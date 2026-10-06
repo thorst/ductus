@@ -3,6 +3,7 @@
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -21,6 +22,12 @@ pub struct InterfaceConfig {
     pub destination: Destination,
     #[serde(default)]
     pub retry: Retry,
+    /// Drop repeats of a message seen recently (e.g. a sender resending after a lost ACK).
+    #[serde(default)]
+    pub dedupe: Option<Dedupe>,
+    /// Throttle delivery, e.g. for devices or vendor APIs that can't take bursts.
+    #[serde(default)]
+    pub rate_limit: Option<RateLimit>,
 
     /// Folder the config was loaded from.
     #[serde(skip)]
@@ -45,10 +52,95 @@ pub enum Destination {
         port: u16,
         #[serde(default = "defaults::timeout_ms")]
         timeout_ms: u64,
+        /// Wait for the receiver's ACK before moving on (default), or send and move on.
+        #[serde(default)]
+        ack: AckMode,
+        /// What to do when the receiver answers AR (reject). AE (error) is always retried.
+        #[serde(default)]
+        on_reject: OnReject,
     },
     File {
         dir: PathBuf,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AckMode {
+    #[default]
+    Wait,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OnReject {
+    #[default]
+    Quarantine,
+    Retry,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Dedupe {
+    /// HL7 paths whose values together identify a message. Default: MSH-10 (control ID).
+    #[serde(default = "defaults::dedupe_keys")]
+    pub keys: Vec<String>,
+    /// How long a key is remembered, e.g. "30m", "24h", "7d".
+    #[serde(default = "defaults::dedupe_window", deserialize_with = "duration")]
+    pub window: Duration,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RateLimit {
+    pub per_minute: u32,
+    /// `average`: token bucket, allows bursts up to `burst` (default). `hard`: at most
+    /// `per_minute` in any calendar minute.
+    #[serde(default)]
+    pub mode: RateMode,
+    /// Bucket size for `average` mode. Default: same as per_minute.
+    pub burst: Option<u32>,
+    /// `wait` (default): hold messages until allowed. `drop`: discard what's over the limit.
+    #[serde(default)]
+    pub over_limit: OverLimit,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RateMode {
+    #[default]
+    Average,
+    Hard,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum OverLimit {
+    #[default]
+    Wait,
+    Drop,
+}
+
+/// Parse durations like "90s", "15m", "24h", "7d".
+pub fn parse_duration(text: &str) -> Result<Duration> {
+    let text = text.trim();
+    let split = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
+    let (number, unit) = text.split_at(split);
+    let n: u64 = number.parse().with_context(|| format!("invalid duration `{text}`"))?;
+    let seconds = match unit.trim() {
+        "s" => n,
+        "m" => n * 60,
+        "h" => n * 3600,
+        "d" => n * 86_400,
+        _ => bail!("invalid duration `{text}` (use e.g. 90s, 15m, 24h, 7d)"),
+    };
+    Ok(Duration::from_secs(seconds))
+}
+
+fn duration<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Duration, D::Error> {
+    let text = String::deserialize(d)?;
+    parse_duration(&text).map_err(serde::de::Error::custom)
 }
 
 /// Messages with the same key value are delivered in the order received.
@@ -108,6 +200,12 @@ mod defaults {
     pub fn max_backoff_ms() -> u64 {
         60_000
     }
+    pub fn dedupe_keys() -> Vec<String> {
+        vec!["MSH-10".into()]
+    }
+    pub fn dedupe_window() -> std::time::Duration {
+        std::time::Duration::from_secs(24 * 3600)
+    }
 }
 
 impl InterfaceConfig {
@@ -132,6 +230,19 @@ impl InterfaceConfig {
             && !script.is_file()
         {
             bail!("script not found: {}", script.display());
+        }
+        if let Some(d) = &self.dedupe
+            && d.keys.is_empty()
+        {
+            bail!("dedupe.keys must list at least one HL7 path");
+        }
+        if let Some(r) = &self.rate_limit {
+            if r.per_minute == 0 {
+                bail!("rate_limit.per_minute must be at least 1");
+            }
+            if r.burst == Some(0) {
+                bail!("rate_limit.burst must be at least 1");
+            }
         }
         Ok(())
     }
@@ -174,6 +285,43 @@ retry: { max_attempts: 3 }
         assert_eq!(c.retry.max_attempts, Some(3));
         assert_eq!(c.partitions_for_worker(0), vec![0, 2, 4, 6]);
         assert_eq!(c.partitions_for_worker(1), vec![1, 3, 5, 7]);
+    }
+
+    #[test]
+    fn parses_reliability_options() {
+        let yaml = r#"
+name: device
+source: { mllp: { port: 1 } }
+destination: { mllp: { host: h, port: 2, ack: none, on_reject: retry } }
+dedupe: { keys: [PID-3.1, EVN-2], window: 30m }
+rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
+"#;
+        let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(matches!(c.destination, Destination::Mllp { ack: AckMode::None, on_reject: OnReject::Retry, .. }));
+        let d = c.dedupe.unwrap();
+        assert_eq!(d.keys, ["PID-3.1", "EVN-2"]);
+        assert_eq!(d.window, Duration::from_secs(1800));
+        let r = c.rate_limit.unwrap();
+        assert_eq!((r.per_minute, r.burst, r.mode, r.over_limit), (100, Some(500), RateMode::Average, OverLimit::Drop));
+
+        let defaults: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: x\nsource: { mllp: { port: 1 } }\ndestination: { mllp: { host: h, port: 2 } }\ndedupe: {}\n",
+        )
+        .unwrap();
+        assert!(matches!(
+            defaults.destination,
+            Destination::Mllp { ack: AckMode::Wait, on_reject: OnReject::Quarantine, .. }
+        ));
+        assert_eq!(defaults.dedupe.unwrap().keys, ["MSH-10"]);
+    }
+
+    #[test]
+    fn parses_durations() {
+        assert_eq!(parse_duration("90s").unwrap(), Duration::from_secs(90));
+        assert_eq!(parse_duration("24h").unwrap(), Duration::from_secs(86_400));
+        assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(604_800));
+        assert!(parse_duration("5 weeks").is_err());
+        assert!(parse_duration("h").is_err());
     }
 
     #[test]

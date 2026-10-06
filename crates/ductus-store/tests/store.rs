@@ -1,7 +1,7 @@
 //! Database-backed tests. Skipped unless DUCTUS_TEST_DATABASE_URL is set
 //! (CI sets it; locally: postgres://todd:ductus@localhost/ductus_dev).
 
-use ductus_store::{NewMessage, Status, Store};
+use ductus_store::{DedupeKey, NewMessage, Status, Store};
 
 async fn store() -> Option<Store> {
     let url = std::env::var("DUCTUS_TEST_DATABASE_URL").ok()?;
@@ -53,6 +53,28 @@ async fn finished_messages_leave_the_queue() {
         counts,
         vec![(name.clone(), Status::Pending, 1), (name.clone(), Status::Sent, 1), (name.clone(), Status::Filtered, 1)]
     );
+}
+
+#[tokio::test]
+async fn duplicates_within_the_window_are_stored_but_not_queued() {
+    let Some(store) = store().await else { return };
+    let name = iface("dedupe");
+    let day = DedupeKey { key: "MSG0001", window: std::time::Duration::from_secs(86_400) };
+
+    let first = store.insert_deduped(msg(&name, 0, b"one"), day).await.unwrap();
+    let again = store.insert_deduped(msg(&name, 0, b"one again"), DedupeKey { key: "MSG0001", ..day }).await.unwrap();
+    let other = store.insert_deduped(msg(&name, 0, b"two"), DedupeKey { key: "MSG0002", ..day }).await.unwrap();
+    assert!(!first.duplicate && again.duplicate && !other.duplicate);
+
+    let pending: Vec<_> = store.pending(&name, &[0], 10).await.unwrap().into_iter().map(|p| p.payload).collect();
+    assert_eq!(pending, vec![b"one".to_vec(), b"two".to_vec()]);
+    let dupes = store.counts().await.unwrap().into_iter().find(|(i, s, _)| *i == name && *s == Status::Duplicate);
+    assert_eq!(dupes.map(|(_, _, n)| n), Some(1));
+
+    // Outside the window, the same key is new again.
+    let instant = DedupeKey { key: "MSG0001", window: std::time::Duration::ZERO };
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    assert!(!store.insert_deduped(msg(&name, 0, b"one, much later"), instant).await.unwrap().duplicate);
 }
 
 #[tokio::test]

@@ -10,7 +10,7 @@ KILL_AFTER=${KILL_AFTER:-5}
 LOGS=$(mktemp -d)
 ROOT=$(cd "$(dirname "$0")/../examples/adt-relay" && pwd)
 
-psql -q "${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}" -c "TRUNCATE messages" 2>/dev/null || true
+psql -q "${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}" -c "TRUNCATE messages, dedupe_keys" 2>/dev/null || true
 
 echo "== starting sink, engine, generator ($COUNT messages, $PATIENTS patients)"
 "$BIN" sink --port 6662 >"$LOGS/sink.log" 2>&1 &

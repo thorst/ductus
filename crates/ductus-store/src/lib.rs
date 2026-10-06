@@ -15,6 +15,8 @@ pub enum Status {
     Sent = 1,
     Filtered = 2,
     Quarantined = 3,
+    /// A repeat of a message received within the dedupe window. Stored for audit, never delivered.
+    Duplicate = 4,
 }
 
 impl Status {
@@ -24,6 +26,7 @@ impl Status {
             1 => Status::Sent,
             2 => Status::Filtered,
             3 => Status::Quarantined,
+            4 => Status::Duplicate,
             _ => return None,
         })
     }
@@ -34,6 +37,7 @@ impl Status {
             Status::Sent => "sent",
             Status::Filtered => "filtered",
             Status::Quarantined => "quarantined",
+            Status::Duplicate => "duplicate",
         }
     }
 }
@@ -44,6 +48,21 @@ pub struct NewMessage<'a> {
     pub ordering_key: Option<&'a str>,
     pub control_id: Option<&'a str>,
     pub payload: &'a [u8],
+}
+
+/// Duplicate detection for one insert: the message's identifying key and how long keys are remembered.
+#[derive(Debug, Clone, Copy)]
+pub struct DedupeKey<'a> {
+    pub key: &'a str,
+    pub window: std::time::Duration,
+}
+
+/// Result of an insert with duplicate detection.
+#[derive(Debug, Clone, Copy)]
+pub struct Stored {
+    pub message: MessageRef,
+    /// True when the key was seen within the window: stored with status `Duplicate`.
+    pub duplicate: bool,
 }
 
 /// Identifies a stored message. `received_at` lets Postgres go straight to the right partition.
@@ -113,6 +132,52 @@ impl Store {
         .await
         .context("inserting message")?;
         Ok(MessageRef { id, received_at })
+    }
+
+    /// Insert with duplicate detection, in one transaction (one commit, same durability cost
+    /// as a plain insert). Duplicates are stored with status `Duplicate` for audit.
+    pub async fn insert_deduped(&self, m: NewMessage<'_>, dedupe: DedupeKey<'_>) -> Result<Stored> {
+        let mut tx = self.pool.begin().await.context("starting transaction")?;
+        // New key, or an old one outside the window: claim it. Otherwise nothing is returned.
+        let claimed = sqlx::query(
+            "INSERT INTO dedupe_keys (interface, key) VALUES ($1, $2)
+             ON CONFLICT (interface, key) DO UPDATE SET seen_at = now()
+                 WHERE dedupe_keys.seen_at < now() - make_interval(secs => $3)
+             RETURNING 1",
+        )
+        .bind(m.interface)
+        .bind(dedupe.key)
+        .bind(dedupe.window.as_secs_f64())
+        .fetch_optional(&mut *tx)
+        .await
+        .context("checking for duplicate")?;
+        let duplicate = claimed.is_none();
+
+        let (id, received_at) = sqlx::query_as::<_, (i64, DateTime<Utc>)>(
+            "INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload, status)
+             VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, received_at",
+        )
+        .bind(m.interface)
+        .bind(m.partition_key)
+        .bind(m.ordering_key)
+        .bind(m.control_id)
+        .bind(m.payload)
+        .bind(if duplicate { Status::Duplicate } else { Status::Pending } as i16)
+        .fetch_one(&mut *tx)
+        .await
+        .context("inserting message")?;
+        tx.commit().await.context("committing message")?;
+        Ok(Stored { message: MessageRef { id, received_at }, duplicate })
+    }
+
+    /// Forget dedupe keys older than `age` (keeps the table small).
+    pub async fn purge_dedupe_keys(&self, age: std::time::Duration) -> Result<u64> {
+        let result = sqlx::query("DELETE FROM dedupe_keys WHERE seen_at < now() - make_interval(secs => $1)")
+            .bind(age.as_secs_f64())
+            .execute(&self.pool)
+            .await
+            .context("purging dedupe keys")?;
+        Ok(result.rows_affected())
     }
 
     /// Oldest pending messages in the given lanes. The caller must be the only owner of

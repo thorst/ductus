@@ -3,6 +3,7 @@
 //! so every worker is its own OS thread with its own isolate and async runtime.
 
 use crate::destination::{SendError, Sender};
+use crate::limiter::{Decision, Limiter};
 use anyhow::{Context, Result};
 use ductus_core::InterfaceConfig;
 use ductus_script::Isolate;
@@ -22,6 +23,7 @@ pub fn spawn(
     index: u32,
     store: Store,
     wake: Arc<[Notify]>,
+    limiter: Option<Arc<Limiter>>,
     ready: std::sync::mpsc::Sender<Result<()>>,
 ) -> Result<()> {
     std::thread::Builder::new()
@@ -30,7 +32,7 @@ pub fn spawn(
             let runtime =
                 tokio::runtime::Builder::new_current_thread().enable_all().build().expect("building worker runtime");
             runtime.block_on(async move {
-                match Worker::new(config, index, store, wake).await {
+                match Worker::new(config, index, store, wake, limiter).await {
                     Ok(worker) => {
                         let _ = ready.send(Ok(()));
                         drop(ready);
@@ -53,6 +55,7 @@ struct Worker {
     sender: Sender,
     store: Store,
     wake: Arc<[Notify]>,
+    limiter: Option<Arc<Limiter>>,
     index: usize,
     /// Delivered but not yet marked sent. Flushed every SENT_FLUSH messages and at the end of
     /// each batch, so a crash re-sends at most that many (at-least-once delivery).
@@ -67,7 +70,13 @@ enum Outcome {
 }
 
 impl Worker {
-    async fn new(config: Arc<InterfaceConfig>, index: u32, store: Store, wake: Arc<[Notify]>) -> Result<Self> {
+    async fn new(
+        config: Arc<InterfaceConfig>,
+        index: u32,
+        store: Store,
+        wake: Arc<[Notify]>,
+        limiter: Option<Arc<Limiter>>,
+    ) -> Result<Self> {
         let isolate = match config.script_path() {
             Some(path) => Some(Isolate::interface(&path).await?),
             None => None,
@@ -79,6 +88,7 @@ impl Worker {
             isolate,
             store,
             wake,
+            limiter,
             index: index as usize,
             sent: Vec::with_capacity(SENT_FLUSH),
         })
@@ -137,6 +147,20 @@ impl Worker {
     }
 
     async fn deliver(&mut self, reference: MessageRef, mut attempts: i32, payload: &[u8]) {
+        if let Some(limiter) = self.limiter.clone() {
+            loop {
+                match limiter.acquire(std::time::Instant::now()) {
+                    Decision::Proceed => break,
+                    Decision::Wait(delay) => {
+                        self.flush_sent().await;
+                        tokio::time::sleep(delay).await;
+                    }
+                    Decision::Drop => {
+                        return self.finish(reference, Status::Filtered, Some("dropped: over rate limit")).await;
+                    }
+                }
+            }
+        }
         let retry = self.config.retry.clone();
         let mut backoff = Duration::from_millis(retry.initial_backoff_ms);
         loop {

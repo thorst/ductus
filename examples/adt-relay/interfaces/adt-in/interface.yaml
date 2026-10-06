@@ -6,5 +6,8 @@ ordering:
   key: PID-3.1      # messages for the same MRN stay in order
   partitions: 64
 workers: 4
+dedupe:
+  keys: [MSH-10]    # a sender resending after a lost ACK is recognized
+  window: 24h
 destination:
-  mllp: { host: 127.0.0.1, port: 6662 }
+  mllp: { host: 127.0.0.1, port: 6662 }   # waits for AA; AE retries, AR quarantines

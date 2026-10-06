@@ -2,6 +2,7 @@
 
 mod destination;
 mod ingest;
+mod limiter;
 mod worker;
 
 use anyhow::{Context, Result, bail};
@@ -39,15 +40,19 @@ pub async fn run(root: &Path, database_url: &str) -> Result<()> {
     }
     let total_workers: u32 = configs.iter().map(|c| c.workers).sum();
     let store = Store::connect(database_url, total_workers + 8).await?;
+    // Keep dedupe keys a little longer than the longest window that uses them.
+    let dedupe_retention = configs.iter().filter_map(|c| c.dedupe.as_ref()).map(|d| d.window).max().unwrap_or_default()
+        + Duration::from_secs(3600);
 
     for config in configs {
         let config = Arc::new(config);
         // One wake-up signal per worker: ingest wakes only the worker that owns the message's lane.
         let wake: Arc<[Notify]> = (0..config.workers).map(|_| Notify::new()).collect();
+        let limiter = config.rate_limit.clone().map(|r| Arc::new(limiter::Limiter::new(r, std::time::Instant::now())));
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         for w in 0..config.workers {
-            worker::spawn(config.clone(), w, store.clone(), wake.clone(), ready_tx.clone())?;
+            worker::spawn(config.clone(), w, store.clone(), wake.clone(), limiter.clone(), ready_tx.clone())?;
         }
         drop(ready_tx);
         // Fail fast if the interface's code doesn't load, before accepting any messages.
@@ -64,6 +69,9 @@ pub async fn run(root: &Path, database_url: &str) -> Result<()> {
             tokio::time::sleep(Duration::from_secs(3600)).await;
             if let Err(e) = maintenance.ensure_partitions(3).await {
                 tracing::error!(error = %e, "partition maintenance failed");
+            }
+            if let Err(e) = maintenance.purge_dedupe_keys(dedupe_retention).await {
+                tracing::error!(error = %e, "dedupe key cleanup failed");
             }
         }
     });

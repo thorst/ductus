@@ -108,15 +108,57 @@ impl Client {
         }
     }
 
-    async fn exchange(&mut self, message: &[u8]) -> io::Result<Bytes> {
+    /// Send one message without waiting for an ACK (for receivers that don't send one).
+    /// Anything the receiver does send is read and discarded so its buffer never fills.
+    pub async fn send_no_ack(&mut self, message: &[u8]) -> io::Result<()> {
+        let result = tokio::time::timeout(self.timeout, async {
+            let stream = self.connect().await?;
+            write_frame(stream, message).await?;
+            let mut scratch = [0u8; 4096];
+            loop {
+                match stream.try_read(&mut scratch) {
+                    Ok(0) => {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "receiver closed the connection"));
+                    }
+                    Ok(_) => continue,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                    Err(e) => return Err(e),
+                }
+            }
+        })
+        .await;
+        match result {
+            Ok(Ok(())) => Ok(()),
+            // The message was written before the close: with no ACK, delivery can't be confirmed either way.
+            Ok(Err(e)) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                self.reset();
+                Ok(())
+            }
+            Ok(Err(e)) => {
+                self.reset();
+                Err(e)
+            }
+            Err(_) => {
+                self.reset();
+                Err(io::Error::new(io::ErrorKind::TimedOut, "timed out sending"))
+            }
+        }
+    }
+
+    async fn connect(&mut self) -> io::Result<&mut TcpStream> {
         if self.stream.is_none() {
             let stream = TcpStream::connect(&self.addr).await?;
             stream.set_nodelay(true)?;
             self.stream = Some(stream);
             self.buf.clear();
         }
-        let stream = self.stream.as_mut().expect("connected above");
+        Ok(self.stream.as_mut().expect("connected above"))
+    }
+
+    async fn exchange(&mut self, message: &[u8]) -> io::Result<Bytes> {
+        let stream = self.connect().await?;
         write_frame(stream, message).await?;
+        let stream = self.stream.as_mut().expect("connected");
         read_frame(stream, &mut self.buf)
             .await?
             .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "connection closed before ACK"))
@@ -131,6 +173,50 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A listener that ACKs with `code`, counting messages.
+    async fn receiver(code: &'static str) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let c = count.clone();
+        tokio::spawn(serve(listener, move |_m: Bytes| {
+            c.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Bytes::from(format!("MSH|^~\\&|R||||||ACK|1|P|2.5\rMSA|{code}|1\r")) }
+        }));
+        (addr, count)
+    }
+
+    #[tokio::test]
+    async fn client_round_trips_and_reconnects() {
+        let (addr, count) = receiver("AA").await;
+        let mut client = Client::new(addr, Duration::from_secs(2));
+        for _ in 0..3 {
+            let ack = client.send(b"MSH|^~\\&|A").await.unwrap();
+            assert!(String::from_utf8_lossy(&ack).contains("MSA|AA|1"));
+        }
+        client.reset();
+        client.send(b"MSH|^~\\&|A").await.unwrap();
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn send_without_ack_discards_replies() {
+        let (addr, count) = receiver("AA").await;
+        let mut client = Client::new(addr, Duration::from_secs(2));
+        for _ in 0..50 {
+            client.send_no_ack(b"MSH|^~\\&|A").await.unwrap();
+        }
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 50);
+    }
+
+    #[tokio::test]
+    async fn unreachable_receiver_is_an_error() {
+        let mut client = Client::new("127.0.0.1:1", Duration::from_millis(500));
+        assert!(client.send(b"MSH|^~\\&|A").await.is_err());
+        assert!(client.send_no_ack(b"MSH|^~\\&|A").await.is_err());
+    }
 
     #[test]
     fn frames_round_trip() {
