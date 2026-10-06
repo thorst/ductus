@@ -1,0 +1,62 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>Ductus</title>
+  <defs>
+    <clipPath id="tile"><rect width="512" height="512" rx="112"/></clipPath>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#22305A"/>
+      <stop offset="1" stop-color="#141C36"/>
+    </linearGradient>
+    <linearGradient id="steel" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#E3E9EF"/>
+      <stop offset="1" stop-color="#9AA7B5"/>
+    </linearGradient>
+    <linearGradient id="crest" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#A9231B"/>
+      <stop offset="1" stop-color="#E0483A"/>
+    </linearGradient>
+    <clipPath id="crestClip"><path d="M146 216 C140 52 344 22 396 198 L362 206 C330 160 200 160 184 222 Z"/></clipPath>
+  </defs>
+
+  <g clip-path="url(#tile)">
+    <rect width="512" height="512" fill="url(#bg)"/>
+
+    <!-- body / chest -->
+    <ellipse cx="226" cy="500" rx="170" ry="110" fill="#F2BE2E"/>
+
+    <!-- bill -->
+    <path d="M312 316 C392 298 448 306 468 332 C450 362 394 372 332 362 Z" fill="#F28C28"/>
+    <path d="M340 340 C392 342 430 340 460 334" fill="none" stroke="#C9661A" stroke-width="6" stroke-linecap="round"/>
+
+    <!-- head -->
+    <circle cx="246" cy="300" r="118" fill="#F6C945"/>
+
+    <!-- eye -->
+    <circle cx="300" cy="324" r="15" fill="#1A1A1A"/>
+    <circle cx="305" cy="319" r="5" fill="#FFFFFF"/>
+    <path d="M280 306 L324 298" stroke="#1A1A1A" stroke-width="8" stroke-linecap="round"/>
+
+    <!-- crest (plume) -->
+    <path d="M146 216 C140 52 344 22 396 198 L362 206 C330 160 200 160 184 222 Z" fill="url(#crest)"/>
+    <path clip-path="url(#crestClip)" d="M178 140 L192 190 M214 92 L224 150 M258 72 L260 140 M302 76 L294 144 M342 102 L326 164 M374 150 L352 190"
+          stroke="#7E1A14" stroke-width="5" stroke-linecap="round" opacity="0.55"/>
+
+    <!-- helmet dome -->
+    <path d="M126 282 C124 188 194 156 250 156 C312 156 372 192 374 270 L374 282 Z" fill="url(#steel)"/>
+    <!-- crest mount -->
+    <rect x="236" y="146" width="28" height="22" rx="6" fill="#C9A227"/>
+
+    <!-- brim band -->
+    <path d="M118 270 L382 262 L384 290 L120 298 Z" fill="#C9A227"/>
+    <path d="M118 270 L382 262" stroke="#F1D36B" stroke-width="4"/>
+
+    <!-- cheek guard (back of head) -->
+    <path d="M140 292 L232 292 C232 340 214 378 178 392 C150 380 136 344 140 292 Z" fill="url(#steel)"/>
+    <path d="M140 292 L232 292 C232 340 214 378 178 392 C150 380 136 344 140 292 Z" fill="none" stroke="#7F8B98" stroke-width="5"/>
+    <circle cx="164" cy="314" r="6" fill="#C9A227"/>
+    <circle cx="208" cy="314" r="6" fill="#C9A227"/>
+    <circle cx="180" cy="360" r="6" fill="#C9A227"/>
+
+    <!-- dome ridge highlight -->
+    <path d="M168 230 C186 190 220 174 252 172" fill="none" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round" opacity="0.6"/>
+  </g>
+</svg>

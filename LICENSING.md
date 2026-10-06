@@ -38,7 +38,8 @@ Features that mainly matter to large, multi-site organizations:
 2. **We won't move features from free to paid.** Once a feature ships in the open-source edition, it stays there.
 3. **No crippleware.** We won't hold back reliability, data safety or security fixes from the free edition to push upgrades.
 4. **Your data and interfaces are yours.** Interfaces are plain files in Git. Message data lives in your own PostgreSQL. Nothing locks you in.
-5. **Contributions stay open.** Contributions go into the open-source core under Apache-2.0. We use a DCO sign-off, not a CLA, because we don't need extra rights over your work.
+5. **Enterprise licensing won't get in your way.** Only production counts: dev, test and DR environments are free. Migrations get a grace period to run old and new side by side. And a license problem never stops your interfaces from processing messages.
+6. **Contributions stay open.** Contributions go into the open-source core under Apache-2.0. We use a DCO sign-off, not a CLA, because we don't need extra rights over your work.
 
 ## Why we chose this model
 
