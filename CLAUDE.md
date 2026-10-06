@@ -39,16 +39,22 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - quick-xml's API churns: XML key extraction uses our own small reader (`runtime/src/keys.rs`), deliberately matching the SDK's `parseXml` rules.
 - `cargo test` doesn't rebuild the `ductus` binary: `check.sh` builds it explicitly (a stale binary once hid a migration bug).
 - TypeScript 6 is vendored (`vendor/typescript`) for type checking because TS 7 is a native Go binary that can't run in V8.
+- Calling `wsl` from the Git Bash tool mangles `/mnt/...` paths: prefix `MSYS_NO_PATHCONV=1` (or use PowerShell). Don't put the text "ductus run" in a wrapper command line: `demos.sh` does `pkill -f 'ductus (run|...)'` and kills the wrapper.
+- Demo waits must re-evaluate their condition: `wait_for 15 '[ "$(count $OUT)" -ge 3 ]'` (quoted, `eval`ed). Passing `"$(...)"` unquoted freezes the value and the wait silently runs to its timeout.
+- Logs are plain text when stdout isn't a terminal (`with_ansi`), so demos can grep fields like `started interfaces=`.
+- SFTP tests use a throwaway user-level `sshd` (openssh-server installed in WSL; its system service is disabled) on 127.0.0.1:2222; see `scripts/demo-files.sh`. Clean up child processes with a `trap` whose commands each end in `|| true` (`set -e` applies inside traps).
+- russh 0.64: `client::Handler::check_server_key(&PublicKeyOrCertificate)`; fingerprints via `key.fingerprint(HashAlg::Sha256)` print like `ssh-keygen -lf`. SFTP `rename` won't overwrite: remove the target first.
 
 ## Where things are
 
 ```
-crates/ductus-core     config, formats, environments, secrets, resources
+crates/ductus-core     config, formats, environments, secrets, resources, schedule timing
 crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
 crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations)
 crates/ductus-script   embedded V8, module loader, ops, type checker (+ tests/script.rs)
-crates/ductus-runtime  engine: lib.rs (startup), ingest.rs, http.rs, worker.rs, destination.rs, keys.rs, services.rs, limiter.rs
+crates/ductus-runtime  engine: lib.rs (startup), ingest.rs, http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
+                       schedule.rs, worker.rs, destination.rs, keys.rs, services.rs, limiter.rs
 crates/ductus-cli      the `ductus` command (project.rs: test/validate/types/secret; tools.rs: gen/sink/status)
 sdk/src                TypeScript SDK (embedded via include_str! in ductus-script/src/loader.rs: add new files there)
 sdk/tests              SDK tests (TypeScript)

@@ -9,6 +9,14 @@ import { contentType, HttpResponse, requestFrom } from "./http.ts";
 
 export { html, type HttpRequest, HttpResponse, response } from "./http.ts";
 
+/** What a schedule source's `transform` receives. Times are ISO 8601, server local time. */
+export interface ScheduledRun {
+  /** When this run was due. */
+  due: string;
+  /** When the previous run was due (null on the first run): use it to pick up what changed since. */
+  previous: string | null;
+}
+
 export { Field, type Message, parse, parse as parseHl7, Segment, Segments } from "./hl7.ts";
 export {
   type CsvRecord,

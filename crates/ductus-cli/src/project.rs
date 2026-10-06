@@ -181,14 +181,19 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
             return Ok(false);
         }
     };
-    match ductus_core::Resources::load(root, &env) {
-        Ok(r) if r.databases.is_empty() => {}
-        Ok(r) => println!("✓ resources: {} database(s)", r.databases.len()),
+    let resources = match ductus_core::Resources::load(root, &env) {
+        Ok(r) => {
+            if !r.databases.is_empty() || !r.sftp.is_empty() {
+                println!("✓ resources: {} database(s), {} SFTP server(s)", r.databases.len(), r.sftp.len());
+            }
+            Some(r)
+        }
         Err(e) => {
             problems += 1;
             println!("✗ resources: {e:#}");
+            None
         }
-    }
+    };
 
     let interfaces = interface_dirs(root, &env)?;
     for iface in &interfaces {
@@ -212,9 +217,14 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
         }
     }
 
-    for conflict in ductus_core::config::check_endpoints(interfaces.iter().filter_map(|i| i.config.as_ref().ok())) {
+    let configs = || interfaces.iter().filter_map(|i| i.config.as_ref().ok());
+    let mut wiring = ductus_core::config::check_endpoints(configs());
+    if let Some(r) = &resources {
+        wiring.extend(r.missing_references(configs()));
+    }
+    for problem in wiring {
         problems += 1;
-        println!("✗ {conflict}");
+        println!("✗ {problem}");
     }
 
     // Every .ts file in the project, so imports of shared libraries resolve. Files outside any
@@ -271,8 +281,15 @@ pub fn secret(command: SecretCommand) -> Result<()> {
             let value = match value {
                 Some(v) => v,
                 None => {
+                    use std::io::{IsTerminal, Read};
                     let mut v = String::new();
-                    std::io::stdin().read_line(&mut v)?;
+                    // Typed: one line. Piped: everything, so multi-line values such as SSH
+                    // private keys work (`ductus secret set KEY < id_ed25519`).
+                    if std::io::stdin().is_terminal() {
+                        std::io::stdin().read_line(&mut v)?;
+                    } else {
+                        std::io::stdin().read_to_string(&mut v)?;
+                    }
                     v.trim_end_matches(['\r', '\n']).to_string()
                 }
             };

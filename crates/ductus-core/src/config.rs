@@ -75,6 +75,80 @@ pub enum Source {
         #[serde(default)]
         mode: HttpMode,
     },
+    /// Files dropped in a local folder.
+    File(FileSource),
+    /// Files on an SFTP server (`server` names it in resources.yaml). Same options as `file`.
+    Sftp(FileSource),
+    /// No input: the transform runs on a timer and its result is the message.
+    Schedule(Schedule),
+}
+
+/// Watch a folder for files. Each file (or each record in it, with `split: records`) becomes a
+/// message. A file is moved or deleted only after everything in it is stored.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FileSource {
+    /// SFTP only: the server's name under `sftp:` in resources.yaml.
+    #[serde(default)]
+    pub server: Option<String>,
+    /// Local folders are relative to the interface folder; SFTP folders to the login folder.
+    pub dir: String,
+    /// File names to pick up: `*` and `?` wildcards (default `*`). Names starting with `.` are
+    /// never picked up (writers use them for files in progress).
+    #[serde(default = "defaults::pattern")]
+    pub pattern: String,
+    /// How often to look (default 10s). A file is picked up once its size and time are unchanged
+    /// between two looks, so a file still being written is never read half-done.
+    #[serde(default = "defaults::poll", deserialize_with = "duration")]
+    pub poll: Duration,
+    /// Or: pick a file up only once a marker exists next to it (`marker: .done` waits for
+    /// `a.csv.done` before reading `a.csv`). The marker is removed with the file.
+    #[serde(default)]
+    pub marker: Option<String>,
+    /// After the file is stored: `move` it to `archive_dir` (default) or `delete` it.
+    #[serde(default)]
+    pub after: After,
+    /// Where `after: move` puts files. Default: `archive` inside `dir`.
+    #[serde(default)]
+    pub archive_dir: Option<String>,
+    /// `none` (default): one message per file. `records`: one message per record, read as a
+    /// stream so files of any size work: HL7 batch files split per MSH, CSV per row (the header
+    /// is kept with each row), fixed-length, text and JSON Lines per line.
+    #[serde(default)]
+    pub split: Split,
+}
+
+impl FileSource {
+    /// Where processed files go (`after: move`).
+    pub fn archive(&self) -> String {
+        self.archive_dir.clone().unwrap_or_else(|| format!("{}/archive", self.dir.trim_end_matches('/')))
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum After {
+    #[default]
+    Move,
+    Delete,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Split {
+    #[default]
+    None,
+    Records,
+}
+
+/// When a schedule source runs: `every: 15m`, or `cron: "0 2 * * *"` (server local time).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Schedule {
+    #[serde(default, deserialize_with = "duration_opt")]
+    pub every: Option<Duration>,
+    #[serde(default)]
+    pub cron: Option<String>,
 }
 
 /// Problems with how a set of interfaces share network ports: two MLLP listeners on one port,
@@ -105,6 +179,7 @@ pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig
                     ));
                 }
             }
+            Source::File(_) | Source::Sftp(_) | Source::Schedule(_) => {}
         }
     }
     for (port, m) in &mllp {
@@ -141,6 +216,12 @@ pub enum Destination {
     },
     File {
         dir: PathBuf,
+    },
+    /// Write each message as a file on an SFTP server (`server` names it in resources.yaml).
+    /// Files are written under a temporary name and renamed, so readers never see half a file.
+    Sftp {
+        server: String,
+        dir: String,
     },
     /// POST (or PUT...) each message to a URL. 2xx = delivered; 408, 429, 5xx and network
     /// errors retry; other 4xx quarantine.
@@ -229,13 +310,14 @@ pub enum OverLimit {
     Drop,
 }
 
-/// Parse durations like "90s", "15m", "24h", "7d".
+/// Parse durations like "500ms", "90s", "15m", "24h", "7d".
 pub fn parse_duration(text: &str) -> Result<Duration> {
     let text = text.trim();
     let split = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());
     let (number, unit) = text.split_at(split);
     let n: u64 = number.parse().with_context(|| format!("invalid duration `{text}`"))?;
     let seconds = match unit.trim() {
+        "ms" => return Ok(Duration::from_millis(n)),
         "s" => n,
         "m" => n * 60,
         "h" => n * 3600,
@@ -248,6 +330,10 @@ pub fn parse_duration(text: &str) -> Result<Duration> {
 fn duration<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Duration, D::Error> {
     let text = String::deserialize(d)?;
     parse_duration(&text).map_err(serde::de::Error::custom)
+}
+
+fn duration_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Duration>, D::Error> {
+    duration(d).map(Some)
 }
 
 /// Messages with the same key value are delivered in the order received.
@@ -315,6 +401,12 @@ mod defaults {
     }
     pub fn dedupe_window() -> std::time::Duration {
         std::time::Duration::from_secs(24 * 3600)
+    }
+    pub fn pattern() -> String {
+        "*".into()
+    }
+    pub fn poll() -> std::time::Duration {
+        std::time::Duration::from_secs(10)
     }
 }
 
@@ -384,6 +476,43 @@ impl InterfaceConfig {
         if self.responds() && (self.ordering.key.is_some() || self.dedupe.is_some() || self.rate_limit.is_some()) {
             bail!("ordering, dedupe and rate_limit apply to queued messages, not `respond` mode");
         }
+        match &self.source {
+            Source::File(f) | Source::Sftp(f) => {
+                let sftp = matches!(self.source, Source::Sftp(_));
+                match (&f.server, sftp) {
+                    (None, true) => bail!("an SFTP source needs `server` (a name under `sftp:` in resources.yaml)"),
+                    (Some(_), false) => bail!("`server` is for SFTP sources; use `source: {{ sftp: ... }}`"),
+                    _ => {}
+                }
+                if f.pattern.trim().is_empty() {
+                    bail!("pattern can't be empty (use * for every file)");
+                }
+                if f.poll < Duration::from_millis(100) {
+                    bail!("poll must be at least 100ms");
+                }
+                if f.marker.as_deref().is_some_and(|m| m.trim().is_empty()) {
+                    bail!("marker can't be empty (e.g. `.done`)");
+                }
+                if f.split == Split::Records && self.format == Format::Xml {
+                    bail!("`split: records` doesn't apply to XML; each XML file is one message");
+                }
+            }
+            Source::Schedule(s) => {
+                crate::schedule::Timing::new(s)?;
+                if self.script.is_none() {
+                    bail!("a schedule source needs a `script`: its transform produces the messages");
+                }
+                if self.ordering.key.is_some() || self.dedupe.is_some() {
+                    bail!("ordering and dedupe don't apply to a schedule source (runs are one at a time)");
+                }
+            }
+            Source::Mllp { .. } | Source::Http { .. } => {}
+        }
+        if let Some(Destination::Sftp { server, .. }) = &self.destination
+            && server.trim().is_empty()
+        {
+            bail!("SFTP destination needs `server` (a name under `sftp:` in resources.yaml)");
+        }
         if let Some(r) = &self.rate_limit {
             if r.per_minute == 0 {
                 bail!("rate_limit.per_minute must be at least 1");
@@ -397,9 +526,36 @@ impl InterfaceConfig {
 
     /// Input and output formats as JSON, for the SDK: `{"input": {...}, "output": {...}}`,
     /// plus `"http": true` when `transform` receives HTTP requests.
+    ///
+    /// Two sources change what `transform` receives: a schedule passes its run details (JSON;
+    /// `format` is then what the transform produces), and a CSV or fixed-length file split into
+    /// records passes one record (`"record": true`) rather than a list of one.
     pub fn format_spec(&self) -> String {
         let output = self.output.as_ref().unwrap_or(&self.format);
-        serde_json::json!({ "input": self.format, "output": output, "http": self.responds() }).to_string()
+        let mut input = serde_json::to_value(&self.format).expect("formats serialize");
+        match &self.source {
+            Source::Schedule(_) => input = serde_json::json!({ "kind": "json" }),
+            Source::File(f) | Source::Sftp(f) if f.split == Split::Records => {
+                if matches!(self.format, Format::Csv(_) | Format::Fixed(_)) {
+                    input["record"] = true.into();
+                }
+            }
+            _ => {}
+        }
+        serde_json::json!({ "input": input, "output": output, "http": self.responds() }).to_string()
+    }
+
+    /// The SFTP servers this interface uses (names in resources.yaml).
+    pub fn sftp_servers(&self) -> Vec<&str> {
+        let source = match &self.source {
+            Source::Sftp(f) => f.server.as_deref(),
+            _ => None,
+        };
+        let destination = match &self.destination {
+            Some(Destination::Sftp { server, .. }) => Some(server.as_str()),
+            _ => None,
+        };
+        source.into_iter().chain(destination).collect()
     }
 
     /// An HTTP source in `respond` mode: requests are answered directly, nothing is queued.
@@ -563,6 +719,54 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
         assert_eq!(parse_duration("7d").unwrap(), Duration::from_secs(604_800));
         assert!(parse_duration("5 weeks").is_err());
         assert!(parse_duration("h").is_err());
+    }
+
+    #[test]
+    fn file_sftp_and_schedule_sources() {
+        let load = |yaml: &str| -> Result<InterfaceConfig> {
+            let c: InterfaceConfig = serde_yaml_ng::from_str(yaml)?;
+            c.validate()?;
+            Ok(c)
+        };
+        let dest = "destination: { file: { dir: out } }";
+        let csv = load(&format!(
+            "name: a\nsource: {{ file: {{ dir: in, pattern: '*.csv', poll: 2s, split: records }} }}\nformat: csv\n{dest}"
+        ))
+        .unwrap();
+        let Source::File(f) = &csv.source else { panic!() };
+        assert_eq!((f.poll, f.after, f.archive().as_str()), (Duration::from_secs(2), After::Move, "in/archive"));
+        assert!(csv.format_spec().contains(r#""record":true"#), "a split CSV passes one record");
+        assert!(csv.sftp_servers().is_empty());
+
+        let whole = load(&format!("name: b\nsource: {{ file: {{ dir: in }} }}\nformat: csv\n{dest}")).unwrap();
+        assert!(!whole.format_spec().contains("record"));
+
+        let sftp = load(
+            "name: c\nsource: { sftp: { server: lab, dir: /out, after: delete } }\ndestination: { sftp: { server: emr, dir: inbound } }\n",
+        )
+        .unwrap();
+        assert_eq!(sftp.sftp_servers(), ["lab", "emr"]);
+
+        let err = |yaml: &str| format!("{:#}", load(yaml).unwrap_err());
+        assert!(err(&format!("name: d\nsource: {{ sftp: {{ dir: x }} }}\n{dest}")).contains("needs `server`"));
+        assert!(err(&format!("name: d\nsource: {{ file: {{ dir: x, server: s }} }}\n{dest}")).contains("for SFTP"));
+        assert!(
+            err(&format!("name: d\nsource: {{ file: {{ dir: x, split: records }} }}\nformat: xml\n{dest}"))
+                .contains("XML")
+        );
+        assert!(err(&format!("name: d\nsource: {{ file: {{ dir: x, poll: 10ms }} }}\n{dest}")).contains("100ms"));
+
+        let mut nightly: InterfaceConfig = serde_yaml_ng::from_str(&format!(
+            "name: e\nsource: {{ schedule: {{ cron: '0 2 * * *' }} }}\nscript: t.ts\nformat: csv\n{dest}"
+        ))
+        .unwrap();
+        assert!(nightly.format_spec().contains(r#""input":{"kind":"json"}"#), "the transform gets the run details");
+        nightly.script = None;
+        assert!(nightly.validate().unwrap_err().to_string().contains("needs a `script`"));
+        assert!(
+            err(&format!("name: f\nsource: {{ schedule: {{ every: 1m, cron: '* * * * *' }} }}\n{dest}"))
+                .contains("one of `every`")
+        );
     }
 
     #[test]

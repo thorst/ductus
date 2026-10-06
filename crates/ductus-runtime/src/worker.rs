@@ -38,6 +38,8 @@ pub struct Job {
     pub limiter: Option<Arc<Limiter>>,
     /// Respond-mode HTTP interfaces: where their requests arrive.
     pub requests: Option<mpsc::Receiver<HttpCall>>,
+    /// SFTP destinations: the server, from resources.yaml.
+    pub server: Option<ductus_core::resources::SftpServer>,
 }
 
 /// Readiness report for one job: its interface name and whether its code loaded.
@@ -156,7 +158,7 @@ impl Worker {
     fn new(job: Job, script: Option<Script>, store: Store) -> Self {
         Self {
             lanes: job.config.partitions_for_worker(job.slot),
-            sender: Sender::new(&job.config),
+            sender: Sender::new(&job.config, job.server),
             config: job.config,
             script,
             store,

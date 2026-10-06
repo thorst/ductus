@@ -20,10 +20,12 @@ export interface FixedLayout {
   trim?: boolean;
 }
 
+/** `record`: each message is one record (a file split with `split: records`), so `transform`
+ *  receives that record rather than a list of one. */
 export type FormatSpec =
   | { kind: "hl7" | "json" | "xml" | "text" }
-  | { kind: "csv"; delimiter: string; header: boolean }
-  | ({ kind: "fixed" } & FixedLayout);
+  | { kind: "csv"; delimiter: string; header: boolean; record?: boolean }
+  | ({ kind: "fixed"; record?: boolean } & FixedLayout);
 
 // ---------------------------------------------------------------------------
 // CSV (RFC 4180: quoted fields may contain delimiters, quotes ("") and newlines)
@@ -376,13 +378,24 @@ export function decode(raw: string, spec: FormatSpec): unknown {
       return JSON.parse(raw);
     case "xml":
       return parseXml(raw);
-    case "csv":
-      return parseCsv(raw, { delimiter: spec.delimiter, header: spec.header as true });
-    case "fixed":
-      return parseFixed(raw, spec);
+    case "csv": {
+      const records = parseCsv(raw, { delimiter: spec.delimiter, header: spec.header as true });
+      return spec.record ? records[0] : records;
+    }
+    case "fixed": {
+      const records = parseFixed(raw, spec);
+      return spec.record ? records[0] : records;
+    }
     case "text":
       return raw;
   }
+}
+
+/** A single object is one record (e.g. a transform handling one record of a split file). */
+function asRecords(result: unknown, what: string): unknown[] {
+  if (Array.isArray(result)) return result;
+  if (typeof result === "object" && result !== null) return [result];
+  throw new TypeError(`${what} output needs a record or an array of records`);
 }
 
 /** Serialize a transform's result for the given output format. */
@@ -393,11 +406,9 @@ export function encode(result: unknown, spec: FormatSpec, isMessage: (v: unknown
     case "json":
       return JSON.stringify(result);
     case "csv":
-      if (!Array.isArray(result)) throw new TypeError("CSV output needs an array of records");
-      return toCsv(result, { delimiter: spec.delimiter, header: spec.header });
+      return toCsv(asRecords(result, "CSV") as CsvRecord[], { delimiter: spec.delimiter, header: spec.header });
     case "fixed":
-      if (!Array.isArray(result)) throw new TypeError("fixed-length output needs an array of records");
-      return toFixed(result, spec);
+      return toFixed(asRecords(result, "fixed-length") as Record<string, unknown>[], spec);
     case "text":
       return String(result);
     case "hl7":

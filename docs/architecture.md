@@ -8,9 +8,9 @@ How the engine works, and the rules that keep it correct. Read this before chang
  sources                 store (Postgres)              workers                       destinations
  ───────                 ────────────────              ───────                       ────────────
  MLLP listener ─┐                                      pool thread 0..N  ─┐          MLLP client
- HTTP (queue)  ─┼─► Intake.accept ─► messages table ─► (shared V8 isolate) ├─► Sender ─ HTTP client
- (file, SFTP,  ─┘   persist, then   (day partitions,   dedicated threads ─┘          File
-  schedule: v0.4)   acknowledge      = the queue)      (own isolate)
+ HTTP (queue)  ─┤   Intake          messages table ─► (shared V8 isolate) ├─► Sender ─ HTTP client
+ File / SFTP   ─┼─► persist, then ─► (day partitions,   dedicated threads ─┘          File
+ Schedule      ─┘   acknowledge      = the queue)      (own isolate)                 SFTP
                                                         │
  HTTP (respond) ───────────────► channel ──────────────►┘ transform(req) → HTTP response (no queue)
 ```
@@ -19,7 +19,7 @@ One binary (`ductus`) plus PostgreSQL. No other services.
 
 ## Invariants (never break these)
 
-1. **Persist before acknowledge.** A source only ACKs (MLLP `AA`, HTTP `202`) after the message row is committed. If storing fails, the sender gets a retryable error (`AE`, `503`). Nothing acknowledged is ever lost by an engine crash.
+1. **Persist before acknowledge.** A source only ACKs (MLLP `AA`, HTTP `202`) after the message row is committed. If storing fails, the sender gets a retryable error (`AE`, `503`). Nothing acknowledged is ever lost by an engine crash. For files, "acknowledge" is moving or deleting the file: that happens only after every record in it is committed.
 2. **At-least-once delivery.** A message stays `pending` until its destination confirms. A crash after sending but before recording `sent` re-sends it on restart; dedupe at ingest and idempotent receivers cover this. Sent statuses are flushed in batches of ≤50 and always before a retry back-off, so the re-send window is small.
 3. **One owner per lane = per-key order.** The ordering key (e.g. MRN) hashes (FNV-1a, stable forever: `ductus_core::partition_of`) to one of N virtual partitions ("lanes"). Each lane is owned by exactly one worker slot, which processes its pending messages strictly by id. A failed message blocks its slot's lanes until it succeeds or is quarantined: that's the price of ordering.
 4. **Migrations are expand-only.** Never drop or rename a column/table in a migration that an older binary still uses. Older binaries tolerate unknown newer migrations (`set_ignore_missing`), so rollback = reinstall the previous binary.
@@ -30,12 +30,12 @@ One binary (`ductus`) plus PostgreSQL. No other services.
 
 | crate | role |
 |---|---|
-| `ductus-core` | `interface.yaml` (`config.rs`), formats (`format.rs`), environments + `${VAR}` substitution (`env.rs`), encrypted secrets (`secrets.rs`), `resources.yaml` (`resources.rs`), lane hashing, port-conflict checks |
+| `ductus-core` | `interface.yaml` (`config.rs`), formats (`format.rs`), environments + `${VAR}` substitution (`env.rs`), encrypted secrets (`secrets.rs`), `resources.yaml` (`resources.rs`: databases, SFTP servers), schedule timing (`schedule.rs`), lane hashing, port-conflict checks |
 | `ductus-hl7` | HL7v2 essentials in Rust: field lookup by path, ACK generation (ingest only; interface code uses the SDK) |
 | `ductus-mllp` | MLLP framing, listener (in order per connection), reconnecting client (with or without waiting for ACK) |
 | `ductus-store` | Postgres: migrations, `messages` (day-partitioned; also the work queue), dedupe keys, status updates |
 | `ductus-script` | Embedded V8 (deno_core): module loader (local files + embedded `@ductus/sdk`), multi-interface isolates, async calls (`begin`/`settle`), native ops (`Services` trait), embedded TypeScript 6 type checker + shared-pool lints |
-| `ductus-runtime` | The engine: planning threads, `Intake` (ingest for any source), MLLP + HTTP servers, workers, destinations, rate limiter, format-aware keys, engine services (DB pools) |
+| `ductus-runtime` | The engine: planning threads, `Intake` (ingest for any source, single or batched), MLLP + HTTP servers, file/SFTP watcher (`files.rs`) and record splitter (`split.rs`), SFTP client (`sftp.rs`), schedules (`schedule.rs`), workers, destinations, rate limiter, format-aware keys, engine services (DB pools) |
 | `ductus-cli` (`ductus`) | `run`, `test`, `validate`, `types`, `secret`, `status`, `gen`, `sink` |
 | `sdk/` | The TypeScript SDK, compiled into the binary: HL7 model, formats (CSV/fixed/XML), HTTP request/response, services, test framework, typings generator |
 
@@ -49,6 +49,18 @@ Worker per message: transform → outcome:
 - `Quarantine(reason)` (transform threw, `quarantine()`, AR, 4xx) → `quarantined`
 - `Retry` (error text contains `[ductus:transient]`, e.g. DB unreachable) → back off 1s→60s, retry the same message (order kept)
 Delivery failures: transient → back off and retry (forever unless `retry.max_attempts`); permanent → quarantine.
+
+### Files (file and SFTP sources)
+
+- One `FileWatcher` per interface over a `Backend` (local folder or SFTP connection). Each poll lists the folder; a file is ready when its size and time are unchanged since the last poll (or its `marker` exists). Dot-files are skipped. Ready files go oldest first, one at a time; a failure stops the poll so later files wait (file order kept).
+- `split: records` streams the file through `split::Records` (256 KB buffer, never the whole file): HL7 per MSH, CSV per record with the header prepended, others per line. Records go to `Intake::accept_batch` 500 at a time (or 4 MB): **one transaction stores the records and the file's progress** (`source_state`: size, time, byte offset, records, done).
+- After a crash, the saved offset is where reading resumes (same size and time) or the file is read again from the start (it changed). `done: true` is saved with the last batch, so a crash before the move doesn't read the file again. Then move/delete, then the progress row is deleted.
+- Unsplit files (one message each) are capped at 256 MB; bigger ones are left in place with an error.
+
+### Schedules
+
+- `schedule::run` sleeps until the next due time (re-checking the clock every minute), then `Intake::accept_scheduled` stores a message `{"due", "previous"}` **and** the schedule state (`anchor`, `previous`) in one transaction, unless a run of this interface is still pending (then the run is skipped). The worker runs `transform` on it like any message; the transform's input format is JSON and `format`/`output` describe what it produces.
+- `ductus_core::schedule::Timing`: `every` runs at start then every interval; `cron` (croner, server local time) waits for its next time. Missed runs collapse into one run on start (`anchor_after`).
 
 ## Threads and isolates
 
@@ -70,9 +82,12 @@ Delivery failures: transient → back off and retry (forever unless `retry.max_a
 - `messages`: partitioned by day on `received_at`; partial index `(interface, partition_key, id) WHERE status = 0` is the queue. Partitions created 3 days ahead, hourly. Retention = drop partitions (v1.3).
 - `dedupe_keys(interface, key, seen_at)`: checked and claimed in the same transaction as the message insert (one commit).
 - `durability: relaxed` sets `synchronous_commit = off` for that insert only.
+- `source_state(interface, key, value jsonb)`: what sources remember (file progress `file:<name>`, `schedule`). Always written in the same transaction as the messages it accounts for.
+- Batched inserts (`Store::insert_batch`) use one `INSERT ... SELECT FROM unnest(...) WITH ORDINALITY ORDER BY n` (ids keep the batch's order) and claim dedupe keys in bulk (repeats inside the batch are duplicates after the first).
 
 ## Performance notes (measured, WSL, 2.5 ms fsync disk)
 
 - One sender connection is bounded by one durable commit per ACK: ~443 msg/s strict, ~868/s relaxed; 16 connections ~2,100/s (group commit).
 - SDK: ~14.8k realistic ORU transforms/s per thread. Embedded V8 call overhead is negligible.
 - 1,001 interfaces: ready in 0.4 s, ~111 MB, 0 idle CPU.
+- File ingest (`split: records`, `durability: relaxed`): ~148k CSV rows/s (300,000 rows, 13 MB, 500 per transaction).

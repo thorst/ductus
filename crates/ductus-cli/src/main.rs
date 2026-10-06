@@ -134,6 +134,8 @@ fn exit_on_failure(result: Result<bool>) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
+        // Plain text when logging to a file or pipe (no color codes in log files).
+        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,sqlx=warn".into()),
         )

@@ -9,7 +9,7 @@ use ductus_core::config::{Durability, Source};
 use ductus_core::format::Format;
 use ductus_core::{InterfaceConfig, partition_of};
 use ductus_hl7::{AckCode, Message};
-use ductus_store::{DedupeKey, MessageRef, NewMessage, Store};
+use ductus_store::{Batch, BatchMessage, DedupeKey, MessageRef, NewMessage, Store};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
@@ -43,46 +43,123 @@ impl Intake {
         Ok(Self { config, store, wake, ordering, dedupe, control_id })
     }
 
-    /// Store a message (deduplicating if configured) and wake its worker.
-    pub async fn accept(&self, payload: &[u8]) -> Result<Accepted> {
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// Read a message's lane, ordering key, control ID and dedupe key.
+    fn keys(&self, payload: &[u8]) -> Keys {
         let text = String::from_utf8_lossy(payload);
         let read = |k: &KeyPath| keys::extract(&self.config.format, k, &text);
+        let ordering_key = self.ordering.as_ref().map(read);
+        let values: Vec<String> = self.dedupe.iter().map(read).collect();
+        Keys {
+            partition: partition_of(ordering_key.as_deref().unwrap_or(""), self.config.partition_count()),
+            ordering_key,
+            control_id: self.control_id.as_ref().map(read).filter(|c| !c.is_empty()),
+            // Nothing to identify the message by: no dedupe. The unit separator can't appear in
+            // these values, so distinct lists never collide.
+            dedupe: values.iter().any(|v| !v.is_empty()).then(|| values.join("\u{1f}")),
+        }
+    }
 
-        let key = self.ordering.as_ref().map(read);
-        let partition_key = partition_of(key.as_deref().unwrap_or(""), self.config.partition_count());
-        let control_id = self.control_id.as_ref().map(read).filter(|c| !c.is_empty());
+    fn relaxed(&self) -> bool {
+        self.config.durability == Durability::Relaxed
+    }
+
+    /// Wake only the lane's owner (same assignment as InterfaceConfig::partitions_for_worker).
+    /// notify_one keeps a permit if the worker is busy, so the wake-up is never lost.
+    fn wake(&self, partition: i32) {
+        self.wake[partition as usize % self.wake.len()].notify_one();
+    }
+
+    /// Store a message (deduplicating if configured) and wake its worker.
+    pub async fn accept(&self, payload: &[u8]) -> Result<Accepted> {
+        let keys = self.keys(payload);
         let new = NewMessage {
             interface: &self.config.name,
-            partition_key,
-            ordering_key: key.as_deref(),
-            control_id: control_id.as_deref(),
+            partition_key: keys.partition,
+            ordering_key: keys.ordering_key.as_deref(),
+            control_id: keys.control_id.as_deref(),
             payload,
-            relaxed: self.config.durability == Durability::Relaxed,
+            relaxed: self.relaxed(),
         };
-
-        let values: Vec<String> = self.dedupe.iter().map(read).collect();
-        let accepted = match &self.config.dedupe {
-            Some(d) if values.iter().any(|v| !v.is_empty()) => {
-                // Unit separator: can't appear in these values, so distinct lists never collide.
-                let dedupe_key = values.join("\u{1f}");
-                let stored = self.store.insert_deduped(new, DedupeKey { key: &dedupe_key, window: d.window }).await?;
+        let accepted = match (&self.config.dedupe, &keys.dedupe) {
+            (Some(d), Some(key)) => {
+                let stored = self.store.insert_deduped(new, DedupeKey { key, window: d.window }).await?;
                 if stored.duplicate {
-                    tracing::debug!(interface = %self.config.name, key = %dedupe_key, "duplicate");
+                    tracing::debug!(interface = %self.config.name, %key, "duplicate");
                     Accepted::Duplicate
                 } else {
                     Accepted::Queued(stored.message)
                 }
             }
-            // Nothing to identify the message by: store it normally.
             _ => Accepted::Queued(self.store.insert(new).await?),
         };
         if matches!(accepted, Accepted::Queued(_)) {
-            // Wake only the lane's owner (same assignment as InterfaceConfig::partitions_for_worker).
-            // notify_one keeps a permit if the worker is busy, so the wake-up is never lost.
-            self.wake[partition_key as usize % self.wake.len()].notify_one();
+            self.wake(keys.partition);
         }
         Ok(accepted)
     }
+
+    /// Store many messages and the source's progress in one transaction (see `Store::insert_batch`).
+    /// Returns how many were queued (the rest were duplicates).
+    pub async fn accept_batch(&self, payloads: &[Vec<u8>], state: Option<(&str, &str)>) -> Result<usize> {
+        let keys: Vec<Keys> = payloads.iter().map(|p| self.keys(p)).collect();
+        let batch = Batch {
+            interface: &self.config.name,
+            messages: keys
+                .iter()
+                .zip(payloads)
+                .map(|(k, payload)| BatchMessage {
+                    partition_key: k.partition,
+                    ordering_key: k.ordering_key.as_deref(),
+                    control_id: k.control_id.as_deref(),
+                    payload,
+                    dedupe_key: k.dedupe.as_deref(),
+                })
+                .collect(),
+            dedupe_window: self.config.dedupe.as_ref().map(|d| d.window).unwrap_or_default(),
+            relaxed: self.relaxed(),
+            state,
+        };
+        let duplicates = self.store.insert_batch(&batch).await?;
+        let mut woken = vec![false; self.wake.len()];
+        let mut queued = 0;
+        for (k, _) in keys.iter().zip(&duplicates).filter(|(_, duplicate)| !**duplicate) {
+            queued += 1;
+            let slot = k.partition as usize % self.wake.len();
+            if !std::mem::replace(&mut woken[slot], true) {
+                self.wake(k.partition);
+            }
+        }
+        Ok(queued)
+    }
+
+    /// Queue a scheduled run (see `Store::insert_scheduled`). False if it was skipped because the
+    /// previous run is still pending; `skipped_state` is saved instead of `state` then.
+    pub async fn accept_scheduled(&self, payload: &[u8], key: &str, state: &str, skipped_state: &str) -> Result<bool> {
+        let new = NewMessage {
+            interface: &self.config.name,
+            partition_key: 0,
+            ordering_key: None,
+            control_id: None,
+            payload,
+            relaxed: self.relaxed(),
+        };
+        let queued = self.store.insert_scheduled(new, key, state, skipped_state).await?.is_some();
+        if queued {
+            self.wake(0);
+        }
+        Ok(queued)
+    }
+}
+
+struct Keys {
+    partition: i32,
+    ordering_key: Option<String>,
+    control_id: Option<String>,
+    dedupe: Option<String>,
 }
 
 /// Start an MLLP listener feeding `intake`.

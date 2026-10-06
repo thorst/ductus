@@ -3,6 +3,7 @@
 use ductus_core::InterfaceConfig;
 use ductus_core::config::{AckMode, Destination, OnReject};
 use ductus_core::format::Format;
+use ductus_core::resources::SftpServer;
 use ductus_hl7::Message;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -29,6 +30,11 @@ pub enum Sender {
         method: reqwest::Method,
         url: String,
         headers: reqwest::header::HeaderMap,
+    },
+    Sftp {
+        connection: crate::sftp::Connection,
+        dir: String,
+        extension: &'static str,
     },
     /// Respond-mode HTTP interfaces deliver nothing.
     None,
@@ -57,8 +63,14 @@ fn extension(format: &Format) -> &'static str {
 }
 
 impl Sender {
-    pub fn new(config: &InterfaceConfig) -> Self {
+    /// `server`: an SFTP destination's server, from resources.yaml.
+    pub fn new(config: &InterfaceConfig, server: Option<SftpServer>) -> Self {
         match &config.destination {
+            Some(Destination::Sftp { server: name, dir }) => Sender::Sftp {
+                connection: crate::sftp::Connection::new(name, server.expect("checked at startup")),
+                dir: dir.clone(),
+                extension: extension(config.output.as_ref().unwrap_or(&config.format)),
+            },
             None => Sender::None,
             Some(Destination::Mllp { host, port, timeout_ms, ack, on_reject }) => Sender::Mllp {
                 client: ductus_mllp::Client::new(format!("{host}:{port}"), Duration::from_millis(*timeout_ms)),
@@ -128,6 +140,12 @@ impl Sender {
                     tokio::fs::rename(&tmp, dir.join(format!("{id}.{extension}"))).await
                 };
                 write.await.map_err(|e| SendError::Transient(e.to_string()))
+            }
+            Sender::Sftp { connection, dir, extension } => {
+                connection.put(dir, &format!("{id}.{extension}"), payload).await.map_err(|e| {
+                    connection.reset();
+                    SendError::Transient(format!("{e:#}"))
+                })
             }
             Sender::Http { client, method, url, headers } => {
                 let response = client

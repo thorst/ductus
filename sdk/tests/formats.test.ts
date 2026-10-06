@@ -99,6 +99,18 @@ test("formats: JSON in, CSV out", () => {
   expect(out).toBe("mrn,name\n1,A\n2,B\n");
 });
 
+test("formats: one record per message (split files), and one record out", () => {
+  const row = { ...csv, record: true };
+  const out = __invoke((r: any) => ({ mrn: r.mrn, name: r.name.toUpperCase() }), "mrn,name\n7,pat", {
+    input: row,
+    output: csv,
+  });
+  expect(out).toBe("mrn,name\n7,PAT\n");
+  const fixed = { kind: "fixed", record: true, fields: [{ name: "mrn", start: 0, width: 3 }] } as const;
+  expect(__invoke((r: any) => r.mrn, "42 ", { input: fixed, output: { kind: "text" } })).toBe("42");
+  expect(() => __invoke(() => 5, "{}", { input: json, output: csv })).toThrow("a record or an array");
+});
+
 test("formats: XML in and out, strings pass through, kill works for any format", () => {
   const xml = { kind: "xml" } as const;
   const out = __invoke((d: any) => {

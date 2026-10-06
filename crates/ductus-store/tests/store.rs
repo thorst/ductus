@@ -1,7 +1,7 @@
 //! Database-backed tests. Skipped unless DUCTUS_TEST_DATABASE_URL is set
 //! (CI sets it; locally: postgres://todd:ductus@localhost/ductus_dev).
 
-use ductus_store::{DedupeKey, NewMessage, Status, Store};
+use ductus_store::{Batch, BatchMessage, DedupeKey, NewMessage, Status, Store};
 
 async fn store() -> Option<Store> {
     let url = std::env::var("DUCTUS_TEST_DATABASE_URL").ok()?;
@@ -118,6 +118,65 @@ async fn failures_count_attempts_and_keep_the_message_pending() {
 
     store.set_status(m, Status::Quarantined, Some("gave up")).await.unwrap();
     assert!(store.pending(&name, &[0], 10).await.unwrap().is_empty());
+}
+
+fn batch<'a>(interface: &'a str, items: &[(&'a str, Option<&'a str>)], state: Option<(&'a str, &'a str)>) -> Batch<'a> {
+    Batch {
+        interface,
+        messages: items
+            .iter()
+            .map(|(payload, key)| BatchMessage {
+                partition_key: 0,
+                ordering_key: None,
+                control_id: None,
+                payload: payload.as_bytes(),
+                dedupe_key: *key,
+            })
+            .collect(),
+        dedupe_window: std::time::Duration::from_secs(3600),
+        relaxed: false,
+        state,
+    }
+}
+
+#[tokio::test]
+async fn batches_keep_order_dedupe_and_save_state_together() {
+    let Some(store) = store().await else { return };
+    let name = iface("batch");
+    let first = batch(
+        &name,
+        &[("a", Some("K1")), ("b", None), ("c", Some("K1")), ("d", Some("K2"))],
+        Some(("file:x", r#"{"offset":10}"#)),
+    );
+    assert_eq!(store.insert_batch(&first).await.unwrap(), [false, false, true, false], "K1 repeats inside the batch");
+    let second = batch(&name, &[("e", Some("K2")), ("f", Some("K3"))], Some(("file:x", r#"{"offset":20}"#)));
+    assert_eq!(store.insert_batch(&second).await.unwrap(), [true, false], "K2 was seen in the earlier batch");
+
+    let pending = store.payloads(&name, Status::Pending).await.unwrap();
+    assert_eq!(pending, [b"a".to_vec(), b"b".to_vec(), b"d".to_vec(), b"f".to_vec()]);
+    assert_eq!(store.payloads(&name, Status::Duplicate).await.unwrap().len(), 2);
+    assert_eq!(store.source_state(&name, "file:x").await.unwrap().as_deref(), Some(r#"{"offset": 20}"#));
+
+    // A state-only batch (end of file) and cleanup.
+    store.insert_batch(&batch(&name, &[], Some(("file:x", r#"{"done":true}"#)))).await.unwrap();
+    assert_eq!(store.source_state(&name, "file:x").await.unwrap().as_deref(), Some(r#"{"done": true}"#));
+    store.delete_source_state(&name, "file:x").await.unwrap();
+    assert_eq!(store.source_state(&name, "file:x").await.unwrap(), None);
+}
+
+#[tokio::test]
+async fn scheduled_runs_are_one_at_a_time() {
+    let Some(store) = store().await else { return };
+    let name = iface("schedule");
+    let run = |payload: &'static [u8]| msg(&name, 0, payload);
+    let first = store.insert_scheduled(run(b"run 1"), "schedule", r#"{"n":1}"#, "{}").await.unwrap();
+    let second = store.insert_scheduled(run(b"run 2"), "schedule", r#"{"n":2}"#, r#"{"skipped":2}"#).await.unwrap();
+    assert!(first.is_some() && second.is_none(), "run 1 is still pending, so run 2 is skipped");
+    assert_eq!(store.source_state(&name, "schedule").await.unwrap().as_deref(), Some(r#"{"skipped": 2}"#));
+
+    store.set_status(first.unwrap(), Status::Sent, None).await.unwrap();
+    assert!(store.insert_scheduled(run(b"run 3"), "schedule", r#"{"n":3}"#, "{}").await.unwrap().is_some());
+    assert_eq!(store.source_state(&name, "schedule").await.unwrap().as_deref(), Some(r#"{"n": 3}"#));
 }
 
 /// Rollback safety: an older binary must start on a database a newer version already migrated.

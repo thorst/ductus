@@ -1,15 +1,19 @@
 //! Runs interfaces: receive → persist → ACK, then workers transform and deliver.
 
 mod destination;
+mod files;
 mod http;
 mod ingest;
 pub mod keys;
 mod limiter;
+mod schedule;
 mod services;
+mod sftp;
+mod split;
 mod worker;
 
 use anyhow::{Context, Result, bail};
-use ductus_core::config::{Isolation, Source};
+use ductus_core::config::{Destination, Isolation, Source};
 use ductus_core::{Environment, InterfaceConfig};
 use ductus_store::Store;
 use std::path::Path;
@@ -69,6 +73,11 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     if !conflicts.is_empty() {
         bail!("port conflicts:\n  {}", conflicts.join("\n  "));
     }
+    let missing = resources.missing_references(&configs);
+    if !missing.is_empty() {
+        bail!("{}", missing.join("\n"));
+    }
+    let sftp_server = |name: &str| resources.sftp.get(name).cloned();
     let store = Store::connect(database_url, options.db_connections).await?;
     // Keep dedupe keys a little longer than the longest window that uses them.
     let dedupe_retention = configs.iter().filter_map(|c| c.dedupe.as_ref()).map(|d| d.window).max().unwrap_or_default()
@@ -112,6 +121,10 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 wake: wake.clone(),
                 limiter: limiter.clone(),
                 requests: requests.take(),
+                server: match &config.destination {
+                    Some(Destination::Sftp { server, .. }) => sftp_server(server),
+                    _ => None,
+                },
             };
             match config.isolation {
                 Isolation::Shared => {
@@ -149,8 +162,17 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     }
 
     for (config, wake) in &interfaces {
-        if matches!(config.source, Source::Mllp { .. }) {
-            ingest::spawn_mllp(Arc::new(ingest::Intake::new(config.clone(), store.clone(), wake.clone())?)).await?;
+        let intake = || ingest::Intake::new(config.clone(), store.clone(), wake.clone()).map(Arc::new);
+        match &config.source {
+            Source::Mllp { .. } => ingest::spawn_mllp(intake()?).await?,
+            Source::File(f) | Source::Sftp(f) => {
+                let watcher = files::FileWatcher::new(intake()?, f.server.as_deref().and_then(sftp_server))?;
+                tokio::spawn(watcher.run());
+            }
+            Source::Schedule(s) => {
+                tokio::spawn(schedule::run(intake()?, ductus_core::schedule::Timing::new(s)?));
+            }
+            Source::Http { .. } => {} // served below, with the other HTTP interfaces on its port
         }
     }
     http::serve(http_endpoints).await?;

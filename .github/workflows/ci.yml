@@ -64,5 +64,10 @@ jobs:
       - name: HTTP demo (respond mode, queue mode, HTTP destination, formats)
         run: PGUSER_=ductus PGPASS_=ductus BIN=target/release/ductus bash scripts/demo-http.sh
 
+      - name: Files demo (file, SFTP and schedule sources; split records; kill -9 mid-file)
+        run: |
+          sudo apt-get install -y -qq openssh-server >/dev/null
+          BIN=target/release/ductus bash scripts/demo-files.sh
+
       - name: Scale demo (300 shared interfaces + 1 dedicated, hot MRN)
         run: SHARED=300 EPIC_SECONDS=10 SAMPLED=50 BIN=target/release/ductus bash scripts/demo-scale.sh
