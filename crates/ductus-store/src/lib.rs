@@ -165,9 +165,6 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .context("counting messages")?;
-        Ok(rows
-            .into_iter()
-            .filter_map(|(i, s, n)| Status::from_i16(s).map(|s| (i, s, n)))
-            .collect())
+        Ok(rows.into_iter().filter_map(|(i, s, n)| Status::from_i16(s).map(|s| (i, s, n))).collect())
     }
 }

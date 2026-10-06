@@ -45,7 +45,12 @@ pub fn transpile(specifier: &ModuleSpecifier, ts: &str) -> anyhow::Result<String
 pub struct Loader;
 
 impl ModuleLoader for Loader {
-    fn resolve(&self, specifier: &str, referrer: &str, _kind: ResolutionKind) -> Result<ModuleSpecifier, ModuleLoaderError> {
+    fn resolve(
+        &self,
+        specifier: &str,
+        referrer: &str,
+        _kind: ResolutionKind,
+    ) -> Result<ModuleSpecifier, ModuleLoaderError> {
         if specifier == SDK_SPECIFIER {
             return ModuleSpecifier::parse(SDK_URL).map_err(JsErrorBox::from_err);
         }
@@ -72,9 +77,8 @@ fn load(specifier: &ModuleSpecifier) -> Result<ModuleSource, ModuleLoaderError> 
             transpile(specifier, source).map_err(generic)?
         }
         "file" => {
-            let path = specifier
-                .to_file_path()
-                .map_err(|_| JsErrorBox::generic(format!("bad file URL: {specifier}")))?;
+            let path =
+                specifier.to_file_path().map_err(|_| JsErrorBox::generic(format!("bad file URL: {specifier}")))?;
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| JsErrorBox::generic(format!("cannot read {}: {e}", path.display())))?;
             match path.extension().and_then(|e| e.to_str()) {

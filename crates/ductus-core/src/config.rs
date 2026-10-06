@@ -90,12 +90,24 @@ impl Default for Retry {
 }
 
 mod defaults {
-    pub fn workers() -> u32 { 4 }
-    pub fn host() -> String { "0.0.0.0".into() }
-    pub fn timeout_ms() -> u64 { 10_000 }
-    pub fn partitions() -> u32 { 64 }
-    pub fn backoff_ms() -> u64 { 1_000 }
-    pub fn max_backoff_ms() -> u64 { 60_000 }
+    pub fn workers() -> u32 {
+        4
+    }
+    pub fn host() -> String {
+        "0.0.0.0".into()
+    }
+    pub fn timeout_ms() -> u64 {
+        10_000
+    }
+    pub fn partitions() -> u32 {
+        64
+    }
+    pub fn backoff_ms() -> u64 {
+        1_000
+    }
+    pub fn max_backoff_ms() -> u64 {
+        60_000
+    }
 }
 
 impl InterfaceConfig {
@@ -103,8 +115,7 @@ impl InterfaceConfig {
     pub fn load(dir: &Path) -> Result<Self> {
         let file = dir.join("interface.yaml");
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-        let mut config: Self =
-            serde_yaml_ng::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+        let mut config: Self = serde_yaml_ng::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
         config.dir = dir.to_path_buf();
         config.validate().with_context(|| format!("validating {}", file.display()))?;
         Ok(config)
@@ -117,10 +128,10 @@ impl InterfaceConfig {
         if self.ordering.partitions == 0 {
             bail!("ordering.partitions must be at least 1");
         }
-        if let Some(script) = self.script_path() {
-            if !script.is_file() {
-                bail!("script not found: {}", script.display());
-            }
+        if let Some(script) = self.script_path()
+            && !script.is_file()
+        {
+            bail!("script not found: {}", script.display());
         }
         Ok(())
     }
@@ -132,10 +143,7 @@ impl InterfaceConfig {
     /// Partitions are spread across workers round-robin. Each partition has exactly one owner,
     /// which is what keeps per-key ordering.
     pub fn partitions_for_worker(&self, worker: u32) -> Vec<i32> {
-        (0..self.partition_count())
-            .filter(|p| p % self.workers == worker)
-            .map(|p| p as i32)
-            .collect()
+        (0..self.partition_count()).filter(|p| p % self.workers == worker).map(|p| p as i32).collect()
     }
 
     /// Effective partition count: one lane when there's no ordering key.

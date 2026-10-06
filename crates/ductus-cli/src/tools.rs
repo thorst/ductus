@@ -9,8 +9,10 @@ use std::time::{Duration, Instant};
 
 pub const DEFAULT_DB: &str = "postgres://todd:ductus@localhost/ductus_dev";
 
-const LAST: &[&str] = &["SMITH", "JOHNSON", "WILLIAMS", "BROWN", "JONES", "GARCIA", "MILLER", "DAVIS", "LOPEZ", "WILSON"];
-const FIRST: &[&str] = &["JAMES", "MARY", "ROBERT", "PATRICIA", "JOHN", "JENNIFER", "MICHAEL", "LINDA", "DAVID", "ELENA"];
+const LAST: &[&str] =
+    &["SMITH", "JOHNSON", "WILLIAMS", "BROWN", "JONES", "GARCIA", "MILLER", "DAVIS", "LOPEZ", "WILSON"];
+const FIRST: &[&str] =
+    &["JAMES", "MARY", "ROBERT", "PATRICIA", "JOHN", "JENNIFER", "MICHAEL", "LINDA", "DAVID", "ELENA"];
 
 fn now() -> String {
     chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
@@ -21,7 +23,7 @@ fn adt(seq: u64, patient: u64) -> String {
     let mrn = 100_000 + patient;
     let last = LAST[(patient % LAST.len() as u64) as usize];
     let first = FIRST[(patient / LAST.len() as u64 % FIRST.len() as u64) as usize];
-    let sex = if patient % 2 == 0 { "F" } else { "M" };
+    let sex = if patient.is_multiple_of(2) { "F" } else { "M" };
     let ts = now();
     format!(
         "MSH|^~\\&|EPIC|HOSP|DUCTUS|HOSP|{ts}||ADT^A08|{seq}|P|2.5\r\

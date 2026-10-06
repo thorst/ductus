@@ -121,9 +121,7 @@ impl<'a> Message<'a> {
     /// The first segment with this name.
     pub fn segment(&self, name: &str) -> Option<&'a str> {
         let field = self.delims.field;
-        self.segments().find(|s| {
-            s.get(..3) == Some(name) && s[3..].chars().next().is_none_or(|c| c == field)
-        })
+        self.segments().find(|s| s.get(..3) == Some(name) && s[3..].chars().next().is_none_or(|c| c == field))
     }
 
     /// Value at `path`, first repetition. Anything missing reads as `""`.

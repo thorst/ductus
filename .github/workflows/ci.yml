@@ -1,0 +1,59 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  DUCTUS_DATABASE_URL: postgres://ductus:ductus@localhost/ductus
+  DUCTUS_TEST_DATABASE_URL: postgres://ductus:ductus@localhost/ductus
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: ductus
+          POSTGRES_PASSWORD: ductus
+          POSTGRES_DB: ductus
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U ductus"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      - name: Lint
+        run: cargo clippy --release --locked --all-targets -- -D warnings
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Unit and integration tests
+        run: cargo test --release --locked
+
+      - name: Example interface tests
+        working-directory: examples/adt-relay
+        run: ../../target/release/ductus test
+
+      - name: Example validation (types, config, loading)
+        working-directory: examples/adt-relay
+        run: ../../target/release/ductus validate
+
+      - name: Crash-recovery demo
+        run: |
+          sudo apt-get install -y -qq postgresql-client >/dev/null
+          COUNT=3000 BIN=target/release/ductus bash scripts/demo-crash-recovery.sh | tee demo.log
+          grep -q "unique 3000 " demo.log
+          grep -q "out of order 0 " demo.log

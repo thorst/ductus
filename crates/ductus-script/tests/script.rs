@@ -82,10 +82,7 @@ export function transform(msg: Message) {
 
 #[test]
 fn transform_errors_carry_the_js_message() {
-    let dir = project(&[(
-        "transform.ts",
-        "export function transform() { throw new Error(\"bad mapping\"); }",
-    )]);
+    let dir = project(&[("transform.ts", "export function transform() { throw new Error(\"bad mapping\"); }")]);
     let rt = rt();
     let _guard = rt.enter();
     let mut isolate = rt.block_on(Isolate::interface(&dir.path().join("transform.ts"))).unwrap();
@@ -114,6 +111,43 @@ fn remote_imports_are_refused() {
     let _guard = rt.enter();
     let err = rt.block_on(Isolate::interface(&dir.path().join("transform.ts"))).err().unwrap().to_string();
     assert!(err.contains("not allowed"), "{err}");
+}
+
+#[test]
+fn type_check_catches_mapping_mistakes() {
+    let rt = rt();
+    let _guard = rt.enter();
+    let types = rt.block_on(Isolate::generate_types()).unwrap();
+    let mut files = std::collections::BTreeMap::new();
+    files.insert("/p/.ductus/types/ductus-sdk.d.ts".to_string(), types);
+    files.insert(
+        "/p/good.ts".to_string(),
+        r#"import type { Message } from "@ductus/sdk";
+export function transform(msg: Message) {
+  if (msg.PID[8] === "F") msg.PID[5][1] = msg.PID[5][1].toUpperCase();
+  for (const obx of msg.OBX) obx[5][1] = obx[5][1].trim();
+  msg.PID[3] = "123^^^MRN";
+  msg.ZPI[1].value;
+  return msg;
+}"#
+        .to_string(),
+    );
+    files.insert(
+        "/p/bad.ts".to_string(),
+        r#"import type { Message } from "@ductus/sdk";
+export function transform(msg: Message) {
+  const last: number = msg.PID[5][1];
+  msg.PID[5][1].toUpperCasee();
+  return msg;
+}"#
+        .to_string(),
+    );
+
+    let diagnostics = ductus_script::type_check(&files).unwrap();
+    let errors: Vec<_> = diagnostics.iter().filter(|d| d.is_error()).collect();
+    assert!(errors.iter().all(|d| d.file.as_deref() == Some("/p/bad.ts")), "unexpected errors: {errors:#?}");
+    assert!(errors.iter().any(|d| d.line == 3 && d.message.contains("not assignable to type 'number'")), "{errors:#?}");
+    assert!(errors.iter().any(|d| d.line == 4 && d.message.contains("toUpperCasee")), "{errors:#?}");
 }
 
 #[test]

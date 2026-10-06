@@ -867,10 +867,13 @@ dependencies = [
  "bytes",
  "chrono",
  "clap",
+ "ductus-core",
  "ductus-hl7",
  "ductus-mllp",
  "ductus-runtime",
+ "ductus-script",
  "ductus-store",
+ "serde_json",
  "tokio",
  "tracing-subscriber",
 ]
@@ -924,6 +927,7 @@ dependencies = [
  "deno_ast",
  "deno_core",
  "deno_error",
+ "serde",
  "serde_json",
  "tempfile",
  "tokio",
@@ -936,6 +940,7 @@ dependencies = [
  "anyhow",
  "chrono",
  "sqlx",
+ "tokio",
 ]
 
 [[package]]

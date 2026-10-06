@@ -26,10 +26,8 @@ pub fn spawn(
     std::thread::Builder::new()
         .name(format!("{}-w{index}", config.name))
         .spawn(move || {
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .expect("building worker runtime");
+            let runtime =
+                tokio::runtime::Builder::new_current_thread().enable_all().build().expect("building worker runtime");
             runtime.block_on(async move {
                 match Worker::new(config, index, store, wake).await {
                     Ok(worker) => {

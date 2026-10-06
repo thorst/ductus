@@ -3,7 +3,10 @@
 //! Interface code is real ES modules: `export function transform(msg)` in a `.ts`
 //! file, free to import its own sibling modules and `@ductus/sdk`.
 
+mod check;
 mod loader;
+
+pub use check::{Diagnostic, type_check};
 
 use anyhow::{Context, Result, anyhow, bail};
 use deno_core::{JsRuntime, ModuleSpecifier, RuntimeOptions, v8};
@@ -22,10 +25,8 @@ pub struct Isolate {
 
 impl Isolate {
     fn new() -> Self {
-        let runtime = JsRuntime::new(RuntimeOptions {
-            module_loader: Some(Rc::new(loader::Loader::default())),
-            ..Default::default()
-        });
+        let runtime =
+            JsRuntime::new(RuntimeOptions { module_loader: Some(Rc::new(loader::Loader)), ..Default::default() });
         Self { runtime }
     }
 
@@ -77,16 +78,9 @@ __setFixtures({fixtures_json});
     async fn load_main(&mut self, beside: &Path, glue: String) -> Result<()> {
         let dir = beside.parent().unwrap_or(Path::new("."));
         let specifier = file_url(&dir.join("__ductus_main__.js"))?;
-        let id = self
-            .runtime
-            .load_main_es_module_from_code(&specifier, glue)
-            .await
-            .map_err(|e| anyhow!("{e}"))?;
+        let id = self.runtime.load_main_es_module_from_code(&specifier, glue).await.map_err(|e| anyhow!("{e}"))?;
         let evaluated = self.runtime.mod_evaluate(id);
-        self.runtime
-            .run_event_loop(Default::default())
-            .await
-            .map_err(|e| anyhow!("{e}"))?;
+        self.runtime.run_event_loop(Default::default()).await.map_err(|e| anyhow!("{e}"))?;
         evaluated.await.map_err(|e| anyhow!("{e}"))?;
         Ok(())
     }

@@ -61,13 +61,7 @@ async fn receive(config: &InterfaceConfig, store: &Store, key_path: Option<&Path
     let control_id = Some(message.control_id()).filter(|c| !c.is_empty());
 
     let stored = store
-        .insert(NewMessage {
-            interface: &config.name,
-            partition_key,
-            ordering_key: key,
-            control_id,
-            payload: frame,
-        })
+        .insert(NewMessage { interface: &config.name, partition_key, ordering_key: key, control_id, payload: frame })
         .await;
 
     match stored {

@@ -1,3 +1,4 @@
+mod project;
 mod tools;
 
 use anyhow::Result;
@@ -20,6 +21,24 @@ enum Command {
         root: PathBuf,
         #[arg(long, env = "DUCTUS_DATABASE_URL", default_value = tools::DEFAULT_DB)]
         database_url: String,
+    },
+    /// Run each interface's `*.test.ts` files.
+    Test {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// Only this interface.
+        #[arg(long)]
+        interface: Option<String>,
+    },
+    /// Check configs, code loading and TypeScript types.
+    Validate {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+    },
+    /// Write editor typings (.ductus/types) and tsconfig.json for VS Code.
+    Types {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
     },
     /// Show message counts by interface and status.
     Status {
@@ -46,6 +65,14 @@ enum Command {
     },
 }
 
+/// For commands that report problems themselves: exit 1 when they found any.
+fn exit_on_failure(result: Result<bool>) -> Result<()> {
+    if !result? {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
@@ -56,6 +83,9 @@ async fn main() -> Result<()> {
 
     match Cli::parse().command {
         Command::Run { root, database_url } => ductus_runtime::run(&root, &database_url).await,
+        Command::Test { root, interface } => exit_on_failure(project::test(&root, interface.as_deref()).await),
+        Command::Validate { root } => exit_on_failure(project::validate(&root).await),
+        Command::Types { root } => project::types(&root).await,
         Command::Status { database_url } => tools::status(&database_url).await,
         Command::Gen { to, count, patients, rate } => tools::generate(&to, count, patients, rate).await,
         Command::Sink { port } => tools::sink(port).await,
