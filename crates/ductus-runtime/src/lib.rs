@@ -42,7 +42,8 @@ pub async fn run(root: &Path, database_url: &str) -> Result<()> {
 
     for config in configs {
         let config = Arc::new(config);
-        let wake = Arc::new(Notify::new());
+        // One wake-up signal per worker: ingest wakes only the worker that owns the message's lane.
+        let wake: Arc<[Notify]> = (0..config.workers).map(|_| Notify::new()).collect();
 
         let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         for w in 0..config.workers {

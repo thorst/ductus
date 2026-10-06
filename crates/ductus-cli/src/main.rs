@@ -54,9 +54,15 @@ enum Command {
         /// Distinct patients (MRNs) to spread messages across.
         #[arg(long, default_value_t = 200)]
         patients: u64,
-        /// Messages per second; 0 = as fast as ACKs come back.
+        /// Total messages per second; 0 = as fast as ACKs come back.
         #[arg(long, default_value_t = 0)]
         rate: u64,
+        /// Concurrent MLLP connections. Each patient always uses the same connection.
+        #[arg(long, default_value_t = 1)]
+        connections: u64,
+        /// Fraction of messages (0..1) for one hot patient, e.g. 0.3.
+        #[arg(long, default_value_t = 0.0)]
+        hot: f64,
     },
     /// Receive messages over MLLP, ACK them, and verify per-patient ordering.
     Sink {
@@ -87,7 +93,9 @@ async fn main() -> Result<()> {
         Command::Validate { root } => exit_on_failure(project::validate(&root).await),
         Command::Types { root } => project::types(&root).await,
         Command::Status { database_url } => tools::status(&database_url).await,
-        Command::Gen { to, count, patients, rate } => tools::generate(&to, count, patients, rate).await,
+        Command::Gen { to, count, patients, rate, connections, hot } => {
+            tools::generate(tools::GenOptions { to, count, patients, rate, connections, hot }).await
+        }
         Command::Sink { port } => tools::sink(port).await,
     }
 }

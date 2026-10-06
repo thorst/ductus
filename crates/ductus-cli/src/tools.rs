@@ -35,15 +35,75 @@ fn adt(seq: u64, patient: u64) -> String {
     )
 }
 
-pub async fn generate(to: &str, count: u64, patients: u64, rate: u64) -> Result<()> {
-    let mut client = ductus_mllp::Client::new(to, Duration::from_secs(10));
-    let start = Instant::now();
-    let interval = (rate > 0).then(|| Duration::from_secs_f64(1.0 / rate as f64));
-    let (mut retries, mut rejected) = (0u64, 0u64);
+/// Traffic shape for `ductus gen`.
+pub struct GenOptions {
+    pub to: String,
+    pub count: u64,
+    pub patients: u64,
+    /// Total messages per second across all connections; 0 = as fast as ACKs come back.
+    pub rate: u64,
+    pub connections: u64,
+    /// Fraction of messages (0..1) for a single hot patient, to exercise hotspot handling.
+    pub hot: f64,
+}
 
-    for seq in 1..=count {
-        let message = adt(seq, seq % patients.max(1));
-        // Resend until ACKed: a lost ACK means we can't know if it was stored.
+/// Small deterministic PRNG (xorshift64*), so runs are reproducible.
+struct Rng(u64);
+
+impl Rng {
+    fn next_f64(&mut self) -> f64 {
+        self.0 ^= self.0 >> 12;
+        self.0 ^= self.0 << 25;
+        self.0 ^= self.0 >> 27;
+        (self.0.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+pub async fn generate(opts: GenOptions) -> Result<()> {
+    let patients = opts.patients.max(1);
+    let connections = opts.connections.max(1);
+
+    // Assign each message a patient, and each patient a connection: one patient's messages
+    // always travel on one connection in sequence order, so the sink can verify ordering.
+    let mut rng = Rng(0x9E3779B97F4A7C15);
+    let mut lanes: Vec<Vec<(u64, u64)>> = vec![Vec::new(); connections as usize];
+    for seq in 1..=opts.count {
+        let patient = if opts.hot > 0.0 && rng.next_f64() < opts.hot { 0 } else { seq % patients };
+        lanes[(patient % connections) as usize].push((seq, patient));
+    }
+
+    let start = Instant::now();
+    let per_connection_rate = opts.rate as f64 / connections as f64;
+    let mut tasks = Vec::new();
+    for lane in lanes {
+        let to = opts.to.clone();
+        tasks.push(tokio::spawn(async move { send_lane(&to, lane, per_connection_rate, start).await }));
+    }
+    let (mut retries, mut rejected) = (0u64, 0u64);
+    for task in tasks {
+        let (r, j) = task.await?;
+        retries += r;
+        rejected += j;
+    }
+
+    let secs = start.elapsed().as_secs_f64();
+    println!(
+        "sent {} messages over {connections} connection(s) in {secs:.1}s ({:.0}/s), retries {retries}, rejected {rejected}",
+        opts.count,
+        opts.count as f64 / secs
+    );
+    Ok(())
+}
+
+/// Send one connection's messages in order, resending each until it's ACKed.
+/// Returns (retries, rejected).
+async fn send_lane(to: &str, messages: Vec<(u64, u64)>, rate: f64, start: Instant) -> (u64, u64) {
+    let mut client = ductus_mllp::Client::new(to, Duration::from_secs(10));
+    let interval = (rate > 0.0).then(|| Duration::from_secs_f64(1.0 / rate));
+    let (mut retries, mut rejected) = (0u64, 0u64);
+    for (i, (seq, patient)) in messages.into_iter().enumerate() {
+        let message = adt(seq, patient);
+        // A lost ACK means we can't know whether it was stored, so resend.
         loop {
             match client.send(message.as_bytes()).await {
                 Ok(ack) => {
@@ -64,20 +124,10 @@ pub async fn generate(to: &str, count: u64, patients: u64, rate: u64) -> Result<
             }
         }
         if let Some(interval) = interval {
-            let due = start + interval * seq as u32;
-            tokio::time::sleep_until(due.into()).await;
-        }
-        if seq % 1000 == 0 {
-            eprintln!("sent {seq}/{count}");
+            tokio::time::sleep_until((start + interval * (i as u32 + 1)).into()).await;
         }
     }
-
-    let secs = start.elapsed().as_secs_f64();
-    println!(
-        "sent {count} messages in {secs:.1}s ({:.0}/s), retries {retries}, rejected {rejected}",
-        count as f64 / secs
-    );
-    Ok(())
+    (retries, rejected)
 }
 
 #[derive(Default)]

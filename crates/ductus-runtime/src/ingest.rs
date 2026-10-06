@@ -11,7 +11,7 @@ use std::sync::Arc;
 use tokio::net::TcpListener;
 use tokio::sync::Notify;
 
-pub async fn spawn(config: Arc<InterfaceConfig>, store: Store, wake: Arc<Notify>) -> Result<()> {
+pub async fn spawn(config: Arc<InterfaceConfig>, store: Store, wake: Arc<[Notify]>) -> Result<()> {
     let key_path: Option<Path> = config
         .ordering
         .key
@@ -32,8 +32,12 @@ pub async fn spawn(config: Arc<InterfaceConfig>, store: Store, wake: Arc<Notify>
         let wake = wake.clone();
         let key_path = key_path.clone();
         async move {
-            let ack = receive(&config, &store, key_path.as_ref(), &frame).await;
-            wake.notify_waiters();
+            let (ack, stored_in) = receive(&config, &store, key_path.as_ref(), &frame).await;
+            if let Some(lane) = stored_in {
+                // Wake only the lane's owner (same assignment as InterfaceConfig::partitions_for_worker).
+                // notify_one keeps a permit if the worker is busy, so the wake-up is never lost.
+                wake[lane as usize % wake.len()].notify_one();
+            }
             Bytes::from(ack)
         }
     };
@@ -45,13 +49,19 @@ pub async fn spawn(config: Arc<InterfaceConfig>, store: Store, wake: Arc<Notify>
     Ok(())
 }
 
-async fn receive(config: &InterfaceConfig, store: &Store, key_path: Option<&Path>, frame: &[u8]) -> String {
+/// Returns the ACK to send, and the lane the message was stored in (if it was).
+async fn receive(
+    config: &InterfaceConfig,
+    store: &Store,
+    key_path: Option<&Path>,
+    frame: &[u8],
+) -> (String, Option<i32>) {
     let raw = String::from_utf8_lossy(frame);
     let message = match Message::parse(&raw) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(interface = %config.name, error = %e, "rejected unparseable message");
-            return ductus_hl7::reject_unparseable(&e.to_string(), &hl7_now());
+            return (ductus_hl7::reject_unparseable(&e.to_string(), &hl7_now()), None);
         }
     };
 
@@ -65,11 +75,11 @@ async fn receive(config: &InterfaceConfig, store: &Store, key_path: Option<&Path
         .await;
 
     match stored {
-        Ok(_) => message.ack(AckCode::Accept, "", &hl7_now()),
+        Ok(_) => (message.ack(AckCode::Accept, "", &hl7_now()), Some(partition_key)),
         Err(e) => {
             // AE tells the sender to retry: nothing was stored, so nothing is lost.
             tracing::error!(interface = %config.name, error = %e, "failed to store message");
-            message.ack(AckCode::Error, "temporarily unable to store message", &hl7_now())
+            (message.ack(AckCode::Error, "temporarily unable to store message", &hl7_now()), None)
         }
     }
 }

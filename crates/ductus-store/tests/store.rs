@@ -56,6 +56,21 @@ async fn finished_messages_leave_the_queue() {
 }
 
 #[tokio::test]
+async fn statuses_update_in_bulk() {
+    let Some(store) = store().await else { return };
+    let name = iface("bulk");
+    let mut refs = Vec::new();
+    for i in 0..5 {
+        refs.push(store.insert(msg(&name, 0, format!("m{i}").as_bytes())).await.unwrap());
+    }
+    store.set_status_many(&refs[..3], Status::Sent).await.unwrap();
+    store.set_status_many(&[], Status::Sent).await.unwrap();
+
+    let left: Vec<_> = store.pending(&name, &[0], 10).await.unwrap().into_iter().map(|p| p.payload).collect();
+    assert_eq!(left, vec![b"m3".to_vec(), b"m4".to_vec()]);
+}
+
+#[tokio::test]
 async fn failures_count_attempts_and_keep_the_message_pending() {
     let Some(store) = store().await else { return };
     let name = iface("failures");
@@ -70,6 +85,27 @@ async fn failures_count_attempts_and_keep_the_message_pending() {
 
     store.set_status(m, Status::Quarantined, Some("gave up")).await.unwrap();
     assert!(store.pending(&name, &[0], 10).await.unwrap().is_empty());
+}
+
+/// Rollback safety: an older binary must start on a database a newer version already migrated.
+#[tokio::test]
+async fn starts_on_a_database_migrated_by_a_newer_version() {
+    let Some(url) = std::env::var("DUCTUS_TEST_DATABASE_URL").ok() else { return };
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    Store::connect(&url, 2).await.unwrap(); // make sure the migrations table exists
+    let future = 99_000_000_000_i64 + i64::from(std::process::id());
+    sqlx::query(
+        "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time)
+         VALUES ($1, 'from a newer engine', true, '\\x00', 0)",
+    )
+    .bind(future)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let result = Store::connect(&url, 2).await;
+    sqlx::query("DELETE FROM _sqlx_migrations WHERE version = $1").bind(future).execute(&pool).await.unwrap();
+    result.expect("older binary should start on a newer schema");
 }
 
 #[tokio::test]

@@ -80,7 +80,11 @@ impl Store {
             .connect(url)
             .await
             .context("connecting to PostgreSQL")?;
-        sqlx::migrate!("./migrations").run(&pool).await.context("running migrations")?;
+        let mut migrator = sqlx::migrate!("./migrations");
+        // A newer engine may have applied migrations this binary doesn't know. Migrations are
+        // expand-only, so older binaries keep working: that's what makes rollback safe.
+        migrator.set_ignore_missing(true);
+        migrator.run(&pool).await.context("running migrations")?;
         let store = Self { pool };
         store.ensure_partitions(3).await?;
         Ok(store)
@@ -139,6 +143,26 @@ impl Store {
         .execute(&self.pool)
         .await
         .context("updating message status")?;
+        Ok(())
+    }
+
+    /// Set the same status on many messages in one statement.
+    pub async fn set_status_many(&self, messages: &[MessageRef], status: Status) -> Result<()> {
+        if messages.is_empty() {
+            return Ok(());
+        }
+        let ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
+        let times: Vec<DateTime<Utc>> = messages.iter().map(|m| m.received_at).collect();
+        sqlx::query(
+            "UPDATE messages SET status = $1, updated_at = now()
+             WHERE (id, received_at) IN (SELECT * FROM unnest($2::bigint[], $3::timestamptz[]))",
+        )
+        .bind(status as i16)
+        .bind(&ids)
+        .bind(&times)
+        .execute(&self.pool)
+        .await
+        .context("updating message statuses")?;
         Ok(())
     }
 

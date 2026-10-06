@@ -14,13 +14,14 @@ use tokio::sync::Notify;
 const BATCH: i64 = 200;
 const IDLE_POLL: Duration = Duration::from_millis(250);
 const DB_RETRY: Duration = Duration::from_secs(1);
+const SENT_FLUSH: usize = 50;
 
 /// Start a worker thread. It reports on `ready` once its interface code has loaded (or failed to).
 pub fn spawn(
     config: Arc<InterfaceConfig>,
     index: u32,
     store: Store,
-    wake: Arc<Notify>,
+    wake: Arc<[Notify]>,
     ready: std::sync::mpsc::Sender<Result<()>>,
 ) -> Result<()> {
     std::thread::Builder::new()
@@ -51,7 +52,11 @@ struct Worker {
     isolate: Option<Isolate>,
     sender: Sender,
     store: Store,
-    wake: Arc<Notify>,
+    wake: Arc<[Notify]>,
+    index: usize,
+    /// Delivered but not yet marked sent. Flushed every SENT_FLUSH messages and at the end of
+    /// each batch, so a crash re-sends at most that many (at-least-once delivery).
+    sent: Vec<MessageRef>,
 }
 
 /// What the interface logic decided to do with a message.
@@ -62,7 +67,7 @@ enum Outcome {
 }
 
 impl Worker {
-    async fn new(config: Arc<InterfaceConfig>, index: u32, store: Store, wake: Arc<Notify>) -> Result<Self> {
+    async fn new(config: Arc<InterfaceConfig>, index: u32, store: Store, wake: Arc<[Notify]>) -> Result<Self> {
         let isolate = match config.script_path() {
             Some(path) => Some(Isolate::interface(&path).await?),
             None => None,
@@ -74,6 +79,8 @@ impl Worker {
             isolate,
             store,
             wake,
+            index: index as usize,
+            sent: Vec::with_capacity(SENT_FLUSH),
         })
     }
 
@@ -92,7 +99,7 @@ impl Worker {
             };
             if batch.is_empty() {
                 tokio::select! {
-                    _ = self.wake.notified() => {}
+                    _ = self.wake[self.index].notified() => {}
                     _ = tokio::time::sleep(IDLE_POLL) => {}
                 }
                 continue;
@@ -100,6 +107,8 @@ impl Worker {
             for message in batch {
                 self.process(message).await;
             }
+            // Must happen before the next read, or those messages would be read again as pending.
+            self.flush_sent().await;
         }
     }
 
@@ -128,11 +137,17 @@ impl Worker {
     }
 
     async fn deliver(&mut self, reference: MessageRef, mut attempts: i32, payload: &[u8]) {
-        let retry = &self.config.retry;
+        let retry = self.config.retry.clone();
         let mut backoff = Duration::from_millis(retry.initial_backoff_ms);
         loop {
             match self.sender.send(reference.id, payload).await {
-                Ok(()) => return self.finish(reference, Status::Sent, None).await,
+                Ok(()) => {
+                    self.sent.push(reference);
+                    if self.sent.len() >= SENT_FLUSH {
+                        self.flush_sent().await;
+                    }
+                    return;
+                }
                 Err(SendError::Permanent(error)) => {
                     tracing::warn!(interface = %self.config.name, id = reference.id, %error, "destination rejected; quarantined");
                     return self.finish(reference, Status::Quarantined, Some(&error)).await;
@@ -145,6 +160,7 @@ impl Worker {
                         return self.finish(reference, Status::Quarantined, Some(&error)).await;
                     }
                     tracing::warn!(interface = %self.config.name, id = reference.id, attempts, %error, "delivery failed; retrying in {backoff:?}");
+                    self.flush_sent().await; // don't hold delivered statuses through a long outage
                     tokio::time::sleep(backoff).await;
                     backoff = (backoff * 2).min(Duration::from_millis(retry.max_backoff_ms));
                 }
@@ -160,6 +176,17 @@ impl Worker {
                 None
             }
         }
+    }
+
+    async fn flush_sent(&mut self) {
+        if self.sent.is_empty() {
+            return;
+        }
+        while let Err(e) = self.store.set_status_many(&self.sent, Status::Sent).await {
+            tracing::error!(interface = %self.config.name, error = %e, "saving sent statuses failed; retrying");
+            tokio::time::sleep(DB_RETRY).await;
+        }
+        self.sent.clear();
     }
 
     /// Persist the final status. Retries until the database accepts it: if we gave up here,
