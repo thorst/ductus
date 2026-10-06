@@ -4,6 +4,13 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Manual runs can pick the runner image, e.g. to try a new Ubuntu before `ubuntu-latest` moves:
+  #   gh workflow run ci.yml -f runner=ubuntu-26.04
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: Runner image
+        default: ubuntu-latest
 
 env:
   CARGO_TERM_COLOR: always
@@ -12,7 +19,7 @@ env:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     services:
       postgres:
         image: postgres:18
@@ -25,11 +32,16 @@ jobs:
           --health-cmd "pg_isready -U ductus"
           --health-interval 5s --health-timeout 5s --health-retries 10
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
+      # Cache per runner image (ImageOS, e.g. ubuntu24): build outputs from a newer image must never be
+      # restored on an older one, or the other way round.
+      - run: echo "RUNNER_IMAGE=$ImageOS" >> "$GITHUB_ENV"
       - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ env.RUNNER_IMAGE }}
 
       - name: Format
         run: cargo fmt --all -- --check
