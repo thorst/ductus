@@ -1,7 +1,7 @@
 //! Project commands: `types`, `test`, `validate`.
 
 use anyhow::{Context, Result};
-use ductus_core::InterfaceConfig;
+use ductus_core::{Environment, InterfaceConfig};
 use ductus_script::Isolate;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -39,7 +39,7 @@ impl InterfaceDir {
     }
 }
 
-fn interface_dirs(root: &Path) -> Result<Vec<InterfaceDir>> {
+fn interface_dirs(root: &Path, env: &Environment) -> Result<Vec<InterfaceDir>> {
     let base = root.join("interfaces");
     let mut dirs: Vec<_> = std::fs::read_dir(&base)
         .with_context(|| format!("reading {}", base.display()))?
@@ -47,7 +47,7 @@ fn interface_dirs(root: &Path) -> Result<Vec<InterfaceDir>> {
         .filter(|p| p.join("interface.yaml").is_file())
         .collect();
     dirs.sort();
-    Ok(dirs.into_iter().map(|dir| InterfaceDir { config: InterfaceConfig::load(&dir), dir }).collect())
+    Ok(dirs.into_iter().map(|dir| InterfaceDir { config: InterfaceConfig::load_in(&dir, env), dir }).collect())
 }
 
 /// Every file under `dir` (recursively) accepted by `keep`, skipping hidden folders and node_modules.
@@ -108,11 +108,12 @@ pub async fn types(root: &Path) -> Result<()> {
 }
 
 /// Run each interface's `*.test.ts` files. Returns false if anything failed.
-pub async fn test(root: &Path, only: Option<&str>) -> Result<bool> {
+pub async fn test(root: &Path, env: &str, only: Option<&str>) -> Result<bool> {
     write_types(root).await?;
+    let env = Environment::load(root, env)?;
     let (mut passed, mut failed) = (0, 0);
 
-    for iface in interface_dirs(root)? {
+    for iface in interface_dirs(root, &env)? {
         let label = iface.label();
         if only.is_some_and(|o| o != label) {
             continue;
@@ -161,13 +162,30 @@ pub async fn test(root: &Path, only: Option<&str>) -> Result<bool> {
 }
 
 /// Check configs, module loading and types. Returns false if anything is wrong.
-pub async fn validate(root: &Path) -> Result<bool> {
+pub async fn validate(root: &Path, env: &str) -> Result<bool> {
     let types = write_types(root).await?;
     let mut problems = 0;
     let mut files = BTreeMap::new();
     files.insert(key(&root.join(TYPES_FILE)), types);
 
-    let interfaces = interface_dirs(root)?;
+    println!("environment: {env}");
+    let env = match Environment::load(root, env) {
+        Ok(e) => e,
+        Err(e) => {
+            println!("✗ {e:#}");
+            return Ok(false);
+        }
+    };
+    match ductus_core::Resources::load(root, &env) {
+        Ok(r) if r.databases.is_empty() => {}
+        Ok(r) => println!("✓ resources: {} database(s)", r.databases.len()),
+        Err(e) => {
+            problems += 1;
+            println!("✗ resources: {e:#}");
+        }
+    }
+
+    let interfaces = interface_dirs(root, &env)?;
     for iface in &interfaces {
         let label = iface.label();
         match &iface.config {
@@ -220,6 +238,43 @@ pub async fn validate(root: &Path) -> Result<bool> {
 
     println!("\n{}", if problems == 0 { "valid".to_string() } else { format!("{problems} problem(s)") });
     Ok(problems == 0)
+}
+
+pub enum SecretCommand {
+    Init,
+    Set { name: String, value: Option<String>, root: PathBuf, env: String },
+    List { root: PathBuf, env: String },
+}
+
+pub fn secret(command: SecretCommand) -> Result<()> {
+    use ductus_core::secrets::{KEY_VAR, SecretStore, generate_key};
+    match command {
+        SecretCommand::Init => {
+            println!("{}", generate_key());
+            eprintln!(
+                "Set this as {KEY_VAR} wherever Ductus runs. Keep it out of Git; without it the secrets can't be read."
+            );
+        }
+        SecretCommand::Set { name, value, root, env } => {
+            let key = std::env::var(KEY_VAR)
+                .with_context(|| format!("{KEY_VAR} is not set (create one with `ductus secret init`)"))?;
+            let value = match value {
+                Some(v) => v,
+                None => {
+                    let mut v = String::new();
+                    std::io::stdin().read_line(&mut v)?;
+                    v.trim_end_matches(['\r', '\n']).to_string()
+                }
+            };
+            SecretStore::set(&root, &env, &name, &value, &key)?;
+            println!("saved {name} in secrets/{env}.json");
+        }
+        SecretCommand::List { root, env } => match SecretStore::open(&root, &env)? {
+            Some(store) => store.names().for_each(|n| println!("{n}")),
+            None => println!("no secrets for {env}"),
+        },
+    }
+    Ok(())
 }
 
 fn indent(text: &str, n: usize) -> String {

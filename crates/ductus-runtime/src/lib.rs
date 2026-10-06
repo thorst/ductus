@@ -6,8 +6,8 @@ mod limiter;
 mod worker;
 
 use anyhow::{Context, Result, bail};
-use ductus_core::InterfaceConfig;
 use ductus_core::config::Isolation;
+use ductus_core::{Environment, InterfaceConfig};
 use ductus_store::Store;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,13 +15,13 @@ use std::time::Duration;
 use tokio::sync::Notify;
 
 /// Load every `interfaces/*/interface.yaml` under `root`.
-pub fn load_interfaces(root: &Path) -> Result<Vec<InterfaceConfig>> {
+pub fn load_interfaces(root: &Path, env: &Environment) -> Result<Vec<InterfaceConfig>> {
     let dir = root.join("interfaces");
     let mut configs = Vec::new();
     for entry in std::fs::read_dir(&dir).with_context(|| format!("reading {}", dir.display()))? {
         let path = entry?.path();
         if path.join("interface.yaml").is_file() {
-            configs.push(InterfaceConfig::load(&path)?);
+            configs.push(InterfaceConfig::load_in(&path, env)?);
         }
     }
     configs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -39,17 +39,26 @@ pub struct EngineOptions {
     pub pool_threads: usize,
     /// Maximum PostgreSQL connections.
     pub db_connections: u32,
+    /// Environment whose variables and secrets fill in the config (e.g. "dev", "prod").
+    pub env: String,
 }
 
 impl Default for EngineOptions {
     fn default() -> Self {
-        Self { pool_threads: std::thread::available_parallelism().map_or(4, |n| n.get()), db_connections: 32 }
+        Self {
+            pool_threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
+            db_connections: 32,
+            env: "dev".into(),
+        }
     }
 }
 
 /// Start every interface under `root` and run until Ctrl-C.
 pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Result<()> {
-    let configs = load_interfaces(root)?;
+    let env = Environment::load(root, &options.env)?;
+    let configs = load_interfaces(root, &env)?;
+    // Loaded now so a missing variable or secret stops startup; used by interface code (v0.4).
+    let _resources = ductus_core::Resources::load(root, &env)?;
     if configs.is_empty() {
         bail!("no interfaces found under {}", root.join("interfaces").display());
     }

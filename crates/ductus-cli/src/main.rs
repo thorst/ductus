@@ -27,6 +27,9 @@ enum Command {
         /// Maximum PostgreSQL connections.
         #[arg(long, env = "DUCTUS_DB_CONNECTIONS", default_value_t = 32)]
         db_connections: u32,
+        /// Environment: variables from environments/<env>.yaml, secrets from secrets/<env>.json.
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
     },
     /// Run each interface's `*.test.ts` files.
     Test {
@@ -35,11 +38,20 @@ enum Command {
         /// Only this interface.
         #[arg(long)]
         interface: Option<String>,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
     },
-    /// Check configs, code loading and TypeScript types.
+    /// Check configs, code loading and TypeScript types for an environment (exits 1 on problems).
     Validate {
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+    },
+    /// Manage encrypted secrets (secrets/<env>.json; key in DUCTUS_SECRET_KEY).
+    Secret {
+        #[command(subcommand)]
+        action: SecretAction,
     },
     /// Write editor typings (.ductus/types) and tsconfig.json for VS Code.
     Types {
@@ -81,6 +93,36 @@ enum Command {
     },
 }
 
+#[derive(Subcommand)]
+enum SecretAction {
+    /// Print a new random key to put in DUCTUS_SECRET_KEY (keep it out of Git).
+    Init,
+    /// Create or update a secret. The value is read from stdin if not given.
+    Set {
+        name: String,
+        value: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+    },
+    /// List secret names (never values).
+    List {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+    },
+}
+
+fn action_args(action: SecretAction) -> project::SecretCommand {
+    match action {
+        SecretAction::Init => project::SecretCommand::Init,
+        SecretAction::Set { name, value, root, env } => project::SecretCommand::Set { name, value, root, env },
+        SecretAction::List { root, env } => project::SecretCommand::List { root, env },
+    }
+}
+
 /// For commands that report problems themselves: exit 1 when they found any.
 fn exit_on_failure(result: Result<bool>) -> Result<()> {
     if !result? {
@@ -98,16 +140,20 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Run { root, database_url, threads, db_connections } => {
+        Command::Run { root, database_url, threads, db_connections, env } => {
             let defaults = ductus_runtime::EngineOptions::default();
             let options = ductus_runtime::EngineOptions {
                 pool_threads: threads.unwrap_or(defaults.pool_threads),
                 db_connections,
+                env,
             };
             ductus_runtime::run(&root, &database_url, options).await
         }
-        Command::Test { root, interface } => exit_on_failure(project::test(&root, interface.as_deref()).await),
-        Command::Validate { root } => exit_on_failure(project::validate(&root).await),
+        Command::Test { root, interface, env } => {
+            exit_on_failure(project::test(&root, &env, interface.as_deref()).await)
+        }
+        Command::Validate { root, env } => exit_on_failure(project::validate(&root, &env).await),
+        Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,
         Command::Status { database_url } => tools::status(&database_url).await,
         Command::Gen { to, count, patients, rate, connections, hot, offset } => {

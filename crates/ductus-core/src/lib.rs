@@ -1,8 +1,13 @@
 //! Shared types: interface configuration and partitioning.
 
 pub mod config;
+pub mod env;
+pub mod resources;
+pub mod secrets;
 
 pub use config::InterfaceConfig;
+pub use env::Environment;
+pub use resources::Resources;
 
 /// Map an ordering-key value to a virtual partition.
 ///

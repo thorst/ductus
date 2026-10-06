@@ -236,11 +236,19 @@ mod defaults {
 }
 
 impl InterfaceConfig {
-    /// Load `<dir>/interface.yaml`.
+    /// Load `<dir>/interface.yaml` with no environment (any `${...}` reference is an error).
     pub fn load(dir: &Path) -> Result<Self> {
+        Self::load_in(dir, &crate::Environment::default())
+    }
+
+    /// Load `<dir>/interface.yaml` with the environment's variables and secrets substituted.
+    pub fn load_in(dir: &Path, env: &crate::Environment) -> Result<Self> {
         let file = dir.join("interface.yaml");
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-        let mut config: Self = serde_yaml_ng::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+        let mut value: serde_yaml_ng::Value =
+            crate::env::parse_yaml(&text).with_context(|| format!("parsing {}", file.display()))?;
+        env.substitute(&mut value).with_context(|| format!("in {}", file.display()))?;
+        let mut config: Self = serde_yaml_ng::from_value(value).with_context(|| format!("in {}", file.display()))?;
         config.dir = dir.to_path_buf();
         config.validate().with_context(|| format!("validating {}", file.display()))?;
         Ok(config)
