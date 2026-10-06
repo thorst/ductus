@@ -40,8 +40,8 @@ impl Isolate {
         Ok(())
     }
 
-    /// Call a global function with one string argument and return its string result.
-    pub fn call(&mut self, func: &str, arg: &str) -> Result<String> {
+    /// Call a global function with one string argument. `null`/`undefined` results come back as `None`.
+    pub fn call(&mut self, func: &str, arg: &str) -> Result<Option<String>> {
         deno_core::scope!(scope, &mut self.runtime);
         let global = scope.get_current_context().global(scope);
         let key = v8::String::new(scope, func).context("function name")?;
@@ -53,7 +53,10 @@ impl Isolate {
         let result = function
             .call(scope, receiver.into(), &[arg.into()])
             .with_context(|| format!("`{func}` threw"))?;
-        Ok(result.to_rust_string_lossy(scope))
+        if result.is_null_or_undefined() {
+            return Ok(None);
+        }
+        Ok(Some(result.to_rust_string_lossy(scope)))
     }
 }
 

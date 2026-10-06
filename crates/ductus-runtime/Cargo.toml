@@ -6,3 +6,13 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+anyhow = "1.0.104"
+bytes = "1.12.1"
+chrono = "0.4.45"
+ductus-core = { version = "0.1.0-dev", path = "../ductus-core" }
+ductus-hl7 = { version = "0.1.0-dev", path = "../ductus-hl7" }
+ductus-mllp = { version = "0.1.0-dev", path = "../ductus-mllp" }
+ductus-script = { version = "0.1.0-dev", path = "../ductus-script" }
+ductus-store = { version = "0.1.0-dev", path = "../ductus-store" }
+tokio = { version = "1.53.2", features = ["full"] }
+tracing = "0.1.44"

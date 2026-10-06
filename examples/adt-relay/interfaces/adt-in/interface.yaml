@@ -1,0 +1,10 @@
+name: adt-in
+source:
+  mllp: { port: 6661 }
+script: transform.ts
+ordering:
+  key: PID-3.1      # messages for the same MRN stay in order
+  partitions: 64
+workers: 4
+destination:
+  mllp: { host: 127.0.0.1, port: 6662 }

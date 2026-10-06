@@ -1,5 +1,20 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+//! Shared types: interface configuration and partitioning.
+
+pub mod config;
+
+pub use config::InterfaceConfig;
+
+/// Map an ordering-key value to a virtual partition.
+///
+/// FNV-1a: a fixed algorithm, so the same key maps to the same partition across
+/// versions and nodes. Never swap this for `std` hashing, which is randomized.
+pub fn partition_of(key: &str, partitions: u32) -> i32 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for byte in key.as_bytes() {
+        hash ^= u64::from(*byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    (hash % u64::from(partitions.max(1))) as i32
 }
 
 #[cfg(test)]
@@ -7,8 +22,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
+    fn partitioning_is_stable_and_in_range() {
+        assert_eq!(partition_of("123456", 64), partition_of("123456", 64));
+        assert_eq!(partition_of("", 64), partition_of("", 64));
+        for k in ["1", "22", "333", "MRN-0001"] {
+            assert!((0..64).contains(&partition_of(k, 64)));
+        }
+        assert_eq!(partition_of("anything", 1), 0);
     }
 }

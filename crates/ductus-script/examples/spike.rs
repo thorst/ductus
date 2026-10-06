@@ -22,7 +22,7 @@ fn main() -> anyhow::Result<()> {
     let mut iso = Isolate::new();
     iso.load("spike.js", js)?;
 
-    println!("result: {}", iso.call("transform", ADT)?);
+    println!("result: {:?}", iso.call("transform", ADT)?);
 
     let n = 100_000;
     let start = Instant::now();
