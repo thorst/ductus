@@ -11,7 +11,7 @@
 use crate::destination::{SendError, Sender};
 use crate::http::HttpCall;
 use crate::limiter::{Decision, Limiter};
-use crate::services::{EngineServices, SharedServices};
+use crate::services::EngineServices;
 use anyhow::{Context, Result};
 use ductus_core::InterfaceConfig;
 use ductus_script::{Call, InterfaceId, Isolate};
@@ -51,7 +51,7 @@ pub fn spawn_thread(
     name: String,
     jobs: Vec<Job>,
     store: Store,
-    services: Arc<SharedServices>,
+    services: EngineServices,
     ready: std::sync::mpsc::Sender<Ready>,
 ) -> Result<()> {
     std::thread::Builder::new()
@@ -61,7 +61,7 @@ pub fn spawn_thread(
                 tokio::runtime::Builder::new_current_thread().enable_all().build().expect("building worker runtime");
             let local = tokio::task::LocalSet::new();
             local.block_on(&runtime, async move {
-                let mut host = Isolate::host_with(Some(Rc::new(EngineServices(services))));
+                let mut host = Isolate::host_with(Some(Rc::new(services)));
                 let mut loaded = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     let script = match job.config.script_path() {

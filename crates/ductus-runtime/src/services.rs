@@ -4,7 +4,7 @@
 use crate::mssql;
 use anyhow::{Result, anyhow, bail};
 use ductus_core::resources::{Database, DbConnection};
-use ductus_core::{Environment, Resources};
+use ductus_core::{Environment, InterfaceConfig, Resources};
 use ductus_script::{BoxFuture, FetchRequest, FetchResponse, Services, TRANSIENT};
 use serde_json::Value;
 use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
@@ -15,14 +15,34 @@ use std::time::Duration;
 /// Bigger responses are refused: interface code holds them in memory.
 const MAX_RESPONSE: usize = 16 * 1024 * 1024;
 
-enum Pool {
+pub(crate) enum Pool {
     Postgres(PgPool),
     Sqlserver(Box<mssql::Pool>),
+}
+
+/// Database pools by resource name.
+pub(crate) type Pools = Arc<HashMap<String, Pool>>;
+
+/// A pool for a database resource; `size` overrides its `max_connections`.
+fn make_pool(db: &Database, size: Option<u32>) -> Pool {
+    match db {
+        Database::Postgres(c) => Pool::Postgres(postgres_pool(&DbConnection {
+            max_connections: size.unwrap_or(c.max_connections),
+            ..c.clone()
+        })),
+        Database::Sqlserver(c) => {
+            Pool::Sqlserver(Box::new(mssql::Pool::new(&ductus_core::resources::SqlServerConnection {
+                max_connections: size.unwrap_or(c.max_connections),
+                ..c.clone()
+            })))
+        }
+    }
 }
 
 /// Shared by every worker thread: connection pools are created once per resource.
 pub struct SharedServices {
     env: Environment,
+    definitions: BTreeMap<String, Database>,
     databases: HashMap<String, Pool>,
     http: reqwest::Client,
     /// Database and HTTP calls run on the engine's main (multi-threaded) runtime. A socket is served by
@@ -37,22 +57,31 @@ impl SharedServices {
     ///
     /// Must be called on the engine's main runtime.
     pub fn new(env: Environment, resources: &Resources) -> Self {
-        let databases = resources
-            .databases
-            .iter()
-            .map(|(name, db)| {
-                let pool = match db {
-                    Database::Postgres(c) => Pool::Postgres(postgres_pool(c)),
-                    Database::Sqlserver(c) => Pool::Sqlserver(Box::new(mssql::Pool::new(c))),
-                };
-                (name.clone(), pool)
-            })
-            .collect();
-        Self { env, databases, http: http_client(), io: tokio::runtime::Handle::current() }
+        let databases = resources.databases.iter().map(|(name, db)| (name.clone(), make_pool(db, None))).collect();
+        Self {
+            env,
+            definitions: resources.databases.clone(),
+            databases,
+            http: http_client(),
+            io: tokio::runtime::Handle::current(),
+        }
     }
 
-    fn pool(&self, name: &str) -> Result<&Pool> {
-        self.databases.get(name).ok_or_else(|| {
+    /// An interface's own pools (`dedicated_pools`), created once and shared by its worker
+    /// threads. Names were checked against resources.yaml at startup.
+    pub(crate) fn dedicated_pools(&self, config: &InterfaceConfig) -> Pools {
+        Arc::new(
+            config
+                .dedicated_pools
+                .iter()
+                .filter_map(|(name, size)| Some((name.clone(), make_pool(self.definitions.get(name)?, Some(*size)))))
+                .collect(),
+        )
+    }
+
+    /// The interface's own pool for `name` if it has one, else the shared one.
+    fn pool<'a>(&'a self, own: &'a HashMap<String, Pool>, name: &str) -> Result<&'a Pool> {
+        own.get(name).or_else(|| self.databases.get(name)).ok_or_else(|| {
             let known: Vec<_> = self.databases.keys().map(String::as_str).collect();
             anyhow!("no database named `{name}` in resources.yaml (defined: {})", known.join(", "))
         })
@@ -213,15 +242,25 @@ async fn postgres_execute(pool: &PgPool, sql: String, params: Vec<Value>) -> Res
     Ok(done.rows_affected())
 }
 
-/// Per-thread handle (an `Rc<dyn Services>` lives in each isolate).
-pub struct EngineServices(pub Arc<SharedServices>);
+/// Per-thread handle (an `Rc<dyn Services>` lives in each isolate): the shared services plus,
+/// on a dedicated interface's threads, that interface's own pools.
+pub struct EngineServices {
+    shared: Arc<SharedServices>,
+    own: Pools,
+}
+
+impl EngineServices {
+    pub(crate) fn new(shared: Arc<SharedServices>, own: Pools) -> Self {
+        Self { shared, own }
+    }
+}
 
 impl Services for EngineServices {
     fn db_query(&self, resource: &str, sql: &str, params: Vec<Value>) -> BoxFuture<Vec<Value>> {
-        let shared = self.0.clone();
+        let (shared, own) = (self.shared.clone(), self.own.clone());
         let (resource, sql) = (resource.to_string(), sql.to_string());
-        self.0.spawn(async move {
-            match shared.pool(&resource)? {
+        self.shared.spawn(async move {
+            match shared.pool(&own, &resource)? {
                 Pool::Postgres(p) => postgres_query(p, &sql, params).await,
                 Pool::Sqlserver(p) => p.query(&sql, params).await,
             }
@@ -229,10 +268,10 @@ impl Services for EngineServices {
     }
 
     fn db_execute(&self, resource: &str, sql: &str, params: Vec<Value>) -> BoxFuture<u64> {
-        let shared = self.0.clone();
+        let (shared, own) = (self.shared.clone(), self.own.clone());
         let (resource, sql) = (resource.to_string(), sql.to_string());
-        self.0.spawn(async move {
-            match shared.pool(&resource)? {
+        self.shared.spawn(async move {
+            match shared.pool(&own, &resource)? {
                 Pool::Postgres(p) => postgres_execute(p, sql, params).await,
                 Pool::Sqlserver(p) => p.execute(&sql, params).await,
             }
@@ -240,22 +279,62 @@ impl Services for EngineServices {
     }
 
     fn fetch(&self, request: FetchRequest) -> BoxFuture<FetchResponse> {
-        let shared = self.0.clone();
-        self.0.spawn(async move { http_fetch(&shared.http, request).await })
+        let shared = self.shared.clone();
+        self.shared.spawn(async move { http_fetch(&shared.http, request).await })
     }
 
     fn variable(&self, name: &str) -> Option<String> {
-        self.0.env.variable(name)
+        self.shared.env.variable(name)
     }
 
     fn secret(&self, name: &str) -> Result<Option<String>> {
-        self.0.env.secret(name)
+        self.shared.env.secret(name)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Postgres test database as a resource with a one-connection shared pool.
+    fn test_resources() -> Option<Resources> {
+        let url = url::Url::parse(&std::env::var("DUCTUS_TEST_DATABASE_URL").ok()?).unwrap();
+        let db = DbConnection {
+            host: url.host_str()?.into(),
+            port: url.port(),
+            database: url.path().trim_start_matches('/').into(),
+            user: url.username().into(),
+            password: url.password().unwrap_or("").into(),
+            max_connections: 1,
+        };
+        Some(Resources { databases: BTreeMap::from([("db".into(), Database::Postgres(db))]), ..Default::default() })
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_dedicated_pool_is_not_held_up_by_the_shared_one() {
+        let Some(resources) = test_resources() else { return };
+        let shared = Arc::new(SharedServices::new(Environment::with_variables("dev", &[]), &resources));
+        let config: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: x\nsource: { mllp: { port: 1 } }\ndestination: { file: { dir: o } }\nisolation: dedicated\ndedicated_pools: { db: 1 }\n",
+        )
+        .unwrap();
+        let busy = EngineServices::new(shared.clone(), Default::default());
+        let own = EngineServices::new(shared.clone(), shared.dedicated_pools(&config));
+
+        // Another interface holds the shared pool's only connection for a second.
+        let slow = busy.db_query("db", "SELECT 1 AS slept FROM pg_sleep(1)", vec![]);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        let start = std::time::Instant::now();
+        assert_eq!(own.db_query("db", "SELECT 1 AS one", vec![]).await.unwrap(), [serde_json::json!({"one": 1})]);
+        assert!(start.elapsed() < Duration::from_millis(500), "own pool waited {:?}", start.elapsed());
+
+        // The same query through the shared pool waits its turn.
+        let start = std::time::Instant::now();
+        busy.db_query("db", "SELECT 1 AS one", vec![]).await.unwrap();
+        assert!(start.elapsed() >= Duration::from_millis(500), "shared pool took {:?}", start.elapsed());
+        assert_eq!(slow.await.unwrap(), [serde_json::json!({"slept": 1})]);
+    }
 
     fn request(url: &str, timeout_ms: u64) -> FetchRequest {
         FetchRequest {

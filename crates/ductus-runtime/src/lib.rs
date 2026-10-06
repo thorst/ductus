@@ -143,11 +143,17 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     let mut jobs = 0;
     for (i, thread_jobs) in pool.into_iter().enumerate().filter(|(_, j)| !j.is_empty()) {
         jobs += thread_jobs.len();
-        worker::spawn_thread(format!("pool-{i}"), thread_jobs, store.clone(), services.clone(), ready_tx.clone())?;
+        let engine = services::EngineServices::new(services.clone(), Default::default());
+        worker::spawn_thread(format!("pool-{i}"), thread_jobs, store.clone(), engine, ready_tx.clone())?;
     }
+    // A dedicated interface's own pools are shared by all its worker threads.
+    let mut own_pools = std::collections::HashMap::new();
     for (name, job) in dedicated {
         jobs += 1;
-        worker::spawn_thread(name, vec![job], store.clone(), services.clone(), ready_tx.clone())?;
+        let own =
+            own_pools.entry(job.config.name.clone()).or_insert_with(|| services.dedicated_pools(&job.config)).clone();
+        let engine = services::EngineServices::new(services.clone(), own);
+        worker::spawn_thread(name, vec![job], store.clone(), engine, ready_tx.clone())?;
     }
     drop(ready_tx);
     // Fail fast if any interface's code doesn't load, before accepting any messages.

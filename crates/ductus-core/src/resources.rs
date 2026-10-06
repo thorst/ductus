@@ -175,10 +175,20 @@ impl Resources {
         Ok(resources)
     }
 
-    /// Interfaces that refer to SFTP servers resources.yaml doesn't define.
+    /// Interfaces that refer to SFTP servers or databases resources.yaml doesn't define.
     pub fn missing_references<'a>(&self, configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<String> {
         let mut problems = Vec::new();
         for c in configs {
+            for db in c.dedicated_pools.keys() {
+                if !self.databases.contains_key(db) {
+                    let known: Vec<_> = self.databases.keys().map(String::as_str).collect();
+                    let known = if known.is_empty() { "none".to_string() } else { known.join(", ") };
+                    problems.push(format!(
+                        "interface `{}`: dedicated_pools names `{db}`, which isn't a database in resources.yaml (defined: {known})",
+                        c.name
+                    ));
+                }
+            }
             for server in c.sftp_servers() {
                 if !self.sftp.contains_key(server) {
                     let known: Vec<_> = self.sftp.keys().map(String::as_str).collect();
@@ -256,6 +266,17 @@ mod tests {
         assert_eq!(
             r.missing_references([&config]),
             ["interface `x`: no sftp server named `emr` in resources.yaml (defined: lab)"]
+        );
+
+        let config: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: y\nsource: { mllp: { port: 1 } }\ndestination: { mllp: { host: h, port: 2 } }\nisolation: dedicated\ndedicated_pools: { billing: 2 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            r.missing_references([&config]),
+            [
+                "interface `y`: dedicated_pools names `billing`, which isn't a database in resources.yaml (defined: none)"
+            ]
         );
 
         std::fs::write(&file, "sftp:\n  lab: { host: h, user: u }\n").unwrap();

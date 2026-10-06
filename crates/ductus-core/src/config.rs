@@ -3,6 +3,7 @@
 use crate::format::Format;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -30,6 +31,11 @@ pub struct InterfaceConfig {
     /// Parallel workers, for `isolation: dedicated` only (default 4).
     #[serde(default)]
     pub workers: Option<u32>,
+    /// Database connections of its own, for `isolation: dedicated` only: `{ patient_db: 4 }`
+    /// gives this interface 4 connections to `patient_db` that no other interface uses, so a
+    /// busy interface can't take every connection from the others (or the other way round).
+    #[serde(default)]
+    pub dedicated_pools: BTreeMap<String, u32>,
     /// `strict` (default): a message is flushed to disk before it's ACKed. `relaxed`: the ACK
     /// doesn't wait for the disk flush, for much higher throughput per connection; if the
     /// database server crashes or loses power, the last fraction of a second of ACKed
@@ -437,6 +443,15 @@ impl InterfaceConfig {
             (Isolation::Dedicated, Some(0)) => bail!("workers must be at least 1"),
             _ => {}
         }
+        if !self.dedicated_pools.is_empty() && self.isolation == Isolation::Shared {
+            bail!(
+                "dedicated_pools needs `isolation: dedicated` (interfaces in the shared pool use the shared \
+                 connection pools; set max_connections in resources.yaml)"
+            );
+        }
+        if let Some((name, _)) = self.dedicated_pools.iter().find(|(_, n)| **n == 0) {
+            bail!("dedicated_pools.{name} must be at least 1 connection");
+        }
         if self.ordering.partitions == 0 {
             bail!("ordering.partitions must be at least 1");
         }
@@ -710,6 +725,19 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
         let mut bad = shared.clone();
         bad.workers = Some(4);
         assert!(bad.validate().unwrap_err().to_string().contains("isolation: dedicated"));
+    }
+
+    #[test]
+    fn dedicated_pools_need_a_dedicated_interface() {
+        let mut c: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: x\nsource: { mllp: { port: 1 } }\ndestination: { file: { dir: o } }\ndedicated_pools: { patient_db: 4 }\n",
+        )
+        .unwrap();
+        assert!(c.validate().unwrap_err().to_string().contains("dedicated_pools needs `isolation: dedicated`"));
+        c.isolation = Isolation::Dedicated;
+        assert!(c.validate().is_ok());
+        c.dedicated_pools.insert("patient_db".into(), 0);
+        assert!(c.validate().unwrap_err().to_string().contains("at least 1"));
     }
 
     #[test]
