@@ -14,7 +14,7 @@ fn iface(test: &str) -> String {
 }
 
 fn msg<'a>(interface: &'a str, lane: i32, payload: &'a [u8]) -> NewMessage<'a> {
-    NewMessage { interface, partition_key: lane, ordering_key: None, control_id: None, payload }
+    NewMessage { interface, partition_key: lane, ordering_key: None, control_id: None, payload, relaxed: false }
 }
 
 #[tokio::test]
@@ -75,6 +75,17 @@ async fn duplicates_within_the_window_are_stored_but_not_queued() {
     let instant = DedupeKey { key: "MSG0001", window: std::time::Duration::ZERO };
     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
     assert!(!store.insert_deduped(msg(&name, 0, b"one, much later"), instant).await.unwrap().duplicate);
+}
+
+#[tokio::test]
+async fn relaxed_inserts_are_stored_and_queued() {
+    let Some(store) = store().await else { return };
+    let name = iface("relaxed");
+    store.insert(NewMessage { relaxed: true, ..msg(&name, 0, b"fast") }).await.unwrap();
+    let day = DedupeKey { key: "K1", window: std::time::Duration::from_secs(60) };
+    store.insert_deduped(NewMessage { relaxed: true, ..msg(&name, 0, b"fast deduped") }, day).await.unwrap();
+    let pending: Vec<_> = store.pending(&name, &[0], 10).await.unwrap().into_iter().map(|p| p.payload).collect();
+    assert_eq!(pending, vec![b"fast".to_vec(), b"fast deduped".to_vec()]);
 }
 
 #[tokio::test]

@@ -48,6 +48,8 @@ pub struct NewMessage<'a> {
     pub ordering_key: Option<&'a str>,
     pub control_id: Option<&'a str>,
     pub payload: &'a [u8],
+    /// Don't wait for the disk flush before returning (see `durability: relaxed`).
+    pub relaxed: bool,
 }
 
 /// Duplicate detection for one insert: the message's identifying key and how long keys are remembered.
@@ -119,7 +121,7 @@ impl Store {
     }
 
     pub async fn insert(&self, m: NewMessage<'_>) -> Result<MessageRef> {
-        let (id, received_at) = sqlx::query_as::<_, (i64, DateTime<Utc>)>(
+        let query = sqlx::query_as::<_, (i64, DateTime<Utc>)>(
             "INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload)
              VALUES ($1, $2, $3, $4, $5) RETURNING id, received_at",
         )
@@ -127,10 +129,16 @@ impl Store {
         .bind(m.partition_key)
         .bind(m.ordering_key)
         .bind(m.control_id)
-        .bind(m.payload)
-        .fetch_one(&self.pool)
-        .await
-        .context("inserting message")?;
+        .bind(m.payload);
+        let (id, received_at) = if m.relaxed {
+            let mut tx = self.pool.begin().await.context("starting transaction")?;
+            sqlx::query("SET LOCAL synchronous_commit = off").execute(&mut *tx).await.context("relaxing commit")?;
+            let row = query.fetch_one(&mut *tx).await.context("inserting message")?;
+            tx.commit().await.context("committing message")?;
+            row
+        } else {
+            query.fetch_one(&self.pool).await.context("inserting message")?
+        };
         Ok(MessageRef { id, received_at })
     }
 
@@ -138,6 +146,9 @@ impl Store {
     /// as a plain insert). Duplicates are stored with status `Duplicate` for audit.
     pub async fn insert_deduped(&self, m: NewMessage<'_>, dedupe: DedupeKey<'_>) -> Result<Stored> {
         let mut tx = self.pool.begin().await.context("starting transaction")?;
+        if m.relaxed {
+            sqlx::query("SET LOCAL synchronous_commit = off").execute(&mut *tx).await.context("relaxing commit")?;
+        }
         // New key, or an old one outside the window: claim it. Otherwise nothing is returned.
         let claimed = sqlx::query(
             "INSERT INTO dedupe_keys (interface, key) VALUES ($1, $2)

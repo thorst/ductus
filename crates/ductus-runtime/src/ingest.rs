@@ -3,7 +3,7 @@
 use crate::hl7_now;
 use anyhow::{Context, Result};
 use bytes::Bytes;
-use ductus_core::config::Source;
+use ductus_core::config::{Durability, Source};
 use ductus_core::{InterfaceConfig, partition_of};
 use ductus_hl7::{AckCode, Message, Path};
 use ductus_store::{DedupeKey, NewMessage, Store};
@@ -81,7 +81,9 @@ async fn receive(
     let partition_key = partition_of(key.unwrap_or(""), partitions);
     let control_id = Some(message.control_id()).filter(|c| !c.is_empty());
 
-    let new = NewMessage { interface: &config.name, partition_key, ordering_key: key, control_id, payload: frame };
+    let relaxed = config.durability == Durability::Relaxed;
+    let new =
+        NewMessage { interface: &config.name, partition_key, ordering_key: key, control_id, payload: frame, relaxed };
     let values: Vec<&str> = dedupe_paths.iter().map(|p| message.get(p)).collect();
     // Unit separator: can't appear in HL7 text, so distinct value lists never collide.
     let dedupe_key = values.join("\u{1f}");

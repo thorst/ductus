@@ -239,7 +239,7 @@ export class Segments {
   }
 
   private all(): SegmentData[] {
-    return this.msg.data.filter((s) => s.name === this.name);
+    return this.msg.named(this.name);
   }
 
   private first(): Segment {
@@ -282,6 +282,20 @@ export class Segments {
 
 class MessageImpl {
   readonly data: SegmentData[];
+  /** Segments by name, built on first use and dropped whenever segments are added or removed. */
+  private index: Map<string, SegmentData[]> | null = null;
+
+  named(name: string): SegmentData[] {
+    if (this.index === null) {
+      this.index = new Map();
+      for (const s of this.data) {
+        const list = this.index.get(s.name);
+        if (list) list.push(s);
+        else this.index.set(s.name, [s]);
+      }
+    }
+    return this.index.get(name) ?? [];
+  }
   readonly delimiters: Delimiters;
 
   constructor(raw: string) {
@@ -307,7 +321,7 @@ class MessageImpl {
 
   get(path: string): string {
     const [segment, field, component] = parsePath(path);
-    const seg = this.data.find((s) => s.name === segment);
+    const seg = this.named(segment)[0];
     if (!seg) return "";
     const rep = seg.getField(field, this.delimiters).split(this.delimiters.repetition)[0];
     if (component === undefined) return rep;
@@ -342,6 +356,7 @@ class MessageImpl {
     const raw = [name, ...fields].join(this.delimiters.field);
     const data = new SegmentData(raw);
     this.data.splice(index, 0, data);
+    this.index = null;
     return new Segment(this, data, name);
   }
 
@@ -349,6 +364,7 @@ class MessageImpl {
     for (let i = this.data.length - 1; i >= 0; i--) {
       if (this.data[i].name === name) this.data.splice(i, 1);
     }
+    this.index = null;
   }
 
   /** Segment names in order, e.g. ["MSH", "EVN", "PID", "PV1"]. */

@@ -23,6 +23,12 @@ pub struct InterfaceConfig {
     /// Parallel workers, for `isolation: dedicated` only (default 4).
     #[serde(default)]
     pub workers: Option<u32>,
+    /// `strict` (default): a message is flushed to disk before it's ACKed. `relaxed`: the ACK
+    /// doesn't wait for the disk flush, for much higher throughput per connection; if the
+    /// database server crashes or loses power, the last fraction of a second of ACKed
+    /// messages can be lost. An engine crash alone never loses anything in either mode.
+    #[serde(default)]
+    pub durability: Durability,
     #[serde(with = "serde_yaml_ng::with::singleton_map")]
     pub destination: Destination,
     #[serde(default)]
@@ -67,6 +73,14 @@ pub enum Destination {
     File {
         dir: PathBuf,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Durability {
+    #[default]
+    Strict,
+    Relaxed,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
