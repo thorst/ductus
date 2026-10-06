@@ -1,3 +1,4 @@
+mod new;
 mod project;
 mod tools;
 
@@ -47,6 +48,11 @@ enum Command {
         root: PathBuf,
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
+    },
+    /// Create something new in a project.
+    New {
+        #[command(subcommand)]
+        what: NewCommand,
     },
     /// List the ports and HTTP routes a project listens on, the hosts it connects to, and port
     /// conflicts, for an environment (exits 1 on conflicts).
@@ -98,6 +104,30 @@ enum Command {
     Sink {
         #[arg(long, default_value_t = 6662)]
         port: u16,
+    },
+}
+
+#[derive(Subcommand)]
+enum NewCommand {
+    /// A working interface (config, code, a test and a sample message) that passes
+    /// `ductus test` and `ductus validate` as generated. MLLP and HTTP get the next free port
+    /// from the ranges in ductus.yaml (default 6661-6699 and 8080-8099).
+    Interface {
+        /// Folder name and interface name, e.g. adt-to-lab.
+        name: String,
+        #[arg(long, value_enum, default_value = "mllp")]
+        source: new::SourceKind,
+        /// Default: hl7 (json for http and schedule).
+        #[arg(long, value_enum)]
+        format: Option<new::FormatKind>,
+        /// Listen on this port instead of the next free one.
+        #[arg(long)]
+        port: Option<u16>,
+        /// SFTP server from resources.yaml (needed when there are several).
+        #[arg(long)]
+        server: Option<String>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
     },
 }
 
@@ -163,6 +193,9 @@ async fn main() -> Result<()> {
             exit_on_failure(project::test(&root, &env, interface.as_deref()).await)
         }
         Command::Validate { root, env } => exit_on_failure(project::validate(&root, &env).await),
+        Command::New { what: NewCommand::Interface { name, source, format, port, server, root } } => {
+            new::interface(new::NewInterface { root, name, source, format, port, server })
+        }
         Command::Ports { root, env } => exit_on_failure(project::ports(&root, &env)),
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,

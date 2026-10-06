@@ -7,6 +7,7 @@ pub mod ports;
 pub mod resources;
 pub mod schedule;
 pub mod secrets;
+pub mod settings;
 
 pub use config::InterfaceConfig;
 pub use env::Environment;

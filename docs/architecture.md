@@ -36,7 +36,7 @@ One binary (`ductus`) plus PostgreSQL. No other services.
 | `ductus-store` | Postgres: migrations, `messages` (day-partitioned; also the work queue), dedupe keys, status updates |
 | `ductus-script` | Embedded V8 (deno_core): module loader (local files + embedded `@ductus/sdk`), multi-interface isolates, async calls (`begin`/`settle`), native ops (`Services` trait), embedded TypeScript 6 type checker + shared-pool lints |
 | `ductus-runtime` | The engine: planning threads, `Intake` (ingest for any source, single or batched), MLLP + HTTP servers, file/SFTP watcher (`files.rs`) and record splitter (`split.rs`), SFTP client (`sftp.rs`), schedules (`schedule.rs`), workers, destinations, rate limiter, format-aware keys, engine services (Postgres pools; SQL Server pool in `mssql.rs`) |
-| `ductus-cli` (`ductus`) | `run`, `test`, `validate`, `ports`, `types`, `secret`, `status`, `gen`, `sink` (tests in `tests/cli.rs` run the real binary) |
+| `ductus-cli` (`ductus`) | `run`, `test`, `validate`, `ports`, `new interface` (`new.rs`: templates per source/format; ports from `ductus.yaml` ranges, free in every environment), `types`, `secret`, `status`, `gen`, `sink` (tests in `tests/cli.rs` run the real binary) |
 | `sdk/` | The TypeScript SDK, compiled into the binary: HL7 model, formats (CSV/fixed/XML), HTTP request/response, services, test framework, typings generator |
 
 ## Message lifecycle
