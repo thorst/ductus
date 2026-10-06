@@ -6,12 +6,21 @@
 # From Windows:         wsl -d Ubuntu -- bash /mnt/d/Projects/integration_engine/ductus/scripts/dev/check.sh
 #
 # Needs Postgres for the store tests (skipped if DUCTUS_TEST_DATABASE_URL is unset).
+# SQL Server tests run when the local container exists (create it once: scripts/dev/sqlserver.sh).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 [ -f ~/.cargo/env ] && source ~/.cargo/env
 # Build outside /mnt (Windows drives are slow from WSL).
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$HOME/target}
 export DUCTUS_TEST_DATABASE_URL=${DUCTUS_TEST_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+if [ -z "${DUCTUS_TEST_SQLSERVER:-}" ]; then
+  if { docker inspect ductus-mssql || sudo -n docker inspect ductus-mssql; } >/dev/null 2>&1; then
+    DUCTUS_TEST_SQLSERVER=$(bash scripts/dev/sqlserver.sh)
+    export DUCTUS_TEST_SQLSERVER
+  else
+    echo "(SQL Server tests skipped: set one up with scripts/dev/sqlserver.sh)"
+  fi
+fi
 
 echo "== fmt";    cargo fmt --all
 echo "== build";  cargo build --release 2>&1 | grep -E '^(warning|error)|-->' || true

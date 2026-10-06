@@ -16,6 +16,7 @@ env:
   CARGO_TERM_COLOR: always
   DUCTUS_DATABASE_URL: postgres://ductus:ductus@localhost/ductus
   DUCTUS_TEST_DATABASE_URL: postgres://ductus:ductus@localhost/ductus
+  DUCTUS_TEST_SQLSERVER: sa:Ductus-ci-1@localhost:1433
 
 jobs:
   test:
@@ -31,6 +32,17 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U ductus"
           --health-interval 5s --health-timeout 5s --health-retries 10
+      sqlserver:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        env:
+          ACCEPT_EULA: "Y"
+          MSSQL_SA_PASSWORD: Ductus-ci-1
+          MSSQL_MEMORY_LIMIT_MB: "3072"
+        ports: ["1433:1433"]
+        options: >-
+          --memory=4g
+          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Ductus-ci-1 -Q 'SELECT 1' -b -o /dev/null"
+          --health-interval 5s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

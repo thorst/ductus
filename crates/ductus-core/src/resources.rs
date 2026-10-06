@@ -9,6 +9,14 @@
 //!       user: ductus
 //!       password: ${secret:PATIENT_DB_PASSWORD}
 //!       max_connections: 10
+//!   billing_db:
+//!     sqlserver:
+//!       host: billing.hospital.local
+//!       instance: PROD                           # optional named instance
+//!       database: Billing
+//!       user: ductus
+//!       password: ${secret:BILLING_DB_PASSWORD}
+//!       trust_server_certificate: true           # self-signed certificate (trusted network only)
 //! sftp:
 //!   lab_server:
 //!     host: sftp.lab.example.org
@@ -78,14 +86,14 @@ fn default_sftp_port() -> u16 {
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum Database {
     Postgres(DbConnection),
-    Sqlserver(DbConnection),
+    Sqlserver(SqlServerConnection),
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DbConnection {
     pub host: String,
-    /// Default: 5432 for Postgres, 1433 for SQL Server.
+    /// Default: 5432.
     pub port: Option<u16>,
     pub database: String,
     pub user: String,
@@ -96,8 +104,55 @@ pub struct DbConnection {
     pub max_connections: u32,
 }
 
+/// SQL Server, with SQL Server authentication (user and password).
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SqlServerConnection {
+    pub host: String,
+    /// Default: 1433, or looked up through the SQL Server Browser when `instance` is set.
+    pub port: Option<u16>,
+    /// Named instance (`host\INSTANCE` in SQL Server tools), e.g. `SQLEXPRESS`.
+    #[serde(default)]
+    pub instance: Option<String>,
+    pub database: String,
+    pub user: String,
+    #[serde(default)]
+    pub password: String,
+    /// Size of the shared connection pool.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: u32,
+    /// Accept the server's TLS certificate without checking it. Many SQL Servers use the
+    /// self-signed certificate they generate at install; set this only on a network you trust.
+    #[serde(default)]
+    pub trust_server_certificate: bool,
+}
+
 fn default_max_connections() -> u32 {
     5
+}
+
+// Hand-written so passwords never end up in logs.
+impl std::fmt::Debug for DbConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DbConnection")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for SqlServerConnection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SqlServerConnection")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("instance", &self.instance)
+            .field("database", &self.database)
+            .field("user", &self.user)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Resources {
@@ -159,6 +214,29 @@ mod tests {
         let missing = Environment::with_variables("prod", &[]);
         let err = format!("{:#}", Resources::load(dir.path(), &missing).unwrap_err());
         assert!(err.contains("DB_HOST, DB_POOL"), "{err}");
+    }
+
+    #[test]
+    fn loads_sql_server_databases() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("resources.yaml");
+        std::fs::write(
+            &file,
+            "databases:\n  billing:\n    sqlserver:\n      host: db1\n      instance: PROD\n      database: Billing\n      user: ductus\n      password: hunter2\n      trust_server_certificate: true\n",
+        )
+        .unwrap();
+        let r = Resources::load(dir.path(), &Environment::with_variables("dev", &[])).unwrap();
+        let Database::Sqlserver(c) = &r.databases["billing"] else { panic!("expected sqlserver") };
+        assert_eq!(
+            (c.instance.as_deref(), c.port, c.max_connections, c.trust_server_certificate),
+            (Some("PROD"), None, 5, true)
+        );
+        assert!(!format!("{:?}", r.databases).contains("hunter2"), "passwords stay out of logs");
+
+        // SQL Server-only options are refused on Postgres.
+        std::fs::write(&file, "databases:\n  p:\n    postgres: { host: h, database: d, user: u, instance: X }\n")
+            .unwrap();
+        assert!(Resources::load(dir.path(), &Environment::with_variables("dev", &[])).is_err());
     }
 
     #[test]

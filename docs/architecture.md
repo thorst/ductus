@@ -30,12 +30,12 @@ One binary (`ductus`) plus PostgreSQL. No other services.
 
 | crate | role |
 |---|---|
-| `ductus-core` | `interface.yaml` (`config.rs`), formats (`format.rs`), environments + `${VAR}` substitution (`env.rs`), encrypted secrets (`secrets.rs`), `resources.yaml` (`resources.rs`: databases, SFTP servers), schedule timing (`schedule.rs`), lane hashing, port-conflict checks |
+| `ductus-core` | `interface.yaml` (`config.rs`), formats (`format.rs`), environments + `${VAR}` substitution (`env.rs`), encrypted secrets (`secrets.rs`), `resources.yaml` (`resources.rs`: Postgres and SQL Server databases, SFTP servers), schedule timing (`schedule.rs`), lane hashing, port-conflict checks |
 | `ductus-hl7` | HL7v2 essentials in Rust: field lookup by path, ACK generation (ingest only; interface code uses the SDK) |
 | `ductus-mllp` | MLLP framing, listener (in order per connection), reconnecting client (with or without waiting for ACK) |
 | `ductus-store` | Postgres: migrations, `messages` (day-partitioned; also the work queue), dedupe keys, status updates |
 | `ductus-script` | Embedded V8 (deno_core): module loader (local files + embedded `@ductus/sdk`), multi-interface isolates, async calls (`begin`/`settle`), native ops (`Services` trait), embedded TypeScript 6 type checker + shared-pool lints |
-| `ductus-runtime` | The engine: planning threads, `Intake` (ingest for any source, single or batched), MLLP + HTTP servers, file/SFTP watcher (`files.rs`) and record splitter (`split.rs`), SFTP client (`sftp.rs`), schedules (`schedule.rs`), workers, destinations, rate limiter, format-aware keys, engine services (DB pools) |
+| `ductus-runtime` | The engine: planning threads, `Intake` (ingest for any source, single or batched), MLLP + HTTP servers, file/SFTP watcher (`files.rs`) and record splitter (`split.rs`), SFTP client (`sftp.rs`), schedules (`schedule.rs`), workers, destinations, rate limiter, format-aware keys, engine services (Postgres pools; SQL Server pool in `mssql.rs`) |
 | `ductus-cli` (`ductus`) | `run`, `test`, `validate`, `types`, `secret`, `status`, `gen`, `sink` |
 | `sdk/` | The TypeScript SDK, compiled into the binary: HL7 model, formats (CSV/fixed/XML), HTTP request/response, services, test framework, typings generator |
 
@@ -75,7 +75,11 @@ Delivery failures: transient → back off and retry (forever unless `retry.max_a
 - Each interface is loaded through a generated glue module: `export const run = (raw) => __invoke(entry.transform, raw, formats)` where `formats` = `InterfaceConfig::format_spec()` (`{"input", "output", "http"}`).
 - `__invoke` decodes the payload by format, calls `transform`, serializes the result. Special results: `null` → filtered; `kill(reason)` → string prefixed `ductus_script::KILL`; errors containing `QUARANTINE` / `TRANSIENT` markers are classified by the worker.
 - Respond-mode HTTP: the engine passes a JSON envelope (method, path, params, query, headers, body); the SDK returns a JSON envelope (status, headers, body).
-- Native ops (`ops.rs` / `ops.js`): `op_ductus_db_query/execute/variable/secret`, exposed to the SDK as `globalThis.__ductus_ops`. The runtime implements the `Services` trait (`services.rs`); DB queries are wrapped as `WITH ductus_q AS (<sql>) SELECT json_agg(...)` so Postgres produces JSON; parameters are always bound.
+- Native ops (`ops.rs` / `ops.js`): `op_ductus_db_query/execute/variable/secret`, exposed to the SDK as `globalThis.__ductus_ops`. The runtime implements the `Services` trait (`services.rs`); parameters are always bound.
+  - Postgres: queries are wrapped as `WITH ductus_q AS (<sql>) SELECT json_agg(...)` so Postgres produces the JSON.
+  - SQL Server (`mssql.rs`, tiberius): `$1` → `@P1` outside literals/quoted names/comments; rows are converted in Rust to match Postgres's JSON (numbers, ISO 8601 times, `\x` hex binary, upper-case GUIDs; unnamed columns `column<N>`); first result set only. Own small pool: a connection goes back only after a call that succeeded (a failed one may be mid-response or inside an open transaction); idle > 5 min is closed (firewalls drop quiet connections); Azure/AG routing is followed once; named instances via SQL Browser.
+  - DB calls are spawned on the **main multi-thread runtime**, not the worker thread's: a socket is served by the runtime that opened it, and a worker thread busy in V8 would delay its replies.
+  - Temporary (message waits and retries): connection/TLS errors, pool timeouts, deadlocks, failovers, **login failures and missing databases** (fixed by fixing config; quarantining every message would be worse). Everything else (SQL errors) is permanent → quarantine.
 
 ## Storage
 

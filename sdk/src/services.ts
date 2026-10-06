@@ -21,7 +21,11 @@ function ops(): Ops {
 
 /** A database defined in resources.yaml. */
 export interface Database {
-  /** Rows as objects. Use $1, $2... placeholders; cast in SQL if needed ($1::int). */
+  /**
+   * Rows as objects. Use $1, $2... placeholders on Postgres and SQL Server alike; cast in SQL if
+   * needed: `$1::int` (Postgres), `CAST($1 AS varchar(20))` (SQL Server sends text as nvarchar, so
+   * cast it when comparing with an indexed varchar column).
+   */
   query<T = Row>(sql: string, params?: Param[]): Promise<T[]>;
   /** The first row, or null. */
   one<T = Row>(sql: string, params?: Param[]): Promise<T | null>;

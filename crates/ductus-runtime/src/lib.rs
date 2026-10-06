@@ -6,6 +6,7 @@ mod http;
 mod ingest;
 pub mod keys;
 mod limiter;
+mod mssql;
 mod schedule;
 mod services;
 mod sftp;

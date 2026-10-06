@@ -44,6 +44,8 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - Logs are plain text when stdout isn't a terminal (`with_ansi`), so demos can grep fields like `started interfaces=`.
 - SFTP tests use a throwaway user-level `sshd` (openssh-server installed in WSL; its system service is disabled) on 127.0.0.1:2222; see `scripts/demo-files.sh`. Clean up child processes with a `trap` whose commands each end in `|| true` (`set -e` applies inside traps).
 - CI "could not find native static library `rusty_v8`" on Build (Lint passes) = a stale rust-cache restored as a partial match. Fix: `gh cache delete --all`, then `gh run rerun <id>`. Always check the run after pushing.
+- **WSL stops the distro** (Docker and containers with it, exit 255, nothing in the logs) once no `wsl` command has run for a while. Not a SQL Server crash. The local SQL Server container (`scripts/dev/sqlserver.sh`, Docker Engine installed in WSL) has `--restart unless-stopped`; check.sh starts it and waits for a real login before the tests. SQL Server tests use `DUCTUS_TEST_SQLSERVER=user:password@host:port`.
+- tiberius 0.13 (bb8-tiberius is stuck on 0.12, so `mssql.rs` has its own pool). SQL Server 2025 image not tried since the WSL finding; tests and CI use 2022.
 - russh 0.64: `client::Handler::check_server_key(&PublicKeyOrCertificate)`; fingerprints via `key.fingerprint(HashAlg::Sha256)` print like `ssh-keygen -lf`. SFTP `rename` won't overwrite: remove the target first.
 
 ## Where things are
@@ -55,7 +57,7 @@ crates/ductus-mllp     MLLP framing/listener/client
 crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations)
 crates/ductus-script   embedded V8, module loader, ops, type checker (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup), ingest.rs, http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
-                       schedule.rs, worker.rs, destination.rs, keys.rs, services.rs, limiter.rs
+                       schedule.rs, worker.rs, destination.rs, keys.rs, services.rs + mssql.rs (DB calls), limiter.rs
 crates/ductus-cli      the `ductus` command (project.rs: test/validate/types/secret; tools.rs: gen/sink/status)
 sdk/src                TypeScript SDK (embedded via include_str! in ductus-script/src/loader.rs: add new files there)
 sdk/tests              SDK tests (TypeScript)
