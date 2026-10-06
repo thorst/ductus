@@ -42,17 +42,16 @@ pub async fn run(root: &Path, database_url: &str) -> Result<()> {
 
     for config in configs {
         let config = Arc::new(config);
-        let script = match config.script_path() {
-            Some(path) => {
-                let ts = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-                Some(ductus_script::transpile(&path.to_string_lossy(), &ts)?)
-            }
-            None => None,
-        };
         let wake = Arc::new(Notify::new());
 
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
         for w in 0..config.workers {
-            worker::spawn(config.clone(), w, script.clone(), store.clone(), wake.clone())?;
+            worker::spawn(config.clone(), w, store.clone(), wake.clone(), ready_tx.clone())?;
+        }
+        drop(ready_tx);
+        // Fail fast if the interface's code doesn't load, before accepting any messages.
+        for result in ready_rx {
+            result.with_context(|| format!("interface `{}`", config.name))?;
         }
         ingest::spawn(config.clone(), store.clone(), wake).await?;
         tracing::info!(interface = %config.name, workers = config.workers, "started");

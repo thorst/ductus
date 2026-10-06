@@ -15,12 +15,13 @@ const BATCH: i64 = 200;
 const IDLE_POLL: Duration = Duration::from_millis(250);
 const DB_RETRY: Duration = Duration::from_secs(1);
 
+/// Start a worker thread. It reports on `ready` once its interface code has loaded (or failed to).
 pub fn spawn(
     config: Arc<InterfaceConfig>,
     index: u32,
-    script: Option<String>,
     store: Store,
     wake: Arc<Notify>,
+    ready: std::sync::mpsc::Sender<Result<()>>,
 ) -> Result<()> {
     std::thread::Builder::new()
         .name(format!("{}-w{index}", config.name))
@@ -30,10 +31,15 @@ pub fn spawn(
                 .build()
                 .expect("building worker runtime");
             runtime.block_on(async move {
-                let name = config.name.clone();
-                match Worker::new(config, index, script, store, wake) {
-                    Ok(worker) => worker.run().await,
-                    Err(e) => tracing::error!(interface = %name, worker = index, error = %e, "worker failed to start"),
+                match Worker::new(config, index, store, wake).await {
+                    Ok(worker) => {
+                        let _ = ready.send(Ok(()));
+                        drop(ready);
+                        worker.run().await
+                    }
+                    Err(e) => {
+                        let _ = ready.send(Err(e));
+                    }
                 }
             });
         })
@@ -58,13 +64,9 @@ enum Outcome {
 }
 
 impl Worker {
-    fn new(config: Arc<InterfaceConfig>, index: u32, script: Option<String>, store: Store, wake: Arc<Notify>) -> Result<Self> {
-        let isolate = match script {
-            Some(js) => {
-                let mut isolate = Isolate::new();
-                isolate.load("interface.js", js)?;
-                Some(isolate)
-            }
+    async fn new(config: Arc<InterfaceConfig>, index: u32, store: Store, wake: Arc<Notify>) -> Result<Self> {
+        let isolate = match config.script_path() {
+            Some(path) => Some(Isolate::interface(&path).await?),
             None => None,
         };
         Ok(Self {
@@ -110,7 +112,7 @@ impl Worker {
         let input = String::from_utf8_lossy(&message.payload);
         let outcome = match self.isolate.as_mut() {
             None => Outcome::Deliver(input.into_owned()),
-            Some(isolate) => match isolate.call("transform", &input) {
+            Some(isolate) => match isolate.transform(&input) {
                 Ok(Some(output)) => Outcome::Deliver(output),
                 Ok(None) => Outcome::Filter,
                 Err(e) => Outcome::Quarantine(format!("transform failed: {e:#}")),

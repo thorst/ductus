@@ -1,6 +1,8 @@
-// v0.1: messages are raw HL7 strings. Typed access (msg.PID[3][1]) arrives in v0.2.
-// Return the message to send, or null to filter it out.
-function transform(msg: string): string | null {
-  if (!msg.includes("|ADT^")) return null;
-  return msg.replace(/\r?$/, "") + "\rZDU|relayed-by-ductus\r";
+import type { Message } from "@ductus/sdk";
+
+// Relay ADT messages, tagged with a ZDU segment. Anything else is filtered out.
+export function transform(msg: Message) {
+  if (msg.MSH[9][1] !== "ADT") return null;
+  msg.add("ZDU", ["relayed-by-ductus"]);
+  return msg;
 }
