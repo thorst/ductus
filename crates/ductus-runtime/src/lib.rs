@@ -1,6 +1,7 @@
 //! Runs interfaces: receive → persist → ACK, then workers transform and deliver.
 
 mod destination;
+mod http;
 mod ingest;
 pub mod keys;
 mod limiter;
@@ -8,7 +9,7 @@ mod services;
 mod worker;
 
 use anyhow::{Context, Result, bail};
-use ductus_core::config::Isolation;
+use ductus_core::config::{Isolation, Source};
 use ductus_core::{Environment, InterfaceConfig};
 use ductus_store::Store;
 use std::path::Path;
@@ -64,6 +65,10 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     if configs.is_empty() {
         bail!("no interfaces found under {}", root.join("interfaces").display());
     }
+    let conflicts = ductus_core::config::check_endpoints(&configs);
+    if !conflicts.is_empty() {
+        bail!("port conflicts:\n  {}", conflicts.join("\n  "));
+    }
     let store = Store::connect(database_url, options.db_connections).await?;
     // Keep dedupe keys a little longer than the longest window that uses them.
     let dedupe_retention = configs.iter().filter_map(|c| c.dedupe.as_ref()).map(|d| d.window).max().unwrap_or_default()
@@ -75,14 +80,39 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     let mut pool: Vec<Vec<worker::Job>> = (0..pool_threads).map(|_| Vec::new()).collect();
     let mut dedicated: Vec<(String, worker::Job)> = Vec::new();
     let mut interfaces = Vec::new();
+    let mut http_endpoints = Vec::new();
     let mut shared_count = 0;
     for config in configs {
         let config = Arc::new(config);
         // One wake-up signal per slot: ingest wakes only the slot that owns the message's lane.
         let wake: Arc<[Notify]> = (0..config.slots()).map(|_| Notify::new()).collect();
         let limiter = config.rate_limit.clone().map(|r| Arc::new(limiter::Limiter::new(r, std::time::Instant::now())));
+        // Respond-mode HTTP interfaces get requests over a channel instead of a queue.
+        let mut requests = None;
+        if let Source::Http { host, port, path, method, .. } = &config.source {
+            let route = if config.responds() {
+                let (calls, rx) = tokio::sync::mpsc::channel(1024);
+                requests = Some(rx);
+                http::Route::Respond { interface: config.name.clone(), calls }
+            } else {
+                http::Route::Queue(Arc::new(ingest::Intake::new(config.clone(), store.clone(), wake.clone())?))
+            };
+            http_endpoints.push(http::Endpoint {
+                host: host.clone(),
+                port: *port,
+                method: method.clone(),
+                path: path.clone(),
+                route,
+            });
+        }
         for slot in 0..config.slots() {
-            let job = worker::Job { config: config.clone(), slot, wake: wake.clone(), limiter: limiter.clone() };
+            let job = worker::Job {
+                config: config.clone(),
+                slot,
+                wake: wake.clone(),
+                limiter: limiter.clone(),
+                requests: requests.take(),
+            };
             match config.isolation {
                 Isolation::Shared => {
                     pool[shared_count % pool_threads].push(job);
@@ -119,8 +149,11 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     }
 
     for (config, wake) in &interfaces {
-        ingest::spawn(config.clone(), store.clone(), wake.clone()).await?;
+        if matches!(config.source, Source::Mllp { .. }) {
+            ingest::spawn_mllp(Arc::new(ingest::Intake::new(config.clone(), store.clone(), wake.clone())?)).await?;
+        }
     }
+    http::serve(http_endpoints).await?;
     tracing::info!(
         interfaces = interfaces.len(),
         shared = shared_count,

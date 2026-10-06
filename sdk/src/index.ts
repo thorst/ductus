@@ -5,6 +5,9 @@
 
 import { isMessage, type Message } from "./hl7.ts";
 import { decode, encode, type FormatSpec } from "./formats.ts";
+import { contentType, HttpResponse, requestFrom } from "./http.ts";
+
+export { html, type HttpRequest, HttpResponse, response } from "./http.ts";
 
 export { Field, type Message, parse, parse as parseHl7, Segment, Segments } from "./hl7.ts";
 export {
@@ -61,6 +64,22 @@ export function quarantine(reason: string): QuarantineError {
 export interface Formats {
   input: FormatSpec;
   output: FormatSpec;
+  /** An HTTP endpoint in respond mode: transform receives the request, returns the response. */
+  http?: boolean;
+}
+
+/** Turn a respond-mode result into the engine's response envelope (JSON). */
+function respond(result: unknown, output: FormatSpec): string {
+  const json = (status: number, body: unknown) =>
+    JSON.stringify({ status, headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (result instanceof Kill) return json(404, { error: result.reason || "not found" });
+  if (result === null || result === undefined) return json(404, { error: "not found" });
+  const r = result instanceof HttpResponse ? result : new HttpResponse(200, result);
+  const headers: Record<string, string> = {};
+  for (const [k, v] of Object.entries(r.headers)) headers[k.toLowerCase()] = v;
+  const body = typeof r.body === "string" ? r.body : encode(r.body, output, isMessage);
+  if (!headers["content-type"] && body !== "") headers["content-type"] = contentType(output);
+  return JSON.stringify({ status: r.status, headers, body });
 }
 
 const HL7: Formats = { input: { kind: "hl7" }, output: { kind: "hl7" } };
@@ -78,6 +97,10 @@ export function __invoke(
   raw: string,
   formats: Formats = HL7,
 ): string | null | Promise<string | null> {
+  if (formats.http) {
+    const result = transform(requestFrom(raw, formats.input));
+    return result instanceof Promise ? result.then((r) => respond(r, formats.output)) : respond(result, formats.output);
+  }
   const result = transform(decode(raw, formats.input));
   return result instanceof Promise
     ? result.then((r) => serialize(r, formats.output))

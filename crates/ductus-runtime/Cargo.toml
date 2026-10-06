@@ -7,6 +7,7 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
+axum = "0.8.9"
 bytes = "1.12.1"
 chrono = "0.4.45"
 csv = "1.4.0"
@@ -15,10 +16,13 @@ ductus-hl7 = { version = "0.1.0-dev", path = "../ductus-hl7" }
 ductus-mllp = { version = "0.1.0-dev", path = "../ductus-mllp" }
 ductus-script = { version = "0.1.0-dev", path = "../ductus-script" }
 ductus-store = { version = "0.1.0-dev", path = "../ductus-store" }
+reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
+serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "json"] }
 tokio = { version = "1.53.2", features = ["full"] }
 tracing = "0.1.44"
+url = "2.5.8"
 
 [dev-dependencies]
 serde_yaml_ng = "0.10.0"

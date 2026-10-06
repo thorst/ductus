@@ -36,8 +36,9 @@ pub struct InterfaceConfig {
     /// messages can be lost. An engine crash alone never loses anything in either mode.
     #[serde(default)]
     pub durability: Durability,
-    #[serde(with = "serde_yaml_ng::with::singleton_map")]
-    pub destination: Destination,
+    /// Where messages go. Not used by HTTP sources in `respond` mode (the response is the result).
+    #[serde(default, with = "serde_yaml_ng::with::singleton_map_recursive")]
+    pub destination: Option<Destination>,
     #[serde(default)]
     pub retry: Retry,
     /// Drop repeats of a message seen recently (e.g. a sender resending after a lost ACK).
@@ -60,6 +61,67 @@ pub enum Source {
         host: String,
         port: u16,
     },
+    /// An HTTP endpoint. Several interfaces can share a port with different paths.
+    Http {
+        #[serde(default = "defaults::host")]
+        host: String,
+        port: u16,
+        /// Route, with `{name}` parameters: `/patients/{mrn}`.
+        path: String,
+        #[serde(default = "defaults::post")]
+        method: String,
+        /// `queue` (default): store the body as a message and answer 202. `respond`: run the
+        /// transform on the request and answer with its result (REST APIs, web pages).
+        #[serde(default)]
+        mode: HttpMode,
+    },
+}
+
+/// Problems with how a set of interfaces share network ports: two MLLP listeners on one port,
+/// MLLP and HTTP on one port, or two interfaces handling the same HTTP method and path.
+/// (Several HTTP interfaces may share a port with different routes.)
+pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<String> {
+    use std::collections::HashMap;
+    let mut problems = Vec::new();
+    let mut mllp: HashMap<u16, &str> = HashMap::new();
+    let mut http_ports: HashMap<u16, &str> = HashMap::new();
+    let mut routes: HashMap<(u16, String, String), &str> = HashMap::new();
+    for c in configs {
+        match &c.source {
+            Source::Mllp { port, .. } => {
+                let first = *mllp.entry(*port).or_insert(&c.name);
+                if first != c.name {
+                    problems.push(format!("port {port}: MLLP listeners for both `{first}` and `{}`", c.name));
+                }
+            }
+            Source::Http { port, method, path, .. } => {
+                http_ports.entry(*port).or_insert(&c.name);
+                let key = (*port, method.to_ascii_uppercase(), path.clone());
+                if let Some(other) = routes.insert(key, &c.name) {
+                    problems.push(format!(
+                        "port {port}: `{other}` and `{}` both handle {} {path}",
+                        c.name,
+                        method.to_ascii_uppercase()
+                    ));
+                }
+            }
+        }
+    }
+    for (port, m) in &mllp {
+        if let Some(h) = http_ports.get(port) {
+            problems.push(format!("port {port}: MLLP (`{m}`) and HTTP (`{h}`) can't share a port"));
+        }
+    }
+    problems.sort();
+    problems
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HttpMode {
+    #[default]
+    Queue,
+    Respond,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -79,6 +141,17 @@ pub enum Destination {
     },
     File {
         dir: PathBuf,
+    },
+    /// POST (or PUT...) each message to a URL. 2xx = delivered; 408, 429, 5xx and network
+    /// errors retry; other 4xx quarantine.
+    Http {
+        url: String,
+        #[serde(default = "defaults::post")]
+        method: String,
+        #[serde(default)]
+        headers: std::collections::BTreeMap<String, String>,
+        #[serde(default = "defaults::timeout_ms")]
+        timeout_ms: u64,
     },
 }
 
@@ -219,6 +292,9 @@ mod defaults {
     pub fn workers() -> u32 {
         4
     }
+    pub fn post() -> String {
+        "POST".into()
+    }
     pub fn host() -> String {
         "0.0.0.0".into()
     }
@@ -289,6 +365,25 @@ impl InterfaceConfig {
         if matches!(self.source, Source::Mllp { .. }) && self.format != Format::Hl7 {
             bail!("an MLLP source carries HL7: `format: {}` needs another source type", self.format.name());
         }
+        match (self.responds(), &self.destination) {
+            (true, Some(_)) => {
+                bail!("an HTTP source in `respond` mode answers with the transform's result; remove `destination`")
+            }
+            (true, None) if self.script.is_none() => bail!("an HTTP source in `respond` mode needs a `script`"),
+            (false, None) => bail!("`destination` is required"),
+            _ => {}
+        }
+        if let Source::Http { path, method, .. } = &self.source {
+            if !path.starts_with('/') {
+                bail!("HTTP path must start with /");
+            }
+            if !matches!(method.to_ascii_uppercase().as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
+                bail!("HTTP method must be GET, POST, PUT, PATCH or DELETE");
+            }
+        }
+        if self.responds() && (self.ordering.key.is_some() || self.dedupe.is_some() || self.rate_limit.is_some()) {
+            bail!("ordering, dedupe and rate_limit apply to queued messages, not `respond` mode");
+        }
         if let Some(r) = &self.rate_limit {
             if r.per_minute == 0 {
                 bail!("rate_limit.per_minute must be at least 1");
@@ -300,10 +395,16 @@ impl InterfaceConfig {
         Ok(())
     }
 
-    /// Input and output formats as JSON, for the SDK: `{"input": {...}, "output": {...}}`.
+    /// Input and output formats as JSON, for the SDK: `{"input": {...}, "output": {...}}`,
+    /// plus `"http": true` when `transform` receives HTTP requests.
     pub fn format_spec(&self) -> String {
         let output = self.output.as_ref().unwrap_or(&self.format);
-        serde_json::json!({ "input": self.format, "output": output }).to_string()
+        serde_json::json!({ "input": self.format, "output": output, "http": self.responds() }).to_string()
+    }
+
+    /// An HTTP source in `respond` mode: requests are answered directly, nothing is queued.
+    pub fn responds(&self) -> bool {
+        matches!(self.source, Source::Http { mode: HttpMode::Respond, .. })
     }
 
     pub fn script_path(&self) -> Option<PathBuf> {
@@ -358,6 +459,58 @@ retry: { max_attempts: 3 }
     }
 
     #[test]
+    fn http_sources_and_destinations() {
+        let respond: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: api\nsource: { http: { port: 8080, path: '/patients/{mrn}', method: GET, mode: respond } }\nscript: t.ts\nformat: json\n",
+        )
+        .unwrap();
+        assert!(respond.responds() && respond.destination.is_none());
+        assert!(respond.format_spec().contains(r#""http":true"#));
+
+        let queue: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: orders\nsource: { http: { port: 8080, path: /orders } }\nformat: json\ndestination: { http: { url: 'https://x/api', headers: { Authorization: Bearer t } } }\n",
+        )
+        .unwrap();
+        assert!(!queue.responds());
+        assert!(matches!(&queue.source, Source::Http { method, mode: HttpMode::Queue, .. } if method == "POST"));
+        assert!(
+            matches!(&queue.destination, Some(Destination::Http { headers, .. }) if headers["Authorization"] == "Bearer t")
+        );
+        assert!(queue.validate().is_ok());
+
+        let mut bad = respond.clone();
+        bad.script = None; // no script file in this test; the destination check comes first
+        bad.destination = queue.destination.clone();
+        assert!(bad.validate().unwrap_err().to_string().contains("remove `destination`"));
+        let mut bad = queue.clone();
+        bad.destination = None;
+        assert!(bad.validate().unwrap_err().to_string().contains("required"));
+    }
+
+    #[test]
+    fn finds_port_conflicts() {
+        let load = |yaml: &str| -> InterfaceConfig { serde_yaml_ng::from_str(yaml).unwrap() };
+        let dest = "destination: { file: { dir: o } }";
+        let a = load(&format!("name: a\nsource: {{ mllp: {{ port: 6661 }} }}\n{dest}"));
+        let b = load(&format!("name: b\nsource: {{ mllp: {{ port: 6661 }} }}\n{dest}"));
+        let c = load(&format!("name: c\nsource: {{ http: {{ port: 8080, path: /x }} }}\nformat: json\n{dest}"));
+        let d = load(&format!(
+            "name: d\nsource: {{ http: {{ port: 8080, path: /x, method: post }} }}\nformat: json\n{dest}"
+        ));
+        let e = load(&format!("name: e\nsource: {{ http: {{ port: 8080, path: /y }} }}\nformat: json\n{dest}"));
+        let f = load(&format!("name: f\nsource: {{ http: {{ port: 6661, path: /z }} }}\nformat: json\n{dest}"));
+        assert!(check_endpoints([&c, &e]).is_empty(), "different paths may share a port");
+        assert_eq!(
+            check_endpoints([&a, &b, &c, &d, &f]),
+            [
+                "port 6661: MLLP (`a`) and HTTP (`f`) can't share a port",
+                "port 6661: MLLP listeners for both `a` and `b`",
+                "port 8080: `c` and `d` both handle POST /x",
+            ]
+        );
+    }
+
+    #[test]
     fn parses_reliability_options() {
         let yaml = r#"
 name: device
@@ -367,7 +520,10 @@ dedupe: { keys: [PID-3.1, EVN-2], window: 30m }
 rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
 "#;
         let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
-        assert!(matches!(c.destination, Destination::Mllp { ack: AckMode::None, on_reject: OnReject::Retry, .. }));
+        assert!(matches!(
+            c.destination,
+            Some(Destination::Mllp { ack: AckMode::None, on_reject: OnReject::Retry, .. })
+        ));
         let d = c.dedupe.unwrap();
         assert_eq!(d.keys, ["PID-3.1", "EVN-2"]);
         assert_eq!(d.window, Duration::from_secs(1800));
@@ -380,7 +536,7 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
         .unwrap();
         assert!(matches!(
             defaults.destination,
-            Destination::Mllp { ack: AckMode::Wait, on_reject: OnReject::Quarantine, .. }
+            Some(Destination::Mllp { ack: AckMode::Wait, on_reject: OnReject::Quarantine, .. })
         ));
         assert_eq!(defaults.dedupe.unwrap().keys, ["MSH-10"]);
     }

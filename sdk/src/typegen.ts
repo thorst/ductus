@@ -130,6 +130,31 @@ const BASE = `
   /** A fixture parsed the way the engine parses this interface's input: \`transform(input("orders.csv"))\`. */
   export function input<T = any>(name: string): T;
 
+  /** An incoming HTTP request (HTTP source in respond mode). */
+  export interface HttpRequest {
+    method: string;
+    path: string;
+    /** Route parameters: \`/patients/{mrn}\` gives \`params.mrn\`. */
+    params: Record<string, string>;
+    query: Record<string, string>;
+    /** Header names are lower-case. */
+    headers: Record<string, string>;
+    /** Raw body text. */
+    text: string;
+    /** Body parsed by the interface's \`format\`. */
+    readonly body: any;
+  }
+  /** A full HTTP response. Create with \`response()\` or \`html()\`. */
+  export class HttpResponse {
+    status: number;
+    body: unknown;
+    headers: Record<string, string>;
+  }
+  /** A response with explicit status/headers; non-string bodies are serialized by the output format. */
+  export function response(init: { status?: number; body?: unknown; headers?: Record<string, string> }): HttpResponse;
+  /** An HTML page. */
+  export function html(body: string, status?: number): HttpResponse;
+
   /** Parse raw HL7 text (same as \`parse\`). */
   export function parseHl7(raw: string): Message;
   /** A CSV record keyed by column name. */

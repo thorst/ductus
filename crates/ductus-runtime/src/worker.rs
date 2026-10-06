@@ -9,6 +9,7 @@
 //! retry back-off or a slow destination doesn't hold up the others on the same thread.
 
 use crate::destination::{SendError, Sender};
+use crate::http::HttpCall;
 use crate::limiter::{Decision, Limiter};
 use crate::services::{EngineServices, SharedServices};
 use anyhow::{Context, Result};
@@ -20,6 +21,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
+use tokio::sync::mpsc;
 
 const BATCH: i64 = 200;
 /// Safety-net poll. Ingest wakes the owning slot directly (and the wake-up is never lost),
@@ -34,6 +36,8 @@ pub struct Job {
     pub slot: u32,
     pub wake: Arc<[Notify]>,
     pub limiter: Option<Arc<Limiter>>,
+    /// Respond-mode HTTP interfaces: where their requests arrive.
+    pub requests: Option<mpsc::Receiver<HttpCall>>,
 }
 
 /// Readiness report for one job: its interface name and whether its code loaded.
@@ -100,6 +104,7 @@ async fn drive_event_loop(host: Rc<RefCell<Isolate>>, kick: Rc<Notify>) {
 
 /// An interface's code in the thread's shared isolate. The isolate is borrowed only for
 /// synchronous calls, never across an await, so tasks on the thread never contend.
+#[derive(Clone)]
 struct Script {
     host: Rc<RefCell<Isolate>>,
     id: InterfaceId,
@@ -133,6 +138,8 @@ struct Worker {
     /// Delivered but not yet marked sent. Flushed every SENT_FLUSH messages and at the end of
     /// each batch, so a crash re-sends at most that many (at-least-once delivery).
     sent: Vec<MessageRef>,
+    /// HTTP requests, for respond-mode interfaces (which have no queue).
+    requests: Option<mpsc::Receiver<HttpCall>>,
 }
 
 /// What the interface logic decided to do with a message.
@@ -149,7 +156,7 @@ impl Worker {
     fn new(job: Job, script: Option<Script>, store: Store) -> Self {
         Self {
             lanes: job.config.partitions_for_worker(job.slot),
-            sender: Sender::new(&job.config.destination, &job.config.dir),
+            sender: Sender::new(&job.config),
             config: job.config,
             script,
             store,
@@ -157,10 +164,14 @@ impl Worker {
             limiter: job.limiter,
             index: job.slot as usize,
             sent: Vec::with_capacity(SENT_FLUSH),
+            requests: job.requests,
         }
     }
 
     async fn run(mut self) {
+        if let Some(requests) = self.requests.take() {
+            return self.answer(requests).await;
+        }
         if self.lanes.is_empty() {
             return; // more workers than lanes: nothing to own
         }
@@ -185,6 +196,19 @@ impl Worker {
             }
             // Must happen before the next read, or those messages would be read again as pending.
             self.flush_sent().await;
+        }
+    }
+
+    /// Respond mode: run each HTTP request through the transform, concurrently (one local task
+    /// per request, so slow lookups don't hold up other callers).
+    async fn answer(self, mut requests: mpsc::Receiver<HttpCall>) {
+        let Some(script) = self.script else { return };
+        while let Some(call) = requests.recv().await {
+            let script = script.clone();
+            tokio::task::spawn_local(async move {
+                let result = script.transform(&call.envelope).await.map(Option::unwrap_or_default);
+                let _ = call.reply.send(result);
+            });
         }
     }
 

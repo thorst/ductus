@@ -16,6 +16,7 @@ const SDK_FILES: &[(&str, &str)] = &[
     ("/sdk/index.ts", include_str!("../../../sdk/src/index.ts")),
     ("/sdk/hl7.ts", include_str!("../../../sdk/src/hl7.ts")),
     ("/sdk/formats.ts", include_str!("../../../sdk/src/formats.ts")),
+    ("/sdk/http.ts", include_str!("../../../sdk/src/http.ts")),
     ("/sdk/schema.ts", include_str!("../../../sdk/src/schema.ts")),
     ("/sdk/services.ts", include_str!("../../../sdk/src/services.ts")),
     ("/sdk/testing.ts", include_str!("../../../sdk/src/testing.ts")),

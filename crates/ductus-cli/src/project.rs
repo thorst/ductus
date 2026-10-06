@@ -212,6 +212,11 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
         }
     }
 
+    for conflict in ductus_core::config::check_endpoints(interfaces.iter().filter_map(|i| i.config.as_ref().ok())) {
+        problems += 1;
+        println!("✗ {conflict}");
+    }
+
     // Every .ts file in the project, so imports of shared libraries resolve. Files outside any
     // interface folder are shared modules: one instance per isolate, imported by many interfaces.
     let interface_dirs: Vec<String> = interfaces.iter().map(|i| format!("{}/", key(&i.dir))).collect();
