@@ -27,7 +27,8 @@ fn oru() -> String {
          ORC|RE|ORD1001\r\
          OBR|1|ORD1001||PANEL^Basic Metabolic Panel\r",
     );
-    let tests = [("GLU", "Glucose", " 245 ", "mg/dL"), ("NA", "Sodium", "140", "mmol/L"), ("K", "Potassium", "4.1", "mmol/L")];
+    let tests =
+        [("GLU", "Glucose", " 245 ", "mg/dL"), ("NA", "Sodium", "140", "mmol/L"), ("K", "Potassium", "4.1", "mmol/L")];
     for i in 0..12 {
         let (code, name, value, unit) = tests[i % tests.len()];
         m.push_str(&format!("OBX|{}|NM|{code}^{name}||{value}|{unit}|||||F\r", i + 1));
