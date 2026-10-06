@@ -26,14 +26,14 @@ const ADT: &str = "MSH|^~\\&|EPIC|HOSP|DUCTUS|HOSP|20261005120000||ADT^A08|1|P|2
 fn sdk_test_suite_passes() {
     let rt = rt();
     let _guard = rt.enter();
-    let suite = [workspace().join("sdk/tests/hl7.test.ts"), workspace().join("sdk/tests/formats.test.ts")];
+    let suite: Vec<PathBuf> =
+        ["hl7", "formats", "services"].iter().map(|s| workspace().join(format!("sdk/tests/{s}.test.ts"))).collect();
+    let paths: Vec<&Path> = suite.iter().map(PathBuf::as_path).collect();
     let fixtures = serde_json::json!({ "adt.hl7": ADT }).to_string();
-    let mut isolate = rt
-        .block_on(Isolate::tests(&[suite[0].as_path(), suite[1].as_path()], &fixtures, ductus_script::DEFAULT_FORMATS))
-        .unwrap();
-    let report: serde_json::Value = serde_json::from_str(&isolate.run_tests().unwrap()).unwrap();
+    let mut isolate = rt.block_on(Isolate::tests(&paths, &fixtures, ductus_script::DEFAULT_FORMATS)).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&rt.block_on(isolate.run_tests()).unwrap()).unwrap();
     let results = report.as_array().unwrap();
-    assert!(results.len() >= 29, "expected the full suite, got {}", results.len());
+    assert!(results.len() >= 37, "expected the full suite, got {}", results.len());
     let failures: Vec<_> = results.iter().filter(|r| r["ok"] != true).collect();
     assert!(failures.is_empty(), "SDK test failures:\n{failures:#?}");
 }
@@ -49,7 +49,7 @@ fn minimal_test_suite_runs() {
     let file = dir.path().join("a.test.ts");
     let mut isolate =
         rt.block_on(Isolate::tests(&[file.as_path()], r#"{"f":"x"}"#, ductus_script::DEFAULT_FORMATS)).unwrap();
-    let report: serde_json::Value = serde_json::from_str(&isolate.run_tests().unwrap()).unwrap();
+    let report: serde_json::Value = serde_json::from_str(&rt.block_on(isolate.run_tests()).unwrap()).unwrap();
     assert_eq!(report[0]["ok"], true, "{report}");
     assert_eq!(report[1]["ok"], false, "{report}");
     assert!(report[1]["error"].as_str().unwrap().contains("expected 2, got 1"), "{report}");
@@ -179,6 +179,17 @@ impl ductus_script::Services for FakeServices {
     fn db_execute(&self, _: &str, _: &str, _: Vec<serde_json::Value>) -> ductus_script::BoxFuture<u64> {
         Box::pin(async { Ok(1) })
     }
+    /// Answers with the status given in the path (`/status/503`) and echoes the request.
+    fn fetch(&self, r: ductus_script::FetchRequest) -> ductus_script::BoxFuture<ductus_script::FetchResponse> {
+        Box::pin(async move {
+            if r.url.contains("unreachable") {
+                anyhow::bail!("{} {} {} failed: connection refused", ductus_script::TRANSIENT, r.method, r.url);
+            }
+            let status = r.url.rsplit_once("/status/").and_then(|(_, s)| s.get(..3)?.parse().ok()).unwrap_or(200);
+            let echo = serde_json::json!({ "method": r.method, "url": r.url, "headers": r.headers, "body": r.body });
+            Ok(ductus_script::FetchResponse { status, headers: Default::default(), body: echo.to_string() })
+        })
+    }
     fn variable(&self, name: &str) -> Option<String> {
         (name == "FACILITY").then(|| "FACILITY-A".to_string())
     }
@@ -211,6 +222,50 @@ fn async_transforms_use_databases_and_variables() {
 
     let err = rt.block_on(host.transform_with(down, ADT)).unwrap_err().to_string();
     assert!(err.contains(ductus_script::TRANSIENT) && err.contains("connection refused"), "{err}");
+}
+
+#[test]
+fn fetch_goes_through_the_engine_and_retries_server_errors() {
+    let transform = r#"import { fetch, type Message } from "@ductus/sdk";
+export async function transform(msg: Message) {
+  const r = await fetch("https://api.test/PATH", { body: { mrn: msg.PID[3][1] }, headers: { "X-Key": "k" }, query: { a: "1 2" }, RETRY });
+  const echo = r.json();
+  msg.add("ZFT", [String(r.status), echo.method, echo.url, echo.headers["content-type"], echo.headers["x-key"], echo.body]);
+  return msg;
+}"#;
+    let make = |path: &str, retry: &str| transform.replace("PATH", path).replace("RETRY", retry);
+    let dir = project(&[
+        ("ok/transform.ts", &make("patients", "retry: true")),
+        ("busy/transform.ts", &make("status/503", "retry: true")),
+        ("own/transform.ts", &make("status/503", "retry: false")),
+        ("down/transform.ts", &make("unreachable", "retry: true")),
+        ("down-own/transform.ts", &make("unreachable", "retry: false")),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host_with(Some(std::rc::Rc::new(FakeServices)));
+    let mut run = |name: &str| {
+        let id = rt.block_on(host.add_interface(&dir.path().join(format!("{name}/transform.ts")))).unwrap();
+        rt.block_on(host.transform_with(id, ADT)).map(Option::unwrap).map_err(|e| e.to_string())
+    };
+
+    let out = run("ok").unwrap();
+    assert!(
+        out.ends_with("ZFT|200|POST|https://api.test/patients?a=1%202|application/json|k|{\"mrn\":\"123456\"}\r"),
+        "{out}"
+    );
+    let err = run("busy").unwrap_err();
+    assert!(
+        err.contains(&format!("{} POST https://api.test/status/503 returned 503", ductus_script::TRANSIENT)),
+        "{err}"
+    );
+    // (The fake echoes the URL in its body, which the message previews; the label itself has no query.)
+    assert!(!err.split(" returned").next().unwrap().contains("a=1"), "the query string stays out of the label: {err}");
+    assert!(run("own").unwrap().contains("ZFT|503|POST"));
+    let err = run("down").unwrap_err();
+    assert!(err.contains(ductus_script::TRANSIENT) && err.contains("connection refused"), "{err}");
+    let err = run("down-own").unwrap_err();
+    assert!(!err.contains(ductus_script::TRANSIENT) && err.contains("connection refused"), "{err}");
 }
 
 #[test]

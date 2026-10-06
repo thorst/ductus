@@ -1,9 +1,12 @@
-//! Native operations interface code can call (through `@ductus/sdk`): database queries,
-//! environment variables and secrets. The engine supplies the implementation as `Services`.
+//! Native operations interface code can call (through `@ductus/sdk`): database queries, HTTP
+//! requests, environment variables and secrets. The engine supplies the implementation as
+//! `Services`.
 
 use deno_core::{OpState, op2};
 use deno_error::JsErrorBox;
+use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
@@ -27,8 +30,30 @@ pub trait Services {
     fn db_query(&self, resource: &str, sql: &str, params: Vec<serde_json::Value>) -> BoxFuture<Vec<serde_json::Value>>;
     /// Run a statement; returns the number of rows affected.
     fn db_execute(&self, resource: &str, sql: &str, params: Vec<serde_json::Value>) -> BoxFuture<u64>;
+    /// Send an HTTP request. Network errors and timeouts are errors (marked `TRANSIENT`); every
+    /// status code, 5xx included, is a response (the SDK decides what to retry).
+    fn fetch(&self, request: FetchRequest) -> BoxFuture<FetchResponse>;
     fn variable(&self, name: &str) -> Option<String>;
     fn secret(&self, name: &str) -> anyhow::Result<Option<String>>;
+}
+
+/// An HTTP request from interface code (`fetch()` in the SDK).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FetchRequest {
+    pub url: String,
+    pub method: String,
+    pub headers: BTreeMap<String, String>,
+    pub body: Option<String>,
+    pub timeout_ms: u64,
+}
+
+/// The response; header names are lower-case, repeated headers are joined with ", ".
+#[derive(Debug, Clone, Serialize)]
+pub struct FetchResponse {
+    pub status: u16,
+    pub headers: BTreeMap<String, String>,
+    pub body: String,
 }
 
 fn services(state: &OpState) -> Result<Rc<dyn Services>, JsErrorBox> {
@@ -67,6 +92,16 @@ async fn op_ductus_db_execute(
 }
 
 #[op2]
+#[serde]
+async fn op_ductus_fetch(
+    state: Rc<RefCell<OpState>>,
+    #[serde] request: FetchRequest,
+) -> Result<FetchResponse, JsErrorBox> {
+    let services = services(&state.borrow())?;
+    services.fetch(request).await.map_err(js_error)
+}
+
+#[op2]
 #[string]
 fn op_ductus_variable(state: &mut OpState, #[string] name: String) -> Result<Option<String>, JsErrorBox> {
     Ok(services(state)?.variable(&name))
@@ -80,7 +115,7 @@ fn op_ductus_secret(state: &mut OpState, #[string] name: String) -> Result<Optio
 
 deno_core::extension!(
     ductus_ops,
-    ops = [op_ductus_db_query, op_ductus_db_execute, op_ductus_variable, op_ductus_secret],
+    ops = [op_ductus_db_query, op_ductus_db_execute, op_ductus_fetch, op_ductus_variable, op_ductus_secret],
     esm_entry_point = "ext:ductus_ops/ops.js",
     esm = [dir "src", "ops.js"],
 );

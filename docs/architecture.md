@@ -24,7 +24,7 @@ One binary (`ductus`) plus PostgreSQL. No other services.
 3. **One owner per lane = per-key order.** The ordering key (e.g. MRN) hashes (FNV-1a, stable forever: `ductus_core::partition_of`) to one of N virtual partitions ("lanes"). Each lane is owned by exactly one worker slot, which processes its pending messages strictly by id. A failed message blocks its slot's lanes until it succeeds or is quarantined: that's the price of ordering.
 4. **Migrations are expand-only.** Never drop or rename a column/table in a migration that an older binary still uses. Older binaries tolerate unknown newer migrations (`set_ignore_missing`), so rollback = reinstall the previous binary.
 5. **No credentials in interface code.** Secrets come from `secrets/<env>.json` (encrypted) via `${secret:NAME}` in YAML or `secret()` in code; connections are named resources (`resources.yaml`).
-6. **Interface code is sandboxed from the network and filesystem** except through engine services (`db()`, `env()`, `secret()`; HTTP fetch is planned). Remote module imports are refused.
+6. **Interface code is sandboxed from the network and filesystem** except through engine services (`db()`, `fetch()`, `env()`, `secret()`). Remote module imports are refused.
 
 ## Crates
 
@@ -75,10 +75,12 @@ Delivery failures: transient → back off and retry (forever unless `retry.max_a
 - Each interface is loaded through a generated glue module: `export const run = (raw) => __invoke(entry.transform, raw, formats)` where `formats` = `InterfaceConfig::format_spec()` (`{"input", "output", "http"}`).
 - `__invoke` decodes the payload by format, calls `transform`, serializes the result. Special results: `null` → filtered; `kill(reason)` → string prefixed `ductus_script::KILL`; errors containing `QUARANTINE` / `TRANSIENT` markers are classified by the worker.
 - Respond-mode HTTP: the engine passes a JSON envelope (method, path, params, query, headers, body); the SDK returns a JSON envelope (status, headers, body).
-- Native ops (`ops.rs` / `ops.js`): `op_ductus_db_query/execute/variable/secret`, exposed to the SDK as `globalThis.__ductus_ops`. The runtime implements the `Services` trait (`services.rs`); parameters are always bound.
+- Native ops (`ops.rs` / `ops.js`): `op_ductus_db_query/execute/fetch/variable/secret`, exposed to the SDK as `globalThis.__ductus_ops`. The runtime implements the `Services` trait (`services.rs`); parameters are always bound.
   - Postgres: queries are wrapped as `WITH ductus_q AS (<sql>) SELECT json_agg(...)` so Postgres produces the JSON.
   - SQL Server (`mssql.rs`, tiberius): `$1` → `@P1` outside literals/quoted names/comments; rows are converted in Rust to match Postgres's JSON (numbers, ISO 8601 times, `\x` hex binary, upper-case GUIDs; unnamed columns `column<N>`); first result set only. Own small pool: a connection goes back only after a call that succeeded (a failed one may be mid-response or inside an open transaction); idle > 5 min is closed (firewalls drop quiet connections); Azure/AG routing is followed once; named instances via SQL Browser.
-  - DB calls are spawned on the **main multi-thread runtime**, not the worker thread's: a socket is served by the runtime that opened it, and a worker thread busy in V8 would delay its replies.
+  - `fetch()` (`services.rs` `http_fetch`, one shared reqwest client): the engine returns every status as a response and marks only network errors/timeouts transient; the SDK turns 5xx/408/429 into transient errors unless `retry: false`. Responses capped at 16 MB; messages never show the query string or URL password.
+  - Under `ductus test` the SDK swaps the ops for mocks (`mock.db/fetch/env/secret`, reset before each test; unmocked calls fail with how to mock them), and tests may be async (`run_tests` drives the event loop).
+  - DB and HTTP calls are spawned on the **main multi-thread runtime**, not the worker thread's: a socket is served by the runtime that opened it, and a worker thread busy in V8 would delay its replies.
   - Temporary (message waits and retries): connection/TLS errors, pool timeouts, deadlocks, failovers, **login failures and missing databases** (fixed by fixing config; quarantining every message would be worse). Everything else (SQL errors) is permanent → quarantine.
 
 ## Storage

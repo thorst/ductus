@@ -9,7 +9,7 @@ mod loader;
 mod ops;
 
 pub use check::{Diagnostic, type_check};
-pub use ops::{BoxFuture, KILL, QUARANTINE, Services, TRANSIENT};
+pub use ops::{BoxFuture, FetchRequest, FetchResponse, KILL, QUARANTINE, Services, TRANSIENT};
 
 use anyhow::{Context, Result, anyhow, bail};
 use deno_core::error::JsError;
@@ -155,7 +155,7 @@ __setFixtures({fixtures_json}, {formats_json});
         );
         let mut isolate = Self::host();
         isolate.load_main(&std::env::current_dir()?.join("types"), glue).await?;
-        isolate.run_tests().context("type generator returned nothing")
+        isolate.run_tests().await.context("type generator returned nothing")
     }
 
     /// Load a main module that installs `globalThis.__ductus_entry`, and register it as entry 0.
@@ -222,12 +222,17 @@ __setFixtures({fixtures_json}, {formats_json});
         self.runtime.poll_event_loop(cx, PollEventLoopOptions::default()).map_err(|e| anyhow!("{e}"))
     }
 
-    /// Run the loaded test suite; returns the JSON report.
-    pub fn run_tests(&mut self) -> Result<String> {
-        match self.call(InterfaceId(0), None)? {
-            RawResult::Value(Some(report)) => Ok(report),
-            _ => bail!("test runner returned nothing"),
-        }
+    /// Run the loaded test suite (tests may be async); returns the JSON report.
+    pub async fn run_tests(&mut self) -> Result<String> {
+        let report = match self.call(InterfaceId(0), None)? {
+            RawResult::Value(report) => report,
+            RawResult::Promise(promise) => {
+                let pending = self.runtime.resolve(promise);
+                let value = self.runtime.with_event_loop_promise(pending, PollEventLoopOptions::default()).await;
+                self.settle(value)?
+            }
+        };
+        report.context("test runner returned nothing")
     }
 
     fn call(&mut self, entry: InterfaceId, arg: Option<&str>) -> Result<RawResult> {

@@ -116,8 +116,59 @@ const BASE = `
   /** A secret from the environment's secret store. Throws if it isn't defined. */
   export function secret(name: string): string;
 
-  /** Register a test (run with \`ductus test\`). */
-  export function test(name: string, fn: () => void): void;
+  export interface FetchOptions {
+    /** Default: GET, or POST when there's a body. */
+    method?: string;
+    headers?: Record<string, string>;
+    /** A string is sent as is; anything else as JSON (with content-type application/json). */
+    body?: unknown;
+    /** Added to the URL's query string (values are encoded). */
+    query?: Record<string, string | number | boolean>;
+    /** Milliseconds; default 30000. */
+    timeout?: number;
+    /**
+     * Default true: network errors, timeouts, 408, 429 and 5xx responses make the message wait and retry
+     * (order is kept). false: those statuses come back as responses, and network errors throw ordinary errors.
+     */
+    retry?: boolean;
+  }
+  /** An HTTP response. The body is already read, so \`text()\` and \`json()\` need no \`await\`. */
+  export class FetchResponse {
+    readonly status: number;
+    /** Header names are lower-case. */
+    readonly headers: Record<string, string>;
+    /** Status 200-299. */
+    readonly ok: boolean;
+    text(): string;
+    json<T = any>(): T;
+  }
+  /**
+   * Call an HTTP API through the engine (interface code has no network of its own).
+   * \`const patient = (await fetch(env("EMPI_URL") + "/patients/" + mrn)).json();\`
+   */
+  export function fetch(url: string, options?: FetchOptions): Promise<FetchResponse>;
+
+  /** A mocked HTTP response; a non-string body is sent as JSON. */
+  export interface MockResponse { status?: number; headers?: Record<string, string>; body?: unknown }
+  /** A request your code sent, as a mock saw it (header names lower-case). */
+  export interface FetchCall { url: string; method: string; headers: Record<string, string>; body: string | null; timeoutMs: number }
+  /**
+   * Stand-ins for databases, HTTP APIs, variables and secrets in tests (reset before each test).
+   * Each returns the calls made, to assert on.
+   */
+  export const mock: {
+    /** Answer \`db(name)\` calls: rows, or a function of (sql, params) returning rows (or a count for execute). */
+    db(name: string, answer: Row[] | ((sql: string, params: Param[]) => Row[] | number | Promise<Row[] | number>)): { sql: string; params: Param[] }[];
+    /** Answer \`fetch()\` calls: a response, or a function of the request. */
+    fetch(answer: MockResponse | ((request: FetchCall) => MockResponse | Promise<MockResponse>)): FetchCall[];
+    /** Values for \`env()\`. */
+    env(values: Record<string, string>): void;
+    /** Values for \`secret()\`. */
+    secret(values: Record<string, string>): void;
+  };
+
+  /** Register a test (run with \`ductus test\`). May be async. */
+  export function test(name: string, fn: () => void | Promise<void>): void;
   /** Assert on a value. HL7 fields and segments are compared by their text. */
   export function expect(actual: unknown): Expectation;
   export interface Expectation {
@@ -128,6 +179,8 @@ const BASE = `
     toBeTruthy(): void;
     toContain(item: unknown): void;
     toThrow(messagePart?: string): void;
+    /** For async code: \`await expect(transform(msg)).toReject("unknown MRN")\`. */
+    toReject(messagePart?: string): Promise<void>;
   }
   /** Contents of a file in the interface's \`fixtures/\` folder. */
   export function fixture(name: string): string;

@@ -138,7 +138,7 @@ pub async fn test(root: &Path, env: &str, only: Option<&str>) -> Result<bool> {
             .map(|c| c.format_spec())
             .unwrap_or_else(|_| ductus_script::DEFAULT_FORMATS.to_string());
         let report = match Isolate::tests(&paths, &serde_json::to_string(&fixtures)?, &formats).await {
-            Ok(mut isolate) => isolate.run_tests(),
+            Ok(mut isolate) => isolate.run_tests().await,
             Err(e) => Err(e),
         };
         let report = match report {
