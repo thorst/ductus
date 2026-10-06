@@ -1,47 +1,77 @@
-//! Workers: each owns a fixed set of lanes (partitions) and processes their pending
-//! messages strictly in arrival order. A V8 isolate can't move between threads,
-//! so every worker is its own OS thread with its own isolate and async runtime.
+//! Worker threads. Each thread owns one V8 isolate (isolates can't move between threads)
+//! and runs one async task per interface slot assigned to it:
+//!
+//! - shared pool threads host many interfaces in one isolate;
+//! - dedicated threads host one slot of one interface.
+//!
+//! A slot owns a fixed set of lanes (partitions) and processes their pending messages
+//! strictly in arrival order. Because slots are async tasks, one interface waiting on a
+//! retry back-off or a slow destination doesn't hold up the others on the same thread.
 
 use crate::destination::{SendError, Sender};
 use crate::limiter::{Decision, Limiter};
 use anyhow::{Context, Result};
 use ductus_core::InterfaceConfig;
-use ductus_script::Isolate;
+use ductus_script::{InterfaceId, Isolate};
 use ductus_store::{MessageRef, Pending, Status, Store};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
 
 const BATCH: i64 = 200;
-const IDLE_POLL: Duration = Duration::from_millis(250);
+/// Safety-net poll. Ingest wakes the owning slot directly (and the wake-up is never lost),
+/// so this only matters for work written by something other than this process.
+const IDLE_POLL: Duration = Duration::from_secs(30);
 const DB_RETRY: Duration = Duration::from_secs(1);
 const SENT_FLUSH: usize = 50;
 
-/// Start a worker thread. It reports on `ready` once its interface code has loaded (or failed to).
-pub fn spawn(
-    config: Arc<InterfaceConfig>,
-    index: u32,
-    store: Store,
-    wake: Arc<[Notify]>,
-    limiter: Option<Arc<Limiter>>,
-    ready: std::sync::mpsc::Sender<Result<()>>,
-) -> Result<()> {
+/// One slot of one interface, to run on a worker thread.
+pub struct Job {
+    pub config: Arc<InterfaceConfig>,
+    pub slot: u32,
+    pub wake: Arc<[Notify]>,
+    pub limiter: Option<Arc<Limiter>>,
+}
+
+/// Readiness report for one job: its interface name and whether its code loaded.
+pub type Ready = (String, Result<()>);
+
+/// Start a worker thread for `jobs`. Each job reports on `ready` once its interface code has
+/// loaded (or failed to); then the thread processes messages forever.
+pub fn spawn_thread(name: String, jobs: Vec<Job>, store: Store, ready: std::sync::mpsc::Sender<Ready>) -> Result<()> {
     std::thread::Builder::new()
-        .name(format!("{}-w{index}", config.name))
+        .name(name)
         .spawn(move || {
             let runtime =
                 tokio::runtime::Builder::new_current_thread().enable_all().build().expect("building worker runtime");
-            runtime.block_on(async move {
-                match Worker::new(config, index, store, wake, limiter).await {
-                    Ok(worker) => {
-                        let _ = ready.send(Ok(()));
-                        drop(ready);
-                        worker.run().await
-                    }
-                    Err(e) => {
-                        let _ = ready.send(Err(e));
-                    }
+            let local = tokio::task::LocalSet::new();
+            local.block_on(&runtime, async move {
+                let mut host = Isolate::host();
+                let mut loaded = Vec::with_capacity(jobs.len());
+                for job in jobs {
+                    let script = match job.config.script_path() {
+                        Some(path) => match host.add_interface(&path).await {
+                            Ok(id) => Some(id),
+                            Err(e) => {
+                                let _ = ready.send((job.config.name.clone(), Err(e)));
+                                continue;
+                            }
+                        },
+                        None => None,
+                    };
+                    let _ = ready.send((job.config.name.clone(), Ok(())));
+                    loaded.push((job, script));
                 }
+                drop(ready);
+
+                let host = Rc::new(RefCell::new(host));
+                for (job, script) in loaded {
+                    let script = script.map(|id| (host.clone(), id));
+                    tokio::task::spawn_local(Worker::new(job, script, store.clone()).run());
+                }
+                std::future::pending::<()>().await;
             });
         })
         .context("spawning worker thread")?;
@@ -51,7 +81,9 @@ pub fn spawn(
 struct Worker {
     config: Arc<InterfaceConfig>,
     lanes: Vec<i32>,
-    isolate: Option<Isolate>,
+    /// The thread's isolate and this interface's handle in it. Borrowed only for the synchronous
+    /// `transform` call, never across an await, so tasks on the thread never contend.
+    script: Option<(Rc<RefCell<Isolate>>, InterfaceId)>,
     sender: Sender,
     store: Store,
     wake: Arc<[Notify]>,
@@ -70,28 +102,18 @@ enum Outcome {
 }
 
 impl Worker {
-    async fn new(
-        config: Arc<InterfaceConfig>,
-        index: u32,
-        store: Store,
-        wake: Arc<[Notify]>,
-        limiter: Option<Arc<Limiter>>,
-    ) -> Result<Self> {
-        let isolate = match config.script_path() {
-            Some(path) => Some(Isolate::interface(&path).await?),
-            None => None,
-        };
-        Ok(Self {
-            lanes: config.partitions_for_worker(index),
-            sender: Sender::new(&config.destination, &config.dir),
-            config,
-            isolate,
+    fn new(job: Job, script: Option<(Rc<RefCell<Isolate>>, InterfaceId)>, store: Store) -> Self {
+        Self {
+            lanes: job.config.partitions_for_worker(job.slot),
+            sender: Sender::new(&job.config.destination, &job.config.dir),
+            config: job.config,
+            script,
             store,
-            wake,
-            limiter,
-            index: index as usize,
+            wake: job.wake,
+            limiter: job.limiter,
+            index: job.slot as usize,
             sent: Vec::with_capacity(SENT_FLUSH),
-        })
+        }
     }
 
     async fn run(mut self) {
@@ -127,9 +149,9 @@ impl Worker {
     async fn process(&mut self, message: Pending) {
         let reference = message.reference();
         let input = String::from_utf8_lossy(&message.payload);
-        let outcome = match self.isolate.as_mut() {
+        let outcome = match &self.script {
             None => Outcome::Deliver(input.into_owned()),
-            Some(isolate) => match isolate.transform(&input) {
+            Some((host, id)) => match host.borrow_mut().transform_with(*id, &input) {
                 Ok(Some(output)) => Outcome::Deliver(output),
                 Ok(None) => Outcome::Filter,
                 Err(e) => Outcome::Quarantine(format!("transform failed: {e:#}")),

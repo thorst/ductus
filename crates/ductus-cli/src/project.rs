@@ -187,12 +187,21 @@ pub async fn validate(root: &Path) -> Result<bool> {
                 println!("✓ {label}: config and code load");
             }
         }
-        for f in files_under(&iface.dir, &is_ts) {
-            files.insert(key(&f), std::fs::read_to_string(&f)?);
-        }
     }
 
-    let diagnostics = ductus_script::type_check(&files)?;
+    // Every .ts file in the project, so imports of shared libraries resolve. Files outside any
+    // interface folder are shared modules: one instance per isolate, imported by many interfaces.
+    let interface_dirs: Vec<String> = interfaces.iter().map(|i| format!("{}/", key(&i.dir))).collect();
+    let mut shared = Vec::new();
+    for f in files_under(root, &is_ts) {
+        let k = key(&f);
+        if !interface_dirs.iter().any(|d| k.starts_with(d)) {
+            shared.push(k.clone());
+        }
+        files.insert(k, std::fs::read_to_string(&f)?);
+    }
+
+    let diagnostics = ductus_script::type_check(&files, &shared)?;
     for d in &diagnostics {
         if d.is_error() {
             problems += 1;
@@ -201,7 +210,9 @@ pub async fn validate(root: &Path) -> Result<bool> {
             Some(f) => format!("{}:{}:{} ", relative(root, f), d.line, d.column),
             None => String::new(),
         };
-        println!("{at}{} TS{}: {}", d.category, d.code, d.message);
+        // Codes 90000+ are Ductus lints; below that, TypeScript's own.
+        let code = if d.code >= 90_000 { format!("DX{}", d.code - 90_000) } else { format!("TS{}", d.code) };
+        println!("{at}{} {code}: {}", d.category, d.message);
     }
     if diagnostics.is_empty() {
         println!("✓ types: no errors");

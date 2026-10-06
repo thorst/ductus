@@ -57,3 +57,6 @@ jobs:
           COUNT=3000 BIN=target/release/ductus bash scripts/demo-crash-recovery.sh | tee demo.log
           grep -q "unique 3000 " demo.log
           grep -q "out of order 0 " demo.log
+
+      - name: Scale demo (300 shared interfaces + 1 dedicated, hot MRN)
+        run: SHARED=300 EPIC_SECONDS=10 SAMPLED=50 BIN=target/release/ductus bash scripts/demo-scale.sh

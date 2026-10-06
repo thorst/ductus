@@ -45,6 +45,8 @@ pub struct GenOptions {
     pub connections: u64,
     /// Fraction of messages (0..1) for a single hot patient, to exercise hotspot handling.
     pub hot: f64,
+    /// Added to sequence and patient numbers (see `ductus gen --offset`).
+    pub offset: u64,
 }
 
 /// Small deterministic PRNG (xorshift64*), so runs are reproducible.
@@ -69,7 +71,7 @@ pub async fn generate(opts: GenOptions) -> Result<()> {
     let mut lanes: Vec<Vec<(u64, u64)>> = vec![Vec::new(); connections as usize];
     for seq in 1..=opts.count {
         let patient = if opts.hot > 0.0 && rng.next_f64() < opts.hot { 0 } else { seq % patients };
-        lanes[(patient % connections) as usize].push((seq, patient));
+        lanes[(patient % connections) as usize].push((opts.offset + seq, opts.offset + patient));
     }
 
     let start = Instant::now();

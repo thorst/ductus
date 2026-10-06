@@ -81,6 +81,80 @@ export function transform(msg: Message) {
 }
 
 #[test]
+fn one_isolate_hosts_many_interfaces() {
+    let mut files = Vec::new();
+    for i in 0..50 {
+        files.push((
+            format!("i{i}/transform.ts"),
+            format!(
+                "import type {{ Message }} from \"@ductus/sdk\";\nexport function transform(m: Message) {{ m.add(\"ZIF\", [\"{i}\"]); return m; }}"
+            ),
+        ));
+    }
+    let refs: Vec<(&str, &str)> = files.iter().map(|(a, b)| (a.as_str(), b.as_str())).collect();
+    let dir = project(&refs);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let ids: Vec<_> = (0..50)
+        .map(|i| rt.block_on(host.add_interface(&dir.path().join(format!("i{i}/transform.ts")))).unwrap())
+        .collect();
+    for (i, id) in ids.iter().enumerate().rev() {
+        let out = host.transform_with(*id, ADT).unwrap().unwrap();
+        assert!(out.ends_with(&format!("ZIF|{i}\r")), "{out}");
+    }
+}
+
+/// The shared-pool isolation guarantees documented in docs/shared-pool.md.
+#[test]
+fn shared_isolate_scoping_rules() {
+    let counter = r#"import type { Message } from "@ductus/sdk";
+let count = 0;                                   // module scope: private to this interface
+export function transform(m: Message) { count++; m.add("ZCT", [String(count)]); return m; }"#;
+    let dir = project(&[
+        ("a/transform.ts", counter),
+        ("b/transform.ts", counter),
+        (
+            "c/transform.ts",
+            r#"import type { Message } from "@ductus/sdk";
+import { bump } from "../lib/shared.ts";
+export function transform(m: Message) { m.add("ZSH", [String(bump())]); return m; }"#,
+        ),
+        (
+            "d/transform.ts",
+            r#"import type { Message } from "@ductus/sdk";
+import { bump } from "../lib/shared.ts";
+export function transform(m: Message) { m.add("ZSH", [String(bump())]); return m; }"#,
+        ),
+        ("lib/shared.ts", "let n = 0;\nexport const bump = () => ++n;"),
+        ("e/transform.ts", "export function transform(m: unknown) { undeclared = 1; return m; }"),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let mut load = |name: &str| rt.block_on(host.add_interface(&dir.path().join(name))).unwrap();
+    let (a, b, c, d, e) = (
+        load("a/transform.ts"),
+        load("b/transform.ts"),
+        load("c/transform.ts"),
+        load("d/transform.ts"),
+        load("e/transform.ts"),
+    );
+
+    let last = |out: String| out.trim_end().rsplit('\r').next().unwrap().to_string();
+    // Same variable name in two interfaces: independent.
+    assert_eq!(last(host.transform_with(a, ADT).unwrap().unwrap()), "ZCT|1");
+    assert_eq!(last(host.transform_with(a, ADT).unwrap().unwrap()), "ZCT|2");
+    assert_eq!(last(host.transform_with(b, ADT).unwrap().unwrap()), "ZCT|1");
+    // A shared library file is ONE module instance: its state is shared.
+    assert_eq!(last(host.transform_with(c, ADT).unwrap().unwrap()), "ZSH|1");
+    assert_eq!(last(host.transform_with(d, ADT).unwrap().unwrap()), "ZSH|2");
+    // Modules are strict: assigning an undeclared variable is an error, not a global.
+    let err = host.transform_with(e, ADT).unwrap_err().to_string();
+    assert!(err.contains("undeclared is not defined"), "{err}");
+}
+
+#[test]
 fn transform_errors_carry_the_js_message() {
     let dir = project(&[("transform.ts", "export function transform() { throw new Error(\"bad mapping\"); }")]);
     let rt = rt();
@@ -143,11 +217,47 @@ export function transform(msg: Message) {
         .to_string(),
     );
 
-    let diagnostics = ductus_script::type_check(&files).unwrap();
+    let diagnostics = ductus_script::type_check(&files, &[]).unwrap();
     let errors: Vec<_> = diagnostics.iter().filter(|d| d.is_error()).collect();
     assert!(errors.iter().all(|d| d.file.as_deref() == Some("/p/bad.ts")), "unexpected errors: {errors:#?}");
     assert!(errors.iter().any(|d| d.line == 3 && d.message.contains("not assignable to type 'number'")), "{errors:#?}");
     assert!(errors.iter().any(|d| d.line == 4 && d.message.contains("toUpperCasee")), "{errors:#?}");
+}
+
+#[test]
+fn validate_warns_about_shared_pool_state() {
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut files = std::collections::BTreeMap::new();
+    files.insert("/p/.ductus/types/ductus-sdk.d.ts".to_string(), rt.block_on(Isolate::generate_types()).unwrap());
+    files.insert(
+        "/p/interfaces/a/transform.ts".to_string(),
+        r#"import type { Message } from "@ductus/sdk";
+let seen = 0;
+export function transform(msg: Message) {
+  seen++;
+  (globalThis as any).lastMrn = msg.PID[3][1];
+  (String.prototype as any).shout = function () { return this.toUpperCase(); };
+  Object.assign(globalThis, { x: 1 });
+  return msg;
+}"#
+        .to_string(),
+    );
+    files.insert(
+        "/p/lib/shared.ts".to_string(),
+        "let cache = new Map();\nconst ok = 1;\nexport { cache, ok };".to_string(),
+    );
+
+    let d = ductus_script::type_check(&files, &["/p/lib/shared.ts".to_string()]).unwrap();
+    let lint = |code: u32| {
+        d.iter().filter(move |x| x.code == code).map(|x| (x.file.clone().unwrap(), x.line)).collect::<Vec<_>>()
+    };
+    let a = "/p/interfaces/a/transform.ts".to_string();
+    assert_eq!(lint(90001), vec![(a.clone(), 5), (a.clone(), 7)], "{d:#?}");
+    assert_eq!(lint(90002), vec![(a.clone(), 6)], "{d:#?}");
+    // Module-level `let` inside an interface is private (fine); in a shared module it's flagged.
+    assert_eq!(lint(90003), vec![("/p/lib/shared.ts".to_string(), 1)], "{d:#?}");
+    assert!(d.iter().all(|x| !x.is_error()), "lints are warnings: {d:#?}");
 }
 
 #[test]

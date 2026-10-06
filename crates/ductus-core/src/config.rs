@@ -16,8 +16,13 @@ pub struct InterfaceConfig {
     pub script: Option<PathBuf>,
     #[serde(default)]
     pub ordering: Ordering,
-    #[serde(default = "defaults::workers")]
-    pub workers: u32,
+    /// `shared` (default): runs in the engine's shared worker pool. `dedicated`: gets its own
+    /// threads and V8 isolate, with `workers` parallel lanes.
+    #[serde(default)]
+    pub isolation: Isolation,
+    /// Parallel workers, for `isolation: dedicated` only (default 4).
+    #[serde(default)]
+    pub workers: Option<u32>,
     #[serde(with = "serde_yaml_ng::with::singleton_map")]
     pub destination: Destination,
     #[serde(default)]
@@ -62,6 +67,14 @@ pub enum Destination {
     File {
         dir: PathBuf,
     },
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Isolation {
+    #[default]
+    Shared,
+    Dedicated,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
@@ -220,8 +233,12 @@ impl InterfaceConfig {
     }
 
     fn validate(&self) -> Result<()> {
-        if self.workers == 0 {
-            bail!("workers must be at least 1");
+        match (self.isolation, self.workers) {
+            (Isolation::Shared, Some(_)) => {
+                bail!("workers only applies with `isolation: dedicated` (shared interfaces use the engine's pool)")
+            }
+            (Isolation::Dedicated, Some(0)) => bail!("workers must be at least 1"),
+            _ => {}
         }
         if self.ordering.partitions == 0 {
             bail!("ordering.partitions must be at least 1");
@@ -251,10 +268,20 @@ impl InterfaceConfig {
         self.script.as_ref().map(|s| self.dir.join(s))
     }
 
-    /// Partitions are spread across workers round-robin. Each partition has exactly one owner,
+    /// Number of independent workers (slots) processing this interface's lanes:
+    /// one in the shared pool, `workers` when dedicated.
+    pub fn slots(&self) -> u32 {
+        match self.isolation {
+            Isolation::Shared => 1,
+            Isolation::Dedicated => self.workers.unwrap_or(defaults::workers()),
+        }
+    }
+
+    /// Partitions are spread across slots round-robin. Each partition has exactly one owner,
     /// which is what keeps per-key ordering.
     pub fn partitions_for_worker(&self, worker: u32) -> Vec<i32> {
-        (0..self.partition_count()).filter(|p| p % self.workers == worker).map(|p| p as i32).collect()
+        let slots = self.slots();
+        (0..self.partition_count()).filter(|p| p % slots == worker).map(|p| p as i32).collect()
     }
 
     /// Effective partition count: one lane when there's no ordering key.
@@ -274,6 +301,7 @@ name: adt
 source: { mllp: { port: 6661 } }
 script: transform.ts
 ordering: { key: PID-3.1, partitions: 8 }
+isolation: dedicated
 workers: 2
 destination: { mllp: { host: 127.0.0.1, port: 6662 } }
 retry: { max_attempts: 3 }
@@ -313,6 +341,21 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
             Destination::Mllp { ack: AckMode::Wait, on_reject: OnReject::Quarantine, .. }
         ));
         assert_eq!(defaults.dedupe.unwrap().keys, ["MSH-10"]);
+    }
+
+    #[test]
+    fn shared_interfaces_have_one_slot_with_every_lane() {
+        let shared: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: x\nsource: { mllp: { port: 1 } }\nordering: { key: PID-3.1, partitions: 4 }\ndestination: { file: { dir: o } }\n",
+        )
+        .unwrap();
+        assert_eq!(shared.isolation, Isolation::Shared);
+        assert_eq!(shared.slots(), 1);
+        assert_eq!(shared.partitions_for_worker(0), vec![0, 1, 2, 3]);
+
+        let mut bad = shared.clone();
+        bad.workers = Some(4);
+        assert!(bad.validate().unwrap_err().to_string().contains("isolation: dedicated"));
     }
 
     #[test]

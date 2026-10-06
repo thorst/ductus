@@ -28,9 +28,11 @@ impl Diagnostic {
     }
 }
 
-/// Type-check a set of files. Keys are absolute paths using `/` separators; include the
-/// generated `@ductus/sdk` typings as one of them.
-pub fn type_check(files: &BTreeMap<String, String>) -> Result<Vec<Diagnostic>> {
+/// Type-check a set of files and run the shared-pool safety lints. Keys are absolute paths
+/// using `/` separators; include the generated `@ductus/sdk` typings as one of them.
+/// `shared_modules` are files imported by interfaces but not inside one (shared libraries):
+/// top-level mutable state in them is flagged.
+pub fn type_check(files: &BTreeMap<String, String>, shared_modules: &[String]) -> Result<Vec<Diagnostic>> {
     let mut runtime = JsRuntime::new(RuntimeOptions::default());
     runtime.execute_script("typescript.js", TYPESCRIPT).map_err(|e| anyhow!("loading TypeScript: {e}"))?;
     runtime.execute_script("check.js", CHECK).map_err(|e| anyhow!("loading checker: {e}"))?;
@@ -47,9 +49,11 @@ pub fn type_check(files: &BTreeMap<String, String>) -> Result<Vec<Diagnostic>> {
         .get(scope, key.into())
         .and_then(|v| v8::Local::<v8::Function>::try_from(v).ok())
         .context("checker not installed")?;
+    let shared_json = serde_json::to_string(shared_modules)?;
     let args = [
         v8::String::new(scope, &files_json).context("files")?.into(),
         v8::String::new(scope, &libs_json).context("libs")?.into(),
+        v8::String::new(scope, &shared_json).context("shared")?.into(),
     ];
     let receiver = v8::undefined(scope);
     let result = match function.call(scope, receiver.into(), &args) {

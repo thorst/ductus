@@ -1,7 +1,8 @@
 //! Embedded V8 runtime for interface logic written in TypeScript.
 //!
 //! Interface code is real ES modules: `export function transform(msg)` in a `.ts`
-//! file, free to import its own sibling modules and `@ductus/sdk`.
+//! file, free to import its own sibling modules and `@ductus/sdk`. One isolate can
+//! host many interfaces; they share the SDK and the global scope.
 
 mod check;
 mod loader;
@@ -9,42 +10,69 @@ mod loader;
 pub use check::{Diagnostic, type_check};
 
 use anyhow::{Context, Result, anyhow, bail};
-use deno_core::{JsRuntime, ModuleSpecifier, RuntimeOptions, v8};
+use deno_core::{JsRuntime, ModuleId, ModuleSpecifier, RuntimeOptions, v8};
 use std::path::Path;
 use std::rc::Rc;
 
 pub use loader::transpile;
 
-/// Name of the global function each glue module installs.
+/// Name of the global function the test and typegen glue modules install.
 const ENTRY: &str = "__ductus_entry";
 
-/// One V8 isolate with an interface (or test suite) loaded.
+/// Handle to an interface loaded into an [`Isolate`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct InterfaceId(usize);
+
+/// One V8 isolate hosting one or more interfaces (or a test suite).
 pub struct Isolate {
     runtime: JsRuntime,
+    /// Callable entry points, indexed by `InterfaceId`.
+    entries: Vec<v8::Global<v8::Function>>,
 }
 
 impl Isolate {
-    fn new() -> Self {
+    /// An empty isolate. Must be created inside a tokio runtime.
+    pub fn host() -> Self {
         let runtime =
             JsRuntime::new(RuntimeOptions { module_loader: Some(Rc::new(loader::Loader)), ..Default::default() });
-        Self { runtime }
+        Self { runtime, entries: Vec::new() }
     }
 
-    /// Load an interface module that exports `transform(msg)`.
-    /// Must be called inside a tokio runtime.
+    /// An isolate with a single interface loaded; use `transform`.
     pub async fn interface(module: &Path) -> Result<Self> {
+        let mut isolate = Self::host();
+        isolate.add_interface(module).await?;
+        Ok(isolate)
+    }
+
+    /// Load another interface module (which must export `transform(msg)`) into this isolate.
+    pub async fn add_interface(&mut self, module: &Path) -> Result<InterfaceId> {
         let url = file_url(module)?;
+        // The glue module sits beside the interface, so each interface gets a unique one.
+        let glue_url = file_url(&module.with_extension("ts.__ductus__.js"))?;
         let glue = format!(
             r#"import * as entry from "{url}";
 import {{ __invoke }} from "@ductus/sdk";
 if (typeof entry.transform !== "function") throw new Error("{name} must export a function named `transform`");
-globalThis.{ENTRY} = (raw) => __invoke(entry.transform, raw);
+export const run = (raw) => __invoke(entry.transform, raw);
 "#,
             name = module.display(),
         );
-        let mut isolate = Self::new();
-        isolate.load_main(module, glue).await?;
-        Ok(isolate)
+        let id = self.runtime.load_side_es_module_from_code(&glue_url, glue).await.map_err(|e| anyhow!("{e}"))?;
+        self.evaluate(id).await?;
+
+        let namespace = self.runtime.get_module_namespace(id).map_err(|e| anyhow!("{e}"))?;
+        let function = {
+            deno_core::scope!(scope, &mut self.runtime);
+            let namespace = v8::Local::new(scope, namespace);
+            let key = v8::String::new(scope, "run").context("export name")?;
+            let value = namespace.get(scope, key.into()).context("glue export")?;
+            let function =
+                v8::Local::<v8::Function>::try_from(value).map_err(|_| anyhow!("glue export is not a function"))?;
+            v8::Global::new(scope, function)
+        };
+        self.entries.push(function);
+        Ok(InterfaceId(self.entries.len() - 1))
     }
 
     /// Load test modules; `run_tests()` then executes everything they registered.
@@ -60,7 +88,7 @@ __setFixtures({fixtures_json});
 {imports}globalThis.{ENTRY} = () => __runTests();
 "#
         );
-        let mut isolate = Self::new();
+        let mut isolate = Self::host();
         isolate.load_main(first, glue).await?;
         Ok(isolate)
     }
@@ -70,39 +98,56 @@ __setFixtures({fixtures_json});
         let glue = format!(
             "import {{ __generateTypes }} from \"@ductus/sdk\";\nglobalThis.{ENTRY} = () => __generateTypes();\n"
         );
-        let mut isolate = Self::new();
+        let mut isolate = Self::host();
         isolate.load_main(&std::env::current_dir()?.join("types"), glue).await?;
-        isolate.call_entry(None)?.context("type generator returned nothing")
+        isolate.call(InterfaceId(0), None)?.context("type generator returned nothing")
     }
 
+    /// Load a main module that installs `globalThis.__ductus_entry`, and register it as entry 0.
     async fn load_main(&mut self, beside: &Path, glue: String) -> Result<()> {
         let dir = beside.parent().unwrap_or(Path::new("."));
         let specifier = file_url(&dir.join("__ductus_main__.js"))?;
         let id = self.runtime.load_main_es_module_from_code(&specifier, glue).await.map_err(|e| anyhow!("{e}"))?;
-        let evaluated = self.runtime.mod_evaluate(id);
-        self.runtime.run_event_loop(Default::default()).await.map_err(|e| anyhow!("{e}"))?;
-        evaluated.await.map_err(|e| anyhow!("{e}"))?;
+        self.evaluate(id).await?;
+        let function = {
+            deno_core::scope!(scope, &mut self.runtime);
+            let global = scope.get_current_context().global(scope);
+            let key = v8::String::new(scope, ENTRY).context("entry name")?;
+            let value = global.get(scope, key.into()).context("entry lookup")?;
+            let function = v8::Local::<v8::Function>::try_from(value).map_err(|_| anyhow!("entry not installed"))?;
+            v8::Global::new(scope, function)
+        };
+        self.entries.push(function);
         Ok(())
     }
 
-    /// Run the loaded interface's `transform` on a raw message.
-    /// Returns the outgoing message, or `None` when it was filtered out.
+    async fn evaluate(&mut self, id: ModuleId) -> Result<()> {
+        let evaluated = self.runtime.mod_evaluate(id);
+        self.runtime.run_event_loop(Default::default()).await.map_err(|e| anyhow!("{e}"))?;
+        evaluated.await.map_err(|e| anyhow!("{e}"))
+    }
+
+    /// Run the (single) loaded interface's `transform` on a raw message.
     pub fn transform(&mut self, raw: &str) -> Result<Option<String>> {
-        self.call_entry(Some(raw))
+        self.transform_with(InterfaceId(0), raw)
+    }
+
+    /// Run a loaded interface's `transform` on a raw message.
+    /// Returns the outgoing message, or `None` when it was filtered out.
+    pub fn transform_with(&mut self, interface: InterfaceId, raw: &str) -> Result<Option<String>> {
+        self.call(interface, Some(raw))
     }
 
     /// Run the loaded test suite; returns the JSON report.
     pub fn run_tests(&mut self) -> Result<String> {
-        self.call_entry(None)?.context("test runner returned nothing")
+        self.call(InterfaceId(0), None)?.context("test runner returned nothing")
     }
 
-    fn call_entry(&mut self, arg: Option<&str>) -> Result<Option<String>> {
+    fn call(&mut self, entry: InterfaceId, arg: Option<&str>) -> Result<Option<String>> {
+        let function = self.entries.get(entry.0).context("no such interface in this isolate")?.clone();
         deno_core::scope!(scope, &mut self.runtime);
         v8::tc_scope!(let scope, scope);
-        let global = scope.get_current_context().global(scope);
-        let key = v8::String::new(scope, ENTRY).context("entry name")?;
-        let value = global.get(scope, key.into()).context("entry lookup")?;
-        let function = v8::Local::<v8::Function>::try_from(value).map_err(|_| anyhow!("no module loaded"))?;
+        let function = v8::Local::new(scope, function);
         let args: Vec<v8::Local<v8::Value>> = match arg {
             Some(a) => vec![v8::String::new(scope, a).context("argument")?.into()],
             None => vec![],

@@ -7,6 +7,7 @@ mod worker;
 
 use anyhow::{Context, Result, bail};
 use ductus_core::InterfaceConfig;
+use ductus_core::config::Isolation;
 use ductus_store::Store;
 use std::path::Path;
 use std::sync::Arc;
@@ -32,36 +33,89 @@ pub fn load_interfaces(root: &Path) -> Result<Vec<InterfaceConfig>> {
     Ok(configs)
 }
 
+/// Engine-wide settings.
+pub struct EngineOptions {
+    /// Threads in the shared worker pool. Default: one per CPU core.
+    pub pool_threads: usize,
+    /// Maximum PostgreSQL connections.
+    pub db_connections: u32,
+}
+
+impl Default for EngineOptions {
+    fn default() -> Self {
+        Self { pool_threads: std::thread::available_parallelism().map_or(4, |n| n.get()), db_connections: 32 }
+    }
+}
+
 /// Start every interface under `root` and run until Ctrl-C.
-pub async fn run(root: &Path, database_url: &str) -> Result<()> {
+pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Result<()> {
     let configs = load_interfaces(root)?;
     if configs.is_empty() {
         bail!("no interfaces found under {}", root.join("interfaces").display());
     }
-    let total_workers: u32 = configs.iter().map(|c| c.workers).sum();
-    let store = Store::connect(database_url, total_workers + 8).await?;
+    let store = Store::connect(database_url, options.db_connections).await?;
     // Keep dedupe keys a little longer than the longest window that uses them.
     let dedupe_retention = configs.iter().filter_map(|c| c.dedupe.as_ref()).map(|d| d.window).max().unwrap_or_default()
         + Duration::from_secs(3600);
 
+    // Plan threads: shared interfaces spread round-robin over the pool; each dedicated slot
+    // gets a thread (and isolate) of its own.
+    let pool_threads = options.pool_threads.max(1);
+    let mut pool: Vec<Vec<worker::Job>> = (0..pool_threads).map(|_| Vec::new()).collect();
+    let mut dedicated: Vec<(String, worker::Job)> = Vec::new();
+    let mut interfaces = Vec::new();
+    let mut shared_count = 0;
     for config in configs {
         let config = Arc::new(config);
-        // One wake-up signal per worker: ingest wakes only the worker that owns the message's lane.
-        let wake: Arc<[Notify]> = (0..config.workers).map(|_| Notify::new()).collect();
+        // One wake-up signal per slot: ingest wakes only the slot that owns the message's lane.
+        let wake: Arc<[Notify]> = (0..config.slots()).map(|_| Notify::new()).collect();
         let limiter = config.rate_limit.clone().map(|r| Arc::new(limiter::Limiter::new(r, std::time::Instant::now())));
-
-        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
-        for w in 0..config.workers {
-            worker::spawn(config.clone(), w, store.clone(), wake.clone(), limiter.clone(), ready_tx.clone())?;
+        for slot in 0..config.slots() {
+            let job = worker::Job { config: config.clone(), slot, wake: wake.clone(), limiter: limiter.clone() };
+            match config.isolation {
+                Isolation::Shared => {
+                    pool[shared_count % pool_threads].push(job);
+                    shared_count += 1;
+                }
+                Isolation::Dedicated => dedicated.push((format!("{}-w{slot}", config.name), job)),
+            }
         }
-        drop(ready_tx);
-        // Fail fast if the interface's code doesn't load, before accepting any messages.
-        for result in ready_rx {
-            result.with_context(|| format!("interface `{}`", config.name))?;
-        }
-        ingest::spawn(config.clone(), store.clone(), wake).await?;
-        tracing::info!(interface = %config.name, workers = config.workers, "started");
+        interfaces.push((config, wake));
     }
+
+    let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+    let mut jobs = 0;
+    for (i, thread_jobs) in pool.into_iter().enumerate().filter(|(_, j)| !j.is_empty()) {
+        jobs += thread_jobs.len();
+        worker::spawn_thread(format!("pool-{i}"), thread_jobs, store.clone(), ready_tx.clone())?;
+    }
+    for (name, job) in dedicated {
+        jobs += 1;
+        worker::spawn_thread(name, vec![job], store.clone(), ready_tx.clone())?;
+    }
+    drop(ready_tx);
+    // Fail fast if any interface's code doesn't load, before accepting any messages.
+    let mut failed = Vec::new();
+    for (name, result) in ready_rx.iter().take(jobs) {
+        if let Err(e) = result {
+            failed.push(format!("interface `{name}`: {e:#}"));
+        }
+    }
+    if !failed.is_empty() {
+        failed.dedup();
+        bail!("{}", failed.join("\n"));
+    }
+
+    for (config, wake) in &interfaces {
+        ingest::spawn(config.clone(), store.clone(), wake.clone()).await?;
+    }
+    tracing::info!(
+        interfaces = interfaces.len(),
+        shared = shared_count,
+        pool_threads,
+        dedicated_threads = jobs - shared_count,
+        "started"
+    );
 
     let maintenance = store.clone();
     tokio::spawn(async move {

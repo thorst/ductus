@@ -21,6 +21,12 @@ enum Command {
         root: PathBuf,
         #[arg(long, env = "DUCTUS_DATABASE_URL", default_value = tools::DEFAULT_DB)]
         database_url: String,
+        /// Threads in the shared worker pool (default: one per CPU core).
+        #[arg(long, env = "DUCTUS_THREADS")]
+        threads: Option<usize>,
+        /// Maximum PostgreSQL connections.
+        #[arg(long, env = "DUCTUS_DB_CONNECTIONS", default_value_t = 32)]
+        db_connections: u32,
     },
     /// Run each interface's `*.test.ts` files.
     Test {
@@ -63,6 +69,10 @@ enum Command {
         /// Fraction of messages (0..1) for one hot patient, e.g. 0.3.
         #[arg(long, default_value_t = 0.0)]
         hot: f64,
+        /// Added to every sequence number and patient number, so several generators can feed one
+        /// sink without their messages looking like duplicates.
+        #[arg(long, default_value_t = 0)]
+        offset: u64,
     },
     /// Receive messages over MLLP, ACK them, and verify per-patient ordering.
     Sink {
@@ -88,13 +98,20 @@ async fn main() -> Result<()> {
         .init();
 
     match Cli::parse().command {
-        Command::Run { root, database_url } => ductus_runtime::run(&root, &database_url).await,
+        Command::Run { root, database_url, threads, db_connections } => {
+            let defaults = ductus_runtime::EngineOptions::default();
+            let options = ductus_runtime::EngineOptions {
+                pool_threads: threads.unwrap_or(defaults.pool_threads),
+                db_connections,
+            };
+            ductus_runtime::run(&root, &database_url, options).await
+        }
         Command::Test { root, interface } => exit_on_failure(project::test(&root, interface.as_deref()).await),
         Command::Validate { root } => exit_on_failure(project::validate(&root).await),
         Command::Types { root } => project::types(&root).await,
         Command::Status { database_url } => tools::status(&database_url).await,
-        Command::Gen { to, count, patients, rate, connections, hot } => {
-            tools::generate(tools::GenOptions { to, count, patients, rate, connections, hot }).await
+        Command::Gen { to, count, patients, rate, connections, hot, offset } => {
+            tools::generate(tools::GenOptions { to, count, patients, rate, connections, hot, offset }).await
         }
         Command::Sink { port } => tools::sink(port).await,
     }

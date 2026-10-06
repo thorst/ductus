@@ -45,6 +45,28 @@ test("filters non-ADT", () => {
 });
 ```
 
+## Reliability options
+
+```yaml
+isolation: dedicated     # own threads + V8 isolate (default: shared pool) - see docs/shared-pool.md
+workers: 4               # parallel MRN lanes, dedicated only
+dedupe:
+  keys: [MSH-10]         # or business keys, e.g. [PID-3.1, EVN-2]
+  window: 24h
+rate_limit:
+  per_minute: 100        # e.g. a device that can't take bursts
+  burst: 500             # average mode (token bucket); or mode: hard
+  over_limit: wait       # or drop
+retry:
+  max_attempts: 10       # default: retry until delivered, backing off 1s -> 60s
+destination:
+  mllp:
+    host: 10.0.0.5
+    port: 6662
+    ack: wait            # or none: send and move on
+    on_reject: quarantine  # AR handling; or retry. AE always retries.
+```
+
 ## Commands
 
 | Command | What it does |

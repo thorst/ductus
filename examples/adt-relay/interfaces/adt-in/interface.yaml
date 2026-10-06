@@ -5,6 +5,7 @@ script: transform.ts
 ordering:
   key: PID-3.1      # messages for the same MRN stay in order
   partitions: 64
+isolation: dedicated   # a busy feed: own threads, 4 parallel MRN lanes
 workers: 4
 dedupe:
   keys: [MSH-10]    # a sender resending after a lost ACK is recognized
