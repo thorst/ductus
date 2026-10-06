@@ -43,6 +43,7 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - Demo waits must re-evaluate their condition: `wait_for 15 '[ "$(count $OUT)" -ge 3 ]'` (quoted, `eval`ed). Passing `"$(...)"` unquoted freezes the value and the wait silently runs to its timeout.
 - Logs are plain text when stdout isn't a terminal (`with_ansi`), so demos can grep fields like `started interfaces=`.
 - SFTP tests use a throwaway user-level `sshd` (openssh-server installed in WSL; its system service is disabled) on 127.0.0.1:2222; see `scripts/demo-files.sh`. Clean up child processes with a `trap` whose commands each end in `|| true` (`set -e` applies inside traps).
+- CI "could not find native static library `rusty_v8`" on Build (Lint passes) = a stale rust-cache restored as a partial match. Fix: `gh cache delete --all`, then `gh run rerun <id>`. Always check the run after pushing.
 - russh 0.64: `client::Handler::check_server_key(&PublicKeyOrCertificate)`; fingerprints via `key.fingerprint(HashAlg::Sha256)` print like `ssh-keygen -lf`. SFTP `rename` won't overwrite: remove the target first.
 
 ## Where things are
