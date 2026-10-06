@@ -2,6 +2,7 @@
 
 mod destination;
 mod ingest;
+pub mod keys;
 mod limiter;
 mod services;
 mod worker;

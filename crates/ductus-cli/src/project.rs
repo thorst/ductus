@@ -132,7 +132,12 @@ pub async fn test(root: &Path, env: &str, only: Option<&str>) -> Result<bool> {
 
         println!("{label}");
         let paths: Vec<&Path> = tests.iter().map(PathBuf::as_path).collect();
-        let report = match Isolate::tests(&paths, &serde_json::to_string(&fixtures)?).await {
+        let formats = iface
+            .config
+            .as_ref()
+            .map(|c| c.format_spec())
+            .unwrap_or_else(|_| ductus_script::DEFAULT_FORMATS.to_string());
+        let report = match Isolate::tests(&paths, &serde_json::to_string(&fixtures)?, &formats).await {
             Ok(mut isolate) => isolate.run_tests(),
             Err(e) => Err(e),
         };

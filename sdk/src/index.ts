@@ -3,10 +3,23 @@
 //   import type { Message } from "@ductus/sdk";
 //   export function transform(msg: Message) { ... }
 
-import { isMessage, type Message, parse } from "./hl7.ts";
+import { isMessage, type Message } from "./hl7.ts";
+import { decode, encode, type FormatSpec } from "./formats.ts";
 
-export { Field, type Message, parse, Segment, Segments } from "./hl7.ts";
-export { expect, fixture, hl7, test } from "./testing.ts";
+export { Field, type Message, parse, parse as parseHl7, Segment, Segments } from "./hl7.ts";
+export {
+  type CsvRecord,
+  type FixedField,
+  type FixedLayout,
+  type FormatSpec,
+  parseCsv,
+  parseFixed,
+  parseXml,
+  toCsv,
+  toFixed,
+  XmlElement,
+} from "./formats.ts";
+export { expect, fixture, hl7, input, test } from "./testing.ts";
 export { __runTests, __setFixtures } from "./testing.ts";
 export { type Database, db, env, secret } from "./services.ts";
 export { generateTypes as __generateTypes } from "./typegen.ts";
@@ -44,16 +57,29 @@ export function quarantine(reason: string): QuarantineError {
   return new QuarantineError(`${QUARANTINE} ${reason}`);
 }
 
-function serialize(result: unknown): string | null {
-  if (result instanceof Kill) return KILL + result.reason;
-  if (result === null || result === undefined) return null;
-  if (typeof result === "string") return result;
-  if (isMessage(result)) return result.toString();
-  throw new TypeError(`transform must return a Message, a string, or null (got ${typeof result})`);
+/** Input and output formats of an interface, from interface.yaml. */
+export interface Formats {
+  input: FormatSpec;
+  output: FormatSpec;
 }
 
-/** Engine entry point: parse, run the interface's transform (sync or async), serialize the result. */
-export function __invoke(transform: (msg: Message) => unknown, raw: string): string | null | Promise<string | null> {
-  const result = transform(parse(raw));
-  return result instanceof Promise ? result.then(serialize) : serialize(result);
+const HL7: Formats = { input: { kind: "hl7" }, output: { kind: "hl7" } };
+
+function serialize(result: unknown, output: FormatSpec): string | null {
+  if (result instanceof Kill) return KILL + result.reason;
+  if (result === null || result === undefined) return null;
+  return encode(result, output, isMessage);
+}
+
+/** Engine entry point: parse by format, run the transform (sync or async), serialize the result.
+ *  @internal Exported for the engine and SDK tests. */
+export function __invoke(
+  transform: (input: unknown) => unknown,
+  raw: string,
+  formats: Formats = HL7,
+): string | null | Promise<string | null> {
+  const result = transform(decode(raw, formats.input));
+  return result instanceof Promise
+    ? result.then((r) => serialize(r, formats.output))
+    : serialize(result, formats.output);
 }

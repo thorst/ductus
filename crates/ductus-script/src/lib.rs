@@ -52,6 +52,9 @@ pub use loader::transpile;
 /// Name of the global function the test and typegen glue modules install.
 const ENTRY: &str = "__ductus_entry";
 
+/// Formats for interfaces loaded without a config: HL7 in, HL7 out.
+pub const DEFAULT_FORMATS: &str = r#"{"input":{"kind":"hl7"},"output":{"kind":"hl7"}}"#;
+
 /// Handle to an interface loaded into an [`Isolate`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InterfaceId(usize);
@@ -89,8 +92,14 @@ impl Isolate {
         Ok(isolate)
     }
 
-    /// Load another interface module (which must export `transform(msg)`) into this isolate.
+    /// Load another HL7 interface module (which must export `transform(msg)`) into this isolate.
     pub async fn add_interface(&mut self, module: &Path) -> Result<InterfaceId> {
+        self.add_interface_with(module, DEFAULT_FORMATS).await
+    }
+
+    /// Load an interface module with its formats (`InterfaceConfig::format_spec`): how
+    /// payloads are parsed for `transform`, and how its results are serialized.
+    pub async fn add_interface_with(&mut self, module: &Path, formats_json: &str) -> Result<InterfaceId> {
         let url = file_url(module)?;
         // The glue module sits beside the interface, so each interface gets a unique one.
         let glue_url = file_url(&module.with_extension("ts.__ductus__.js"))?;
@@ -98,7 +107,8 @@ impl Isolate {
             r#"import * as entry from "{url}";
 import {{ __invoke }} from "@ductus/sdk";
 if (typeof entry.transform !== "function") throw new Error("{name} must export a function named `transform`");
-export const run = (raw) => __invoke(entry.transform, raw);
+const formats = {formats_json};
+export const run = (raw) => __invoke(entry.transform, raw, formats);
 "#,
             name = module.display(),
         );
@@ -120,7 +130,8 @@ export const run = (raw) => __invoke(entry.transform, raw);
     }
 
     /// Load test modules; `run_tests()` then executes everything they registered.
-    pub async fn tests(modules: &[&Path], fixtures_json: &str) -> Result<Self> {
+    /// `formats_json` is the interface's formats, used by the `input()` test helper.
+    pub async fn tests(modules: &[&Path], fixtures_json: &str, formats_json: &str) -> Result<Self> {
         let Some(first) = modules.first() else { bail!("no test files") };
         let mut imports = String::new();
         for m in modules {
@@ -128,7 +139,7 @@ export const run = (raw) => __invoke(entry.transform, raw);
         }
         let glue = format!(
             r#"import {{ __setFixtures, __runTests }} from "@ductus/sdk";
-__setFixtures({fixtures_json});
+__setFixtures({fixtures_json}, {formats_json});
 {imports}globalThis.{ENTRY} = () => __runTests();
 "#
         );

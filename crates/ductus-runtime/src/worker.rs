@@ -59,7 +59,7 @@ pub fn spawn_thread(
                 let mut loaded = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     let script = match job.config.script_path() {
-                        Some(path) => match host.add_interface(&path).await {
+                        Some(path) => match host.add_interface_with(&path, &job.config.format_spec()).await {
                             Ok(id) => Some(id),
                             Err(e) => {
                                 let _ = ready.send((job.config.name.clone(), Err(e)));

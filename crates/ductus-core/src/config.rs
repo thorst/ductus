@@ -1,5 +1,6 @@
 //! `interface.yaml`: everything about an interface except its logic.
 
+use crate::format::Format;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,12 @@ pub struct InterfaceConfig {
     /// TypeScript file exporting `transform(msg)`, relative to the interface folder.
     #[serde(default)]
     pub script: Option<PathBuf>,
+    /// How incoming messages are parsed (default hl7). See `format.rs`.
+    #[serde(default, deserialize_with = "crate::format::deserialize")]
+    pub format: Format,
+    /// How results are serialized, if different from `format`.
+    #[serde(default, deserialize_with = "crate::format::deserialize_opt")]
+    pub output: Option<Format>,
     #[serde(default)]
     pub ordering: Ordering,
     /// `shared` (default): runs in the engine's shared worker pool. `dedicated`: gets its own
@@ -273,7 +280,14 @@ impl InterfaceConfig {
         if let Some(d) = &self.dedupe
             && d.keys.is_empty()
         {
-            bail!("dedupe.keys must list at least one HL7 path");
+            bail!("dedupe.keys must list at least one key path");
+        }
+        let keys = self.ordering.key.iter().chain(self.dedupe.iter().flat_map(|d| d.keys.iter()));
+        for key in keys {
+            self.format.check_key_path(key).with_context(|| format!("key `{key}` (format {})", self.format.name()))?;
+        }
+        if matches!(self.source, Source::Mllp { .. }) && self.format != Format::Hl7 {
+            bail!("an MLLP source carries HL7: `format: {}` needs another source type", self.format.name());
         }
         if let Some(r) = &self.rate_limit {
             if r.per_minute == 0 {
@@ -284,6 +298,12 @@ impl InterfaceConfig {
             }
         }
         Ok(())
+    }
+
+    /// Input and output formats as JSON, for the SDK: `{"input": {...}, "output": {...}}`.
+    pub fn format_spec(&self) -> String {
+        let output = self.output.as_ref().unwrap_or(&self.format);
+        serde_json::json!({ "input": self.format, "output": output }).to_string()
     }
 
     pub fn script_path(&self) -> Option<PathBuf> {

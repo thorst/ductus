@@ -26,12 +26,14 @@ const ADT: &str = "MSH|^~\\&|EPIC|HOSP|DUCTUS|HOSP|20261005120000||ADT^A08|1|P|2
 fn sdk_test_suite_passes() {
     let rt = rt();
     let _guard = rt.enter();
-    let suite = workspace().join("sdk/tests/hl7.test.ts");
+    let suite = [workspace().join("sdk/tests/hl7.test.ts"), workspace().join("sdk/tests/formats.test.ts")];
     let fixtures = serde_json::json!({ "adt.hl7": ADT }).to_string();
-    let mut isolate = rt.block_on(Isolate::tests(&[suite.as_path()], &fixtures)).unwrap();
+    let mut isolate = rt
+        .block_on(Isolate::tests(&[suite[0].as_path(), suite[1].as_path()], &fixtures, ductus_script::DEFAULT_FORMATS))
+        .unwrap();
     let report: serde_json::Value = serde_json::from_str(&isolate.run_tests().unwrap()).unwrap();
     let results = report.as_array().unwrap();
-    assert!(results.len() >= 15, "expected the full suite, got {}", results.len());
+    assert!(results.len() >= 29, "expected the full suite, got {}", results.len());
     let failures: Vec<_> = results.iter().filter(|r| r["ok"] != true).collect();
     assert!(failures.is_empty(), "SDK test failures:\n{failures:#?}");
 }
@@ -45,7 +47,8 @@ fn minimal_test_suite_runs() {
     let rt = rt();
     let _guard = rt.enter();
     let file = dir.path().join("a.test.ts");
-    let mut isolate = rt.block_on(Isolate::tests(&[file.as_path()], r#"{"f":"x"}"#)).unwrap();
+    let mut isolate =
+        rt.block_on(Isolate::tests(&[file.as_path()], r#"{"f":"x"}"#, ductus_script::DEFAULT_FORMATS)).unwrap();
     let report: serde_json::Value = serde_json::from_str(&isolate.run_tests().unwrap()).unwrap();
     assert_eq!(report[0]["ok"], true, "{report}");
     assert_eq!(report[1]["ok"], false, "{report}");

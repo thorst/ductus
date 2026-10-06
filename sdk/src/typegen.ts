@@ -127,6 +127,45 @@ const BASE = `
   }
   /** Contents of a file in the interface's \`fixtures/\` folder. */
   export function fixture(name: string): string;
+  /** A fixture parsed the way the engine parses this interface's input: \`transform(input("orders.csv"))\`. */
+  export function input<T = any>(name: string): T;
+
+  /** Parse raw HL7 text (same as \`parse\`). */
+  export function parseHl7(raw: string): Message;
+  /** A CSV record keyed by column name. */
+  export type CsvRecord = Record<string, string>;
+  /** Parse CSV (RFC 4180). With a header (default), records are objects keyed by column name. */
+  export function parseCsv(text: string, options?: { delimiter?: string; header?: true }): CsvRecord[];
+  export function parseCsv(text: string, options: { delimiter?: string; header: false }): string[][];
+  /** Write CSV. Objects get a header row; arrays are written as-is. */
+  export function toCsv(records: readonly (CsvRecord | readonly unknown[])[], options?: { delimiter?: string; header?: boolean }): string;
+  export interface FixedField { name: string; start: number; width: number; align?: "left" | "right"; pad?: string }
+  export interface FixedLayout { fields: FixedField[]; trim?: boolean }
+  /** Parse fixed-length lines into records keyed by field name (start is 0-based here). */
+  export function parseFixed(text: string, layout: FixedLayout): CsvRecord[];
+  /** Write records as fixed-length lines; long values are cut to their field width. */
+  export function toFixed(records: readonly Record<string, unknown>[], layout: FixedLayout): string;
+  /** Parse an XML document into its root element. */
+  export function parseXml(text: string): XmlElement;
+  /** An XML element. Paths are relative to it: \`doc.get("Patient/MRN")\`, \`"Item[2]/Qty"\`, \`"@id"\`. */
+  export class XmlElement {
+    constructor(name: string, attributes?: Record<string, string>, children?: (XmlElement | string)[]);
+    name: string;
+    attributes: Record<string, string>;
+    children: (XmlElement | string)[];
+    /** Text directly inside this element; setting it replaces the content. */
+    text: string;
+    elements(name?: string): XmlElement[];
+    element(name: string): XmlElement | undefined;
+    find(path: string): XmlElement | undefined;
+    /** Text at a path (or attribute with a final \`@name\`). Missing reads as "". */
+    get(path: string): string;
+    /** Set text (or \`@attribute\`) at a path, creating missing elements. */
+    set(path: string, value: string): void;
+    add(name: string, text?: string, attributes?: Record<string, string>): XmlElement;
+    remove(name: string): void;
+    toString(): string;
+  }
   /** A fixture parsed as an HL7 message. */
   export function hl7(name: string): Message;
 `;

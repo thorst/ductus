@@ -1,6 +1,7 @@
 // Built-in test framework: test(), expect(), fixture(). Run with `ductus test`.
 
 import { type Message, parse } from "./hl7.ts";
+import { decode, type FormatSpec } from "./formats.ts";
 
 interface TestCase {
   name: string;
@@ -16,6 +17,7 @@ export interface TestResult {
 
 const tests: TestCase[] = [];
 let fixtures: Record<string, string> = {};
+let inputFormat: FormatSpec = { kind: "hl7" };
 
 /** Register a test. */
 export function test(name: string, fn: () => unknown): void {
@@ -35,6 +37,14 @@ export function fixture(name: string): string {
 /** A fixture parsed as an HL7 message. */
 export function hl7(name: string): Message {
   return parse(fixture(name));
+}
+
+/**
+ * A fixture parsed the way the engine parses this interface's input (its `format:`), ready
+ * to pass to `transform`: `transform(input("orders.csv"))`.
+ */
+export function input<T = unknown>(name: string): T {
+  return decode(fixture(name), inputFormat) as T;
 }
 
 class AssertionError extends Error {}
@@ -117,8 +127,9 @@ export function expect(actual: unknown): Expectation {
   return new Expectation(value);
 }
 
-export function __setFixtures(map: Record<string, string>): void {
+export function __setFixtures(map: Record<string, string>, formats?: { input: FormatSpec }): void {
   fixtures = map;
+  if (formats) inputFormat = formats.input;
 }
 
 /** Run every registered test; returns a JSON report. */
