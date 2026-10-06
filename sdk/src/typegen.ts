@@ -77,8 +77,40 @@ const BASE = `
   /** Parse raw HL7 text. */
   export function parse(raw: string): Message;
 
-  /** Signature of an interface's \`transform\` export. Return null to filter the message out. */
-  export type Transform = (msg: Message) => Message | string | null;
+  /** Signature of an interface's \`transform\` export (may be async). Return null or kill() to drop the message. */
+  export type Transform = (msg: Message) => Message | string | null | Kill | Promise<Message | string | null | Kill>;
+
+  /** A deliberate drop, with a reason. Create with \`kill()\`. */
+  export class Kill {
+    readonly reason: string;
+  }
+  /**
+   * Drop this message: it's never delivered, and it's kept (status "filtered") with the reason for audit.
+   * \`return null\` does the same without a reason.
+   */
+  export function kill(reason?: string): Kill;
+  /** Error that sends the message to quarantine with a clear reason. */
+  export class QuarantineError extends Error {}
+  /** Send this message to quarantine for review: \`throw quarantine("missing MRN")\`. */
+  export function quarantine(reason: string): QuarantineError;
+
+  type Param = string | number | boolean | null;
+  type Row = Record<string, unknown>;
+  /** A database defined in resources.yaml. */
+  export interface Database {
+    /** Rows as objects. Use $1, $2... placeholders; cast in SQL if needed ($1::int). */
+    query<T = Row>(sql: string, params?: Param[]): Promise<T[]>;
+    /** The first row, or null. */
+    one<T = Row>(sql: string, params?: Param[]): Promise<T | null>;
+    /** Run a statement; returns rows affected. */
+    execute(sql: string, params?: Param[]): Promise<number>;
+  }
+  /** A database defined in resources.yaml, by name. */
+  export function db(name: string): Database;
+  /** A variable from environments/<env>.yaml. Throws if it isn't defined. */
+  export function env(name: string): string;
+  /** A secret from the environment's secret store. Throws if it isn't defined. */
+  export function secret(name: string): string;
 
   /** Register a test (run with \`ductus test\`). */
   export function test(name: string, fn: () => void): void;

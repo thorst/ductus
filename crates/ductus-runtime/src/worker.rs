@@ -10,9 +10,10 @@
 
 use crate::destination::{SendError, Sender};
 use crate::limiter::{Decision, Limiter};
+use crate::services::{EngineServices, SharedServices};
 use anyhow::{Context, Result};
 use ductus_core::InterfaceConfig;
-use ductus_script::{InterfaceId, Isolate};
+use ductus_script::{Call, InterfaceId, Isolate};
 use ductus_store::{MessageRef, Pending, Status, Store};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -40,7 +41,13 @@ pub type Ready = (String, Result<()>);
 
 /// Start a worker thread for `jobs`. Each job reports on `ready` once its interface code has
 /// loaded (or failed to); then the thread processes messages forever.
-pub fn spawn_thread(name: String, jobs: Vec<Job>, store: Store, ready: std::sync::mpsc::Sender<Ready>) -> Result<()> {
+pub fn spawn_thread(
+    name: String,
+    jobs: Vec<Job>,
+    store: Store,
+    services: Arc<SharedServices>,
+    ready: std::sync::mpsc::Sender<Ready>,
+) -> Result<()> {
     std::thread::Builder::new()
         .name(name)
         .spawn(move || {
@@ -48,7 +55,7 @@ pub fn spawn_thread(name: String, jobs: Vec<Job>, store: Store, ready: std::sync
                 tokio::runtime::Builder::new_current_thread().enable_all().build().expect("building worker runtime");
             let local = tokio::task::LocalSet::new();
             local.block_on(&runtime, async move {
-                let mut host = Isolate::host();
+                let mut host = Isolate::host_with(Some(Rc::new(EngineServices(services))));
                 let mut loaded = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     let script = match job.config.script_path() {
@@ -67,8 +74,10 @@ pub fn spawn_thread(name: String, jobs: Vec<Job>, store: Store, ready: std::sync
                 drop(ready);
 
                 let host = Rc::new(RefCell::new(host));
+                let kick = Rc::new(Notify::new());
+                tokio::task::spawn_local(drive_event_loop(host.clone(), kick.clone()));
                 for (job, script) in loaded {
-                    let script = script.map(|id| (host.clone(), id));
+                    let script = script.map(|id| Script { host: host.clone(), id, kick: kick.clone() });
                     tokio::task::spawn_local(Worker::new(job, script, store.clone()).run());
                 }
                 std::future::pending::<()>().await;
@@ -78,12 +87,44 @@ pub fn spawn_thread(name: String, jobs: Vec<Job>, store: Store, ready: std::sync
     Ok(())
 }
 
+/// Runs the thread's JavaScript event loop whenever async transforms are waiting (on database
+/// calls etc.), so many of them can be in flight at once. Sleeps when there's nothing to do.
+async fn drive_event_loop(host: Rc<RefCell<Isolate>>, kick: Rc<Notify>) {
+    loop {
+        if let Err(e) = std::future::poll_fn(|cx| host.borrow_mut().poll_event_loop(cx)).await {
+            tracing::error!(error = %e, "JavaScript event loop error");
+        }
+        kick.notified().await;
+    }
+}
+
+/// An interface's code in the thread's shared isolate. The isolate is borrowed only for
+/// synchronous calls, never across an await, so tasks on the thread never contend.
+struct Script {
+    host: Rc<RefCell<Isolate>>,
+    id: InterfaceId,
+    /// Wakes the event-loop driver when an async transform starts.
+    kick: Rc<Notify>,
+}
+
+impl Script {
+    async fn transform(&self, input: &str) -> Result<Option<String>> {
+        let started = self.host.borrow_mut().begin(self.id, input)?;
+        match started {
+            Call::Done(output) => Ok(output),
+            Call::Pending(pending) => {
+                self.kick.notify_one();
+                let value = pending.await;
+                self.host.borrow_mut().settle(value)
+            }
+        }
+    }
+}
+
 struct Worker {
     config: Arc<InterfaceConfig>,
     lanes: Vec<i32>,
-    /// The thread's isolate and this interface's handle in it. Borrowed only for the synchronous
-    /// `transform` call, never across an await, so tasks on the thread never contend.
-    script: Option<(Rc<RefCell<Isolate>>, InterfaceId)>,
+    script: Option<Script>,
     sender: Sender,
     store: Store,
     wake: Arc<[Notify]>,
@@ -97,12 +138,15 @@ struct Worker {
 /// What the interface logic decided to do with a message.
 enum Outcome {
     Deliver(String),
-    Filter,
+    /// Dropped on purpose (`return null` or `kill(reason)`): kept for audit, never delivered.
+    Filter(Option<String>),
     Quarantine(String),
+    /// A temporary failure inside the transform (e.g. its database is down): try again later.
+    Retry(String),
 }
 
 impl Worker {
-    fn new(job: Job, script: Option<(Rc<RefCell<Isolate>>, InterfaceId)>, store: Store) -> Self {
+    fn new(job: Job, script: Option<Script>, store: Store) -> Self {
         Self {
             lanes: job.config.partitions_for_worker(job.slot),
             sender: Sender::new(&job.config.destination, &job.config.dir),
@@ -149,22 +193,51 @@ impl Worker {
     async fn process(&mut self, message: Pending) {
         let reference = message.reference();
         let input = String::from_utf8_lossy(&message.payload);
-        let outcome = match &self.script {
-            None => Outcome::Deliver(input.into_owned()),
-            Some((host, id)) => match host.borrow_mut().transform_with(*id, &input) {
-                Ok(Some(output)) => Outcome::Deliver(output),
-                Ok(None) => Outcome::Filter,
-                Err(e) => Outcome::Quarantine(format!("transform failed: {e:#}")),
-            },
-        };
+        let mut attempts = message.attempts;
+        let mut backoff = Duration::from_millis(self.config.retry.initial_backoff_ms);
+        loop {
+            let outcome = match &self.script {
+                None => Outcome::Deliver(input.to_string()),
+                Some(script) => match script.transform(&input).await {
+                    Ok(Some(output)) => match output.strip_prefix(ductus_script::KILL) {
+                        Some(reason) => Outcome::Filter(Some(format!("killed: {reason}"))),
+                        None => Outcome::Deliver(output),
+                    },
+                    Ok(None) => Outcome::Filter(None),
+                    Err(e) => {
+                        let error = format!("{e:#}");
+                        if let Some((_, reason)) = error.split_once(ductus_script::QUARANTINE) {
+                            // A deliberate quarantine: keep just the reason, not the stack trace.
+                            Outcome::Quarantine(reason.lines().next().unwrap_or("").trim().to_string())
+                        } else if error.contains(ductus_script::TRANSIENT) {
+                            Outcome::Retry(format!(
+                                "transform failed: {}",
+                                error.replace(ductus_script::TRANSIENT, "").trim()
+                            ))
+                        } else {
+                            Outcome::Quarantine(format!("transform failed: {error}"))
+                        }
+                    }
+                },
+            };
 
-        match outcome {
-            Outcome::Filter => self.finish(reference, Status::Filtered, None).await,
-            Outcome::Quarantine(error) => {
-                tracing::warn!(interface = %self.config.name, id = reference.id, %error, "quarantined");
-                self.finish(reference, Status::Quarantined, Some(&error)).await
-            }
-            Outcome::Deliver(output) => self.deliver(reference, message.attempts, output.as_bytes()).await,
+            return match outcome {
+                Outcome::Filter(reason) => self.finish(reference, Status::Filtered, reason.as_deref()).await,
+                Outcome::Quarantine(error) => {
+                    tracing::warn!(interface = %self.config.name, id = reference.id, %error, "quarantined");
+                    self.finish(reference, Status::Quarantined, Some(&error)).await
+                }
+                Outcome::Deliver(output) => self.deliver(reference, attempts, output.as_bytes()).await,
+                Outcome::Retry(error) => {
+                    // Keep this lane's order: the message stays first in line until it succeeds.
+                    attempts = self.record_failure(reference, &error).await.unwrap_or(attempts + 1);
+                    tracing::warn!(interface = %self.config.name, id = reference.id, attempts, %error, "temporary failure; retrying in {backoff:?}");
+                    self.flush_sent().await;
+                    tokio::time::sleep(backoff).await;
+                    backoff = (backoff * 2).min(Duration::from_millis(self.config.retry.max_backoff_ms));
+                    continue;
+                }
+            };
         }
     }
 

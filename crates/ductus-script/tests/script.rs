@@ -72,12 +72,12 @@ export function transform(msg: Message) {
     let _guard = rt.enter();
     let mut isolate = rt.block_on(Isolate::interface(&dir.path().join("transform.ts"))).unwrap();
 
-    let out = isolate.transform(ADT).unwrap().unwrap();
+    let out = rt.block_on(isolate.transform(ADT)).unwrap().unwrap();
     assert!(out.contains("PID|1||123456^^^MRN||SMITH^john\r"), "{out}");
     assert!(out.ends_with("ZDU|relayed\r"), "{out}");
 
     let a01 = ADT.replace("ADT^A08", "ADT^A01");
-    assert_eq!(isolate.transform(&a01).unwrap(), None);
+    assert_eq!(rt.block_on(isolate.transform(&a01)).unwrap(), None);
 }
 
 #[test]
@@ -100,7 +100,7 @@ fn one_isolate_hosts_many_interfaces() {
         .map(|i| rt.block_on(host.add_interface(&dir.path().join(format!("i{i}/transform.ts")))).unwrap())
         .collect();
     for (i, id) in ids.iter().enumerate().rev() {
-        let out = host.transform_with(*id, ADT).unwrap().unwrap();
+        let out = rt.block_on(host.transform_with(*id, ADT)).unwrap().unwrap();
         assert!(out.ends_with(&format!("ZIF|{i}\r")), "{out}");
     }
 }
@@ -143,15 +143,137 @@ export function transform(m: Message) { m.add("ZSH", [String(bump())]); return m
 
     let last = |out: String| out.trim_end().rsplit('\r').next().unwrap().to_string();
     // Same variable name in two interfaces: independent.
-    assert_eq!(last(host.transform_with(a, ADT).unwrap().unwrap()), "ZCT|1");
-    assert_eq!(last(host.transform_with(a, ADT).unwrap().unwrap()), "ZCT|2");
-    assert_eq!(last(host.transform_with(b, ADT).unwrap().unwrap()), "ZCT|1");
+    assert_eq!(last(rt.block_on(host.transform_with(a, ADT)).unwrap().unwrap()), "ZCT|1");
+    assert_eq!(last(rt.block_on(host.transform_with(a, ADT)).unwrap().unwrap()), "ZCT|2");
+    assert_eq!(last(rt.block_on(host.transform_with(b, ADT)).unwrap().unwrap()), "ZCT|1");
     // A shared library file is ONE module instance: its state is shared.
-    assert_eq!(last(host.transform_with(c, ADT).unwrap().unwrap()), "ZSH|1");
-    assert_eq!(last(host.transform_with(d, ADT).unwrap().unwrap()), "ZSH|2");
+    assert_eq!(last(rt.block_on(host.transform_with(c, ADT)).unwrap().unwrap()), "ZSH|1");
+    assert_eq!(last(rt.block_on(host.transform_with(d, ADT)).unwrap().unwrap()), "ZSH|2");
     // Modules are strict: assigning an undeclared variable is an error, not a global.
-    let err = host.transform_with(e, ADT).unwrap_err().to_string();
+    let err = rt.block_on(host.transform_with(e, ADT)).unwrap_err().to_string();
     assert!(err.contains("undeclared is not defined"), "{err}");
+}
+
+/// Stand-in for the engine's services: a slow "database", one variable.
+struct FakeServices;
+
+impl ductus_script::Services for FakeServices {
+    fn db_query(
+        &self,
+        resource: &str,
+        _sql: &str,
+        params: Vec<serde_json::Value>,
+    ) -> ductus_script::BoxFuture<Vec<serde_json::Value>> {
+        let resource = resource.to_string();
+        Box::pin(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if resource == "down" {
+                anyhow::bail!("{} connection refused", ductus_script::TRANSIENT);
+            }
+            Ok(vec![serde_json::json!({ "name": "SMITH", "mrn": params[0] })])
+        })
+    }
+    fn db_execute(&self, _: &str, _: &str, _: Vec<serde_json::Value>) -> ductus_script::BoxFuture<u64> {
+        Box::pin(async { Ok(1) })
+    }
+    fn variable(&self, name: &str) -> Option<String> {
+        (name == "FACILITY").then(|| "FACILITY-A".to_string())
+    }
+    fn secret(&self, _: &str) -> anyhow::Result<Option<String>> {
+        Ok(None)
+    }
+}
+
+const LOOKUP: &str = r#"import { db, env, type Message } from "@ductus/sdk";
+export async function transform(msg: Message) {
+  const row = await db("RESOURCE").one<{ name: string }>("SELECT name FROM patients WHERE mrn = $1", [msg.PID[3][1]]);
+  msg.add("ZLK", [row?.name ?? "", env("FACILITY")]);
+  return msg;
+}"#;
+
+#[test]
+fn async_transforms_use_databases_and_variables() {
+    let dir = project(&[
+        ("ok/transform.ts", &LOOKUP.replace("RESOURCE", "patients")),
+        ("down/transform.ts", &LOOKUP.replace("RESOURCE", "down")),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host_with(Some(std::rc::Rc::new(FakeServices)));
+    let ok = rt.block_on(host.add_interface(&dir.path().join("ok/transform.ts"))).unwrap();
+    let down = rt.block_on(host.add_interface(&dir.path().join("down/transform.ts"))).unwrap();
+
+    let out = rt.block_on(host.transform_with(ok, ADT)).unwrap().unwrap();
+    assert!(out.ends_with("ZLK|SMITH|FACILITY-A\r"), "{out}");
+
+    let err = rt.block_on(host.transform_with(down, ADT)).unwrap_err().to_string();
+    assert!(err.contains(ductus_script::TRANSIENT) && err.contains("connection refused"), "{err}");
+}
+
+#[test]
+fn kill_and_quarantine_reach_the_engine() {
+    let dir = project(&[
+        (
+            "k/transform.ts",
+            r#"import { kill, type Message } from "@ductus/sdk";
+export function transform(msg: Message) { return msg.PID[5][1] === "smith" ? kill("test patient") : msg; }"#,
+        ),
+        (
+            "q/transform.ts",
+            r#"import { quarantine, type Message } from "@ductus/sdk";
+export function transform(msg: Message) { if (!msg.PV1.exists) throw quarantine("no visit"); return msg; }"#,
+        ),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let k = rt.block_on(host.add_interface(&dir.path().join("k/transform.ts"))).unwrap();
+    let q = rt.block_on(host.add_interface(&dir.path().join("q/transform.ts"))).unwrap();
+
+    let killed = rt.block_on(host.transform_with(k, ADT)).unwrap().unwrap();
+    assert_eq!(killed.strip_prefix(ductus_script::KILL), Some("test patient"));
+    let err = rt.block_on(host.transform_with(q, ADT)).unwrap_err().to_string();
+    assert!(err.contains(&format!("{} no visit", ductus_script::QUARANTINE)), "{err}");
+}
+
+#[test]
+fn concurrent_async_transforms_share_one_isolate() {
+    use ductus_script::Call;
+    let dir = project(&[("a/transform.ts", &LOOKUP.replace("RESOURCE", "patients"))]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host_with(Some(std::rc::Rc::new(FakeServices)));
+    let a = rt.block_on(host.add_interface(&dir.path().join("a/transform.ts"))).unwrap();
+
+    // Start 20 transforms before any finishes; each "query" takes 50 ms.
+    let mut pending = Vec::new();
+    for _ in 0..20 {
+        match host.begin(a, ADT).unwrap() {
+            Call::Pending(p) => pending.push(Box::pin(p)),
+            Call::Done(_) => panic!("expected an async transform"),
+        }
+    }
+    let start = std::time::Instant::now();
+    let results = rt.block_on(async {
+        let mut results = Vec::new();
+        for mut p in pending {
+            // Drive the event loop until this call settles (others progress meanwhile).
+            let value = loop {
+                tokio::select! {
+                    v = &mut p => break v,
+                    _ = std::future::poll_fn(|cx| host.poll_event_loop(cx)) => {
+                        tokio::task::yield_now().await;
+                    }
+                }
+            };
+            results.push(host.settle(value).unwrap().unwrap());
+        }
+        results
+    });
+    assert_eq!(results.len(), 20);
+    assert!(results.iter().all(|r| r.ends_with("ZLK|SMITH|FACILITY-A\r")));
+    // Concurrent, not sequential: 20 x 50 ms would take a full second.
+    assert!(start.elapsed() < std::time::Duration::from_millis(600), "took {:?}", start.elapsed());
 }
 
 #[test]
@@ -160,10 +282,10 @@ fn transform_errors_carry_the_js_message() {
     let rt = rt();
     let _guard = rt.enter();
     let mut isolate = rt.block_on(Isolate::interface(&dir.path().join("transform.ts"))).unwrap();
-    let err = isolate.transform(ADT).unwrap_err().to_string();
+    let err = rt.block_on(isolate.transform(ADT)).unwrap_err().to_string();
     assert!(err.contains("bad mapping"), "{err}");
     // The isolate stays usable after an error.
-    assert!(isolate.transform(ADT).is_err());
+    assert!(rt.block_on(isolate.transform(ADT)).is_err());
 }
 
 #[test]

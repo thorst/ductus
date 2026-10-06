@@ -962,6 +962,8 @@ dependencies = [
  "ductus-mllp",
  "ductus-script",
  "ductus-store",
+ "serde_json",
+ "sqlx",
  "tokio",
  "tracing",
 ]

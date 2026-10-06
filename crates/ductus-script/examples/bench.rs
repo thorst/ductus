@@ -46,18 +46,18 @@ fn main() -> anyhow::Result<()> {
 
     let mut isolate = rt.block_on(Isolate::interface(&path))?;
     let message = oru();
-    let out = isolate.transform(&message)?.expect("not filtered");
+    let out = rt.block_on(isolate.transform(&message))?.expect("not filtered");
     assert!(out.contains("PID|1||123456^^^MRN^MR||SMITH^john^q"), "{out}");
     assert!(out.contains("|GLU^Glucose||245|mg/dL||H|"), "{out}"); // OBX-5 trimmed, OBX-8 flagged
     assert!(out.ends_with("ZDU|benchmarked\r"), "{out}");
 
     for _ in 0..5_000 {
-        isolate.transform(&message)?; // warm up the JIT
+        rt.block_on(isolate.transform(&message))?; // warm up the JIT
     }
     let n = 100_000;
     let start = Instant::now();
     for _ in 0..n {
-        isolate.transform(&message)?;
+        rt.block_on(isolate.transform(&message))?;
     }
     let secs = start.elapsed().as_secs_f64();
     println!(

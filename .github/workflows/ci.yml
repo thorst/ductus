@@ -58,5 +58,8 @@ jobs:
           grep -q "unique 3000 " demo.log
           grep -q "out of order 0 " demo.log
 
+      - name: Database lookup demo (async transform, resources, secrets, kill/quarantine)
+        run: PGUSER_=ductus PGPASS_=ductus BIN=target/release/ductus bash scripts/demo-lookup.sh
+
       - name: Scale demo (300 shared interfaces + 1 dedicated, hot MRN)
         run: SHARED=300 EPIC_SECONDS=10 SAMPLED=50 BIN=target/release/ductus bash scripts/demo-scale.sh

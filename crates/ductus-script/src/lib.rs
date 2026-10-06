@@ -6,13 +6,46 @@
 
 mod check;
 mod loader;
+mod ops;
 
 pub use check::{Diagnostic, type_check};
+pub use ops::{BoxFuture, KILL, QUARANTINE, Services, TRANSIENT};
 
 use anyhow::{Context, Result, anyhow, bail};
-use deno_core::{JsRuntime, ModuleId, ModuleSpecifier, RuntimeOptions, v8};
+use deno_core::error::JsError;
+use deno_core::{JsRuntime, ModuleId, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions, v8};
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
 use std::rc::Rc;
+use std::task::{Context as TaskContext, Poll};
+
+/// An async transform still running: resolves once the event loop settles its promise.
+/// The isolate isn't borrowed while waiting, so other interfaces on the thread keep running.
+pub struct PendingCall(Pin<Box<dyn Future<Output = CallResult>>>);
+
+/// What a `PendingCall` resolves to; pass it to `Isolate::settle`.
+pub type CallResult = Result<v8::Global<v8::Value>, Box<JsError>>;
+
+impl Future for PendingCall {
+    type Output = CallResult;
+    fn poll(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> Poll<Self::Output> {
+        self.0.as_mut().poll(cx)
+    }
+}
+
+/// Result of starting a transform.
+pub enum Call {
+    /// Finished synchronously: the outgoing message, or None if filtered.
+    Done(Option<String>),
+    /// Async transform: await it (while something drives the event loop), then `settle`.
+    Pending(PendingCall),
+}
+
+enum RawResult {
+    Value(Option<String>),
+    Promise(v8::Global<v8::Value>),
+}
 
 pub use loader::transpile;
 
@@ -31,10 +64,21 @@ pub struct Isolate {
 }
 
 impl Isolate {
-    /// An empty isolate. Must be created inside a tokio runtime.
+    /// An empty isolate without engine services. Must be created inside a tokio runtime.
     pub fn host() -> Self {
-        let runtime =
-            JsRuntime::new(RuntimeOptions { module_loader: Some(Rc::new(loader::Loader)), ..Default::default() });
+        Self::host_with(None)
+    }
+
+    /// An empty isolate whose interface code can use `services` (databases, env, secrets).
+    pub fn host_with(services: Option<Rc<dyn Services>>) -> Self {
+        let runtime = JsRuntime::new(RuntimeOptions {
+            module_loader: Some(Rc::new(loader::Loader)),
+            extensions: vec![ops::ductus_ops::init()],
+            ..Default::default()
+        });
+        if let Some(services) = services {
+            runtime.op_state().borrow_mut().put(services);
+        }
         Self { runtime, entries: Vec::new() }
     }
 
@@ -100,7 +144,7 @@ __setFixtures({fixtures_json});
         );
         let mut isolate = Self::host();
         isolate.load_main(&std::env::current_dir()?.join("types"), glue).await?;
-        isolate.call(InterfaceId(0), None)?.context("type generator returned nothing")
+        isolate.run_tests().context("type generator returned nothing")
     }
 
     /// Load a main module that installs `globalThis.__ductus_entry`, and register it as entry 0.
@@ -127,23 +171,55 @@ __setFixtures({fixtures_json});
         evaluated.await.map_err(|e| anyhow!("{e}"))
     }
 
-    /// Run the (single) loaded interface's `transform` on a raw message.
-    pub fn transform(&mut self, raw: &str) -> Result<Option<String>> {
-        self.transform_with(InterfaceId(0), raw)
+    /// Run the (single) loaded interface's `transform` on a raw message (sync or async).
+    pub async fn transform(&mut self, raw: &str) -> Result<Option<String>> {
+        self.transform_with(InterfaceId(0), raw).await
     }
 
-    /// Run a loaded interface's `transform` on a raw message.
+    /// Run a loaded interface's `transform`, driving the event loop itself until an async
+    /// transform finishes. Use `begin`/`settle` instead when several interfaces share the isolate.
     /// Returns the outgoing message, or `None` when it was filtered out.
-    pub fn transform_with(&mut self, interface: InterfaceId, raw: &str) -> Result<Option<String>> {
-        self.call(interface, Some(raw))
+    pub async fn transform_with(&mut self, interface: InterfaceId, raw: &str) -> Result<Option<String>> {
+        match self.begin(interface, raw)? {
+            Call::Done(out) => Ok(out),
+            Call::Pending(pending) => {
+                let value = self.runtime.with_event_loop_promise(pending, PollEventLoopOptions::default()).await;
+                self.settle(value)
+            }
+        }
+    }
+
+    /// Start a transform. Synchronous transforms finish immediately; async ones return a
+    /// `PendingCall` to await while the event loop is driven (see `poll_event_loop`).
+    pub fn begin(&mut self, interface: InterfaceId, raw: &str) -> Result<Call> {
+        match self.call(interface, Some(raw))? {
+            RawResult::Value(out) => Ok(Call::Done(out)),
+            RawResult::Promise(promise) => Ok(Call::Pending(PendingCall(Box::pin(self.runtime.resolve(promise))))),
+        }
+    }
+
+    /// Turn a finished `PendingCall` into the outgoing message (or the transform's error).
+    pub fn settle<E: std::fmt::Display>(&mut self, result: Result<v8::Global<v8::Value>, E>) -> Result<Option<String>> {
+        let value = result.map_err(|e| anyhow!("{e}"))?;
+        deno_core::scope!(scope, &mut self.runtime);
+        let value = v8::Local::new(scope, value);
+        Ok(if value.is_null_or_undefined() { None } else { Some(value.to_rust_string_lossy(scope)) })
+    }
+
+    /// Run the JavaScript event loop (pending database calls, timers...). Ready when idle.
+    pub fn poll_event_loop(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<()>> {
+        self.runtime.poll_event_loop(cx, PollEventLoopOptions::default()).map_err(|e| anyhow!("{e}"))
     }
 
     /// Run the loaded test suite; returns the JSON report.
     pub fn run_tests(&mut self) -> Result<String> {
-        self.call(InterfaceId(0), None)?.context("test runner returned nothing")
+        match self.call(InterfaceId(0), None)? {
+            RawResult::Value(Some(report)) => Ok(report),
+            _ => bail!("test runner returned nothing"),
+        }
     }
 
-    fn call(&mut self, entry: InterfaceId, arg: Option<&str>) -> Result<Option<String>> {
+    fn call(&mut self, entry: InterfaceId, arg: Option<&str>) -> Result<RawResult> {
         let function = self.entries.get(entry.0).context("no such interface in this isolate")?.clone();
         deno_core::scope!(scope, &mut self.runtime);
         v8::tc_scope!(let scope, scope);
@@ -154,8 +230,9 @@ __setFixtures({fixtures_json});
         };
         let receiver = v8::undefined(scope);
         match function.call(scope, receiver.into(), &args) {
-            Some(result) if result.is_null_or_undefined() => Ok(None),
-            Some(result) => Ok(Some(result.to_rust_string_lossy(scope))),
+            Some(result) if result.is_null_or_undefined() => Ok(RawResult::Value(None)),
+            Some(result) if result.is_promise() => Ok(RawResult::Promise(v8::Global::new(scope, result))),
+            Some(result) => Ok(RawResult::Value(Some(result.to_rust_string_lossy(scope)))),
             None => {
                 let message = match scope.exception() {
                     Some(e) if e.is_object() => {

@@ -1,5 +1,14 @@
 // SDK tests: run inside the real engine by `cargo test -p ductus-script`.
-import { expect, hl7, parse, test } from "@ductus/sdk";
+import { expect, hl7, Kill, kill, parse, quarantine, QuarantineError, test } from "@ductus/sdk";
+
+test("kill and quarantine carry their reasons", () => {
+  const k = kill("test patient");
+  expect(k instanceof Kill).toBe(true);
+  expect(k.reason).toBe("test patient");
+  const q = quarantine("missing MRN");
+  expect(q instanceof QuarantineError).toBe(true);
+  expect(q.message).toContain("missing MRN");
+});
 
 const ADT =
   "MSH|^~\\&|EPIC|HOSP|DUCTUS|HOSP|20261005120000||ADT^A08^ADT_A01|MSG0001|P|2.5\r" +

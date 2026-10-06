@@ -3,6 +3,7 @@
 mod destination;
 mod ingest;
 mod limiter;
+mod services;
 mod worker;
 
 use anyhow::{Context, Result, bail};
@@ -58,7 +59,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     let env = Environment::load(root, &options.env)?;
     let configs = load_interfaces(root, &env)?;
     // Loaded now so a missing variable or secret stops startup; used by interface code (v0.4).
-    let _resources = ductus_core::Resources::load(root, &env)?;
+    let resources = ductus_core::Resources::load(root, &env)?;
     if configs.is_empty() {
         bail!("no interfaces found under {}", root.join("interfaces").display());
     }
@@ -92,15 +93,16 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         interfaces.push((config, wake));
     }
 
+    let services = Arc::new(services::SharedServices::new(env, &resources));
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let mut jobs = 0;
     for (i, thread_jobs) in pool.into_iter().enumerate().filter(|(_, j)| !j.is_empty()) {
         jobs += thread_jobs.len();
-        worker::spawn_thread(format!("pool-{i}"), thread_jobs, store.clone(), ready_tx.clone())?;
+        worker::spawn_thread(format!("pool-{i}"), thread_jobs, store.clone(), services.clone(), ready_tx.clone())?;
     }
     for (name, job) in dedicated {
         jobs += 1;
-        worker::spawn_thread(name, vec![job], store.clone(), ready_tx.clone())?;
+        worker::spawn_thread(name, vec![job], store.clone(), services.clone(), ready_tx.clone())?;
     }
     drop(ready_tx);
     // Fail fast if any interface's code doesn't load, before accepting any messages.
