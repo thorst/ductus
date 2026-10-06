@@ -48,6 +48,14 @@ enum Command {
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
+    /// List the ports and HTTP routes a project listens on, the hosts it connects to, and port
+    /// conflicts, for an environment (exits 1 on conflicts).
+    Ports {
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+    },
     /// Manage encrypted secrets (secrets/<env>.json; key in DUCTUS_SECRET_KEY).
     Secret {
         #[command(subcommand)]
@@ -155,6 +163,7 @@ async fn main() -> Result<()> {
             exit_on_failure(project::test(&root, &env, interface.as_deref()).await)
         }
         Command::Validate { root, env } => exit_on_failure(project::validate(&root, &env).await),
+        Command::Ports { root, env } => exit_on_failure(project::ports(&root, &env)),
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,
         Command::Status { database_url } => tools::status(&database_url).await,

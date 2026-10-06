@@ -3,6 +3,7 @@
 pub mod config;
 pub mod env;
 pub mod format;
+pub mod ports;
 pub mod resources;
 pub mod schedule;
 pub mod secrets;

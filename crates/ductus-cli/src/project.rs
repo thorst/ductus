@@ -1,4 +1,4 @@
-//! Project commands: `types`, `test`, `validate`.
+//! Project commands: `types`, `test`, `validate`, `ports`, `secret`.
 
 use anyhow::{Context, Result};
 use ductus_core::{Environment, InterfaceConfig};
@@ -258,6 +258,82 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
 
     println!("\n{}", if problems == 0 { "valid".to_string() } else { format!("{problems} problem(s)") });
     Ok(problems == 0)
+}
+
+/// `ductus ports`: listening ports and HTTP routes, outbound connections, and port conflicts
+/// for one environment. Returns false on conflicts or interfaces that don't load.
+pub fn ports(root: &Path, env: &str) -> Result<bool> {
+    use ductus_core::ports;
+    let environment = Environment::load(root, env)?;
+    let interfaces = interface_dirs(root, &environment)?;
+    println!("environment: {env}");
+    let mut problems = 0;
+    for i in &interfaces {
+        if let Err(e) = &i.config {
+            problems += 1;
+            println!("✗ {}: not shown, its config doesn't load: {}", i.label(), first_line(&format!("{e:#}")));
+        }
+    }
+    let configs: Vec<&InterfaceConfig> = interfaces.iter().filter_map(|i| i.config.as_ref().ok()).collect();
+
+    let listening = ports::listeners(configs.iter().copied());
+    println!("\nListening");
+    if listening.is_empty() {
+        println!("  (nothing: no MLLP or HTTP sources)");
+    } else {
+        table(
+            &["PORT", "PROTOCOL", "HOST", "INTERFACE", "ROUTE"],
+            listening
+                .into_iter()
+                .map(|l| vec![l.port.to_string(), l.protocol.into(), l.host, l.interface, l.route.unwrap_or_default()]),
+        );
+    }
+
+    let resources = match ductus_core::Resources::load(root, &environment) {
+        Ok(r) => r,
+        Err(e) => {
+            problems += 1;
+            println!("✗ resources: {e:#}");
+            Default::default()
+        }
+    };
+    let outbound = ports::outbound(configs.iter().copied(), &resources);
+    println!("\nConnects to");
+    if outbound.is_empty() {
+        println!("  (nothing)");
+    } else {
+        table(
+            &["HOST", "PORT", "PROTOCOL", "USED BY"],
+            outbound.into_iter().map(|o| vec![o.host, o.port.to_string(), o.protocol.into(), o.used_by]),
+        );
+    }
+
+    println!();
+    let conflicts = ductus_core::config::check_endpoints(configs.iter().copied());
+    if conflicts.is_empty() {
+        println!("✓ no port conflicts");
+    }
+    for c in &conflicts {
+        problems += 1;
+        println!("✗ {c}");
+    }
+    Ok(problems == 0)
+}
+
+/// Print rows as aligned columns, indented two spaces.
+fn table(headers: &[&str], rows: impl IntoIterator<Item = Vec<String>>) {
+    let rows: Vec<Vec<String>> = rows.into_iter().collect();
+    let widths: Vec<usize> = (0..headers.len())
+        .map(|i| rows.iter().map(|r| r[i].chars().count()).chain([headers[i].len()]).max().unwrap_or(0))
+        .collect();
+    let line = |cells: Vec<&str>| {
+        let padded: Vec<String> = cells.iter().zip(&widths).map(|(c, w)| format!("{c:<w$}")).collect();
+        println!("  {}", padded.join("  ").trim_end());
+    };
+    line(headers.to_vec());
+    for r in &rows {
+        line(r.iter().map(String::as_str).collect());
+    }
 }
 
 pub enum SecretCommand {

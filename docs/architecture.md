@@ -30,13 +30,13 @@ One binary (`ductus`) plus PostgreSQL. No other services.
 
 | crate | role |
 |---|---|
-| `ductus-core` | `interface.yaml` (`config.rs`), formats (`format.rs`), environments + `${VAR}` substitution (`env.rs`), encrypted secrets (`secrets.rs`), `resources.yaml` (`resources.rs`: Postgres and SQL Server databases, SFTP servers), schedule timing (`schedule.rs`), lane hashing, port-conflict checks |
+| `ductus-core` | `interface.yaml` (`config.rs`), formats (`format.rs`), environments + `${VAR}` substitution (`env.rs`), encrypted secrets (`secrets.rs`), `resources.yaml` (`resources.rs`: Postgres and SQL Server databases, SFTP servers), schedule timing (`schedule.rs`), lane hashing, port-conflict checks, listeners and outbound connections (`ports.rs`) |
 | `ductus-hl7` | HL7v2 essentials in Rust: field lookup by path, ACK generation (ingest only; interface code uses the SDK) |
 | `ductus-mllp` | MLLP framing, listener (in order per connection), reconnecting client (with or without waiting for ACK) |
 | `ductus-store` | Postgres: migrations, `messages` (day-partitioned; also the work queue), dedupe keys, status updates |
 | `ductus-script` | Embedded V8 (deno_core): module loader (local files + embedded `@ductus/sdk`), multi-interface isolates, async calls (`begin`/`settle`), native ops (`Services` trait), embedded TypeScript 6 type checker + shared-pool lints |
 | `ductus-runtime` | The engine: planning threads, `Intake` (ingest for any source, single or batched), MLLP + HTTP servers, file/SFTP watcher (`files.rs`) and record splitter (`split.rs`), SFTP client (`sftp.rs`), schedules (`schedule.rs`), workers, destinations, rate limiter, format-aware keys, engine services (Postgres pools; SQL Server pool in `mssql.rs`) |
-| `ductus-cli` (`ductus`) | `run`, `test`, `validate`, `types`, `secret`, `status`, `gen`, `sink` |
+| `ductus-cli` (`ductus`) | `run`, `test`, `validate`, `ports`, `types`, `secret`, `status`, `gen`, `sink` (tests in `tests/cli.rs` run the real binary) |
 | `sdk/` | The TypeScript SDK, compiled into the binary: HL7 model, formats (CSV/fixed/XML), HTTP request/response, services, test framework, typings generator |
 
 ## Message lifecycle

@@ -1395,6 +1395,7 @@ dependencies = [
  "ductus-script",
  "ductus-store",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing-subscriber",
 ]
@@ -1413,6 +1414,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "tempfile",
+ "url",
 ]
 
 [[package]]

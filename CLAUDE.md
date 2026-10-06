@@ -51,14 +51,15 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 ## Where things are
 
 ```
-crates/ductus-core     config, formats, environments, secrets, resources, schedule timing
+crates/ductus-core     config, formats, environments, secrets, resources, schedule timing, ports
 crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
 crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations)
 crates/ductus-script   embedded V8, module loader, ops, type checker (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup), ingest.rs, http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, destination.rs, keys.rs, services.rs + mssql.rs (DB calls), limiter.rs
-crates/ductus-cli      the `ductus` command (project.rs: test/validate/types/secret; tools.rs: gen/sink/status)
+crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/types/secret; tools.rs: gen/sink/status;
+                       tests/cli.rs runs the binary on temp projects)
 sdk/src                TypeScript SDK (embedded via include_str! in ductus-script/src/loader.rs: add new files there)
 sdk/tests              SDK tests (TypeScript)
 scripts/               demos (end-to-end, PASS/FAIL) and scripts/dev (check.sh, demos.sh)
