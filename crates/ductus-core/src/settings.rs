@@ -4,6 +4,8 @@
 //! ports:              # ranges `ductus new interface` picks free ports from
 //!   mllp: 6661-6699
 //!   http: 8080-8099
+//! isolates:
+//!   heap_mb: 512      # memory limit of each V8 isolate (one per pool thread and per dedicated worker)
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -17,6 +19,27 @@ pub const FILE: &str = "ductus.yaml";
 pub struct Settings {
     #[serde(default)]
     pub ports: PortRanges,
+    #[serde(default)]
+    pub isolates: Isolates,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Isolates {
+    /// Heap limit of each V8 isolate, in MB. Interface code that fills it is stopped (the
+    /// process keeps running). Every pool thread and every dedicated worker has one isolate.
+    #[serde(default = "default_heap_mb")]
+    pub heap_mb: usize,
+}
+
+impl Default for Isolates {
+    fn default() -> Self {
+        Self { heap_mb: default_heap_mb() }
+    }
+}
+
+fn default_heap_mb() -> usize {
+    512
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -74,7 +97,11 @@ impl Settings {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-        serde_yaml_ng::from_str(&text).with_context(|| format!("in {}", file.display()))
+        let settings: Self = serde_yaml_ng::from_str(&text).with_context(|| format!("in {}", file.display()))?;
+        if settings.isolates.heap_mb < 64 {
+            bail!("in {}: isolates.heap_mb must be at least 64 (the SDK alone needs a few MB)", file.display());
+        }
+        Ok(settings)
     }
 }
 
@@ -118,6 +145,17 @@ mod tests {
         std::fs::write(dir.path().join(FILE), "ports:\n  http: 9000-8000\n").unwrap();
         let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
         assert!(err.contains("write it like 6661-6699"), "{err}");
+    }
+
+    #[test]
+    fn loads_the_isolate_heap_limit() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().isolates.heap_mb, 512);
+        std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 2048 }\n").unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().isolates.heap_mb, 2048);
+        std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 8 }\n").unwrap();
+        let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
+        assert!(err.contains("at least 64"), "{err}");
     }
 
     #[test]

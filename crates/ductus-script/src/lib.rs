@@ -3,22 +3,57 @@
 //! Interface code is real ES modules: `export function transform(msg)` in a `.ts`
 //! file, free to import its own sibling modules and `@ductus/sdk`. One isolate can
 //! host many interfaces; they share the SDK and the global scope.
+//!
+//! Every call into JavaScript has a time budget and every isolate a heap limit (`guard.rs`):
+//! a runaway interface is stopped with a [`Runaway`] error instead of stalling the thread.
 
 mod check;
+mod guard;
 mod loader;
 mod ops;
 
 pub use check::{Diagnostic, type_check};
+pub use guard::Cause;
 pub use ops::{BoxFuture, FetchRequest, FetchResponse, KILL, QUARANTINE, Services, TRANSIENT};
 
 use anyhow::{Context, Result, anyhow, bail};
 use deno_core::error::JsError;
 use deno_core::{JsRuntime, ModuleId, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions, v8};
+use guard::{Guard, Trip};
 use std::future::Future;
 use std::path::Path;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context as TaskContext, Poll};
+use std::time::Duration;
+
+/// Time budget for interfaces loaded without one, for tests and for loading modules.
+pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
+/// Heap limit for isolates created without one.
+pub const DEFAULT_HEAP_MB: usize = 512;
+
+/// Interface code that was stopped: it ran past its time budget without pausing, or the
+/// isolate's heap filled up while it ran. The isolate stays usable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Runaway {
+    /// The interface whose code was running. `None` when it couldn't be told: code in a
+    /// shared module, resumed after an `await`, has no interface's file on its stack.
+    pub interface: Option<InterfaceId>,
+    pub cause: Cause,
+}
+
+impl std::fmt::Display for Runaway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.cause {
+            Cause::Timeout(budget) => {
+                write!(f, "stopped: the script ran longer than its {budget:?} timeout without pausing (endless loop?)")
+            }
+            Cause::Heap(mb) => write!(f, "stopped: the script used up the {mb} MB script heap"),
+        }
+    }
+}
+
+impl std::error::Error for Runaway {}
 
 /// An async transform still running: resolves once the event loop settles its promise.
 /// The isolate isn't borrowed while waiting, so other interfaces on the thread keep running.
@@ -62,8 +97,14 @@ pub struct InterfaceId(usize);
 /// One V8 isolate hosting one or more interfaces (or a test suite).
 pub struct Isolate {
     runtime: JsRuntime,
-    /// Callable entry points, indexed by `InterfaceId`.
+    /// Callable entry points, indexed by `InterfaceId` (the guard's table is indexed the same).
     entries: Vec<v8::Global<v8::Function>>,
+    guard: Guard,
+}
+
+/// The `Runaway` a guard trip stands for; `known` is the interface when the caller knows it.
+fn runaway(known: Option<InterfaceId>, trip: Trip) -> Runaway {
+    Runaway { interface: known.or(trip.interface.map(InterfaceId)), cause: trip.cause }
 }
 
 impl Isolate {
@@ -74,15 +115,24 @@ impl Isolate {
 
     /// An empty isolate whose interface code can use `services` (databases, env, secrets).
     pub fn host_with(services: Option<Rc<dyn Services>>) -> Self {
-        let runtime = JsRuntime::new(RuntimeOptions {
+        Self::new(services, DEFAULT_HEAP_MB)
+    }
+
+    /// An empty isolate with engine services and a heap limit of `heap_mb`.
+    pub fn new(services: Option<Rc<dyn Services>>, heap_mb: usize) -> Self {
+        let mut runtime = JsRuntime::new(RuntimeOptions {
             module_loader: Some(Rc::new(loader::Loader)),
             extensions: vec![ops::ductus_ops::init()],
+            create_params: Some(v8::Isolate::create_params().heap_limits(0, heap_mb << 20)),
             ..Default::default()
         });
         if let Some(services) = services {
             runtime.op_state().borrow_mut().put(services);
         }
-        Self { runtime, entries: Vec::new() }
+        let context = runtime.main_context();
+        let guard = Guard::new(runtime.v8_isolate(), context, heap_mb);
+        runtime.add_near_heap_limit_callback(guard.heap_callback());
+        Self { runtime, entries: Vec::new(), guard }
     }
 
     /// An isolate with a single interface loaded; use `transform`.
@@ -94,12 +144,18 @@ impl Isolate {
 
     /// Load another HL7 interface module (which must export `transform(msg)`) into this isolate.
     pub async fn add_interface(&mut self, module: &Path) -> Result<InterfaceId> {
-        self.add_interface_with(module, DEFAULT_FORMATS).await
+        self.add_interface_with(module, DEFAULT_FORMATS, DEFAULT_TIMEOUT).await
     }
 
     /// Load an interface module with its formats (`InterfaceConfig::format_spec`): how
-    /// payloads are parsed for `transform`, and how its results are serialized.
-    pub async fn add_interface_with(&mut self, module: &Path, formats_json: &str) -> Result<InterfaceId> {
+    /// payloads are parsed for `transform`, and how its results are serialized. Each call of
+    /// its code may run for `timeout` without pausing before it's stopped.
+    pub async fn add_interface_with(
+        &mut self,
+        module: &Path,
+        formats_json: &str,
+        timeout: Duration,
+    ) -> Result<InterfaceId> {
         let url = file_url(module)?;
         // The glue module sits beside the interface, so each interface gets a unique one.
         let glue_url = file_url(&module.with_extension("ts.__ductus__.js"))?;
@@ -113,7 +169,7 @@ export const run = (raw) => __invoke(entry.transform, raw, formats);
             name = module.display(),
         );
         let id = self.runtime.load_side_es_module_from_code(&glue_url, glue).await.map_err(|e| anyhow!("{e}"))?;
-        self.evaluate(id).await?;
+        self.evaluate(id, timeout).await?;
 
         let namespace = self.runtime.get_module_namespace(id).map_err(|e| anyhow!("{e}"))?;
         let function = {
@@ -125,6 +181,9 @@ export const run = (raw) => __invoke(entry.transform, raw, formats);
                 v8::Local::<v8::Function>::try_from(value).map_err(|_| anyhow!("glue export is not a function"))?;
             v8::Global::new(scope, function)
         };
+        let folder = file_url(module.parent().unwrap_or(Path::new(".")))?.to_string();
+        let folder = if folder.ends_with('/') { folder } else { folder + "/" };
+        self.guard.add(Some((url.to_string(), folder)), timeout);
         self.entries.push(function);
         Ok(InterfaceId(self.entries.len() - 1))
     }
@@ -163,7 +222,7 @@ __setFixtures({fixtures_json}, {formats_json});
         let dir = beside.parent().unwrap_or(Path::new("."));
         let specifier = file_url(&dir.join("__ductus_main__.js"))?;
         let id = self.runtime.load_main_es_module_from_code(&specifier, glue).await.map_err(|e| anyhow!("{e}"))?;
-        self.evaluate(id).await?;
+        self.evaluate(id, DEFAULT_TIMEOUT).await?;
         let function = {
             deno_core::scope!(scope, &mut self.runtime);
             let global = scope.get_current_context().global(scope);
@@ -172,14 +231,24 @@ __setFixtures({fixtures_json}, {formats_json});
             let function = v8::Local::<v8::Function>::try_from(value).map_err(|_| anyhow!("entry not installed"))?;
             v8::Global::new(scope, function)
         };
+        self.guard.add(None, DEFAULT_TIMEOUT);
         self.entries.push(function);
         Ok(())
     }
 
-    async fn evaluate(&mut self, id: ModuleId) -> Result<()> {
+    /// Run a module's top-level code (and anything it awaits) within `timeout`. Nothing
+    /// else runs on the thread while interfaces load, so the budget is simply wall time.
+    async fn evaluate(&mut self, id: ModuleId, timeout: Duration) -> Result<()> {
+        self.guard.arm(timeout, false);
         let evaluated = self.runtime.mod_evaluate(id);
-        self.runtime.run_event_loop(Default::default()).await.map_err(|e| anyhow!("{e}"))?;
-        evaluated.await.map_err(|e| anyhow!("{e}"))
+        let result = match self.runtime.run_event_loop(Default::default()).await {
+            Ok(()) => evaluated.await.map_err(|e| anyhow!("{e}")),
+            Err(e) => Err(anyhow!("{e}")),
+        };
+        match self.guard.disarm(self.runtime.v8_isolate()) {
+            Some(trip) => Err(anyhow!("loading the module: {}", Runaway { interface: None, cause: trip.cause })),
+            None => result,
+        }
     }
 
     /// Run the (single) loaded interface's `transform` on a raw message (sync or async).
@@ -194,10 +263,30 @@ __setFixtures({fixtures_json}, {formats_json});
         match self.begin(interface, raw)? {
             Call::Done(out) => Ok(out),
             Call::Pending(pending) => {
-                let value = self.runtime.with_event_loop_promise(pending, PollEventLoopOptions::default()).await;
-                self.settle(value)
+                let value = self.drive(pending).await?;
+                Ok(self.output(value))
             }
         }
+    }
+
+    /// Run the event loop until `pending` settles.
+    async fn drive(&mut self, mut pending: PendingCall) -> Result<v8::Global<v8::Value>> {
+        std::future::poll_fn(|cx| {
+            let event_loop = self.poll_event_loop(cx);
+            if let Poll::Ready(Err(e)) = event_loop {
+                return Poll::Ready(Err(e));
+            }
+            if let Poll::Ready(value) = Pin::new(&mut pending).poll(cx) {
+                return Poll::Ready(value.map_err(|e| anyhow!("{e}")));
+            }
+            match event_loop {
+                Poll::Pending => Poll::Pending,
+                _ => Poll::Ready(Err(anyhow!(
+                    "the transform's promise never settled: nothing is left for it to wait on"
+                ))),
+            }
+        })
+        .await
     }
 
     /// Start a transform. Synchronous transforms finish immediately; async ones return a
@@ -212,14 +301,28 @@ __setFixtures({fixtures_json}, {formats_json});
     /// Turn a finished `PendingCall` into the outgoing message (or the transform's error).
     pub fn settle<E: std::fmt::Display>(&mut self, result: Result<v8::Global<v8::Value>, E>) -> Result<Option<String>> {
         let value = result.map_err(|e| anyhow!("{e}"))?;
+        Ok(self.output(value))
+    }
+
+    /// The outgoing message a transform's result stands for (None: filtered).
+    fn output(&mut self, value: v8::Global<v8::Value>) -> Option<String> {
         deno_core::scope!(scope, &mut self.runtime);
         let value = v8::Local::new(scope, value);
-        Ok(if value.is_null_or_undefined() { None } else { Some(value.to_rust_string_lossy(scope)) })
+        if value.is_null_or_undefined() { None } else { Some(value.to_rust_string_lossy(scope)) }
     }
 
     /// Run the JavaScript event loop (pending database calls, timers...). Ready when idle.
+    ///
+    /// Code resumed after an `await` runs here. If it runs away, this returns a [`Runaway`]
+    /// error. V8 then drops every queued continuation, not just the runaway's, so the
+    /// async transforms in flight on this isolate will never settle: give up on all of them.
     pub fn poll_event_loop(&mut self, cx: &mut TaskContext<'_>) -> Poll<Result<()>> {
-        self.runtime.poll_event_loop(cx, PollEventLoopOptions::default()).map_err(|e| anyhow!("{e}"))
+        self.guard.arm_any(DEFAULT_TIMEOUT); // continuations of any interface may run
+        let poll = self.runtime.poll_event_loop(cx, PollEventLoopOptions::default());
+        match self.guard.disarm(self.runtime.v8_isolate()) {
+            Some(trip) => Poll::Ready(Err(runaway(None, trip).into())),
+            None => poll.map_err(|e| anyhow!("{e}")),
+        }
     }
 
     /// Run the loaded test suite (tests may be async); returns the JSON report.
@@ -227,16 +330,26 @@ __setFixtures({fixtures_json}, {formats_json});
         let report = match self.call(InterfaceId(0), None)? {
             RawResult::Value(report) => report,
             RawResult::Promise(promise) => {
-                let pending = self.runtime.resolve(promise);
-                let value = self.runtime.with_event_loop_promise(pending, PollEventLoopOptions::default()).await;
-                self.settle(value)?
+                let pending = PendingCall(Box::pin(self.runtime.resolve(promise)));
+                let value = self.drive(pending).await?;
+                self.output(value)
             }
         };
         report.context("test runner returned nothing")
     }
 
+    /// Call an entry point within its time budget.
     fn call(&mut self, entry: InterfaceId, arg: Option<&str>) -> Result<RawResult> {
         let function = self.entries.get(entry.0).context("no such interface in this isolate")?.clone();
+        self.guard.arm_for(entry.0);
+        let result = self.call_unguarded(function, arg);
+        match self.guard.disarm(self.runtime.v8_isolate()) {
+            Some(trip) => Err(runaway(Some(entry), trip).into()),
+            None => result,
+        }
+    }
+
+    fn call_unguarded(&mut self, function: v8::Global<v8::Function>, arg: Option<&str>) -> Result<RawResult> {
         deno_core::scope!(scope, &mut self.runtime);
         v8::tc_scope!(let scope, scope);
         let function = v8::Local::new(scope, function);

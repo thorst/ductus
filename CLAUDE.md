@@ -46,6 +46,9 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - CI "could not find native static library `rusty_v8`" on Build (Lint passes) = a stale rust-cache restored as a partial match. Fix: `gh cache delete --all`, then `gh run rerun <id>`. Always check the run after pushing.
 - **WSL stops the distro** (Docker and containers with it, exit 255, nothing in the logs) once no `wsl` command has run for a while. Not a SQL Server crash. The local SQL Server container (`scripts/dev/sqlserver.sh`, Docker Engine installed in WSL) has `--restart unless-stopped`; check.sh starts it and waits for a real login before the tests. SQL Server tests use `DUCTUS_TEST_SQLSERVER=user:password@host:port`.
 - tiberius 0.13 (bb8-tiberius is stuck on 0.12, so `mssql.rs` has its own pool). SQL Server 2025 image not tried since the WSL finding; tests and CI use 2022.
+- **Runaway guard (`ductus-script/src/guard.rs`)**: terminate only from inside an `IsolateHandle::request_interrupt` callback (runs on the isolate's thread; check the call generation first), never `terminate_execution` from the watchdog thread (a finished call's successor would be killed). Reading the stack there needs a context: the main context is kept in an isolate slot (`MainContext`) and entered with `v8::scope_with_context!`. After termination, `cancel_terminate_execution` (deno_core re-arms termination in `exception_to_err`). A termination during the event loop **drops all queued microtasks**, so every in-flight async transform on that isolate hangs: fail them all (worker's `interrupted` watch). `Isolate::settle` stringifies errors: use `drive` + `output` where a typed error (`Runaway`) must survive.
+- **Sockets belong to the runtime that opened them.** The sqlx pool is shared with intake: worker threads must run store calls on the main runtime (`Worker::db`), or a busy V8 thread delays other interfaces' ACKs.
+- tracing's plain log format puts the message before the fields: grep `interface stopped.*interface=x`, not the other way round.
 - russh 0.64: `client::Handler::check_server_key(&PublicKeyOrCertificate)`; fingerprints via `key.fingerprint(HashAlg::Sha256)` print like `ssh-keygen -lf`. SFTP `rename` won't overwrite: remove the target first.
 
 ## Where things are
@@ -55,9 +58,10 @@ crates/ductus-core     config, formats, environments, secrets, resources, schedu
 crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
 crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations)
-crates/ductus-script   embedded V8, module loader, ops, type checker (+ tests/script.rs)
+crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup), ingest.rs, http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
-                       schedule.rs, worker.rs, destination.rs, keys.rs, services.rs + mssql.rs (DB calls), limiter.rs
+                       schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
+                       services.rs + mssql.rs (DB calls), limiter.rs
 crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/types/secret; new.rs: `new interface`;
                        tools.rs: gen/sink/status;
                        tests/cli.rs runs the binary on temp projects)

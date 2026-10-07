@@ -96,5 +96,8 @@ jobs:
       - name: v0.4 release demo (REST + DB + fetch, nightly SFTP CSV, dev and prod environments)
         run: PGUSER_=ductus PGPASS_=ductus BIN=target/release/ductus bash scripts/demo-v04.sh
 
+      - name: Runaway demo (endless loops and heap blow-ups don't stall neighbours)
+        run: BIN=target/release/ductus bash scripts/demo-runaway.sh
+
       - name: Scale demo (300 shared interfaces + 1 dedicated, hot MRN)
         run: SHARED=300 EPIC_SECONDS=10 SAMPLED=50 BIN=target/release/ductus bash scripts/demo-scale.sh

@@ -2,6 +2,7 @@
 
 mod destination;
 mod files;
+pub mod health;
 mod http;
 mod ingest;
 pub mod keys;
@@ -67,6 +68,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     let configs = load_interfaces(root, &env)?;
     // Loaded now so a missing variable or secret stops startup; used by interface code (v0.4).
     let resources = ductus_core::Resources::load(root, &env)?;
+    let heap_mb = ductus_core::settings::Settings::load(root)?.isolates.heap_mb;
     if configs.is_empty() {
         bail!("no interfaces found under {}", root.join("interfaces").display());
     }
@@ -96,6 +98,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         let config = Arc::new(config);
         // One wake-up signal per slot: ingest wakes only the slot that owns the message's lane.
         let wake: Arc<[Notify]> = (0..config.slots()).map(|_| Notify::new()).collect();
+        let health = Arc::new(health::Health::default());
         let limiter = config.rate_limit.clone().map(|r| Arc::new(limiter::Limiter::new(r, std::time::Instant::now())));
         // Respond-mode HTTP interfaces get requests over a channel instead of a queue.
         let mut requests = None;
@@ -126,6 +129,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                     Some(Destination::Sftp { server, .. }) => sftp_server(server),
                     _ => None,
                 },
+                health: health.clone(),
             };
             match config.isolation {
                 Isolation::Shared => {
@@ -144,7 +148,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     for (i, thread_jobs) in pool.into_iter().enumerate().filter(|(_, j)| !j.is_empty()) {
         jobs += thread_jobs.len();
         let engine = services::EngineServices::new(services.clone(), Default::default());
-        worker::spawn_thread(format!("pool-{i}"), thread_jobs, store.clone(), engine, ready_tx.clone())?;
+        worker::spawn_thread(format!("pool-{i}"), thread_jobs, store.clone(), engine, heap_mb, ready_tx.clone())?;
     }
     // A dedicated interface's own pools are shared by all its worker threads.
     let mut own_pools = std::collections::HashMap::new();
@@ -153,7 +157,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         let own =
             own_pools.entry(job.config.name.clone()).or_insert_with(|| services.dedicated_pools(&job.config)).clone();
         let engine = services::EngineServices::new(services.clone(), own);
-        worker::spawn_thread(name, vec![job], store.clone(), engine, ready_tx.clone())?;
+        worker::spawn_thread(name, vec![job], store.clone(), engine, heap_mb, ready_tx.clone())?;
     }
     drop(ready_tx);
     // Fail fast if any interface's code doesn't load, before accepting any messages.

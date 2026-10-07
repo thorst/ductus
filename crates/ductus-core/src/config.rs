@@ -53,6 +53,12 @@ pub struct InterfaceConfig {
     /// Throttle delivery, e.g. for devices or vendor APIs that can't take bursts.
     #[serde(default)]
     pub rate_limit: Option<RateLimit>,
+    /// Longest the interface's code may run without pausing, e.g. "5s" (the default) or
+    /// "500ms". Waiting on `db()` or `fetch()` doesn't count: this catches endless loops,
+    /// which would otherwise stall every interface sharing the thread. Past it, the code is
+    /// stopped and the message quarantined; three in a row stop the interface.
+    #[serde(default = "defaults::timeout", deserialize_with = "duration")]
+    pub timeout: Duration,
 
     /// Folder the config was loaded from.
     #[serde(skip)]
@@ -414,6 +420,9 @@ mod defaults {
     pub fn poll() -> std::time::Duration {
         std::time::Duration::from_secs(10)
     }
+    pub fn timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(5)
+    }
 }
 
 impl InterfaceConfig {
@@ -454,6 +463,9 @@ impl InterfaceConfig {
         }
         if self.ordering.partitions == 0 {
             bail!("ordering.partitions must be at least 1");
+        }
+        if !(Duration::from_millis(10)..=Duration::from_secs(600)).contains(&self.timeout) {
+            bail!("timeout must be between 10ms and 10m (other interfaces on the thread wait while code runs)");
         }
         if let Some(script) = self.script_path()
             && !script.is_file()
@@ -627,6 +639,21 @@ retry: { max_attempts: 3 }
         assert_eq!(c.retry.max_attempts, Some(3));
         assert_eq!(c.partitions_for_worker(0), vec![0, 2, 4, 6]);
         assert_eq!(c.partitions_for_worker(1), vec![1, 3, 5, 7]);
+    }
+
+    #[test]
+    fn script_timeout_has_a_safe_default_and_range() {
+        let load = |extra: &str| -> InterfaceConfig {
+            let dest = "destination: { file: { dir: o } }";
+            serde_yaml_ng::from_str(&format!("name: a\nsource: {{ mllp: {{ port: 6661 }} }}\n{dest}\n{extra}")).unwrap()
+        };
+        assert_eq!(load("").timeout, Duration::from_secs(5));
+        let c = load("timeout: 250ms");
+        assert_eq!(c.timeout, Duration::from_millis(250));
+        assert!(c.validate().is_ok());
+        for bad in ["timeout: 5ms", "timeout: 1h"] {
+            assert!(load(bad).validate().unwrap_err().to_string().contains("between 10ms and 10m"), "{bad}");
+        }
     }
 
     #[test]

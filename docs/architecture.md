@@ -34,7 +34,7 @@ One binary (`ductus`) plus PostgreSQL. No other services.
 | `ductus-hl7` | HL7v2 essentials in Rust: field lookup by path, ACK generation (ingest only; interface code uses the SDK) |
 | `ductus-mllp` | MLLP framing, listener (in order per connection), reconnecting client (with or without waiting for ACK) |
 | `ductus-store` | Postgres: migrations, `messages` (day-partitioned; also the work queue), dedupe keys, status updates |
-| `ductus-script` | Embedded V8 (deno_core): module loader (local files + embedded `@ductus/sdk`), multi-interface isolates, async calls (`begin`/`settle`), native ops (`Services` trait), embedded TypeScript 6 type checker + shared-pool lints |
+| `ductus-script` | Embedded V8 (deno_core): module loader (local files + embedded `@ductus/sdk`), multi-interface isolates, async calls (`begin`/`settle`), runaway guard (`guard.rs`: time budgets, heap limit), native ops (`Services` trait), embedded TypeScript 6 type checker + shared-pool lints |
 | `ductus-runtime` | The engine: planning threads, `Intake` (ingest for any source, single or batched), MLLP + HTTP servers, file/SFTP watcher (`files.rs`) and record splitter (`split.rs`), SFTP client (`sftp.rs`), schedules (`schedule.rs`), workers, destinations, rate limiter, format-aware keys, engine services (Postgres pools; SQL Server pool in `mssql.rs`) |
 | `ductus-cli` (`ductus`) | `run`, `test`, `validate`, `ports`, `new interface` (`new.rs`: templates per source/format; ports from `ductus.yaml` ranges, free in every environment), `types`, `secret`, `status`, `gen`, `sink` (tests in `tests/cli.rs` run the real binary) |
 | `sdk/` | The TypeScript SDK, compiled into the binary: HL7 model, formats (CSV/fixed/XML), HTTP request/response, services, test framework, typings generator |
@@ -48,6 +48,7 @@ Worker per message: transform → outcome:
 - `Filter(reason)` → `filtered`
 - `Quarantine(reason)` (transform threw, `quarantine()`, AR, 4xx) → `quarantined`
 - `Retry` (error text contains `[ductus:transient]`, e.g. DB unreachable) → back off 1s→60s, retry the same message (order kept)
+- `Runaway` (the code ran past its `timeout` without pausing, or filled the isolate's heap) → `quarantined`; three timeouts in a row or one heap overflow **stop the interface** (`health.rs`): its messages stay `pending` until the code is fixed and the engine restarted; respond-mode requests get 503
 Delivery failures: transient → back off and retry (forever unless `retry.max_attempts`); permanent → quarantine.
 
 ### Files (file and SFTP sources)
@@ -69,6 +70,15 @@ Delivery failures: transient → back off and retry (forever unless `retry.max_a
 - V8 isolates can't move between threads; the isolate is `Rc<RefCell<Isolate>>` per thread and is **only borrowed for synchronous calls, never across an await**.
 - **Async transforms**: `Isolate::begin` returns `Call::Done` (sync transform) or `Call::Pending` (a future not borrowing the isolate). A per-thread `drive_event_loop` task polls the JS event loop when kicked, so many interfaces can await DB calls concurrently on one thread. `settle` converts the result.
 - Wake-ups: ingest calls `notify_one` on the owning slot's `Notify` (permit kept if busy); a 30 s idle poll is only a safety net.
+- **Store calls from workers run on the main runtime** (`Worker::db`). The Postgres pool is shared with intake, and a connection's socket is served by the runtime that opened it: a connection opened on a worker thread stalled intake's commits (the senders' ACKs) whenever that thread was busy in V8. Measured in the runaway demo: one sender's 200 ACKs took 4.0 s instead of 0.9 s; a pass-through run 3.3 s → 0.5 s.
+
+### Runaway scripts (`ductus-script/src/guard.rs`)
+
+- Every call into V8 is **armed** with a deadline: the interface's `timeout` (default 5 s, 10 ms–10 min) for its `transform`, the module's for loading it. A single `script-watchdog` thread checks all isolates every 10 ms and, past a deadline, calls `IsolateHandle::request_interrupt`. The interrupt runs **on the isolate's thread inside the running code**: it checks the call is still the one armed (generation counter), reads the JS stack to find whose code it is (module URL, then folder), and calls `terminate_execution`. `disarm` then cancels the termination; the isolate stays usable. Terminating only from inside the interrupt means a call that finished in the meantime can never be hit.
+- The event loop runs continuations of *any* interface, so it's armed with the **shortest** budget on the isolate; when it passes, the interrupt extends the deadline to the budget of the interface found on the stack (or the longest, if none is found).
+- Heap: each isolate is created with `heap_limits(0, isolates.heap_mb)` (`ductus.yaml`, default 512). Near the limit V8 calls our callback: we raise the limit by a quarter (or the process dies) and stop the running call the same way, then run a full GC.
+- **A termination in the event loop drops every queued continuation** (V8 clears the microtask queue), not just the runaway's: every async transform in flight on that thread will never settle. The worker's `drive_event_loop` signals them all (`watch`): the culprit gets the `Runaway`, the others a transient error and are retried.
+- Limits: code in a shared module resumed after an `await` has no interface file on its stack, so it can't be attributed: all in-flight transforms are retried and it can recur. While runaway code runs, its thread's other interfaces wait up to `timeout`.
 
 ## SDK ↔ engine protocol
 

@@ -77,6 +77,16 @@ If an interface needs a cache, create it in the interface's own module and pass 
 
 Note: `const` alone doesn't make an object immutable (`const m = new Map()` can still be modified). `DX3` flags only top-level `let`/`var`; mutating a `const` Map or object in a shared library is still shared state. Treat shared libraries as read-only.
 
+## Endless loops and memory blow-ups
+
+Interfaces on one thread take turns, so code that never pauses would hold up all of them. The engine stops it:
+
+- **Time:** each run of your code may last `timeout` without pausing (default `5s`; set it in `interface.yaml`, e.g. `timeout: 500ms`). Waiting on `db()` or `fetch()` doesn't count. Past it, the code is stopped and the message quarantined (`transform stopped: the script ran longer than its 5s timeout…`). The other interfaces on the thread waited at most that long.
+- **Memory:** each isolate has a heap limit (`isolates.heap_mb` in `ductus.yaml`, default 512). Code that fills it is stopped and its message quarantined; the process keeps running.
+- **Stopped interface:** three timeouts in a row, or one heap overflow, stop the interface. New messages are still received and stored; they wait (pending) until the code is fixed and the engine restarted. The log says `interface stopped` with the reason.
+
+A loop in a shared library file, resumed after an `await`, can't be traced to one interface (no interface file is on the stack): every transform running on that thread is retried. Keep heavy work in the interface's own files, or give the interface its own isolate.
+
 ## When to use a dedicated isolate
 
 Give an interface its own threads and isolate when it:

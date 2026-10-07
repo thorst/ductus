@@ -1,5 +1,6 @@
-use ductus_script::Isolate;
+use ductus_script::{Cause, DEFAULT_FORMATS, Isolate, Runaway};
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 fn rt() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap()
@@ -344,6 +345,131 @@ fn transform_errors_carry_the_js_message() {
     assert!(err.contains("bad mapping"), "{err}");
     // The isolate stays usable after an error.
     assert!(rt.block_on(isolate.transform(ADT)).is_err());
+}
+
+fn runaway(result: anyhow::Result<Option<String>>) -> Runaway {
+    match result {
+        Err(e) => *e.downcast_ref::<Runaway>().unwrap_or_else(|| panic!("not a runaway: {e:#}")),
+        Ok(out) => panic!("expected a runaway, got {out:?}"),
+    }
+}
+
+const SPIN: Duration = Duration::from_millis(200);
+
+/// An endless loop in one interface of a shared isolate is stopped; the others keep working.
+#[test]
+fn endless_loops_are_stopped_and_the_isolate_keeps_working() {
+    let dir = project(&[
+        ("spin/transform.ts", "export function transform(m: unknown) { while (true) {} }"),
+        ("ok/transform.ts", "export function transform(m: unknown) { return m; }"),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let spin =
+        rt.block_on(host.add_interface_with(&dir.path().join("spin/transform.ts"), DEFAULT_FORMATS, SPIN)).unwrap();
+    let ok = rt.block_on(host.add_interface(&dir.path().join("ok/transform.ts"))).unwrap();
+    for _ in 0..3 {
+        let start = Instant::now();
+        let stopped = runaway(rt.block_on(host.transform_with(spin, ADT)));
+        assert_eq!(stopped, Runaway { interface: Some(spin), cause: Cause::Timeout(SPIN) });
+        assert!(start.elapsed() < SPIN * 3, "took {:?}", start.elapsed());
+        assert_eq!(rt.block_on(host.transform_with(ok, ADT)).unwrap().as_deref(), Some(ADT));
+    }
+    let message = Runaway { interface: Some(spin), cause: Cause::Timeout(SPIN) }.to_string();
+    assert!(message.contains("200ms timeout"), "{message}");
+}
+
+/// A loop after an `await` runs in the event loop: the stack still tells whose it was, and
+/// the event loop works afterwards.
+#[test]
+fn endless_loops_after_await_are_stopped_and_attributed() {
+    let dir = project(&[
+        (
+            "spin/transform.ts",
+            r#"import { db, type Message } from "@ductus/sdk";
+export async function transform(msg: Message) { await db("patients").query("SELECT 1", ["x"]); while (true) {} }"#,
+        ),
+        ("ok/transform.ts", &LOOKUP.replace("RESOURCE", "patients")),
+        // A shared module resumed after an await: no interface's file on the stack.
+        (
+            "lib/spin.ts",
+            r#"import { db } from "@ductus/sdk";
+export async function spin() { await db("patients").query("SELECT 1", ["x"]); while (true) {} }"#,
+        ),
+        (
+            "lib-user/transform.ts",
+            r#"import { spin } from "../lib/spin.ts";
+export async function transform(m: unknown) { await spin(); return m; }"#,
+        ),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host_with(Some(std::rc::Rc::new(FakeServices)));
+    let mut load =
+        |name: &str| rt.block_on(host.add_interface_with(&dir.path().join(name), DEFAULT_FORMATS, SPIN)).unwrap();
+    let (spin, ok, lib_user) = (load("spin/transform.ts"), load("ok/transform.ts"), load("lib-user/transform.ts"));
+
+    assert_eq!(
+        runaway(rt.block_on(host.transform_with(spin, ADT))),
+        Runaway { interface: Some(spin), cause: Cause::Timeout(SPIN) }
+    );
+    let out = rt.block_on(host.transform_with(ok, ADT)).unwrap().unwrap();
+    assert!(out.ends_with("ZLK|SMITH|FACILITY-A\r"), "{out}");
+    assert_eq!(runaway(rt.block_on(host.transform_with(lib_user, ADT))).interface, None);
+    assert!(rt.block_on(host.transform_with(ok, ADT)).is_ok());
+
+    // The event loop starts with the shortest budget on the isolate (200ms), but code of an
+    // interface allowed longer gets its own budget.
+    let slow = project(&[(
+        "slow/transform.ts",
+        r#"import { db } from "@ductus/sdk";
+export async function transform(m: unknown) {
+  await db("patients").query("SELECT 1", ["x"]);
+  const end = Date.now() + 600; while (Date.now() < end) {}
+  return m;
+}"#,
+    )]);
+    let slow_path = slow.path().join("slow/transform.ts");
+    let slow = rt.block_on(host.add_interface_with(&slow_path, DEFAULT_FORMATS, Duration::from_secs(2))).unwrap();
+    assert_eq!(rt.block_on(host.transform_with(slow, ADT)).unwrap().as_deref(), Some(ADT));
+}
+
+/// Using up the heap stops the code that was allocating, not the process.
+#[test]
+fn heap_exhaustion_is_stopped() {
+    let dir = project(&[
+        (
+            "hog/transform.ts",
+            "export function transform(m: unknown) { const a: number[][] = []; while (true) a.push(new Array(10000).fill(1)); }",
+        ),
+        ("ok/transform.ts", "export function transform(m: unknown) { return m; }"),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::new(None, 64);
+    let long = Duration::from_secs(60);
+    let hog =
+        rt.block_on(host.add_interface_with(&dir.path().join("hog/transform.ts"), DEFAULT_FORMATS, long)).unwrap();
+    let ok = rt.block_on(host.add_interface(&dir.path().join("ok/transform.ts"))).unwrap();
+    for _ in 0..2 {
+        assert_eq!(
+            runaway(rt.block_on(host.transform_with(hog, ADT))),
+            Runaway { interface: Some(hog), cause: Cause::Heap(64) }
+        );
+        assert_eq!(rt.block_on(host.transform_with(ok, ADT)).unwrap().as_deref(), Some(ADT));
+    }
+}
+
+#[test]
+fn endless_loops_while_loading_are_reported() {
+    let dir = project(&[("transform.ts", "while (true) {}\nexport function transform(m: unknown) { return m; }")]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let err = rt.block_on(host.add_interface_with(&dir.path().join("transform.ts"), DEFAULT_FORMATS, SPIN));
+    let err = format!("{:#}", err.unwrap_err());
+    assert!(err.contains("loading the module") && err.contains("200ms timeout"), "{err}");
 }
 
 #[test]
