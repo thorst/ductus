@@ -27,6 +27,15 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** after a crash, a temporary failure (database down, `fetch()` getting a 503) or an interruption (see "Runaway scripts" below), the whole transform runs again from the start. Any `db().execute()` or `fetch()` POST it made the first time happens again.
 - **What to do:** make writes idempotent: `INSERT ... ON CONFLICT DO NOTHING`, upserts keyed on the message's control ID, or an idempotency key header on API calls.
 
+### Only the original is stored; outputs are recomputed (level 3)
+- **What:** the engine stores each message exactly as received and never changes it. What was sent isn't stored by default; it's reproduced by running the same code on the original. That's exact only if the transform depends on nothing but the message and the code. Lookups (`db()`, `fetch()`), the current time and environment values can give a different result when re-run later.
+- **Why:** transforms are fast, and storing every output would cost a database write per message.
+- **What to do:** if you must be able to prove exactly what was sent, turn on saved output for that interface (planned for v0.5). Keep transforms that don't need lookups free of them.
+
+### A "done" marker can't prevent duplicates (level 5)
+- **What:** recording "this insert happened" in the engine's database doesn't make an insert in *another* database happen exactly once: the two writes can't share a transaction, so a crash between them still repeats the insert on re-run.
+- **What to do:** put the guarantee where the data lands: a unique key or upsert in the target table, or an idempotency key the receiving API checks. Use the message's stable key (planned: `meta.id`) for it.
+
 ### Order is per key, and one stuck message holds up its key (level 3)
 - **What:** messages with the same ordering key (e.g. MRN) are processed strictly in arrival order. A message that keeps failing temporarily blocks the other messages in its lane until it succeeds or is quarantined. With no `ordering.key`, the whole interface is one lane.
 - **Why:** that's the price of ordering: patient B's update must not overtake patient A's.
