@@ -59,6 +59,8 @@ pub struct Outlet {
     pub limiter: Option<Arc<Limiter>>,
     /// SFTP destinations: the server, from resources.yaml.
     pub server: Option<ductus_core::resources::SftpServer>,
+    /// HTTP destinations through an API: the API, from resources.yaml.
+    pub api: Option<ductus_core::resources::Api>,
 }
 
 /// Readiness report for one job: its interface name and whether its code loaded.
@@ -288,7 +290,7 @@ impl Worker {
             destination: name.into(),
             destination_id: outlet.id,
             lanes: config.partitions_for_worker(job.slot),
-            sender: Sender::new(&config, destination, outlet.server),
+            sender: Sender::new(&config, destination, outlet.server, outlet.api),
             retry: config.retry_for(destination).clone(),
             save_output: destination.save_output,
             script,

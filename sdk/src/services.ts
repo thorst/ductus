@@ -1,7 +1,8 @@
 // Engine services for interface code: databases, HTTP, environment variables, secrets.
 //
 //   const rows = await db("patient_db").query("SELECT name FROM patients WHERE mrn = $1", [mrn]);
-//   const patient = (await fetch(`${env("EMPI_URL")}/patients/${mrn}`)).json();
+//   const patient = (await api("empi").get(`/patients/${mrn}`)).json();
+//   const page = (await fetch(`${env("WIKI_URL")}/status`)).text();
 //   const url = env("EPIC_URL");
 
 export type Param = string | number | boolean | null;
@@ -12,12 +13,15 @@ const TRANSIENT = "[ductus:transient]";
 
 /** An HTTP request as the engine receives it (ductus_script::FetchRequest). */
 export interface FetchCall {
+  /** `api(name)` calls: the API's name in resources.yaml; `url` is then the path. */
+  api?: string;
   url: string;
   method: string;
   /** Header names are lower-case. */
   headers: Record<string, string>;
   body: string | null;
-  timeoutMs: number;
+  /** null: the API's `timeout`, or 30 s. */
+  timeoutMs: number | null;
 }
 
 export interface RawResponse {
@@ -95,7 +99,7 @@ export interface FetchOptions {
   body?: unknown;
   /** Added to the URL's query string (values are encoded). */
   query?: Record<string, string | number | boolean>;
-  /** Milliseconds; default 30000. */
+  /** Milliseconds; default 30000 (or the API's `timeout` in resources.yaml). */
   timeout?: number;
   /**
    * Default true: network errors, timeouts, 408, 429 and 5xx responses make the message wait
@@ -154,7 +158,41 @@ function withQuery(url: string, query: FetchOptions["query"]): string {
  *   if (r.status === 404) throw quarantine(`unknown MRN ${mrn}`);
  *   const patient = r.json();
  */
-export async function fetch(url: string, options: FetchOptions = {}): Promise<FetchResponse> {
+export function fetch(url: string, options: FetchOptions = {}): Promise<FetchResponse> {
+  return send(undefined, url, options);
+}
+
+/** An HTTP API defined in resources.yaml: its base URL, credentials and timeout live there. */
+export interface Api {
+  /** A request to a path under the API's URL (`/patients/123`). Same options as `fetch()`. */
+  fetch(path: string, options?: FetchOptions): Promise<FetchResponse>;
+  get(path: string, options?: Omit<FetchOptions, "method" | "body">): Promise<FetchResponse>;
+  /** The body is sent as JSON unless it's a string. */
+  post(path: string, body: unknown, options?: Omit<FetchOptions, "method" | "body">): Promise<FetchResponse>;
+  put(path: string, body: unknown, options?: Omit<FetchOptions, "method" | "body">): Promise<FetchResponse>;
+  delete(path: string, options?: Omit<FetchOptions, "method" | "body">): Promise<FetchResponse>;
+}
+
+/**
+ * An HTTP API defined in resources.yaml, by name. The engine adds its URL and headers (tokens
+ * included), so credentials never pass through interface code:
+ *
+ *   const patient = (await api("empi").get(`/patients/${mrn}`)).json();
+ */
+export function api(name: string): Api {
+  return {
+    fetch: (path, options = {}) => send(name, path, options),
+    get: (path, options = {}) => send(name, path, { ...options, method: "GET" }),
+    post: (path, body, options = {}) => send(name, path, { ...options, method: "POST", body }),
+    put: (path, body, options = {}) => send(name, path, { ...options, method: "PUT", body }),
+    delete: (path, options = {}) => send(name, path, { ...options, method: "DELETE" }),
+  };
+}
+
+async function send(api: string | undefined, url: string, options: FetchOptions): Promise<FetchResponse> {
+  if (api !== undefined && /^[a-z][a-z0-9+.-]*:/i.test(url)) {
+    throw new Error(`api("${api}"): give a path such as "/patients/1", not a full URL (the URL is in resources.yaml)`);
+  }
   const hasBody = options.body !== undefined && options.body !== null;
   const method = (options.method ?? (hasBody ? "POST" : "GET")).toUpperCase();
   const headers: Record<string, string> = {};
@@ -170,11 +208,13 @@ export async function fetch(url: string, options: FetchOptions = {}): Promise<Fe
   }
   const full = withQuery(url, options.query);
   // Messages never show the query string: it may carry an API key.
-  const label = `${method} ${full.split(/[?#]/)[0]}`;
+  const label = `${api === undefined ? "" : `api("${api}") `}${method} ${full.split(/[?#]/)[0]}`;
   const retry = options.retry ?? true;
+  const call: FetchCall = { url: full, method, headers, body, timeoutMs: options.timeout ?? (api ? null : 30_000) };
+  if (api !== undefined) call.api = api;
   let raw: RawResponse;
   try {
-    raw = await ops().fetch({ url: full, method, headers, body, timeoutMs: options.timeout ?? 30_000 });
+    raw = await ops().fetch(call);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
     throw new Error(retry ? message : message.replace(TRANSIENT, "").trim());

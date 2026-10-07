@@ -12,7 +12,7 @@ mod guard;
 mod loader;
 mod ops;
 
-pub use check::{Diagnostic, type_check};
+pub use check::{Analysis, Diagnostic, ResourceReference, analyze, type_check};
 pub use guard::Cause;
 pub use ops::{BoxFuture, FetchRequest, FetchResponse, KILL, QUARANTINE, Services, TRANSIENT};
 

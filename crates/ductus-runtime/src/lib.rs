@@ -122,6 +122,10 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                     Destination::Sftp { server, .. } => sftp_server(server),
                     _ => None,
                 },
+                api: match &d.connector {
+                    Destination::Http { api: Some(api), .. } => resources.apis.get(api).cloned(),
+                    _ => None,
+                },
             })
             .collect();
         // Respond-mode HTTP interfaces get requests over a channel instead of a queue.

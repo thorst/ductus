@@ -351,6 +351,8 @@ mod tests {
             password: password.into(),
             max_connections: 1,
             trust_server_certificate: true,
+            application: None,
+            vendor: None,
         })
     }
 

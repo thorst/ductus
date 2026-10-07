@@ -1,6 +1,8 @@
 //! `interface.yaml`: everything about an interface except its logic.
 
+use crate::about::{About, System};
 use crate::format::Format;
+use crate::resources::Kind;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -64,6 +66,9 @@ pub struct InterfaceConfig {
     /// stopped and the message quarantined; three in a row stop the interface.
     #[serde(default = "defaults::timeout", deserialize_with = "duration")]
     pub timeout: Duration,
+    /// What it's for, who owns it, and the systems on each side (for `ductus impact`).
+    #[serde(default)]
+    pub about: About,
 
     /// Folder the config was loaded from.
     #[serde(skip)]
@@ -236,12 +241,29 @@ pub struct DestinationConfig {
     /// Keep a copy of exactly what was sent (off by default: outputs can be recomputed from the
     /// original, and storing them costs space). For when it must be provable what was sent.
     pub save_output: bool,
+    /// The receiving system, when it differs from `about.to` (several destinations).
+    pub application: Option<String>,
+    pub vendor: Option<String>,
 }
 
 impl DestinationConfig {
     /// The exported function that prepares this destination's messages.
     pub fn function(&self) -> &str {
         self.transform.as_deref().unwrap_or("transform")
+    }
+
+    /// The receiving system as configured on the destination itself (may be unknown).
+    pub fn system(&self) -> System {
+        System::new(&self.application, &self.vendor)
+    }
+
+    /// The resources.yaml entry it sends through, if any: an SFTP server or an API.
+    pub fn resource(&self) -> Option<(Kind, &str)> {
+        match &self.connector {
+            Destination::Sftp { server, .. } => Some((Kind::Sftp, server)),
+            Destination::Http { api: Some(api), .. } => Some((Kind::Api, api)),
+            _ => None,
+        }
     }
 }
 
@@ -268,6 +290,10 @@ struct RawDestination {
     rate_limit: Option<RateLimit>,
     #[serde(default)]
     save_output: bool,
+    #[serde(default)]
+    application: Option<String>,
+    #[serde(default)]
+    vendor: Option<String>,
 }
 
 impl TryFrom<RawDestination> for DestinationConfig {
@@ -289,6 +315,8 @@ impl TryFrom<RawDestination> for DestinationConfig {
             retry: raw.retry,
             rate_limit: raw.rate_limit,
             save_output: raw.save_output,
+            application: raw.application,
+            vendor: raw.vendor,
         })
     }
 }
@@ -317,16 +345,25 @@ pub enum Destination {
         server: String,
         dir: String,
     },
-    /// POST (or PUT...) each message to a URL. 2xx = delivered; 408, 429, 5xx and network
-    /// errors retry; other 4xx quarantine.
+    /// POST (or PUT...) each message to a URL, or to `path` under an API in resources.yaml
+    /// (`api: billing`, which brings its URL, headers and timeout). 2xx = delivered; 408, 429,
+    /// 5xx and network errors retry; other 4xx quarantine.
     Http {
-        url: String,
+        #[serde(default)]
+        url: Option<String>,
+        #[serde(default)]
+        api: Option<String>,
+        /// With `api`: where under its URL (default: the URL itself).
+        #[serde(default)]
+        path: Option<String>,
         #[serde(default = "defaults::post")]
         method: String,
+        /// Added to (and overriding) the API's headers.
         #[serde(default)]
         headers: std::collections::BTreeMap<String, String>,
-        #[serde(default = "defaults::timeout_ms")]
-        timeout_ms: u64,
+        /// Default: the API's `timeout`, else 10 s.
+        #[serde(default)]
+        timeout_ms: Option<u64>,
     },
 }
 
@@ -436,7 +473,7 @@ fn duration<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Durat
     parse_duration(&text).map_err(serde::de::Error::custom)
 }
 
-fn duration_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Duration>, D::Error> {
+pub(crate) fn duration_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Option<Duration>, D::Error> {
     duration(d).map(Some)
 }
 
@@ -611,9 +648,26 @@ impl InterfaceConfig {
             {
                 bail!("{}: SFTP needs `server` (a name under `sftp:` in resources.yaml)", what());
             }
+            if let Destination::Http { url, api, path, .. } = &d.connector {
+                match (url, api) {
+                    (Some(_), Some(_)) | (None, None) => {
+                        bail!("{}: HTTP needs either `url` or `api` (a name under `apis:` in resources.yaml)", what())
+                    }
+                    (Some(_), None) if path.is_some() => {
+                        bail!("{}: `path` goes with `api`; put it in the `url` instead", what())
+                    }
+                    (Some(u), None) if crate::resources::Endpoint::from_url(u).is_none() => {
+                        bail!("{}: `url` must be an http(s) URL, not `{u}`", what())
+                    }
+                    _ => {}
+                }
+            }
             if let Some(r) = &d.rate_limit {
                 check_rate_limit(r).with_context(what)?;
             }
+        }
+        for host in &self.about.from.hosts {
+            crate::about::Network::parse(host).context("about.from.hosts")?;
         }
         if let Source::Http { path, method, .. } = &self.source {
             if !path.starts_with('/') {
@@ -723,17 +777,22 @@ impl InterfaceConfig {
         serde_json::json!({ "input": input, "output": output, "http": self.responds() }).to_string()
     }
 
-    /// The SFTP servers this interface uses (names in resources.yaml).
-    pub fn sftp_servers(&self) -> Vec<&str> {
-        let source = match &self.source {
-            Source::Sftp(f) => f.server.as_deref(),
-            _ => None,
-        };
-        let destinations = self.destinations().filter_map(|(_, d)| match &d.connector {
-            Destination::Sftp { server, .. } => Some(server.as_str()),
-            _ => None,
-        });
-        source.into_iter().chain(destinations).collect()
+    /// The resources.yaml entries this config refers to, each with where (`source`,
+    /// `destination `lab``, `dedicated_pools`). Code may use more (`db()`, `api()`).
+    pub fn resource_references(&self) -> Vec<(Kind, &str, String)> {
+        let mut out = Vec::new();
+        if let Source::Sftp(FileSource { server: Some(s), .. }) = &self.source {
+            out.push((Kind::Sftp, s.as_str(), "source".to_string()));
+        }
+        for (name, d) in self.destinations() {
+            if let Some((kind, resource)) = d.resource() {
+                out.push((kind, resource, format!("destination `{name}`")));
+            }
+        }
+        for db in self.dedicated_pools.keys() {
+            out.push((Kind::Database, db.as_str(), "dedicated_pools".to_string()));
+        }
+        out
     }
 
     /// An HTTP source in `respond` mode: requests are answered directly, nothing is queued.
@@ -942,7 +1001,7 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
         let Source::File(f) = &csv.source else { panic!() };
         assert_eq!((f.poll, f.after, f.archive().as_str()), (Duration::from_secs(2), After::Move, "in/archive"));
         assert!(csv.format_spec().contains(r#""record":true"#), "a split CSV passes one record");
-        assert!(csv.sftp_servers().is_empty());
+        assert!(csv.resource_references().is_empty());
 
         let whole = load(&format!("name: b\nsource: {{ file: {{ dir: in }} }}\nformat: csv\n{dest}")).unwrap();
         assert!(!whole.format_spec().contains("record"));
@@ -951,7 +1010,10 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
             "name: c\nsource: { sftp: { server: lab, dir: /out, after: delete } }\ndestination: { sftp: { server: emr, dir: inbound } }\n",
         )
         .unwrap();
-        assert_eq!(sftp.sftp_servers(), ["lab", "emr"]);
+        assert_eq!(
+            sftp.resource_references(),
+            [(Kind::Sftp, "lab", "source".into()), (Kind::Sftp, "emr", "destination `default`".into())]
+        );
 
         let err = |yaml: &str| format!("{:#}", load(yaml).unwrap_err());
         assert!(err(&format!("name: d\nsource: {{ sftp: {{ dir: x }} }}\n{dest}")).contains("needs `server`"));
@@ -1047,6 +1109,59 @@ destinations:
                 .contains("destination `a`")
         );
         assert!(err(&format!("{head}destinations: {{}}")).contains("is required"));
+    }
+
+    #[test]
+    fn about_and_api_destinations() {
+        let yaml = r#"
+name: adt
+source: { mllp: { port: 6661 } }
+about:
+  description: ADT to the lab and billing
+  owner: Integration team
+  from: { application: Epic, vendor: Epic Systems, hosts: [10.20.30.0/24, epic-vpn.local] }
+  to: { application: Sunquest Lab }
+destinations:
+  lab: { mllp: { host: lab, port: 6662 } }
+  billing:
+    http: { api: billing, path: /charges, headers: { X-Source: ductus } }
+    vendor: Experian
+"#;
+        let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(c.validate().is_ok(), "{:#}", c.validate().unwrap_err());
+        assert_eq!(c.about.from.system().label(), "Epic (Epic Systems)");
+        let all: Vec<_> = c.destinations().collect();
+        let (billing, lab) = (all[0].1, all[1].1);
+        assert_eq!((billing.system().label(), lab.system().is_known()), ("(Experian)".to_string(), false));
+        assert_eq!(billing.resource(), Some((Kind::Api, "billing")));
+        assert_eq!(c.resource_references(), [(Kind::Api, "billing", "destination `billing`".into())]);
+
+        let err = |yaml: &str| {
+            let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
+            format!("{:#}", c.validate().unwrap_err())
+        };
+        let head = "name: x\nsource: { mllp: { port: 1 } }\n";
+        assert!(err(&format!("{head}destination: {{ http: {{ method: PUT }} }}")).contains("either `url` or `api`"));
+        assert!(
+            err(&format!("{head}destination: {{ http: {{ url: 'https://a/b', api: b }} }}"))
+                .contains("either `url` or `api`")
+        );
+        assert!(
+            err(&format!("{head}destination: {{ http: {{ url: 'https://a/b', path: /c }} }}"))
+                .contains("goes with `api`")
+        );
+        assert!(err(&format!("{head}destination: {{ http: {{ url: 'ftp://a/b' }} }}")).contains("http(s) URL"));
+        assert!(
+            err(&format!("{head}destination: {{ file: {{ dir: o }} }}\nabout: {{ from: {{ hosts: [10.1.2.0/40] }} }}"))
+                .contains("about.from.hosts")
+        );
+        assert!(
+            serde_yaml_ng::from_str::<InterfaceConfig>(&format!(
+                "{head}destination: {{ file: {{ dir: o }} }}\nabout: {{ to: {{ hosts: [h] }} }}"
+            ))
+            .is_err(),
+            "hosts are for the sending side"
+        );
     }
 
     #[test]

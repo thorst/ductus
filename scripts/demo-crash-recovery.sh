@@ -49,3 +49,11 @@ echo "== engine status"
 "$BIN" status
 echo "== sink $(tail -1 "$LOGS/sink.log")"
 echo "logs: $LOGS"
+
+# Every message arrives, in order per patient. A duplicate is allowed (at-least-once: a kill
+# between sending and recording `sent` resends one), so it's reported, not failed.
+final=$(tail -1 "$LOGS/sink.log")
+fail=""
+grep "unique $COUNT |" <<<"$final" >/dev/null || fail+=" lost-messages"
+grep "out of order 0 |" <<<"$final" >/dev/null || fail+=" out-of-order"
+if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

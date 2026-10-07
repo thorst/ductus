@@ -183,8 +183,13 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
     };
     let resources = match ductus_core::Resources::load(root, &env) {
         Ok(r) => {
-            if !r.databases.is_empty() || !r.sftp.is_empty() {
-                println!("✓ resources: {} database(s), {} SFTP server(s)", r.databases.len(), r.sftp.len());
+            if !r.databases.is_empty() || !r.sftp.is_empty() || !r.apis.is_empty() {
+                println!(
+                    "✓ resources: {} database(s), {} SFTP server(s), {} API(s)",
+                    r.databases.len(),
+                    r.sftp.len(),
+                    r.apis.len()
+                );
             }
             Some(r)
         }
@@ -227,20 +232,49 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
         println!("✗ {problem}");
     }
 
-    // Every .ts file in the project, so imports of shared libraries resolve. Files outside any
-    // interface folder are shared modules: one instance per isolate, imported by many interfaces.
-    let interface_dirs: Vec<String> = interfaces.iter().map(|i| format!("{}/", key(&i.dir))).collect();
-    let mut shared = Vec::new();
-    for f in files_under(root, &is_ts) {
-        let k = key(&f);
-        if !interface_dirs.iter().any(|d| k.starts_with(d)) {
-            shared.push(k.clone());
+    let shared = project_files(root, &interfaces, &mut files)?;
+    let analysis = ductus_script::analyze(&files, &shared, true)?;
+
+    // Databases and APIs named in code must exist (each place reported once, even in a shared
+    // library many interfaces import).
+    if let Some(r) = &resources {
+        let mut seen = std::collections::BTreeSet::new();
+        for config in configs() {
+            for reference in code_references(config, &analysis) {
+                if let Some(kind) = resource_kind(&reference.kind)
+                    && let Some(missing) = r.missing(kind, &reference.name)
+                    && seen.insert((&reference.file, reference.line, reference.column))
+                {
+                    problems += 1;
+                    let at = relative(root, &reference.file);
+                    println!(
+                        "✗ {at}:{}:{} {}(\"{}\"): {missing}",
+                        reference.line, reference.column, reference.kind, reference.name
+                    );
+                }
+            }
         }
-        files.insert(k, std::fs::read_to_string(&f)?);
     }
 
-    let diagnostics = ductus_script::type_check(&files, &shared)?;
-    for d in &diagnostics {
+    // Which systems each interface connects, for `ductus impact`.
+    let require_about = ductus_core::settings::Settings::load(root).map(|s| s.require_about).unwrap_or(false);
+    let mut gaps = 0;
+    for config in configs() {
+        for gap in ductus_core::impact::about_gaps(config, resources.as_ref().unwrap_or(&Default::default())) {
+            gaps += 1;
+            println!("{} {}: {gap}", if require_about { "✗" } else { "⚠" }, config.name);
+        }
+    }
+    if require_about {
+        problems += gaps;
+    } else if gaps > 0 {
+        println!(
+            "  (warnings: `ductus impact` can't find what isn't named; `require_about: true` in ductus.yaml makes them errors)"
+        );
+    }
+
+    let diagnostics = &analysis.diagnostics;
+    for d in diagnostics {
         if d.is_error() {
             problems += 1;
         }
@@ -258,6 +292,135 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
 
     println!("\n{}", if problems == 0 { "valid".to_string() } else { format!("{problems} problem(s)") });
     Ok(problems == 0)
+}
+
+/// Add every .ts file in the project to `files`, so imports of shared libraries resolve, and
+/// return the shared modules: files outside any interface folder, one instance per isolate,
+/// imported by many interfaces.
+fn project_files(
+    root: &Path,
+    interfaces: &[InterfaceDir],
+    files: &mut BTreeMap<String, String>,
+) -> Result<Vec<String>> {
+    let interface_dirs: Vec<String> = interfaces.iter().map(|i| format!("{}/", key(&i.dir))).collect();
+    let mut shared = Vec::new();
+    for f in files_under(root, &is_ts) {
+        let k = key(&f);
+        if !interface_dirs.iter().any(|d| k.starts_with(d)) {
+            shared.push(k.clone());
+        }
+        files.insert(k, std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display()))?);
+    }
+    Ok(shared)
+}
+
+/// The `db()`/`api()` calls reachable from an interface's script (through its imports).
+fn code_references<'a>(
+    config: &InterfaceConfig,
+    analysis: &'a ductus_script::Analysis,
+) -> Vec<&'a ductus_script::ResourceReference> {
+    config.script_path().map(|s| analysis.references_from(&key(&s))).unwrap_or_default()
+}
+
+fn resource_kind(function: &str) -> Option<ductus_core::resources::Kind> {
+    match function {
+        "db" => Some(ductus_core::resources::Kind::Database),
+        "api" => Some(ductus_core::resources::Kind::Api),
+        _ => None,
+    }
+}
+
+/// `ductus impact`: every interface a vendor, application or host touches, how, and where to
+/// look. Returns false if some interfaces couldn't be checked (their config doesn't load).
+pub async fn impact(root: &Path, env: &str, query: ductus_core::impact::Query, resolve: bool) -> Result<bool> {
+    use ductus_core::impact::{self, Query};
+    let environment = Environment::load(root, env)?;
+    let interfaces = interface_dirs(root, &environment)?;
+    let resources = ductus_core::Resources::load(root, &environment)?;
+    println!("environment: {env}");
+    let mut complete = true;
+    for i in &interfaces {
+        if let Err(e) = &i.config {
+            complete = false;
+            println!("✗ {}: not checked, its config doesn't load: {}", i.label(), first_line(&format!("{e:#}")));
+        }
+    }
+    let configs: Vec<&InterfaceConfig> = interfaces.iter().filter_map(|i| i.config.as_ref().ok()).collect();
+
+    // What code uses: parsing and name resolution only (no type check), so it's quick.
+    let mut files = BTreeMap::new();
+    files.insert(key(&root.join(TYPES_FILE)), Isolate::generate_types().await?);
+    let shared = project_files(root, &interfaces, &mut files)?;
+    let analysis = ductus_script::analyze(&files, &shared, false)?;
+    let code: impact::CodeUses = configs
+        .iter()
+        .map(|c| {
+            let uses = code_references(c, &analysis)
+                .into_iter()
+                .filter_map(|r| Some((resource_kind(&r.kind)?, r.name.clone())))
+                .collect();
+            (c.name.clone(), uses)
+        })
+        .collect();
+
+    let lookup = |name: &str| -> Vec<std::net::IpAddr> {
+        use std::net::ToSocketAddrs;
+        if !resolve {
+            return Vec::new();
+        }
+        let mut ips: Vec<_> = (name, 0).to_socket_addrs().map(|a| a.map(|s| s.ip()).collect()).unwrap_or_default();
+        ips.sort();
+        ips.dedup();
+        ips
+    };
+    let hits = impact::impact(configs.iter().copied(), &resources, &code, &query, &lookup);
+
+    let affected: std::collections::BTreeSet<&str> = hits.iter().map(|h| h.interface.as_str()).collect();
+    println!("{query}: {} interface(s) affected, of {}\n", affected.len(), configs.len());
+    let width = hits.iter().map(|h| h.role.chars().count()).max().unwrap_or(0);
+    let mut last = "";
+    for h in &hits {
+        if h.interface != last {
+            if !last.is_empty() {
+                println!();
+            }
+            let owner = if h.owner.is_empty() { String::new() } else { format!("  (owner: {})", h.owner) };
+            println!("{}{owner}", h.interface);
+            last = &h.interface;
+        }
+        println!("  {:<width$}  {}", h.role, h.reason);
+        for e in &h.endpoints {
+            println!("  {:<width$}  → {e}", "");
+        }
+    }
+    if hits.is_empty() {
+        match &query {
+            Query::Vendor(_) | Query::Application(_) => {
+                let known = impact::known_values(configs.iter().copied(), &resources, &query);
+                let what = if matches!(query, Query::Vendor(_)) { "vendors" } else { "applications" };
+                if known.is_empty() {
+                    println!(
+                        "no {what} are named in this project yet (`about:` in interface.yaml, `vendor`/`application` in resources.yaml)"
+                    );
+                } else {
+                    println!("known {what}: {}", known.join(", "));
+                }
+            }
+            Query::Host(_) => {}
+        }
+    }
+    if matches!(query, Query::Host(_)) && !resolve {
+        println!(
+            "\nnote: host names in the config were compared as written; add --resolve to look them up and match by address"
+        );
+    }
+    let unnamed = configs.iter().filter(|c| !impact::about_gaps(c, &resources).is_empty()).count();
+    if unnamed > 0 && !matches!(query, Query::Host(_)) {
+        println!(
+            "\nnote: {unnamed} interface(s) don't name every system they connect (see `ductus validate`); they may be missing here"
+        );
+    }
+    Ok(complete)
 }
 
 /// `ductus ports`: listening ports and HTTP routes, outbound connections, and port conflicts

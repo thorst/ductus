@@ -32,7 +32,7 @@ export {
 } from "./formats.ts";
 export { expect, fixture, hl7, input, mock, type MockResponse, test } from "./testing.ts";
 export { __runTests, __setFixtures } from "./testing.ts";
-export { type Database, db, env, fetch, type FetchOptions, FetchResponse, secret } from "./services.ts";
+export { type Api, api, type Database, db, env, fetch, type FetchOptions, FetchResponse, secret } from "./services.ts";
 export { generateTypes as __generateTypes } from "./typegen.ts";
 
 // Must match ductus_script::KILL / QUARANTINE.

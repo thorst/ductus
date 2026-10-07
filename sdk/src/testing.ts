@@ -26,12 +26,14 @@ export interface DbCall {
 // Mocks last for one test: every test starts with none.
 let dbMocks = new Map<string, { handler: DbHandler; calls: DbCall[] }>();
 let fetchMock: { handler: FetchHandler; calls: FetchCall[] } | null = null;
+let apiMocks = new Map<string, { handler: FetchHandler; calls: FetchCall[] }>();
 let envMock: Record<string, string> = {};
 let secretMock: Record<string, string> = {};
 
 function resetMocks(): void {
   dbMocks = new Map();
   fetchMock = null;
+  apiMocks = new Map();
   envMock = {};
   secretMock = {};
 }
@@ -55,6 +57,12 @@ export const mock = {
   fetch(answer: FetchHandler | MockResponse): FetchCall[] {
     const calls: FetchCall[] = [];
     fetchMock = { handler: typeof answer === "function" ? answer : () => answer, calls };
+    return calls;
+  },
+  /** Answer `api(name)` calls (the request's `url` is the path). Pass a response, or a function of the request. */
+  api(name: string, answer: FetchHandler | MockResponse): FetchCall[] {
+    const calls: FetchCall[] = [];
+    apiMocks.set(name, { handler: typeof answer === "function" ? answer : () => answer, calls });
     return calls;
   },
   /** Values for `env()`. */
@@ -85,11 +93,16 @@ const mockOps: Ops = {
     return typeof r === "number" ? r : r.length;
   },
   async fetch(request): Promise<RawResponse> {
-    if (!fetchMock) {
-      throw new Error(`fetch(${request.method} ${request.url}) is not mocked in this test: add mock.fetch({ status: 200, body: ... })`);
+    const m = request.api === undefined ? fetchMock : apiMocks.get(request.api);
+    if (!m) {
+      throw new Error(
+        request.api === undefined
+          ? `fetch(${request.method} ${request.url}) is not mocked in this test: add mock.fetch({ status: 200, body: ... })`
+          : `api("${request.api}") ${request.method} ${request.url} is not mocked in this test: add mock.api("${request.api}", { status: 200, body: ... })`,
+      );
     }
-    fetchMock.calls.push(request);
-    const r = await fetchMock.handler(request);
+    m.calls.push(request);
+    const r = await m.handler(request);
     const headers: Record<string, string> = {};
     for (const [k, v] of Object.entries(r.headers ?? {})) headers[k.toLowerCase()] = v;
     let body = "";

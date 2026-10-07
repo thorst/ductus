@@ -236,7 +236,9 @@ impl ductus_script::Services for FakeServices {
                 anyhow::bail!("{} {} {} failed: connection refused", ductus_script::TRANSIENT, r.method, r.url);
             }
             let status = r.url.rsplit_once("/status/").and_then(|(_, s)| s.get(..3)?.parse().ok()).unwrap_or(200);
-            let echo = serde_json::json!({ "method": r.method, "url": r.url, "headers": r.headers, "body": r.body });
+            let echo = serde_json::json!({
+                "api": r.api, "method": r.method, "url": r.url, "headers": r.headers, "body": r.body, "timeout": r.timeout_ms,
+            });
             Ok(ductus_script::FetchResponse { status, headers: Default::default(), body: echo.to_string() })
         })
     }
@@ -316,6 +318,27 @@ export async function transform(msg: Message) {
     assert!(err.contains(ductus_script::TRANSIENT) && err.contains("connection refused"), "{err}");
     let err = run("down-own").unwrap_err();
     assert!(!err.contains(ductus_script::TRANSIENT) && err.contains("connection refused"), "{err}");
+}
+
+#[test]
+fn api_calls_reach_the_engine_with_their_name_and_path() {
+    let dir = project(&[(
+        "a/transform.ts",
+        r#"import { api, type Message } from "@ductus/sdk";
+export async function transform(msg: Message) {
+  const e = (await api("empi").get(`/patients/${msg.PID[3][1]}`)).json();
+  const t = (await api("empi").post("/x", "raw", { timeout: 50 })).json();
+  msg.add("ZAP", [e.api, e.method, e.url, String(e.timeout), String(t.timeout), t.body]);
+  return msg;
+}"#,
+    )]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host_with(Some(std::rc::Rc::new(FakeServices)));
+    let id = rt.block_on(host.add_interface(&dir.path().join("a/transform.ts"))).unwrap();
+    let out = rt.block_on(host.transform_with(id, ADT)).unwrap().unwrap();
+    // No timeout given: null, so the engine uses the API's own.
+    assert!(out.ends_with("ZAP|empi|GET|/patients/123456|null|50|raw\r"), "{out}");
 }
 
 #[test]
@@ -613,6 +636,66 @@ export function transform(msg: Message) {
     // Module-level `let` inside an interface is private (fine); in a shared module it's flagged.
     assert_eq!(lint(90003), vec![("/p/lib/shared.ts".to_string(), 1)], "{d:#?}");
     assert!(d.iter().all(|x| !x.is_error()), "lints are warnings: {d:#?}");
+}
+
+#[test]
+fn finds_the_resources_code_names_through_imports() {
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut files = std::collections::BTreeMap::new();
+    files.insert("/p/.ductus/types/ductus-sdk.d.ts".to_string(), rt.block_on(Isolate::generate_types()).unwrap());
+    let a = "/p/interfaces/a/transform.ts";
+    files.insert(
+        a.to_string(),
+        r#"import { db as database, type Message } from "@ductus/sdk";
+import * as sdk from "@ductus/sdk";
+import { lookup } from "../../lib/lookups.ts";
+export async function transform(msg: Message) {
+  await database("patient_db").query("SELECT 1");
+  await sdk.api(`empi`).get("/x");
+  const name = "billing";
+  await sdk.db(name).query("SELECT 1");
+  return lookup(msg);
+}"#
+        .to_string(),
+    );
+    files.insert(
+        "/p/lib/lookups.ts".to_string(),
+        r#"import { api, type Message } from "@ductus/sdk";
+export async function lookup(msg: Message) { await api("provider_api").get("/p"); return msg; }"#
+            .to_string(),
+    );
+    // Its own `db` isn't the SDK's; and a test file isn't imported by the interface.
+    let b = "/p/interfaces/b/transform.ts";
+    files.insert(
+        b.to_string(),
+        r#"const db = (name: string) => name;
+export function transform(m: string) { db("not_a_resource"); return m; }"#
+            .to_string(),
+    );
+    files.insert(
+        "/p/interfaces/b/transform.test.ts".to_string(),
+        r#"import { db } from "@ductus/sdk";
+import { transform } from "./transform.ts";
+db("test_only"); transform("x");"#
+            .to_string(),
+    );
+
+    let analysis = ductus_script::analyze(&files, &[], true).unwrap();
+    let names = |entry: &str| {
+        analysis.references_from(entry).iter().map(|r| format!("{} {}", r.kind, r.name)).collect::<Vec<_>>()
+    };
+    assert_eq!(names(a), ["api empi", "api provider_api", "db patient_db"]);
+    assert!(names(b).is_empty(), "{:?}", names(b));
+    let dynamic: Vec<_> =
+        analysis.diagnostics.iter().filter(|d| d.code == 90004).map(|d| (d.line, d.is_error())).collect();
+    assert_eq!(dynamic, [(8, false)], "a name that isn't written out is a warning: {:#?}", analysis.diagnostics);
+    assert!(analysis.diagnostics.iter().all(|d| !d.is_error()), "{:#?}", analysis.diagnostics);
+
+    // Without diagnostics: the same references, no type checking.
+    let quick = ductus_script::analyze(&files, &[], false).unwrap();
+    assert!(quick.diagnostics.is_empty());
+    assert_eq!(quick.references, analysis.references);
 }
 
 #[test]

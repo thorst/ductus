@@ -71,7 +71,8 @@ test("looks up the account", async () => {
 - **Sources:** MLLP, HTTP (queue a message, or answer the request directly as a REST endpoint), local folders and SFTP (crash-safe streaming of large files, record by record), schedules (`every: 15m` or cron).
 - **Destinations:** MLLP, HTTP, files, SFTP. Several per interface, each independent: one vendor being down holds up only its own queue.
 - **Formats:** HL7 v2 (lazy parsing, positional syntax), JSON, XML, CSV, fixed-width, text.
-- **Interface code:** TypeScript in embedded V8, with `db()` (PostgreSQL and SQL Server), `fetch()`, `env()` and encrypted `secret()`. No direct network or file access; no credentials in code.
+- **Interface code:** TypeScript in embedded V8, with `db()` (PostgreSQL and SQL Server), `api()` (named HTTP APIs whose tokens the engine adds), `fetch()`, `env()` and encrypted `secret()`. No direct network or file access; no credentials in code.
+- **Know what connects to what:** each interface names the applications and vendors on each side (`about:`), resources name theirs, and `ductus impact --vendor "Epic Systems"` lists every interface affected, including through databases and APIs its code uses.
 - **Reliability:** persist before ACK, per-key ordering, dedupe, rate limits, retries with back-off, quarantine. A runaway script (endless loop, memory blow-up) is stopped without affecting its neighbours.
 - **Environments:** one project, per-environment variables and encrypted secrets, named resources (`resources.yaml`).
 
@@ -107,6 +108,15 @@ Measured on a development laptop (WSL2, a slow disk at ~2.5 ms per flush), not a
 
 Fast startup is what makes upgrades and restarts uneventful: senders reconnect to a ready engine within a second, and nothing they sent is lost meanwhile. Details and how each was measured: [docs/architecture.md](docs/architecture.md#performance-notes-measured-wsl-25-ms-fsync-disk). Numbers on real server hardware are still to come.
 
+### Scaling one interface
+
+Most interfaces never need to: one destination of an interface in the shared pool drained about 1,500 messages/s in the measurements above, against an average of 12/s for a 1M/day feed. When one does, in this order:
+
+1. **Set `ordering.key`** (e.g. `PID-3.1`). Without one, the interface is a single ordered lane and no number of workers can split it; with one, it has 64 lanes and only the same patient's messages wait on each other.
+2. **`isolation: dedicated`**: its own threads and V8 isolate, away from its neighbours, with 4 workers by default.
+3. **Raise `workers`**, up to about the number of CPU cores. Lanes are spread evenly over them.
+4. **`dedicated_pools`** if it does database lookups, so it has connections of its own.
+
 ## Commands
 
 | Command | What it does |
@@ -116,6 +126,7 @@ Fast startup is what makes upgrades and restarts uneventful: senders reconnect t
 | `ductus test` | Run each interface's `*.test.ts`, with mocks for databases and APIs |
 | `ductus validate` | Check configs, code loading and TypeScript types for an environment (exits 1 on problems) |
 | `ductus ports` | Listening ports and routes, outbound hosts (for firewall requests), conflicts |
+| `ductus impact` | Which interfaces a vendor, application or host/subnet touches, how, and who owns them (vendor breach, VPN change) |
 | `ductus secret` | Manage encrypted per-environment secrets |
 | `ductus types` | Write editor typings and `tsconfig.json` for VS Code |
 | `ductus status` | Message counts by interface, status and destination |

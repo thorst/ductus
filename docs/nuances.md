@@ -62,6 +62,11 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **Why:** that's the price of ordering: patient B's update must not overtake patient A's.
 - **What to do:** choose a key that's as narrow as correctness allows. Set `retry.max_attempts` on destinations where waiting forever is worse than quarantining.
 
+### Without an ordering key, more workers don't help (level 3)
+- **What:** an interface with no `ordering.key` is one lane, and a lane has exactly one owner. `isolation: dedicated` with `workers: 8` still processes it one message at a time per destination (the other seven workers have no lanes).
+- **Why:** with no key, the only safe order is the order of arrival for everything.
+- **What to do:** scale in this order: (1) set an ordering key (64 lanes by default), (2) `isolation: dedicated` (own threads, 4 workers by default), (3) raise `workers` up to about the number of cores, (4) `dedicated_pools` if it does database lookups. Most interfaces need none of it: one destination of a shared interface drained ~1,500 messages/s on a laptop.
+
 ### Temporary failures retry forever by default (level 3)
 - **What:** a destination that's down, or a transform that hits a temporary error, is retried with back-off (1 s up to 60 s) until it works. `retry.max_attempts` limits delivery attempts; transform retries (database or API down) have no limit.
 - **What to do:** monitor queue depth ("behind-by" comes in v0.5) rather than expecting failures to show up as quarantined messages.
@@ -133,11 +138,26 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 ### SQL Server: one result set, one batch per call (level 3)
 - **What:** only the first result set is returned. Each `query`/`execute` is its own batch, so a transaction must begin and end within one call. Text parameters are sent as `nvarchar`: comparing them with a `varchar` column can skip its index (cast the parameter).
 
-### `fetch()` retries 5xx, 408 and 429 by default (level 3)
+### `fetch()` and `api()` retry 5xx, 408 and 429 by default (level 3)
 - **What:** those statuses become temporary errors (the message waits and retries). Pass `retry: false` to handle them yourself. Bodies are text only, up to 16 MB.
+
+### `api()` headers: the API's, then yours (level 2)
+- **What:** an API in `resources.yaml` brings its URL, headers and timeout. A header your code (or an HTTP destination) sets with the same name replaces the API's. Paths go under the API's URL (`/patients/1` under `https://h/api/v2` is `https://h/api/v2/patients/1`); a full URL is refused.
+- **Why:** the token lives in one place, per environment, and never passes through interface code; overriding is for the rare call that needs something else.
+- **What to do:** keep credentials in the API's `headers` (with `${secret:...}`), not in code. Tests answer with `mock.api("name", ...)`; `mock.fetch` doesn't answer `api()` calls.
+
+### Write resource names out: `db("patient_db")`, not `db(name)` (level 2)
+- **What:** `ductus validate` checks that every database and API named in code exists in `resources.yaml`, and `ductus impact` uses the same names to know which interfaces use what. A name computed at run time can't be seen before the code runs: validate warns (DX4), and impact doesn't know that code uses it. The engine itself doesn't check names at startup: a wrong name quarantines messages at run time.
+- **What to do:** write the name in the call. If a shared helper takes a name, have callers pass a literal through a small wrapper per resource, or accept the warning knowingly. Run `ductus validate` before deploying (in CI).
 
 ### Dedicated connection pools only for dedicated interfaces (level 4)
 - **What:** `dedicated_pools` needs `isolation: dedicated`; shared-pool interfaces use the shared pools from `resources.yaml`.
+
+## Impact and `about:`
+
+### `ductus impact` only knows what's named (level 2)
+- **What:** it finds interfaces through `about:` (applications, vendors, sender hosts), destinations' `application`/`vendor`, the resources.yaml entries they use, and the databases and APIs their code names. A side with no system named is invisible to `--vendor` and `--application`. Host names are compared as written unless you pass `--resolve` (DNS lookups, from where you run it).
+- **What to do:** fill in `about:` when creating an interface (`ductus new` writes it); `validate` warns about gaps, and `require_about: true` in `ductus.yaml` makes them errors. Name the vendor on shared resources once in `resources.yaml`. List senders' subnets in `about.from.hosts`: the engine can't know where inbound connections come from.
 
 ## Files, SFTP and schedules
 

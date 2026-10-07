@@ -2,7 +2,7 @@
 //! them (with conflicts from `config::check_endpoints`), and `ductus new` picks free ports.
 
 use crate::config::{Destination, HttpMode, Source};
-use crate::resources::Database;
+use crate::resources::{Endpoint, Kind};
 use crate::{InterfaceConfig, Resources};
 
 /// A port an interface listens on.
@@ -58,55 +58,43 @@ pub fn listeners<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> 
     out
 }
 
-/// Every host the project connects to: destinations, and the databases and SFTP servers in
-/// resources.yaml. Sorted by host then port.
+/// Where a destination connects to directly (not through resources.yaml). Empty for files,
+/// SFTP servers and APIs (those are listed from resources.yaml).
+pub fn destination_endpoint(d: &Destination) -> Option<Endpoint> {
+    match d {
+        Destination::Mllp { host, port, .. } => Some(Endpoint::new(host, *port, "MLLP")),
+        Destination::Http { url: Some(url), .. } => Endpoint::from_url(url),
+        Destination::Http { .. } | Destination::Sftp { .. } | Destination::File { .. } => None,
+    }
+}
+
+/// Every host the project connects to: destinations, and the databases, SFTP servers and APIs
+/// in resources.yaml. Sorted by host then port.
 pub fn outbound<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>, resources: &Resources) -> Vec<Outbound> {
     let mut out = Vec::new();
     for c in configs {
         for (name, d) in c.destinations() {
-            let used_by = if c.destination.is_some() { c.name.clone() } else { format!("{} → {name}", c.name) };
-            match &d.connector {
-                Destination::Mllp { host, port, .. } => {
-                    out.push(Outbound { host: host.clone(), port: *port, protocol: "MLLP", used_by });
-                }
-                Destination::Http { url, .. } => {
-                    if let Ok(u) = url::Url::parse(url)
-                        && let (Some(host), Some(port)) = (u.host_str(), u.port_or_known_default())
-                    {
-                        let protocol = if u.scheme() == "https" { "HTTPS" } else { "HTTP" };
-                        out.push(Outbound { host: host.to_string(), port, protocol, used_by });
-                    }
-                }
-                // SFTP servers are listed once, from resources.yaml, below.
-                Destination::Sftp { .. } | Destination::File { .. } => {}
+            if let Some(e) = destination_endpoint(&d.connector) {
+                let used_by = if c.destination.is_some() { c.name.clone() } else { format!("{} → {name}", c.name) };
+                out.push(Outbound { host: e.host, port: e.port, protocol: e.protocol, used_by });
             }
         }
     }
-    for (name, db) in &resources.databases {
-        let used_by = format!("resources.yaml: {name}");
-        let (host, port, protocol, used_by) = match db {
-            Database::Postgres(c) => (c.host.clone(), c.port.unwrap_or(5432), "Postgres", used_by),
-            // A named instance without a port is found through the SQL Server Browser; the
-            // instance's own TCP port is whatever the server assigned it.
-            Database::Sqlserver(c) => match (&c.instance, c.port) {
-                (Some(i), None) => (
-                    c.host.clone(),
-                    1434,
-                    "SQL Browser (UDP)",
-                    format!("{used_by} (instance {i}; also its TCP port, set on the server)"),
-                ),
-                _ => (c.host.clone(), c.port.unwrap_or(1433), "SQL Server", used_by),
-            },
-        };
-        out.push(Outbound { host, port, protocol, used_by });
-    }
-    for (name, s) in &resources.sftp {
-        out.push(Outbound {
-            host: s.host.clone(),
-            port: s.port,
-            protocol: "SFTP",
-            used_by: format!("resources.yaml: {name}"),
-        });
+    let defined = [
+        (Kind::Database, resources.databases.keys().collect::<Vec<_>>()),
+        (Kind::Sftp, resources.sftp.keys().collect()),
+        (Kind::Api, resources.apis.keys().collect()),
+    ];
+    for (kind, names) in defined {
+        for name in names {
+            for e in resources.endpoints(kind, name) {
+                let used_by = match e.note {
+                    Some(note) => format!("resources.yaml: {name} ({note})"),
+                    None => format!("resources.yaml: {name}"),
+                };
+                out.push(Outbound { host: e.host, port: e.port, protocol: e.protocol, used_by });
+            }
+        }
     }
     out.sort();
     out
@@ -131,6 +119,7 @@ mod tests {
                 "name: hook\nsource: { http: { port: 8080, path: /orders } }\ndestination: { http: { url: 'https://lab.example.org/api' } }",
             ),
             config("name: files\nsource: { file: { dir: in } }\ndestination: { sftp: { server: lab, dir: out } }"),
+            config("name: charges\nsource: { file: { dir: in } }\ndestination: { http: { api: billing_api } }"),
         ];
         let l = listeners(&configs);
         let shown: Vec<_> = l.iter().map(|l| (l.port, l.protocol, l.interface.as_str(), l.route.as_deref())).collect();
@@ -144,7 +133,7 @@ mod tests {
         );
 
         let resources: Resources = serde_yaml_ng::from_str(
-            "databases:\n  pdb: { postgres: { host: db1, database: p, user: u } }\n  billing: { sqlserver: { host: sql1, instance: PROD, database: b, user: u } }\nsftp:\n  lab: { host: sftp.lab, user: u, password: x }\n",
+            "databases:\n  pdb: { postgres: { host: db1, database: p, user: u } }\n  billing: { sqlserver: { host: sql1, instance: PROD, database: b, user: u } }\nsftp:\n  lab: { host: sftp.lab, user: u, password: x }\napis:\n  billing_api: { url: 'https://billing.example.org:8443/v2' }\n",
         )
         .unwrap();
         let o = outbound(&configs, &resources);
@@ -152,6 +141,7 @@ mod tests {
         assert_eq!(
             shown,
             [
+                ("billing.example.org", 8443, "HTTPS", "resources.yaml: billing_api"),
                 ("db1", 5432, "Postgres", "resources.yaml: pdb"),
                 ("epic.local", 5000, "MLLP", "adt"),
                 ("lab.example.org", 443, "HTTPS", "hook"),

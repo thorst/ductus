@@ -3,7 +3,7 @@
 
 use crate::mssql;
 use anyhow::{Result, anyhow, bail};
-use ductus_core::resources::{Database, DbConnection};
+use ductus_core::resources::{Api, Database, DbConnection};
 use ductus_core::{Environment, InterfaceConfig, Resources};
 use ductus_script::{BoxFuture, FetchRequest, FetchResponse, Services, TRANSIENT};
 use serde_json::Value;
@@ -44,6 +44,7 @@ pub struct SharedServices {
     env: Environment,
     definitions: BTreeMap<String, Database>,
     databases: HashMap<String, Pool>,
+    apis: BTreeMap<String, Api>,
     http: reqwest::Client,
     /// Database and HTTP calls run on the engine's main (multi-threaded) runtime. A socket is served by
     /// the runtime that opened it; if a worker thread's runtime opened it, its replies would
@@ -62,6 +63,7 @@ impl SharedServices {
             env,
             definitions: resources.databases.clone(),
             databases,
+            apis: resources.apis.clone(),
             http: http_client(),
             io: tokio::runtime::Handle::current(),
         }
@@ -110,9 +112,31 @@ fn shown(url: &reqwest::Url) -> String {
     url.to_string()
 }
 
+/// An `api(name)` request made concrete: its URL under the API's, the API's headers (code's own
+/// win), and its timeout unless the code set one. Requests without `api` pass through.
+fn resolve_api(apis: &BTreeMap<String, Api>, mut r: FetchRequest) -> Result<FetchRequest> {
+    let Some(name) = r.api.take() else { return Ok(r) };
+    let api = apis.get(&name).ok_or_else(|| {
+        let known: Vec<_> = apis.keys().map(String::as_str).collect();
+        let known = if known.is_empty() { "none".to_string() } else { known.join(", ") };
+        anyhow!("no api named `{name}` in resources.yaml (defined: {known})")
+    })?;
+    let mut headers: BTreeMap<String, String> =
+        api.headers.iter().map(|(k, v)| (k.to_ascii_lowercase(), v.clone())).collect();
+    headers.extend(r.headers);
+    Ok(FetchRequest {
+        api: None,
+        url: api.url_for(&r.url),
+        headers,
+        timeout_ms: r.timeout_ms.or(api.timeout.map(|t| t.as_millis() as u64)),
+        ..r
+    })
+}
+
 /// One HTTP request for interface code. Network errors and timeouts are temporary (the message
 /// retries); every status is returned as a response, and the SDK decides what to retry.
 async fn http_fetch(client: &reqwest::Client, r: FetchRequest) -> Result<FetchResponse> {
+    let timeout_ms = r.timeout_ms.unwrap_or(30_000).max(1);
     let url = reqwest::Url::parse(&r.url).map_err(|e| anyhow!("fetch: invalid URL: {e}"))?;
     if !matches!(url.scheme(), "http" | "https") {
         bail!("fetch: only http and https URLs are supported, not `{}:`", url.scheme());
@@ -120,7 +144,7 @@ async fn http_fetch(client: &reqwest::Client, r: FetchRequest) -> Result<FetchRe
     let method = reqwest::Method::from_bytes(r.method.as_bytes())
         .map_err(|_| anyhow!("fetch: invalid method `{}`", r.method))?;
     let label = format!("{method} {}", shown(&url));
-    let mut request = client.request(method, url).timeout(Duration::from_millis(r.timeout_ms.max(1)));
+    let mut request = client.request(method, url).timeout(Duration::from_millis(timeout_ms));
     for (name, value) in &r.headers {
         request = request.header(name, value);
     }
@@ -132,7 +156,7 @@ async fn http_fetch(client: &reqwest::Client, r: FetchRequest) -> Result<FetchRe
             return anyhow!("{label}: {}", e.without_url());
         }
         let why = if e.is_timeout() {
-            format!("timed out after {} ms", r.timeout_ms)
+            format!("timed out after {timeout_ms} ms")
         } else {
             // The chain has the useful part ("connection refused", "certificate expired").
             let e = e.without_url();
@@ -280,7 +304,7 @@ impl Services for EngineServices {
 
     fn fetch(&self, request: FetchRequest) -> BoxFuture<FetchResponse> {
         let shared = self.shared.clone();
-        self.shared.spawn(async move { http_fetch(&shared.http, request).await })
+        self.shared.spawn(async move { http_fetch(&shared.http, resolve_api(&shared.apis, request)?).await })
     }
 
     fn variable(&self, name: &str) -> Option<String> {
@@ -306,6 +330,8 @@ mod tests {
             user: url.username().into(),
             password: url.password().unwrap_or("").into(),
             max_connections: 1,
+            application: None,
+            vendor: None,
         };
         Some(Resources { databases: BTreeMap::from([("db".into(), Database::Postgres(db))]), ..Default::default() })
     }
@@ -338,12 +364,46 @@ mod tests {
 
     fn request(url: &str, timeout_ms: u64) -> FetchRequest {
         FetchRequest {
+            api: None,
             url: url.into(),
             method: "POST".into(),
             headers: BTreeMap::from([("x-token".to_string(), "abc".to_string())]),
             body: Some("hello".into()),
-            timeout_ms,
+            timeout_ms: Some(timeout_ms),
         }
+    }
+
+    #[tokio::test]
+    async fn api_requests_get_the_api_url_headers_and_timeout() {
+        let base = server().await;
+        let resources: Resources = serde_yaml_ng::from_str(&format!(
+            "apis:\n  echo: {{ url: '{base}/', headers: {{ X-Token: from-api, X-Other: kept }}, timeout: 300ms }}\n"
+        ))
+        .unwrap();
+        let client = http_client();
+        let mut r = request("/echo", 0);
+        r.api = Some("echo".into());
+        r.timeout_ms = None;
+        let resolved = resolve_api(&resources.apis, r.clone()).unwrap();
+        assert_eq!(resolved.url, format!("{base}/echo"));
+        assert_eq!(resolved.timeout_ms, Some(300));
+        assert_eq!(
+            (resolved.headers["x-token"].as_str(), resolved.headers["x-other"].as_str()),
+            ("abc", "kept"),
+            "the code's header wins"
+        );
+
+        r.headers.clear();
+        let response = http_fetch(&client, resolve_api(&resources.apis, r.clone()).unwrap()).await.unwrap();
+        assert_eq!(response.body, "from-api:hello", "the API's header was sent");
+
+        r.url = "/slow".into();
+        let err = http_fetch(&client, resolve_api(&resources.apis, r.clone()).unwrap()).await.unwrap_err().to_string();
+        assert!(err.contains("timed out after 300 ms"), "{err}");
+
+        r.api = Some("nope".into());
+        let err = resolve_api(&resources.apis, r).unwrap_err().to_string();
+        assert_eq!(err, "no api named `nope` in resources.yaml (defined: echo)");
     }
 
     /// A local HTTP server: /echo answers with what it got, /slow takes 2 s, /big is 17 MB.

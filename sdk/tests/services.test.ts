@@ -1,5 +1,5 @@
 // Service mocks, async tests and fetch(): run inside the real engine by `cargo test -p ductus-script`.
-import { db, env, expect, fetch, hl7, type Message, mock, quarantine, secret, test } from "@ductus/sdk";
+import { api, db, env, expect, fetch, hl7, type Message, mock, quarantine, secret, test } from "@ductus/sdk";
 
 // A typical lookup interface: MRN → name from a database, then enrich from an API.
 async function transform(msg: Message) {
@@ -86,4 +86,27 @@ test("fetch: 5xx, 408 and 429 retry the message unless retry: false; 4xx are res
   const missing = await fetch("https://api.test/x");
   expect(missing.ok).toBe(false);
   expect(missing.status).toBe(404);
+});
+
+test("api(name): paths, verbs and the API's own timeout; mocked per API", async () => {
+  const empi = mock.api("empi", (req) => ({ body: { path: req.url, method: req.method } }));
+  expect((await api("empi").get("/patients/1", { query: { full: true } })).json()).toEqual({ path: "/patients/1?full=true", method: "GET" });
+  await api("empi").post("/merge", { from: "1", to: "2" });
+  await api("empi").delete("/patients/1", { timeout: 900 });
+  expect(empi.map((c) => `${c.api} ${c.method} ${c.url} ${c.timeoutMs}`)).toEqual([
+    "empi GET /patients/1?full=true null",
+    "empi POST /merge null",
+    "empi DELETE /patients/1 900",
+  ]);
+  expect(empi[1].body).toBe('{"from":"1","to":"2"}');
+  expect(empi[1].headers["content-type"]).toBe("application/json");
+
+  // A plain fetch() mock doesn't answer api() calls, and the other way round.
+  await expect(api("billing").get("/x")).toReject('add mock.api("billing"');
+  mock.fetch({ status: 200 });
+  expect((await fetch("https://x.test/")).status).toBe(200);
+
+  await expect(api("empi").get("https://elsewhere.test/x")).toReject("give a path");
+  mock.api("empi", { status: 503, body: "down" });
+  await expect(api("empi").get("/patients/2?key=SECRET")).toReject('[ductus:transient] api("empi") GET /patients/2 returned 503: down');
 });

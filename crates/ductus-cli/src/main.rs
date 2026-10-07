@@ -62,6 +62,28 @@ enum Command {
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
+    /// Which interfaces a vendor, application or host touches, how, and who owns them: for a
+    /// vendor breach or a VPN/IP change. Reads `about:`, destinations, resources.yaml, and the
+    /// databases and APIs code uses.
+    #[command(group(clap::ArgGroup::new("what").required(true).args(["vendor", "application", "host"])))]
+    Impact {
+        /// e.g. "Epic Systems" (ignores case).
+        #[arg(long)]
+        vendor: Option<String>,
+        /// e.g. "Sunquest Lab" (ignores case).
+        #[arg(long)]
+        application: Option<String>,
+        /// An address, subnet (10.20.30.0/24) or host name.
+        #[arg(long)]
+        host: Option<String>,
+        /// Look host names up in DNS, so names in the config match addresses (and the other way round).
+        #[arg(long)]
+        resolve: bool,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+    },
     /// Manage encrypted secrets (secrets/<env>.json; key in DUCTUS_SECRET_KEY).
     Secret {
         #[command(subcommand)]
@@ -197,6 +219,16 @@ async fn main() -> Result<()> {
             new::interface(new::NewInterface { root, name, source, format, port, server })
         }
         Command::Ports { root, env } => exit_on_failure(project::ports(&root, &env)),
+        Command::Impact { vendor, application, host, resolve, root, env } => {
+            use ductus_core::impact::Query;
+            let query = match (vendor, application, host) {
+                (Some(v), _, _) => Query::Vendor(v),
+                (_, Some(a), _) => Query::Application(a),
+                (_, _, Some(h)) => Query::Host(ductus_core::about::HostQuery::parse(&h)?),
+                _ => unreachable!("clap requires one"),
+            };
+            exit_on_failure(project::impact(&root, &env, query, resolve).await)
+        }
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,
         Command::Status { database_url } => tools::status(&database_url).await,

@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # v0.5 demo: one ADT feed, three destinations, each with its own queue and status.
 #   lab      MLLP, gets every message as HL7 (the lab system is DOWN at first)
-#   billing  HTTP, gets JSON from its own function `toBilling` (which skips patients that
-#            aren't billable), keeps a copy of what it sent, and uses meta.id as the key
+#   billing  HTTP through the `billing` API in resources.yaml, gets JSON from its own function
+#            `toBilling` (which skips patients that aren't billable), keeps a copy of what it
+#            sent, and uses meta.id as the key
 #   archive  files, every message as received
 # While the lab is down, billing and archive must get everything anyway. Then the engine is
 # killed (kill -9) with the lab's 200 messages still waiting, restarted, the lab comes up, and
 # it must get all 200, in order per patient, once each; billing and archive nothing twice.
+# `ductus impact` must find the interface by the billing vendor and the lab's host.
 set -euo pipefail
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
@@ -19,17 +21,24 @@ psql -q "$DB" -c "TRUNCATE messages, deliveries, dedupe_keys"
 mkdir -p "$P/interfaces/adt" "$P/interfaces/billing-api"
 cat >"$P/interfaces/adt/interface.yaml" <<'EOF'
 name: adt
+about:
+  owner: Integration team
+  from: { application: Epic, vendor: Epic Systems, hosts: [127.0.0.0/8] }
 source: { mllp: { port: 6681 } }
 script: transform.ts
 ordering: { key: PID-3.1 }
 destinations:
-  lab: { mllp: { host: 127.0.0.1, port: 6682 } }
+  lab: { mllp: { host: 127.0.0.1, port: 6682 }, application: Sunquest Lab }
   billing:
-    http: { url: 'http://127.0.0.1:8091/charges' }
+    http: { api: billing, path: /charges }
     transform: toBilling
     output: json
     save_output: true
-  archive: { file: { dir: out/archive } }
+  archive: { file: { dir: out/archive }, application: Archive }
+EOF
+cat >"$P/resources.yaml" <<'EOF'
+apis:
+  billing: { url: 'http://127.0.0.1:8091', headers: { X-Billing-Key: k1 }, vendor: Experian }
 EOF
 cat >"$P/interfaces/adt/transform.ts" <<'EOF'
 import { kill, type Message, type Meta } from "@ductus/sdk";
@@ -50,6 +59,7 @@ EOF
 # The "billing system": another interface in the same engine, storing what it's sent as files.
 cat >"$P/interfaces/billing-api/interface.yaml" <<'EOF'
 name: billing-api
+about: { from: { application: Ductus }, to: { application: Billing } }
 source: { http: { port: 8091, path: /charges } }
 format: json
 destination: { file: { dir: out/charges } }
@@ -57,6 +67,10 @@ EOF
 
 cd "$P"
 echo "== validate"; "$BIN" validate >/dev/null || { "$BIN" validate; echo "FAIL: validation"; exit 1; }
+echo "== impact"
+"$BIN" impact --vendor experian | sed 's/^/   /'
+impact_vendor=$("$BIN" impact --vendor experian)
+impact_host=$("$BIN" impact --host 127.0.0.1)
 q() { psql -tA "$DB" -c "$1"; }
 # Deliveries with their destination's name.
 D="deliveries d JOIN destinations t ON t.id = d.destination_id"
@@ -120,4 +134,8 @@ billed=$(q "SELECT count(*) FROM $D WHERE t.name = 'billing' AND status = 1
 [ "$billed" = 100 ] || fail+=" billing-saved-with-meta-id=$billed"
 [ "$(q "SELECT count(*) FROM $D WHERE t.name = 'billing' AND status = 2 AND last_error = 'killed: not billable'")" = 100 ] || fail+=" not-billable"
 [ "$(q "SELECT count(*) FROM messages WHERE interface = 'adt' AND status = 1")" = $COUNT ] || fail+=" overall-sent"
+grep "destination billing.*(Experian)" <<<"$impact_vendor" >/dev/null || fail+=" impact-vendor"
+grep "127.0.0.1:8091 HTTP" <<<"$impact_vendor" >/dev/null || fail+=" impact-endpoint"
+grep "destination lab *host: 127.0.0.1" <<<"$impact_host" >/dev/null || fail+=" impact-host"
+grep "sender host (about.from.hosts): 127.0.0.0/8" <<<"$impact_host" >/dev/null || fail+=" impact-sender"
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; tail -20 "$P/run.log"; exit 1; fi

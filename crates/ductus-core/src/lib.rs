@@ -1,8 +1,10 @@
 //! Shared types: interface configuration and partitioning.
 
+pub mod about;
 pub mod config;
 pub mod env;
 pub mod format;
+pub mod impact;
 pub mod ports;
 pub mod resources;
 pub mod schedule;

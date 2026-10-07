@@ -133,7 +133,7 @@ const BASE = `
     body?: unknown;
     /** Added to the URL's query string (values are encoded). */
     query?: Record<string, string | number | boolean>;
-    /** Milliseconds; default 30000. */
+    /** Milliseconds; default 30000 (or the API's \`timeout\` in resources.yaml). */
     timeout?: number;
     /**
      * Default true: network errors, timeouts, 408, 429 and 5xx responses make the message wait and retry
@@ -156,11 +156,27 @@ const BASE = `
    * \`const patient = (await fetch(env("EMPI_URL") + "/patients/" + mrn)).json();\`
    */
   export function fetch(url: string, options?: FetchOptions): Promise<FetchResponse>;
+  /** An HTTP API defined in resources.yaml: its base URL, credentials and timeout live there. */
+  export interface Api {
+    /** A request to a path under the API's URL (\`/patients/123\`). Same options as \`fetch()\`. */
+    fetch(path: string, options?: FetchOptions): Promise<FetchResponse>;
+    get(path: string, options?: Omit<FetchOptions, "method" | "body">): Promise<FetchResponse>;
+    /** The body is sent as JSON unless it's a string. */
+    post(path: string, body: unknown, options?: Omit<FetchOptions, "method" | "body">): Promise<FetchResponse>;
+    put(path: string, body: unknown, options?: Omit<FetchOptions, "method" | "body">): Promise<FetchResponse>;
+    delete(path: string, options?: Omit<FetchOptions, "method" | "body">): Promise<FetchResponse>;
+  }
+  /**
+   * An HTTP API defined in resources.yaml, by name. The engine adds its URL and headers (tokens included),
+   * so credentials never pass through interface code. Same retry rules as \`fetch()\`.
+   * \`const patient = (await api("empi").get("/patients/" + mrn)).json();\`
+   */
+  export function api(name: string): Api;
 
   /** A mocked HTTP response; a non-string body is sent as JSON. */
   export interface MockResponse { status?: number; headers?: Record<string, string>; body?: unknown }
-  /** A request your code sent, as a mock saw it (header names lower-case). */
-  export interface FetchCall { url: string; method: string; headers: Record<string, string>; body: string | null; timeoutMs: number }
+  /** A request your code sent, as a mock saw it (header names lower-case). For \`api()\` calls, \`api\` is its name and \`url\` the path. */
+  export interface FetchCall { api?: string; url: string; method: string; headers: Record<string, string>; body: string | null; timeoutMs: number | null }
   /**
    * Stand-ins for databases, HTTP APIs, variables and secrets in tests (reset before each test).
    * Each returns the calls made, to assert on.
@@ -170,6 +186,8 @@ const BASE = `
     db(name: string, answer: Row[] | ((sql: string, params: Param[]) => Row[] | number | Promise<Row[] | number>)): { sql: string; params: Param[] }[];
     /** Answer \`fetch()\` calls: a response, or a function of the request. */
     fetch(answer: MockResponse | ((request: FetchCall) => MockResponse | Promise<MockResponse>)): FetchCall[];
+    /** Answer \`api(name)\` calls: a response, or a function of the request (its \`url\` is the path). */
+    api(name: string, answer: MockResponse | ((request: FetchCall) => MockResponse | Promise<MockResponse>)): FetchCall[];
     /** Values for \`env()\`. */
     env(values: Record<string, string>): void;
     /** Values for \`secret()\`. */

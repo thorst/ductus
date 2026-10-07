@@ -96,7 +96,72 @@ function lintSharedPool(sourceFile, isSharedModule) {
   return found;
 }
 
-globalThis.__ductus_check = (filesJson, libsJson, sharedJson) => {
+// SDK functions whose first argument names a resource in resources.yaml.
+const RESOURCE_FUNCTIONS = { db: "database", api: "API" };
+
+/** `db` or `api` if this call is to the SDK's function (through any import alias), else undefined. */
+function sdkResourceFunction(checker, call) {
+  let symbol = checker.getSymbolAtLocation(unwrap(call.expression));
+  if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+  const decl = symbol?.declarations?.[0];
+  if (!decl || !(symbol.name in RESOURCE_FUNCTIONS)) return undefined;
+  let parent = decl.parent;
+  while (parent && !ts.isModuleDeclaration(parent)) parent = parent.parent;
+  return parent && ts.isStringLiteral(parent.name) && parent.name.text === "@ductus/sdk" ? symbol.name : undefined;
+}
+
+/**
+ * Resources named in code (`db("patient_db")`, `api("empi")`), so validate can check they exist
+ * and `ductus impact` knows who uses them. A name that isn't written out can't be known before
+ * the code runs: that gets a warning instead.
+ */
+function findResources(checker, sourceFile) {
+  const references = [];
+  const lints = [];
+  const visit = (node) => {
+    if (ts.isCallExpression(node)) {
+      const fn = sdkResourceFunction(checker, node);
+      if (fn) {
+        const arg = node.arguments[0] && unwrap(node.arguments[0]);
+        const start = node.getStart(sourceFile);
+        if (arg && (ts.isStringLiteral(arg) || ts.isNoSubstitutionTemplateLiteral(arg))) {
+          references.push({ start, kind: fn, name: arg.text });
+        } else {
+          lints.push({
+            start,
+            code: 90004,
+            message: `${fn}() with a name that isn't written out: validate can't check that the ${RESOURCE_FUNCTIONS[fn]} exists, and \`ductus impact\` can't see that this code uses it; write ${fn}("name")`,
+          });
+        }
+      }
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return { references, lints };
+}
+
+/** The project files a file imports (static and dynamic imports, re-exports). */
+function localImports(sourceFile, options, host) {
+  const specifiers = [];
+  const visit = (node) => {
+    if ((ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) && node.moduleSpecifier && ts.isStringLiteral(node.moduleSpecifier)) {
+      specifiers.push(node.moduleSpecifier.text);
+    } else if (ts.isCallExpression(node) && node.expression.kind === ts.SyntaxKind.ImportKeyword && node.arguments[0] && ts.isStringLiteral(node.arguments[0])) {
+      specifiers.push(node.arguments[0].text);
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  const out = new Set();
+  for (const s of specifiers) {
+    const resolved = ts.resolveModuleName(s, sourceFile.fileName, options, host).resolvedModule;
+    if (resolved && !resolved.isExternalLibraryImport && host.fileExists(resolved.resolvedFileName)) out.add(resolved.resolvedFileName);
+  }
+  return [...out];
+}
+
+globalThis.__ductus_check = (filesJson, libsJson, sharedJson, wantDiagnostics) => {
   const files = JSON.parse(filesJson);
   const libs = JSON.parse(libsJson);
   const shared = new Set(JSON.parse(sharedJson ?? "[]"));
@@ -138,21 +203,25 @@ globalThis.__ductus_check = (filesJson, libsJson, sharedJson) => {
   };
 
   const program = ts.createProgram(Object.keys(files), options, host);
+  const checker = program.getTypeChecker();
   const lints = [];
+  const references = [];
+  const imports = {};
   for (const sourceFile of program.getSourceFiles()) {
     if (sourceFile.isDeclarationFile || sourceFile.fileName.startsWith(LIB_DIR)) continue;
-    for (const f of lintSharedPool(sourceFile, shared.has(sourceFile.fileName))) {
-      const pos = sourceFile.getLineAndCharacterOfPosition(f.start);
-      lints.push({
-        file: sourceFile.fileName,
-        line: pos.line + 1,
-        column: pos.character + 1,
-        code: f.code,
-        category: "warning",
-        message: f.message,
-      });
+    const at = (start) => {
+      const pos = sourceFile.getLineAndCharacterOfPosition(start);
+      return { file: sourceFile.fileName, line: pos.line + 1, column: pos.character + 1 };
+    };
+    const found = findResources(checker, sourceFile);
+    for (const r of found.references) references.push({ ...at(r.start), kind: r.kind, name: r.name });
+    imports[sourceFile.fileName] = localImports(sourceFile, options, host);
+    if (!wantDiagnostics) continue;
+    for (const f of lintSharedPool(sourceFile, shared.has(sourceFile.fileName)).concat(found.lints)) {
+      lints.push({ ...at(f.start), code: f.code, category: "warning", message: f.message });
     }
   }
+  if (!wantDiagnostics) return JSON.stringify({ diagnostics: [], references, imports });
   const diagnostics = ts.getPreEmitDiagnostics(program).map((d) => {
     let line = 0;
     let column = 0;
@@ -170,5 +239,5 @@ globalThis.__ductus_check = (filesJson, libsJson, sharedJson) => {
       message: ts.flattenDiagnosticMessageText(d.messageText, "\n"),
     };
   });
-  return JSON.stringify(diagnostics.concat(lints));
+  return JSON.stringify({ diagnostics: diagnostics.concat(lints), references, imports });
 };

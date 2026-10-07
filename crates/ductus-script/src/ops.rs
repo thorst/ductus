@@ -41,11 +41,16 @@ pub trait Services {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FetchRequest {
+    /// `api(name)` in the SDK: an API in resources.yaml, whose URL `url` (a path) is under and
+    /// whose headers the engine adds.
+    #[serde(default)]
+    pub api: Option<String>,
     pub url: String,
     pub method: String,
     pub headers: BTreeMap<String, String>,
     pub body: Option<String>,
-    pub timeout_ms: u64,
+    /// None: the API's `timeout`, else 30 s.
+    pub timeout_ms: Option<u64>,
 }
 
 /// The response; header names are lower-case, repeated headers are joined with ", ".

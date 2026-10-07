@@ -52,12 +52,15 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - **Runaway guard (`ductus-script/src/guard.rs`)**: terminate only from inside an `IsolateHandle::request_interrupt` callback (runs on the isolate's thread; check the call generation first), never `terminate_execution` from the watchdog thread (a finished call's successor would be killed). Reading the stack there needs a context: the main context is kept in an isolate slot (`MainContext`) and entered with `v8::scope_with_context!`. After termination, `cancel_terminate_execution` (deno_core re-arms termination in `exception_to_err`). A termination during the event loop **drops all queued microtasks**, so every in-flight async transform on that isolate hangs: fail them all (worker's `interrupted` watch). `Isolate::settle` stringifies errors: use `drive` + `output` where a typed error (`Runaway`) must survive.
 - **Sockets belong to the runtime that opened them.** The sqlx pool is shared with intake: worker threads must run store calls on the main runtime (`Worker::db`), or a busy V8 thread delays other interfaces' ACKs.
 - tracing's plain log format puts the message before the fields: grep `interface stopped.*interface=x`, not the other way round.
+- **The package of `crates/ductus-cli` is named `ductus`**: `cargo test -p ductus --test cli`, not `-p ductus-cli`.
+- **Type checker API (`check.js`)**: to know whether a call is the SDK's `db`/`api`, resolve the callee with `checker.getSymbolAtLocation` + `getAliasedSymbol` and check its declaration sits in `declare module "@ductus/sdk"`; don't match names (a local `db` would count, an alias wouldn't). `analyze(..., false)` skips `getPreEmitDiagnostics`, which is the slow part.
 - russh 0.64: `client::Handler::check_server_key(&PublicKeyOrCertificate)`; fingerprints via `key.fingerprint(HashAlg::Sha256)` print like `ssh-keygen -lf`. SFTP `rename` won't overwrite: remove the target first.
 
 ## Where things are
 
 ```
-crates/ductus-core     config, formats, environments, secrets, resources, schedule timing, ports, settings (ductus.yaml)
+crates/ductus-core     config, formats, environments, secrets, resources (databases, sftp, apis), about (systems,
+                       host/subnet matching), impact, schedule timing, ports, settings (ductus.yaml)
 crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
 crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations)
@@ -65,7 +68,7 @@ crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs)
 crates/ductus-runtime  engine: lib.rs (startup), ingest.rs, http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
                        services.rs + mssql.rs (DB calls), limiter.rs
-crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/types/secret; new.rs: `new interface`;
+crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/impact/types/secret; new.rs: `new interface`;
                        tools.rs: gen/sink/status;
                        tests/cli.rs runs the binary on temp projects)
 sdk/src                TypeScript SDK (embedded via include_str! in ductus-script/src/loader.rs: add new files there)

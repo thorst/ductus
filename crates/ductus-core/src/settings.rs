@@ -6,6 +6,7 @@
 //!   http: 8080-8099
 //! isolates:
 //!   heap_mb: 512      # memory limit of each V8 isolate (one per pool thread and per dedicated worker)
+//! require_about: true # `ductus validate` fails when an interface doesn't name the systems it connects
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -21,6 +22,10 @@ pub struct Settings {
     pub ports: PortRanges,
     #[serde(default)]
     pub isolates: Isolates,
+    /// Interfaces must name the application or vendor on each side (`about:`), so `ductus
+    /// impact` is never missing one: `ductus validate` reports gaps as problems, not warnings.
+    #[serde(default)]
+    pub require_about: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -151,8 +156,10 @@ mod tests {
     fn loads_the_isolate_heap_limit() {
         let dir = tempfile::tempdir().unwrap();
         assert_eq!(Settings::load(dir.path()).unwrap().isolates.heap_mb, 512);
-        std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 2048 }\n").unwrap();
-        assert_eq!(Settings::load(dir.path()).unwrap().isolates.heap_mb, 2048);
+        assert!(!Settings::load(dir.path()).unwrap().require_about);
+        std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 2048 }\nrequire_about: true\n").unwrap();
+        let s = Settings::load(dir.path()).unwrap();
+        assert_eq!((s.isolates.heap_mb, s.require_about), (2048, true));
         std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 8 }\n").unwrap();
         let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
         assert!(err.contains("at least 64"), "{err}");
