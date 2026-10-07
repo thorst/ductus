@@ -20,7 +20,10 @@ struct Iface {
 
 impl Iface {
     async fn new(store: &Store, test: &str, destinations: &[&str]) -> Self {
-        let name = format!("test-{test}-{}", std::process::id());
+        // Process id and time: process ids repeat across quick runs, and a reused name would
+        // see the dedupe keys an earlier run left behind.
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let name = format!("test-{test}-{}-{nanos}", std::process::id());
         let pairs: Vec<_> = destinations.iter().map(|d| (name.clone(), d.to_string())).collect();
         let ids = store.destination_ids(&pairs).await.unwrap();
         let destinations = destinations.iter().map(|d| d.to_string()).zip(ids.iter().copied()).collect();
@@ -430,6 +433,281 @@ async fn overlapping_batches_settle_without_deadlock() {
     assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), 1000);
 }
 
+/// docs/schema.md describes every table and column (so the published schema can't drift).
+#[tokio::test]
+async fn the_schema_doc_describes_every_table_and_column() {
+    let Some(url) = std::env::var("DUCTUS_TEST_DATABASE_URL").ok() else { return };
+    let _ = store().await; // migrations applied
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let doc = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../docs/schema.md")).unwrap();
+    let section = |table: &str| -> Option<String> {
+        let start = doc.find(&format!("\n## `{table}`\n"))?;
+        let rest = &doc[start + 1..];
+        Some(rest[..rest[3..].find("\n## ").map(|e| e + 3).unwrap_or(rest.len())].to_string())
+    };
+    // Our tables are the ones the migrations create (demos add their own lookup tables to the
+    // same database; partitions follow their parent).
+    let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/migrations");
+    let mut tables = Vec::new();
+    for entry in std::fs::read_dir(dir).unwrap() {
+        for line in std::fs::read_to_string(entry.unwrap().path()).unwrap().lines() {
+            if let Some(rest) = line.strip_prefix("CREATE TABLE ")
+                && let Some((name, _)) = rest.split_once(" (")
+            {
+                tables.push(name.trim().to_string());
+            }
+        }
+    }
+    assert!(tables.contains(&"deliveries".to_string()), "{tables:?}");
+    let columns: Vec<(String, String)> = sqlx::query_as(
+        "SELECT table_name::text, column_name::text FROM information_schema.columns
+         WHERE table_schema = 'public' AND table_name = ANY($1) ORDER BY 1, ordinal_position",
+    )
+    .bind(&tables)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    let mut missing = Vec::new();
+    for (table, column) in &columns {
+        match section(table) {
+            None => missing.push(format!("table `{table}`")),
+            Some(s) if !s.contains(&format!("| `{column}` |")) => missing.push(format!("`{table}.{column}`")),
+            _ => {}
+        }
+    }
+    missing.dedup();
+    assert!(missing.is_empty(), "docs/schema.md doesn't describe: {}", missing.join(", "));
+    assert!(columns.len() >= 30, "found the tables: {}", columns.len());
+}
+
+/// How far ahead the furthest `messages` partition goes, in days from today (by Postgres's date).
+async fn furthest_partition(pool: &sqlx::PgPool) -> i32 {
+    sqlx::query_scalar(
+        "SELECT (max(to_date(substr(c.relname, 10), 'YYYYMMDD')) - current_date)::int
+         FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+         WHERE i.inhparent = 'messages'::regclass AND c.relname ~ '^messages_[0-9]{8}$'",
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Partition maintenance as the engine runs it: giving up on a lock timeout is by design (another
+/// test may hold a long read, as `partition_maintenance_never_holds_up_inserts` does); any other
+/// error, a deadlock above all, fails the test.
+async fn maintain(store: &Store, days_ahead: i32) {
+    if let Err(e) = store.ensure_partitions(days_ahead).await {
+        let e = format!("{e:#}");
+        assert!(e.contains("lock timeout"), "{e}");
+    }
+}
+
+/// Drop every partition beyond the 3 days ahead the engine keeps (tests make further ones; future
+/// partitions never hold data). Measured now, not when the test started: tests run at the same
+/// time, and one's maintenance re-fills days another dropped. One table per statement: dropping
+/// both in one transaction would lock both parents together, which deadlocks with inserts.
+async fn drop_test_partitions(pool: &sqlx::PgPool) {
+    let furthest = furthest_partition(pool).await;
+    for table in ["deliveries", "messages"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DO $$ BEGIN FOR i IN 4 .. {furthest} LOOP
+                 EXECUTE format('DROP TABLE IF EXISTS %I', '{table}_' || to_char(current_date + i, 'YYYYMMDD'));
+             END LOOP; END $$"
+        )))
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+}
+
+/// A long read of `messages` (a big report, say) must not make inserts, and so ACKs, wait
+/// behind partition maintenance. Creating a partition needs a lock that waits for the report;
+/// while it waits, every later statement on the table queues behind it. Maintenance gives up
+/// after a short lock timeout instead (partitions are made days ahead: it retries in an hour).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn partition_maintenance_never_holds_up_inserts() {
+    let Some(store) = store().await else { return };
+    let t = Iface::single(&store, "convoy").await;
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let furthest = furthest_partition(&pool).await;
+
+    // The report: an open transaction that has read `messages`, for 4 s.
+    let mut report = pool.begin().await.unwrap();
+    sqlx::query("SELECT count(*) FROM messages").execute(&mut *report).await.unwrap();
+    let maintenance = {
+        let store = store.clone();
+        tokio::spawn(async move { store.ensure_partitions(furthest + 1).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let start = std::time::Instant::now();
+    let insert = {
+        let store = store.clone();
+        let name = t.name.clone();
+        let ids = t.ids.clone();
+        tokio::spawn(async move {
+            let m = NewMessage {
+                interface: &name,
+                partition_key: 0,
+                ordering_key: None,
+                control_id: None,
+                payload: b"during maintenance",
+                relaxed: false,
+                destinations: &ids,
+            };
+            store.insert(m).await.map(|_| start.elapsed())
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+    report.rollback().await.unwrap();
+    let waited = insert.await.unwrap().unwrap();
+    let maintained = maintenance.await.unwrap();
+    drop_test_partitions(&pool).await;
+    // (Before the lock timeout: 4.05 s, the whole report.)
+    assert!(waited < std::time::Duration::from_secs(3), "the insert waited {waited:?} behind maintenance");
+    // Maintenance gave up (lock timeout); or found nothing to create, if another test running
+    // at the same time made that day's partition first.
+    if let Err(e) = maintained {
+        let e = format!("{e:#}");
+        assert!(e.contains("lock timeout"), "{e}");
+    }
+}
+
+/// Everything the engine does to the database, at once, for a while (`DUCTUS_STRESS_SECONDS`,
+/// default 5): single inserts with colliding dedupe keys (MLLP connections), a batch writer (a
+/// file source), three destinations draining and recording failures, partition maintenance
+/// creating partitions, and dedupe key purges. Any deadlock or lock error fails it; at the end
+/// nothing may be left pending and every delivery is recorded exactly once.
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn everything_at_once_without_lock_errors() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+    let Some(store) = store().await else { return };
+    let seconds: u64 = std::env::var("DUCTUS_STRESS_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
+    let t = Arc::new(Iface::new(&store, "stress", &["lab", "billing", "archive"]).await);
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let furthest = furthest_partition(&pool).await;
+    let stop = Arc::new(AtomicBool::new(false));
+    let queued = Arc::new(AtomicUsize::new(0));
+    let window = std::time::Duration::from_secs(3600);
+    let lanes: Vec<i32> = (0..8).collect();
+    let mut tasks = Vec::new();
+
+    for writer in 0..4 {
+        let (store, t, stop, queued) = (store.clone(), t.clone(), stop.clone(), queued.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut i = 0usize;
+            while !stop.load(Relaxed) {
+                let key = format!("k{}", (i * 4 + writer) / 2); // pairs of writers share each key
+                let payload = format!("single-{writer}-{i}");
+                let m = t.msg((i % 8) as i32, payload.as_bytes());
+                let stored = store.insert_deduped(m, DedupeKey { key: &key, window }).await.unwrap();
+                if !stored.duplicate {
+                    queued.fetch_add(1, Relaxed);
+                }
+                i += 1;
+            }
+        }));
+    }
+    {
+        let (store, t, stop, queued) = (store.clone(), t.clone(), stop.clone(), queued.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut round = 0usize;
+            while !stop.load(Relaxed) {
+                let texts: Vec<(String, String)> =
+                    (0..50).map(|n| (format!("batch-{round}-{n}"), format!("k{}", round * 50 + n))).collect();
+                let messages = texts
+                    .iter()
+                    .enumerate()
+                    .map(|(n, (payload, key))| BatchMessage {
+                        partition_key: (n % 8) as i32,
+                        ordering_key: None,
+                        control_id: None,
+                        payload: payload.as_bytes(),
+                        dedupe_key: Some(key),
+                    })
+                    .collect();
+                let batch = Batch {
+                    interface: &t.name,
+                    messages,
+                    dedupe_window: window,
+                    relaxed: false,
+                    state: None,
+                    destinations: &t.ids,
+                };
+                let duplicates = store.insert_batch(&batch).await.unwrap();
+                queued.fetch_add(duplicates.iter().filter(|d| !**d).count(), Relaxed);
+                round += 1;
+            }
+        }));
+    }
+    for (n, destination) in t.ids.clone().into_iter().enumerate() {
+        let (store, stop, lanes) = (store.clone(), stop.clone(), lanes.clone());
+        tasks.push(tokio::spawn(async move {
+            let mut rounds = 0usize;
+            loop {
+                let stopped = stop.load(Relaxed);
+                let pending = store.pending(destination, &lanes, 50).await.unwrap();
+                if pending.is_empty() {
+                    if stopped {
+                        break; // everything stored before the stop has been drained
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+                    continue;
+                }
+                rounds += 1;
+                if rounds.is_multiple_of(5 + n) {
+                    store.record_failure(pending[0].reference(), destination, "busy").await.unwrap();
+                }
+                let done: Vec<_> = pending.iter().map(|p| sent(p.reference())).collect();
+                store.finish(destination, &done).await.unwrap();
+            }
+        }));
+    }
+    let maintenance = {
+        let (store, stop) = (store.clone(), stop.clone());
+        tokio::spawn(async move {
+            let mut day = 0;
+            while !stop.load(Relaxed) {
+                day += 1;
+                maintain(&store, furthest + day).await;
+                store.purge_dedupe_keys(window).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            day
+        })
+    };
+
+    tokio::time::sleep(std::time::Duration::from_secs(seconds)).await;
+    stop.store(true, Relaxed);
+    let mut results = Vec::new();
+    for task in tasks {
+        results.push(task.await);
+    }
+    let days = maintenance.await;
+    drop_test_partitions(&pool).await;
+    for r in results {
+        r.expect("a writer or drain failed");
+    }
+    let days = days.expect("maintenance failed");
+
+    let queued = queued.load(Relaxed);
+    assert!(queued > 1000, "too little traffic to mean anything: {queued}");
+    assert!(store.payloads(&t.name, Status::Pending).await.unwrap().is_empty(), "nothing left pending");
+    assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), queued);
+    let deliveries: Vec<_> =
+        store.delivery_counts().await.unwrap().into_iter().filter(|(i, ..)| *i == t.name).collect();
+    for (_, destination, status, n) in &deliveries {
+        assert_eq!((*status, *n as usize), (Status::Sent, queued), "{destination}: {deliveries:?}");
+    }
+    assert_eq!(deliveries.len(), 3);
+    let duplicates = store.payloads(&t.name, Status::Duplicate).await.unwrap().len();
+    assert!(duplicates > 0, "dedupe keys collided");
+    println!(
+        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations, {days} partitions created, {seconds}s",
+        queued + duplicates
+    );
+}
+
 /// Creating new day partitions while destinations settle messages must not deadlock. (Partition
 /// maintenance locked `messages` then `deliveries` in one transaction; settling reads
 /// `deliveries` then updates `messages`. Seen in CI; in production it would meet the hourly
@@ -445,20 +723,13 @@ async fn partition_maintenance_never_deadlocks_with_settling() {
     // Each call reaches one day further than any partition so far: it creates one new partition
     // of each table (dropped again at the end, so repeated runs don't pile them up).
     let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
-    let furthest: i32 = sqlx::query_scalar(
-        "SELECT (max(to_date(substr(c.relname, 10), 'YYYYMMDD')) - current_date)::int
-         FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
-         WHERE i.inhparent = 'messages'::regclass AND c.relname ~ '^messages_[0-9]{8}$'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let furthest = furthest_partition(&pool).await;
     const NEW_DAYS: i32 = 20;
     let maintenance = {
         let store = store.clone();
         tokio::spawn(async move {
             for day in 1..=NEW_DAYS {
-                store.ensure_partitions(furthest + day).await.unwrap();
+                maintain(&store, furthest + day).await;
             }
         })
     };
@@ -471,21 +742,7 @@ async fn partition_maintenance_never_deadlocks_with_settling() {
         })
     };
     let (m, a, b) = tokio::join!(maintenance, finish(t.id("a")), finish(t.id("b")));
-    // Dates computed by Postgres, like the partition names (so time zones can't disagree). One
-    // table per statement: dropping both in one transaction would lock both parents together,
-    // the very thing that deadlocks with other tests' inserts (messages, then deliveries).
-    for table in ["deliveries", "messages"] {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DO $$ BEGIN FOR i IN {} .. {} LOOP
-                 EXECUTE format('DROP TABLE IF EXISTS %I', '{table}_' || to_char(current_date + i, 'YYYYMMDD'));
-             END LOOP; END $$",
-            furthest + 1,
-            furthest + NEW_DAYS
-        )))
-        .execute(&pool)
-        .await
-        .unwrap();
-    }
+    drop_test_partitions(&pool).await;
     m.unwrap();
     a.unwrap();
     b.unwrap();
@@ -495,6 +752,6 @@ async fn partition_maintenance_never_deadlocks_with_settling() {
 #[tokio::test]
 async fn partition_maintenance_is_idempotent() {
     let Some(store) = store().await else { return };
-    store.ensure_partitions(5).await.unwrap();
-    store.ensure_partitions(5).await.unwrap();
+    maintain(&store, 5).await;
+    maintain(&store, 5).await;
 }

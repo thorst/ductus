@@ -168,6 +168,10 @@ pub struct Reconciled {
     pub settled: u64,
 }
 
+/// How long partition maintenance waits for a table lock before giving up (see
+/// `Store::ensure_partitions`).
+const PARTITION_LOCK_TIMEOUT: &str = "SET LOCAL lock_timeout = '2s'";
+
 #[derive(Clone)]
 pub struct Store {
     pool: PgPool,
@@ -187,23 +191,46 @@ impl Store {
         migrator.set_ignore_missing(true);
         migrator.run(&pool).await.context("running migrations")?;
         let store = Self { pool };
-        store.ensure_partitions(3).await?;
+        // Today's partition must exist before anything is received, so keep trying for a while
+        // if a long query holds the tables (each try gives up quickly; see ensure_partitions).
+        let mut tries = 0;
+        while let Err(e) = store.ensure_partitions(3).await {
+            tries += 1;
+            if tries == 20 {
+                return Err(e);
+            }
+            tracing::warn!(error = %format!("{e:#}"), "creating partitions; trying again");
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        }
         Ok(store)
     }
 
     /// Day partitions from yesterday to `days_ahead` days ahead, for `messages` and then
-    /// `deliveries`. Two statements, so the two tables are never locked together: settling a
-    /// status locks them in the other order, and the two could deadlock (migration 0006).
+    /// `deliveries`.
+    ///
+    /// - Two transactions, so the two tables are never locked together: settling a status
+    ///   locks them in the other order, and the two could deadlock (migration 0006).
+    /// - Each waits at most `PARTITION_LOCK_TIMEOUT` for its table lock, then fails. Creating a
+    ///   partition must wait for every open query on the table (a long report, say), and while
+    ///   it waits, every later statement on the table queues behind it: inserts, so ACKs, would
+    ///   stall for as long as the report runs. Partitions are made days ahead, so failing now
+    ///   and trying again in an hour costs nothing.
     pub async fn ensure_partitions(&self, days_ahead: i32) -> Result<()> {
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(PARTITION_LOCK_TIMEOUT).execute(&mut *tx).await?;
         sqlx::query("SELECT ductus_ensure_message_partitions($1)")
             .bind(days_ahead)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .context("creating message partitions")?;
+        tx.commit().await?;
+        let mut tx = self.pool.begin().await?;
+        sqlx::query(PARTITION_LOCK_TIMEOUT).execute(&mut *tx).await?;
         sqlx::query("SELECT ductus_ensure_delivery_partitions()")
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .context("creating delivery partitions")?;
+        tx.commit().await?;
         Ok(())
     }
 

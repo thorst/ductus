@@ -230,7 +230,9 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         loop {
             tokio::time::sleep(Duration::from_secs(3600)).await;
             if let Err(e) = maintenance.ensure_partitions(3).await {
-                tracing::error!(error = %e, "partition maintenance failed");
+                // Usually a long query holding the tables (it gives up rather than queue ACKs
+                // behind it). Partitions exist days ahead, so the next hour's try is in time.
+                tracing::warn!(error = %format!("{e:#}"), "partition maintenance didn't run; trying again in an hour");
             }
             if let Err(e) = maintenance.purge_dedupe_keys(dedupe_retention).await {
                 tracing::error!(error = %e, "dedupe key cleanup failed");

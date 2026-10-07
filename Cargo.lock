@@ -1485,6 +1485,7 @@ dependencies = [
  "chrono",
  "sqlx",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

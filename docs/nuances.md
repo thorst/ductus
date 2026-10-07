@@ -62,6 +62,10 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **Why:** that's the price of ordering: patient B's update must not overtake patient A's.
 - **What to do:** choose a key that's as narrow as correctness allows. Set `retry.max_attempts` on destinations where waiting forever is worse than quarantining.
 
+### Change `ordering.partitions` only with an empty queue (level 4)
+- **What:** each message's lane is computed from its key and `partitions` when it arrives, and stored. Change `partitions` while messages are waiting, and a patient's waiting messages stay in their old lane while new ones go to a different lane (maybe another worker): until the backlog drains, that patient's messages can be delivered out of order. Changing `workers` alone is safe (every lane still has one owner).
+- **What to do:** change `partitions` when the interface has nothing pending (`ductus status`), e.g. stop the sender, let it drain, restart with the new value. To give each of N workers 64 lanes, set `partitions: 64 * N`. (The engine will re-assign waiting messages itself later; until then, this is on you.)
+
 ### Without an ordering key, more workers don't help (level 3)
 - **What:** an interface with no `ordering.key` is one lane, and a lane has exactly one owner. `isolation: dedicated` with `workers: 8` still processes it one message at a time per destination (the other seven workers have no lanes).
 - **Why:** with no key, the only safe order is the order of arrival for everything.
