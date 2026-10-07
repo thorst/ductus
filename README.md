@@ -117,6 +117,8 @@ Most interfaces never need to: one destination of an interface in the shared poo
 3. **Raise `workers`**, up to about the number of CPU cores. Lanes are spread evenly over them.
 4. **`dedicated_pools`** if it does database lookups, so it has connections of its own.
 
+Past that, the limit is PostgreSQL, and mostly its disk: Ductus spends little CPU and memory per message, and every acknowledged message waits for one durable commit. A disk that flushes in 0.2 ms instead of 2.5 ms raises what one sender connection can do about tenfold. So: fast storage for Postgres's write-ahead log (NVMe, or a cloud disk with low write latency), more sender connections (commits are grouped), and `durability: relaxed` for feeds where losing the last fraction of a second on a database server crash is acceptable (an engine crash alone loses nothing either way). Tuning guidance and a built-in check are planned.
+
 ## Commands
 
 | Command | What it does |
