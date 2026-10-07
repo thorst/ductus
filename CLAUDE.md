@@ -10,6 +10,7 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - **Every change ships with tests.** Unit tests next to the code; DB tests in `crates/ductus-store/tests`; script/SDK tests in `crates/ductus-script/tests` and `sdk/tests/*.test.ts` (run inside the real engine); end-to-end in `scripts/demo-*.sh` (each ends with PASS/FAIL and runs in CI).
 - **Before every commit:** `scripts/dev/check.sh` must end with `ALL CHECKS PASSED` (fmt, build incl. the binary, clippy `-D warnings`, all tests). For runtime changes also run `scripts/dev/demos.sh`.
 - Commits: `git commit -s` (DCO), message explains what and why, ends with the Co-Authored-By trailer. Push to `main` (solo project, CI on every push).
+- **Nuances get documented, not hidden.** Any behaviour that could surprise an interface developer (limits, failure semantics, things that run twice) goes into `docs/nuances.md` in the same commit, with what/why/what to do and a level (1 foundations … 5 expert; these become the certification tracks).
 - Keep `../ductus-enterprise/planning/` current: decisions in `decisions.md`, progress in `roadmap.md` and `STATUS.md`.
 
 ## Environment

@@ -1,6 +1,6 @@
 # Ductus architecture
 
-How the engine works, and the rules that keep it correct. Read this before changing the runtime.
+How the engine works, and the rules that keep it correct. Read this before changing the runtime. What interface developers need to know about the resulting behaviour is in [nuances.md](nuances.md).
 
 ## The shape of it
 
