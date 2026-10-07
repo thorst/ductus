@@ -106,7 +106,7 @@ Delivery failures: transient → back off and retry (forever unless `retry.max_a
 
 ## Storage
 
-- `messages`: partitioned by day on `received_at`; partial index `(interface, partition_key, id) WHERE status = 0` (the queue of older versions; still used to find pending messages). `deliveries` gets a partition for every `messages` partition, with the same bounds (copied from the catalog). Partitions created 3 days ahead, hourly. Retention = drop partitions (v0.5 step 5).
+- `messages`: partitioned by day on `received_at`; partial index `(interface, partition_key, id) WHERE status = 0` (the queue of older versions; still used to find pending messages). `deliveries` gets a partition for every `messages` partition, with the same bounds (copied from the catalog). Partitions created 3 days ahead, hourly, in two statements (`messages`, then `deliveries`): one transaction holding both table locks deadlocked with status settling, which reads `deliveries` then updates `messages` (migration 0006; reproduced 8/8 by `partition_maintenance_never_deadlocks_with_settling`). Retention = drop partitions (v0.5 step 5).
 - `dedupe_keys(interface, key, seen_at)`: checked and claimed in the same transaction as the message insert (one commit).
 - `durability: relaxed` sets `synchronous_commit = off` for that insert only.
 - `source_state(interface, key, value jsonb)`: what sources remember (file progress `file:<name>`, `schedule`). Always written in the same transaction as the messages it accounts for.

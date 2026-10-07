@@ -191,12 +191,19 @@ impl Store {
         Ok(store)
     }
 
+    /// Day partitions from yesterday to `days_ahead` days ahead, for `messages` and then
+    /// `deliveries`. Two statements, so the two tables are never locked together: settling a
+    /// status locks them in the other order, and the two could deadlock (migration 0006).
     pub async fn ensure_partitions(&self, days_ahead: i32) -> Result<()> {
-        sqlx::query("SELECT ductus_ensure_partitions($1)")
+        sqlx::query("SELECT ductus_ensure_message_partitions($1)")
             .bind(days_ahead)
             .execute(&self.pool)
             .await
-            .context("creating partitions")?;
+            .context("creating message partitions")?;
+        sqlx::query("SELECT ductus_ensure_delivery_partitions()")
+            .execute(&self.pool)
+            .await
+            .context("creating delivery partitions")?;
         Ok(())
     }
 

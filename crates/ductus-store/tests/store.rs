@@ -402,6 +402,96 @@ async fn starts_on_a_database_migrated_by_a_newer_version() {
     result.expect("older binary should start on a newer schema");
 }
 
+/// Two destinations flushing overlapping batches (workers batch sent statuses, ≤50) in
+/// different orders must not deadlock on the message rows they both settle.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn overlapping_batches_settle_without_deadlock() {
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "batches", &["a", "b"]).await;
+    let mut refs = Vec::new();
+    for i in 0..1000 {
+        refs.push(store.insert(t.msg(0, format!("m{i}").as_bytes())).await.unwrap());
+    }
+    let finish = |destination: DestinationId, reverse: bool| {
+        let (store, mut refs) = (store.clone(), refs.clone());
+        if reverse {
+            refs.reverse();
+        }
+        tokio::spawn(async move {
+            for batch in refs.chunks(50) {
+                let done: Vec<_> = batch.iter().map(|m| sent(*m)).collect();
+                store.finish(destination, &done).await.unwrap();
+            }
+        })
+    };
+    let (a, b) = tokio::join!(finish(t.id("a"), false), finish(t.id("b"), true));
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), 1000);
+}
+
+/// Creating new day partitions while destinations settle messages must not deadlock. (Partition
+/// maintenance locked `messages` then `deliveries` in one transaction; settling reads
+/// `deliveries` then updates `messages`. Seen in CI; in production it would meet the hourly
+/// maintenance on the day a new partition is created.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn partition_maintenance_never_deadlocks_with_settling() {
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "maint", &["a", "b"]).await;
+    let mut refs = Vec::new();
+    for i in 0..200 {
+        refs.push(store.insert(t.msg(0, format!("m{i}").as_bytes())).await.unwrap());
+    }
+    // Each call reaches one day further than any partition so far: it creates one new partition
+    // of each table (dropped again at the end, so repeated runs don't pile them up).
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let furthest: i32 = sqlx::query_scalar(
+        "SELECT (max(to_date(substr(c.relname, 10), 'YYYYMMDD')) - current_date)::int
+         FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+         WHERE i.inhparent = 'messages'::regclass AND c.relname ~ '^messages_[0-9]{8}$'",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    const NEW_DAYS: i32 = 20;
+    let maintenance = {
+        let store = store.clone();
+        tokio::spawn(async move {
+            for day in 1..=NEW_DAYS {
+                store.ensure_partitions(furthest + day).await.unwrap();
+            }
+        })
+    };
+    let finish = |destination: DestinationId| {
+        let (store, refs) = (store.clone(), refs.clone());
+        tokio::spawn(async move {
+            for m in refs {
+                store.finish(destination, &[sent(m)]).await.unwrap();
+            }
+        })
+    };
+    let (m, a, b) = tokio::join!(maintenance, finish(t.id("a")), finish(t.id("b")));
+    // Dates computed by Postgres, like the partition names (so time zones can't disagree). One
+    // table per statement: dropping both in one transaction would lock both parents together,
+    // the very thing that deadlocks with other tests' inserts (messages, then deliveries).
+    for table in ["deliveries", "messages"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "DO $$ BEGIN FOR i IN {} .. {} LOOP
+                 EXECUTE format('DROP TABLE IF EXISTS %I', '{table}_' || to_char(current_date + i, 'YYYYMMDD'));
+             END LOOP; END $$",
+            furthest + 1,
+            furthest + NEW_DAYS
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    m.unwrap();
+    a.unwrap();
+    b.unwrap();
+    assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), 200);
+}
+
 #[tokio::test]
 async fn partition_maintenance_is_idempotent() {
     let Some(store) = store().await else { return };
