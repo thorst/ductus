@@ -1,10 +1,14 @@
 # Ductus
 
-**A code-first integration engine for healthcare.** Write interfaces in TypeScript, run them on a fast Rust runtime, and operate them with monitoring, replay and data lifecycle tools built in.
+**A code-first integration engine for healthcare.** Write interfaces in TypeScript, run them on a fast Rust runtime with PostgreSQL as the store and queue, and operate them with monitoring, replay and data lifecycle tools built in.
 
-> Early development (v0.2). Not production-ready.
+One binary plus PostgreSQL. No message broker, no JVM, no Node.js.
+
+> Early development (v0.4 released, v0.5 in progress). Not production-ready yet.
 
 ## What an interface looks like
+
+Each interface is a folder: config in `interface.yaml`, logic in TypeScript, tests next to it.
 
 `interfaces/adt-in/interface.yaml`:
 
@@ -14,15 +18,20 @@ source:
   mllp: { port: 6661 }
 script: transform.ts
 ordering:
-  key: PID-3.1        # messages for the same MRN stay in order
-destination:
-  mllp: { host: 127.0.0.1, port: 6662 }
+  key: PID-3.1          # messages for the same MRN stay in order
+destinations:           # each gets every message, with its own queue, retries and status
+  lab:
+    mllp: { host: 10.0.0.5, port: 6662 }
+  billing:
+    http: { url: "https://billing.example.org/api/charges" }
+    transform: toBilling
+    output: json
 ```
 
 `interfaces/adt-in/transform.ts`:
 
 ```ts
-import type { Message } from "@ductus/sdk";
+import { db, kill, type Message, type Meta } from "@ductus/sdk";
 
 export function transform(msg: Message) {
   if (msg.MSH[9][1] !== "ADT") return null;      // filter
@@ -30,61 +39,96 @@ export function transform(msg: Message) {
   for (const obx of msg.OBX) obx[5][1] = obx[5][1].trim();
   return msg;
 }
+
+export async function toBilling(msg: Message, meta: Meta) {
+  const account = await db("billing_db").one("SELECT id FROM accounts WHERE mrn = $1", [msg.PID[3][1]]);
+  if (!account) return kill("not billable");
+  return { id: meta.id, account: account.id, event: msg.MSH[9][2] };   // meta.id: stable idempotency key
+}
 ```
 
-Hovering `msg.PID[5]` in VS Code shows **PID-5 Patient Name (XPN)**.
+Hovering `msg.PID[5]` in VS Code shows **PID-5 Patient Name (XPN)**. `ductus validate` type-checks everything with an embedded TypeScript compiler.
 
 `interfaces/adt-in/transform.test.ts`:
 
 ```ts
-import { expect, hl7, test } from "@ductus/sdk";
-import { transform } from "./transform.ts";
+import { expect, hl7, mock, test } from "@ductus/sdk";
+import { toBilling, transform } from "./transform.ts";
 
 test("filters non-ADT", () => {
   expect(transform(hl7("orm-o01.hl7"))).toBeNull();   // fixtures/orm-o01.hl7
 });
+
+test("looks up the account", async () => {
+  mock.db("billing_db", [{ id: 42 }]);                 // no database needed in tests
+  const out = await toBilling(hl7("adt-a01.hl7"), { id: 1, receivedAt: "", destination: "billing" });
+  expect(out).toEqual({ id: 1, account: 42, event: "A01" });
+});
 ```
 
-## Reliability options
+## What it does today
+
+- **Sources:** MLLP, HTTP (queue a message, or answer the request directly as a REST endpoint), local folders and SFTP (crash-safe streaming of large files, record by record), schedules (`every: 15m` or cron).
+- **Destinations:** MLLP, HTTP, files, SFTP. Several per interface, each independent: one vendor being down holds up only its own queue.
+- **Formats:** HL7 v2 (lazy parsing, positional syntax), JSON, XML, CSV, fixed-width, text.
+- **Interface code:** TypeScript in embedded V8, with `db()` (PostgreSQL and SQL Server), `fetch()`, `env()` and encrypted `secret()`. No direct network or file access; no credentials in code.
+- **Reliability:** persist before ACK, per-key ordering, dedupe, rate limits, retries with back-off, quarantine. A runaway script (endless loop, memory blow-up) is stopped without affecting its neighbours.
+- **Environments:** one project, per-environment variables and encrypted secrets, named resources (`resources.yaml`).
 
 ```yaml
 isolation: dedicated     # own threads + V8 isolate (default: shared pool) - see docs/shared-pool.md
 workers: 4               # parallel MRN lanes, dedicated only
+timeout: 5s              # longest the code may run without pausing
 dedupe:
   keys: [MSH-10]         # or business keys, e.g. [PID-3.1, EVN-2]
   window: 24h
 rate_limit:
   per_minute: 100        # e.g. a device that can't take bursts
-  burst: 500             # average mode (token bucket); or mode: hard
   over_limit: wait       # or drop
 retry:
   max_attempts: 10       # default: retry until delivered, backing off 1s -> 60s
-destination:
-  mllp:
-    host: 10.0.0.5
-    port: 6662
-    ack: wait            # or none: send and move on
-    on_reject: quarantine  # AR handling; or retry. AE always retries.
+durability: strict       # or relaxed: ACK before the disk flush, for much higher throughput
 ```
+
+## Performance
+
+Measured on a development laptop (WSL2, a slow disk at ~2.5 ms per flush), not a server, so treat these as a floor. For scale: a large hospital network's ADT feed of **1 million messages/day averages about 12 messages/second**, with peaks around 10x that.
+
+| What | Measured |
+|---|---|
+| MLLP ingest, 16 sender connections, each message flushed to disk before its ACK | ~3,100 messages/s |
+| Same, one sender connection (one disk flush per ACK) | ~440 messages/s strict, ~870/s relaxed |
+| Fan-out: 6,000 messages to 5 destinations each | 8,400 deliveries/s, ingest unchanged |
+| Fan-out: 6,000 messages to 25 destinations each | 18,800 deliveries/s |
+| Large file ingest (CSV split into records, relaxed durability) | ~100,000 records/s |
+| Realistic HL7 ORU transform in TypeScript | ~14,800 transforms/s per CPU thread |
+| Startup, 1,001 interfaces (every interface's TypeScript loaded and compiled) | 0.4 s to ready, 111 MB memory, no CPU when idle |
+| Startup, 301 interfaces, including checking stored deliveries against the config | 0.4 s to ready |
+
+Fast startup is what makes upgrades and restarts uneventful: senders reconnect to a ready engine within a second, and nothing they sent is lost meanwhile. Details and how each was measured: [docs/architecture.md](docs/architecture.md#performance-notes-measured-wsl-25-ms-fsync-disk). Numbers on real server hardware are still to come.
 
 ## Commands
 
 | Command | What it does |
 |---|---|
 | `ductus run` | Run every interface in the project |
-| `ductus test` | Run each interface's `*.test.ts` against its `fixtures/` |
-| `ductus validate` | Check configs, code loading and TypeScript types (exits 1 on problems) |
+| `ductus new interface <name>` | A working interface (config, code, test, sample) on a free port |
+| `ductus test` | Run each interface's `*.test.ts`, with mocks for databases and APIs |
+| `ductus validate` | Check configs, code loading and TypeScript types for an environment (exits 1 on problems) |
+| `ductus ports` | Listening ports and routes, outbound hosts (for firewall requests), conflicts |
+| `ductus secret` | Manage encrypted per-environment secrets |
 | `ductus types` | Write editor typings and `tsconfig.json` for VS Code |
-| `ductus status` | Message counts by interface and status |
+| `ductus status` | Message counts by interface, status and destination |
 | `ductus gen` / `ductus sink` | Synthetic HL7 traffic and an order-verifying receiver |
 
-## Guarantees so far
+## Guarantees
 
-- Messages are stored in PostgreSQL **before** they're acknowledged; a crash loses nothing.
-- Messages with the same ordering key (e.g. MRN) are delivered in order, across restarts.
-- Delivery is at-least-once: a crash can cause a rare duplicate (deduplication arrives in v0.3).
+- Messages are stored in PostgreSQL **before** they're acknowledged (files are moved only after every record is stored). An engine crash loses nothing.
+- Messages with the same ordering key (e.g. MRN) are delivered in order to each destination, across restarts.
+- Delivery is at-least-once: a crash between sending and recording it can resend one message. Dedupe at ingest and `meta.id` (a stable key for idempotent receivers) cover this.
+- Upgrades are in place and rollback is reinstalling the previous binary: database migrations only ever add.
 
-`scripts/demo-crash-recovery.sh` proves the first two by killing the engine mid-stream.
+Every guarantee has an end-to-end demo in `scripts/` that kills the engine mid-stream and checks the result; they all run in CI. Behaviour worth planning around is collected in [docs/nuances.md](docs/nuances.md).
 
 ## Building
 
