@@ -183,6 +183,18 @@ fn action_args(action: SecretAction) -> project::SecretCommand {
     }
 }
 
+/// Let a report piped into `head` or `grep -q` end quietly when the reader stops, like other
+/// Unix tools, instead of panicking on the next print. Rust ignores SIGPIPE so that a closed
+/// socket is an error rather than death; that's what the engine needs, so this is only for
+/// commands that print a report, never `run`, `gen` or `sink`.
+fn quiet_on_closed_pipe() {
+    #[cfg(unix)]
+    // SAFETY: called at startup, before any other thread exists; SIG_DFL is always valid.
+    unsafe {
+        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
+    }
+}
+
 /// For commands that report problems themselves: exit 1 when they found any.
 fn exit_on_failure(result: Result<bool>) -> Result<()> {
     if !result? {
@@ -191,8 +203,15 @@ fn exit_on_failure(result: Result<bool>) -> Result<()> {
     Ok(())
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
+    let cli = Cli::parse();
+    if !matches!(cli.command, Command::Run { .. } | Command::Gen { .. } | Command::Sink { .. }) {
+        quiet_on_closed_pipe();
+    }
+    tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(cli))
+}
+
+async fn run(cli: Cli) -> Result<()> {
     tracing_subscriber::fmt()
         // Plain text when logging to a file or pipe (no color codes in log files).
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
@@ -201,7 +220,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    match Cli::parse().command {
+    match cli.command {
         Command::Run { root, database_url, threads, db_connections, env } => {
             let defaults = ductus_runtime::EngineOptions::default();
             let options = ductus_runtime::EngineOptions {

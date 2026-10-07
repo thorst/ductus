@@ -230,6 +230,27 @@ results  (owner: Lab team)
     assert!(!ok && out.contains("--vendor"), "one of the three is required: {out}");
 }
 
+/// `ductus ports | head -1`: when the reader goes away, a report ends quietly (as other Unix
+/// tools do) instead of panicking with "failed printing to stdout".
+#[cfg(unix)]
+#[test]
+fn reports_end_quietly_when_the_reader_stops() {
+    use std::os::unix::process::ExitStatusExt;
+    let dir = hospital();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .arg("ports")
+        .current_dir(dir.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stdout.take()); // the reader is gone before the first line is written
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("panicked"), "{stderr}");
+    assert_eq!(out.status.signal(), Some(13), "ended by SIGPIPE: {:?}", out.status);
+}
+
 #[test]
 fn ports_lists_listeners_and_connections_per_environment_and_flags_conflicts() {
     let dir = project(&[

@@ -1394,6 +1394,7 @@ dependencies = [
  "ductus-runtime",
  "ductus-script",
  "ductus-store",
+ "libc",
  "serde_json",
  "tempfile",
  "tokio",

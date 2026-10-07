@@ -116,9 +116,9 @@ for e in dev prod; do
 done
 
 echo "== scaffold with ductus new interface"
-"$BIN" new interface patient-api --source http | head -1
-"$BIN" new interface empi --source http | head -1
-"$BIN" new interface lab-results --source sftp --format csv | head -1
+"$BIN" new interface patient-api --source http | sed -n 1p   # not head: it can exit before ductus finishes writing (EPIPE)
+"$BIN" new interface empi --source http | sed -n 1p   # not head: it can exit before ductus finishes writing (EPIPE)
+"$BIN" new interface lab-results --source sftp --format csv | sed -n 1p   # not head: it can exit before ductus finishes writing (EPIPE)
 check "generated interfaces pass their tests" "3 passed, 0 failed" "$("$BIN" test | tail -1)"
 
 echo "== write the real interfaces"
