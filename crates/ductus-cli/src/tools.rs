@@ -209,5 +209,19 @@ pub async fn status(database_url: &str) -> Result<()> {
     for (interface, status, n) in counts {
         println!("{interface:<20} {:<12} {n}", status.label());
     }
+    // Per destination, for interfaces with several (one destination says nothing new).
+    let deliveries = store.delivery_counts().await?;
+    let several = |interface: &str| {
+        let mut names: Vec<_> = deliveries.iter().filter(|(i, ..)| i == interface).map(|(_, d, ..)| d).collect();
+        names.dedup();
+        names.len() > 1
+    };
+    let rows: Vec<_> = deliveries.iter().filter(|(i, ..)| several(i)).collect();
+    if !rows.is_empty() {
+        println!("\nby destination:");
+        for (interface, destination, status, n) in rows {
+            println!("{:<20} {:<12} {n}", format!("{interface} → {destination}"), status.label());
+        }
+    }
     Ok(())
 }

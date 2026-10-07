@@ -15,7 +15,7 @@ psql -q "$DB" <<'SQL'
 DROP TABLE IF EXISTS demo_patients;
 CREATE TABLE demo_patients (mrn text PRIMARY KEY, display_name text, vip boolean DEFAULT false);
 INSERT INTO demo_patients SELECT (100000 + i)::text, 'Patient ' || i, i IN (3, 7) FROM generate_series(0, 9) i;
-TRUNCATE messages, dedupe_keys;
+TRUNCATE messages, deliveries, dedupe_keys;
 SQL
 
 mkdir -p "$P/interfaces/lookup" "$P/environments"
@@ -73,7 +73,7 @@ until grep -q "started" "$P/run.log"; do kill -0 $ENGINE || { cat "$P/run.log"; 
 
 echo "== 200 messages for 20 patients (10 known, 2 of them VIP)"
 "$BIN" gen --to 127.0.0.1:6671 --count 200 --patients 20 | tail -1
-for _ in $(seq 1 60); do "$BIN" status | grep -q pending || break; sleep 0.5; done
+for _ in $(seq 1 60); do "$BIN" status | grep pending >/dev/null || break; sleep 0.5; done
 kill -INT $SINK $ENGINE; wait 2>/dev/null || true
 
 echo "== results"

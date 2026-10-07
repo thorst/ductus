@@ -20,8 +20,8 @@ One binary (`ductus`) plus PostgreSQL. No other services.
 ## Invariants (never break these)
 
 1. **Persist before acknowledge.** A source only ACKs (MLLP `AA`, HTTP `202`) after the message row is committed. If storing fails, the sender gets a retryable error (`AE`, `503`). Nothing acknowledged is ever lost by an engine crash. For files, "acknowledge" is moving or deleting the file: that happens only after every record in it is committed.
-2. **At-least-once delivery.** A message stays `pending` until its destination confirms. A crash after sending but before recording `sent` re-sends it on restart; dedupe at ingest and idempotent receivers cover this. Sent statuses are flushed in batches of ≤50 and always before a retry back-off, so the re-send window is small.
-3. **One owner per lane = per-key order.** The ordering key (e.g. MRN) hashes (FNV-1a, stable forever: `ductus_core::partition_of`) to one of N virtual partitions ("lanes"). Each lane is owned by exactly one worker slot, which processes its pending messages strictly by id. A failed message blocks its slot's lanes until it succeeds or is quarantined: that's the price of ordering.
+2. **At-least-once delivery.** A delivery stays `pending` until its destination confirms. A crash after sending but before recording `sent` re-sends it on restart; dedupe at ingest and idempotent receivers cover this. Sent statuses are flushed in batches of ≤50 and always before a retry back-off, so the re-send window is small.
+3. **One owner per lane and destination = per-key order.** The ordering key (e.g. MRN) hashes (FNV-1a, stable forever: `ductus_core::partition_of`) to one of N virtual partitions ("lanes"). For each destination, each lane is owned by exactly one worker (slot), which processes its pending deliveries strictly by message id. A failed message blocks its slot's lanes *for that destination* until it succeeds or is quarantined: that's the price of ordering.
 4. **Migrations are expand-only.** Never drop or rename a column/table in a migration that an older binary still uses. Older binaries tolerate unknown newer migrations (`set_ignore_missing`), so rollback = reinstall the previous binary.
 5. **No credentials in interface code.** Secrets come from `secrets/<env>.json` (encrypted) via `${secret:NAME}` in YAML or `secret()` in code; connections are named resources (`resources.yaml`).
 6. **Interface code is sandboxed from the network and filesystem** except through engine services (`db()`, `fetch()`, `env()`, `secret()`). Remote module imports are refused.
@@ -33,7 +33,7 @@ One binary (`ductus`) plus PostgreSQL. No other services.
 | `ductus-core` | `interface.yaml` (`config.rs`), formats (`format.rs`), environments + `${VAR}` substitution (`env.rs`), encrypted secrets (`secrets.rs`), `resources.yaml` (`resources.rs`: Postgres and SQL Server databases, SFTP servers), schedule timing (`schedule.rs`), lane hashing, port-conflict checks, listeners and outbound connections (`ports.rs`) |
 | `ductus-hl7` | HL7v2 essentials in Rust: field lookup by path, ACK generation (ingest only; interface code uses the SDK) |
 | `ductus-mllp` | MLLP framing, listener (in order per connection), reconnecting client (with or without waiting for ACK) |
-| `ductus-store` | Postgres: migrations, `messages` (day-partitioned; also the work queue), dedupe keys, status updates |
+| `ductus-store` | Postgres: migrations, `messages` (day-partitioned, overall status), `deliveries` (status per destination; each destination's work queue), dedupe keys, reconcile at startup |
 | `ductus-script` | Embedded V8 (deno_core): module loader (local files + embedded `@ductus/sdk`), multi-interface isolates, async calls (`begin`/`settle`), runaway guard (`guard.rs`: time budgets, heap limit), native ops (`Services` trait), embedded TypeScript 6 type checker + shared-pool lints |
 | `ductus-runtime` | The engine: planning threads, `Intake` (ingest for any source, single or batched), MLLP + HTTP servers, file/SFTP watcher (`files.rs`) and record splitter (`split.rs`), SFTP client (`sftp.rs`), schedules (`schedule.rs`), workers, destinations, rate limiter, format-aware keys, engine services (Postgres pools; SQL Server pool in `mssql.rs`) |
 | `ductus-cli` (`ductus`) | `run`, `test`, `validate`, `ports`, `new interface` (`new.rs`: templates per source/format; ports from `ductus.yaml` ranges, free in every environment), `types`, `secret`, `status`, `gen`, `sink` (tests in `tests/cli.rs` run the real binary) |
@@ -41,9 +41,18 @@ One binary (`ductus`) plus PostgreSQL. No other services.
 
 ## Message lifecycle
 
-`messages.status`: `0 pending`, `1 sent`, `2 filtered` (dropped on purpose: `return null` / `kill(reason)`, or over a rate limit with `drop`), `3 quarantined` (needs a human), `4 duplicate` (dedupe hit; stored for audit). `last_error` holds the reason.
+Statuses: `0 pending`, `1 sent`, `2 filtered` (dropped on purpose: `return null` / `kill(reason)`, over a rate limit with `drop`, or its destination was removed), `3 quarantined` (needs a human), `4 duplicate` (dedupe hit; stored for audit, never queued). `last_error` holds the reason.
 
-Worker per message: transform → outcome:
+### Destinations and deliveries
+
+- An interface has one destination (`destination:`, named `default`) or several (`destinations:` by name). Each destination has its own function (`transform:`, default `transform`), output format, `retry`, `rate_limit` (its own allowance) and `save_output`.
+- **`deliveries`** (day-partitioned like `messages`): one row per queued message and destination, inserted **in the same statement** as the message (so still one commit per ACK). Its partial index `(interface, destination, partition_key, message_id) WHERE status = 0` is each destination's queue. Rows carry `status`, `attempts`, `last_error` and, with `save_output`, `output`.
+- **One worker per (slot, destination).** Each runs the destination's function on the original message (with `meta`: `id`, `receivedAt`, `destination`), then delivers. A destination that's down blocks only its own lanes; the others keep going. Ingest wakes every destination's worker for the lane's slot (`Wake`).
+- **`messages.status` is the overall status**: pending until no delivery is pending; then quarantined if any is, else sent if any is, else filtered. `Store::settle` sets it in a statement of its own **after** the delivery update commits: of two destinations finishing a message at once, the later always sees both done (in one statement, each could see the other pending: write skew). Older binaries read only `messages.status`, so rolling back still works.
+- **Reconcile at startup** (`Store::reconcile`, all interfaces in four queries): deliveries for pending messages that lack one (stored by an older version, or a new destination); pending deliveries to removed destinations → filtered; pending deliveries whose message an older version finished → its status; then settle.
+- The script host loads an interface module **once** and binds one entry per destination (`Isolate::add_functions` → `FunctionId`s); runaways are attributed per interface (`InterfaceId`), so every in-flight call of that interface takes the blame.
+
+Worker per delivery: function → outcome:
 - deliver → rate limit → send → `sent` (batched)
 - `Filter(reason)` → `filtered`
 - `Quarantine(reason)` (transform threw, `quarantine()`, AR, 4xx) → `quarantined`
@@ -96,7 +105,7 @@ Delivery failures: transient → back off and retry (forever unless `retry.max_a
 
 ## Storage
 
-- `messages`: partitioned by day on `received_at`; partial index `(interface, partition_key, id) WHERE status = 0` is the queue. Partitions created 3 days ahead, hourly. Retention = drop partitions (v1.3).
+- `messages`: partitioned by day on `received_at`; partial index `(interface, partition_key, id) WHERE status = 0` (the queue of older versions; still used to find pending messages). `deliveries` gets a partition for every `messages` partition, with the same bounds (copied from the catalog). Partitions created 3 days ahead, hourly. Retention = drop partitions (v0.5 step 5).
 - `dedupe_keys(interface, key, seen_at)`: checked and claimed in the same transaction as the message insert (one commit).
 - `durability: relaxed` sets `synchronous_commit = off` for that insert only.
 - `source_state(interface, key, value jsonb)`: what sources remember (file progress `file:<name>`, `schedule`). Always written in the same transaction as the messages it accounts for.
@@ -107,4 +116,4 @@ Delivery failures: transient → back off and retry (forever unless `retry.max_a
 - One sender connection is bounded by one durable commit per ACK: ~443 msg/s strict, ~868/s relaxed; 16 connections ~2,100/s (group commit).
 - SDK: ~14.8k realistic ORU transforms/s per thread. Embedded V8 call overhead is negligible.
 - 1,001 interfaces: ready in 0.4 s, ~111 MB, 0 idle CPU.
-- File ingest (`split: records`, `durability: relaxed`): ~148k CSV rows/s (300,000 rows, 13 MB, 500 per transaction).
+- File ingest (`split: records`, `durability: relaxed`): ~100k CSV rows/s (300,000 rows, 13 MB, 500 per transaction); ~155k before status per destination (a delivery row costs about as much to insert as the message). Strict MLLP ingest (16 connections) unchanged: ~3,100/s either way, it's bound by the commit flush.

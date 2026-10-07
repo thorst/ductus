@@ -19,7 +19,7 @@ psql -q "$DB" <<'SQL'
 DROP TABLE IF EXISTS demo_patients;
 CREATE TABLE demo_patients (mrn text PRIMARY KEY, display_name text, vip boolean DEFAULT false);
 INSERT INTO demo_patients VALUES ('100001', 'Pat One', false), ('100002', 'Pat Two', false);
-TRUNCATE messages, dedupe_keys;
+TRUNCATE messages, deliveries, dedupe_keys;
 SQL
 
 mkdir -p "$P/environments" "$P/interfaces"/{patient-api,home,orders,inbox}

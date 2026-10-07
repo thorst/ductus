@@ -99,5 +99,8 @@ jobs:
       - name: Runaway demo (endless loops and heap blow-ups don't stall neighbours)
         run: BIN=target/release/ductus bash scripts/demo-runaway.sh
 
+      - name: Destinations demo (lab down, billing and archive keep going, kill -9, lab catches up)
+        run: BIN=target/release/ductus bash scripts/demo-destinations.sh
+
       - name: Scale demo (300 shared interfaces + 1 dedicated, hot MRN)
         run: SHARED=300 EPIC_SECONDS=10 SAMPLED=50 BIN=target/release/ductus bash scripts/demo-scale.sh

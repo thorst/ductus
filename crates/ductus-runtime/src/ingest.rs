@@ -1,6 +1,7 @@
 //! Source side: receive, persist, then acknowledge. A message is never acknowledged before
 //! it's stored. `Intake` does the storing for every source (MLLP, HTTP, files...).
 
+use crate::Wake;
 use crate::hl7_now;
 use crate::keys::{self, KeyPath};
 use anyhow::{Context, Result};
@@ -9,10 +10,9 @@ use ductus_core::config::{Durability, Source};
 use ductus_core::format::Format;
 use ductus_core::{InterfaceConfig, partition_of};
 use ductus_hl7::{AckCode, Message};
-use ductus_store::{Batch, BatchMessage, DedupeKey, MessageRef, NewMessage, Store};
+use ductus_store::{Batch, BatchMessage, DedupeKey, DestinationId, MessageRef, NewMessage, Store};
 use std::sync::Arc;
 use tokio::net::TcpListener;
-use tokio::sync::Notify;
 
 /// What happened to an accepted message.
 pub enum Accepted {
@@ -26,21 +26,29 @@ pub enum Accepted {
 pub struct Intake {
     pub config: Arc<InterfaceConfig>,
     store: Store,
-    wake: Arc<[Notify]>,
+    wake: Arc<Wake>,
+    /// The interface's destinations: each stored message is queued for all of them.
+    destinations: Vec<DestinationId>,
     ordering: Option<KeyPath>,
     dedupe: Vec<KeyPath>,
     control_id: Option<KeyPath>,
 }
 
 impl Intake {
-    pub fn new(config: Arc<InterfaceConfig>, store: Store, wake: Arc<[Notify]>) -> Result<Self> {
+    /// `destinations`: the ids of the interface's destinations (`Store::destination_ids`).
+    pub fn new(
+        config: Arc<InterfaceConfig>,
+        store: Store,
+        wake: Arc<Wake>,
+        destinations: Vec<DestinationId>,
+    ) -> Result<Self> {
         let compile = |path: &str| {
             keys::compile(&config.format, path).with_context(|| format!("interface `{}`: key `{path}`", config.name))
         };
         let ordering = config.ordering.key.as_deref().map(compile).transpose()?;
         let dedupe = config.dedupe.iter().flat_map(|d| d.keys.iter()).map(|k| compile(k)).collect::<Result<_>>()?;
         let control_id = (config.format == Format::Hl7).then(|| compile("MSH-10")).transpose()?;
-        Ok(Self { config, store, wake, ordering, dedupe, control_id })
+        Ok(Self { config, store, wake, destinations, ordering, dedupe, control_id })
     }
 
     pub fn store(&self) -> &Store {
@@ -67,10 +75,9 @@ impl Intake {
         self.config.durability == Durability::Relaxed
     }
 
-    /// Wake only the lane's owner (same assignment as InterfaceConfig::partitions_for_worker).
-    /// notify_one keeps a permit if the worker is busy, so the wake-up is never lost.
+    /// Wake only the lane's owners: one worker per destination.
     fn wake(&self, partition: i32) {
-        self.wake[partition as usize % self.wake.len()].notify_one();
+        self.wake.lane(partition);
     }
 
     /// Store a message (deduplicating if configured) and wake its worker.
@@ -83,6 +90,7 @@ impl Intake {
             control_id: keys.control_id.as_deref(),
             payload,
             relaxed: self.relaxed(),
+            destinations: &self.destinations,
         };
         let accepted = match (&self.config.dedupe, &keys.dedupe) {
             (Some(d), Some(key)) => {
@@ -122,13 +130,14 @@ impl Intake {
             dedupe_window: self.config.dedupe.as_ref().map(|d| d.window).unwrap_or_default(),
             relaxed: self.relaxed(),
             state,
+            destinations: &self.destinations,
         };
         let duplicates = self.store.insert_batch(&batch).await?;
-        let mut woken = vec![false; self.wake.len()];
+        let mut woken = vec![false; self.wake.slots()];
         let mut queued = 0;
         for (k, _) in keys.iter().zip(&duplicates).filter(|(_, duplicate)| !**duplicate) {
             queued += 1;
-            let slot = k.partition as usize % self.wake.len();
+            let slot = k.partition as usize % self.wake.slots();
             if !std::mem::replace(&mut woken[slot], true) {
                 self.wake(k.partition);
             }
@@ -146,6 +155,7 @@ impl Intake {
             control_id: None,
             payload,
             relaxed: self.relaxed(),
+            destinations: &self.destinations,
         };
         let queued = self.store.insert_scheduled(new, key, state, skipped_state).await?.is_some();
         if queued {

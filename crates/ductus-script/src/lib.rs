@@ -94,11 +94,23 @@ pub const DEFAULT_FORMATS: &str = r#"{"input":{"kind":"hl7"},"output":{"kind":"h
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct InterfaceId(usize);
 
+/// Handle to one of an interface's functions (e.g. one per destination), see `add_functions`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FunctionId(usize);
+
+/// A callable entry point and the interface it belongs to.
+struct Entry {
+    function: v8::Global<v8::Function>,
+    interface: InterfaceId,
+}
+
 /// One V8 isolate hosting one or more interfaces (or a test suite).
 pub struct Isolate {
     runtime: JsRuntime,
-    /// Callable entry points, indexed by `InterfaceId` (the guard's table is indexed the same).
-    entries: Vec<v8::Global<v8::Function>>,
+    /// Callable entry points, indexed by `FunctionId`.
+    entries: Vec<Entry>,
+    /// Each interface's first entry, indexed by `InterfaceId` (the guard's table is indexed the same).
+    interfaces: Vec<FunctionId>,
     guard: Guard,
 }
 
@@ -132,7 +144,7 @@ impl Isolate {
         let context = runtime.main_context();
         let guard = Guard::new(runtime.v8_isolate(), context, heap_mb);
         runtime.add_near_heap_limit_callback(guard.heap_callback());
-        Self { runtime, entries: Vec::new(), guard }
+        Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard }
     }
 
     /// An isolate with a single interface loaded; use `transform`.
@@ -156,36 +168,69 @@ impl Isolate {
         formats_json: &str,
         timeout: Duration,
     ) -> Result<InterfaceId> {
+        Ok(self.add_functions(module, &[("transform", formats_json)], timeout).await?.0)
+    }
+
+    /// Load an interface module and the functions the engine calls in it, each with its
+    /// formats (`InterfaceConfig::functions`): e.g. one per destination. The module is loaded
+    /// once, so its functions share its module-level state. Each call may run for `timeout`
+    /// without pausing before it's stopped.
+    pub async fn add_functions(
+        &mut self,
+        module: &Path,
+        functions: &[(&str, &str)],
+        timeout: Duration,
+    ) -> Result<(InterfaceId, Vec<FunctionId>)> {
+        if functions.is_empty() {
+            bail!("no functions to load from {}", module.display());
+        }
         let url = file_url(module)?;
         // The glue module sits beside the interface, so each interface gets a unique one.
         let glue_url = file_url(&module.with_extension("ts.__ductus__.js"))?;
-        let glue = format!(
+        let quote = |s: &str| serde_json::to_string(s).expect("strings serialize");
+        let mut glue = format!(
             r#"import * as entry from "{url}";
 import {{ __invoke }} from "@ductus/sdk";
-if (typeof entry.transform !== "function") throw new Error("{name} must export a function named `transform`");
-const formats = {formats_json};
-export const run = (raw) => __invoke(entry.transform, raw, formats);
+const bind = (name, formats) => {{
+  const f = entry[name];
+  if (typeof f !== "function") throw new Error(`${{{file}}} must export a function named \`${{name}}\``);
+  return (raw, meta) => __invoke(f, raw, formats, meta);
+}};
 "#,
-            name = module.display(),
+            file = quote(&module.display().to_string()),
         );
+        for (i, (name, formats_json)) in functions.iter().enumerate() {
+            glue.push_str(&format!("export const run{i} = bind({}, {formats_json});\n", quote(name)));
+        }
         let id = self.runtime.load_side_es_module_from_code(&glue_url, glue).await.map_err(|e| anyhow!("{e}"))?;
         self.evaluate(id, timeout).await?;
 
         let namespace = self.runtime.get_module_namespace(id).map_err(|e| anyhow!("{e}"))?;
-        let function = {
-            deno_core::scope!(scope, &mut self.runtime);
-            let namespace = v8::Local::new(scope, namespace);
-            let key = v8::String::new(scope, "run").context("export name")?;
-            let value = namespace.get(scope, key.into()).context("glue export")?;
-            let function =
-                v8::Local::<v8::Function>::try_from(value).map_err(|_| anyhow!("glue export is not a function"))?;
-            v8::Global::new(scope, function)
-        };
+        let interface = InterfaceId(self.interfaces.len());
+        let mut ids = Vec::with_capacity(functions.len());
+        for i in 0..functions.len() {
+            let function = {
+                deno_core::scope!(scope, &mut self.runtime);
+                let namespace = v8::Local::new(scope, namespace.clone());
+                let key = v8::String::new(scope, &format!("run{i}")).context("export name")?;
+                let value = namespace.get(scope, key.into()).context("glue export")?;
+                let function =
+                    v8::Local::<v8::Function>::try_from(value).map_err(|_| anyhow!("glue export is not a function"))?;
+                v8::Global::new(scope, function)
+            };
+            ids.push(FunctionId(self.entries.len()));
+            self.entries.push(Entry { function, interface });
+        }
         let folder = file_url(module.parent().unwrap_or(Path::new(".")))?.to_string();
         let folder = if folder.ends_with('/') { folder } else { folder + "/" };
         self.guard.add(Some((url.to_string(), folder)), timeout);
-        self.entries.push(function);
-        Ok(InterfaceId(self.entries.len() - 1))
+        self.interfaces.push(ids[0]);
+        Ok((interface, ids))
+    }
+
+    /// The interface a function belongs to.
+    pub fn interface_of(&self, function: FunctionId) -> InterfaceId {
+        self.entries[function.0].interface
     }
 
     /// Load test modules; `run_tests()` then executes everything they registered.
@@ -232,7 +277,9 @@ __setFixtures({fixtures_json}, {formats_json});
             v8::Global::new(scope, function)
         };
         self.guard.add(None, DEFAULT_TIMEOUT);
-        self.entries.push(function);
+        let interface = InterfaceId(self.interfaces.len());
+        self.interfaces.push(FunctionId(self.entries.len()));
+        self.entries.push(Entry { function, interface });
         Ok(())
     }
 
@@ -289,10 +336,18 @@ __setFixtures({fixtures_json}, {formats_json});
         .await
     }
 
-    /// Start a transform. Synchronous transforms finish immediately; async ones return a
-    /// `PendingCall` to await while the event loop is driven (see `poll_event_loop`).
+    /// Start an interface's (first) function on a raw message; see `begin_function`.
     pub fn begin(&mut self, interface: InterfaceId, raw: &str) -> Result<Call> {
-        match self.call(interface, Some(raw))? {
+        let function = *self.interfaces.get(interface.0).context("no such interface in this isolate")?;
+        self.begin_function(function, raw, None)
+    }
+
+    /// Start a function on a raw message, with `meta` (JSON: message id etc.) as its second
+    /// argument. Synchronous functions finish immediately; async ones return a `PendingCall`
+    /// to await while the event loop is driven (see `poll_event_loop`).
+    pub fn begin_function(&mut self, function: FunctionId, raw: &str, meta: Option<&str>) -> Result<Call> {
+        let args: Vec<&str> = std::iter::once(raw).chain(meta).collect();
+        match self.call(function, &args)? {
             RawResult::Value(out) => Ok(Call::Done(out)),
             RawResult::Promise(promise) => Ok(Call::Pending(PendingCall(Box::pin(self.runtime.resolve(promise))))),
         }
@@ -327,7 +382,7 @@ __setFixtures({fixtures_json}, {formats_json});
 
     /// Run the loaded test suite (tests may be async); returns the JSON report.
     pub async fn run_tests(&mut self) -> Result<String> {
-        let report = match self.call(InterfaceId(0), None)? {
+        let report = match self.call(FunctionId(0), &[])? {
             RawResult::Value(report) => report,
             RawResult::Promise(promise) => {
                 let pending = PendingCall(Box::pin(self.runtime.resolve(promise)));
@@ -338,25 +393,26 @@ __setFixtures({fixtures_json}, {formats_json});
         report.context("test runner returned nothing")
     }
 
-    /// Call an entry point within its time budget.
-    fn call(&mut self, entry: InterfaceId, arg: Option<&str>) -> Result<RawResult> {
-        let function = self.entries.get(entry.0).context("no such interface in this isolate")?.clone();
-        self.guard.arm_for(entry.0);
-        let result = self.call_unguarded(function, arg);
+    /// Call an entry point within its interface's time budget.
+    fn call(&mut self, entry: FunctionId, args: &[&str]) -> Result<RawResult> {
+        let Entry { function, interface } = self.entries.get(entry.0).context("no such function in this isolate")?;
+        let (function, interface) = (function.clone(), *interface);
+        self.guard.arm_for(interface.0);
+        let result = self.call_unguarded(function, args);
         match self.guard.disarm(self.runtime.v8_isolate()) {
-            Some(trip) => Err(runaway(Some(entry), trip).into()),
+            Some(trip) => Err(runaway(Some(interface), trip).into()),
             None => result,
         }
     }
 
-    fn call_unguarded(&mut self, function: v8::Global<v8::Function>, arg: Option<&str>) -> Result<RawResult> {
+    fn call_unguarded(&mut self, function: v8::Global<v8::Function>, args: &[&str]) -> Result<RawResult> {
         deno_core::scope!(scope, &mut self.runtime);
         v8::tc_scope!(let scope, scope);
         let function = v8::Local::new(scope, function);
-        let args: Vec<v8::Local<v8::Value>> = match arg {
-            Some(a) => vec![v8::String::new(scope, a).context("argument")?.into()],
-            None => vec![],
-        };
+        let args = args
+            .iter()
+            .map(|a| v8::String::new(scope, a).map(Into::into).context("argument"))
+            .collect::<Result<Vec<v8::Local<v8::Value>>>>()?;
         let receiver = v8::undefined(scope);
         match function.call(scope, receiver.into(), &args) {
             Some(result) if result.is_null_or_undefined() => Ok(RawResult::Value(None)),

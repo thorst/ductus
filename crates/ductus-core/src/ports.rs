@@ -63,21 +63,23 @@ pub fn listeners<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> 
 pub fn outbound<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>, resources: &Resources) -> Vec<Outbound> {
     let mut out = Vec::new();
     for c in configs {
-        let used_by = c.name.clone();
-        match &c.destination {
-            Some(Destination::Mllp { host, port, .. }) => {
-                out.push(Outbound { host: host.clone(), port: *port, protocol: "MLLP", used_by });
-            }
-            Some(Destination::Http { url, .. }) => {
-                if let Ok(u) = url::Url::parse(url)
-                    && let (Some(host), Some(port)) = (u.host_str(), u.port_or_known_default())
-                {
-                    let protocol = if u.scheme() == "https" { "HTTPS" } else { "HTTP" };
-                    out.push(Outbound { host: host.to_string(), port, protocol, used_by });
+        for (name, d) in c.destinations() {
+            let used_by = if c.destination.is_some() { c.name.clone() } else { format!("{} → {name}", c.name) };
+            match &d.connector {
+                Destination::Mllp { host, port, .. } => {
+                    out.push(Outbound { host: host.clone(), port: *port, protocol: "MLLP", used_by });
                 }
+                Destination::Http { url, .. } => {
+                    if let Ok(u) = url::Url::parse(url)
+                        && let (Some(host), Some(port)) = (u.host_str(), u.port_or_known_default())
+                    {
+                        let protocol = if u.scheme() == "https" { "HTTPS" } else { "HTTP" };
+                        out.push(Outbound { host: host.to_string(), port, protocol, used_by });
+                    }
+                }
+                // SFTP servers are listed once, from resources.yaml, below.
+                Destination::Sftp { .. } | Destination::File { .. } => {}
             }
-            // SFTP servers are listed once, from resources.yaml, below.
-            Some(Destination::Sftp { .. } | Destination::File { .. }) | None => {}
         }
     }
     for (name, db) in &resources.databases {

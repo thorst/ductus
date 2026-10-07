@@ -43,7 +43,7 @@ field() { # json, python expression over d
 DEV_DB=$(sed -E 's#.*/([^/?]+).*#\1#' <<<"$DB")
 PROD_DB=ductus_v04_prod
 PROD_URL=$(sed -E "s#/[^/?]+([?]|$)#/$PROD_DB\1#" <<<"$DB")
-psql -q "$DB" -c "TRUNCATE messages, dedupe_keys, source_state" -c "DROP DATABASE IF EXISTS $PROD_DB" -c "CREATE DATABASE $PROD_DB"
+psql -q "$DB" -c "TRUNCATE messages, deliveries, dedupe_keys, source_state" -c "DROP DATABASE IF EXISTS $PROD_DB" -c "CREATE DATABASE $PROD_DB"
 seed() { # url, name suffix
   psql -q "$1" <<SQL
 DROP TABLE IF EXISTS v04_patients, v04_results;

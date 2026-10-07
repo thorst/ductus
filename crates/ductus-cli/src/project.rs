@@ -206,7 +206,7 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
             }
             Ok(config) => {
                 if let Some(script) = config.script_path()
-                    && let Err(e) = Isolate::interface(&script).await
+                    && let Err(e) = load_functions(config, &script).await
                 {
                     problems += 1;
                     println!("✗ {label}: {}", first_line(&format!("{e:#}")));
@@ -383,6 +383,14 @@ pub fn secret(command: SecretCommand) -> Result<()> {
 fn indent(text: &str, n: usize) -> String {
     let pad = " ".repeat(n);
     text.lines().map(|l| format!("{pad}{l}")).collect::<Vec<_>>().join("\n")
+}
+
+/// Load an interface's code the way the engine does: every function its destinations name
+/// must be exported.
+async fn load_functions(config: &ductus_core::InterfaceConfig, script: &Path) -> Result<()> {
+    let functions = config.functions();
+    let functions: Vec<(&str, &str)> = functions.iter().map(|(n, f)| (n.as_str(), f.as_str())).collect();
+    Isolate::host().add_functions(script, &functions, config.timeout).await.map(drop)
 }
 
 fn first_line(text: &str) -> &str {

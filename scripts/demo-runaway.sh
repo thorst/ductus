@@ -15,7 +15,7 @@ DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
 COUNT=${COUNT:-200}
 P=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB
-psql -q "$DB" -c "TRUNCATE messages, dedupe_keys"
+psql -q "$DB" -c "TRUNCATE messages, deliveries, dedupe_keys"
 
 echo "isolates: { heap_mb: 128 }" >"$P/ductus.yaml"
 add() { # name port timeout transform-body

@@ -19,7 +19,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 ## Messages and delivery
 
 ### A message can be delivered twice (level 3)
-- **What:** delivery is *at least once*. If the engine stops after the destination accepted a message but before recording it as sent, the message is sent again on restart. Sent statuses are saved in batches of up to 50, so a crash can re-send up to that many per worker.
+- **What:** delivery is *at least once*. If the engine stops after the destination accepted a message but before recording it as sent, the message is sent again on restart. Sent statuses are saved in batches of up to 50, so a crash can re-send up to that many per worker and destination.
 - **Why:** the alternative (at most once) loses messages. Nothing that was ACKed is ever lost.
 - **What to do:** make receivers tolerate repeats (most HL7 receivers dedupe on MSH-10), or use `dedupe` on the receiving interface.
 
@@ -30,11 +30,32 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 ### Only the original is stored; outputs are recomputed (level 3)
 - **What:** the engine stores each message exactly as received and never changes it. What was sent isn't stored by default; it's reproduced by running the same code on the original. That's exact only if the transform depends on nothing but the message and the code. Lookups (`db()`, `fetch()`), the current time and environment values can give a different result when re-run later.
 - **Why:** transforms are fast, and storing every output would cost a database write per message.
-- **What to do:** if you must be able to prove exactly what was sent, turn on saved output for that interface (planned for v0.5). Keep transforms that don't need lookups free of them.
+- **What to do:** if you must be able to prove exactly what was sent, set `save_output: true` on that destination: what it was sent is kept with its delivery. Keep transforms that don't need lookups free of them.
 
 ### A "done" marker can't prevent duplicates (level 5)
 - **What:** recording "this insert happened" in the engine's database doesn't make an insert in *another* database happen exactly once: the two writes can't share a transaction, so a crash between them still repeats the insert on re-run.
-- **What to do:** put the guarantee where the data lands: a unique key or upsert in the target table, or an idempotency key the receiving API checks. Use the message's stable key (planned: `meta.id`) for it.
+- **What to do:** put the guarantee where the data lands: a unique key or upsert in the target table, or an idempotency key the receiving API checks. Use the message's stable key `meta.id` (the second argument of `transform`: `transform(msg, meta)`) for it. It's unique within one engine database; add something per environment if several engines write to the same place.
+
+## Several destinations
+
+### Each destination runs its own function on the original message (level 2)
+- **What:** with `destinations:`, every destination calls its function (`transform` unless it names another with `transform: toBilling`) on the message as received, not on another destination's result. Three destinations using `transform` run it three times, and each run makes its own `db()` and `fetch()` calls.
+- **Why:** each destination works through its own queue at its own pace (one can be hours behind), and outputs aren't stored, so nothing can be handed from one to the other.
+- **What to do:** put shared preparation in a helper the functions call. Keep lookups in the functions that need them. Module-level state is shared by all of an interface's functions (one module), so a bounded cache can save repeated lookups.
+
+### One destination down holds up only itself (level 2)
+- **What:** each destination has its own queue, order and retries. While the lab is down, billing and the archive keep receiving; the lab's messages wait, in order, and go once it's back. A message's overall status stays `pending` until every destination is done with it. Then it's `quarantined` if any destination quarantined it, `sent` if any destination got it, and `filtered` if all of them filtered it. The status per destination says which (`ductus status` lists them).
+- **What to do:** watch each destination's queue, not just the interface's.
+
+### Filtering and quarantine are per destination (level 2)
+- **What:** `return null`, `kill()` and `quarantine()` in a destination's function apply to that destination only. The message still goes to the others.
+
+### Adding, removing or renaming a destination (level 3)
+- **What:** at startup the engine matches stored deliveries to `interface.yaml`. A **new** destination also gets the messages still in flight (pending for any destination), not older ones. A **removed** destination's waiting messages are marked filtered ("destination `x` was removed from interface.yaml") and logged. A **rename** is both: the new name gets everything in flight, including what the old name had waiting, and may re-send some the old name had already sent.
+- **What to do:** rename only when the destination is caught up. Removing a destination by mistake can't be undone by putting it back: its waiting messages were already filtered.
+
+### A runaway is blamed on the interface, not the destination (level 5)
+- **What:** when code runs away after an `await`, the engine knows which interface's code it was, not which function. Every call of that interface in flight on the thread is quarantined, so another destination's message can be quarantined with it. Each one counts towards stopping the interface.
 
 ### Order is per key, and one stuck message holds up its key (level 3)
 - **What:** messages with the same ordering key (e.g. MRN) are processed strictly in arrival order. A message that keeps failing temporarily blocks the other messages in its lane until it succeeds or is quarantined. With no `ordering.key`, the whole interface is one lane.

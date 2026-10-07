@@ -158,6 +158,55 @@ export function transform(m: Message) { m.add("ZSH", [String(bump())]); return m
     assert!(err.contains("undeclared is not defined"), "{err}");
 }
 
+/// Several destinations: one module, one function each (sharing the module's state), each with
+/// its own output format, and `meta` as the second argument.
+#[test]
+fn one_module_several_functions_with_meta() {
+    let dir = project(&[
+        (
+            "adt/transform.ts",
+            r#"import { kill, type Message, type Meta } from "@ductus/sdk";
+let calls = 0;
+export function transform(m: Message, meta: Meta) { m.add("ZID", [String(meta.id), meta.destination, String(++calls)]); return m; }
+export function toBilling(m: Message, meta: Meta) {
+  if (m.PID[3][1] === "999") return kill("not billable");
+  return { id: meta.id, mrn: m.PID[3][1], calls: ++calls };
+}"#,
+        ),
+        ("fax/transform.ts", "export function transform(m: unknown) { return m; }"),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let module = dir.path().join("adt/transform.ts");
+    let json = r#"{"input":{"kind":"hl7"},"output":{"kind":"json"}}"#;
+    let (interface, f) = rt
+        .block_on(host.add_functions(&module, &[("transform", DEFAULT_FORMATS), ("toBilling", json)], SECOND))
+        .unwrap();
+    assert_eq!((host.interface_of(f[0]), host.interface_of(f[1])), (interface, interface));
+
+    let mut run = |function, raw: &str, destination: &str| {
+        let meta = format!(r#"{{"id":42,"receivedAt":"2026-10-07T12:00:00Z","destination":"{destination}"}}"#);
+        match host.begin_function(function, raw, Some(&meta)).unwrap() {
+            ductus_script::Call::Done(out) => out,
+            ductus_script::Call::Pending(_) => panic!("sync functions finish at once"),
+        }
+    };
+    let lab = run(f[0], ADT, "lab").unwrap();
+    assert!(lab.trim_end().ends_with("ZID|42|lab|1"), "{lab}");
+    let billing: serde_json::Value = serde_json::from_str(&run(f[1], ADT, "billing").unwrap()).unwrap();
+    assert_eq!(billing, serde_json::json!({ "id": 42, "mrn": "123456", "calls": 2 }), "module state is shared");
+    let unbillable = run(f[1], &ADT.replace("123456", "999"), "billing").unwrap();
+    assert!(unbillable.starts_with(ductus_script::KILL) && unbillable.ends_with("not billable"));
+
+    // A function the config names but the module doesn't export fails the load, by name.
+    let fax = dir.path().join("fax/transform.ts");
+    let err = rt.block_on(host.add_functions(&fax, &[("toFax", DEFAULT_FORMATS)], SECOND)).unwrap_err();
+    assert!(format!("{err:#}").contains("must export a function named `toFax`"), "{err:#}");
+}
+
+const SECOND: Duration = Duration::from_secs(1);
+
 /// Stand-in for the engine's services: a slow "database", one variable.
 struct FakeServices;
 

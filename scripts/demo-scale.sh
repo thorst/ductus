@@ -57,7 +57,7 @@ export function transform(msg: Message) {
 EOF
 done
 
-psql -q "$DB" -c "TRUNCATE messages, dedupe_keys" 2>/dev/null || true
+psql -q "$DB" -c "TRUNCATE messages, deliveries, dedupe_keys" 2>/dev/null || true
 "$BIN" sink --port 6662 >"$WORK/sink.log" 2>&1 &
 SINK=$!
 
@@ -93,7 +93,7 @@ wait $EPIC
 echo "   epic generator: $(tail -1 "$WORK/gen-epic.log")"
 sleep 1
 
-for _ in $(seq 1 120); do "$BIN" status | grep -q pending || break; sleep 1; done
+for _ in $(seq 1 120); do "$BIN" status | grep pending >/dev/null || break; sleep 1; done
 rss_after=$(( $(awk '/VmRSS/ {print $2}' /proc/$ENGINE/status) / 1024 ))
 kill -INT $SINK; wait $SINK 2>/dev/null || true
 kill -INT $ENGINE; wait $ENGINE 2>/dev/null || true

@@ -82,6 +82,17 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     }
     let sftp_server = |name: &str| resources.sftp.get(name).cloned();
     let store = Store::connect(database_url, options.db_connections).await?;
+    // Before any worker starts: stored deliveries must match the destinations configured now.
+    let destinations: Vec<(String, String)> =
+        configs.iter().flat_map(|c| c.destinations().map(|(name, _)| (c.name.clone(), name.to_string()))).collect();
+    let changes = store.reconcile(&destinations).await.context("matching stored deliveries to the destinations")?;
+    let mut ids = store.destination_ids(&destinations).await?.into_iter();
+    for (interface, count) in &changes.added {
+        tracing::info!(%interface, count, "queued messages in flight for destinations they had no delivery for (new destination, or stored by an older version)");
+    }
+    for (interface, destination, count) in &changes.removed {
+        tracing::warn!(%interface, %destination, count, "destination is no longer in interface.yaml: its pending deliveries were marked filtered");
+    }
     // Keep dedupe keys a little longer than the longest window that uses them.
     let dedupe_retention = configs.iter().filter_map(|c| c.dedupe.as_ref()).map(|d| d.window).max().unwrap_or_default()
         + Duration::from_secs(3600);
@@ -96,10 +107,23 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     let mut shared_count = 0;
     for config in configs {
         let config = Arc::new(config);
-        // One wake-up signal per slot: ingest wakes only the slot that owns the message's lane.
-        let wake: Arc<[Notify]> = (0..config.slots()).map(|_| Notify::new()).collect();
+        let wake = Arc::new(Wake::new(config.slots(), config.destinations().count()));
+        let destination_ids: Vec<_> = ids.by_ref().take(config.destinations().count()).collect();
         let health = Arc::new(health::Health::default());
-        let limiter = config.rate_limit.clone().map(|r| Arc::new(limiter::Limiter::new(r, std::time::Instant::now())));
+        let outlets: Vec<worker::Outlet> = config
+            .destinations()
+            .zip(&destination_ids)
+            .map(|((_, d), &id)| worker::Outlet {
+                id,
+                limiter: config
+                    .rate_limit_for(d)
+                    .map(|r| Arc::new(limiter::Limiter::new(r.clone(), std::time::Instant::now()))),
+                server: match &d.connector {
+                    Destination::Sftp { server, .. } => sftp_server(server),
+                    _ => None,
+                },
+            })
+            .collect();
         // Respond-mode HTTP interfaces get requests over a channel instead of a queue.
         let mut requests = None;
         if let Source::Http { host, port, path, method, .. } = &config.source {
@@ -108,7 +132,12 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 requests = Some(rx);
                 http::Route::Respond { interface: config.name.clone(), calls }
             } else {
-                http::Route::Queue(Arc::new(ingest::Intake::new(config.clone(), store.clone(), wake.clone())?))
+                http::Route::Queue(Arc::new(ingest::Intake::new(
+                    config.clone(),
+                    store.clone(),
+                    wake.clone(),
+                    destination_ids.clone(),
+                )?))
             };
             http_endpoints.push(http::Endpoint {
                 host: host.clone(),
@@ -123,13 +152,9 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 config: config.clone(),
                 slot,
                 wake: wake.clone(),
-                limiter: limiter.clone(),
                 requests: requests.take(),
-                server: match &config.destination {
-                    Some(Destination::Sftp { server, .. }) => sftp_server(server),
-                    _ => None,
-                },
                 health: health.clone(),
+                outlets: outlets.clone(),
             };
             match config.isolation {
                 Isolation::Shared => {
@@ -139,7 +164,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 Isolation::Dedicated => dedicated.push((format!("{}-w{slot}", config.name), job)),
             }
         }
-        interfaces.push((config, wake));
+        interfaces.push((config, wake, destination_ids));
     }
 
     let services = Arc::new(services::SharedServices::new(env, &resources));
@@ -172,8 +197,9 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         bail!("{}", failed.join("\n"));
     }
 
-    for (config, wake) in &interfaces {
-        let intake = || ingest::Intake::new(config.clone(), store.clone(), wake.clone()).map(Arc::new);
+    for (config, wake, destination_ids) in &interfaces {
+        let intake =
+            || ingest::Intake::new(config.clone(), store.clone(), wake.clone(), destination_ids.clone()).map(Arc::new);
         match &config.source {
             Source::Mllp { .. } => ingest::spawn_mllp(intake()?).await?,
             Source::File(f) | Source::Sftp(f) => {
@@ -211,6 +237,35 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     tokio::signal::ctrl_c().await?;
     tracing::info!("shutting down");
     Ok(())
+}
+
+/// Wake-up signals, one per (slot, destination). Ingest wakes every destination's worker in the
+/// slot that owns a new message's lane; `notify_one` keeps a permit while a worker is busy, so
+/// a wake-up is never lost.
+pub(crate) struct Wake {
+    destinations: usize,
+    notify: Box<[Notify]>,
+}
+
+impl Wake {
+    fn new(slots: u32, destinations: usize) -> Self {
+        let destinations = destinations.max(1); // respond mode has none, and no queue
+        Self { destinations, notify: (0..slots as usize * destinations).map(|_| Notify::new()).collect() }
+    }
+
+    pub(crate) fn slots(&self) -> usize {
+        self.notify.len() / self.destinations
+    }
+
+    /// Wake the owners of a lane (same assignment as `InterfaceConfig::partitions_for_worker`).
+    pub(crate) fn lane(&self, partition: i32) {
+        let slot = partition as usize % self.slots();
+        self.notify[slot * self.destinations..][..self.destinations].iter().for_each(Notify::notify_one);
+    }
+
+    pub(crate) fn get(&self, slot: usize, destination: usize) -> &Notify {
+        &self.notify[slot * self.destinations + destination]
+    }
 }
 
 /// Current local time in HL7 TS format.

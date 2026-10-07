@@ -214,7 +214,11 @@ fn render(
         format!(
             "destination: {{ file: {{ dir: out/{name} }} }}\n\
              # or: destination: {{ mllp: {{ host: receiver.example.org, port: 5000 }} }}\n\
-             # or: destination: {{ http: {{ url: https://api.example.org/messages }} }}\n"
+             # or: destination: {{ http: {{ url: https://api.example.org/messages }} }}\n\
+             # or several, each with its own queue (and optionally its own exported function):\n\
+             # destinations:\n\
+             #   lab: {{ mllp: {{ host: lab.example.org, port: 5000 }} }}\n\
+             #   billing: {{ http: {{ url: https://billing.example.org/charges }}, transform: toBilling, output: json }}\n"
         )
     };
     let yaml = format!(

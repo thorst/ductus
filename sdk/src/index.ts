@@ -68,6 +68,23 @@ export function quarantine(reason: string): QuarantineError {
   return new QuarantineError(`${QUARANTINE} ${reason}`);
 }
 
+/**
+ * About the message being processed, the second argument of `transform` (and of each
+ * destination's function):
+ *
+ *   export function transform(msg: Message, meta: Meta) { ... }
+ */
+export interface Meta {
+  /** The stored message's id: the same every time this message is processed (retries, restarts,
+   *  each destination). Use it as a unique key or `Idempotency-Key` so a receiver can ignore
+   *  a repeat. Unique within one engine database. */
+  id: number;
+  /** When the message was received (ISO 8601). */
+  receivedAt: string;
+  /** The destination this call prepares the message for (`default` with a single `destination:`). */
+  destination: string;
+}
+
 /** Input and output formats of an interface, from interface.yaml. */
 export interface Formats {
   input: FormatSpec;
@@ -99,17 +116,19 @@ function serialize(result: unknown, output: FormatSpec): string | null {
 }
 
 /** Engine entry point: parse by format, run the transform (sync or async), serialize the result.
+ *  `meta` is the message's `Meta` as JSON (none in respond mode).
  *  @internal Exported for the engine and SDK tests. */
 export function __invoke(
-  transform: (input: unknown) => unknown,
+  transform: (input: unknown, meta?: Meta) => unknown,
   raw: string,
   formats: Formats = HL7,
+  meta?: string,
 ): string | null | Promise<string | null> {
   if (formats.http) {
     const result = transform(requestFrom(raw, formats.input));
     return result instanceof Promise ? result.then((r) => respond(r, formats.output)) : respond(result, formats.output);
   }
-  const result = transform(decode(raw, formats.input));
+  const result = transform(decode(raw, formats.input), meta === undefined ? undefined : JSON.parse(meta));
   return result instanceof Promise
     ? result.then((r) => serialize(r, formats.output))
     : serialize(result, formats.output);

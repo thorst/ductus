@@ -21,7 +21,7 @@ cleanup() {
   for pid in $ENGINE $SSHD_PID; do kill "$pid" 2>/dev/null || true; done
 }
 trap cleanup EXIT
-psql -q "$DB" -c "TRUNCATE messages, dedupe_keys, source_state"
+psql -q "$DB" -c "TRUNCATE messages, deliveries, dedupe_keys, source_state"
 
 FAILED=0
 check() { # name, expected, actual

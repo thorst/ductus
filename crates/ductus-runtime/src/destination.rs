@@ -1,7 +1,7 @@
 //! Delivery to a destination.
 
 use ductus_core::InterfaceConfig;
-use ductus_core::config::{AckMode, Destination, OnReject};
+use ductus_core::config::{AckMode, Destination, DestinationConfig, OnReject};
 use ductus_core::format::Format;
 use ductus_core::resources::SftpServer;
 use ductus_hl7::Message;
@@ -16,28 +16,10 @@ pub enum SendError {
 }
 
 pub enum Sender {
-    Mllp {
-        client: ductus_mllp::Client,
-        ack: AckMode,
-        on_reject: OnReject,
-    },
-    File {
-        dir: PathBuf,
-        extension: &'static str,
-    },
-    Http {
-        client: reqwest::Client,
-        method: reqwest::Method,
-        url: String,
-        headers: reqwest::header::HeaderMap,
-    },
-    Sftp {
-        connection: crate::sftp::Connection,
-        dir: String,
-        extension: &'static str,
-    },
-    /// Respond-mode HTTP interfaces deliver nothing.
-    None,
+    Mllp { client: ductus_mllp::Client, ack: AckMode, on_reject: OnReject },
+    File { dir: PathBuf, extension: &'static str },
+    Http { client: reqwest::Client, method: reqwest::Method, url: String, headers: reqwest::header::HeaderMap },
+    Sftp { connection: crate::sftp::Connection, dir: String, extension: &'static str },
 }
 
 /// Content-Type for a format's serialized output.
@@ -63,26 +45,23 @@ fn extension(format: &Format) -> &'static str {
 }
 
 impl Sender {
-    /// `server`: an SFTP destination's server, from resources.yaml.
-    pub fn new(config: &InterfaceConfig, server: Option<SftpServer>) -> Self {
-        match &config.destination {
-            Some(Destination::Sftp { server: name, dir }) => Sender::Sftp {
+    /// A sender for one of `config`'s destinations. `server`: an SFTP destination's server,
+    /// from resources.yaml.
+    pub fn new(config: &InterfaceConfig, destination: &DestinationConfig, server: Option<SftpServer>) -> Self {
+        let output = config.output_for(destination);
+        match &destination.connector {
+            Destination::Sftp { server: name, dir } => Sender::Sftp {
                 connection: crate::sftp::Connection::new(name, server.expect("checked at startup")),
                 dir: dir.clone(),
-                extension: extension(config.output.as_ref().unwrap_or(&config.format)),
+                extension: extension(output),
             },
-            None => Sender::None,
-            Some(Destination::Mllp { host, port, timeout_ms, ack, on_reject }) => Sender::Mllp {
+            Destination::Mllp { host, port, timeout_ms, ack, on_reject } => Sender::Mllp {
                 client: ductus_mllp::Client::new(format!("{host}:{port}"), Duration::from_millis(*timeout_ms)),
                 ack: *ack,
                 on_reject: *on_reject,
             },
-            Some(Destination::File { dir }) => Sender::File {
-                dir: config.dir.join(dir),
-                extension: extension(config.output.as_ref().unwrap_or(&config.format)),
-            },
-            Some(Destination::Http { url, method, headers, timeout_ms }) => {
-                let output = config.output.as_ref().unwrap_or(&config.format);
+            Destination::File { dir } => Sender::File { dir: config.dir.join(dir), extension: extension(output) },
+            Destination::Http { url, method, headers, timeout_ms } => {
                 let mut map = reqwest::header::HeaderMap::new();
                 map.insert(
                     reqwest::header::CONTENT_TYPE,
@@ -111,7 +90,6 @@ impl Sender {
 
     pub async fn send(&mut self, id: i64, payload: &[u8]) -> Result<(), SendError> {
         match self {
-            Sender::None => Ok(()),
             Sender::Mllp { client, ack: AckMode::None, .. } => {
                 client.send_no_ack(payload).await.map_err(|e| SendError::Transient(e.to_string()))
             }

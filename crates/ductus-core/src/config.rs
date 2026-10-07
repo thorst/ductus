@@ -42,9 +42,14 @@ pub struct InterfaceConfig {
     /// messages can be lost. An engine crash alone never loses anything in either mode.
     #[serde(default)]
     pub durability: Durability,
-    /// Where messages go. Not used by HTTP sources in `respond` mode (the response is the result).
-    #[serde(default, with = "serde_yaml_ng::with::singleton_map_recursive")]
-    pub destination: Option<Destination>,
+    /// Where messages go (one place; its name is `default`). Not used by HTTP sources in
+    /// `respond` mode (the response is the result).
+    #[serde(default)]
+    pub destination: Option<DestinationConfig>,
+    /// Or several places, by name: each gets every message, delivered independently (one that's
+    /// down holds up only its own deliveries), with its own function, format, retries and limits.
+    #[serde(default)]
+    pub destinations: BTreeMap<String, DestinationConfig>,
     #[serde(default)]
     pub retry: Retry,
     /// Drop repeats of a message seen recently (e.g. a sender resending after a lost ACK).
@@ -211,6 +216,83 @@ pub enum HttpMode {
     Respond,
 }
 
+/// Name of the destination given with `destination:` (rather than `destinations:`).
+pub const DEFAULT_DESTINATION: &str = "default";
+
+/// One destination: where to (`connector`) and how messages are prepared for it.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(try_from = "RawDestination")]
+pub struct DestinationConfig {
+    pub connector: Destination,
+    /// Exported function that prepares messages for this destination (default `transform`).
+    /// Every destination runs its function on the original message.
+    pub transform: Option<String>,
+    /// How this destination's results are serialized (default: the interface's `output`).
+    pub output: Option<Format>,
+    /// Overrides the interface's `retry` for this destination.
+    pub retry: Option<Retry>,
+    /// Overrides the interface's `rate_limit` for this destination.
+    pub rate_limit: Option<RateLimit>,
+    /// Keep a copy of exactly what was sent (off by default: outputs can be recomputed from the
+    /// original, and storing them costs space). For when it must be provable what was sent.
+    pub save_output: bool,
+}
+
+impl DestinationConfig {
+    /// The exported function that prepares this destination's messages.
+    pub fn function(&self) -> &str {
+        self.transform.as_deref().unwrap_or("transform")
+    }
+}
+
+/// A destination as written: exactly one connector key (`mllp`, `file`, `sftp`, `http`) next to
+/// the options. Read through this so unknown keys are still errors.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawDestination {
+    #[serde(default)]
+    mllp: Option<serde_yaml_ng::Value>,
+    #[serde(default)]
+    file: Option<serde_yaml_ng::Value>,
+    #[serde(default)]
+    sftp: Option<serde_yaml_ng::Value>,
+    #[serde(default)]
+    http: Option<serde_yaml_ng::Value>,
+    #[serde(default)]
+    transform: Option<String>,
+    #[serde(default, deserialize_with = "crate::format::deserialize_opt")]
+    output: Option<Format>,
+    #[serde(default)]
+    retry: Option<Retry>,
+    #[serde(default)]
+    rate_limit: Option<RateLimit>,
+    #[serde(default)]
+    save_output: bool,
+}
+
+impl TryFrom<RawDestination> for DestinationConfig {
+    type Error = String;
+    fn try_from(raw: RawDestination) -> std::result::Result<Self, String> {
+        let mut connectors = [("mllp", raw.mllp), ("file", raw.file), ("sftp", raw.sftp), ("http", raw.http)]
+            .into_iter()
+            .filter_map(|(kind, value)| value.map(|v| serde_yaml_ng::Mapping::from_iter([(kind.into(), v)])));
+        let (Some(connector), None) = (connectors.next(), connectors.next()) else {
+            return Err("a destination needs exactly one of `mllp`, `file`, `sftp` or `http`".into());
+        };
+        let connector =
+            serde_yaml_ng::with::singleton_map_recursive::deserialize(serde_yaml_ng::Value::Mapping(connector))
+                .map_err(|e| e.to_string())?;
+        Ok(Self {
+            connector,
+            transform: raw.transform,
+            output: raw.output,
+            retry: raw.retry,
+            rate_limit: raw.rate_limit,
+            save_output: raw.save_output,
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum Destination {
@@ -320,6 +402,16 @@ pub enum OverLimit {
     #[default]
     Wait,
     Drop,
+}
+
+fn check_rate_limit(r: &RateLimit) -> Result<()> {
+    if r.per_minute == 0 {
+        bail!("rate_limit.per_minute must be at least 1");
+    }
+    if r.burst == Some(0) {
+        bail!("rate_limit.burst must be at least 1");
+    }
+    Ok(())
 }
 
 /// Parse durations like "500ms", "90s", "15m", "24h", "7d".
@@ -484,13 +576,44 @@ impl InterfaceConfig {
         if matches!(self.source, Source::Mllp { .. }) && self.format != Format::Hl7 {
             bail!("an MLLP source carries HL7: `format: {}` needs another source type", self.format.name());
         }
-        match (self.responds(), &self.destination) {
-            (true, Some(_)) => {
+        if self.destination.is_some() && !self.destinations.is_empty() {
+            bail!("use either `destination` (one) or `destinations` (several, by name), not both");
+        }
+        let has_destination = self.destinations().next().is_some();
+        match (self.responds(), has_destination) {
+            (true, true) => {
                 bail!("an HTTP source in `respond` mode answers with the transform's result; remove `destination`")
             }
-            (true, None) if self.script.is_none() => bail!("an HTTP source in `respond` mode needs a `script`"),
-            (false, None) => bail!("`destination` is required"),
+            (true, false) if self.script.is_none() => bail!("an HTTP source in `respond` mode needs a `script`"),
+            (false, false) => bail!("`destination` is required (or `destinations`, to send to several places)"),
             _ => {}
+        }
+        for (name, d) in self.destinations() {
+            let what = || format!("destination `{name}`");
+            let valid_name = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
+            if name.is_empty() || name.len() > 64 || !name.chars().all(valid_name) {
+                bail!("{}: names use lower-case letters, digits, `_` and `-` (at most 64)", what());
+            }
+            if let Some(function) = &d.transform {
+                let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+                if function.is_empty() || function.starts_with(|c: char| c.is_ascii_digit()) {
+                    bail!("{}: `transform` must name an exported function", what());
+                }
+                if !function.chars().all(identifier) {
+                    bail!("{}: `transform: {function}` isn't a function name", what());
+                }
+                if self.script.is_none() {
+                    bail!("{}: `transform: {function}` needs a `script` that exports it", what());
+                }
+            }
+            if let Destination::Sftp { server, .. } = &d.connector
+                && server.trim().is_empty()
+            {
+                bail!("{}: SFTP needs `server` (a name under `sftp:` in resources.yaml)", what());
+            }
+            if let Some(r) = &d.rate_limit {
+                check_rate_limit(r).with_context(what)?;
+            }
         }
         if let Source::Http { path, method, .. } = &self.source {
             if !path.starts_with('/') {
@@ -535,20 +658,43 @@ impl InterfaceConfig {
             }
             Source::Mllp { .. } | Source::Http { .. } => {}
         }
-        if let Some(Destination::Sftp { server, .. }) = &self.destination
-            && server.trim().is_empty()
-        {
-            bail!("SFTP destination needs `server` (a name under `sftp:` in resources.yaml)");
-        }
         if let Some(r) = &self.rate_limit {
-            if r.per_minute == 0 {
-                bail!("rate_limit.per_minute must be at least 1");
-            }
-            if r.burst == Some(0) {
-                bail!("rate_limit.burst must be at least 1");
-            }
+            check_rate_limit(r)?;
         }
         Ok(())
+    }
+
+    /// Every destination with its name (`default` for one given with `destination:`).
+    pub fn destinations(&self) -> impl Iterator<Item = (&str, &DestinationConfig)> {
+        let single = self.destination.iter().map(|d| (DEFAULT_DESTINATION, d));
+        single.chain(self.destinations.iter().map(|(name, d)| (name.as_str(), d)))
+    }
+
+    /// The functions the engine calls, each with its formats (see `format_spec`): one per
+    /// destination, or `transform` for respond mode. Same order as `destinations()`.
+    pub fn functions(&self) -> Vec<(String, String)> {
+        if self.responds() {
+            return vec![("transform".into(), self.format_spec())];
+        }
+        self.destinations()
+            .map(|(_, d)| (d.function().to_string(), self.format_spec_with(Some(self.output_for(d)))))
+            .collect()
+    }
+
+    /// A destination's retry settings: its own, or the interface's.
+    pub fn retry_for<'a>(&'a self, destination: &'a DestinationConfig) -> &'a Retry {
+        destination.retry.as_ref().unwrap_or(&self.retry)
+    }
+
+    /// A destination's rate limit: its own, or the interface's (each destination has its own
+    /// allowance either way).
+    pub fn rate_limit_for<'a>(&'a self, destination: &'a DestinationConfig) -> Option<&'a RateLimit> {
+        destination.rate_limit.as_ref().or(self.rate_limit.as_ref())
+    }
+
+    /// The format a destination's results are serialized in.
+    pub fn output_for<'a>(&'a self, destination: &'a DestinationConfig) -> &'a Format {
+        destination.output.as_ref().or(self.output.as_ref()).unwrap_or(&self.format)
     }
 
     /// Input and output formats as JSON, for the SDK: `{"input": {...}, "output": {...}}`,
@@ -558,7 +704,12 @@ impl InterfaceConfig {
     /// `format` is then what the transform produces), and a CSV or fixed-length file split into
     /// records passes one record (`"record": true`) rather than a list of one.
     pub fn format_spec(&self) -> String {
-        let output = self.output.as_ref().unwrap_or(&self.format);
+        self.format_spec_with(self.output.as_ref())
+    }
+
+    /// `format_spec` with another output format (a destination's own).
+    fn format_spec_with(&self, output: Option<&Format>) -> String {
+        let output = output.unwrap_or(&self.format);
         let mut input = serde_json::to_value(&self.format).expect("formats serialize");
         match &self.source {
             Source::Schedule(_) => input = serde_json::json!({ "kind": "json" }),
@@ -578,11 +729,11 @@ impl InterfaceConfig {
             Source::Sftp(f) => f.server.as_deref(),
             _ => None,
         };
-        let destination = match &self.destination {
-            Some(Destination::Sftp { server, .. }) => Some(server.as_str()),
+        let destinations = self.destinations().filter_map(|(_, d)| match &d.connector {
+            Destination::Sftp { server, .. } => Some(server.as_str()),
             _ => None,
-        };
-        source.into_iter().chain(destination).collect()
+        });
+        source.into_iter().chain(destinations).collect()
     }
 
     /// An HTTP source in `respond` mode: requests are answered directly, nothing is queued.
@@ -672,7 +823,7 @@ retry: { max_attempts: 3 }
         assert!(!queue.responds());
         assert!(matches!(&queue.source, Source::Http { method, mode: HttpMode::Queue, .. } if method == "POST"));
         assert!(
-            matches!(&queue.destination, Some(Destination::Http { headers, .. }) if headers["Authorization"] == "Bearer t")
+            matches!(&queue.destination.as_ref().unwrap().connector, Destination::Http { headers, .. } if headers["Authorization"] == "Bearer t")
         );
         assert!(queue.validate().is_ok());
 
@@ -719,8 +870,8 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
 "#;
         let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(matches!(
-            c.destination,
-            Some(Destination::Mllp { ack: AckMode::None, on_reject: OnReject::Retry, .. })
+            c.destination.as_ref().unwrap().connector,
+            Destination::Mllp { ack: AckMode::None, on_reject: OnReject::Retry, .. }
         ));
         let d = c.dedupe.unwrap();
         assert_eq!(d.keys, ["PID-3.1", "EVN-2"]);
@@ -733,8 +884,8 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
         )
         .unwrap();
         assert!(matches!(
-            defaults.destination,
-            Some(Destination::Mllp { ack: AckMode::Wait, on_reject: OnReject::Quarantine, .. })
+            defaults.destination.as_ref().unwrap().connector,
+            Destination::Mllp { ack: AckMode::Wait, on_reject: OnReject::Quarantine, .. }
         ));
         assert_eq!(defaults.dedupe.unwrap().keys, ["MSH-10"]);
     }
@@ -822,6 +973,80 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
             err(&format!("name: f\nsource: {{ schedule: {{ every: 1m, cron: '* * * * *' }} }}\n{dest}"))
                 .contains("one of `every`")
         );
+    }
+
+    #[test]
+    fn several_destinations_each_with_their_own_options() {
+        let yaml = r#"
+name: adt
+source: { mllp: { port: 6661 } }
+script: transform.ts
+output: hl7
+retry: { max_attempts: 9 }
+destinations:
+  lab: { mllp: { host: lab, port: 6662 } }
+  billing:
+    http: { url: 'https://billing/api' }
+    transform: toBilling
+    output: json
+    retry: { max_attempts: 2 }
+    rate_limit: { per_minute: 60 }
+    save_output: true
+"#;
+        let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        let all: Vec<_> = c.destinations().collect();
+        assert_eq!(all.iter().map(|(n, _)| *n).collect::<Vec<_>>(), ["billing", "lab"]);
+        let (billing, lab) = (all[0].1, all[1].1);
+        assert!(matches!(billing.connector, Destination::Http { .. }) && billing.save_output);
+        assert_eq!((billing.function(), lab.function()), ("toBilling", "transform"));
+        assert_eq!((c.retry_for(billing).max_attempts, c.retry_for(lab).max_attempts), (Some(2), Some(9)));
+        assert!(c.rate_limit_for(billing).is_some() && c.rate_limit_for(lab).is_none());
+        assert_eq!((c.output_for(billing), c.output_for(lab)), (&Format::Json, &Format::Hl7));
+        let functions = c.functions();
+        assert_eq!(functions[0].0, "toBilling");
+        assert!(functions[0].1.contains(r#""output":{"kind":"json"}"#), "{}", functions[0].1);
+        assert!(functions[1].1.contains(r#""output":{"kind":"hl7"}"#));
+
+        let single: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: x\nsource: { mllp: { port: 1 } }\ndestination: { file: { dir: o }, save_output: true }\n",
+        )
+        .unwrap();
+        let (name, d) = single.destinations().next().unwrap();
+        assert_eq!(name, DEFAULT_DESTINATION);
+        assert!(d.save_output && matches!(d.connector, Destination::File { .. }));
+
+        let err = |yaml: &str| match serde_yaml_ng::from_str::<InterfaceConfig>(yaml) {
+            Ok(c) => format!("{:#}", c.validate().unwrap_err()),
+            Err(e) => e.to_string(),
+        };
+        let head = "name: x\nsource: { mllp: { port: 1 } }\n";
+        assert!(err(&format!("{head}destinations: {{ a: {{ transform: t }} }}")).contains("exactly one of"));
+        assert!(
+            err(&format!("{head}destinations: {{ a: {{ file: {{ dir: o }}, mllp: {{ host: h, port: 2 }} }} }}"))
+                .contains("exactly one of")
+        );
+        assert!(err(&format!("{head}destinations: {{ a: {{ file: {{ dir: o }}, bogus: 1 }} }}")).contains("bogus"));
+        assert!(err(&format!("{head}destinations: {{ a: {{ file: {{ dir: o, bogus: 1 }} }} }}")).contains("bogus"));
+        assert!(
+            err(&format!(
+                "{head}destination: {{ file: {{ dir: o }} }}\ndestinations: {{ a: {{ file: {{ dir: o }} }} }}"
+            ))
+            .contains("not both")
+        );
+        assert!(err(&format!("{head}destinations: {{ Lab: {{ file: {{ dir: o }} }} }}")).contains("lower-case"));
+        assert!(
+            err(&format!("{head}destinations: {{ a: {{ file: {{ dir: o }}, transform: to-x }} }}"))
+                .contains("isn't a function name")
+        );
+        assert!(
+            err(&format!("{head}destinations: {{ a: {{ file: {{ dir: o }}, transform: toA }} }}"))
+                .contains("needs a `script`")
+        );
+        assert!(
+            err(&format!("{head}destinations: {{ a: {{ file: {{ dir: o }}, rate_limit: {{ per_minute: 0 }} }} }}"))
+                .contains("destination `a`")
+        );
+        assert!(err(&format!("{head}destinations: {{}}")).contains("is required"));
     }
 
     #[test]

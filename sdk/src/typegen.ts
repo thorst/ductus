@@ -77,8 +77,17 @@ const BASE = `
   /** Parse raw HL7 text. */
   export function parse(raw: string): Message;
 
-  /** Signature of an interface's \`transform\` export (may be async). Return null or kill() to drop the message. */
-  export type Transform = (msg: Message) => Message | string | null | Kill | Promise<Message | string | null | Kill>;
+  /** Signature of an interface's \`transform\` export, or a destination's own function (may be async). Return null or kill() to drop the message (for that destination). */
+  export type Transform = (msg: Message, meta: Meta) => Message | string | null | Kill | Promise<Message | string | null | Kill>;
+  /** About the message being processed: the second argument of \`transform\` and of each destination's function. */
+  export interface Meta {
+    /** The stored message's id: the same every time this message is processed (retries, restarts, each destination). Use it as a unique key or \`Idempotency-Key\` so a receiver can ignore a repeat. Unique within one engine database. */
+    id: number;
+    /** When the message was received (ISO 8601). */
+    receivedAt: string;
+    /** The destination this call prepares the message for (\`default\` with a single \`destination:\`). */
+    destination: string;
+  }
 
   /** A deliberate drop, with a reason. Create with \`kill()\`. */
   export class Kill {
