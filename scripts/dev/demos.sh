@@ -11,4 +11,5 @@ echo "##### crash recovery";  COUNT=3000 bash scripts/demo-crash-recovery.sh | t
 echo "##### database lookup"; bash scripts/demo-lookup.sh | tail -1
 echo "##### http";            bash scripts/demo-http.sh | tail -1
 echo "##### files";           bash scripts/demo-files.sh | tail -1
+echo "##### v0.4 release";    bash scripts/demo-v04.sh | tail -1
 echo "##### scale";           SHARED=300 EPIC_SECONDS=10 SAMPLED=50 bash scripts/demo-scale.sh | tail -1
