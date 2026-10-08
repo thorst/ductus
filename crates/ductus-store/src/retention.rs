@@ -18,10 +18,10 @@ use chrono::{DateTime, Utc};
 pub type Tier = i16;
 
 /// The tiers, shortest first (`ductus_tiers()` in the database).
-pub const TIERS: [Tier; 4] = [7, 21, 45, 90];
+pub const TIERS: [Tier; 3] = [7, 21, 49];
 
 /// The tier rows stored without one go to (older binaries; before migration 0010).
-const LEGACY_TIER: Tier = 90;
+const LEGACY_TIER: Tier = 49;
 
 /// An interface's retention as the engine applied it (the `retention` table).
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
@@ -566,7 +566,7 @@ mod tests {
     #[test]
     fn only_partition_names_go_into_sql() {
         assert!(leaf("messages_t30_20261008").is_ok());
-        assert!(leaf("deliveries_t90_20261005").is_ok());
+        assert!(leaf("deliveries_t49_20261005").is_ok());
         for bad in ["messages", "messages_t30", "messages_t_20261008", "messages_t30_2026100", "x; DROP TABLE y"] {
             assert!(leaf(bad).is_err(), "{bad}");
         }
@@ -578,7 +578,7 @@ mod tests {
     fn a_shorter_waiting_value_needs_a_confirmation() {
         let state = |waiting, confirmed| RetentionState {
             interface: "adt".into(),
-            days: 90,
+            days: 21,
             changing_from: None,
             rows_left: None,
             waiting,
@@ -588,7 +588,7 @@ mod tests {
         assert!(state(Some(7), None).needs_confirmation());
         assert!(!state(Some(7), Some(7)).needs_confirmation());
         assert!(state(Some(7), Some(30)).needs_confirmation());
-        assert!(!state(Some(90), None).needs_confirmation(), "longer keeps everything");
+        assert!(!state(Some(49), None).needs_confirmation(), "longer keeps everything");
         assert!(!state(None, None).needs_confirmation());
     }
 }

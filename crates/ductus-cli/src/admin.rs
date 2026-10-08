@@ -144,22 +144,28 @@ pub async fn resume(remote: Remote) -> Result<()> {
 
 /// One interface's retention, as `GET /retention` describes it.
 fn retention_line(i: &Value) -> String {
-    let days = |v: &Value| v.as_i64().map(|d| format!("{d}d")).unwrap_or("?".into());
-    let mut line = format!("{:<28} {}", i["name"].as_str().unwrap_or("?"), days(&i["days"]));
+    // The API gives days; retention is written in weeks.
+    let weeks = |v: &Value| match v.as_i64() {
+        Some(d) if d % 7 == 0 => format!("{}w", d / 7),
+        Some(d) => format!("{d}d"),
+        None => "?".into(),
+    };
+    let mut line = format!("{:<28} {}", i["name"].as_str().unwrap_or("?"), weeks(&i["days"]));
     if let Some(change) = i["change"].as_object() {
         let left =
             change.get("rows_left").and_then(Value::as_i64).map(|n| format!(", {n} messages left")).unwrap_or_default();
-        line += &format!("  changing from {}{left}", days(&change["from"]));
+        line += &format!("  changing from {}{left}", weeks(&change["from"]));
     }
-    if let Some(waiting) = i["waiting"].as_i64() {
+    if !i["waiting"].is_null() {
+        let waiting = weeks(&i["waiting"]);
         if i["needs_confirmation"].as_bool() == Some(true) {
             let deletes = i["would_delete"].as_i64().map(|n| format!(", deletes {n} messages")).unwrap_or_default();
             line += &format!(
-                "  configured {waiting}d{deletes}: needs `ductus retention confirm {}`",
+                "  configured {waiting}{deletes}: needs `ductus retention confirm {}`",
                 i["name"].as_str().unwrap_or("?")
             );
         } else {
-            line += &format!("  configured {waiting}d: waits for the running change");
+            line += &format!("  configured {waiting}: waits for the running change");
         }
     }
     line

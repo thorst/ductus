@@ -44,13 +44,13 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 
 ## Retention
 
-### Retention is one of four windows, not any number of days (level 1)
-- **What:** `retention:` in interface.yaml is 7d, 21d, 45d or 90d (default: `retention` in ductus.yaml, else 45d). Anything else is refused by `ductus validate`.
-- **Why:** performance. Each window is a tier of partitions, and old messages go by dropping whole partitions, which costs nothing however many messages there are. Deleting rows one by one (the usual pruner) slows the busiest tables and needs vacuuming after. Each tier adds partitions that some queries have to plan for, so there are few tiers, sized to keep the count around 38.
+### Retention is 1, 3 or 7 weeks, not any number of days (level 1)
+- **What:** `retention:` in interface.yaml is `1w`, `3w` or `7w` (or the same in days: `7d`, `21d`, `49d`; default: `retention` in ductus.yaml, else 7w). Anything else is refused by `ductus validate`.
+- **Why:** performance. Each window is a tier of partitions, and old messages go by dropping whole partitions, which costs nothing however many messages there are. Deleting rows one by one (the usual pruner) slows the busiest tables and needs vacuuming after. Each tier adds partitions that some queries have to plan for, so there are few, short tiers, keeping the count around 24.
 - **What to do:** pick the window that covers how far back you need to look into problems. Older history: the source system, or an archive on cheaper disk (an export is planned). The engine isn't a data warehouse.
 
 ### Messages are kept at least their window, and gone within a period after (level 2)
-- **What:** a partition covers a day (7d) or a week (21d, 45d, 90d), and it's dropped once all of it is older than the window. So a 7d message lives 7 to 8 days, a 45d one 45 to 52. Partitions are checked hourly.
+- **What:** a partition covers a day (1w) or a week (3w, 7w), and it's dropped once all of it is older than the window. So a 1w message lives 7 to 8 days, a 7w one 49 to 56. Partitions are checked hourly.
 - **What to do:** treat the window as "at least". If something must be gone sooner, use a shorter tier.
 
 ### Pending and quarantined messages are never purged (level 2)

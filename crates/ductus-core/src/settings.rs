@@ -9,7 +9,7 @@
 //! require_about: true # `ductus validate` fails when an interface doesn't name the systems it connects
 //! api:
 //!   listen: 127.0.0.1:7700  # the REST API (`/api/v1`); `off` to run without it
-//! retention: 45d      # how long messages are kept when an interface doesn't say (7d, 21d, 45d, 90d)
+//! retention: 7w       # how long messages are kept when an interface doesn't say (1w, 3w, 7w)
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -205,14 +205,9 @@ mod tests {
         std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 2048 }\nrequire_about: true\n").unwrap();
         let s = Settings::load(dir.path()).unwrap();
         assert_eq!((s.isolates.heap_mb, s.require_about), (2048, true));
-        assert_eq!(s.retention.days(), 45, "the default");
-        std::fs::write(
-            dir.path().join(FILE),
-            "retention: 90d
-",
-        )
-        .unwrap();
-        assert_eq!(Settings::load(dir.path()).unwrap().retention.days(), 90);
+        assert_eq!(s.retention.days(), 49, "the default");
+        std::fs::write(dir.path().join(FILE), "retention: 3w\n").unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().retention.days(), 21);
         std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 8 }\n").unwrap();
         let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
         assert!(err.contains("at least 64"), "{err}");

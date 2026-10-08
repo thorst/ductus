@@ -1,39 +1,43 @@
-//! How long an interface's messages are kept: one of a few fixed windows.
+//! How long an interface's messages are kept: 1, 3 or 7 weeks.
 //!
 //! Fixed windows, not any duration: each is a tier of partitions in the database, and old
-//! messages go by dropping whole partitions (no row-by-row deletes on the busiest tables). They
-//! also settle the "29 or 31 days?" debates.
+//! messages go by dropping whole partitions (no row-by-row deletes on the busiest tables). Few,
+//! short tiers keep the partition count low, which every query that can't prune pays for. Longer
+//! history belongs to the source systems or an archive. Weeks also settle the "29 or 31 days?"
+//! debates.
 
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
-/// Days messages are kept: 7, 21, 45 or 90.
+/// Days messages are kept: 7, 21 or 49 (written `1w`, `3w`, `7w`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Retention(u16);
 
 impl Retention {
-    /// The windows, shortest first (the store's tiers: `ductus_store::TIERS`). Chosen for the
-    /// partitions they cost (about window / 7 each; the 7d tier one per day): longer history
-    /// belongs to the source systems or an archive.
-    pub const DAYS: [u16; 4] = [7, 21, 45, 90];
+    /// The windows in days, shortest first (the store's tiers: `ductus_store::TIERS`). Chosen
+    /// for the partitions they cost: about window / 7 each, one per day for 1w (~24 in all).
+    pub const DAYS: [u16; 3] = [7, 21, 49];
 
-    /// When neither the interface nor ductus.yaml says: long enough to look into last month's
-    /// problems, short enough not to fill a disk by surprise.
-    pub const DEFAULT: Retention = Retention(45);
+    /// When neither the interface nor ductus.yaml says: the longest, so nothing is lost by
+    /// surprise; long enough to look into last month's problems.
+    pub const DEFAULT: Retention = Retention(49);
 
     pub fn days(self) -> u16 {
         self.0
     }
 
-    /// From `45d` (or `45`).
+    /// From `3w`, or the same in days (`21d`, `21`).
     pub fn parse(text: &str) -> Result<Self> {
         let trimmed = text.trim();
-        let days: Option<u16> = trimmed.strip_suffix('d').unwrap_or(trimmed).trim().parse().ok();
+        let days: Option<u16> = match trimmed.strip_suffix('w') {
+            Some(weeks) => weeks.trim().parse::<u16>().ok().and_then(|w| w.checked_mul(7)),
+            None => trimmed.strip_suffix('d').unwrap_or(trimmed).trim().parse().ok(),
+        };
         match days {
             Some(d) if Self::DAYS.contains(&d) => Ok(Self(d)),
             _ => bail!(
-                "retention `{trimmed}`: use one of 7d, 21d, 45d, 90d (fixed windows: old messages go by \
-                 dropping whole partitions)"
+                "retention `{trimmed}`: use 1w, 3w or 7w (fixed windows, so old messages go by dropping whole \
+                 partitions; longer history belongs to the source system or an archive)"
             ),
         }
     }
@@ -52,13 +56,13 @@ impl Default for Retention {
 
 impl std::fmt::Display for Retention {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}d", self.0)
+        write!(f, "{}w", self.0 / 7)
     }
 }
 
 impl<'de> Deserialize<'de> for Retention {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        // `45d` is a string in YAML; a bare `45` is a number.
+        // `3w` is a string in YAML; a bare `21` (days) is a number.
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Text {
@@ -79,22 +83,23 @@ mod tests {
 
     #[test]
     fn only_the_fixed_windows() {
-        assert_eq!(Retention::parse("45d").unwrap().days(), 45);
-        assert_eq!(Retention::parse(" 21d ").unwrap().to_string(), "21d");
+        assert_eq!(Retention::parse("3w").unwrap().days(), 21);
+        assert_eq!(Retention::parse(" 7w ").unwrap().to_string(), "7w");
+        assert_eq!(Retention::parse("49d").unwrap(), Retention(49));
         assert_eq!(Retention::parse("7").unwrap(), Retention(7));
-        for bad in ["30d", "365d", "1y", "", "45 days", "-7d"] {
+        for bad in ["45d", "90d", "2w", "1y", "", "3 weeks", "-1w", "9999w"] {
             let err = Retention::parse(bad).unwrap_err().to_string();
-            assert!(err.contains("7d, 21d, 45d, 90d"), "{bad}: {err}");
+            assert!(err.contains("1w, 3w or 7w"), "{bad}: {err}");
         }
-        assert_eq!(Retention::default().days(), 45);
-        assert_eq!(Retention::from_days(90), Some(Retention(90)));
-        assert_eq!(Retention::from_days(91), None);
+        assert_eq!(Retention::default().to_string(), "7w");
+        assert_eq!(Retention::from_days(21), Some(Retention(21)));
+        assert_eq!(Retention::from_days(90), None);
     }
 
     #[test]
     fn reads_from_yaml() {
-        let r: Retention = serde_yaml_ng::from_str("90d").unwrap();
-        assert_eq!(r.days(), 90);
+        let r: Retention = serde_yaml_ng::from_str("1w").unwrap();
+        assert_eq!(r.days(), 7);
         let r: Retention = serde_yaml_ng::from_str("21").unwrap();
         assert_eq!(r.days(), 21);
         assert!(serde_yaml_ng::from_str::<Retention>("31d").is_err());

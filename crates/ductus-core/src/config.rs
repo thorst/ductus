@@ -69,8 +69,8 @@ pub struct InterfaceConfig {
     /// What it's for, who owns it, and the systems on each side (for `ductus impact`).
     #[serde(default)]
     pub about: About,
-    /// How long its messages are kept: 7d, 21d, 45d or 90d. Default: `retention` in
-    /// ductus.yaml (45d if that doesn't say).
+    /// How long its messages are kept: 1w, 3w or 7w. Default: `retention` in ductus.yaml (7w if
+    /// that doesn't say).
     #[serde(default)]
     pub retention: Option<crate::Retention>,
 
@@ -1039,15 +1039,15 @@ retry: { max_attempts: 3 }
             ))
         };
         assert_eq!(load("").unwrap().retention, None, "ductus.yaml's applies");
-        assert_eq!(load("retention: 90d").unwrap().retention.map(|r| r.days()), Some(90));
+        assert_eq!(load("retention: 3w").unwrap().retention.map(|r| r.days()), Some(21));
         let err = load("retention: 60d").unwrap_err().to_string();
-        assert!(err.contains("7d, 21d, 45d, 90d"), "{err}");
+        assert!(err.contains("1w, 3w or 7w"), "{err}");
 
         // Respond mode stores nothing, so it has nothing to keep.
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("t.ts"), "").unwrap();
         let mut respond: InterfaceConfig = serde_yaml_ng::from_str(
-            "name: api\nsource: { http: { port: 8080, path: /p, mode: respond } }\nscript: t.ts\nformat: json\nretention: 7d\n",
+            "name: api\nsource: { http: { port: 8080, path: /p, mode: respond } }\nscript: t.ts\nformat: json\nretention: 1w\n",
         )
         .unwrap();
         respond.dir = dir.path().to_path_buf();

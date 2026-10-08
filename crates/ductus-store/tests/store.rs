@@ -7,7 +7,7 @@ use ductus_store::{
 };
 
 /// The retention tier test messages go to.
-const TIER: ductus_store::Tier = 45;
+const TIER: ductus_store::Tier = 21;
 
 async fn store() -> Option<Store> {
     let url = std::env::var("DUCTUS_TEST_DATABASE_URL").ok()?;
@@ -871,14 +871,14 @@ async fn everything_at_once_without_lock_errors() {
             }
         }));
     }
-    // A retention change under way: the interface's finished messages move to the 90d tier (with
-    // their deliveries) while new ones keep arriving in the 45d tier and destinations settle.
+    // A retention change under way: the interface's finished messages move to the 49d tier (with
+    // their deliveries) while new ones keep arriving in the 21d tier and destinations settle.
     let mover = {
         let (store, t, stop) = (store.clone(), t.clone(), stop.clone());
         tokio::spawn(async move {
             let mut moved = 0;
             while !stop.load(Relaxed) {
-                moved += store.retention_step(&t.name, 90, 200).await.unwrap().moved;
+                moved += store.retention_step(&t.name, 49, 200).await.unwrap().moved;
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
             moved
@@ -916,11 +916,11 @@ async fn everything_at_once_without_lock_errors() {
     let days = days.expect("maintenance failed");
     let moved = moved.expect("moving to another tier failed");
     assert!(moved > 0, "the retention change moved something");
-    // What's left moves now; then every message is in the 90d tier, each with its deliveries.
-    while !store.retention_step(&t.name, 90, 1000).await.unwrap().is_empty() {}
+    // What's left moves now; then every message is in the 49d tier, each with its deliveries.
+    while !store.retention_step(&t.name, 49, 1000).await.unwrap().is_empty() {}
     let misplaced: i64 = sqlx::query_scalar(
-        "SELECT (SELECT count(*) FROM messages WHERE interface = $1 AND tier <> 90)
-              + (SELECT count(*) FROM deliveries WHERE destination_id = ANY($2) AND tier <> 90)",
+        "SELECT (SELECT count(*) FROM messages WHERE interface = $1 AND tier <> 49)
+              + (SELECT count(*) FROM deliveries WHERE destination_id = ANY($2) AND tier <> 49)",
     )
     .bind(&t.name)
     .bind(&t.ids)
@@ -1121,36 +1121,36 @@ async fn exists(pool: &sqlx::PgPool, table: &str) -> bool {
 async fn retention_changes_one_at_a_time_and_shorter_needs_a_confirmation() {
     let Some(store) = store().await else { return };
     let t = Iface::single(&store, "ret-apply").await;
-    let s = store.apply_retention(&t.name, 45).await.unwrap();
-    assert_eq!((s.days, s.changing_from, s.waiting), (45, None, None), "first time: applied as is");
+    let s = store.apply_retention(&t.name, 21).await.unwrap();
+    assert_eq!((s.days, s.changing_from, s.waiting), (21, None, None), "first time: applied as is");
     assert!(store.apply_retention(&t.name, 30).await.is_err(), "not a tier");
 
-    let s = store.apply_retention(&t.name, 90).await.unwrap();
-    assert_eq!((s.days, s.changing_from), (90, Some(45)), "longer starts now");
+    let s = store.apply_retention(&t.name, 49).await.unwrap();
+    assert_eq!((s.days, s.changing_from), (49, Some(21)), "longer starts now");
     let s = store.apply_retention(&t.name, 7).await.unwrap();
-    assert_eq!((s.days, s.changing_from, s.waiting), (90, Some(45), Some(7)), "waits for the running change");
+    assert_eq!((s.days, s.changing_from, s.waiting), (49, Some(21), Some(7)), "waits for the running change");
     assert_eq!(store.finish_retention_change(&t.name).await.unwrap(), 0);
 
     let s = store.apply_retention(&t.name, 7).await.unwrap();
-    assert_eq!((s.days, s.changing_from, s.waiting), (90, None, Some(7)));
+    assert_eq!((s.days, s.changing_from, s.waiting), (49, None, Some(7)));
     assert!(s.needs_confirmation(), "shorter deletes messages");
     let s = store.confirm_retention(&t.name).await.unwrap().expect("something to confirm");
     assert_eq!(s.confirmed, Some(7));
     let s = store.apply_retention(&t.name, 7).await.unwrap();
-    assert_eq!((s.days, s.changing_from, s.waiting, s.confirmed), (7, Some(90), None, None), "confirmed: started");
+    assert_eq!((s.days, s.changing_from, s.waiting, s.confirmed), (7, Some(49), None, None), "confirmed: started");
     assert_eq!(store.confirm_retention(&t.name).await.unwrap(), None, "nothing waits");
 
     // Configured back to the applied value: whatever waited is dropped.
     store.finish_retention_change(&t.name).await.unwrap();
-    let s = store.apply_retention(&t.name, 45).await.unwrap();
-    assert_eq!((s.days, s.changing_from), (45, Some(7)));
+    let s = store.apply_retention(&t.name, 21).await.unwrap();
+    assert_eq!((s.days, s.changing_from), (21, Some(7)));
     store.finish_retention_change(&t.name).await.unwrap();
     assert_eq!(store.apply_retention(&t.name, 7).await.unwrap().waiting, Some(7));
-    let s = store.apply_retention(&t.name, 45).await.unwrap();
-    assert_eq!((s.days, s.changing_from, s.waiting), (45, None, None));
+    let s = store.apply_retention(&t.name, 21).await.unwrap();
+    assert_eq!((s.days, s.changing_from, s.waiting), (21, None, None));
 }
 
-/// Shortening 90d → 7d: finished messages past 7 days are deleted with their deliveries, newer
+/// Shortening 7w → 1w: finished messages past 7 days are deleted with their deliveries, newer
 /// ones move to the 7d tier, quarantined ones are never deleted, pending ones move once delivered.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn a_shorter_retention_deletes_what_is_past_it_and_moves_the_rest() {
@@ -1158,17 +1158,17 @@ async fn a_shorter_retention_deletes_what_is_past_it_and_moves_the_rest() {
     let _serial = LONG_LOCKS.lock().await;
     let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
     let t = Iface::new(&store, "ret-shorten", &["lab", "billing"]).await;
-    store.apply_retention(&t.name, 90).await.unwrap();
-    insert_at(&pool, &t, 40, 90, Status::Sent, "a old sent").await;
-    insert_at(&pool, &t, 40, 90, Status::Quarantined, "b old quarantined").await;
-    insert_at(&pool, &t, 2, 90, Status::Sent, "c new sent").await;
-    let pending = insert_at(&pool, &t, 2, 90, Status::Pending, "d new pending").await;
+    store.apply_retention(&t.name, 49).await.unwrap();
+    insert_at(&pool, &t, 40, 49, Status::Sent, "a old sent").await;
+    insert_at(&pool, &t, 40, 49, Status::Quarantined, "b old quarantined").await;
+    insert_at(&pool, &t, 2, 49, Status::Sent, "c new sent").await;
+    let pending = insert_at(&pool, &t, 2, 49, Status::Pending, "d new pending").await;
 
     store.apply_retention(&t.name, 7).await.unwrap();
     assert_eq!(store.retention_would_delete(&t.name, 7).await.unwrap(), 1);
     store.confirm_retention(&t.name).await.unwrap();
     let s = store.apply_retention(&t.name, 7).await.unwrap();
-    assert_eq!((s.days, s.changing_from), (7, Some(90)));
+    assert_eq!((s.days, s.changing_from), (7, Some(49)));
     assert_eq!(store.start_retention_change(&t.name, 7).await.unwrap(), 3, "a, c, d (b stays)");
 
     let mut done = ductus_store::Step::default();
@@ -1198,7 +1198,7 @@ async fn a_shorter_retention_deletes_what_is_past_it_and_moves_the_rest() {
 
     assert_eq!(
         tiers_of(&pool, &t.name).await,
-        [("b old quarantined".into(), 90), ("c new sent".into(), 7), ("d new pending".into(), 7)]
+        [("b old quarantined".into(), 49), ("c new sent".into(), 7), ("d new pending".into(), 7)]
     );
     let deliveries: Vec<(i16, i64)> = sqlx::query_as(
         "SELECT d.tier, count(*) FROM deliveries d JOIN destinations t ON t.id = d.destination_id
@@ -1208,7 +1208,7 @@ async fn a_shorter_retention_deletes_what_is_past_it_and_moves_the_rest() {
     .fetch_all(&pool)
     .await
     .unwrap();
-    assert_eq!(deliveries, [(7, 4), (90, 2)], "deliveries went with their messages");
+    assert_eq!(deliveries, [(7, 4), (49, 2)], "deliveries went with their messages");
     let s = store.retention().await.unwrap().into_iter().find(|s| s.interface == t.name).unwrap();
     assert_eq!((s.days, s.changing_from, s.rows_left), (7, None, None));
 }
@@ -1225,7 +1225,7 @@ async fn expired_partitions_are_dropped_unless_something_must_stay() {
     insert_at(&pool, &a, 30, 7, Status::Sent, "sent long ago").await;
     insert_at(&pool, &a, 20, 7, Status::Quarantined, "quarantined long ago").await;
     insert_at(&pool, &b, 15, 7, Status::Sent, "b's, kept longer now").await;
-    store.apply_retention(&b.name, 45).await.unwrap();
+    store.apply_retention(&b.name, 21).await.unwrap();
     let gone = seven_day_partition(&pool, 30).await;
     let quarantined = seven_day_partition(&pool, 20).await;
     let kept = seven_day_partition(&pool, 15).await;
