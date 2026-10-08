@@ -112,17 +112,22 @@ impl Engine {
         self.interfaces.iter().flat_map(|i| i.destinations.iter().map(|(_, id)| *id))
     }
 
-    /// Queue counts now (one quick query).
+    /// This engine's queue counts now (one quick query). Destinations the database knows from
+    /// elsewhere (another engine, an older config) are left out, so they never look like a
+    /// change here.
     pub async fn snapshot(&self) -> Result<Snapshot> {
+        let mine: std::collections::HashSet<DestinationId> = self.destination_ids().collect();
         let counts = self.store.queue_counts().await?;
-        Ok(Snapshot { at: Utc::now(), queues: counts.into_iter().map(|c| (c.destination_id, c)).collect() })
+        let queues = counts.into_iter().filter(|c| mine.contains(&c.destination_id)).map(|c| (c.destination_id, c));
+        Ok(Snapshot { at: Utc::now(), queues: queues.collect() })
     }
 
     /// Queue counts as they change, every few seconds while anyone is subscribed.
     pub fn watch_queues(&self) -> watch::Receiver<Arc<Snapshot>> {
-        let rx = self.monitor.subscribe();
-        self.monitor.send_modify(|_| {}); // wake the monitor at once for its first subscriber
-        rx
+        // Wake the monitor at once for its first subscriber; subscribe after, so the new
+        // subscriber doesn't take the nudge for a change.
+        self.monitor.send_modify(|_| {});
+        self.monitor.subscribe()
     }
 
     pub fn drain_state(&self) -> DrainState {
