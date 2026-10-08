@@ -24,7 +24,7 @@ Every message received, as received (the original is never changed). **Partition
 | `last_error` | text | Why it was quarantined or filtered (`destination: reason; ...` with several destinations). |
 | `updated_at` | timestamptz | Last status change. |
 
-Indexes: primary key `(id, received_at)`; `messages_pending (interface, partition_key, id) WHERE status = 0`.
+Indexes: primary key `(id, received_at)`; `messages_pending (interface, partition_key, id) WHERE status = 0`; `messages_by_interface (interface, id)` (the message browser, newest first); `messages_quarantined (interface, id) WHERE status = 3`.
 
 ## `deliveries`
 
@@ -42,7 +42,7 @@ One row per queued message and destination: each destination's work queue and it
 | `output` | bytea | Exactly what was sent, only for destinations with `save_output: true`. |
 | `updated_at` | timestamptz | Last change. |
 
-Indexes: primary key `(message_id, received_at, destination_id)`; `deliveries_pending (destination_id, partition_key, message_id) WHERE status = 0`, which is each destination's queue in arrival order.
+Indexes: primary key `(message_id, received_at, destination_id)`; `deliveries_pending (destination_id, partition_key, message_id) WHERE status = 0`, which is each destination's queue in arrival order; `deliveries_quarantined (destination_id, message_id) WHERE status = 3` (quarantine counts without reading the table).
 
 ## `destinations`
 
@@ -80,6 +80,22 @@ What sources remember between runs, always written in the same transaction as th
 | `updated_at` | timestamptz | Last change. |
 
 Index: primary key `(interface, key)`.
+
+## `api_tokens`
+
+REST API tokens (`ductus token create`, or `POST /api/v1/tokens`). Only a hash of each token is kept; the token itself is shown once. Revoked tokens stay, for the record.
+
+| column | type | |
+|---|---|---|
+| `id` | integer | Identity. |
+| `name` | text | Who or what uses it (`ci`, `monitoring`). One live token per name. |
+| `role` | smallint | `0` viewer (reads), `1` operator (also drain and connection checks), `2` admin (also tokens). |
+| `hash` | bytea | SHA-256 of the token (tokens are 32 random bytes, so a slow password hash adds nothing). |
+| `created_at` | timestamptz | When it was made. |
+| `last_used_at` | timestamptz | Last use, to the minute (written at most once a minute per token). |
+| `revoked_at` | timestamptz | When it was revoked; it stops working at once. |
+
+Indexes: primary key `id`; unique `hash`; `api_tokens_live_name (name) WHERE revoked_at IS NULL` (unique).
 
 ## Functions
 

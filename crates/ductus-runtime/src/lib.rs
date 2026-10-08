@@ -1,14 +1,18 @@
 //! Runs interfaces: receive → persist → ACK, then workers transform and deliver.
 
+pub mod api;
+pub mod control;
 mod destination;
 pub mod doctor;
 mod files;
+pub mod gate;
 pub mod health;
 mod http;
 mod ingest;
 pub mod keys;
 mod limiter;
 mod mssql;
+pub mod project;
 mod schedule;
 mod services;
 mod sftp;
@@ -51,6 +55,8 @@ pub struct EngineOptions {
     pub db_connections: u32,
     /// Environment whose variables and secrets fill in the config (e.g. "dev", "prod").
     pub env: String,
+    /// Where the REST API listens (`host:port` or `off`), instead of `api.listen` in ductus.yaml.
+    pub api_listen: Option<String>,
 }
 
 impl Default for EngineOptions {
@@ -59,23 +65,32 @@ impl Default for EngineOptions {
             pool_threads: std::thread::available_parallelism().map_or(4, |n| n.get()),
             db_connections: 32,
             env: "dev".into(),
+            api_listen: None,
         }
     }
 }
 
-/// Start every interface under `root` and run until Ctrl-C.
+/// Start every interface under `root` and run until Ctrl-C (or until drained, when a drain
+/// asked to stop).
 pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Result<()> {
     let env = Environment::load(root, &options.env)?;
     let configs = load_interfaces(root, &env)?;
     // Loaded now so a missing variable or secret stops startup; used by interface code (v0.4).
     let resources = ductus_core::Resources::load(root, &env)?;
-    let heap_mb = ductus_core::settings::Settings::load(root)?.isolates.heap_mb;
+    let settings = ductus_core::settings::Settings::load(root)?;
+    let heap_mb = settings.isolates.heap_mb;
+    let api_address = settings.api.address(options.api_listen.as_deref())?;
     if configs.is_empty() {
         bail!("no interfaces found under {}", root.join("interfaces").display());
     }
     let conflicts = ductus_core::config::check_endpoints(&configs);
     if !conflicts.is_empty() {
         bail!("port conflicts:\n  {}", conflicts.join("\n  "));
+    }
+    if let Some((_, port)) = &api_address
+        && let Some(l) = ductus_core::ports::listeners(&configs).into_iter().find(|l| l.port == *port)
+    {
+        bail!("port {port}: the REST API (`api.listen` in ductus.yaml) and interface `{}` both want it", l.interface);
     }
     let missing = resources.missing_references(&configs);
     if !missing.is_empty() {
@@ -111,6 +126,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         let wake = Arc::new(Wake::new(config.slots(), config.destinations().count()));
         let destination_ids: Vec<_> = ids.by_ref().take(config.destinations().count()).collect();
         let health = Arc::new(health::Health::default());
+        let gate = Arc::new(gate::Gate::default());
         let outlets: Vec<worker::Outlet> = config
             .destinations()
             .zip(&destination_ids)
@@ -141,6 +157,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                     config.clone(),
                     store.clone(),
                     wake.clone(),
+                    gate.clone(),
                     destination_ids.clone(),
                 )?))
             };
@@ -169,7 +186,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 Isolation::Dedicated => dedicated.push((format!("{}-w{slot}", config.name), job)),
             }
         }
-        interfaces.push((config, wake, destination_ids));
+        interfaces.push((config, wake, destination_ids, health, gate));
     }
 
     let services = Arc::new(services::SharedServices::new(env, &resources));
@@ -202,9 +219,11 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         bail!("{}", failed.join("\n"));
     }
 
-    for (config, wake, destination_ids) in &interfaces {
-        let intake =
-            || ingest::Intake::new(config.clone(), store.clone(), wake.clone(), destination_ids.clone()).map(Arc::new);
+    for (config, wake, destination_ids, _, gate) in &interfaces {
+        let intake = || {
+            ingest::Intake::new(config.clone(), store.clone(), wake.clone(), gate.clone(), destination_ids.clone())
+                .map(Arc::new)
+        };
         match &config.source {
             Source::Mllp { .. } => ingest::spawn_mllp(intake()?).await?,
             Source::File(f) | Source::Sftp(f) => {
@@ -218,6 +237,26 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         }
     }
     http::serve(http_endpoints).await?;
+    let running: Vec<control::Running> = interfaces
+        .iter()
+        .map(|(config, _, ids, health, gate)| control::Running {
+            config: config.clone(),
+            health: health.clone(),
+            gate: gate.clone(),
+            destinations: config.destinations().map(|(name, _)| name.to_string()).zip(ids.iter().copied()).collect(),
+        })
+        .collect();
+    let engine = control::Engine::new(
+        options.env.clone(),
+        root.to_path_buf(),
+        database_url.to_string(),
+        store.clone(),
+        resources.clone(),
+        running,
+    );
+    if let Some((host, port)) = &api_address {
+        api::serve(engine.clone(), host, *port).await?;
+    }
     tracing::info!(
         interfaces = interfaces.len(),
         shared = shared_count,
@@ -241,7 +280,10 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         }
     });
 
-    tokio::signal::ctrl_c().await?;
+    tokio::select! {
+        signal = tokio::signal::ctrl_c() => signal?,
+        _ = engine.shutdown.cancelled() => tracing::info!("drained and asked to stop"),
+    }
     tracing::info!("shutting down");
     Ok(())
 }

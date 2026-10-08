@@ -2,6 +2,7 @@
 //! it's stored. `Intake` does the storing for every source (MLLP, HTTP, files...).
 
 use crate::Wake;
+use crate::gate::{Closed, Gate};
 use crate::hl7_now;
 use crate::keys::{self, KeyPath};
 use anyhow::{Context, Result};
@@ -27,6 +28,8 @@ pub struct Intake {
     pub config: Arc<InterfaceConfig>,
     store: Store,
     wake: Arc<Wake>,
+    /// Closed while draining: nothing new is stored.
+    pub gate: Arc<Gate>,
     /// The interface's destinations: each stored message is queued for all of them.
     destinations: Vec<DestinationId>,
     ordering: Option<KeyPath>,
@@ -40,6 +43,7 @@ impl Intake {
         config: Arc<InterfaceConfig>,
         store: Store,
         wake: Arc<Wake>,
+        gate: Arc<Gate>,
         destinations: Vec<DestinationId>,
     ) -> Result<Self> {
         let compile = |path: &str| {
@@ -48,7 +52,7 @@ impl Intake {
         let ordering = config.ordering.key.as_deref().map(compile).transpose()?;
         let dedupe = config.dedupe.iter().flat_map(|d| d.keys.iter()).map(|k| compile(k)).collect::<Result<_>>()?;
         let control_id = (config.format == Format::Hl7).then(|| compile("MSH-10")).transpose()?;
-        Ok(Self { config, store, wake, destinations, ordering, dedupe, control_id })
+        Ok(Self { config, store, wake, gate, destinations, ordering, dedupe, control_id })
     }
 
     pub fn store(&self) -> &Store {
@@ -80,8 +84,10 @@ impl Intake {
         self.wake.lane(partition);
     }
 
-    /// Store a message (deduplicating if configured) and wake its worker.
+    /// Store a message (deduplicating if configured) and wake its worker. Fails with `Closed`
+    /// while draining.
     pub async fn accept(&self, payload: &[u8]) -> Result<Accepted> {
+        let _pass = self.gate.enter()?;
         let keys = self.keys(payload);
         let new = NewMessage {
             interface: &self.config.name,
@@ -113,6 +119,7 @@ impl Intake {
     /// Store many messages and the source's progress in one transaction (see `Store::insert_batch`).
     /// Returns how many were queued (the rest were duplicates).
     pub async fn accept_batch(&self, payloads: &[Vec<u8>], state: Option<(&str, &str)>) -> Result<usize> {
+        let _pass = self.gate.enter()?;
         let keys: Vec<Keys> = payloads.iter().map(|p| self.keys(p)).collect();
         let batch = Batch {
             interface: &self.config.name,
@@ -148,6 +155,7 @@ impl Intake {
     /// Queue a scheduled run (see `Store::insert_scheduled`). False if it was skipped because the
     /// previous run is still pending; `skipped_state` is saved instead of `state` then.
     pub async fn accept_scheduled(&self, payload: &[u8], key: &str, state: &str, skipped_state: &str) -> Result<bool> {
+        let _pass = self.gate.enter()?;
         let new = NewMessage {
             interface: &self.config.name,
             partition_key: 0,
@@ -172,44 +180,83 @@ struct Keys {
     dedupe: Option<String>,
 }
 
-/// Start an MLLP listener feeding `intake`.
+/// Start an MLLP listener feeding `intake`. While its gate is closed (draining) the listener
+/// is closed, so senders see the engine as down and keep their messages; it opens again when
+/// the gate does.
 pub async fn spawn_mllp(intake: Arc<Intake>) -> Result<()> {
     let config = intake.config.clone();
     let Source::Mllp { host, port } = &config.source else { return Ok(()) };
-    let listener = TcpListener::bind((host.as_str(), *port))
-        .await
-        .with_context(|| format!("interface `{}`: binding {host}:{port}", config.name))?;
-    tracing::info!(interface = %config.name, %host, port, "listening (MLLP)");
+    let (host, port) = (host.clone(), *port);
+    let bind = move || {
+        let host = host.clone();
+        async move { TcpListener::bind((host.as_str(), port)).await.with_context(|| format!("binding {host}:{port}")) }
+    };
+    // The first bind is part of startup: a port in use stops the engine.
+    let mut listener = Some(bind().await.with_context(|| format!("interface `{}`", config.name))?);
 
-    let handler = move |frame: Bytes| {
+    let handler = {
         let intake = intake.clone();
-        async move { Bytes::from(receive_hl7(&intake, &frame).await) }
+        move |frame: Bytes| {
+            let intake = intake.clone();
+            async move { receive_hl7(&intake, &frame).await.map(Bytes::from) }
+        }
     };
     tokio::spawn(async move {
-        if let Err(e) = ductus_mllp::serve(listener, handler).await {
-            tracing::error!(error = %e, "listener stopped");
+        let name = &intake.config.name;
+        loop {
+            intake.gate.opened().await;
+            let listener = match listener.take() {
+                Some(l) => l,
+                None => match bind().await {
+                    Ok(l) => l,
+                    Err(e) => {
+                        tracing::error!(interface = %name, error = %format!("{e:#}"), "can't listen again after draining; retrying");
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                        continue;
+                    }
+                },
+            };
+            tracing::info!(interface = %name, address = %listener.local_addr().map(|a| a.to_string()).unwrap_or_default(), "listening (MLLP)");
+            let stop = ductus_mllp::CancellationToken::new();
+            let serve = ductus_mllp::serve_until(listener, handler.clone(), stop.clone());
+            tokio::pin!(serve);
+            tokio::select! {
+                result = &mut serve => {
+                    if let Err(e) = result {
+                        tracing::error!(interface = %name, error = %e, "listener stopped; listening again");
+                        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                    }
+                }
+                _ = intake.gate.closed() => {
+                    stop.cancel();
+                    let _ = serve.await;
+                    tracing::info!(interface = %name, "MLLP listener closed: not taking new messages");
+                }
+            }
         }
     });
     Ok(())
 }
 
-/// Store an HL7 message and build its ACK.
-async fn receive_hl7(intake: &Intake, frame: &[u8]) -> String {
+/// Store an HL7 message and build its ACK. `None`: it came in after the gate closed, so the
+/// connection is closed without an answer (an AE could make some senders skip the message).
+async fn receive_hl7(intake: &Intake, frame: &[u8]) -> Option<String> {
     let raw = String::from_utf8_lossy(frame);
     let message = match Message::parse(&raw) {
         Ok(m) => m,
         Err(e) => {
             tracing::warn!(interface = %intake.config.name, error = %e, "rejected unparseable message");
-            return ductus_hl7::reject_unparseable(&e.to_string(), &hl7_now());
+            return Some(ductus_hl7::reject_unparseable(&e.to_string(), &hl7_now()));
         }
     };
-    match intake.accept(frame).await {
+    Some(match intake.accept(frame).await {
         // Duplicates are ACKed AA too, so the sender stops resending.
         Ok(_) => message.ack(AckCode::Accept, "", &hl7_now()),
+        Err(e) if e.is::<Closed>() => return None,
         Err(e) => {
             // AE tells the sender to retry: nothing was stored, so nothing is lost.
             tracing::error!(interface = %intake.config.name, error = %e, "failed to store message");
             message.ack(AckCode::Error, "temporarily unable to store message", &hl7_now())
         }
-    }
+    })
 }

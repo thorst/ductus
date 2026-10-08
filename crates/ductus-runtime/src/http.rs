@@ -4,6 +4,7 @@
 //! - `respond` mode: the request goes to the interface's `transform` (on its worker thread)
 //!   and its result is the response.
 
+use crate::gate::Closed;
 use crate::ingest::{Accepted, Intake};
 use anyhow::{Context, Result, anyhow, bail};
 use axum::Router;
@@ -103,6 +104,11 @@ async fn handle(
         Route::Queue(intake) => match intake.accept(&body).await {
             Ok(Accepted::Queued(m)) => json(StatusCode::ACCEPTED, serde_json::json!({ "id": m.id })),
             Ok(Accepted::Duplicate) => json(StatusCode::OK, serde_json::json!({ "duplicate": true })),
+            Err(e) if e.is::<Closed>() => {
+                let mut response = json(StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({ "error": e.to_string() }));
+                response.headers_mut().insert("retry-after", axum::http::HeaderValue::from_static("30"));
+                response
+            }
             Err(e) => {
                 tracing::error!(interface = %intake.config.name, error = %e, "failed to store message");
                 json(

@@ -2,7 +2,8 @@
 //! (CI sets it; locally: postgres://todd:ductus@localhost/ductus_dev).
 
 use ductus_store::{
-    Batch, BatchMessage, DedupeKey, DestinationId, Done, MessageRef, NewMessage, Reconciled, Status, Store,
+    Batch, BatchMessage, Browse, DedupeKey, DestinationId, Done, MessageRef, NewMessage, QueueCount, Reconciled, Role,
+    Status, Store,
 };
 
 async fn store() -> Option<Store> {
@@ -617,6 +618,10 @@ async fn everything_at_once_without_lock_errors() {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
     let Some(store) = store().await else { return };
+    // Its maintenance creates partitions every 100 ms: while another test holds a long read on
+    // purpose, each of those waits up to 2 s and the inserts queue behind it (seen: only the
+    // batch writer got anything stored in 5 s).
+    let _serial = LONG_LOCKS.lock().await;
     let seconds: u64 = std::env::var("DUCTUS_STRESS_SECONDS").ok().and_then(|s| s.parse().ok()).unwrap_or(5);
     let t = Arc::new(Iface::new(&store, "stress", &["lab", "billing", "archive"]).await);
     let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
@@ -695,6 +700,21 @@ async fn everything_at_once_without_lock_errors() {
                 }
                 let done: Vec<_> = pending.iter().map(|p| sent(p.reference())).collect();
                 store.finish(destination, &done).await.unwrap();
+            }
+        }));
+    }
+    // The REST API's reads: the monitor's queue counts and someone paging through messages.
+    {
+        let (store, t, stop) = (store.clone(), t.clone(), stop.clone());
+        tasks.push(tokio::spawn(async move {
+            while !stop.load(Relaxed) {
+                store.queue_counts().await.unwrap();
+                let page = Browse { interface: &t.name, status: None, before: None, limit: 50 };
+                let rows = store.browse(&page).await.unwrap();
+                if let Some(last) = rows.last() {
+                    store.message(last.id).await.unwrap().expect("a listed message can be read");
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         }));
     }
@@ -789,4 +809,67 @@ async fn partition_maintenance_is_idempotent() {
     let Some(store) = store().await else { return };
     maintain(&store, 5).await;
     maintain(&store, 5).await;
+}
+
+#[tokio::test]
+async fn tokens_are_stored_hashed_and_can_be_revoked() {
+    let Some(store) = store().await else { return };
+    let name = format!("test-token-{}", std::process::id());
+    let (token, secret) = store.create_token(&name, Role::Operator).await.unwrap();
+    assert!(secret.starts_with(ductus_store::TOKEN_PREFIX) && secret.len() == 68, "{secret}");
+    assert_eq!((token.name.as_str(), token.role), (name.as_str(), Role::Operator));
+    let err = store.create_token(&name, Role::Viewer).await.unwrap_err().to_string();
+    assert!(err.contains("already exists"), "{err}");
+
+    let found = store.authenticate(&secret).await.unwrap().expect("the token works");
+    assert_eq!(found.id, token.id);
+    assert!(store.tokens(false).await.unwrap().iter().any(|t| t.id == token.id && t.last_used_at.is_some()));
+    assert!(store.authenticate("dux_0000").await.unwrap().is_none());
+    assert!(store.authenticate("not a token").await.unwrap().is_none());
+
+    assert!(store.revoke_token(&name).await.unwrap());
+    assert!(!store.revoke_token(&name).await.unwrap(), "nothing left to revoke");
+    assert!(store.authenticate(&secret).await.unwrap().is_none(), "revoked tokens stop working");
+    assert!(!store.tokens(false).await.unwrap().iter().any(|t| t.id == token.id));
+    assert!(store.tokens(true).await.unwrap().iter().any(|t| t.id == token.id && t.revoked_at.is_some()));
+    // The name is free again.
+    let (again, _) = store.create_token(&name, Role::Viewer).await.unwrap();
+    store.revoke_token(&name).await.unwrap();
+    assert_ne!(again.id, token.id);
+}
+
+#[tokio::test]
+async fn messages_page_newest_first_and_queues_are_counted() {
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "browse", &["lab", "billing"]).await;
+    let mut refs = Vec::new();
+    for n in 0..5 {
+        refs.push(store.insert(t.msg(0, format!("m{n}").as_bytes())).await.unwrap());
+    }
+    // m0 sent everywhere; m1 quarantined by lab; the rest pending.
+    store.finish(t.id("lab"), &[sent(refs[0])]).await.unwrap();
+    store.finish(t.id("billing"), &[sent(refs[0]), sent(refs[1])]).await.unwrap();
+    store.finish(t.id("lab"), &[Done::with(refs[1], Status::Quarantined, Some("AR: unknown patient"))]).await.unwrap();
+
+    let page = |status, before| Browse { interface: &t.name, status, before, limit: 2 };
+    let first = store.browse(&page(None, None)).await.unwrap();
+    assert_eq!(first.iter().map(|r| r.id).collect::<Vec<_>>(), [refs[4].id, refs[3].id]);
+    let second = store.browse(&page(None, Some(first[1].id))).await.unwrap();
+    assert_eq!(second.iter().map(|r| r.id).collect::<Vec<_>>(), [refs[2].id, refs[1].id]);
+    let quarantined = store.browse(&page(Some(Status::Quarantined), None)).await.unwrap();
+    assert_eq!(quarantined.len(), 1);
+    assert_eq!(quarantined[0].last_error.as_deref(), Some("lab: AR: unknown patient"));
+    assert_eq!((quarantined[0].size, quarantined[0].status), (2, Status::Quarantined));
+
+    let (row, payload) = store.message(refs[1].id).await.unwrap().unwrap();
+    assert_eq!((row.interface.as_str(), payload.as_slice()), (t.name.as_str(), &b"m1"[..]));
+    assert!(store.message(-1).await.unwrap().is_none());
+
+    let counts = store.queue_counts().await.unwrap();
+    let count = |d| counts.iter().find(|c| c.destination_id == d).copied();
+    assert_eq!(count(t.id("lab")), Some(QueueCount { destination_id: t.id("lab"), pending: 3, quarantined: 1 }));
+    assert_eq!(
+        count(t.id("billing")),
+        Some(QueueCount { destination_id: t.id("billing"), pending: 3, quarantined: 0 })
+    );
 }

@@ -1,3 +1,4 @@
+mod admin;
 mod doctor;
 mod new;
 mod owners;
@@ -33,6 +34,10 @@ enum Command {
         /// Environment: variables from environments/<env>.yaml, secrets from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
+        /// Where the REST API listens (`host:port`, or `off`), instead of `api.listen` in
+        /// ductus.yaml (default 127.0.0.1:7700).
+        #[arg(long, env = "DUCTUS_API_LISTEN")]
+        api_listen: Option<String>,
     },
     /// Run each interface's `*.test.ts` files.
     Test {
@@ -117,6 +122,32 @@ enum Command {
         root: PathBuf,
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
+    },
+    /// Manage REST API tokens (in the engine's database). Roles: viewer reads, operator also
+    /// drains and runs connection checks, admin also manages tokens.
+    Token {
+        #[command(subcommand)]
+        action: TokenAction,
+        #[arg(long, env = "DUCTUS_DATABASE_URL", default_value = tools::DEFAULT_DB, global = true)]
+        database_url: String,
+    },
+    /// Stop taking new messages and deliver what's stored (for upgrades, server moves, config
+    /// changes that need an empty queue): MLLP listeners close, queued HTTP answers 503, file
+    /// pickup and schedules pause. Through the running engine's REST API.
+    Drain {
+        /// Exit the engine once nothing is pending.
+        #[arg(long)]
+        stop: bool,
+        /// Wait until drained, showing what's left.
+        #[arg(long)]
+        wait: bool,
+        #[command(flatten)]
+        api: ApiArgs,
+    },
+    /// Take new messages again after `ductus drain`.
+    Resume {
+        #[command(flatten)]
+        api: ApiArgs,
     },
     /// Manage encrypted secrets (secrets/<env>.json; key in DUCTUS_SECRET_KEY).
     Secret {
@@ -212,6 +243,36 @@ enum OwnersAction {
     },
 }
 
+#[derive(clap::Args)]
+struct ApiArgs {
+    /// The engine's REST API.
+    #[arg(long, env = "DUCTUS_API_URL", default_value = "http://127.0.0.1:7700")]
+    api: String,
+    /// An operator token (`ductus token create <name> --role operator`).
+    #[arg(long, env = "DUCTUS_API_TOKEN", hide_env_values = true)]
+    token: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum TokenAction {
+    /// Create a token and print it (only this once: it's stored as a hash).
+    Create {
+        /// Who or what uses it, e.g. `ci` or `monitoring`.
+        name: String,
+        /// viewer, operator or admin.
+        #[arg(long, default_value = "viewer")]
+        role: String,
+    },
+    /// List tokens (never their secrets).
+    List {
+        /// Include revoked tokens.
+        #[arg(long)]
+        revoked: bool,
+    },
+    /// Revoke a token: it stops working at once.
+    Revoke { name: String },
+}
+
 #[derive(Subcommand)]
 enum SecretAction {
     /// Print a new random key to put in DUCTUS_SECRET_KEY (keep it out of Git).
@@ -289,12 +350,13 @@ async fn run(cli: Cli) -> Result<()> {
         .init();
 
     match cli.command {
-        Command::Run { root, database_url, threads, db_connections, env } => {
+        Command::Run { root, database_url, threads, db_connections, env, api_listen } => {
             let defaults = ductus_runtime::EngineOptions::default();
             let options = ductus_runtime::EngineOptions {
                 pool_threads: threads.unwrap_or(defaults.pool_threads),
                 db_connections,
                 env,
+                api_listen,
             };
             ductus_runtime::run(&root, &database_url, options).await
         }
@@ -324,6 +386,16 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Owners {
             action: Some(OwnersAction::Reassign { from, to, interface, dry_run, root, env }), ..
         } => exit_on_failure(owners::reassign(&root, &env, &from, &to, &interface, dry_run)),
+        Command::Token { action, database_url } => {
+            let command = match action {
+                TokenAction::Create { name, role } => admin::TokenCommand::Create { name, role },
+                TokenAction::List { revoked } => admin::TokenCommand::List { revoked },
+                TokenAction::Revoke { name } => admin::TokenCommand::Revoke { name },
+            };
+            admin::token(&database_url, command).await
+        }
+        Command::Drain { stop, wait, api } => admin::drain(admin::Remote::new(&api.api, api.token)?, stop, wait).await,
+        Command::Resume { api } => admin::resume(admin::Remote::new(&api.api, api.token)?).await,
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,
         Command::Status { database_url } => tools::status(&database_url).await,

@@ -57,6 +57,8 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - **The package of `crates/ductus-cli` is named `ductus`**: `cargo test -p ductus --test cli`, not `-p ductus-cli`.
 - **Type checker API (`check.js`)**: to know whether a call is the SDK's `db`/`api`, resolve the callee with `checker.getSymbolAtLocation` + `getAliasedSymbol` and check its declaration sits in `declare module "@ductus/sdk"`; don't match names (a local `db` would count, an alias wouldn't). `analyze(..., false)` skips `getPreEmitDiagnostics`, which is the slow part.
 - **Timing durable commits**: a transaction that only takes an xid (`SELECT txid_current()`) writes no WAL of its own, so its commit doesn't wait for the flush (0.28 ms vs 3.06 ms measured on the same disk). `ductus doctor` uses `pg_logical_emit_message(true, ...)` (WAL, no table). The TLS verifier (`rustls_platform_verifier`) logs every failed verification at ERROR: doctor's log filter turns it off.
+- **REST API routes** go through `utoipa_axum::routes!` in each `api/*.rs` `routes()` (that's what puts them in the OpenAPI document); a handler's `#[utoipa::path]` path is relative to `/api/v1`. Two handlers with one path and different methods go in one `routes!(a, b)`. A plain helper with the same name as a handler breaks the macro (it picks the wrong item).
+- **Store tests that make partitions often** (the stress test) also take `LONG_LOCKS`: while another test holds its long read on purpose, each partition DDL waits up to 2 s and the inserts queue behind it (seen as "too little traffic").
 - Python on Windows writes CRLF in text mode: pass `newline='
 '` when editing repo files from a script.
 - russh 0.64: `client::Handler::check_server_key(&PublicKeyOrCertificate)`; fingerprints via `key.fingerprint(HashAlg::Sha256)` print like `ssh-keygen -lf`. SFTP `rename` won't overwrite: remove the target first.
@@ -71,11 +73,14 @@ crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
 crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations)
 crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker (+ tests/script.rs)
-crates/ductus-runtime  engine: lib.rs (startup), ingest.rs, http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
+crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for the API: health, queues, drain),
+                       gate.rs (drain gate), api/ (REST API: status, messages, reports, tokens),
+                       project.rs (what code uses, via the type checker), ingest.rs, http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
                        services.rs + mssql.rs (DB calls), limiter.rs, doctor.rs (connection checks)
 crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/impact/types/secret; new.rs: `new interface`;
-                       doctor.rs: what `doctor` checks; owners.rs: `owners` report and reassign;
+                       admin.rs: `token`, `drain`, `resume`;
+                       doctor.rs: runs `doctor` (what to check is runtime's `doctor::plan`); owners.rs: `owners` report and reassign;
                        tools.rs: gen/sink/status;
                        tests/cli.rs runs the binary on temp projects)
 sdk/src                TypeScript SDK (embedded via include_str! in ductus-script/src/loader.rs: add new files there)

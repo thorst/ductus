@@ -8,6 +8,7 @@ use std::io;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+pub use tokio_util::sync::CancellationToken;
 
 pub const START: u8 = 0x0b;
 pub const END: [u8; 2] = [0x1c, 0x0d];
@@ -53,15 +54,39 @@ where
     H: Fn(Bytes) -> F + Clone + Send + Sync + 'static,
     F: Future<Output = Bytes> + Send,
 {
+    let handler = move |message| {
+        let answer = handler(message);
+        async move { Some(answer.await) }
+    };
+    serve_until(listener, handler, CancellationToken::new()).await
+}
+
+/// `serve` until `stop` is cancelled, then close the listener and every connection, so senders
+/// see the receiver as down (connection refused) and keep their messages queued. A message
+/// being handled when `stop` comes is still answered first; a half-received one is dropped
+/// unanswered (the sender sends it again later). A handler answering `None` closes the
+/// connection without an ACK, for a message that arrived too late to be taken.
+pub async fn serve_until<H, F>(listener: TcpListener, handler: H, stop: CancellationToken) -> io::Result<()>
+where
+    H: Fn(Bytes) -> F + Clone + Send + Sync + 'static,
+    F: Future<Output = Option<Bytes>> + Send,
+{
     loop {
-        let (mut stream, peer) = listener.accept().await?;
-        let handler = handler.clone();
+        let (mut stream, peer) = tokio::select! {
+            accepted = listener.accept() => accepted?,
+            _ = stop.cancelled() => return Ok(()),
+        };
+        let (handler, stop) = (handler.clone(), stop.clone());
         tokio::spawn(async move {
             let mut buf = BytesMut::with_capacity(16 * 1024);
             loop {
-                match read_frame(&mut stream, &mut buf).await {
+                let frame = tokio::select! {
+                    frame = read_frame(&mut stream, &mut buf) => frame,
+                    _ = stop.cancelled() => break,
+                };
+                match frame {
                     Ok(Some(message)) => {
-                        let ack = handler(message).await;
+                        let Some(ack) = handler(message).await else { break };
                         if let Err(e) = write_frame(&mut stream, &ack).await {
                             tracing::warn!(%peer, error = %e, "failed to write ACK");
                             break;
@@ -209,6 +234,29 @@ mod tests {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
         assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 50);
+    }
+
+    #[tokio::test]
+    async fn stopping_closes_the_listener_and_open_connections() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let stop = CancellationToken::new();
+        // "late" stands for a message that arrives after the gate closed: no ACK, just closed.
+        let handler = |m: Bytes| async move { (!m.starts_with(b"late")).then(|| Bytes::from_static(b"ACK")) };
+        let server = tokio::spawn(serve_until(listener, handler, stop.clone()));
+        let mut client = Client::new(addr.clone(), Duration::from_secs(2));
+        assert_eq!(&client.send(b"MSH|1").await.unwrap()[..], b"ACK");
+        let err = client.send(b"late").await.unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof, "closed without an ACK");
+
+        let mut open = Client::new(addr.clone(), Duration::from_secs(2));
+        open.send(b"MSH|2").await.unwrap();
+        stop.cancel();
+        server.await.unwrap().unwrap();
+        // The open connection is closed and new ones are refused.
+        assert!(open.send(b"MSH|3").await.is_err());
+        let refused = TcpStream::connect(&addr).await.unwrap_err();
+        assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
     }
 
     #[tokio::test]

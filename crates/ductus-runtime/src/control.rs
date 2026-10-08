@@ -1,0 +1,250 @@
+//! The running engine as the REST API sees it and steers it: its interfaces and their health,
+//! queue counts, and drain mode.
+//!
+//! **Drain mode** stops taking new messages and keeps delivering what's stored, until nothing
+//! is pending: for server moves, upgrades, and config changes that need an empty queue. MLLP
+//! listeners close (senders see the engine as down and keep their messages), queued HTTP
+//! answers 503 with `Retry-After`, file pickup and schedules pause. Respond-mode HTTP keeps
+//! answering: it stores nothing. "Drained" means the gates are closed, nothing is being
+//! stored, and no delivery is pending; with `stop`, the engine then exits.
+
+use crate::gate::Gate;
+use crate::health::Health;
+use anyhow::Result;
+use chrono::{DateTime, Utc};
+use ductus_core::impact::CodeUses;
+use ductus_core::{InterfaceConfig, Resources};
+use ductus_store::{DestinationId, QueueCount, Store};
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{OnceCell, watch};
+use tokio_util::sync::CancellationToken;
+
+/// How often the monitor counts queues while someone is watching (or draining).
+const MONITOR_EVERY: Duration = Duration::from_secs(2);
+
+/// One running interface.
+pub struct Running {
+    pub config: Arc<InterfaceConfig>,
+    pub health: Arc<Health>,
+    pub gate: Arc<Gate>,
+    /// Its destinations' names and store ids, in config order.
+    pub destinations: Vec<(String, DestinationId)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainState {
+    /// Taking messages as usual.
+    Accepting,
+    /// Not taking new messages; delivering what's stored.
+    Draining { since: DateTime<Utc>, stop: bool },
+    /// Nothing left to deliver (and not taking new messages).
+    Drained { since: DateTime<Utc>, stop: bool },
+}
+
+/// Queue counts at a moment, by destination id.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Snapshot {
+    pub at: DateTime<Utc>,
+    pub queues: HashMap<DestinationId, QueueCount>,
+}
+
+impl Snapshot {
+    pub fn queue(&self, destination: DestinationId) -> QueueCount {
+        self.queues.get(&destination).copied().unwrap_or(QueueCount {
+            destination_id: destination,
+            pending: 0,
+            quarantined: 0,
+        })
+    }
+}
+
+pub struct Engine {
+    pub started_at: DateTime<Utc>,
+    pub environment: String,
+    pub root: PathBuf,
+    pub database_url: String,
+    pub store: Store,
+    pub resources: Resources,
+    pub interfaces: Vec<Running>,
+    drain: watch::Sender<DrainState>,
+    monitor: watch::Sender<Arc<Snapshot>>,
+    /// What each interface's code uses, worked out on first request (it needs the TypeScript
+    /// analysis, which takes a moment; code doesn't change while the engine runs).
+    code: OnceCell<CodeUses>,
+    /// Cancelled when the engine should stop (drained with `stop`).
+    pub shutdown: CancellationToken,
+}
+
+impl Engine {
+    pub fn new(
+        environment: String,
+        root: PathBuf,
+        database_url: String,
+        store: Store,
+        resources: Resources,
+        interfaces: Vec<Running>,
+    ) -> Arc<Self> {
+        let engine = Arc::new(Self {
+            started_at: Utc::now(),
+            environment,
+            root,
+            database_url,
+            store,
+            resources,
+            interfaces,
+            drain: watch::Sender::new(DrainState::Accepting),
+            monitor: watch::Sender::new(Arc::default()),
+            code: OnceCell::new(),
+            shutdown: CancellationToken::new(),
+        });
+        tokio::spawn(monitor(Arc::downgrade(&engine)));
+        engine
+    }
+
+    pub fn interface(&self, name: &str) -> Option<&Running> {
+        self.interfaces.iter().find(|i| i.config.name == name)
+    }
+
+    fn destination_ids(&self) -> impl Iterator<Item = DestinationId> + '_ {
+        self.interfaces.iter().flat_map(|i| i.destinations.iter().map(|(_, id)| *id))
+    }
+
+    /// Queue counts now (one quick query).
+    pub async fn snapshot(&self) -> Result<Snapshot> {
+        let counts = self.store.queue_counts().await?;
+        Ok(Snapshot { at: Utc::now(), queues: counts.into_iter().map(|c| (c.destination_id, c)).collect() })
+    }
+
+    /// Queue counts as they change, every few seconds while anyone is subscribed.
+    pub fn watch_queues(&self) -> watch::Receiver<Arc<Snapshot>> {
+        let rx = self.monitor.subscribe();
+        self.monitor.send_modify(|_| {}); // wake the monitor at once for its first subscriber
+        rx
+    }
+
+    pub fn drain_state(&self) -> DrainState {
+        *self.drain.borrow()
+    }
+
+    pub fn watch_drain(&self) -> watch::Receiver<DrainState> {
+        self.drain.subscribe()
+    }
+
+    /// Stop taking messages and deliver what's stored; with `stop`, exit once drained.
+    /// Draining again only updates `stop`.
+    pub fn drain(&self, stop: bool) {
+        let now = Utc::now();
+        self.drain.send_modify(|s| {
+            *s = match *s {
+                DrainState::Accepting => DrainState::Draining { since: now, stop },
+                DrainState::Draining { since, .. } => DrainState::Draining { since, stop },
+                DrainState::Drained { since, .. } => DrainState::Drained { since, stop },
+            }
+        });
+        for i in &self.interfaces {
+            i.gate.set_open(false);
+        }
+        tracing::warn!(stop, "draining: not taking new messages; delivering what's stored");
+        if stop && matches!(self.drain_state(), DrainState::Drained { .. }) {
+            self.shutdown.cancel();
+        }
+    }
+
+    /// Take messages again.
+    pub fn resume(&self) {
+        if self.drain.send_replace(DrainState::Accepting) != DrainState::Accepting {
+            tracing::info!("resumed: taking new messages again");
+        }
+        for i in &self.interfaces {
+            i.gate.set_open(true);
+        }
+    }
+
+    /// Pending deliveries of this engine's interfaces, if nothing can add more: every gate
+    /// closed and nothing being stored. `None` while a store is still in flight.
+    async fn left_to_deliver(&self) -> Result<Option<i64>> {
+        if self.interfaces.iter().any(|i| i.gate.is_open() || i.gate.in_flight() > 0) {
+            return Ok(None);
+        }
+        let snapshot = self.snapshot().await?;
+        Ok(Some(self.destination_ids().map(|d| snapshot.queue(d).pending).sum()))
+    }
+
+    /// What each interface's code uses (`db`/`api` names), worked out once.
+    pub async fn code_uses(&self) -> Result<&CodeUses> {
+        self.code
+            .get_or_try_init(|| async {
+                let root = self.root.clone();
+                let configs: Vec<InterfaceConfig> = self.interfaces.iter().map(|i| (*i.config).clone()).collect();
+                // The analysis runs the TypeScript compiler in V8: on a thread of its own, so
+                // it never holds up the runtime that serves intake.
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                std::thread::Builder::new().name("code-analysis".into()).spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+                    let result = runtime.map_err(anyhow::Error::from).and_then(|rt| {
+                        let dirs: Vec<&std::path::Path> = configs.iter().map(|c| c.dir.as_path()).collect();
+                        let refs: Vec<&InterfaceConfig> = configs.iter().collect();
+                        rt.block_on(crate::project::code_uses(&root, &dirs, &refs))
+                    });
+                    let _ = tx.send(result);
+                })?;
+                rx.await?
+            })
+            .await
+    }
+}
+
+/// Counts queues every few seconds while anyone watches them, and moves a drain to drained.
+/// Ends with the engine.
+async fn monitor(engine: std::sync::Weak<Engine>) {
+    loop {
+        let Some(e) = engine.upgrade() else { return };
+        let watched = e.monitor.receiver_count() > 0;
+        let draining = matches!(e.drain_state(), DrainState::Draining { .. });
+        if watched {
+            match e.snapshot().await {
+                Ok(snapshot) => {
+                    e.monitor.send_if_modified(|s| {
+                        // Same counts: keep the old snapshot, so watchers only hear of changes.
+                        let changed = s.queues != snapshot.queues;
+                        if changed {
+                            *s = Arc::new(snapshot);
+                        }
+                        changed
+                    });
+                }
+                Err(e) => tracing::warn!(error = %format!("{e:#}"), "counting queues failed"),
+            }
+        }
+        if draining {
+            match e.left_to_deliver().await {
+                Ok(Some(0)) => {
+                    let mut stop = false;
+                    e.drain.send_modify(|s| {
+                        if let DrainState::Draining { stop: s_stop, .. } = *s {
+                            stop = s_stop;
+                            *s = DrainState::Drained { since: Utc::now(), stop };
+                        }
+                    });
+                    tracing::warn!(stop, "drained: nothing left to deliver");
+                    if stop {
+                        e.shutdown.cancel();
+                    }
+                }
+                Ok(_) => {}
+                Err(err) => tracing::warn!(error = %format!("{err:#}"), "checking the drain failed"),
+            }
+        }
+        let mut changes = e.monitor.subscribe();
+        let mut drain = e.drain.subscribe();
+        drop(e); // don't keep the engine alive while sleeping
+        tokio::select! {
+            _ = tokio::time::sleep(if draining { Duration::from_millis(500) } else { MONITOR_EVERY }) => {}
+            _ = changes.changed(), if !watched => {} // a first subscriber came
+            _ = drain.changed() => {}
+        }
+    }
+}

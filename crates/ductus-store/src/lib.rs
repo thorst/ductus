@@ -6,6 +6,10 @@
 //! destination is done. Anything pending after a crash is simply picked up again:
 //! at-least-once delivery.
 
+mod api;
+
+pub use api::{Browse, MessageRow, QueueCount, Role, TOKEN_PREFIX, Token};
+
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::postgres::{PgPool, PgPoolOptions};
@@ -31,6 +35,14 @@ impl Status {
             4 => Status::Duplicate,
             _ => return None,
         })
+    }
+
+    pub const ALL: [Status; 5] =
+        [Status::Pending, Status::Sent, Status::Filtered, Status::Quarantined, Status::Duplicate];
+
+    /// From its label (`pending`, `sent`, ...), ignoring case.
+    pub fn parse(label: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|s| s.label().eq_ignore_ascii_case(label.trim()))
     }
 
     pub fn label(self) -> &'static str {

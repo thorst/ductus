@@ -7,6 +7,7 @@
 //! stored twice. The last batch also marks the file done, so a crash before the move doesn't
 //! read the file again either.
 
+use crate::gate::Closed;
 use crate::ingest::Intake;
 use crate::sftp::{self, Connection};
 use crate::split::{Records, Splitter};
@@ -216,12 +217,18 @@ impl FileWatcher {
         let mut last_error: Option<(String, std::time::Instant)> = None;
         loop {
             ticker.tick().await;
+            if !self.intake.gate.is_open() {
+                // Draining: a file being read stopped between batches, its progress saved.
+                self.intake.gate.opened().await;
+                continue;
+            }
             match self.poll().await {
                 Ok(()) => {
                     if last_error.take().is_some() {
                         tracing::info!(interface = %self.name(), "file pickup working again");
                     }
                 }
+                Err(e) if e.root_cause().is::<Closed>() => {}
                 Err(e) => {
                     // Nothing is lost: the file stays where it is and its progress is saved.
                     let error = format!("{e:#}");

@@ -237,15 +237,17 @@ results  (owner: Lab team)
 fn reports_end_quietly_when_the_reader_stops() {
     use std::os::unix::process::ExitStatusExt;
     let dir = hospital();
-    let mut child = Command::new(env!("CARGO_BIN_EXE_ductus"))
+    // The reader is gone before the child starts (closing it after spawning raced: a quick
+    // child could write everything into the pipe's buffer first and exit normally).
+    let (reader, writer) = std::io::pipe().unwrap();
+    drop(reader);
+    let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
         .arg("ports")
         .current_dir(dir.path())
-        .stdout(std::process::Stdio::piped())
+        .stdout(writer)
         .stderr(std::process::Stdio::piped())
-        .spawn()
+        .output()
         .unwrap();
-    drop(child.stdout.take()); // the reader is gone before the first line is written
-    let out = child.wait_with_output().unwrap();
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(!stderr.contains("panicked"), "{stderr}");
     assert_eq!(out.status.signal(), Some(13), "ended by SIGPIPE: {:?}", out.status);
@@ -274,9 +276,10 @@ fn ports_lists_listeners_and_connections_per_environment_and_flags_conflicts() {
         "environment: prod
 
 Listening
-  PORT  PROTOCOL  HOST     INTERFACE  ROUTE
-  7661  MLLP      0.0.0.0  adt
-  8080  HTTP      0.0.0.0  api        GET /patients/{mrn} (queue)
+  PORT  PROTOCOL  HOST       INTERFACE          ROUTE
+  7661  MLLP      0.0.0.0    adt
+  7700  HTTP      127.0.0.1  (engine REST API)  /api/v1
+  8080  HTTP      0.0.0.0    api                GET /patients/{mrn} (queue)
 
 Connects to
   HOST        PORT  PROTOCOL  USED BY
@@ -296,6 +299,11 @@ Connects to
     let (ok, out) = ductus(dir.path(), &["ports"]);
     assert!(!ok, "{out}");
     assert!(out.contains("✗ port 6661: MLLP listeners for both `adt` and `api`"), "{out}");
+
+    // The REST API's port is checked too.
+    std::fs::write(dir.path().join("ductus.yaml"), "api: { listen: '0.0.0.0:6661' }\n").unwrap();
+    let (ok, out) = ductus(dir.path(), &["ports"]);
+    assert!(!ok && out.contains("✗ port 6661: the REST API (`api.listen` in ductus.yaml) and `adt`"), "{out}");
 }
 
 #[test]
@@ -397,4 +405,167 @@ fn doctor_checks_what_the_project_uses_and_saves_a_report() {
     assert!(out.contains("checked 4 connection(s)") && !out.contains("empi"), "{out}");
     let (ok, out) = ductus(dir.path(), &["doctor", &db, "--interface", "nope"]);
     assert!(!ok && out.contains("no interface named nope"), "{out}");
+}
+
+/// A free local port (bound, then released).
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+}
+
+/// Ends the engine if the test fails half-way.
+struct Child(std::process::Child);
+
+impl Drop for Child {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// Wait up to 2.5 s for `check` to hold.
+async fn eventually(mut check: impl AsyncFnMut() -> bool) -> bool {
+    for _ in 0..50 {
+        if check().await {
+            return true;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    false
+}
+
+/// The engine with its REST API: tokens and roles, status and queues, the message browser, the
+/// OpenAPI document, and drain mode end to end (the MLLP listener closes, what's stored is
+/// delivered once the receiver is back, then the engine stops).
+#[tokio::test(flavor = "multi_thread")]
+async fn the_api_shows_the_engine_and_drains_it() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (mllp, receiver, api) = (free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("api-test-{nanos}");
+    let config = format!(
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\nabout: {{ owner: Lab team }}\ndestinations:\n  lab: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 500 }} }}\n"
+    );
+    let dir = project(&[(format!("interfaces/{name}/interface.yaml").as_str(), config.as_str())]);
+    let run = |args: &[&str]| {
+        let out =
+            Command::new(env!("CARGO_BIN_EXE_ductus")).args(args).env("DUCTUS_DATABASE_URL", &db).output().unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), text)
+    };
+    let token = |role: &str| {
+        let (ok, out) = run(&["token", "create", &format!("{name}-{role}"), "--role", role]);
+        assert!(ok, "{out}");
+        out.lines().next().unwrap().to_string()
+    };
+    let (admin, viewer) = (token("admin"), token("viewer"));
+
+    let mut engine = Child(
+        Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["run", "--root", &dir.path().to_string_lossy(), "--threads", "1"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let api_url = format!("http://127.0.0.1:{api}");
+    let base = format!("{api_url}/api/v1");
+    let http = reqwest::Client::new();
+    let get = |path: &str, token: &str| http.get(format!("{base}{path}")).bearer_auth(token).send();
+    let json =
+        async |path: &str, token: &str| -> serde_json::Value { get(path, token).await.unwrap().json().await.unwrap() };
+    let mut up = false;
+    for _ in 0..100 {
+        if http.get(format!("{base}/health")).send().await.is_ok_and(|r| r.status().is_success()) {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(up, "the API never came up");
+
+    // The receiver is down: three messages wait.
+    let mut sender = ductus_mllp::Client::new(format!("127.0.0.1:{mllp}"), std::time::Duration::from_secs(5));
+    for n in 1..=3 {
+        let msg = format!("MSH|^~\\&|EPIC|H|LAB|H|20260101||ADT^A01|C{n}|P|2.5\rPID|1||MRN{n}\r");
+        let ack = sender.send(msg.as_bytes()).await.unwrap();
+        assert!(String::from_utf8_lossy(&ack).contains("MSA|AA"));
+    }
+
+    // Tokens and roles.
+    assert_eq!(http.get(format!("{base}/interfaces")).send().await.unwrap().status(), 401);
+    assert_eq!(get("/interfaces", "dux_nope").await.unwrap().status(), 401);
+    let forbidden = http.post(format!("{base}/drain")).bearer_auth(&viewer).send().await.unwrap();
+    assert_eq!(forbidden.status(), 403);
+    assert!(forbidden.text().await.unwrap().contains("needs operator"));
+
+    let interfaces = json("/interfaces", &viewer).await;
+    let mine = interfaces.as_array().unwrap().iter().find(|i| i["name"] == name.as_str()).unwrap();
+    assert_eq!((&mine["state"], &mine["owner"]), (&"running".into(), &"Lab team".into()), "{mine}");
+    assert_eq!(mine["source"], format!("mllp 127.0.0.1:{mllp}"));
+    assert_eq!(mine["destinations"][0]["connector"], format!("mllp 127.0.0.1:{receiver}"));
+    assert_eq!(mine["destinations"][0]["pending"], 3);
+
+    // The message browser.
+    let page = json(&format!("/interfaces/{name}/messages?limit=2"), &viewer).await;
+    assert_eq!(page["messages"].as_array().unwrap().len(), 2);
+    assert_eq!(page["messages"][0]["control_id"], "C3", "newest first: {page}");
+    let rest = json(&format!("/interfaces/{name}/messages?before={}", page["next_before"]), &viewer).await;
+    assert_eq!(rest["messages"][0]["control_id"], "C1");
+    assert!(rest["next_before"].is_null(), "{rest}");
+    let one = json(&format!("/messages/{}", rest["messages"][0]["id"]), &viewer).await;
+    assert!(one["payload"].as_str().unwrap().contains("PID|1||MRN1"), "{one}");
+    assert_eq!(
+        (&one["deliveries"][0]["destination"], &one["deliveries"][0]["status"]),
+        (&"lab".into(), &"pending".into())
+    );
+    assert_eq!(get(&format!("/interfaces/{name}/messages?status=lost"), &viewer).await.unwrap().status(), 400);
+    assert_eq!(get("/interfaces/nope", &viewer).await.unwrap().status(), 404);
+
+    let owners = json("/owners", &viewer).await;
+    assert!(owners.to_string().contains("Lab team"), "{owners}");
+    let spec: serde_json::Value = http.get(format!("{base}/openapi.json")).send().await.unwrap().json().await.unwrap();
+    for path in
+        ["/interfaces", "/interfaces/{name}/messages", "/messages/{id}", "/drain", "/events", "/doctor", "/tokens"]
+    {
+        assert!(spec["paths"][path].is_object(), "{path} missing from the OpenAPI document");
+    }
+
+    // Drain: the MLLP listener closes (senders keep their messages); nothing can be delivered.
+    let (ok, out) = ductus(dir.path(), &["drain", "--api", &api_url, "--token", &admin]);
+    assert!(ok && out.contains("draining: 3 pending"), "{out}");
+    let refused = eventually(async || tokio::net::TcpStream::connect(("127.0.0.1", mllp)).await.is_err()).await;
+    assert!(refused, "the MLLP listener should close while draining");
+    let health: serde_json::Value = http.get(format!("{base}/health")).send().await.unwrap().json().await.unwrap();
+    assert_eq!(health["drain"], "draining");
+
+    // Resume: the listener comes back.
+    let (ok, out) = ductus(dir.path(), &["resume", "--api", &api_url, "--token", &admin]);
+    assert!(ok && out.contains("accepting"), "{out}");
+    let back = eventually(async || tokio::net::TcpStream::connect(("127.0.0.1", mllp)).await.is_ok()).await;
+    assert!(back, "the MLLP listener should open again on resume");
+
+    // The receiver comes up; `drain --wait --stop` returns once all three are delivered, and the
+    // engine exits by itself.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", receiver)).await.unwrap();
+    let delivered = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let count = delivered.clone();
+    tokio::spawn(ductus_mllp::serve(listener, move |_m: bytes::Bytes| {
+        count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        async { bytes::Bytes::from_static(b"MSH|^~\\&|LAB|H|EPIC|H|20260101||ACK|1|P|2.5\rMSA|AA|1\r") }
+    }));
+    let root = dir.path().to_path_buf();
+    let (ok, out) = tokio::task::spawn_blocking(move || {
+        ductus(&root, &["drain", "--wait", "--stop", "--api", &api_url, "--token", &admin])
+    })
+    .await
+    .unwrap();
+    assert!(ok && out.contains("drained"), "{out}");
+    let exit = engine.0.wait().unwrap();
+    assert!(exit.success(), "the engine exits cleanly once drained: {exit}");
+    assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst), 3);
+
+    for role in ["admin", "viewer"] {
+        run(&["token", "revoke", &format!("{name}-{role}")]);
+    }
 }

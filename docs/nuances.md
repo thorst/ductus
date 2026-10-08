@@ -201,3 +201,31 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 
 ### Cron uses the server's local time; missed runs collapse to one (level 3)
 - **What:** after downtime, a schedule runs once, not once per missed time. A run is skipped if the previous run's message is still pending.
+
+## Operations: drain mode and the REST API
+
+### Draining closes MLLP listeners; it doesn't answer AE (level 4)
+- **What:** `ductus drain` (or `POST /api/v1/drain`) stops taking new messages. MLLP listeners close: open connections are closed after the message being handled is ACKed, new ones are refused. A message that was half received, or that arrived just as the drain started, is dropped unanswered, never ACKed, so the sender sends it again later. Queued HTTP sources answer 503 with `Retry-After: 30`. File pickup pauses (a file being read stops between batches and resumes at its saved offset after `ductus resume` or a restart). A schedule that comes due while draining runs once on resume, however many times it came due.
+- **Why:** to a sender, a closed port means "receiver down: keep the message and retry", which every sender handles. An AE can be configured to mean "skip it after N tries" on some engines, which would lose messages.
+- **What to do:** expect senders to show the connection as down during a drain. Use it for upgrades and server moves: `ductus drain --wait --stop`, upgrade, start.
+
+### Respond-mode HTTP keeps answering while draining (level 4)
+- **What:** respond-mode interfaces (APIs that answer from a transform) keep answering until the engine stops. They store nothing, so there's nothing to drain.
+- **What to do:** take the server out of your load balancer when you drain it. `GET /api/v1/health` reports `drain: draining`, which a load balancer can check.
+
+### A drain finishes only when every destination has caught up (level 4)
+- **What:** "drained" means nothing is pending anywhere. A destination that's down, or an interface stopped because its code ran away, keeps the drain waiting (`ductus drain --wait` and `GET /api/v1/drain` show which interfaces). Quarantined messages don't count: they wait for a person anyway.
+- **What to do:** fix the destination, or resume and plan the maintenance for later. Stopping anyway is safe: what's pending stays stored and goes out after the restart.
+
+### Drain mode isn't remembered across a restart (level 4)
+- **What:** an engine that restarts takes messages again, even if it was draining.
+- **Why:** the usual sequence is drain, stop, upgrade, start, and the start should take messages.
+- **What to do:** to keep senders out across a restart, stop the senders, or drain again right after starting.
+
+### The API listens on this machine only, until you open it (level 4)
+- **What:** the REST API listens on `127.0.0.1:7700` by default (`api.listen` in ductus.yaml, `--api-listen`, or `off`). Every call except `/health` and `/openapi.json` needs a token. Tokens are made on the server with `ductus token create` and are stored only as hashes: a lost token can't be shown again; revoke it and make a new one.
+- **What to do:** put a TLS reverse proxy in front before opening it to the network (the engine's own listeners have no TLS yet).
+
+### Anyone with a viewer token can read message payloads (level 4)
+- **What:** `GET /api/v1/messages/{id}` returns the payload, which holds patient data. Each read is logged with the token's name; there are no finer permissions or audit log yet (they come with users and roles in v0.5 step 8).
+- **What to do:** give tokens only to people and tools that may see patient data, and name them so the log says who looked.

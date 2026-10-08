@@ -6,7 +6,7 @@ use ductus_script::Isolate;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const TYPES_FILE: &str = ".ductus/types/ductus-sdk.d.ts";
+use ductus_runtime::project::{TYPES_FILE, code_references, files_under, key, resource_kind};
 
 const TSCONFIG: &str = r#"{
   "compilerOptions": {
@@ -50,37 +50,8 @@ pub(crate) fn interface_dirs(root: &Path, env: &Environment) -> Result<Vec<Inter
     Ok(dirs.into_iter().map(|dir| InterfaceDir { config: InterfaceConfig::load_in(&dir, env), dir }).collect())
 }
 
-/// Every file under `dir` (recursively) accepted by `keep`, skipping hidden folders and node_modules.
-fn files_under(dir: &Path, keep: &dyn Fn(&Path) -> bool) -> Vec<PathBuf> {
-    let mut out = Vec::new();
-    let Ok(entries) = std::fs::read_dir(dir) else { return out };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if path.is_dir() {
-            if !name.starts_with('.') && name != "node_modules" {
-                out.extend(files_under(&path, keep));
-            }
-        } else if keep(&path) {
-            out.push(path);
-        }
-    }
-    out.sort();
-    out
-}
-
-fn is_ts(p: &Path) -> bool {
-    p.extension().is_some_and(|e| e == "ts") && !p.to_string_lossy().ends_with(".d.ts")
-}
-
 fn is_test(p: &Path) -> bool {
     p.to_string_lossy().ends_with(".test.ts")
-}
-
-/// Forward-slash absolute path, the form the type checker uses.
-fn key(path: &Path) -> String {
-    std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).to_string_lossy().replace('\\', "/")
 }
 
 fn relative(root: &Path, file: &str) -> String {
@@ -294,60 +265,23 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
     Ok(problems == 0)
 }
 
-/// Add every .ts file in the project to `files`, so imports of shared libraries resolve, and
-/// return the shared modules: files outside any interface folder, one instance per isolate,
-/// imported by many interfaces.
+/// Every .ts file of the project into `files`; returns the shared modules (see
+/// `ductus_runtime::project::project_files`).
 fn project_files(
     root: &Path,
     interfaces: &[InterfaceDir],
     files: &mut BTreeMap<String, String>,
 ) -> Result<Vec<String>> {
-    let interface_dirs: Vec<String> = interfaces.iter().map(|i| format!("{}/", key(&i.dir))).collect();
-    let mut shared = Vec::new();
-    for f in files_under(root, &is_ts) {
-        let k = key(&f);
-        if !interface_dirs.iter().any(|d| k.starts_with(d)) {
-            shared.push(k.clone());
-        }
-        files.insert(k, std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display()))?);
-    }
-    Ok(shared)
-}
-
-/// The `db()`/`api()` calls reachable from an interface's script (through its imports).
-fn code_references<'a>(
-    config: &InterfaceConfig,
-    analysis: &'a ductus_script::Analysis,
-) -> Vec<&'a ductus_script::ResourceReference> {
-    config.script_path().map(|s| analysis.references_from(&key(&s))).unwrap_or_default()
-}
-
-fn resource_kind(function: &str) -> Option<ductus_core::resources::Kind> {
-    match function {
-        "db" => Some(ductus_core::resources::Kind::Database),
-        "api" => Some(ductus_core::resources::Kind::Api),
-        _ => None,
-    }
+    let dirs: Vec<&Path> = interfaces.iter().map(|i| i.dir.as_path()).collect();
+    ductus_runtime::project::project_files(root, &dirs, files)
 }
 
 /// The databases and APIs each interface's code uses (`db("...")`, `api("...")`, through its
-/// imports). Parsing and name resolution only, no type check, so it's quick.
+/// imports).
 pub(crate) async fn code_uses(root: &Path, interfaces: &[InterfaceDir]) -> Result<ductus_core::impact::CodeUses> {
-    let mut files = BTreeMap::new();
-    files.insert(key(&root.join(TYPES_FILE)), Isolate::generate_types().await?);
-    let shared = project_files(root, interfaces, &mut files)?;
-    let analysis = ductus_script::analyze(&files, &shared, false)?;
-    Ok(interfaces
-        .iter()
-        .filter_map(|i| i.config.as_ref().ok())
-        .map(|c| {
-            let uses = code_references(c, &analysis)
-                .into_iter()
-                .filter_map(|r| Some((resource_kind(&r.kind)?, r.name.clone())))
-                .collect();
-            (c.name.clone(), uses)
-        })
-        .collect())
+    let dirs: Vec<&Path> = interfaces.iter().map(|i| i.dir.as_path()).collect();
+    let configs: Vec<&InterfaceConfig> = interfaces.iter().filter_map(|i| i.config.as_ref().ok()).collect();
+    ductus_runtime::project::code_uses(root, &dirs, &configs).await
 }
 
 /// `ductus impact`: every interface a vendor, application or host touches, how, and where to
@@ -446,10 +380,26 @@ pub fn ports(root: &Path, env: &str) -> Result<bool> {
     }
     let configs: Vec<&InterfaceConfig> = interfaces.iter().filter_map(|i| i.config.as_ref().ok()).collect();
 
-    let listening = ports::listeners(configs.iter().copied());
+    let mut listening = ports::listeners(configs.iter().copied());
+    // The engine's own REST API listens too (unless it's `off`).
+    let api = ductus_core::settings::Settings::load(root)?.api.address(None)?;
+    let mut conflicts = Vec::new();
+    if let Some((host, port)) = api {
+        if let Some(l) = listening.iter().find(|l| l.port == port) {
+            conflicts.push(format!("port {port}: the REST API (`api.listen` in ductus.yaml) and `{}`", l.interface));
+        }
+        listening.push(ports::Listener {
+            port,
+            host,
+            protocol: "HTTP",
+            interface: "(engine REST API)".into(),
+            route: Some("/api/v1".into()),
+        });
+        listening.sort();
+    }
     println!("\nListening");
     if listening.is_empty() {
-        println!("  (nothing: no MLLP or HTTP sources)");
+        println!("  (nothing: no MLLP or HTTP sources, and the REST API is off)");
     } else {
         table(
             &["PORT", "PROTOCOL", "HOST", "INTERFACE", "ROUTE"],
@@ -479,7 +429,7 @@ pub fn ports(root: &Path, env: &str) -> Result<bool> {
     }
 
     println!();
-    let conflicts = ductus_core::config::check_endpoints(configs.iter().copied());
+    conflicts.extend(ductus_core::config::check_endpoints(configs.iter().copied()));
     if conflicts.is_empty() {
         println!("✓ no port conflicts");
     }

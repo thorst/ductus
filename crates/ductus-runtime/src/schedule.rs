@@ -6,6 +6,7 @@
 //! Runs are one at a time: if the previous run is still pending when the next one is due, the
 //! new one is skipped. A run missed while the engine was down runs once on start.
 
+use crate::gate::Closed;
 use crate::ingest::Intake;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local, Utc};
@@ -32,9 +33,14 @@ pub async fn run(intake: Arc<Intake>, timing: Timing) {
     let name = intake.config.name.clone();
     tracing::info!(interface = %name, "schedule started");
     loop {
-        if let Err(e) = next_run(&intake, &timing).await {
-            tracing::error!(interface = %name, error = %format!("{e:#}"), "schedule failed; retrying");
-            tokio::time::sleep(RETRY).await;
+        match next_run(&intake, &timing).await {
+            Ok(()) => {}
+            // Draining: the run waits for the gate to open (and runs once then, however late).
+            Err(e) if e.is::<Closed>() => {}
+            Err(e) => {
+                tracing::error!(interface = %name, error = %format!("{e:#}"), "schedule failed; retrying");
+                tokio::time::sleep(RETRY).await;
+            }
         }
     }
 }
@@ -55,6 +61,7 @@ async fn next_run(intake: &Intake, timing: &Timing) -> Result<()> {
         tokio::time::sleep(wait.min(MAX_SLEEP)).await;
     }
 
+    intake.gate.opened().await;
     let now = Utc::now();
     let local = |t: DateTime<Utc>| t.with_timezone(&Local).to_rfc3339();
     let payload = serde_json::json!({ "due": local(due), "previous": state.previous.map(local) }).to_string();
