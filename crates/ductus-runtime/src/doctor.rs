@@ -977,7 +977,7 @@ pub fn plan(
                 let server = f.server.as_deref().unwrap_or_default();
                 plan.resource(resources, Kind::Sftp, server, format!("{} (source)", c.name), me);
             }
-            Source::Schedule(_) => {}
+            Source::Schedule(_) | Source::Internal => {}
         }
         for (name, d) in c.destinations() {
             let label = if c.destination.is_some() { c.name.clone() } else { format!("{} → {name}", c.name) };
@@ -991,7 +991,7 @@ pub fn plan(
                     plan.add(4, url.clone(), "HTTP destination", target, label, me);
                 }
                 Destination::Http { api: Some(api), .. } => plan.resource(resources, Kind::Api, api, label, me),
-                Destination::Http { .. } => {}
+                Destination::Http { .. } | Destination::Interface(_) => {}
                 Destination::Sftp { server, .. } => plan.resource(resources, Kind::Sftp, server, label, me),
                 Destination::File { dir } => {
                     let path = c.dir.join(dir);

@@ -195,12 +195,18 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
 
     let configs = || interfaces.iter().filter_map(|i| i.config.as_ref().ok());
     let mut wiring = ductus_core::config::check_endpoints(configs());
+    wiring.extend(ductus_core::config::check_routes(configs()));
     if let Some(r) = &resources {
         wiring.extend(r.missing_references(configs()));
     }
     for problem in wiring {
         problems += 1;
         println!("✗ {problem}");
+    }
+    for name in ductus_core::config::unrouted(configs()) {
+        println!(
+            "⚠ {name}: has `source: internal` but no interface routes to it (`destination: {{ interface: {name} }}`)"
+        );
     }
 
     let shared = project_files(root, &interfaces, &mut files)?;

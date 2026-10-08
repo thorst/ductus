@@ -58,6 +58,7 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - **Type checker API (`check.js`)**: to know whether a call is the SDK's `db`/`api`, resolve the callee with `checker.getSymbolAtLocation` + `getAliasedSymbol` and check its declaration sits in `declare module "@ductus/sdk"`; don't match names (a local `db` would count, an alias wouldn't). `analyze(..., false)` skips `getPreEmitDiagnostics`, which is the slow part.
 - **Timing durable commits**: a transaction that only takes an xid (`SELECT txid_current()`) writes no WAL of its own, so its commit doesn't wait for the flush (0.28 ms vs 3.06 ms measured on the same disk). `ductus doctor` uses `pg_logical_emit_message(true, ...)` (WAL, no table). The TLS verifier (`rustls_platform_verifier`) logs every failed verification at ERROR: doctor's log filter turns it off.
 - **REST API routes** go through `utoipa_axum::routes!` in each `api/*.rs` `routes()` (that's what puts them in the OpenAPI document); a handler's `#[utoipa::path]` path is relative to `/api/v1`. Two handlers with one path and different methods go in one `routes!(a, b)`. A plain helper with the same name as a handler breaks the macro (it picks the wrong item).
+- **Statements that lock many rows lock them in id order** (`ORDER BY id FOR UPDATE` in a CTE, as `Store::settle` does), never in whatever order the plan visits them: the plan changes with the statistics, and two writers over overlapping sets then deadlock. The routing demo hit it once in 11 runs; no test could force the plan, so it's a rule, not a test. And **a flush may be retried after its commit** (a later statement failed): writes must be guarded (`WHERE status = 0 RETURNING`), or a route would store its messages twice (it did, before the guard).
 - **Store tests that make partitions often** (the stress test) also take `LONG_LOCKS`: while another test holds its long read on purpose, each partition DDL waits up to 2 s and the inserts queue behind it (seen as "too little traffic").
 - Python on Windows writes CRLF in text mode: pass `newline='
 '` when editing repo files from a script.
@@ -75,7 +76,8 @@ crates/ductus-store    Postgres store + migrations (crates/ductus-store/migratio
 crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for the API: health, queues, drain),
                        gate.rs (drain gate), api/ (REST API: status, messages, reports, tokens),
-                       project.rs (what code uses, via the type checker), ingest.rs, http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
+                       project.rs (what code uses, via the type checker), ingest.rs (also the receiving
+                       side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
                        services.rs + mssql.rs (DB calls), limiter.rs, doctor.rs (connection checks)
 crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/impact/types/secret; new.rs: `new interface`;

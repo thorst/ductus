@@ -46,15 +46,17 @@ fn extension(format: &Format) -> &'static str {
 
 impl Sender {
     /// A sender for one of `config`'s destinations. `server`: an SFTP destination's server;
-    /// `api`: an HTTP destination's API; both from resources.yaml.
+    /// `api`: an HTTP destination's API; both from resources.yaml. `None` for a route to another
+    /// interface: nothing is sent, the worker stores the messages there (`Intake::accept_routed`).
     pub fn new(
         config: &InterfaceConfig,
         destination: &DestinationConfig,
         server: Option<SftpServer>,
         api: Option<Api>,
-    ) -> Self {
+    ) -> Option<Self> {
         let output = config.output_for(destination);
-        match &destination.connector {
+        Some(match &destination.connector {
+            Destination::Interface(_) => return None,
             Destination::Sftp { server: name, dir } => Sender::Sftp {
                 connection: Box::new(crate::sftp::Connection::new(name, server.expect("checked at startup"))),
                 dir: dir.clone(),
@@ -98,7 +100,7 @@ impl Sender {
                     headers: map,
                 }
             }
-        }
+        })
     }
 
     pub async fn send(&mut self, id: i64, payload: &[u8]) -> Result<(), SendError> {
@@ -204,7 +206,7 @@ mod tests {
         let api = resources.apis.get("billing").cloned();
         let send = |config: InterfaceConfig| {
             let d = config.destination.clone().unwrap();
-            let mut sender = Sender::new(&config, &d, None, api.clone());
+            let mut sender = Sender::new(&config, &d, None, api.clone()).unwrap();
             async move { sender.send(1, b"MSH|").await }
         };
         // The API's URL and headers, the destination's headers winning where both set one.

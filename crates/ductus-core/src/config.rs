@@ -103,6 +103,23 @@ pub enum Source {
     Sftp(FileSource),
     /// No input: the transform runs on a timer and its result is the message.
     Schedule(Schedule),
+    /// Messages routed from other interfaces (`destination: { interface: <this one> }`), stored
+    /// in the same transaction that marks them sent there.
+    Internal,
+}
+
+impl Source {
+    /// What kind of source it is, as written in interface.yaml.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Source::Mllp { .. } => "mllp",
+            Source::Http { .. } => "http",
+            Source::File(_) => "file",
+            Source::Sftp(_) => "sftp",
+            Source::Schedule(_) => "schedule",
+            Source::Internal => "internal",
+        }
+    }
 }
 
 /// Watch a folder for files. Each file (or each record in it, with `split: records`) becomes a
@@ -201,7 +218,7 @@ pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig
                     ));
                 }
             }
-            Source::File(_) | Source::Sftp(_) | Source::Schedule(_) => {}
+            Source::File(_) | Source::Sftp(_) | Source::Schedule(_) | Source::Internal => {}
         }
     }
     for (port, m) in &mllp {
@@ -211,6 +228,75 @@ pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig
     }
     problems.sort();
     problems
+}
+
+/// Problems with routes between interfaces (`destination: { interface: b }`): a target that
+/// doesn't exist or doesn't have `source: internal`, a format the target doesn't read, and
+/// loops (a message would go round forever).
+pub fn check_routes<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<String> {
+    use std::collections::{BTreeMap, BTreeSet};
+    let configs: BTreeMap<&str, &InterfaceConfig> = configs.into_iter().map(|c| (c.name.as_str(), c)).collect();
+    let mut problems = Vec::new();
+    let mut edges: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+    for c in configs.values() {
+        for (name, d) in c.destinations() {
+            let Some(target) = d.route() else { continue };
+            let from = c.label_destination(name);
+            let Some(t) = configs.get(target) else {
+                problems.push(format!("{from}: no interface named `{target}`"));
+                continue;
+            };
+            if !matches!(t.source, Source::Internal) {
+                problems.push(format!(
+                    "{from} routes to `{target}`, which has a `{}` source: give `{target}` `source: internal`",
+                    t.source.kind()
+                ));
+                continue;
+            }
+            let output = c.output_for(d);
+            if *output != t.format {
+                problems.push(format!(
+                    "{from} sends {} but `{target}` reads {}: set `output:` on the destination or `format:` on `{target}`",
+                    output.name(),
+                    t.format.name()
+                ));
+            }
+            edges.entry(c.name.as_str()).or_default().insert(target);
+        }
+    }
+    // Loops: depth-first from each interface, in name order, so each loop is reported once
+    // (from its first name).
+    let mut reported: BTreeSet<BTreeSet<&str>> = BTreeSet::new();
+    for &start in edges.keys() {
+        let mut stack = vec![(start, vec![start])];
+        while let Some((at, path)) = stack.pop() {
+            for &next in edges.get(at).into_iter().flatten() {
+                if next == start {
+                    let members: BTreeSet<&str> = path.iter().copied().collect();
+                    if reported.insert(members) {
+                        problems.push(format!("routes loop: {} → {start}", path.join(" → ")));
+                    }
+                } else if next > start && !path.contains(&next) {
+                    let mut longer = path.clone();
+                    longer.push(next);
+                    stack.push((next, longer));
+                }
+            }
+        }
+    }
+    problems.sort();
+    problems
+}
+
+/// Interfaces with `source: internal` that no interface routes to: they'd never get anything.
+pub fn unrouted<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig> + Clone) -> Vec<&'a str> {
+    let targets: std::collections::BTreeSet<&str> =
+        configs.clone().into_iter().flat_map(|c| c.destinations().filter_map(|(_, d)| d.route())).collect();
+    configs
+        .into_iter()
+        .filter(|c| matches!(c.source, Source::Internal) && !targets.contains(c.name.as_str()))
+        .map(|c| c.name.as_str())
+        .collect()
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
@@ -260,6 +346,14 @@ impl DestinationConfig {
         System::new(&self.application, &self.vendor)
     }
 
+    /// The interface it routes to (`interface: <name>`), if that's where it sends.
+    pub fn route(&self) -> Option<&str> {
+        match &self.connector {
+            Destination::Interface(target) => Some(target),
+            _ => None,
+        }
+    }
+
     /// The resources.yaml entry it sends through, if any: an SFTP server or an API.
     pub fn resource(&self) -> Option<(Kind, &str)> {
         match &self.connector {
@@ -284,6 +378,8 @@ struct RawDestination {
     #[serde(default)]
     http: Option<serde_yaml_ng::Value>,
     #[serde(default)]
+    interface: Option<serde_yaml_ng::Value>,
+    #[serde(default)]
     transform: Option<String>,
     #[serde(default, deserialize_with = "crate::format::deserialize_opt")]
     output: Option<Format>,
@@ -304,11 +400,18 @@ struct RawDestination {
 impl TryFrom<RawDestination> for DestinationConfig {
     type Error = String;
     fn try_from(raw: RawDestination) -> std::result::Result<Self, String> {
-        let mut connectors = [("mllp", raw.mllp), ("file", raw.file), ("sftp", raw.sftp), ("http", raw.http)]
+        let connectors = [
+            ("mllp", raw.mllp),
+            ("file", raw.file),
+            ("sftp", raw.sftp),
+            ("http", raw.http),
+            ("interface", raw.interface),
+        ];
+        let mut connectors = connectors
             .into_iter()
             .filter_map(|(kind, value)| value.map(|v| serde_yaml_ng::Mapping::from_iter([(kind.into(), v)])));
         let (Some(connector), None) = (connectors.next(), connectors.next()) else {
-            return Err("a destination needs exactly one of `mllp`, `file`, `sftp` or `http`".into());
+            return Err("a destination needs exactly one of `mllp`, `file`, `sftp`, `http` or `interface`".into());
         };
         let connector =
             serde_yaml_ng::with::singleton_map_recursive::deserialize(serde_yaml_ng::Value::Mapping(connector))
@@ -371,6 +474,9 @@ pub enum Destination {
         #[serde(default)]
         timeout_ms: Option<u64>,
     },
+    /// Put each message into another interface's queue (it has `source: internal`), in the
+    /// same transaction that marks it sent here: no network hop, nothing sent twice.
+    Interface(String),
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Deserialize)]
@@ -668,6 +774,14 @@ impl InterfaceConfig {
                     _ => {}
                 }
             }
+            if let Some(target) = d.route() {
+                if target.trim().is_empty() {
+                    bail!("{}: `interface` needs the name of the interface to route to", what());
+                }
+                if target == self.name {
+                    bail!("{}: an interface can't route to itself (messages would go round forever)", what());
+                }
+            }
             if let Some(r) = &d.rate_limit {
                 check_rate_limit(r).with_context(what)?;
             }
@@ -716,7 +830,7 @@ impl InterfaceConfig {
                     bail!("ordering and dedupe don't apply to a schedule source (runs are one at a time)");
                 }
             }
-            Source::Mllp { .. } | Source::Http { .. } => {}
+            Source::Mllp { .. } | Source::Http { .. } | Source::Internal => {}
         }
         if let Some(r) = &self.rate_limit {
             check_rate_limit(r)?;
@@ -728,6 +842,15 @@ impl InterfaceConfig {
     pub fn destinations(&self) -> impl Iterator<Item = (&str, &DestinationConfig)> {
         let single = self.destination.iter().map(|d| (DEFAULT_DESTINATION, d));
         single.chain(self.destinations.iter().map(|(name, d)| (name.as_str(), d)))
+    }
+
+    /// "`adt` destination `lab`" (or "`adt`" when it has just one destination), for messages.
+    pub fn label_destination(&self, name: &str) -> String {
+        if self.destination.is_some() {
+            format!("`{}`", self.name)
+        } else {
+            format!("`{}` destination `{name}`", self.name)
+        }
     }
 
     /// The functions the engine calls, each with its formats (see `format_spec`): one per
@@ -1168,6 +1291,56 @@ destinations:
             .is_err(),
             "hosts are for the sending side"
         );
+    }
+
+    #[test]
+    fn routes_between_interfaces() {
+        let load = |yaml: &str| -> InterfaceConfig {
+            let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
+            c.validate().unwrap();
+            c
+        };
+        let front = load(
+            "name: front\nsource: { mllp: { port: 1 } }\ndestinations:\n  lab: { interface: lab }\n  billing: { interface: billing, output: json }\n",
+        );
+        let lab = load("name: lab\nsource: internal\ndestination: { file: { dir: o } }\n");
+        let billing = load("name: billing\nsource: internal\nformat: json\ndestination: { interface: archive }\n");
+        let archive = load("name: archive\nsource: internal\nformat: json\ndestination: { file: { dir: o } }\n");
+        assert!(matches!(lab.source, Source::Internal));
+        assert_eq!(front.destinations().map(|(_, d)| d.route()).collect::<Vec<_>>(), [Some("billing"), Some("lab")]);
+        assert!(check_routes([&front, &lab, &billing, &archive]).is_empty());
+        assert!(unrouted([&front, &lab, &billing, &archive]).is_empty());
+        assert_eq!(unrouted([&front, &lab, &billing]), Vec::<&str>::new(), "archive isn't loaded");
+        assert_eq!(unrouted([&lab]), ["lab"], "nothing routes to it");
+        assert!(check_endpoints([&front, &lab]).is_empty());
+
+        // A target that's missing, has another source, or reads another format.
+        let wrong_format = load("name: lab\nsource: internal\nformat: json\ndestination: { file: { dir: o } }\n");
+        let outside = load("name: lab\nsource: { mllp: { port: 2 } }\ndestination: { file: { dir: o } }\n");
+        assert_eq!(
+            check_routes([&front, &wrong_format, &billing]),
+            [
+                "`billing`: no interface named `archive`",
+                "`front` destination `lab` sends hl7 but `lab` reads json: set `output:` on the destination or `format:` on `lab`",
+            ]
+        );
+        assert_eq!(
+            check_routes([&front, &outside, &billing, &archive]),
+            ["`front` destination `lab` routes to `lab`, which has a `mllp` source: give `lab` `source: internal`"]
+        );
+
+        // Loops, each reported once.
+        let a = load("name: a\nsource: internal\ndestination: { interface: b }\n");
+        let b = load("name: b\nsource: internal\ndestinations: { x: { interface: c }, y: { interface: a } }\n");
+        let c = load("name: c\nsource: internal\ndestination: { interface: a }\n");
+        assert_eq!(check_routes([&a, &b, &c]), ["routes loop: a → b → a", "routes loop: a → b → c → a"]);
+
+        let err = |yaml: &str| {
+            format!("{:#}", serde_yaml_ng::from_str::<InterfaceConfig>(yaml).unwrap().validate().unwrap_err())
+        };
+        assert!(err("name: a\nsource: internal\ndestination: { interface: a }\n").contains("route to itself"));
+        assert!(err("name: a\nsource: internal\ndestination: { interface: ' ' }\n").contains("needs the name"));
+        assert!(err("name: a\nsource: internal\n").contains("is required"));
     }
 
     #[test]

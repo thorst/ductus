@@ -104,12 +104,15 @@ pub struct Batch<'a> {
     pub destinations: &'a [DestinationId],
 }
 
+#[derive(Clone)]
 pub struct BatchMessage<'a> {
     pub partition_key: i32,
     pub ordering_key: Option<&'a str>,
     pub control_id: Option<&'a str>,
     pub payload: &'a [u8],
     pub dedupe_key: Option<&'a str>,
+    /// Routed from another interface: the id of the message there.
+    pub origin: Option<i64>,
 }
 
 /// Identifies a stored message. `received_at` lets Postgres go straight to the right partition.
@@ -128,6 +131,8 @@ pub struct Pending {
     pub received_at: DateTime<Utc>,
     pub payload: Vec<u8>,
     pub attempts: i32,
+    /// Routed from another interface: the id of the message there.
+    pub origin: Option<i64>,
 }
 
 impl Pending {
@@ -351,72 +356,39 @@ impl Store {
         if batch.relaxed {
             sqlx::query("SET LOCAL synchronous_commit = off").execute(&mut *tx).await.context("relaxing commit")?;
         }
-
-        let mut duplicate = vec![false; batch.messages.len()];
-        let mut first_seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
-        for (i, m) in batch.messages.iter().enumerate() {
-            if let Some(key) = m.dedupe_key {
-                if first_seen.contains_key(key) {
-                    duplicate[i] = true;
-                } else {
-                    first_seen.insert(key, i);
-                }
-            }
-        }
-        if !first_seen.is_empty() {
-            let keys: Vec<&str> = first_seen.keys().copied().collect();
-            // Claims keys that are new or outside the window; the rest are duplicates.
-            let claimed: Vec<String> = sqlx::query_scalar(
-                "INSERT INTO dedupe_keys (interface, key) SELECT $1, unnest($2::text[])
-                 ON CONFLICT (interface, key) DO UPDATE SET seen_at = now()
-                     WHERE dedupe_keys.seen_at < now() - make_interval(secs => $3)
-                 RETURNING key",
-            )
-            .bind(batch.interface)
-            .bind(&keys)
-            .bind(batch.dedupe_window.as_secs_f64())
-            .fetch_all(&mut *tx)
-            .await
-            .context("checking for duplicates")?;
-            let claimed: std::collections::HashSet<&str> = claimed.iter().map(String::as_str).collect();
-            for (key, i) in &first_seen {
-                duplicate[*i] = !claimed.contains(key);
-            }
-        }
-
-        if !batch.messages.is_empty() {
-            let m = &batch.messages;
-            let statuses: Vec<i16> =
-                duplicate.iter().map(|&d| if d { Status::Duplicate } else { Status::Pending } as i16).collect();
-            // ORDER BY ordinality: ids follow the order of the batch, which is the lanes' order.
-            sqlx::query(
-                "WITH m AS (
-                     INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload, status)
-                     SELECT $1, p, o, c, b, s
-                     FROM unnest($2::int[], $3::text[], $4::text[], $5::bytea[], $6::smallint[])
-                          WITH ORDINALITY AS t(p, o, c, b, s, n)
-                     ORDER BY n
-                     RETURNING id, received_at, partition_key, status
-                 )
-                 INSERT INTO deliveries (message_id, received_at, destination_id, partition_key)
-                 SELECT m.id, m.received_at, d, m.partition_key FROM m, unnest($7::int[]) d WHERE m.status = 0",
-            )
-            .bind(batch.interface)
-            .bind(m.iter().map(|m| m.partition_key).collect::<Vec<_>>())
-            .bind(m.iter().map(|m| m.ordering_key).collect::<Vec<_>>())
-            .bind(m.iter().map(|m| m.control_id).collect::<Vec<_>>())
-            .bind(m.iter().map(|m| m.payload.to_vec()).collect::<Vec<_>>())
-            .bind(statuses)
-            .bind(batch.destinations)
-            .execute(&mut *tx)
-            .await
-            .context("inserting messages")?;
-        }
-        if let Some((key, value)) = batch.state {
-            save_state(&mut tx, batch.interface, key, value).await?;
-        }
+        let duplicate = insert_batch_in(&mut tx, batch).await?;
         tx.commit().await.context("committing messages")?;
         Ok(duplicate)
+    }
+
+    /// A destination that routes to another interface: store `done` (its statuses) and `routed`
+    /// (the messages it sent, as the target interface's batch; each `origin` is the id of a
+    /// message in `done`) in one transaction, so each routed message is queued in the target
+    /// exactly once. Returns, per routed message, whether it was queued there: not if it was a
+    /// duplicate (the target's dedupe), or if its delivery here wasn't pending any more (a retry
+    /// of a call that committed: then it was routed the first time).
+    ///
+    /// The commit doesn't wait for the disk flush: nothing outside the database has been told
+    /// anything, so if the database loses the commit, it loses all of it, and the deliveries
+    /// are simply still pending and routed again. (Later durable commits flush it anyway.)
+    pub async fn finish_routed(
+        &self,
+        destination: DestinationId,
+        done: &[Done],
+        routed: &Batch<'_>,
+    ) -> Result<Vec<bool>> {
+        let mut tx = self.pool.begin().await.context("starting transaction")?;
+        sqlx::query("SET LOCAL synchronous_commit = off").execute(&mut *tx).await.context("relaxing commit")?;
+        let finished: std::collections::HashSet<i64> =
+            update_deliveries(&mut tx, destination, done).await?.into_iter().collect();
+        let fresh = |m: &BatchMessage| m.origin.is_some_and(|o| finished.contains(&o));
+        let batch = Batch { messages: routed.messages.iter().filter(|m| fresh(m)).cloned().collect(), ..*routed };
+        let mut duplicate = insert_batch_in(&mut tx, &batch).await.context("routing")?.into_iter();
+        tx.commit().await.context("committing routed messages")?;
+        let queued = routed.messages.iter().map(|m| fresh(m) && !duplicate.next().unwrap_or(true)).collect();
+        let messages: Vec<MessageRef> = done.iter().map(|d| d.message).collect();
+        self.settle(&messages).await?;
+        Ok(queued)
     }
 
     /// Store a scheduled run's message and the schedule's `state` (JSON, under `key`) together,
@@ -492,7 +464,7 @@ impl Store {
     /// without row locks.
     pub async fn pending(&self, destination: DestinationId, partitions: &[i32], limit: i64) -> Result<Vec<Pending>> {
         sqlx::query_as::<_, Pending>(
-            "SELECT d.message_id AS id, d.received_at, m.payload, d.attempts
+            "SELECT d.message_id AS id, d.received_at, m.payload, d.attempts, m.origin_id AS origin
              FROM deliveries d JOIN messages m ON m.id = d.message_id AND m.received_at = d.received_at
              WHERE d.destination_id = $1 AND d.status = 0 AND d.partition_key = ANY($2)
              ORDER BY d.message_id LIMIT $3",
@@ -511,27 +483,9 @@ impl Store {
         if done.is_empty() {
             return Ok(());
         }
-        let ids: Vec<i64> = done.iter().map(|d| d.message.id).collect();
-        let times: Vec<DateTime<Utc>> = done.iter().map(|d| d.message.received_at).collect();
-        let statuses: Vec<i16> = done.iter().map(|d| d.status as i16).collect();
-        let reasons: Vec<Option<&str>> = done.iter().map(|d| d.reason.as_deref()).collect();
-        let outputs: Vec<Option<&[u8]>> = done.iter().map(|d| d.output.as_deref()).collect();
-        sqlx::query(
-            "UPDATE deliveries d
-             SET status = u.status, last_error = COALESCE(u.reason, d.last_error), output = u.output, updated_at = now()
-             FROM unnest($2::bigint[], $3::timestamptz[], $4::smallint[], $5::text[], $6::bytea[])
-                  AS u(id, received_at, status, reason, output)
-             WHERE d.message_id = u.id AND d.received_at = u.received_at AND d.destination_id = $1",
-        )
-        .bind(destination)
-        .bind(&ids)
-        .bind(&times)
-        .bind(&statuses)
-        .bind(&reasons)
-        .bind(&outputs)
-        .execute(&self.pool)
-        .await
-        .context("updating delivery statuses")?;
+        let mut connection = self.pool.acquire().await.context("connecting")?;
+        update_deliveries(&mut connection, destination, done).await?;
+        drop(connection);
         let messages: Vec<MessageRef> = done.iter().map(|d| d.message).collect();
         self.settle(&messages).await
     }
@@ -544,6 +498,11 @@ impl Store {
     /// two destinations finishing the same message at once, the later one always sees both done.
     /// (In one statement or transaction, each could see the other still pending, and the
     /// message would stay pending forever.)
+    ///
+    /// Several destinations settle overlapping sets of messages at once, so the rows are locked
+    /// in id order first (`locked`), by primary key: left to the plan, the order followed a hash
+    /// join or a scan, and two settles could lock the same rows in opposite orders (a deadlock,
+    /// seen with routes, which settle the same messages within milliseconds of each other).
     async fn settle(&self, messages: &[MessageRef]) -> Result<()> {
         let ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
         let times: Vec<DateTime<Utc>> = messages.iter().map(|m| m.received_at).collect();
@@ -555,6 +514,11 @@ impl Store {
                  WHERE (message_id, received_at) IN (SELECT * FROM unnest($1::bigint[], $2::timestamptz[]))
                  GROUP BY message_id, received_at
                  HAVING NOT bool_or(status = 0)
+             ), locked AS (
+                 SELECT m.id, m.received_at FROM messages m
+                 WHERE (m.id, m.received_at) IN (SELECT message_id, received_at FROM done) AND m.status = 0
+                 ORDER BY m.id
+                 FOR UPDATE
              )
              UPDATE messages m
              SET status = done.status, updated_at = now(),
@@ -566,8 +530,8 @@ impl Store {
                      WHERE d.message_id = done.message_id AND d.received_at = done.received_at
                        AND d.status = done.status AND done.status <> 1
                  ), m.last_error)
-             FROM done
-             WHERE m.id = done.message_id AND m.received_at = done.received_at AND m.status = 0",
+             FROM done JOIN locked ON locked.id = done.message_id AND locked.received_at = done.received_at
+             WHERE m.id = locked.id AND m.received_at = locked.received_at AND m.status = 0",
         )
         .bind(&ids)
         .bind(&times)
@@ -751,6 +715,106 @@ const INSERT_ONE: &str = "
         SELECT m.id, m.received_at, d, $2 FROM m, unnest($7::int[]) d
     )
     SELECT id, received_at FROM m";
+
+/// `Store::insert_batch` inside a transaction the caller commits.
+async fn insert_batch_in(tx: &mut sqlx::PgConnection, batch: &Batch<'_>) -> Result<Vec<bool>> {
+    let mut duplicate = vec![false; batch.messages.len()];
+    let mut first_seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for (i, m) in batch.messages.iter().enumerate() {
+        if let Some(key) = m.dedupe_key {
+            if first_seen.contains_key(key) {
+                duplicate[i] = true;
+            } else {
+                first_seen.insert(key, i);
+            }
+        }
+    }
+    if !first_seen.is_empty() {
+        // Sorted: several batches can claim overlapping keys at once (routes from several
+        // interfaces into one), and must take them in the same order.
+        let mut keys: Vec<&str> = first_seen.keys().copied().collect();
+        keys.sort_unstable();
+        // Claims keys that are new or outside the window; the rest are duplicates.
+        let claimed: Vec<String> = sqlx::query_scalar(
+            "INSERT INTO dedupe_keys (interface, key) SELECT $1, unnest($2::text[])
+             ON CONFLICT (interface, key) DO UPDATE SET seen_at = now()
+                 WHERE dedupe_keys.seen_at < now() - make_interval(secs => $3)
+             RETURNING key",
+        )
+        .bind(batch.interface)
+        .bind(&keys)
+        .bind(batch.dedupe_window.as_secs_f64())
+        .fetch_all(&mut *tx)
+        .await
+        .context("checking for duplicates")?;
+        let claimed: std::collections::HashSet<&str> = claimed.iter().map(String::as_str).collect();
+        for (key, i) in &first_seen {
+            duplicate[*i] = !claimed.contains(key);
+        }
+    }
+
+    if !batch.messages.is_empty() {
+        let m = &batch.messages;
+        let statuses: Vec<i16> =
+            duplicate.iter().map(|&d| if d { Status::Duplicate } else { Status::Pending } as i16).collect();
+        // ORDER BY ordinality: ids follow the order of the batch, which is the lanes' order.
+        sqlx::query(
+            "WITH m AS (
+                 INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload, status, origin_id)
+                 SELECT $1, p, o, c, b, s, r
+                 FROM unnest($2::int[], $3::text[], $4::text[], $5::bytea[], $6::smallint[], $8::bigint[])
+                      WITH ORDINALITY AS t(p, o, c, b, s, r, n)
+                 ORDER BY n
+                 RETURNING id, received_at, partition_key, status
+             )
+             INSERT INTO deliveries (message_id, received_at, destination_id, partition_key)
+             SELECT m.id, m.received_at, d, m.partition_key FROM m, unnest($7::int[]) d WHERE m.status = 0",
+        )
+        .bind(batch.interface)
+        .bind(m.iter().map(|m| m.partition_key).collect::<Vec<_>>())
+        .bind(m.iter().map(|m| m.ordering_key).collect::<Vec<_>>())
+        .bind(m.iter().map(|m| m.control_id).collect::<Vec<_>>())
+        .bind(m.iter().map(|m| m.payload.to_vec()).collect::<Vec<_>>())
+        .bind(statuses)
+        .bind(batch.destinations)
+        .bind(m.iter().map(|m| m.origin).collect::<Vec<_>>())
+        .execute(&mut *tx)
+        .await
+        .context("inserting messages")?;
+    }
+    if let Some((key, value)) = batch.state {
+        save_state(tx, batch.interface, key, value).await?;
+    }
+    Ok(duplicate)
+}
+
+/// Record a destination's statuses for messages (not their overall status: see `Store::settle`).
+/// Only deliveries still pending change (a final status is never overwritten, so a retried call
+/// changes nothing twice); returns the ids of their messages.
+async fn update_deliveries(tx: &mut sqlx::PgConnection, destination: DestinationId, done: &[Done]) -> Result<Vec<i64>> {
+    let ids: Vec<i64> = done.iter().map(|d| d.message.id).collect();
+    let times: Vec<DateTime<Utc>> = done.iter().map(|d| d.message.received_at).collect();
+    let statuses: Vec<i16> = done.iter().map(|d| d.status as i16).collect();
+    let reasons: Vec<Option<&str>> = done.iter().map(|d| d.reason.as_deref()).collect();
+    let outputs: Vec<Option<&[u8]>> = done.iter().map(|d| d.output.as_deref()).collect();
+    sqlx::query_scalar(
+        "UPDATE deliveries d
+         SET status = u.status, last_error = COALESCE(u.reason, d.last_error), output = u.output, updated_at = now()
+         FROM unnest($2::bigint[], $3::timestamptz[], $4::smallint[], $5::text[], $6::bytea[])
+              AS u(id, received_at, status, reason, output)
+         WHERE d.message_id = u.id AND d.received_at = u.received_at AND d.destination_id = $1 AND d.status = 0
+         RETURNING d.message_id",
+    )
+    .bind(destination)
+    .bind(&ids)
+    .bind(&times)
+    .bind(&statuses)
+    .bind(&reasons)
+    .bind(&outputs)
+    .fetch_all(tx)
+    .await
+    .context("updating delivery statuses")
+}
 
 async fn save_state(tx: &mut sqlx::PgConnection, interface: &str, key: &str, value: &str) -> Result<()> {
     sqlx::query(

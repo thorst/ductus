@@ -33,6 +33,8 @@ pub struct MessageSummary {
     /// Why it was quarantined or filtered (per destination when there are several).
     last_error: Option<String>,
     updated_at: DateTime<Utc>,
+    /// Routed from another interface: the id of the message there (`GET /messages/{origin}`).
+    origin: Option<i64>,
 }
 
 impl From<MessageRow> for MessageSummary {
@@ -47,6 +49,7 @@ impl From<MessageRow> for MessageSummary {
             size: r.size,
             last_error: r.last_error,
             updated_at: r.updated_at,
+            origin: r.origin_id,
         }
     }
 }

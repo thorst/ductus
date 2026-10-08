@@ -23,6 +23,7 @@ Every message received, as received (the original is never changed). **Partition
 | `attempts` | integer | Used before status per destination (v0.5); attempts are now counted per delivery. Kept for older engines; removed when the migrations are squashed before release. |
 | `last_error` | text | Why it was quarantined or filtered (`destination: reason; ...` with several destinations). |
 | `updated_at` | timestamptz | Last status change. |
+| `origin_id` | bigint | Routed from another interface (`source: internal`): the `id` of the message there. NULL for messages received from outside. Not indexed. |
 
 Indexes: primary key `(id, received_at)`; `messages_pending (interface, partition_key, id) WHERE status = 0`; `messages_by_interface (interface, id)` (the message browser, newest first); `messages_quarantined (interface, id) WHERE status = 3`.
 

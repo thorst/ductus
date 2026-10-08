@@ -17,6 +17,7 @@ use crate::Wake;
 use crate::destination::{SendError, Sender};
 use crate::health::Health;
 use crate::http::HttpCall;
+use crate::ingest::{Intake, Routed};
 use crate::limiter::{Decision, Limiter};
 use crate::services::EngineServices;
 use anyhow::{Context, Result, anyhow};
@@ -36,6 +37,9 @@ const BATCH: i64 = 200;
 const IDLE_POLL: Duration = Duration::from_secs(30);
 const DB_RETRY: Duration = Duration::from_secs(1);
 const FLUSH: usize = 50;
+/// Longest a routed message waits for the batch to fill before it's stored in its target
+/// interface (otherwise slow transforms would hold the first ones back until 50 are done).
+const ROUTE_LINGER: Duration = Duration::from_millis(20);
 
 /// One slot of one interface (all its destinations), to run on a worker thread.
 pub struct Job {
@@ -61,6 +65,8 @@ pub struct Outlet {
     pub server: Option<ductus_core::resources::SftpServer>,
     /// HTTP destinations through an API: the API, from resources.yaml.
     pub api: Option<ductus_core::resources::Api>,
+    /// Routes to another interface: where its messages are stored.
+    pub route: Option<Arc<Intake>>,
 }
 
 /// Readiness report for one job: its interface name and whether its code loaded.
@@ -247,7 +253,9 @@ struct Worker {
     destination_id: DestinationId,
     lanes: Vec<i32>,
     script: Option<Script>,
-    sender: Sender,
+    /// Where messages go: sent by `sender`, or stored in another interface by `route`.
+    sender: Option<Sender>,
+    route: Option<Arc<Intake>>,
     store: Store,
     io: tokio::runtime::Handle,
     wake: Arc<Wake>,
@@ -259,6 +267,10 @@ struct Worker {
     /// Sent or filtered, not yet saved. Flushed every FLUSH messages and at the end of
     /// each batch, so a crash re-sends at most that many (at-least-once delivery).
     done: Vec<Done>,
+    /// Routes: the messages for the target interface, stored with `done` in one transaction
+    /// (so exactly once), and when the oldest of them was ready.
+    routed: Vec<Routed>,
+    routed_since: Option<std::time::Instant>,
     health: Arc<Health>,
 }
 
@@ -291,6 +303,7 @@ impl Worker {
             destination_id: outlet.id,
             lanes: config.partitions_for_worker(job.slot),
             sender: Sender::new(&config, destination, outlet.server, outlet.api),
+            route: outlet.route,
             retry: config.retry_for(destination).clone(),
             save_output: destination.save_output,
             script,
@@ -301,6 +314,8 @@ impl Worker {
             index,
             limiter: outlet.limiter,
             done: Vec::with_capacity(FLUSH),
+            routed: Vec::new(),
+            routed_since: None,
             health: job.health.clone(),
             config,
         }
@@ -345,12 +360,15 @@ impl Worker {
     async fn process(&mut self, message: Pending) {
         let reference = message.reference();
         let input = String::from_utf8_lossy(&message.payload);
-        let meta = serde_json::json!({
+        let mut meta = serde_json::json!({
             "id": message.id,
             "receivedAt": message.received_at.to_rfc3339(),
             "destination": &*self.destination,
-        })
-        .to_string();
+        });
+        if let Some(origin) = message.origin {
+            meta["origin"] = origin.into();
+        }
+        let meta = meta.to_string();
         let mut attempts = message.attempts;
         let mut backoff = Duration::from_millis(self.retry.initial_backoff_ms);
         loop {
@@ -426,10 +444,19 @@ impl Worker {
                 }
             }
         }
+        if self.sender.is_none() {
+            // A route: stored in the target interface with the next flush, in the same
+            // transaction as this status.
+            let output = self.save_output.then(|| payload.clone());
+            self.routed.push(Routed { payload, origin: reference.id });
+            self.routed_since.get_or_insert_with(std::time::Instant::now);
+            return self.done(Done::sent(reference, output)).await;
+        }
         let retry = self.retry.clone();
         let mut backoff = Duration::from_millis(retry.initial_backoff_ms);
         loop {
-            match self.sender.send(reference.id, &payload).await {
+            let sender = self.sender.as_mut().expect("not a route");
+            match sender.send(reference.id, &payload).await {
                 Ok(()) => {
                     let output = self.save_output.then_some(payload);
                     return self.done(Done::sent(reference, output)).await;
@@ -481,7 +508,7 @@ impl Worker {
     /// If the engine stops before then, it's processed again: the same result, or a re-send.
     async fn done(&mut self, done: Done) {
         self.done.push(done);
-        if self.done.len() >= FLUSH {
+        if self.done.len() >= FLUSH || self.routed_since.is_some_and(|t| t.elapsed() >= ROUTE_LINGER) {
             self.flush().await;
         }
     }
@@ -492,13 +519,21 @@ impl Worker {
         }
         let flush = || {
             let (done, destination) = (self.done.clone(), self.destination_id);
-            self.db(move |store| async move { store.finish(destination, &done).await })
+            let (route, routed) = (self.route.clone(), self.routed.clone());
+            self.db(move |store| async move {
+                match route {
+                    Some(target) => target.accept_routed(destination, &done, &routed).await,
+                    None => store.finish(destination, &done).await,
+                }
+            })
         };
         while let Err(e) = flush().await {
-            tracing::error!(interface = %self.config.name, destination = %self.destination, error = %e, "saving statuses failed; retrying");
+            tracing::error!(interface = %self.config.name, destination = %self.destination, error = %format!("{e:#}"), "saving statuses failed; retrying");
             tokio::time::sleep(DB_RETRY).await;
         }
         self.done.clear();
+        self.routed.clear();
+        self.routed_since = None;
     }
 
     /// Persist a final status now (quarantines: someone should see them at once). Retries until

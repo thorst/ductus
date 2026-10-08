@@ -76,6 +76,8 @@ pub struct MessageRow {
     pub size: i32,
     pub last_error: Option<String>,
     pub updated_at: DateTime<Utc>,
+    /// Routed from another interface: the id of the message there.
+    pub origin_id: Option<i64>,
 }
 
 /// Which messages to list: an interface's, newest first, optionally of one status, older than
@@ -97,7 +99,7 @@ pub struct QueueCount {
 }
 
 const MESSAGE_COLUMNS: &str = "id, received_at, interface, status, ordering_key, control_id,
-    octet_length(payload) AS size, last_error, updated_at";
+    octet_length(payload) AS size, last_error, updated_at, origin_id";
 
 impl Store {
     /// A new token with `name` (no other live token may have it). Returns the token and its

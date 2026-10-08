@@ -11,7 +11,7 @@ use ductus_core::config::{Durability, Source};
 use ductus_core::format::Format;
 use ductus_core::{InterfaceConfig, partition_of};
 use ductus_hl7::{AckCode, Message};
-use ductus_store::{Batch, BatchMessage, DedupeKey, DestinationId, MessageRef, NewMessage, Store};
+use ductus_store::{Batch, BatchMessage, DedupeKey, DestinationId, Done, MessageRef, NewMessage, Store};
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -132,6 +132,7 @@ impl Intake {
                     control_id: k.control_id.as_deref(),
                     payload,
                     dedupe_key: k.dedupe.as_deref(),
+                    origin: None,
                 })
                 .collect(),
             dedupe_window: self.config.dedupe.as_ref().map(|d| d.window).unwrap_or_default(),
@@ -150,6 +151,43 @@ impl Intake {
             }
         }
         Ok(queued)
+    }
+
+    /// Messages another interface's destination routed here, stored together with that
+    /// destination's statuses (`done`) in one transaction (`Store::finish_routed`): each is
+    /// queued here exactly once. This interface's keys, dedupe and destinations apply.
+    ///
+    /// Not held back by the drain gate: these were received (by the interface routing them)
+    /// before the drain, and a drain waits for them to be delivered.
+    pub async fn accept_routed(&self, destination: DestinationId, done: &[Done], routed: &[Routed]) -> Result<()> {
+        if routed.is_empty() {
+            return self.store.finish(destination, done).await;
+        }
+        let keys: Vec<Keys> = routed.iter().map(|r| self.keys(&r.payload)).collect();
+        let batch = Batch {
+            interface: &self.config.name,
+            messages: keys
+                .iter()
+                .zip(routed)
+                .map(|(k, r)| BatchMessage {
+                    partition_key: k.partition,
+                    ordering_key: k.ordering_key.as_deref(),
+                    control_id: k.control_id.as_deref(),
+                    payload: &r.payload,
+                    dedupe_key: k.dedupe.as_deref(),
+                    origin: Some(r.origin),
+                })
+                .collect(),
+            dedupe_window: self.config.dedupe.as_ref().map(|d| d.window).unwrap_or_default(),
+            relaxed: true, // see `Store::finish_routed`
+            state: None,
+            destinations: &self.destinations,
+        };
+        let queued = self.store.finish_routed(destination, done, &batch).await?;
+        for (k, _) in keys.iter().zip(&queued).filter(|(_, queued)| **queued) {
+            self.wake(k.partition);
+        }
+        Ok(())
     }
 
     /// Queue a scheduled run (see `Store::insert_scheduled`). False if it was skipped because the
@@ -171,6 +209,14 @@ impl Intake {
         }
         Ok(queued)
     }
+}
+
+/// A message a destination routes to another interface: what it sent, and the id of the
+/// message it came from.
+#[derive(Debug, Clone)]
+pub struct Routed {
+    pub payload: Vec<u8>,
+    pub origin: i64,
 }
 
 struct Keys {

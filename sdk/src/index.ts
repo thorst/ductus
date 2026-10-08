@@ -83,6 +83,9 @@ export interface Meta {
   receivedAt: string;
   /** The destination this call prepares the message for (`default` with a single `destination:`). */
   destination: string;
+  /** Routed from another interface (`source: internal`): the `id` of the message there. Absent
+   *  for messages received from outside. */
+  origin?: number;
 }
 
 /** Input and output formats of an interface, from interface.yaml. */

@@ -13,6 +13,8 @@ How the engine works, and the rules that keep it correct. Read this before chang
  Schedule      ─┘   acknowledge      = the queue)      (own isolate)                 SFTP
                                                         │
  HTTP (respond) ───────────────► channel ──────────────►┘ transform(req) → HTTP response (no queue)
+ Internal ◄──────────────────────────────────────────────── Route (destination `interface: x`): stored in
+                                                            x's queue in the transaction that marks it sent
 ```
 
 One binary (`ductus`) plus PostgreSQL. No other services. The engine also serves its REST API (`/api/v1`, default `127.0.0.1:7700`), which is how the UI, scripts and `ductus drain` see and steer it.
@@ -47,10 +49,18 @@ Statuses: `0 pending`, `1 sent`, `2 filtered` (dropped on purpose: `return null`
 
 - An interface has one destination (`destination:`, named `default`) or several (`destinations:` by name). Each destination has its own function (`transform:`, default `transform`), output format, `retry`, `rate_limit` (its own allowance) and `save_output`.
 - **`deliveries`** (day-partitioned like `messages`): one row per queued message and destination, inserted **in the same statement** as the message (so still one commit per ACK). Its partial index `(interface, destination, partition_key, message_id) WHERE status = 0` is each destination's queue. Rows carry `status`, `attempts`, `last_error` and, with `save_output`, `output`.
-- **One worker per (slot, destination).** Each runs the destination's function on the original message (with `meta`: `id`, `receivedAt`, `destination`), then delivers. A destination that's down blocks only its own lanes; the others keep going. Ingest wakes every destination's worker for the lane's slot (`Wake`).
-- **`messages.status` is the overall status**: pending until no delivery is pending; then quarantined if any is, else sent if any is, else filtered. `Store::settle` sets it in a statement of its own **after** the delivery update commits: of two destinations finishing a message at once, the later always sees both done (in one statement, each could see the other pending: write skew). Older binaries read only `messages.status`, so rolling back still works.
+- **One worker per (slot, destination).** Each runs the destination's function on the original message (with `meta`: `id`, `receivedAt`, `destination`, and `origin` for a routed message), then delivers. A destination that's down blocks only its own lanes; the others keep going. Ingest wakes every destination's worker for the lane's slot (`Wake`).
+- **`messages.status` is the overall status**: pending until no delivery is pending; then quarantined if any is, else sent if any is, else filtered. `Store::settle` sets it in a statement of its own **after** the delivery update commits: of two destinations finishing a message at once, the later always sees both done (in one statement, each could see the other pending: write skew). Settle locks the message rows in id order (`ORDER BY id FOR UPDATE`) before updating them: destinations settle overlapping sets at once, and left to the plan the lock order could differ between two of them (a deadlock, seen once with routes). Delivery updates only change deliveries that are still pending, so a retried flush changes nothing twice. Older binaries read only `messages.status`, so rolling back still works.
 - **Reconcile at startup** (`Store::reconcile`, all interfaces in four queries): deliveries for pending messages that lack one (stored by an older version, or a new destination); pending deliveries to removed destinations → filtered; pending deliveries whose message an older version finished → its status; then settle.
 - The script host loads an interface module **once** and binds one entry per destination (`Isolate::add_functions` → `FunctionId`s); runaways are attributed per interface (`InterfaceId`), so every in-flight call of that interface takes the blame.
+
+### Routes between interfaces
+
+- A destination `interface: <name>` routes to another interface, which has `source: internal` (no listener; only routes fill it). `ductus_core::config::check_routes` (validate and startup) requires the target to exist with that source and to read the format the destination outputs, and refuses loops.
+- The routing worker has no `Sender`. A routed message joins the worker's flush batch (≤50, or after 20 ms, or at the end of a read), and `Intake::accept_routed` on the **target's** intake stores the batch: `Store::finish_routed` updates this destination's deliveries (pending ones only, `RETURNING` which) and inserts, for exactly those, the target's messages and deliveries (its keys, dedupe and destinations; `origin_id` = the source message) **in one transaction**. Then settle, then the target's lanes are woken. So each hop is exactly once: a crash before the commit routes again; a retry after it finds the deliveries done and routes nothing.
+- That commit skips the flush wait (`synchronous_commit = off`): nobody outside the database has been told anything, so a lost commit is lost whole and the deliveries are still pending.
+- Routed inserts don't pass the target's drain gate (they were received before the drain); the drain waits for them through the pending counts.
+- Startup builds every queued interface's `Intake` before any worker, since a route's worker holds its target's.
 
 Worker per delivery: function → outcome:
 - deliver → rate limit → send → `sent` (batched)

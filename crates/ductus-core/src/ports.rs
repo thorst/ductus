@@ -51,7 +51,7 @@ pub fn listeners<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> 
                     if *mode == HttpMode::Respond { "respond" } else { "queue" }
                 )),
             }),
-            Source::File(_) | Source::Sftp(_) | Source::Schedule(_) => None,
+            Source::File(_) | Source::Sftp(_) | Source::Schedule(_) | Source::Internal => None,
         })
         .collect();
     out.sort();
@@ -59,12 +59,14 @@ pub fn listeners<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> 
 }
 
 /// Where a destination connects to directly (not through resources.yaml). Empty for files,
-/// SFTP servers and APIs (those are listed from resources.yaml).
+/// SFTP servers and APIs (those are listed from resources.yaml) and routes to other interfaces.
 pub fn destination_endpoint(d: &Destination) -> Option<Endpoint> {
     match d {
         Destination::Mllp { host, port, .. } => Some(Endpoint::new(host, *port, "MLLP")),
         Destination::Http { url: Some(url), .. } => Endpoint::from_url(url),
-        Destination::Http { .. } | Destination::Sftp { .. } | Destination::File { .. } => None,
+        Destination::Http { .. } | Destination::Sftp { .. } | Destination::File { .. } | Destination::Interface(_) => {
+            None
+        }
     }
 }
 

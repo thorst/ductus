@@ -87,6 +87,13 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     if !conflicts.is_empty() {
         bail!("port conflicts:\n  {}", conflicts.join("\n  "));
     }
+    let routes = ductus_core::config::check_routes(&configs);
+    if !routes.is_empty() {
+        bail!("routes between interfaces:\n  {}", routes.join("\n  "));
+    }
+    for name in ductus_core::config::unrouted(&configs) {
+        tracing::warn!(interface = %name, "has `source: internal` but no interface routes to it: it will get nothing");
+    }
     if let Some((_, port)) = &api_address
         && let Some(l) = ductus_core::ports::listeners(&configs).into_iter().find(|l| l.port == *port)
     {
@@ -121,12 +128,28 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     let mut interfaces = Vec::new();
     let mut http_endpoints = Vec::new();
     let mut shared_count = 0;
+    // Every queued interface's intake first: routes need their target's.
+    let mut intakes = std::collections::HashMap::new();
+    let mut parts = Vec::with_capacity(configs.len());
     for config in configs {
         let config = Arc::new(config);
         let wake = Arc::new(Wake::new(config.slots(), config.destinations().count()));
         let destination_ids: Vec<_> = ids.by_ref().take(config.destinations().count()).collect();
-        let health = Arc::new(health::Health::default());
         let gate = Arc::new(gate::Gate::default());
+        if !config.responds() {
+            let intake = ingest::Intake::new(
+                config.clone(),
+                store.clone(),
+                wake.clone(),
+                gate.clone(),
+                destination_ids.clone(),
+            )?;
+            intakes.insert(config.name.clone(), Arc::new(intake));
+        }
+        parts.push((config, wake, destination_ids, gate));
+    }
+    for (config, wake, destination_ids, gate) in parts {
+        let health = Arc::new(health::Health::default());
         let outlets: Vec<worker::Outlet> = config
             .destinations()
             .zip(&destination_ids)
@@ -143,6 +166,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                     Destination::Http { api: Some(api), .. } => resources.apis.get(api).cloned(),
                     _ => None,
                 },
+                route: d.route().map(|target| intakes[target].clone()), // checked by check_routes
             })
             .collect();
         // Respond-mode HTTP interfaces get requests over a channel instead of a queue.
@@ -153,13 +177,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 requests = Some(rx);
                 http::Route::Respond { interface: config.name.clone(), calls }
             } else {
-                http::Route::Queue(Arc::new(ingest::Intake::new(
-                    config.clone(),
-                    store.clone(),
-                    wake.clone(),
-                    gate.clone(),
-                    destination_ids.clone(),
-                )?))
+                http::Route::Queue(intakes[&config.name].clone())
             };
             http_endpoints.push(http::Endpoint {
                 host: host.clone(),
@@ -219,21 +237,19 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         bail!("{}", failed.join("\n"));
     }
 
-    for (config, wake, destination_ids, _, gate) in &interfaces {
-        let intake = || {
-            ingest::Intake::new(config.clone(), store.clone(), wake.clone(), gate.clone(), destination_ids.clone())
-                .map(Arc::new)
-        };
+    for (config, ..) in &interfaces {
+        let intake = || intakes[&config.name].clone();
         match &config.source {
-            Source::Mllp { .. } => ingest::spawn_mllp(intake()?).await?,
+            Source::Mllp { .. } => ingest::spawn_mllp(intake()).await?,
             Source::File(f) | Source::Sftp(f) => {
-                let watcher = files::FileWatcher::new(intake()?, f.server.as_deref().and_then(sftp_server))?;
+                let watcher = files::FileWatcher::new(intake(), f.server.as_deref().and_then(sftp_server))?;
                 tokio::spawn(watcher.run());
             }
             Source::Schedule(s) => {
-                tokio::spawn(schedule::run(intake()?, ductus_core::schedule::Timing::new(s)?));
+                tokio::spawn(schedule::run(intake(), ductus_core::schedule::Timing::new(s)?));
             }
             Source::Http { .. } => {} // served below, with the other HTTP interfaces on its port
+            Source::Internal => {}    // other interfaces' workers store its messages (routes)
         }
     }
     http::serve(http_endpoints).await?;

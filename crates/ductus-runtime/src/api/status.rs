@@ -179,6 +179,7 @@ fn source_label(source: &Source) -> String {
             (_, Some(cron)) => format!("schedule cron {cron}"),
             _ => "schedule".into(),
         },
+        Source::Internal => "internal (routed from other interfaces)".into(),
     }
 }
 
@@ -206,6 +207,7 @@ fn connector_label(d: &Destination) -> String {
             api.as_deref().unwrap_or("?"),
             path.as_deref().map(|p| format!(" {p}")).unwrap_or_default()
         ),
+        Destination::Interface(target) => format!("interface {target}"),
     }
 }
 

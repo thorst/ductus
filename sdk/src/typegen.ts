@@ -87,6 +87,8 @@ const BASE = `
     receivedAt: string;
     /** The destination this call prepares the message for (\`default\` with a single \`destination:\`). */
     destination: string;
+    /** Routed from another interface (\`source: internal\`): the \`id\` of the message there. Absent for messages received from outside. */
+    origin?: number;
   }
 
   /** A deliberate drop, with a reason. Create with \`kill()\`. */

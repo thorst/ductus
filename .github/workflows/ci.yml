@@ -102,5 +102,8 @@ jobs:
       - name: Destinations demo (lab down, billing and archive keep going, kill -9, lab catches up)
         run: BIN=target/release/ductus bash scripts/demo-destinations.sh
 
+      - name: Routing demo (one feed routed to three interfaces, kill -9 mid-route, each hop exactly once)
+        run: BIN=target/release/ductus bash scripts/demo-routing.sh
+
       - name: Scale demo (300 shared interfaces + 1 dedicated, hot MRN)
         run: SHARED=300 EPIC_SECONDS=10 SAMPLED=50 BIN=target/release/ductus bash scripts/demo-scale.sh

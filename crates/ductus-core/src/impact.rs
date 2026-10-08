@@ -80,8 +80,16 @@ pub fn impact<'a>(
     };
     let show = |endpoints: Vec<Endpoint>| endpoints.iter().map(ToString::to_string).collect::<Vec<_>>();
 
+    let configs: Vec<&InterfaceConfig> = configs.into_iter().collect();
+    // Who routes to each internal interface.
+    let mut routed_from: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for c in &configs {
+        for target in c.destinations().filter_map(|(_, d)| d.route()) {
+            routed_from.entry(target).or_default().push(&c.name);
+        }
+    }
     let mut hits = Vec::new();
-    for c in configs {
+    for c in configs.iter().copied() {
         let owner = given(&c.about.owner).unwrap_or("");
         let mut hit = |owner: &str, role: String, reasons: Vec<String>, endpoints: Vec<String>| {
             if !reasons.is_empty() {
@@ -110,6 +118,12 @@ pub fn impact<'a>(
                 show(resources.endpoints(Kind::Sftp, server)).into_iter().map(|e| format!("{e} {}", f.dir)).collect()
             }
             Source::Schedule(_) => vec!["schedule".into()],
+            Source::Internal => routed_from
+                .get(c.name.as_str())
+                .into_iter()
+                .flatten()
+                .map(|from| format!("routed from interface {from}"))
+                .collect(),
         };
         hit(owner, "source".into(), reasons, endpoints);
 
@@ -133,8 +147,10 @@ pub fn impact<'a>(
                 reasons.extend(resource_reasons(kind, resource));
                 endpoints.extend(show(resources.endpoints(kind, resource)));
             }
-            if let Destination::File { dir } = &d.connector {
-                endpoints.push(format!("folder {}", dir.display()));
+            match &d.connector {
+                Destination::File { dir } => endpoints.push(format!("folder {}", dir.display())),
+                Destination::Interface(target) => endpoints.push(format!("interface {target}")),
+                _ => {}
             }
             hit(given(&d.owner).unwrap_or(owner), role, reasons, endpoints);
         }
@@ -156,6 +172,39 @@ pub fn impact<'a>(
             hit(owner, role, resource_reasons(kind, &name), show(resources.endpoints(kind, &name)));
         }
     }
+
+    // Interfaces fed by an affected sender through routes get nothing either: follow each
+    // route downstream (validate refuses loops; `seen` stops one anyway).
+    let mut downstream = Vec::new();
+    let mut seen: BTreeSet<&str> = hits.iter().filter(|h| h.role == "source").map(|h| h.interface.as_str()).collect();
+    // (interface, the route to it from the affected sender, why the sender is affected)
+    let mut queue: Vec<(&str, Vec<&str>, &str)> = hits
+        .iter()
+        .filter(|h| h.role == "source")
+        .map(|h| (h.interface.as_str(), vec![h.interface.as_str()], h.reason.as_str()))
+        .collect();
+    while let Some((from, path, reason)) = queue.pop() {
+        let Some(c) = configs.iter().find(|c| c.name == from) else { continue };
+        for target in c.destinations().filter_map(|(_, d)| d.route()) {
+            let Some(t) = configs.iter().find(|c| c.name == target) else { continue };
+            if !seen.insert(&t.name) {
+                continue;
+            }
+            downstream.push(Hit {
+                interface: t.name.clone(),
+                owner: given(&t.about.owner).unwrap_or("").to_string(),
+                role: "source".into(),
+                reason: format!("routed from {} ({reason})", path.join(" → ")),
+                endpoints: vec![format!("routed from interface {from}")],
+            });
+            let mut longer = path.clone();
+            longer.push(&t.name);
+            queue.push((&t.name, longer, reason));
+        }
+    }
+    hits.extend(downstream);
+    // Interface order, as given.
+    hits.sort_by_key(|h| configs.iter().position(|c| c.name == h.interface));
     hits
 }
 
@@ -203,7 +252,8 @@ pub fn known_values<'a>(
 pub fn about_gaps(c: &InterfaceConfig, resources: &Resources) -> Vec<String> {
     let mut gaps = Vec::new();
     let sender_known = match &c.source {
-        Source::Schedule(_) => true,
+        // Schedules have no sender; internal interfaces' senders are the interfaces routing to them.
+        Source::Schedule(_) | Source::Internal => true,
         Source::Sftp(f) => {
             c.about.from.system().is_known()
                 || resources.system(Kind::Sftp, f.server.as_deref().unwrap_or("")).is_known()
@@ -215,7 +265,7 @@ pub fn about_gaps(c: &InterfaceConfig, resources: &Resources) -> Vec<String> {
         gaps.push(format!("about.from: add the {who} system's `application` or `vendor`"));
     }
     let several = c.destination.is_none();
-    for (name, d) in c.destinations() {
+    for (name, d) in c.destinations().filter(|(_, d)| d.route().is_none()) {
         let through = d.resource().map(|(kind, r)| resources.system(kind, r).is_known()).unwrap_or(false);
         if !(d.system().is_known() || c.about.to.is_known() || through) {
             gaps.push(if several {
@@ -383,6 +433,43 @@ apis:
         assert_eq!(
             known_values(&configs, &resources, &Query::Vendor(String::new())),
             ["Epic Systems", "Experian", "Quest", "Sunquest"]
+        );
+    }
+
+    #[test]
+    fn a_sender_affects_every_interface_routed_from_it() {
+        let configs = [
+            config(
+                "name: front\nsource: { mllp: { port: 1 } }\nabout: { from: { vendor: Epic Systems } }\ndestinations: { a: { interface: lab }, b: { interface: other } }\n",
+            ),
+            config(
+                "name: lab\nsource: internal\nabout: { owner: Lab team }\ndestination: { interface: lab-archive }\n",
+            ),
+            config("name: lab-archive\nsource: internal\ndestination: { file: { dir: o } }\n"),
+            config("name: other\nsource: internal\ndestination: { file: { dir: o } }\n"),
+            config("name: unrelated\nsource: { mllp: { port: 2 } }\ndestination: { file: { dir: o } }\n"),
+        ];
+        let hits =
+            impact(&configs, &Resources::default(), &CodeUses::new(), &Query::Vendor("epic systems".into()), &no_dns);
+        let rows: Vec<_> = hits.iter().map(|h| (h.interface.as_str(), h.role.as_str(), h.reason.as_str())).collect();
+        assert_eq!(
+            rows,
+            [
+                ("front", "source", "about.from: (Epic Systems)"),
+                ("lab", "source", "routed from front (about.from: (Epic Systems))"),
+                ("lab-archive", "source", "routed from front → lab (about.from: (Epic Systems))"),
+                ("other", "source", "routed from front (about.from: (Epic Systems))"),
+            ]
+        );
+        assert_eq!(
+            (hits[1].owner.as_str(), hits[1].endpoints.as_slice()),
+            ("Lab team", &["routed from interface front".to_string()][..])
+        );
+        // Routes need no application or vendor: the receiving interface names its own.
+        assert!(about_gaps(&configs[0], &Resources::default()).is_empty());
+        assert_eq!(
+            about_gaps(&configs[2], &Resources::default()),
+            ["about.to: add the receiving system's `application` or `vendor`"]
         );
     }
 

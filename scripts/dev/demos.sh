@@ -14,4 +14,5 @@ echo "##### files";           bash scripts/demo-files.sh | tail -1
 echo "##### v0.4 release";    bash scripts/demo-v04.sh | tail -1
 echo "##### runaway scripts"; bash scripts/demo-runaway.sh | tail -1
 echo "##### destinations";    bash scripts/demo-destinations.sh | tail -1
+echo "##### routing";         bash scripts/demo-routing.sh | tail -1
 echo "##### scale";           SHARED=300 EPIC_SECONDS=10 SAMPLED=50 bash scripts/demo-scale.sh | tail -1

@@ -70,6 +70,7 @@ test("looks up the account", async () => {
 
 - **Sources:** MLLP, HTTP (queue a message, or answer the request directly as a REST endpoint), local folders and SFTP (crash-safe streaming of large files, record by record), schedules (`every: 15m` or cron).
 - **Destinations:** MLLP, HTTP, files, SFTP. Several per interface, each independent: one vendor being down holds up only its own queue.
+- **Routing between interfaces:** `destination: { interface: lab }` puts the message straight into another interface's queue, in the same transaction that marks it sent: no network hop, exactly once even across a crash. Chain and fan out by structure or ownership; `ductus validate` refuses loops and `ductus impact` follows the routes.
 - **Formats:** HL7 v2 (lazy parsing, positional syntax), JSON, XML, CSV, fixed-width, text.
 - **Interface code:** TypeScript in embedded V8, with `db()` (PostgreSQL and SQL Server), `api()` (named HTTP APIs whose tokens the engine adds), `fetch()`, `env()` and encrypted `secret()`. No direct network or file access; no credentials in code.
 - **Know what connects to what:** each interface names the applications and vendors on each side (`about:`), resources name theirs, and `ductus impact --vendor "Epic Systems"` lists every interface affected, including through databases and APIs its code uses. `ductus owners` lists who to call about each interface and destination, and `ductus owners reassign` moves ownership when someone leaves.

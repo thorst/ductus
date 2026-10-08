@@ -334,6 +334,7 @@ fn batch<'a>(t: &'a Iface, items: &[(&'a str, Option<&'a str>)], state: Option<(
                 control_id: None,
                 payload: payload.as_bytes(),
                 dedupe_key: *key,
+                origin: None,
             })
             .collect(),
         dedupe_window: std::time::Duration::from_secs(3600),
@@ -368,6 +369,60 @@ async fn batches_keep_order_dedupe_and_save_state_together() {
     assert_eq!(store.source_state(&t.name, "file:x").await.unwrap().as_deref(), Some(r#"{"done": true}"#));
     store.delete_source_state(&t.name, "file:x").await.unwrap();
     assert_eq!(store.source_state(&t.name, "file:x").await.unwrap(), None);
+}
+
+/// A route stores what a destination sent into the target interface in the same transaction
+/// that records the destination's statuses: both happen, or neither.
+#[tokio::test]
+async fn routed_messages_are_queued_in_the_target_exactly_once() {
+    let Some(store) = store().await else { return };
+    let source = Iface::new(&store, "route-from", &["lab"]).await;
+    let target = Iface::single(&store, "route-to").await;
+    let a = store.insert(source.msg(0, b"a")).await.unwrap();
+    let b = store.insert(source.msg(0, b"b")).await.unwrap();
+    let c = store.insert(source.msg(0, b"c")).await.unwrap();
+    let routed = |items: &[(&'static str, i64)], destinations| Batch {
+        interface: &target.name,
+        messages: items
+            .iter()
+            .map(|(payload, origin)| BatchMessage {
+                partition_key: 0,
+                ordering_key: None,
+                control_id: None,
+                payload: payload.as_bytes(),
+                dedupe_key: Some("same key"),
+                origin: Some(*origin),
+            })
+            .collect(),
+        dedupe_window: std::time::Duration::from_secs(3600),
+        relaxed: true,
+        state: None,
+        destinations,
+    };
+    let done = [sent(a), sent(b), Done::with(c, Status::Filtered, Some("killed: not for the lab"))];
+
+    // A failure (here: the same destination twice) stores nothing on either side.
+    let twice = [target.dest(), target.dest()];
+    assert!(store.finish_routed(source.dest(), &done, &routed(&[("A", a.id)], &twice)).await.is_err());
+    assert_eq!(store.pending(source.dest(), &[0], 10).await.unwrap().len(), 3, "still pending in the source");
+    assert!(store.payloads(&target.name, Status::Pending).await.unwrap().is_empty(), "nothing in the target");
+
+    let both = routed(&[("A", a.id), ("B", b.id)], &target.ids);
+    let queued = store.finish_routed(source.dest(), &done, &both).await.unwrap();
+    assert_eq!(queued, [true, false], "the target's dedupe applies");
+    // A retry of a call that committed (e.g. its settle failed afterwards) routes nothing again.
+    assert_eq!(store.finish_routed(source.dest(), &done, &both).await.unwrap(), [false, false]);
+    assert!(store.pending(source.dest(), &[0], 10).await.unwrap().is_empty());
+    assert_eq!(
+        (status_of(&store, &source.name, b"a").await, status_of(&store, &source.name, b"c").await),
+        (Status::Sent, Status::Filtered),
+        "the source's overall status is settled"
+    );
+    let queued = store.pending(target.dest(), &[0], 10).await.unwrap();
+    assert_eq!((queued.len(), queued[0].payload.as_slice(), queued[0].origin), (1, &b"A"[..], Some(a.id)));
+    let row = store.message(queued[0].id).await.unwrap().unwrap().0;
+    assert_eq!(row.origin_id, Some(a.id), "the browser shows where it came from");
+    assert_eq!(store.payloads(&target.name, Status::Duplicate).await.unwrap(), [b"B".to_vec()]);
 }
 
 #[tokio::test]
@@ -432,6 +487,40 @@ async fn overlapping_batches_settle_without_deadlock() {
     a.unwrap();
     b.unwrap();
     assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), 1000);
+}
+
+/// The same, with batches that overlap without matching: in the engine, two destinations of one
+/// message flush whatever each has done (50 at a time, at the end of a read, before a back-off,
+/// or after 20 ms for a route), so their batches share some messages but not all. Settling
+/// locked message rows in whatever order the plan visited them; a plan driven by the finished
+/// set (hash order, which differs between two such sets) deadlocked once in the routing demo.
+/// This test doesn't reproduce that (here the planner scans `messages`, in physical order, the
+/// same for both); `Store::settle` now locks in id order whatever the plan.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn misaligned_batches_settle_without_deadlock() {
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "misaligned", &["a", "b", "c", "d"]).await;
+    let texts: Vec<String> = (0..4000).map(|i| format!("m{i}")).collect();
+    let items: Vec<(&str, Option<&str>)> = texts.iter().map(|s| (s.as_str(), None)).collect();
+    store.insert_batch(&batch(&t, &items, None)).await.unwrap();
+    let refs: Vec<MessageRef> =
+        store.pending(t.id("a"), &[0], 4000).await.unwrap().iter().map(|p| p.reference()).collect();
+    let finish = |destination: DestinationId, size: usize| {
+        let (store, refs) = (store.clone(), refs.clone());
+        tokio::spawn(async move {
+            for batch in refs.chunks(size) {
+                let done: Vec<_> = batch.iter().map(|m| sent(*m)).collect();
+                store.finish(destination, &done).await?;
+            }
+            anyhow::Ok(())
+        })
+    };
+    let (a, b, c, d) =
+        tokio::join!(finish(t.id("a"), 50), finish(t.id("b"), 37), finish(t.id("c"), 23), finish(t.id("d"), 61));
+    for (name, result) in [("a", a), ("b", b), ("c", c), ("d", d)] {
+        result.unwrap().unwrap_or_else(|e| panic!("destination {name}: {e:#}"));
+    }
+    assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), 4000);
 }
 
 /// docs/schema.md describes every table and column (so the published schema can't drift).
@@ -664,6 +753,7 @@ async fn everything_at_once_without_lock_errors() {
                         control_id: None,
                         payload: payload.as_bytes(),
                         dedupe_key: Some(key),
+                        origin: None,
                     })
                     .collect();
                 let batch = Batch {
@@ -680,12 +770,23 @@ async fn everything_at_once_without_lock_errors() {
             }
         }));
     }
-    for (n, destination) in t.ids.clone().into_iter().enumerate() {
-        let (store, stop, lanes) = (store.clone(), stop.clone(), lanes.clone());
+    // `archive` routes everything to a second interface (`Store::finish_routed`), drained by the
+    // last task; it stops once the first ones have stopped.
+    let routed = Arc::new(Iface::single(&store, "stress-routed").await);
+    let sources_done = Arc::new(AtomicUsize::new(0));
+    // (destination, where it routes to, whether it's the routed interface's own drain)
+    let drains = [
+        (t.id("lab"), None, false),
+        (t.id("billing"), None, false),
+        (t.id("archive"), Some(routed.clone()), false),
+        (routed.dest(), None, true),
+    ];
+    for (n, (destination, route, is_route_target)) in drains.into_iter().enumerate() {
+        let (store, stop, lanes, sources_done) = (store.clone(), stop.clone(), lanes.clone(), sources_done.clone());
         tasks.push(tokio::spawn(async move {
             let mut rounds = 0usize;
             loop {
-                let stopped = stop.load(Relaxed);
+                let stopped = if is_route_target { sources_done.load(Relaxed) == 3 } else { stop.load(Relaxed) };
                 let pending = store.pending(destination, &lanes, 50).await.unwrap();
                 if pending.is_empty() {
                     if stopped {
@@ -699,7 +800,34 @@ async fn everything_at_once_without_lock_errors() {
                     store.record_failure(pending[0].reference(), destination, "busy").await.unwrap();
                 }
                 let done: Vec<_> = pending.iter().map(|p| sent(p.reference())).collect();
-                store.finish(destination, &done).await.unwrap();
+                match &route {
+                    Some(target) => {
+                        let messages = pending
+                            .iter()
+                            .map(|p| BatchMessage {
+                                partition_key: (p.id % 8) as i32,
+                                ordering_key: None,
+                                control_id: None,
+                                payload: &p.payload,
+                                dedupe_key: None,
+                                origin: Some(p.id),
+                            })
+                            .collect();
+                        let batch = Batch {
+                            interface: &target.name,
+                            messages,
+                            dedupe_window: window,
+                            relaxed: true,
+                            state: None,
+                            destinations: &target.ids,
+                        };
+                        store.finish_routed(destination, &done, &batch).await.unwrap();
+                    }
+                    None => store.finish(destination, &done).await.unwrap(),
+                }
+            }
+            if !is_route_target {
+                sources_done.fetch_add(1, Relaxed);
             }
         }));
     }
@@ -757,8 +885,10 @@ async fn everything_at_once_without_lock_errors() {
     assert_eq!(deliveries.len(), 3);
     let duplicates = store.payloads(&t.name, Status::Duplicate).await.unwrap().len();
     assert!(duplicates > 0, "dedupe keys collided");
+    assert!(store.payloads(&routed.name, Status::Pending).await.unwrap().is_empty(), "routed: nothing left pending");
+    assert_eq!(store.payloads(&routed.name, Status::Sent).await.unwrap().len(), queued, "each routed exactly once");
     println!(
-        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations, {days} partitions created, {seconds}s",
+        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations (one routing {queued} to another interface), {days} partitions created, {seconds}s",
         queued + duplicates
     );
 }
