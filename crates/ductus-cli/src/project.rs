@@ -25,13 +25,13 @@ const TSCONFIG: &str = r#"{
 "#;
 
 /// An interface folder, loaded or not.
-struct InterfaceDir {
-    dir: PathBuf,
-    config: Result<InterfaceConfig>,
+pub(crate) struct InterfaceDir {
+    pub(crate) dir: PathBuf,
+    pub(crate) config: Result<InterfaceConfig>,
 }
 
 impl InterfaceDir {
-    fn label(&self) -> String {
+    pub(crate) fn label(&self) -> String {
         match &self.config {
             Ok(c) => c.name.clone(),
             Err(_) => self.dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
@@ -39,7 +39,7 @@ impl InterfaceDir {
     }
 }
 
-fn interface_dirs(root: &Path, env: &Environment) -> Result<Vec<InterfaceDir>> {
+pub(crate) fn interface_dirs(root: &Path, env: &Environment) -> Result<Vec<InterfaceDir>> {
     let base = root.join("interfaces");
     let mut dirs: Vec<_> = std::fs::read_dir(&base)
         .with_context(|| format!("reading {}", base.display()))?
@@ -330,6 +330,26 @@ fn resource_kind(function: &str) -> Option<ductus_core::resources::Kind> {
     }
 }
 
+/// The databases and APIs each interface's code uses (`db("...")`, `api("...")`, through its
+/// imports). Parsing and name resolution only, no type check, so it's quick.
+pub(crate) async fn code_uses(root: &Path, interfaces: &[InterfaceDir]) -> Result<ductus_core::impact::CodeUses> {
+    let mut files = BTreeMap::new();
+    files.insert(key(&root.join(TYPES_FILE)), Isolate::generate_types().await?);
+    let shared = project_files(root, interfaces, &mut files)?;
+    let analysis = ductus_script::analyze(&files, &shared, false)?;
+    Ok(interfaces
+        .iter()
+        .filter_map(|i| i.config.as_ref().ok())
+        .map(|c| {
+            let uses = code_references(c, &analysis)
+                .into_iter()
+                .filter_map(|r| Some((resource_kind(&r.kind)?, r.name.clone())))
+                .collect();
+            (c.name.clone(), uses)
+        })
+        .collect())
+}
+
 /// `ductus impact`: every interface a vendor, application or host touches, how, and where to
 /// look. Returns false if some interfaces couldn't be checked (their config doesn't load).
 pub async fn impact(root: &Path, env: &str, query: ductus_core::impact::Query, resolve: bool) -> Result<bool> {
@@ -346,22 +366,7 @@ pub async fn impact(root: &Path, env: &str, query: ductus_core::impact::Query, r
         }
     }
     let configs: Vec<&InterfaceConfig> = interfaces.iter().filter_map(|i| i.config.as_ref().ok()).collect();
-
-    // What code uses: parsing and name resolution only (no type check), so it's quick.
-    let mut files = BTreeMap::new();
-    files.insert(key(&root.join(TYPES_FILE)), Isolate::generate_types().await?);
-    let shared = project_files(root, &interfaces, &mut files)?;
-    let analysis = ductus_script::analyze(&files, &shared, false)?;
-    let code: impact::CodeUses = configs
-        .iter()
-        .map(|c| {
-            let uses = code_references(c, &analysis)
-                .into_iter()
-                .filter_map(|r| Some((resource_kind(&r.kind)?, r.name.clone())))
-                .collect();
-            (c.name.clone(), uses)
-        })
-        .collect();
+    let code = code_uses(root, &interfaces).await?;
 
     let lookup = |name: &str| -> Vec<std::net::IpAddr> {
         use std::net::ToSocketAddrs;
@@ -378,17 +383,19 @@ pub async fn impact(root: &Path, env: &str, query: ductus_core::impact::Query, r
     let affected: std::collections::BTreeSet<&str> = hits.iter().map(|h| h.interface.as_str()).collect();
     println!("{query}: {} interface(s) affected, of {}\n", affected.len(), configs.len());
     let width = hits.iter().map(|h| h.role.chars().count()).max().unwrap_or(0);
-    let mut last = "";
+    let owned = |owner: &str| if owner.is_empty() { String::new() } else { format!("  (owner: {owner})") };
+    let (mut last, mut heading_owner) = ("", "");
     for h in &hits {
         if h.interface != last {
             if !last.is_empty() {
                 println!();
             }
-            let owner = if h.owner.is_empty() { String::new() } else { format!("  (owner: {})", h.owner) };
-            println!("{}{owner}", h.interface);
-            last = &h.interface;
+            println!("{}{}", h.interface, owned(&h.owner));
+            (last, heading_owner) = (&h.interface, &h.owner);
         }
-        println!("  {:<width$}  {}", h.role, h.reason);
+        // A destination with an owner of its own says so.
+        let own = if h.owner != heading_owner { owned(&h.owner) } else { String::new() };
+        println!("  {:<width$}  {}{own}", h.role, h.reason);
         for e in &h.endpoints {
             println!("  {:<width$}  → {e}", "");
         }
@@ -556,6 +563,6 @@ async fn load_functions(config: &ductus_core::InterfaceConfig, script: &Path) ->
     Isolate::host().add_functions(script, &functions, config.timeout).await.map(drop)
 }
 
-fn first_line(text: &str) -> &str {
+pub(crate) fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text)
 }

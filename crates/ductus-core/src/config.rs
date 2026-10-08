@@ -244,6 +244,9 @@ pub struct DestinationConfig {
     /// The receiving system, when it differs from `about.to` (several destinations).
     pub application: Option<String>,
     pub vendor: Option<String>,
+    /// Who to call about this destination, when it isn't `about.owner` (e.g. its code is
+    /// another team's).
+    pub owner: Option<String>,
 }
 
 impl DestinationConfig {
@@ -294,6 +297,8 @@ struct RawDestination {
     application: Option<String>,
     #[serde(default)]
     vendor: Option<String>,
+    #[serde(default)]
+    owner: Option<String>,
 }
 
 impl TryFrom<RawDestination> for DestinationConfig {
@@ -317,6 +322,7 @@ impl TryFrom<RawDestination> for DestinationConfig {
             save_output: raw.save_output,
             application: raw.application,
             vendor: raw.vendor,
+            owner: raw.owner,
         })
     }
 }

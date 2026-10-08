@@ -82,11 +82,11 @@ pub fn impact<'a>(
 
     let mut hits = Vec::new();
     for c in configs {
-        let owner = given(&c.about.owner).unwrap_or("").to_string();
-        let mut hit = |role: String, reasons: Vec<String>, endpoints: Vec<String>| {
+        let owner = given(&c.about.owner).unwrap_or("");
+        let mut hit = |owner: &str, role: String, reasons: Vec<String>, endpoints: Vec<String>| {
             if !reasons.is_empty() {
                 let reason = reasons.join("; ");
-                hits.push(Hit { interface: c.name.clone(), owner: owner.clone(), role, reason, endpoints });
+                hits.push(Hit { interface: c.name.clone(), owner: owner.to_string(), role, reason, endpoints });
             }
         };
 
@@ -111,7 +111,7 @@ pub fn impact<'a>(
             }
             Source::Schedule(_) => vec!["schedule".into()],
         };
-        hit("source".into(), reasons, endpoints);
+        hit(owner, "source".into(), reasons, endpoints);
 
         // Each destination.
         let mut covered = BTreeSet::new();
@@ -136,7 +136,7 @@ pub fn impact<'a>(
             if let Destination::File { dir } = &d.connector {
                 endpoints.push(format!("folder {}", dir.display()));
             }
-            hit(role, reasons, endpoints);
+            hit(given(&d.owner).unwrap_or(owner), role, reasons, endpoints);
         }
 
         // Databases and APIs its code (or dedicated_pools) uses.
@@ -153,7 +153,7 @@ pub fn impact<'a>(
             .collect();
         for (kind, name) in used {
             let role = format!("{} {name}", kind.label());
-            hit(role, resource_reasons(kind, &name), show(resources.endpoints(kind, &name)));
+            hit(owner, role, resource_reasons(kind, &name), show(resources.endpoints(kind, &name)));
         }
     }
     hits
@@ -256,7 +256,7 @@ name: results
 source: { sftp: { server: quest, dir: /out } }
 about: { owner: Lab team }
 destinations:
-  emr: { mllp: { host: epic-int.local, port: 7000 }, application: Epic, vendor: Epic Systems }
+  emr: { mllp: { host: epic-int.local, port: 7000 }, application: Epic, vendor: Epic Systems, owner: EMR team }
   billing: { http: { api: billing }, vendor: Experian }
 "#,
             ),
@@ -368,7 +368,9 @@ apis:
             (hits[0].role.as_str(), hits[0].endpoints.as_slice()),
             ("destination emr", &["epic-int.local:7000 MLLP".to_string()][..])
         );
-        assert_eq!(hits[0].owner, "Lab team");
+        assert_eq!(hits[0].owner, "EMR team", "the destination's own owner");
+        let hits = impact(&configs, &resources, &code, &Query::Vendor("quest".into()), &no_dns);
+        assert_eq!(hits[0].owner, "Lab team", "the source belongs to the interface's owner");
     }
 
     #[test]

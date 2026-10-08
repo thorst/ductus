@@ -312,7 +312,7 @@ fn to_json(cell: &ColumnData<'static>) -> Result<Value, Error> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -337,7 +337,7 @@ mod tests {
 
     /// Runs against a real SQL Server when DUCTUS_TEST_SQLSERVER is set (`user:password@host:port`;
     /// CI sets it, `scripts/dev/sqlserver.sh` starts one locally).
-    fn test_connection() -> Option<SqlServerConnection> {
+    pub(crate) fn test_connection() -> Option<SqlServerConnection> {
         let spec = std::env::var("DUCTUS_TEST_SQLSERVER").ok()?;
         let (credentials, address) = spec.rsplit_once('@').expect("DUCTUS_TEST_SQLSERVER = user:password@host:port");
         let (user, password) = credentials.split_once(':').expect("user:password");

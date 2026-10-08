@@ -72,7 +72,8 @@ test("looks up the account", async () => {
 - **Destinations:** MLLP, HTTP, files, SFTP. Several per interface, each independent: one vendor being down holds up only its own queue.
 - **Formats:** HL7 v2 (lazy parsing, positional syntax), JSON, XML, CSV, fixed-width, text.
 - **Interface code:** TypeScript in embedded V8, with `db()` (PostgreSQL and SQL Server), `api()` (named HTTP APIs whose tokens the engine adds), `fetch()`, `env()` and encrypted `secret()`. No direct network or file access; no credentials in code.
-- **Know what connects to what:** each interface names the applications and vendors on each side (`about:`), resources name theirs, and `ductus impact --vendor "Epic Systems"` lists every interface affected, including through databases and APIs its code uses.
+- **Know what connects to what:** each interface names the applications and vendors on each side (`about:`), resources name theirs, and `ductus impact --vendor "Epic Systems"` lists every interface affected, including through databases and APIs its code uses. `ductus owners` lists who to call about each interface and destination, and `ductus owners reassign` moves ownership when someone leaves.
+- **Find out why a connection doesn't work before messages fail:** `ductus doctor` checks every connection from the server it runs on (DNS, TCP with the source address a firewall request needs, TLS certificate and expiry, each system's login) and says in plain words what a failure means. `--report` saves it for the network team or vendor.
 - **Reliability:** persist before ACK, per-key ordering, dedupe, rate limits, retries with back-off, quarantine. A runaway script (endless loop, memory blow-up) is stopped without affecting its neighbours.
 - **Environments:** one project, per-environment variables and encrypted secrets, named resources (`resources.yaml`).
 
@@ -129,6 +130,8 @@ Past that, the limit is PostgreSQL, and mostly its disk: Ductus spends little CP
 | `ductus validate` | Check configs, code loading and TypeScript types for an environment (exits 1 on problems) |
 | `ductus ports` | Listening ports and routes, outbound hosts (for firewall requests), conflicts |
 | `ductus impact` | Which interfaces a vendor, application or host/subnet touches, how, and who owns them (vendor breach, VPN change) |
+| `ductus doctor` | Check every connection from this server: DNS, TCP, TLS, logins, folders, ports; failures explained; `--report` to hand on |
+| `ductus owners` | Who owns which interface and destination; `reassign` changes owners in place |
 | `ductus secret` | Manage encrypted per-environment secrets |
 | `ductus types` | Write editor typings and `tsconfig.json` for VS Code |
 | `ductus status` | Message counts by interface, status and destination |

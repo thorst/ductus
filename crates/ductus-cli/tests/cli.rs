@@ -297,3 +297,104 @@ Connects to
     assert!(!ok, "{out}");
     assert!(out.contains("✗ port 6661: MLLP listeners for both `adt` and `api`"), "{out}");
 }
+
+#[test]
+fn owners_lists_and_reassigns_in_place() {
+    let adt = "name: adt\nsource: { mllp: { port: 6661 } }\nabout:\n  owner: Ann Smith   # on call: weekdays\ndestinations:\n  lab: { mllp: { host: lab, port: 1 } }\n  billing: { file: { dir: out }, owner: Billing team }\n";
+    let dir = project(&[
+        ("interfaces/adt/interface.yaml", adt),
+        (
+            "interfaces/orders/interface.yaml",
+            "name: orders\nsource: { mllp: { port: 6662 } }\nabout: { owner: ann smith }\ndestination: { file: { dir: out } }\n",
+        ),
+        (
+            "interfaces/nightly/interface.yaml",
+            "name: nightly\nsource: { schedule: { every: 1h } }\nscript: t.ts\ndestination: { file: { dir: out } }\n",
+        ),
+        ("interfaces/nightly/t.ts", "export function transform() { return {}; }\n"),
+    ]);
+    let (ok, out) = ductus(dir.path(), &["owners"]);
+    assert!(ok, "{out}");
+    assert!(
+        out.contains("Ann Smith (2)\n  adt\n  orders\n\nBilling team (1)\n  adt → billing\n\nno owner (1)\n  nightly"),
+        "{out}"
+    );
+
+    // Split Ann's work: orders to Bob first, as a dry run, then for real; then the rest to Carol.
+    let (ok, out) = ductus(
+        dir.path(),
+        &["owners", "reassign", "--from", "Ann Smith", "--to", "Bob", "--interface", "orders", "--dry-run"],
+    );
+    assert!(ok && out.contains("- about: { owner: ann smith }\n") && out.contains("+ about: { owner: Bob }"), "{out}");
+    assert!(out.contains("dry run: would change 1 owner value(s) in 1 file(s)"), "{out}");
+    assert!(ductus(dir.path(), &["owners"]).1.contains("Ann Smith (2)"), "a dry run writes nothing");
+    let (ok, out) =
+        ductus(dir.path(), &["owners", "reassign", "--from", "Ann Smith", "--to", "Bob", "--interface", "orders"]);
+    assert!(ok && out.contains("changed 1 owner value(s)"), "{out}");
+    let (ok, out) = ductus(dir.path(), &["owners", "reassign", "--from", "ann smith", "--to", "Carol"]);
+    assert!(ok && out.contains("interfaces/adt/interface.yaml\n  4  - owner: Ann Smith   # on call: weekdays\n     + owner: Carol   # on call: weekdays"), "{out}");
+    let written = std::fs::read_to_string(dir.path().join("interfaces/adt/interface.yaml")).unwrap();
+    assert_eq!(written, adt.replace("Ann Smith", "Carol"), "only the value changed");
+    let (_, out) = ductus(dir.path(), &["owners"]);
+    assert!(
+        out.contains("Billing team (1)") && out.contains("Bob (1)\n  orders") && out.contains("Carol (1)\n  adt"),
+        "{out}"
+    );
+
+    let (ok, out) = ductus(dir.path(), &["owners", "reassign", "--from", "Ann Smith", "--to", "X"]);
+    assert!(!ok && out.contains("no `owner: Ann Smith` found (owners: Billing team, Bob, Carol)"), "{out}");
+    let (ok, out) = ductus(dir.path(), &["owners", "reassign", "--from", "Bob", "--to", "X", "--interface", "nope"]);
+    assert!(!ok && out.contains("no interface named nope"), "{out}");
+}
+
+#[test]
+fn doctor_checks_what_the_project_uses_and_saves_a_report() {
+    let receiver = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let up = receiver.local_addr().unwrap().port();
+    let down = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let adt = format!(
+        "name: adt\nsource: {{ mllp: {{ host: 127.0.0.1, port: {down} }} }}\ndestinations:\n  lab: {{ mllp: {{ host: 127.0.0.1, port: {up} }} }}\n  files: {{ file: {{ dir: out }} }}\n"
+    );
+    let lookup = format!(
+        "name: lookup\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\nscript: t.ts\ndestination: {{ mllp: {{ host: 127.0.0.1, port: {up} }} }}\n",
+        down + 1
+    );
+    let dir = project(&[
+        ("interfaces/adt/interface.yaml", &adt),
+        ("interfaces/lookup/interface.yaml", &lookup),
+        (
+            "interfaces/lookup/t.ts",
+            "import { api } from \"@ductus/sdk\";\nexport async function transform(m: string) { await api(\"empi\").get(\"/x\"); return m; }\n",
+        ),
+        (
+            "resources.yaml",
+            &format!(
+                "apis:\n  empi: {{ url: 'http://127.0.0.1:{down}/api' }}\n  spare: {{ url: 'http://127.0.0.1:{down}/spare' }}\n"
+            ),
+        ),
+    ]);
+    // The engine's database on a closed port: that check fails, so doctor exits 1.
+    let db = format!("--database-url=postgres://u:p@127.0.0.1:{down}/d");
+    let (ok, out) = ductus(dir.path(), &["doctor", &db, "--timeout", "2s", "--report", "r.json"]);
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains(&format!("✓ MLLP destination  127.0.0.1:{up} MLLP\n    used by  adt → lab, lookup\n")),
+        "one check for both: {out}"
+    );
+    assert!(out.contains("✗ api empi") && out.contains("used by  lookup (code)"), "{out}");
+    assert!(out.contains("used by  nothing yet (defined in resources.yaml)"), "{out}");
+    assert!(out.contains("doesn't exist yet; the engine creates it"), "{out}");
+    assert!(out.contains(&format!("✓ listening port  127.0.0.1:{down} MLLP")), "{out}");
+    assert!(out.contains("Ask its owner whether it's up on"), "refused explained: {out}");
+    let report: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join("r.json")).unwrap()).unwrap();
+    let checks = report["checks"].as_array().unwrap();
+    assert_eq!((checks.len(), checks[0]["what"].as_str()), (7, Some("engine database")), "{report:#}");
+    assert_eq!(checks[0]["outcome"], "fail");
+
+    // Only one interface's connections (and the engine's database).
+    let (_, out) = ductus(dir.path(), &["doctor", &db, "--interface", "adt"]);
+    assert!(out.contains("checked 4 connection(s)") && !out.contains("empi"), "{out}");
+    let (ok, out) = ductus(dir.path(), &["doctor", &db, "--interface", "nope"]);
+    assert!(!ok && out.contains("no interface named nope"), "{out}");
+}

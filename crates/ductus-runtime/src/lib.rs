@@ -1,6 +1,7 @@
 //! Runs interfaces: receive → persist → ACK, then workers transform and deliver.
 
 mod destination;
+pub mod doctor;
 mod files;
 pub mod health;
 mod http;

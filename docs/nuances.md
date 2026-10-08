@@ -163,6 +163,28 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** it finds interfaces through `about:` (applications, vendors, sender hosts), destinations' `application`/`vendor`, the resources.yaml entries they use, and the databases and APIs their code names. A side with no system named is invisible to `--vendor` and `--application`. Host names are compared as written unless you pass `--resolve` (DNS lookups, from where you run it).
 - **What to do:** fill in `about:` when creating an interface (`ductus new` writes it); `validate` warns about gaps, and `require_about: true` in `ductus.yaml` makes them errors. Name the vendor on shared resources once in `resources.yaml`. List senders' subnets in `about.from.hosts`: the engine can't know where inbound connections come from.
 
+### A destination's owner is its interface's unless it says otherwise (level 1)
+- **What:** `about.owner` owns the interface and every destination; `owner:` on a destination overrides it for that destination only (e.g. its code is another team's). `ductus owners` lists destinations separately only when their owner differs. `ductus owners reassign --from A --to B` changes only `owner:` values that are written down: a destination that inherits moves with its interface.
+- **What to do:** to hand one destination to someone else, add `owner:` to it by hand; to split a person's interfaces, run `reassign` once per group with `--interface`. It edits interface.yaml in place (comments and layout kept), so commit and deploy the change like any other.
+
+## Checking connections (`ductus doctor`)
+
+### Doctor checks from where it runs (level 2)
+- **What:** every result (DNS, routes, firewalls, the source address in a firewall request) is about the machine running `ductus doctor`. A laptop on the VPN and the engine's server can get opposite answers.
+- **What to do:** run it on the engine's server, as the account the engine runs as (folder rights and trusted certificates are per account), with the environment it uses (`--env prod`).
+
+### A pass means "can connect and log in", not "will accept your messages" (level 2)
+- **What:** doctor never sends anything to a destination: MLLP and HTTP destinations are only connected to (and TLS checked). For an API it sends one `GET` to the API's base URL with its headers and reports the status: a 404 there is normal, a 401/403 means the token was refused. Databases get a login and a version query; SFTP a host key check, login and SFTP start. Code that writes to a table it has no rights to still fails at run time.
+- **What to do:** use doctor for "can we reach it"; use the interface's tests and a test message for "does it accept what we send".
+
+### One working address is enough to pass, with a warning (level 3)
+- **What:** a name can resolve to several addresses (IPv4 and IPv6, or a cluster). Doctor tries each. If some fail and one works, the check warns: the engine (like any client) may try a failing address first and be slow, or fail now and then.
+- **What to do:** ask for the DNS entry to list only working addresses, or for the others to be opened.
+
+### The commit time is the store's disk, and the ceiling per strict sender (level 4)
+- **What:** doctor times 20 durable commits against the engine's database. With `durability: strict`, each ACK waits for one, so one sender connection can't go faster than about 1 / commit time (2.4 ms ≈ 410 msg/s); more connections share commits. Doctor warns above 10 ms.
+- **What to do:** if that's near your peak per connection, use a faster disk (SSD/NVMe, write cache with battery), more sender connections, or `durability: relaxed` where losing the last fraction of a second on a database crash is acceptable.
+
 ## Files, SFTP and schedules
 
 ### A file is picked up one poll after it stops changing (level 3)

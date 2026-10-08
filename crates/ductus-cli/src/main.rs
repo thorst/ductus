@@ -1,4 +1,6 @@
+mod doctor;
 mod new;
+mod owners;
 mod project;
 mod tools;
 
@@ -84,6 +86,38 @@ enum Command {
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
+    /// Check every connection the project needs, from this server: DNS, TCP (with the address
+    /// a firewall request needs), TLS (certificate, expiry), then each system's own login.
+    /// Explains failures in plain words. Never sends anything to a destination. Exits 1 if
+    /// something failed.
+    Doctor {
+        /// Only what these interfaces use (repeat for several); the engine's database always.
+        #[arg(long)]
+        interface: Vec<String>,
+        /// Longest wait per step, e.g. 5s or 500ms.
+        #[arg(long, default_value = "5s", value_parser = parse_duration)]
+        timeout: std::time::Duration,
+        /// Also save the report (for a network team or vendor): JSON if the name ends in .json.
+        #[arg(long)]
+        report: Option<PathBuf>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+        #[arg(long, env = "DUCTUS_DATABASE_URL", default_value = tools::DEFAULT_DB)]
+        database_url: String,
+    },
+    /// Who owns which interface and destination (`about.owner`, and `owner` on a destination
+    /// someone else owns). `ductus owners reassign` moves ownership.
+    #[command(args_conflicts_with_subcommands = true)]
+    Owners {
+        #[command(subcommand)]
+        action: Option<OwnersAction>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+    },
     /// Manage encrypted secrets (secrets/<env>.json; key in DUCTUS_SECRET_KEY).
     Secret {
         #[command(subcommand)]
@@ -154,6 +188,31 @@ enum NewCommand {
 }
 
 #[derive(Subcommand)]
+enum OwnersAction {
+    /// Change an owner in interface.yaml files (someone left, or work is split up): only the
+    /// `owner:` values change, comments and layout stay. To split, run it per group of
+    /// interfaces with --interface.
+    Reassign {
+        /// The current owner (ignores case).
+        #[arg(long)]
+        from: String,
+        /// The new owner.
+        #[arg(long)]
+        to: String,
+        /// Only these interfaces (repeat for several).
+        #[arg(long)]
+        interface: Vec<String>,
+        /// Show what would change without writing.
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+    },
+}
+
+#[derive(Subcommand)]
 enum SecretAction {
     /// Print a new random key to put in DUCTUS_SECRET_KEY (keep it out of Git).
     Init,
@@ -195,6 +254,10 @@ fn quiet_on_closed_pipe() {
     }
 }
 
+fn parse_duration(text: &str) -> Result<std::time::Duration> {
+    ductus_core::config::parse_duration(text)
+}
+
 /// For commands that report problems themselves: exit 1 when they found any.
 fn exit_on_failure(result: Result<bool>) -> Result<()> {
     if !result? {
@@ -215,9 +278,14 @@ async fn run(cli: Cli) -> Result<()> {
     tracing_subscriber::fmt()
         // Plain text when logging to a file or pipe (no color codes in log files).
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "info,sqlx=warn".into()),
-        )
+        .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            // Doctor's report says what failed; the TLS verifier would log each failure again.
+            if matches!(cli.command, Command::Doctor { .. }) {
+                "warn,rustls_platform_verifier=off".into()
+            } else {
+                "info,sqlx=warn".into()
+            }
+        }))
         .init();
 
     match cli.command {
@@ -248,6 +316,14 @@ async fn run(cli: Cli) -> Result<()> {
             };
             exit_on_failure(project::impact(&root, &env, query, resolve).await)
         }
+        Command::Doctor { interface, timeout, report, root, env, database_url } => {
+            let options = doctor::Options { root, env, database_url, interfaces: interface, timeout, report };
+            exit_on_failure(doctor::run(options).await)
+        }
+        Command::Owners { action: None, root, env } => exit_on_failure(owners::report(&root, &env)),
+        Command::Owners {
+            action: Some(OwnersAction::Reassign { from, to, interface, dry_run, root, env }), ..
+        } => exit_on_failure(owners::reassign(&root, &env, &from, &to, &interface, dry_run)),
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,
         Command::Status { database_url } => tools::status(&database_url).await,

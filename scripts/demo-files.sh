@@ -140,6 +140,16 @@ export DUCTUS_SECRET_KEY=$("$BIN" secret init 2>/dev/null)
 [ $SFTP = 1 ] && "$BIN" secret set LAB_SFTP_KEY <"$K/client_key" >/dev/null
 echo "== validate"; "$BIN" validate | tail -1 || { echo "FAIL: validation"; exit 1; }
 
+if [ $SFTP = 1 ]; then
+  echo "== doctor (before the engine starts)"
+  "$BIN" doctor --interface sftp-relay >doctor.txt 2>&1 && D=ok || D=failed
+  check "sftp-relay's connections all work" "ok" "$D"
+  check "pinned host key and key login checked" "yes" "$(grep 'host key matches; logged in as' doctor.txt >/dev/null && echo yes || echo no)"
+  "$BIN" doctor --interface sftp-unpinned --report doctor.json >doctor.txt 2>&1 && D=ok || D=failed
+  check "an unpinned server fails" "failed" "$D"
+  check "and the report shows its fingerprint" "yes" "$(grep "has host key $FINGERPRINT" doctor.json >/dev/null && echo yes || echo no)"
+fi
+
 start() { # log file
   LOG=$1
   "$BIN" run >"$LOG" 2>&1 &

@@ -95,7 +95,7 @@ impl SharedServices {
     }
 }
 
-fn http_client() -> reqwest::Client {
+pub(crate) fn http_client() -> reqwest::Client {
     reqwest::Client::builder()
         .user_agent(concat!("ductus/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
@@ -193,17 +193,21 @@ async fn http_fetch(client: &reqwest::Client, r: FetchRequest) -> Result<FetchRe
     Ok(FetchResponse { status, headers, body: String::from_utf8_lossy(&body).into_owned() })
 }
 
-fn postgres_pool(c: &DbConnection) -> PgPool {
-    let options = PgConnectOptions::new()
+/// How the engine connects to a Postgres resource (also what `ductus doctor` checks).
+pub(crate) fn postgres_options(c: &DbConnection) -> PgConnectOptions {
+    PgConnectOptions::new()
         .host(&c.host)
         .port(c.port.unwrap_or(5432))
         .database(&c.database)
         .username(&c.user)
-        .password(&c.password);
+        .password(&c.password)
+}
+
+fn postgres_pool(c: &DbConnection) -> PgPool {
     PgPoolOptions::new()
         .max_connections(c.max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))
-        .connect_lazy_with(options)
+        .connect_lazy_with(postgres_options(c))
 }
 
 /// Temporary failures (can't connect, pool exhausted, server restarting) are marked so the
