@@ -8,7 +8,7 @@ Statuses (`status` columns): `0` pending, `1` sent, `2` filtered, `3` quarantine
 
 ## `messages`
 
-Every message received, as received (the original is never changed). **Partitioned by day** on `received_at` (`messages_YYYYMMDD`), created 3 days ahead; retention will drop whole days.
+Every message received, as received (the original is never changed). **Partitioned by retention tier, then by time** (migration 0010): `messages_t30` holds the 30-day tier, and its partitions cover a period each, named by their first day (`messages_t30_20261008`). Periods are sized to the tier: a day for 7d and 30d, a week (from Monday) for 90d and 180d, a month for 365d, so there are about 100 partitions in all. They're created 3 days ahead; a partition is dropped once its whole period is older than its tier's days (see `retention`).
 
 | column | type | |
 |---|---|---|
@@ -24,12 +24,13 @@ Every message received, as received (the original is never changed). **Partition
 | `last_error` | text | Why it was quarantined or filtered (`destination: reason; ...` with several destinations). |
 | `updated_at` | timestamptz | Last status change. |
 | `origin_id` | bigint | Routed from another interface (`source: internal`): the `id` of the message there. NULL for messages received from outside. Not indexed. |
+| `tier` | smallint | The retention tier the row is stored in, in days (7, 30, 90, 180, 365): its interface's retention when it was stored, until a retention change moves it. 365 for rows stored by engines that don't know tiers. |
 
-Indexes: primary key `(id, received_at)`; `messages_pending (interface, partition_key, id) WHERE status = 0`; `messages_by_interface (interface, id)` (the message browser, newest first); `messages_quarantined (interface, id) WHERE status = 3`.
+Indexes: primary key `(id, received_at, tier)` (a partitioned table's key must include its partition columns); `messages_pending (interface, partition_key, id) WHERE status = 0`; `messages_by_interface (interface, id)` (the message browser, newest first); `messages_quarantined (interface, id) WHERE status = 3`.
 
 ## `deliveries`
 
-One row per queued message and destination: each destination's work queue and its status. Inserted in the same statement as the message. **Partitioned by day** like `messages` (`deliveries_YYYYMMDD`, same bounds).
+One row per queued message and destination: each destination's work queue and its status. Inserted in the same statement as the message. **Partitioned** like `messages` (`deliveries_t30_20261008`, same tier and bounds).
 
 | column | type | |
 |---|---|---|
@@ -42,8 +43,9 @@ One row per queued message and destination: each destination's work queue and it
 | `last_error` | text | Last failure or the reason it was filtered/quarantined. |
 | `output` | bytea | Exactly what was sent, only for destinations with `save_output: true`. |
 | `updated_at` | timestamptz | Last change. |
+| `tier` | smallint | Always its message's tier (a retention change moves both in one statement). |
 
-Indexes: primary key `(message_id, received_at, destination_id)`; `deliveries_pending (destination_id, partition_key, message_id) WHERE status = 0`, which is each destination's queue in arrival order; `deliveries_quarantined (destination_id, message_id) WHERE status = 3` (quarantine counts without reading the table).
+Indexes: primary key `(message_id, received_at, destination_id, tier)`; `deliveries_pending (destination_id, partition_key, message_id) WHERE status = 0`, which is each destination's queue in arrival order; `deliveries_quarantined (destination_id, message_id) WHERE status = 3` (quarantine counts without reading the table).
 
 ## `destinations`
 
@@ -98,7 +100,26 @@ REST API tokens (`ductus token create`, or `POST /api/v1/tokens`). Only a hash o
 
 Indexes: primary key `id`; unique `hash`; `api_tokens_live_name (name) WHERE revoked_at IS NULL` (unique).
 
+## `retention`
+
+Each interface's retention as the engine applied it, and the change in progress. Changes run one at a time per interface: a different value configured meanwhile waits in `waiting`, and so does a shorter one (it deletes messages) until someone confirms it (`ductus retention confirm`).
+
+| column | type | |
+|---|---|---|
+| `interface` | text | The interface's name. |
+| `days` | smallint | The tier its new messages go to (the target of a running change). |
+| `changing_from` | smallint | Set while a change runs: the tier it's changing from. The interface's rows in other tiers are being moved into `days`, or deleted when they're past its window, in small batches. |
+| `rows_left` | bigint | Rows still to move or delete (counted when the change started, then counted down). |
+| `waiting` | smallint | A configured value not applied yet. |
+| `confirmed` | smallint | A shorter `waiting` value someone confirmed. |
+| `changed_at` | timestamptz | When the current value, or the running change, started. |
+| `updated_at` | timestamptz | Last change. |
+
+Index: primary key `interface`.
+
 ## Functions
 
-- `ductus_ensure_message_partitions(days_ahead)`, `ductus_ensure_delivery_partitions()`: create missing day partitions; the engine runs them hourly as two statements with a short lock timeout (see architecture.md, Storage).
-- `ductus_ensure_partitions(days_ahead)`: the older single-transaction version, kept for older engines; removed when the migrations are squashed.
+- `ductus_tiers()`: the tiers, `{7,30,90,180,365}`. `ductus_tier_unit(tier)`: the period one partition of a tier covers (`day`, `week`, `month`).
+- `ductus_create_tier_partition(table, tier, day)`: the partition of `messages` or `deliveries` holding that tier's rows of that day, created if missing.
+- `ductus_ensure_tier_partitions(table, tier, days_ahead)`, `ductus_ensure_delivery_partitions(tier)`: one tier's missing partitions; the engine runs them hourly, one table and tier per transaction, with a short lock timeout (see architecture.md, Storage).
+- `ductus_ensure_message_partitions(days_ahead)`, `ductus_ensure_delivery_partitions()`, `ductus_ensure_partitions(days_ahead)`: every tier at once, shortest tier first: what older engines call. Removed when the migrations are squashed.

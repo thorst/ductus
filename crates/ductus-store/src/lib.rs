@@ -7,8 +7,10 @@
 //! at-least-once delivery.
 
 mod api;
+mod retention;
 
 pub use api::{Browse, MessageRow, QueueCount, Role, TOKEN_PREFIX, Token};
+pub use retention::{Expired, Held, RetentionState, Step, TIERS, Tier};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -73,6 +75,8 @@ pub struct NewMessage<'a> {
     pub relaxed: bool,
     /// The interface's destinations (`Store::destination_ids`): each gets a pending delivery.
     pub destinations: &'a [DestinationId],
+    /// The retention tier to store it in (the interface's retention, in days).
+    pub tier: Tier,
 }
 
 /// Duplicate detection for one insert: the message's identifying key and how long keys are remembered.
@@ -102,6 +106,8 @@ pub struct Batch<'a> {
     pub state: Option<(&'a str, &'a str)>,
     /// The interface's destinations: each gets a pending delivery of every message queued.
     pub destinations: &'a [DestinationId],
+    /// The retention tier to store them in.
+    pub tier: Tier,
 }
 
 #[derive(Clone)]
@@ -257,31 +263,39 @@ impl Store {
             );
         }
         let lock = if urgent { "SET LOCAL lock_timeout = 0" } else { PARTITION_LOCK_TIMEOUT };
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(lock).execute(&mut *tx).await?;
-        sqlx::query("SELECT ductus_ensure_message_partitions($1)")
-            .bind(days_ahead)
-            .execute(&mut *tx)
-            .await
-            .context("creating message partitions")?;
-        tx.commit().await?;
-        let mut tx = self.pool.begin().await?;
-        sqlx::query(lock).execute(&mut *tx).await?;
-        sqlx::query("SELECT ductus_ensure_delivery_partitions()")
-            .execute(&mut *tx)
-            .await
-            .context("creating delivery partitions")?;
-        tx.commit().await?;
+        // One tier per transaction: each locks only its own tier's table, briefly (holding two
+        // at once can deadlock with queries, which lock them all: migration 0010).
+        for tier in TIERS {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(lock).execute(&mut *tx).await?;
+            sqlx::query("SELECT ductus_ensure_tier_partitions('messages', $1, $2)")
+                .bind(i32::from(tier))
+                .bind(days_ahead)
+                .execute(&mut *tx)
+                .await
+                .with_context(|| format!("creating message partitions ({tier}d tier)"))?;
+            tx.commit().await?;
+        }
+        for tier in TIERS {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(lock).execute(&mut *tx).await?;
+            sqlx::query("SELECT ductus_ensure_delivery_partitions($1)")
+                .bind(i32::from(tier))
+                .execute(&mut *tx)
+                .await
+                .with_context(|| format!("creating delivery partitions ({tier}d tier)"))?;
+            tx.commit().await?;
+        }
         Ok(())
     }
 
-    /// The first day from today (0) to `days_ahead` without both its `messages` and its
-    /// `deliveries` partition; `days_ahead + 1` if none is missing. Reads the catalog only.
+    /// The first day from today (0) to `days_ahead` without its `messages` and `deliveries`
+    /// partitions in every tier; `days_ahead + 1` if none is missing. Reads the catalog only.
     pub async fn first_missing_partition_day(&self, days_ahead: i32) -> Result<i32> {
         let day = sqlx::query_scalar(
-            "SELECT coalesce(min(i), $1 + 1) FROM generate_series(0, $1) i
-             WHERE to_regclass('messages_' || to_char(current_date + i, 'YYYYMMDD')) IS NULL
-                OR to_regclass('deliveries_' || to_char(current_date + i, 'YYYYMMDD')) IS NULL",
+            "SELECT coalesce(min(i), $1 + 1) FROM generate_series(0, $1) i, unnest(ductus_tiers()) t,
+                 LATERAL (SELECT format('_t%s_%s', t, to_char(date_trunc(ductus_tier_unit(t), (current_date + i)::timestamp), 'YYYYMMDD')) AS leaf) l
+             WHERE to_regclass('messages' || l.leaf) IS NULL OR to_regclass('deliveries' || l.leaf) IS NULL",
         )
         .bind(days_ahead)
         .fetch_one(&self.pool)
@@ -298,7 +312,8 @@ impl Store {
             .bind(m.control_id)
             .bind(m.payload)
             .bind(Status::Pending as i16)
-            .bind(m.destinations);
+            .bind(m.destinations)
+            .bind(m.tier);
         let (id, received_at) = if m.relaxed {
             let mut tx = self.pool.begin().await.context("starting transaction")?;
             sqlx::query("SET LOCAL synchronous_commit = off").execute(&mut *tx).await.context("relaxing commit")?;
@@ -341,6 +356,7 @@ impl Store {
             .bind(m.payload)
             .bind(if duplicate { Status::Duplicate } else { Status::Pending } as i16)
             .bind(if duplicate { &[][..] } else { m.destinations }) // duplicates aren't delivered
+            .bind(m.tier)
             .fetch_one(&mut *tx)
             .await
             .context("inserting message")?;
@@ -419,6 +435,7 @@ impl Store {
                 .bind(m.payload)
                 .bind(Status::Pending as i16)
                 .bind(m.destinations)
+                .bind(m.tier)
                 .fetch_one(&mut *tx)
                 .await
                 .context("inserting message")?;
@@ -462,12 +479,20 @@ impl Store {
     /// A destination's oldest pending messages in the given lanes. The caller must be the only
     /// owner of these lanes for this destination; that's what makes per-key ordering hold
     /// without row locks.
+    ///
+    /// The queue rows come first, then each message is looked up by its key (`LATERAL ... LIMIT
+    /// 1`, which Postgres can't turn into a join). As a join, Postgres priced looking a message up
+    /// in ~100 partitions above scanning them, and hashed every message stored (it grows with
+    /// the day's volume: one destination drained at 429/s instead of ~1,500/s).
     pub async fn pending(&self, destination: DestinationId, partitions: &[i32], limit: i64) -> Result<Vec<Pending>> {
         sqlx::query_as::<_, Pending>(
             "SELECT d.message_id AS id, d.received_at, m.payload, d.attempts, m.origin_id AS origin
-             FROM deliveries d JOIN messages m ON m.id = d.message_id AND m.received_at = d.received_at
-             WHERE d.destination_id = $1 AND d.status = 0 AND d.partition_key = ANY($2)
-             ORDER BY d.message_id LIMIT $3",
+             FROM (SELECT message_id, received_at, attempts FROM deliveries
+                   WHERE destination_id = $1 AND status = 0 AND partition_key = ANY($2)
+                   ORDER BY message_id LIMIT $3) d
+             CROSS JOIN LATERAL (SELECT payload, origin_id FROM messages m
+                                 WHERE m.id = d.message_id AND m.received_at = d.received_at LIMIT 1) m
+             ORDER BY d.message_id",
         )
         .bind(destination)
         .bind(partitions)
@@ -503,20 +528,38 @@ impl Store {
     /// in id order first (`locked`), by primary key: left to the plan, the order followed a hash
     /// join or a scan, and two settles could lock the same rows in opposite orders (a deadlock,
     /// seen with routes, which settle the same messages within milliseconds of each other).
+    ///
+    /// A retention change can move a message another destination just finished to another
+    /// tier while this statement has it in view. Postgres then can't re-check the row (as it does
+    /// after an ordinary update) and fails the statement ("already moved to another partition",
+    /// a serialization failure). Settling again is safe and finds that message done.
     async fn settle(&self, messages: &[MessageRef]) -> Result<()> {
+        let mut tries = 0;
+        loop {
+            match self.settle_once(messages).await {
+                Err(e) if tries < 5 && is_serialization_failure(&e) => tries += 1,
+                result => return result,
+            }
+        }
+    }
+
+    async fn settle_once(&self, messages: &[MessageRef]) -> Result<()> {
         let ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
         let times: Vec<DateTime<Utc>> = messages.iter().map(|m| m.received_at).collect();
+        let Some((first, last)) = span(&times) else { return Ok(()) };
         sqlx::query(
             "WITH done AS (
                  SELECT message_id, received_at, count(*) AS n,
                         CASE WHEN bool_or(status = 3) THEN 3 WHEN bool_or(status = 1) THEN 1 ELSE 2 END AS status
                  FROM deliveries
                  WHERE (message_id, received_at) IN (SELECT * FROM unnest($1::bigint[], $2::timestamptz[]))
+                   AND received_at BETWEEN $3 AND $4
                  GROUP BY message_id, received_at
                  HAVING NOT bool_or(status = 0)
              ), locked AS (
                  SELECT m.id, m.received_at FROM messages m
                  WHERE (m.id, m.received_at) IN (SELECT message_id, received_at FROM done) AND m.status = 0
+                   AND m.received_at BETWEEN $3 AND $4
                  ORDER BY m.id
                  FOR UPDATE
              )
@@ -531,10 +574,13 @@ impl Store {
                        AND d.status = done.status AND done.status <> 1
                  ), m.last_error)
              FROM done JOIN locked ON locked.id = done.message_id AND locked.received_at = done.received_at
-             WHERE m.id = locked.id AND m.received_at = locked.received_at AND m.status = 0",
+             WHERE m.id = locked.id AND m.received_at = locked.received_at AND m.status = 0
+               AND m.received_at BETWEEN $3 AND $4",
         )
         .bind(&ids)
         .bind(&times)
+        .bind(first)
+        .bind(last)
         .execute(&self.pool)
         .await
         .context("updating message status")?;
@@ -583,8 +629,8 @@ impl Store {
         .context("syncing deliveries finished elsewhere")?;
         let added: Vec<(String, i64)> = sqlx::query_as(
             "WITH added AS (
-                 INSERT INTO deliveries (message_id, received_at, destination_id, partition_key)
-                 SELECT m.id, m.received_at, c.id, m.partition_key
+                 INSERT INTO deliveries (message_id, received_at, destination_id, partition_key, tier)
+                 SELECT m.id, m.received_at, c.id, m.partition_key, m.tier
                  FROM messages m JOIN unnest($1::text[], $2::int[]) AS c(interface, id) ON m.interface = c.interface
                  WHERE m.interface = ANY($1) AND m.status = 0
                  ON CONFLICT DO NOTHING
@@ -704,15 +750,31 @@ impl Store {
     }
 }
 
-/// Insert one message (`$6` its status) and a pending delivery for each destination in `$7`
-/// (none for a duplicate), in one statement.
+/// The earliest and latest of some messages' `received_at`, for statements that find messages by
+/// `(id, received_at)` pairs. With the range written out, Postgres leaves out the partitions
+/// outside it when it plans; without it, it priced looking each message up in all ~100
+/// partitions above scanning them, and settling 50 messages read every `messages` partition
+/// (84 ms instead of 1.8 ms on 375k rows, and growing with the table).
+fn span(times: &[DateTime<Utc>]) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    Some((*times.iter().min()?, *times.iter().max()?))
+}
+
+/// Postgres's serialization failure (40001): the statement can simply run again.
+fn is_serialization_failure(e: &anyhow::Error) -> bool {
+    e.downcast_ref::<sqlx::Error>()
+        .and_then(|e| e.as_database_error())
+        .is_some_and(|e| e.code().as_deref() == Some("40001"))
+}
+
+/// Insert one message (`$6` its status, `$8` its tier) and a pending delivery for each
+/// destination in `$7` (none for a duplicate), in one statement.
 const INSERT_ONE: &str = "
     WITH m AS (
-        INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload, status)
-        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id, received_at
+        INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload, status, tier)
+        VALUES ($1, $2, $3, $4, $5, $6, $8) RETURNING id, received_at
     ), queued AS (
-        INSERT INTO deliveries (message_id, received_at, destination_id, partition_key)
-        SELECT m.id, m.received_at, d, $2 FROM m, unnest($7::int[]) d
+        INSERT INTO deliveries (message_id, received_at, destination_id, partition_key, tier)
+        SELECT m.id, m.received_at, d, $2, $8 FROM m, unnest($7::int[]) d
     )
     SELECT id, received_at FROM m";
 
@@ -760,15 +822,15 @@ async fn insert_batch_in(tx: &mut sqlx::PgConnection, batch: &Batch<'_>) -> Resu
         // ORDER BY ordinality: ids follow the order of the batch, which is the lanes' order.
         sqlx::query(
             "WITH m AS (
-                 INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload, status, origin_id)
-                 SELECT $1, p, o, c, b, s, r
+                 INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload, status, origin_id, tier)
+                 SELECT $1, p, o, c, b, s, r, $9
                  FROM unnest($2::int[], $3::text[], $4::text[], $5::bytea[], $6::smallint[], $8::bigint[])
                       WITH ORDINALITY AS t(p, o, c, b, s, r, n)
                  ORDER BY n
                  RETURNING id, received_at, partition_key, status
              )
-             INSERT INTO deliveries (message_id, received_at, destination_id, partition_key)
-             SELECT m.id, m.received_at, d, m.partition_key FROM m, unnest($7::int[]) d WHERE m.status = 0",
+             INSERT INTO deliveries (message_id, received_at, destination_id, partition_key, tier)
+             SELECT m.id, m.received_at, d, m.partition_key, $9 FROM m, unnest($7::int[]) d WHERE m.status = 0",
         )
         .bind(batch.interface)
         .bind(m.iter().map(|m| m.partition_key).collect::<Vec<_>>())
@@ -778,6 +840,7 @@ async fn insert_batch_in(tx: &mut sqlx::PgConnection, batch: &Batch<'_>) -> Resu
         .bind(statuses)
         .bind(batch.destinations)
         .bind(m.iter().map(|m| m.origin).collect::<Vec<_>>())
+        .bind(batch.tier)
         .execute(&mut *tx)
         .await
         .context("inserting messages")?;
@@ -797,12 +860,14 @@ async fn update_deliveries(tx: &mut sqlx::PgConnection, destination: Destination
     let statuses: Vec<i16> = done.iter().map(|d| d.status as i16).collect();
     let reasons: Vec<Option<&str>> = done.iter().map(|d| d.reason.as_deref()).collect();
     let outputs: Vec<Option<&[u8]>> = done.iter().map(|d| d.output.as_deref()).collect();
+    let Some((first, last)) = span(&times) else { return Ok(Vec::new()) };
     sqlx::query_scalar(
         "UPDATE deliveries d
          SET status = u.status, last_error = COALESCE(u.reason, d.last_error), output = u.output, updated_at = now()
          FROM unnest($2::bigint[], $3::timestamptz[], $4::smallint[], $5::text[], $6::bytea[])
               AS u(id, received_at, status, reason, output)
          WHERE d.message_id = u.id AND d.received_at = u.received_at AND d.destination_id = $1 AND d.status = 0
+           AND d.received_at BETWEEN $7 AND $8
          RETURNING d.message_id",
     )
     .bind(destination)
@@ -811,6 +876,8 @@ async fn update_deliveries(tx: &mut sqlx::PgConnection, destination: Destination
     .bind(&statuses)
     .bind(&reasons)
     .bind(&outputs)
+    .bind(first)
+    .bind(last)
     .fetch_all(tx)
     .await
     .context("updating delivery statuses")

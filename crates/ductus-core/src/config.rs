@@ -69,6 +69,10 @@ pub struct InterfaceConfig {
     /// What it's for, who owns it, and the systems on each side (for `ductus impact`).
     #[serde(default)]
     pub about: About,
+    /// How long its messages are kept: 7d, 30d, 90d, 180d or 365d. Default: `retention` in
+    /// ductus.yaml (30d if that doesn't say).
+    #[serde(default)]
+    pub retention: Option<crate::Retention>,
 
     /// Folder the config was loaded from.
     #[serde(skip)]
@@ -734,6 +738,9 @@ impl InterfaceConfig {
                 bail!("an HTTP source in `respond` mode answers with the transform's result; remove `destination`")
             }
             (true, false) if self.script.is_none() => bail!("an HTTP source in `respond` mode needs a `script`"),
+            (true, false) if self.retention.is_some() => {
+                bail!("an HTTP source in `respond` mode stores no messages; remove `retention`")
+            }
             (false, false) => bail!("`destination` is required (or `destinations`, to send to several places)"),
             _ => {}
         }
@@ -1022,6 +1029,29 @@ retry: { max_attempts: 3 }
         let mut bad = queue.clone();
         bad.destination = None;
         assert!(bad.validate().unwrap_err().to_string().contains("required"));
+    }
+
+    #[test]
+    fn retention_is_one_of_the_fixed_windows() {
+        let load = |extra: &str| {
+            serde_yaml_ng::from_str::<InterfaceConfig>(&format!(
+                "name: a\nsource: {{ mllp: {{ port: 6661 }} }}\ndestination: {{ file: {{ dir: o }} }}\n{extra}"
+            ))
+        };
+        assert_eq!(load("").unwrap().retention, None, "ductus.yaml's applies");
+        assert_eq!(load("retention: 90d").unwrap().retention.map(|r| r.days()), Some(90));
+        let err = load("retention: 60d").unwrap_err().to_string();
+        assert!(err.contains("7d, 30d, 90d, 180d, 365d"), "{err}");
+
+        // Respond mode stores nothing, so it has nothing to keep.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("t.ts"), "").unwrap();
+        let mut respond: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: api\nsource: { http: { port: 8080, path: /p, mode: respond } }\nscript: t.ts\nformat: json\nretention: 7d\n",
+        )
+        .unwrap();
+        respond.dir = dir.path().to_path_buf();
+        assert!(respond.validate().unwrap_err().to_string().contains("remove `retention`"));
     }
 
     #[test]

@@ -124,6 +124,9 @@ pub struct InterfaceStatus {
     isolation: &'static str,
     /// Parallel workers (dedicated) or 1 (shared).
     workers: u32,
+    /// Days its messages are kept, as configured (none in respond mode: it stores nothing).
+    /// `GET /retention` has changes in progress.
+    retention_days: Option<i16>,
     description: Option<String>,
     owner: Option<String>,
     destinations: Vec<DestinationStatus>,
@@ -223,7 +226,7 @@ fn strip_query(url: &str) -> String {
     }
 }
 
-fn interface_status(i: &Running, snapshot: &Snapshot) -> InterfaceStatus {
+fn interface_status(engine: &Engine, i: &Running, snapshot: &Snapshot) -> InterfaceStatus {
     let c = &i.config;
     let owner = given(&c.about.owner);
     let stopped = i.health.stopped();
@@ -235,6 +238,7 @@ fn interface_status(i: &Running, snapshot: &Snapshot) -> InterfaceStatus {
         source: source_label(&c.source),
         isolation: if c.isolation == Isolation::Dedicated { "dedicated" } else { "shared" },
         workers: c.slots(),
+        retention_days: engine.retention.get(&c.name).map(|m| m.configured),
         description: given(&c.about.description).map(Into::into),
         owner: owner.map(Into::into),
         destinations: c
@@ -260,7 +264,7 @@ fn interface_status(i: &Running, snapshot: &Snapshot) -> InterfaceStatus {
 #[utoipa::path(get, path = "/interfaces", tag = "engine", responses((status = 200, body = Vec<InterfaceStatus>)))]
 async fn interfaces(engine: Eng, _caller: Caller) -> ApiResult<Vec<InterfaceStatus>> {
     let snapshot = engine.snapshot().await?;
-    Ok(Json(engine.interfaces.iter().map(|i| interface_status(i, &snapshot)).collect()))
+    Ok(Json(engine.interfaces.iter().map(|i| interface_status(&engine, i, &snapshot)).collect()))
 }
 
 /// One interface: its state, queues and what it connects.
@@ -278,7 +282,7 @@ async fn interface(engine: Eng, _caller: Caller, Path(name): Path<String>) -> Ap
         vendor: given(vendor).map(Into::into),
     };
     Ok(Json(InterfaceDetail {
-        status: interface_status(i, &snapshot),
+        status: interface_status(&engine, i, &snapshot),
         from: system(&about.from.application, &about.from.vendor),
         from_hosts: about.from.hosts.clone(),
         to: system(&about.to.application, &about.to.vendor),

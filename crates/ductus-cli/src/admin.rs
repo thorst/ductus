@@ -1,5 +1,6 @@
 //! `ductus token` (API tokens, straight in the engine's database: that's how the first one is
-//! made) and `ductus drain` / `ductus resume` (through a running engine's REST API).
+//! made), and through a running engine's REST API: `ductus drain` / `ductus resume`, `ductus
+//! retention`.
 
 use anyhow::{Context, Result, bail};
 use ductus_store::{Role, Store};
@@ -66,7 +67,7 @@ pub struct Remote {
 impl Remote {
     pub fn new(api: &str, token: Option<String>) -> Result<Self> {
         let token = token.filter(|t| !t.trim().is_empty()).context(
-            "set DUCTUS_API_TOKEN to an operator token (create one on the server: `ductus token create <name> --role operator`)",
+            "set DUCTUS_API_TOKEN to a token (create one on the server: `ductus token create <name> --role operator`)",
         )?;
         let client = reqwest::Client::builder().timeout(Duration::from_secs(30)).build()?;
         Ok(Self { base: format!("{}/api/v1", api.trim_end_matches('/')), token, client })
@@ -139,4 +140,75 @@ pub async fn resume(remote: Remote) -> Result<()> {
     let status = remote.call(reqwest::Method::DELETE, "/drain", None).await?;
     println!("{}: taking new messages", status["state"].as_str().unwrap_or("?"));
     Ok(())
+}
+
+/// One interface's retention, as `GET /retention` describes it.
+fn retention_line(i: &Value) -> String {
+    let days = |v: &Value| v.as_i64().map(|d| format!("{d}d")).unwrap_or("?".into());
+    let mut line = format!("{:<28} {}", i["name"].as_str().unwrap_or("?"), days(&i["days"]));
+    if let Some(change) = i["change"].as_object() {
+        let left =
+            change.get("rows_left").and_then(Value::as_i64).map(|n| format!(", {n} messages left")).unwrap_or_default();
+        line += &format!("  changing from {}{left}", days(&change["from"]));
+    }
+    if let Some(waiting) = i["waiting"].as_i64() {
+        if i["needs_confirmation"].as_bool() == Some(true) {
+            let deletes = i["would_delete"].as_i64().map(|n| format!(", deletes {n} messages")).unwrap_or_default();
+            line += &format!(
+                "  configured {waiting}d{deletes}: needs `ductus retention confirm {}`",
+                i["name"].as_str().unwrap_or("?")
+            );
+        } else {
+            line += &format!("  configured {waiting}d: waits for the running change");
+        }
+    }
+    line
+}
+
+/// `ductus retention`: each interface's retention and what's in progress.
+pub async fn retention(remote: Remote) -> Result<()> {
+    let report = remote.call(reqwest::Method::GET, "/retention", None).await?;
+    for i in report["interfaces"].as_array().into_iter().flatten() {
+        println!("{}", retention_line(i));
+    }
+    let held = report["held"].as_array().cloned().unwrap_or_default();
+    if !held.is_empty() {
+        println!(
+            "
+expired partitions kept:"
+        );
+    }
+    for h in &held {
+        let mut why = Vec::new();
+        for (what, key) in [("pending", "pending"), ("quarantined", "quarantined")] {
+            if let Some(n) = h[key].as_i64().filter(|n| *n > 0) {
+                why.push(format!("{n} {what}"));
+            }
+        }
+        let kept: Vec<&str> = h["kept_for"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        if !kept.is_empty() {
+            why.push(format!("kept longer by {}", kept.join(", ")));
+        }
+        println!("  {}: {}", h["partition"].as_str().unwrap_or("?"), why.join("; "));
+    }
+    Ok(())
+}
+
+/// `ductus retention confirm <interface>`: apply a shorter retention, which deletes messages.
+pub async fn confirm_retention(remote: Remote, interface: &str) -> Result<()> {
+    let path = format!("/retention/{}/confirm", urlencoding(interface));
+    let state = remote.call(reqwest::Method::POST, &path, None).await?;
+    println!("confirmed: {}", retention_line(&state));
+    Ok(())
+}
+
+/// Interface names are lower-case letters, digits, `-` and `_` in practice; anything else is
+/// percent-encoded so it stays one path segment.
+fn urlencoding(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'-' | b'_' | b'.' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }

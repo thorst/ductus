@@ -69,6 +69,7 @@ pub struct Engine {
     pub store: Store,
     pub resources: Resources,
     pub interfaces: Vec<Running>,
+    pub retention: Arc<crate::retention::Retention>,
     drain: watch::Sender<DrainState>,
     monitor: watch::Sender<Arc<Snapshot>>,
     /// What each interface's code uses, worked out on first request (it needs the TypeScript
@@ -86,6 +87,7 @@ impl Engine {
         store: Store,
         resources: Resources,
         interfaces: Vec<Running>,
+        retention: Arc<crate::retention::Retention>,
     ) -> Arc<Self> {
         let engine = Arc::new(Self {
             started_at: Utc::now(),
@@ -95,6 +97,7 @@ impl Engine {
             store,
             resources,
             interfaces,
+            retention,
             drain: watch::Sender::new(DrainState::Accepting),
             monitor: watch::Sender::new(Arc::default()),
             code: OnceCell::new(),

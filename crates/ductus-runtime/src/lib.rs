@@ -13,6 +13,7 @@ pub mod keys;
 mod limiter;
 mod mssql;
 pub mod project;
+pub mod retention;
 mod schedule;
 mod services;
 mod sftp;
@@ -116,6 +117,13 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     for (interface, destination, count) in &changes.removed {
         tracing::warn!(%interface, %destination, count, "destination is no longer in interface.yaml: its pending deliveries were marked filtered");
     }
+    // Each interface's retention, before anything is stored: intake needs the tier.
+    let configured = configs
+        .iter()
+        .filter(|c| !c.responds())
+        .map(|c| (c.name.clone(), c.retention.unwrap_or(settings.retention).days() as ductus_store::Tier))
+        .collect();
+    let retention = retention::Retention::start(store.clone(), configured).await.context("applying retention")?;
     // Keep dedupe keys a little longer than the longest window that uses them.
     let dedupe_retention = configs.iter().filter_map(|c| c.dedupe.as_ref()).map(|d| d.window).max().unwrap_or_default()
         + Duration::from_secs(3600);
@@ -143,6 +151,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 wake.clone(),
                 gate.clone(),
                 destination_ids.clone(),
+                retention.tier(&config.name),
             )?;
             intakes.insert(config.name.clone(), Arc::new(intake));
         }
@@ -269,6 +278,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         store.clone(),
         resources.clone(),
         running,
+        retention,
     );
     if let Some((host, port)) = &api_address {
         api::serve(engine.clone(), host, *port).await?;

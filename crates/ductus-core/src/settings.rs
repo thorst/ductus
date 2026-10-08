@@ -9,6 +9,7 @@
 //! require_about: true # `ductus validate` fails when an interface doesn't name the systems it connects
 //! api:
 //!   listen: 127.0.0.1:7700  # the REST API (`/api/v1`); `off` to run without it
+//! retention: 30d      # how long messages are kept when an interface doesn't say (7d, 30d, 90d, 180d, 365d)
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -30,6 +31,9 @@ pub struct Settings {
     pub require_about: bool,
     #[serde(default)]
     pub api: ApiSettings,
+    /// How long messages are kept, for interfaces whose interface.yaml doesn't say.
+    #[serde(default)]
+    pub retention: crate::Retention,
 }
 
 /// The REST API the engine serves (`/api/v1`).
@@ -201,6 +205,14 @@ mod tests {
         std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 2048 }\nrequire_about: true\n").unwrap();
         let s = Settings::load(dir.path()).unwrap();
         assert_eq!((s.isolates.heap_mb, s.require_about), (2048, true));
+        assert_eq!(s.retention.days(), 30, "the default");
+        std::fs::write(
+            dir.path().join(FILE),
+            "retention: 90d
+",
+        )
+        .unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().retention.days(), 90);
         std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 8 }\n").unwrap();
         let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
         assert!(err.contains("at least 64"), "{err}");

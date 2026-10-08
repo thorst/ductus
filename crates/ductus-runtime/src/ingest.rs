@@ -13,6 +13,7 @@ use ductus_core::{InterfaceConfig, partition_of};
 use ductus_hl7::{AckCode, Message};
 use ductus_store::{Batch, BatchMessage, DedupeKey, DestinationId, Done, MessageRef, NewMessage, Store};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicI16, Ordering::Relaxed};
 use tokio::net::TcpListener;
 
 /// What happened to an accepted message.
@@ -32,19 +33,23 @@ pub struct Intake {
     pub gate: Arc<Gate>,
     /// The interface's destinations: each stored message is queued for all of them.
     destinations: Vec<DestinationId>,
+    /// The retention tier new messages go to (changes when a retention change starts).
+    tier: Arc<AtomicI16>,
     ordering: Option<KeyPath>,
     dedupe: Vec<KeyPath>,
     control_id: Option<KeyPath>,
 }
 
 impl Intake {
-    /// `destinations`: the ids of the interface's destinations (`Store::destination_ids`).
+    /// `destinations`: the ids of the interface's destinations (`Store::destination_ids`);
+    /// `tier`: its retention tier (`Retention::tier`).
     pub fn new(
         config: Arc<InterfaceConfig>,
         store: Store,
         wake: Arc<Wake>,
         gate: Arc<Gate>,
         destinations: Vec<DestinationId>,
+        tier: Arc<AtomicI16>,
     ) -> Result<Self> {
         let compile = |path: &str| {
             keys::compile(&config.format, path).with_context(|| format!("interface `{}`: key `{path}`", config.name))
@@ -52,7 +57,7 @@ impl Intake {
         let ordering = config.ordering.key.as_deref().map(compile).transpose()?;
         let dedupe = config.dedupe.iter().flat_map(|d| d.keys.iter()).map(|k| compile(k)).collect::<Result<_>>()?;
         let control_id = (config.format == Format::Hl7).then(|| compile("MSH-10")).transpose()?;
-        Ok(Self { config, store, wake, gate, destinations, ordering, dedupe, control_id })
+        Ok(Self { config, store, wake, gate, destinations, tier, ordering, dedupe, control_id })
     }
 
     pub fn store(&self) -> &Store {
@@ -73,6 +78,10 @@ impl Intake {
             // these values, so distinct lists never collide.
             dedupe: values.iter().any(|v| !v.is_empty()).then(|| values.join("\u{1f}")),
         }
+    }
+
+    fn tier(&self) -> ductus_store::Tier {
+        self.tier.load(Relaxed)
     }
 
     fn relaxed(&self) -> bool {
@@ -97,6 +106,7 @@ impl Intake {
             payload,
             relaxed: self.relaxed(),
             destinations: &self.destinations,
+            tier: self.tier(),
         };
         let accepted = match (&self.config.dedupe, &keys.dedupe) {
             (Some(d), Some(key)) => {
@@ -139,6 +149,7 @@ impl Intake {
             relaxed: self.relaxed(),
             state,
             destinations: &self.destinations,
+            tier: self.tier(),
         };
         let duplicates = self.store.insert_batch(&batch).await?;
         let mut woken = vec![false; self.wake.slots()];
@@ -182,6 +193,7 @@ impl Intake {
             relaxed: true, // see `Store::finish_routed`
             state: None,
             destinations: &self.destinations,
+            tier: self.tier(),
         };
         let queued = self.store.finish_routed(destination, done, &batch).await?;
         for (k, _) in keys.iter().zip(&queued).filter(|(_, queued)| **queued) {
@@ -202,6 +214,7 @@ impl Intake {
             payload,
             relaxed: self.relaxed(),
             destinations: &self.destinations,
+            tier: self.tier(),
         };
         let queued = self.store.insert_scheduled(new, key, state, skipped_state).await?.is_some();
         if queued {

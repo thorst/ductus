@@ -8,6 +8,7 @@ pub mod impact;
 pub mod owners;
 pub mod ports;
 pub mod resources;
+pub mod retention;
 pub mod schedule;
 pub mod secrets;
 pub mod settings;
@@ -15,6 +16,7 @@ pub mod settings;
 pub use config::InterfaceConfig;
 pub use env::Environment;
 pub use resources::Resources;
+pub use retention::Retention;
 
 /// Map an ordering-key value to a virtual partition.
 ///

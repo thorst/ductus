@@ -42,6 +42,35 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** each day's tables are created ahead of time, hourly. Creating one needs a brief exclusive lock on `messages`/`deliveries`, which has to wait for every open query on them. Maintenance gives up after 2 s and tries again in an hour (partitions exist 3 days ahead), so a long report never holds up ACKs. If tomorrow's partitions still don't exist (something held the tables through every try for two days), maintenance stops giving up and waits: new messages (and their ACKs) then wait as long as the blocking query runs, rather than fail at midnight. The engine logs a warning when that happens.
 - **What to do:** run long reports against a replica, or keep them short; never leave a transaction open on the store. Watch for the warning "a partition needed soon is missing".
 
+## Retention
+
+### Retention is one of five windows, not any number of days (level 1)
+- **What:** `retention:` in interface.yaml is 7d, 30d, 90d, 180d or 365d (default: `retention` in ductus.yaml, else 30d). Anything else is refused by `ductus validate`.
+- **Why:** each window is a tier of partitions, and old messages go by dropping whole partitions, which costs nothing however many there are. Deleting rows one by one (the usual pruner) slows the busiest tables and needs vacuuming after.
+- **What to do:** pick the window that covers how far back you need to look into problems. Longer-term records belong to the receiving system (an archive export is planned).
+
+### Messages are kept at least their window, and gone within a period after (level 2)
+- **What:** a partition covers a day (7d, 30d), a week (90d, 180d) or a month (365d), and it's dropped once all of it is older than the window. So a 30d message lives 30 to 31 days; a 365d one up to about 13 months. Partitions are checked hourly.
+- **What to do:** treat the window as "at least". If something must be gone sooner, use a shorter tier.
+
+### Pending and quarantined messages are never purged (level 2)
+- **What:** an expired partition that still holds pending (undelivered) or quarantined messages stays, with all its other messages, until they're resolved. `ductus retention` lists such partitions and why. The same goes for a shorter retention: it never deletes pending or quarantined messages.
+- **Why:** a destination that was down for a month must not lose its backlog, and quarantined messages wait for a person.
+- **What to do:** resolve quarantines; a long-held partition costs disk, not correctness.
+
+### Shortening retention deletes messages, so it needs a confirmation (level 2)
+- **What:** deploying a shorter `retention:` doesn't apply it. The engine logs a warning and keeps the old one, and `ductus retention` shows how many messages the new value would delete. `ductus retention confirm <interface>` (an operator token) applies it: its finished messages past the new window are deleted in the background, the others move into the new tier. Lengthening needs no confirmation and keeps everything not yet dropped.
+- **Why:** a typo (7d for 70d, say) shouldn't delete a quarter of the history.
+- **What to do:** confirm after deploying, on each engine (it's per database).
+
+### One retention change at a time per interface (level 3)
+- **What:** a change moves (or deletes) the interface's older messages in batches, at most half the time busy (the demo's 8,000 messages took 1 to 1.5 s on a dev machine: a day of a 1M-message feed would take a few minutes). A different value deployed meanwhile waits until it's done; values in between are skipped. A change also waits for the interface's pending messages to be delivered before it finishes (they move once delivered).
+- **What to do:** watch progress with `ductus retention` (messages left). Don't flip retention back and forth.
+
+### Shortening frees disk when partitions go, not at once (level 4)
+- **What:** deleted messages leave space that Postgres reuses only within the same partition, and old partitions get no new messages. The disk space comes back when their partitions are dropped, at most the old window later.
+- **What to do:** to free space now, shorten and then, off-hours, `VACUUM FULL` the affected old partitions yourself (it locks each while it runs). A built-in compaction is planned.
+
 ## Several destinations
 
 ### Each destination runs its own function on the original message (level 2)

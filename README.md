@@ -76,6 +76,7 @@ test("looks up the account", async () => {
 - **Know what connects to what:** each interface names the applications and vendors on each side (`about:`), resources name theirs, and `ductus impact --vendor "Epic Systems"` lists every interface affected, including through databases and APIs its code uses. `ductus owners` lists who to call about each interface and destination, and `ductus owners reassign` moves ownership when someone leaves.
 - **Find out why a connection doesn't work before messages fail:** `ductus doctor` checks every connection from the server it runs on (DNS, TCP with the source address a firewall request needs, TLS certificate and expiry, each system's login) and says in plain words what a failure means. `--report` saves it for the network team or vendor.
 - **Reliability:** persist before ACK, per-key ordering, dedupe, rate limits, retries with back-off, quarantine. A runaway script (endless loop, memory blow-up) is stopped without affecting its neighbours.
+- **Retention without a pruner:** each interface keeps its messages 7, 30, 90, 180 or 365 days (`retention: 90d`), and old ones go by dropping whole partitions, without blocking intake. Nothing pending or quarantined is ever purged. Changing retention applies to old messages too, in the background; a shorter one deletes, so it waits for `ductus retention confirm`.
 - **Environments:** one project, per-environment variables and encrypted secrets, named resources (`resources.yaml`).
 
 ```yaml
@@ -135,6 +136,7 @@ Past that, the limit is PostgreSQL, and mostly its disk: Ductus spends little CP
 | `ductus owners` | Who owns which interface and destination; `reassign` changes owners in place |
 | `ductus secret` | Manage encrypted per-environment secrets |
 | `ductus types` | Write editor typings and `tsconfig.json` for VS Code |
+| `ductus retention` | How long each interface keeps messages, changes in progress, partitions kept and why; `confirm` applies a shorter one |
 | `ductus status` | Message counts by interface, status and destination |
 | `ductus gen` / `ductus sink` | Synthetic HL7 traffic and an order-verifying receiver |
 

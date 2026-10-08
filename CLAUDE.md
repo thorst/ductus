@@ -60,6 +60,11 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - **REST API routes** go through `utoipa_axum::routes!` in each `api/*.rs` `routes()` (that's what puts them in the OpenAPI document); a handler's `#[utoipa::path]` path is relative to `/api/v1`. Two handlers with one path and different methods go in one `routes!(a, b)`. A plain helper with the same name as a handler breaks the macro (it picks the wrong item).
 - **Statements that lock many rows lock them in id order** (`ORDER BY id FOR UPDATE` in a CTE, as `Store::settle` does), never in whatever order the plan visits them: the plan changes with the statistics, and two writers over overlapping sets then deadlock. The routing demo hit it once in 11 runs; no test could force the plan, so it's a rule, not a test. And **a flush may be retried after its commit** (a later statement failed): writes must be guarded (`WHERE status = 0 RETURNING`), or a route would store its messages twice (it did, before the guard).
 - **Store tests that make partitions often** (the stress test) also take `LONG_LOCKS`: while another test holds its long read on purpose, each partition DDL waits up to 2 s and the inserts queue behind it (seen as "too little traffic").
+- **Retention tiers (migration 0010):** `messages`/`deliveries` are LIST-partitioned by `tier`, then RANGE by `received_at` (`messages_t30_20261008`). **Never hold two tier tables in one transaction for DDL**: queries lock every tier in creation order (7d first), so creating or dropping partitions of two tiers at once deadlocks (the stress test caught it, in a test cleanup too). One table and tier per statement or transaction.
+- **Partition bounds are UTC midnights** (`ductus_create_tier_partition`): a date in `FOR VALUES` is read in the session's time zone, sqlx sessions are UTC and psql's aren't, and the two made overlapping partitions. Scripts that touch dates run psql with `PGTZ=UTC`.
+- **Statements that look messages up by `(id, received_at)` arrays carry the batch's time range** (`span` in `Store::settle`/`update_deliveries`), and the queue read looks messages up with `LATERAL ... LIMIT 1`: with ~100 partitions Postgres priced per-message lookups above scanning every partition, and hashed the whole table (settle 84 ms vs 1.8 ms; one destination drained at 429/s). Look at the plan of any new statement joining these tables (`EXPLAIN ANALYZE` with near-steady-state partitions: a fresh database has only ~15 and hides it).
+- **A row moved to another partition can't be re-checked**: a statement that saw it before the move fails with 40001 ("already moved to another partition"). Retention moves finished messages, so `settle` retries on 40001; anything new that updates rows a retention change might move needs the same.
+- **Expired partitions go with `DETACH PARTITION CONCURRENTLY`** (blocks no insert or read; can't run in a transaction block; an interrupted one is `FINALIZE`d next run), then `DROP`. Store tests that create old partitions and call `drop_expired` take `LONG_LOCKS` (it drops every expired partition in the database).
 - Python on Windows writes CRLF in text mode: pass `newline='
 '` when editing repo files from a script.
 - russh 0.64: `client::Handler::check_server_key(&PublicKeyOrCertificate)`; fingerprints via `key.fingerprint(HashAlg::Sha256)` print like `ssh-keygen -lf`. SFTP `rename` won't overwrite: remove the target first.
@@ -67,21 +72,22 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 ## Where things are
 
 ```
-crates/ductus-core     config, formats, environments, secrets, resources (databases, sftp, apis), about (systems,
+crates/ductus-core     config, formats, environments, secrets, resources (databases, sftp, apis), retention, about (systems,
                        host/subnet matching), impact, owners (report + in-place reassign), schedule timing, ports,
                        settings (ductus.yaml)
 crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
-crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations)
+crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations); retention.rs (tiers, changes, drops)
 crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for the API: health, queues, drain),
-                       gate.rs (drain gate), api/ (REST API: status, messages, reports, tokens),
+                       gate.rs (drain gate), retention.rs (applies retention, runs changes, drops partitions),
+                       api/ (REST API: status, messages, reports, retention, tokens),
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
                        services.rs + mssql.rs (DB calls), limiter.rs, doctor.rs (connection checks)
 crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/impact/types/secret; new.rs: `new interface`;
-                       admin.rs: `token`, `drain`, `resume`;
+                       admin.rs: `token`, `drain`, `resume`, `retention`;
                        doctor.rs: runs `doctor` (what to check is runtime's `doctor::plan`); owners.rs: `owners` report and reassign;
                        tools.rs: gen/sink/status;
                        tests/cli.rs runs the binary on temp projects)

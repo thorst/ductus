@@ -149,6 +149,15 @@ enum Command {
         #[command(flatten)]
         api: ApiArgs,
     },
+    /// How long each interface keeps its messages (`retention:` in interface.yaml), changes in
+    /// progress, shorter values waiting for a confirmation, and expired partitions that had to
+    /// stay. Through the running engine's REST API.
+    Retention {
+        #[command(subcommand)]
+        action: Option<RetentionAction>,
+        #[command(flatten)]
+        api: ApiArgs,
+    },
     /// Manage encrypted secrets (secrets/<env>.json; key in DUCTUS_SECRET_KEY).
     Secret {
         #[command(subcommand)]
@@ -251,6 +260,12 @@ struct ApiArgs {
     /// An operator token (`ductus token create <name> --role operator`).
     #[arg(long, env = "DUCTUS_API_TOKEN", hide_env_values = true)]
     token: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum RetentionAction {
+    /// Apply an interface's shorter retention: it deletes the messages past it (operator token).
+    Confirm { interface: String },
 }
 
 #[derive(Subcommand)]
@@ -396,6 +411,13 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Drain { stop, wait, api } => admin::drain(admin::Remote::new(&api.api, api.token)?, stop, wait).await,
         Command::Resume { api } => admin::resume(admin::Remote::new(&api.api, api.token)?).await,
+        Command::Retention { action, api } => {
+            let remote = admin::Remote::new(&api.api, api.token)?;
+            match action {
+                None => admin::retention(remote).await,
+                Some(RetentionAction::Confirm { interface }) => admin::confirm_retention(remote, &interface).await,
+            }
+        }
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,
         Command::Status { database_url } => tools::status(&database_url).await,

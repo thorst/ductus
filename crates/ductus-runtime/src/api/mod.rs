@@ -9,6 +9,7 @@
 
 mod messages;
 mod reports;
+mod retention;
 mod status;
 mod tokens;
 
@@ -42,6 +43,7 @@ pub type Shared = Arc<Engine>;
         (name = "messages", description = "The message browser"),
         (name = "drain", description = "Stop taking messages and deliver what's stored"),
         (name = "reports", description = "Impact, owners and connection checks"),
+        (name = "retention", description = "How long messages are kept, and changes to it"),
         (name = "tokens", description = "API tokens (admin)")
     )
 )]
@@ -63,6 +65,7 @@ pub fn router(engine: Shared) -> (Router, utoipa::openapi::OpenApi) {
         .merge(status::routes())
         .merge(messages::routes())
         .merge(reports::routes())
+        .merge(retention::routes())
         .merge(tokens::routes())
         .split_for_parts();
     let spec = doc.clone();

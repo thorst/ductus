@@ -6,6 +6,9 @@ use ductus_store::{
     Status, Store,
 };
 
+/// The retention tier test messages go to.
+const TIER: ductus_store::Tier = 30;
+
 async fn store() -> Option<Store> {
     let url = std::env::var("DUCTUS_TEST_DATABASE_URL").ok()?;
     Some(Store::connect(&url, 4).await.expect("connecting to test database"))
@@ -54,6 +57,7 @@ impl Iface {
             payload,
             relaxed: false,
             destinations: &self.ids,
+            tier: TIER,
         }
     }
 
@@ -341,6 +345,7 @@ fn batch<'a>(t: &'a Iface, items: &[(&'a str, Option<&'a str>)], state: Option<(
         relaxed: false,
         state,
         destinations: &t.ids,
+        tier: TIER,
     }
 }
 
@@ -398,6 +403,7 @@ async fn routed_messages_are_queued_in_the_target_exactly_once() {
         relaxed: true,
         state: None,
         destinations,
+        tier: TIER,
     };
     let done = [sent(a), sent(b), Done::with(c, Status::Filtered, Some("killed: not for the lab"))];
 
@@ -570,12 +576,13 @@ async fn the_schema_doc_describes_every_table_and_column() {
     assert!(columns.len() >= 30, "found the tables: {}", columns.len());
 }
 
-/// How far ahead the furthest `messages` partition goes, in days from today (by Postgres's date).
+/// How far ahead the furthest `messages` partition goes, in days from today (by Postgres's date):
+/// the 7d tier's, whose partitions are a day each.
 async fn furthest_partition(pool: &sqlx::PgPool) -> i32 {
     sqlx::query_scalar(
-        "SELECT (max(to_date(substr(c.relname, 10), 'YYYYMMDD')) - current_date)::int
+        "SELECT (max(to_date(right(c.relname, 8), 'YYYYMMDD')) - current_date)::int
          FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
-         WHERE i.inhparent = 'messages'::regclass AND c.relname ~ '^messages_[0-9]{8}$'",
+         WHERE i.inhparent = 'messages_t7'::regclass AND c.relname ~ '_[0-9]{8}$'",
     )
     .fetch_one(pool)
     .await
@@ -592,21 +599,28 @@ async fn maintain(store: &Store, days_ahead: i32) {
     }
 }
 
-/// Drop every partition beyond the 3 days ahead the engine keeps (tests make further ones; future
-/// partitions never hold data). Measured now, not when the test started: tests run at the same
-/// time, and one's maintenance re-fills days another dropped. One table per statement: dropping
-/// both in one transaction would lock both parents together, which deadlocks with inserts.
+/// Drop every partition starting beyond the 3 days ahead the engine keeps (tests make further
+/// ones; future partitions never hold data). Listed now, not when the test started: tests run at
+/// the same time, and one's maintenance re-fills days another dropped. One table and tier per
+/// statement: holding two tier tables at once deadlocks with queries, which lock every tier (it
+/// did, when this dropped all tiers in one statement).
 async fn drop_test_partitions(pool: &sqlx::PgPool) {
-    let furthest = furthest_partition(pool).await;
     for table in ["deliveries", "messages"] {
-        sqlx::query(sqlx::AssertSqlSafe(format!(
-            "DO $$ BEGIN FOR i IN 4 .. {furthest} LOOP
-                 EXECUTE format('DROP TABLE IF EXISTS %I', '{table}_' || to_char(current_date + i, 'YYYYMMDD'));
-             END LOOP; END $$"
-        )))
-        .execute(pool)
-        .await
-        .unwrap();
+        for tier in ductus_store::TIERS {
+            sqlx::query(sqlx::AssertSqlSafe(format!(
+                "DO $$ DECLARE p text; BEGIN
+                     FOR p IN SELECT c.relname FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid
+                              WHERE i.inhparent = '{table}_t{tier}'::regclass AND c.relname ~ '_[0-9]{{8}}$'
+                                AND to_date(right(c.relname, 8), 'YYYYMMDD') > current_date + 3
+                     LOOP
+                         EXECUTE format('DROP TABLE IF EXISTS %I', p);
+                     END LOOP;
+                 END $$"
+            )))
+            .execute(pool)
+            .await
+            .unwrap();
+        }
     }
 }
 
@@ -648,6 +662,7 @@ async fn partition_maintenance_never_holds_up_inserts() {
                 payload: b"during maintenance",
                 relaxed: false,
                 destinations: &ids,
+                tier: TIER,
             };
             store.insert(m).await.map(|_| start.elapsed())
         })
@@ -763,6 +778,7 @@ async fn everything_at_once_without_lock_errors() {
                     relaxed: false,
                     state: None,
                     destinations: &t.ids,
+                    tier: TIER,
                 };
                 let duplicates = store.insert_batch(&batch).await.unwrap();
                 queued.fetch_add(duplicates.iter().filter(|d| !**d).count(), Relaxed);
@@ -784,6 +800,17 @@ async fn everything_at_once_without_lock_errors() {
     for (n, (destination, route, is_route_target)) in drains.into_iter().enumerate() {
         let (store, stop, lanes, sources_done) = (store.clone(), stop.clone(), lanes.clone(), sources_done.clone());
         tasks.push(tokio::spawn(async move {
+            // A source drain counts as done however it ends: one that panics must fail the test,
+            // not leave the routed drain waiting for it forever.
+            struct Done(Arc<AtomicUsize>, bool);
+            impl Drop for Done {
+                fn drop(&mut self) {
+                    if !self.1 {
+                        self.0.fetch_add(1, Relaxed);
+                    }
+                }
+            }
+            let _done = Done(sources_done.clone(), is_route_target);
             let mut rounds = 0usize;
             loop {
                 let stopped = if is_route_target { sources_done.load(Relaxed) == 3 } else { stop.load(Relaxed) };
@@ -820,14 +847,12 @@ async fn everything_at_once_without_lock_errors() {
                             relaxed: true,
                             state: None,
                             destinations: &target.ids,
+                            tier: TIER,
                         };
                         store.finish_routed(destination, &done, &batch).await.unwrap();
                     }
                     None => store.finish(destination, &done).await.unwrap(),
                 }
-            }
-            if !is_route_target {
-                sources_done.fetch_add(1, Relaxed);
             }
         }));
     }
@@ -846,6 +871,19 @@ async fn everything_at_once_without_lock_errors() {
             }
         }));
     }
+    // A retention change under way: the interface's finished messages move to the 90d tier (with
+    // their deliveries) while new ones keep arriving in the 30d tier and destinations settle.
+    let mover = {
+        let (store, t, stop) = (store.clone(), t.clone(), stop.clone());
+        tokio::spawn(async move {
+            let mut moved = 0;
+            while !stop.load(Relaxed) {
+                moved += store.retention_step(&t.name, 90, 200).await.unwrap().moved;
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            moved
+        })
+    };
     let maintenance = {
         let (store, stop) = (store.clone(), stop.clone());
         tokio::spawn(async move {
@@ -854,6 +892,9 @@ async fn everything_at_once_without_lock_errors() {
                 day += 1;
                 maintain(&store, furthest + day).await;
                 store.purge_dedupe_keys(window).await.unwrap();
+                if day % 5 == 0 {
+                    store.drop_expired().await.unwrap();
+                }
                 tokio::time::sleep(std::time::Duration::from_millis(100)).await;
             }
             day
@@ -867,11 +908,26 @@ async fn everything_at_once_without_lock_errors() {
         results.push(task.await);
     }
     let days = maintenance.await;
+    let moved = mover.await;
     drop_test_partitions(&pool).await;
     for r in results {
         r.expect("a writer or drain failed");
     }
     let days = days.expect("maintenance failed");
+    let moved = moved.expect("moving to another tier failed");
+    assert!(moved > 0, "the retention change moved something");
+    // What's left moves now; then every message is in the 90d tier, each with its deliveries.
+    while !store.retention_step(&t.name, 90, 1000).await.unwrap().is_empty() {}
+    let misplaced: i64 = sqlx::query_scalar(
+        "SELECT (SELECT count(*) FROM messages WHERE interface = $1 AND tier <> 90)
+              + (SELECT count(*) FROM deliveries WHERE destination_id = ANY($2) AND tier <> 90)",
+    )
+    .bind(&t.name)
+    .bind(&t.ids)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(misplaced, 0);
 
     let queued = queued.load(Relaxed);
     assert!(queued > 1000, "too little traffic to mean anything: {queued}");
@@ -888,7 +944,7 @@ async fn everything_at_once_without_lock_errors() {
     assert!(store.payloads(&routed.name, Status::Pending).await.unwrap().is_empty(), "routed: nothing left pending");
     assert_eq!(store.payloads(&routed.name, Status::Sent).await.unwrap().len(), queued, "each routed exactly once");
     println!(
-        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations (one routing {queued} to another interface), {days} partitions created, {seconds}s",
+        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations (one routing {queued} to another interface), {moved} moved to another tier meanwhile, {days} maintenance rounds, {seconds}s",
         queued + duplicates
     );
 }
@@ -1002,4 +1058,197 @@ async fn messages_page_newest_first_and_queues_are_counted() {
         count(t.id("billing")),
         Some(QueueCount { destination_id: t.id("billing"), pending: 3, quarantined: 0 })
     );
+}
+
+/// A message stored `days_ago` (at noon) in a tier, with one delivery per destination, written
+/// straight to the tables: the engine only stores messages now. Creates the partitions it needs.
+async fn insert_at(pool: &sqlx::PgPool, t: &Iface, days_ago: i32, tier: i16, status: Status, payload: &str) -> i64 {
+    sqlx::query("SELECT ductus_create_tier_partition('messages', $1, current_date - $2)")
+        .bind(i32::from(tier))
+        .bind(days_ago)
+        .execute(pool)
+        .await
+        .unwrap();
+    sqlx::query("SELECT ductus_ensure_delivery_partitions($1)").bind(i32::from(tier)).execute(pool).await.unwrap();
+    sqlx::query_scalar(
+        "WITH m AS (
+             INSERT INTO messages (received_at, interface, partition_key, payload, status, tier)
+             VALUES (current_date - $2 + interval '12 hours', $1, 0, $3, $4, $5) RETURNING id, received_at
+         ), d AS (
+             INSERT INTO deliveries (message_id, received_at, destination_id, partition_key, status, tier)
+             SELECT id, received_at, unnest($6::int[]), 0, $4, $5 FROM m
+         )
+         SELECT id FROM m",
+    )
+    .bind(&t.name)
+    .bind(days_ago)
+    .bind(payload.as_bytes())
+    .bind(status as i16)
+    .bind(tier)
+    .bind(&t.ids)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+/// Each of an interface's messages (by payload) and the tier it's in, in payload order.
+async fn tiers_of(pool: &sqlx::PgPool, interface: &str) -> Vec<(String, i16)> {
+    let rows: Vec<(Vec<u8>, i16)> =
+        sqlx::query_as("SELECT payload, tier FROM messages WHERE interface = $1 ORDER BY payload")
+            .bind(interface)
+            .fetch_all(pool)
+            .await
+            .unwrap();
+    rows.into_iter().map(|(p, t)| (String::from_utf8(p).unwrap(), t)).collect()
+}
+
+/// The 7d tier's `messages` partition for `days_ago`, and whether it exists.
+async fn seven_day_partition(pool: &sqlx::PgPool, days_ago: i32) -> String {
+    sqlx::query_scalar("SELECT 'messages_t7_' || to_char(current_date - $1, 'YYYYMMDD')")
+        .bind(days_ago)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn exists(pool: &sqlx::PgPool, table: &str) -> bool {
+    sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL").bind(table).fetch_one(pool).await.unwrap()
+}
+
+/// One change at a time: longer starts at once, shorter waits for a confirmation, and a value
+/// configured while a change runs waits for it.
+#[tokio::test]
+async fn retention_changes_one_at_a_time_and_shorter_needs_a_confirmation() {
+    let Some(store) = store().await else { return };
+    let t = Iface::single(&store, "ret-apply").await;
+    let s = store.apply_retention(&t.name, 30).await.unwrap();
+    assert_eq!((s.days, s.changing_from, s.waiting), (30, None, None), "first time: applied as is");
+    assert!(store.apply_retention(&t.name, 45).await.is_err(), "not a tier");
+
+    let s = store.apply_retention(&t.name, 90).await.unwrap();
+    assert_eq!((s.days, s.changing_from), (90, Some(30)), "longer starts now");
+    let s = store.apply_retention(&t.name, 7).await.unwrap();
+    assert_eq!((s.days, s.changing_from, s.waiting), (90, Some(30), Some(7)), "waits for the running change");
+    assert_eq!(store.finish_retention_change(&t.name).await.unwrap(), 0);
+
+    let s = store.apply_retention(&t.name, 7).await.unwrap();
+    assert_eq!((s.days, s.changing_from, s.waiting), (90, None, Some(7)));
+    assert!(s.needs_confirmation(), "shorter deletes messages");
+    let s = store.confirm_retention(&t.name).await.unwrap().expect("something to confirm");
+    assert_eq!(s.confirmed, Some(7));
+    let s = store.apply_retention(&t.name, 7).await.unwrap();
+    assert_eq!((s.days, s.changing_from, s.waiting, s.confirmed), (7, Some(90), None, None), "confirmed: started");
+    assert_eq!(store.confirm_retention(&t.name).await.unwrap(), None, "nothing waits");
+
+    // Configured back to the applied value: whatever waited is dropped.
+    store.finish_retention_change(&t.name).await.unwrap();
+    let s = store.apply_retention(&t.name, 30).await.unwrap();
+    assert_eq!((s.days, s.changing_from), (30, Some(7)));
+    store.finish_retention_change(&t.name).await.unwrap();
+    assert_eq!(store.apply_retention(&t.name, 7).await.unwrap().waiting, Some(7));
+    let s = store.apply_retention(&t.name, 30).await.unwrap();
+    assert_eq!((s.days, s.changing_from, s.waiting), (30, None, None));
+}
+
+/// Shortening 90d → 7d: finished messages past 7 days are deleted with their deliveries, newer
+/// ones move to the 7d tier, quarantined ones are never deleted, pending ones move once delivered.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_shorter_retention_deletes_what_is_past_it_and_moves_the_rest() {
+    let Some(store) = store().await else { return };
+    let _serial = LONG_LOCKS.lock().await;
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let t = Iface::new(&store, "ret-shorten", &["lab", "billing"]).await;
+    store.apply_retention(&t.name, 90).await.unwrap();
+    insert_at(&pool, &t, 40, 90, Status::Sent, "a old sent").await;
+    insert_at(&pool, &t, 40, 90, Status::Quarantined, "b old quarantined").await;
+    insert_at(&pool, &t, 2, 90, Status::Sent, "c new sent").await;
+    let pending = insert_at(&pool, &t, 2, 90, Status::Pending, "d new pending").await;
+
+    store.apply_retention(&t.name, 7).await.unwrap();
+    assert_eq!(store.retention_would_delete(&t.name, 7).await.unwrap(), 1);
+    store.confirm_retention(&t.name).await.unwrap();
+    let s = store.apply_retention(&t.name, 7).await.unwrap();
+    assert_eq!((s.days, s.changing_from), (7, Some(90)));
+    assert_eq!(store.start_retention_change(&t.name, 7).await.unwrap(), 3, "a, c, d (b stays)");
+
+    let mut done = ductus_store::Step::default();
+    loop {
+        let step = store.retention_step(&t.name, 7, 1).await.unwrap();
+        if step.is_empty() {
+            break;
+        }
+        done.deleted += step.deleted;
+        done.moved += step.moved;
+    }
+    assert_eq!(done, ductus_store::Step { deleted: 1, moved: 1 });
+    assert_eq!(store.retention_waiting_for_delivery(&t.name, 7).await.unwrap(), 1, "d is still pending");
+
+    let received_at: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT received_at FROM messages WHERE id = $1")
+            .bind(pending)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let d = MessageRef { id: pending, received_at };
+    store.finish(t.id("lab"), &[sent(d)]).await.unwrap();
+    store.finish(t.id("billing"), &[sent(d)]).await.unwrap();
+    assert_eq!(store.retention_step(&t.name, 7, 10).await.unwrap(), ductus_store::Step { deleted: 0, moved: 1 });
+    assert_eq!(store.retention_waiting_for_delivery(&t.name, 7).await.unwrap(), 0);
+    assert_eq!(store.finish_retention_change(&t.name).await.unwrap(), 1, "the old quarantined one stays where it was");
+
+    assert_eq!(
+        tiers_of(&pool, &t.name).await,
+        [("b old quarantined".into(), 90), ("c new sent".into(), 7), ("d new pending".into(), 7)]
+    );
+    let deliveries: Vec<(i16, i64)> = sqlx::query_as(
+        "SELECT d.tier, count(*) FROM deliveries d JOIN destinations t ON t.id = d.destination_id
+         WHERE t.interface = $1 GROUP BY 1 ORDER BY 1",
+    )
+    .bind(&t.name)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert_eq!(deliveries, [(7, 4), (90, 2)], "deliveries went with their messages");
+    let s = store.retention().await.unwrap().into_iter().find(|s| s.interface == t.name).unwrap();
+    assert_eq!((s.days, s.changing_from, s.rows_left), (7, None, None));
+}
+
+/// Expired partitions are dropped, `deliveries` with `messages`, except while they hold
+/// quarantined (or pending) messages, or rows of an interface that keeps its messages longer.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_partitions_are_dropped_unless_something_must_stay() {
+    let Some(store) = store().await else { return };
+    let _serial = LONG_LOCKS.lock().await;
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let a = Iface::single(&store, "ret-drop-a").await;
+    let b = Iface::single(&store, "ret-drop-b").await;
+    insert_at(&pool, &a, 30, 7, Status::Sent, "sent long ago").await;
+    insert_at(&pool, &a, 20, 7, Status::Quarantined, "quarantined long ago").await;
+    insert_at(&pool, &b, 15, 7, Status::Sent, "b's, kept longer now").await;
+    store.apply_retention(&b.name, 30).await.unwrap();
+    let gone = seven_day_partition(&pool, 30).await;
+    let quarantined = seven_day_partition(&pool, 20).await;
+    let kept = seven_day_partition(&pool, 15).await;
+
+    let expired = store.drop_expired().await.unwrap();
+    assert!(expired.dropped.contains(&gone), "{expired:?}");
+    let held = |name: &str| expired.held.iter().find(|h| h.partition == name).cloned();
+    let q = held(&quarantined).expect("quarantined messages keep their partition");
+    assert_eq!((q.tier, q.pending, q.quarantined, q.kept_for.len()), (7, 0, 1, 0));
+    assert_eq!(held(&kept).expect("b keeps it").kept_for, [b.name.as_str()]);
+    assert!(!exists(&pool, &gone).await && !exists(&pool, &gone.replace("messages", "deliveries")).await);
+    assert!(exists(&pool, &quarantined).await && exists(&pool, &quarantined.replace("messages", "deliveries")).await);
+
+    // Once resolved (and moved away), they go too.
+    sqlx::query("UPDATE deliveries SET status = 1 WHERE destination_id = $1")
+        .bind(a.dest())
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE messages SET status = 1 WHERE interface = $1").bind(&a.name).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM deliveries WHERE destination_id = $1").bind(b.dest()).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM messages WHERE interface = $1").bind(&b.name).execute(&pool).await.unwrap();
+    let expired = store.drop_expired().await.unwrap();
+    assert!(expired.dropped.contains(&quarantined) && expired.dropped.contains(&kept), "{expired:?}");
+    assert!(!exists(&pool, &quarantined).await && !exists(&pool, &kept).await);
 }
