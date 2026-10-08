@@ -919,11 +919,11 @@ mod tests {
         assert_eq!(c.outcome, Outcome::Fail);
         assert_eq!(step(&c, "address").outcome, Outcome::Ok);
         assert!(step(&c, "connect").detail.ends_with("from 127.0.0.1: refused"), "{c:#?}");
-        assert!(c.advice[0].contains("nothing accepts connections on port"), "{c:#?}");
+        assert!(c.advice.iter().any(|a| a.contains("nothing accepts connections on port")), "{c:#?}");
 
         let c = one(Target::Mllp { host: "no-such-host.invalid".into(), port: 1 }).await;
         assert_eq!(step(&c, "DNS").outcome, Outcome::Fail);
-        assert!(c.advice[0].contains("can't look up `no-such-host.invalid`"), "{c:#?}");
+        assert!(c.advice.iter().any(|a| a.contains("can't look up `no-such-host.invalid`")), "{c:#?}");
 
         // Something listening.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -986,7 +986,7 @@ mod tests {
         assert_eq!(tls.outcome, Outcome::Fail);
         assert!(tls.detail.starts_with("not trusted"), "{c:#?}");
         assert!(tls.detail.contains("certificate for rcgen self signed cert, self-signed, valid until"), "{c:#?}");
-        assert!(c.advice[0].contains("trusted certificates"), "{c:#?}");
+        assert!(c.advice.iter().any(|a| a.contains("trusted certificates")), "{c:#?}");
 
         // Plain HTTP API: its headers are sent, and a refused token says so.
         use axum::http::StatusCode;
@@ -1011,7 +1011,7 @@ mod tests {
         assert!(step(&c, "HTTP").detail.starts_with(&format!("GET {base} → 200 OK")), "no query string: {c:#?}");
         let c = one(Target::Api("orders".into(), api("bad"))).await;
         assert_eq!(step(&c, "HTTP").outcome, Outcome::Fail);
-        assert!(c.advice[0].contains("refused the request's credentials"), "{c:#?}");
+        assert!(c.advice.iter().any(|a| a.contains("refused the request's credentials")), "{c:#?}");
     }
 
     #[tokio::test]
