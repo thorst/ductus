@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
-# v0.5 demo: retention. Each interface keeps its messages for one of five fixed windows (7d,
-# 30d, 90d, 180d, 365d); old messages go by dropping whole partitions, never by deleting rows
-# from the busy tables.
+# v0.5 demo: retention. Each interface keeps its messages for one of four fixed windows (7d,
+# 21d, 45d, 90d); old messages go by dropping whole partitions, never by deleting rows from the
+# busy tables.
 #
 #   adt  (MLLP, retention 90d): four days of history, 3 to 120 days old, plus live traffic.
-#   lab  (MLLP, no retention: ductus.yaml's 30d): history 40 and 45 days old.
+#   lab  (MLLP, no retention: ductus.yaml's 45d): history 52 and 60 days old.
 #
-# 1. Startup drops what's expired: adt's 120-day-old partition, lab's 45-day-old one. Lab's
-#    40-day-old partition stays: it holds quarantined messages (someone must look at them).
-# 2. adt is shortened to 30d while ADT keeps flowing. That deletes messages, so the engine
-#    waits for `ductus retention confirm adt`; then it deletes adt's finished messages past 30
-#    days (never quarantined ones) and moves the rest into the 30d tier, in the background.
+# 1. Startup drops what's expired: adt's 120-day-old partition, lab's 60-day-old one. Lab's
+#    52-day-old partition stays: it holds quarantined messages (someone must look at them).
+# 2. adt is shortened to 45d while ADT keeps flowing. That deletes messages, so the engine
+#    waits for `ductus retention confirm adt`; then it deletes adt's finished messages past 45
+#    days (never quarantined ones) and moves the rest into the 45d tier, in the background.
 # 3. lab is lengthened to 90d: no confirmation, it starts at once and keeps everything; its
 #    quarantined messages move to the 90d tier, so their old partition can finally go.
 set -euo pipefail
@@ -26,7 +26,7 @@ q "TRUNCATE messages, deliveries, dedupe_keys" >/dev/null
 q "DELETE FROM retention WHERE interface IN ('adt', 'lab')" >/dev/null
 
 mkdir -p "$P/interfaces/"{adt,lab}
-printf 'retention: 30d\napi: { listen: 127.0.0.1:7791 }\n' >"$P/ductus.yaml"
+printf 'retention: 45d\napi: { listen: 127.0.0.1:7791 }\n' >"$P/ductus.yaml"
 cat >"$P/interfaces/adt/interface.yaml" <<'EOF'
 name: adt
 source: { mllp: { port: 6693 } }
@@ -84,15 +84,15 @@ start_engine 1
 stop_engine
 for days in 120 60 20 3; do history adt 90 $days $HISTORY 1; done
 history adt 90 60 5 3     # quarantined, 60 days old
-history lab 30 45 1000 1
-history lab 30 40 3 3     # quarantined, 40 days old
+history lab 45 60 1000 1
+history lab 45 52 3 3     # quarantined, 52 days old
 echo "   adt: $(tier_counts adt)   lab: $(tier_counts lab)"
-adt120=$(leaf 90 120) lab45=$(leaf 30 45) lab40=$(leaf 30 40)
+adt120=$(leaf 90 120) lab60=$(leaf 45 60) lab52=$(leaf 45 52)
 TOKEN=$("$BIN" token create "demo-$$" --role operator 2>/dev/null)
 export DUCTUS_API_TOKEN=$TOKEN
 
-echo "== adt shortened to 30d; the engine starts while ADT keeps coming"
-sed -i 's/retention: 90d/retention: 30d/' interfaces/adt/interface.yaml
+echo "== adt shortened to 45d; the engine starts while ADT keeps coming"
+sed -i 's/retention: 90d/retention: 45d/' interfaces/adt/interface.yaml
 start_engine 2
 "$BIN" gen --to 127.0.0.1:6693 --count $LIVE --patients 100 --connections 4 >"$P/gen.log" &
 GEN=$!
@@ -100,20 +100,20 @@ sleep 6 # the first drop of expired partitions runs 5 s after startup
 grep -o 'shorter retention not applied.*' run.log | sed 's/^/   log: /'
 echo "   \$ ductus retention"
 "$BIN" retention | sed 's/^/     /'
-deleted_before=$(q "SELECT count(*) FROM messages WHERE interface = 'adt' AND received_at < current_date - 30 AND status = 1")
+deleted_before=$(q "SELECT count(*) FROM messages WHERE interface = 'adt' AND received_at < current_date - 45 AND status = 1")
 exists "$adt120" && dropped_adt120=no || dropped_adt120=yes
-exists "$lab45" && dropped_lab45=no || dropped_lab45=yes
-exists "$lab40" && kept_lab40=yes || kept_lab40=no
-echo "   expired partitions dropped: $adt120 $dropped_adt120, $lab45 $dropped_lab45; $lab40 kept: $kept_lab40"
+exists "$lab60" && dropped_lab60=no || dropped_lab60=yes
+exists "$lab52" && kept_lab52=yes || kept_lab52=no
+echo "   expired partitions dropped: $adt120 $dropped_adt120, $lab60 $dropped_lab60; $lab52 kept: $kept_lab52"
 
 echo "== \$ ductus retention confirm adt"
 start=$(date +%s%N)
 "$BIN" retention confirm adt | sed 's/^/   /'
-wait_for 120 '"$BIN" retention | grep -E "^adt +30d *$" >/dev/null'
+wait_for 120 '"$BIN" retention | grep -E "^adt +45d *$" >/dev/null'
 elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
 wait $GEN
 tail -1 "$P/gen.log" | sed 's/^/   gen: /'
-wait_for 60 '[ "$(q "SELECT count(*) FROM messages WHERE interface = '"'adt'"' AND tier = 30 AND status = 1 AND received_at >= current_date")" = $LIVE ]'
+wait_for 60 '[ "$(q "SELECT count(*) FROM messages WHERE interface = '"'adt'"' AND tier = 45 AND status = 1 AND received_at >= current_date")" = $LIVE ]'
 grep -o 'retention change done.*' run.log | sed 's/^/   log: /'
 echo "   adt after ${elapsed} ms: $(tier_counts adt)"
 
@@ -122,20 +122,20 @@ stop_engine
 echo "retention: 90d" >>interfaces/lab/interface.yaml
 start_engine 3
 wait_for 60 '"$BIN" retention | grep -E "^lab +90d *$" >/dev/null'
-for _ in $(seq 1 50); do exists "$lab40" || break; sleep 0.2; done
-echo "   lab: $(tier_counts lab); $lab40 $(exists "$lab40" && echo still there || echo dropped)"
+for _ in $(seq 1 50); do exists "$lab52" || break; sleep 0.2; done
+echo "   lab: $(tier_counts lab); $lab52 $(exists "$lab52" && echo still there || echo dropped)"
 "$BIN" retention | sed 's/^/   /'
 stop_engine
 "$BIN" token revoke "demo-$$" >/dev/null
 
 fail=""
 [ "$dropped_adt120" = yes ] || fail+=" adt-120-days-not-dropped"
-[ "$dropped_lab45" = yes ] || fail+=" lab-45-days-not-dropped"
-[ "$kept_lab40" = yes ] || fail+=" quarantined-partition-dropped"
+[ "$dropped_lab60" = yes ] || fail+=" lab-60-days-not-dropped"
+[ "$kept_lab52" = yes ] || fail+=" quarantined-partition-dropped"
 [ "$deleted_before" = $HISTORY ] || fail+=" deleted-before-confirmation($deleted_before)"
-[ "$(tier_counts adt)" = "30d: $((2 * HISTORY + LIVE)), 90d: 5" ] || fail+=" adt-tiers($(tier_counts adt))"
+[ "$(tier_counts adt)" = "45d: $((2 * HISTORY + LIVE)), 90d: 5" ] || fail+=" adt-tiers($(tier_counts adt))"
 [ "$(q "SELECT count(*) FROM messages WHERE interface = 'adt' AND status = 3")" = 5 ] || fail+=" adt-quarantined"
 [ "$(q "SELECT count(*) FROM deliveries d JOIN messages m ON m.id = d.message_id AND m.received_at = d.received_at WHERE m.interface = 'adt' AND d.tier <> m.tier")" = 0 ] || fail+=" deliveries-split"
 [ "$(tier_counts lab)" = "90d: 3" ] || fail+=" lab-tiers($(tier_counts lab))"
-exists "$lab40" && fail+=" lab-40-not-dropped"
+exists "$lab52" && fail+=" lab-52-not-dropped"
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; tail -30 "$P/run.log"; exit 1; fi

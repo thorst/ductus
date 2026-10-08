@@ -7,7 +7,7 @@ use ductus_store::{
 };
 
 /// The retention tier test messages go to.
-const TIER: ductus_store::Tier = 30;
+const TIER: ductus_store::Tier = 45;
 
 async fn store() -> Option<Store> {
     let url = std::env::var("DUCTUS_TEST_DATABASE_URL").ok()?;
@@ -872,7 +872,7 @@ async fn everything_at_once_without_lock_errors() {
         }));
     }
     // A retention change under way: the interface's finished messages move to the 90d tier (with
-    // their deliveries) while new ones keep arriving in the 30d tier and destinations settle.
+    // their deliveries) while new ones keep arriving in the 45d tier and destinations settle.
     let mover = {
         let (store, t, stop) = (store.clone(), t.clone(), stop.clone());
         tokio::spawn(async move {
@@ -1121,14 +1121,14 @@ async fn exists(pool: &sqlx::PgPool, table: &str) -> bool {
 async fn retention_changes_one_at_a_time_and_shorter_needs_a_confirmation() {
     let Some(store) = store().await else { return };
     let t = Iface::single(&store, "ret-apply").await;
-    let s = store.apply_retention(&t.name, 30).await.unwrap();
-    assert_eq!((s.days, s.changing_from, s.waiting), (30, None, None), "first time: applied as is");
-    assert!(store.apply_retention(&t.name, 45).await.is_err(), "not a tier");
+    let s = store.apply_retention(&t.name, 45).await.unwrap();
+    assert_eq!((s.days, s.changing_from, s.waiting), (45, None, None), "first time: applied as is");
+    assert!(store.apply_retention(&t.name, 30).await.is_err(), "not a tier");
 
     let s = store.apply_retention(&t.name, 90).await.unwrap();
-    assert_eq!((s.days, s.changing_from), (90, Some(30)), "longer starts now");
+    assert_eq!((s.days, s.changing_from), (90, Some(45)), "longer starts now");
     let s = store.apply_retention(&t.name, 7).await.unwrap();
-    assert_eq!((s.days, s.changing_from, s.waiting), (90, Some(30), Some(7)), "waits for the running change");
+    assert_eq!((s.days, s.changing_from, s.waiting), (90, Some(45), Some(7)), "waits for the running change");
     assert_eq!(store.finish_retention_change(&t.name).await.unwrap(), 0);
 
     let s = store.apply_retention(&t.name, 7).await.unwrap();
@@ -1142,12 +1142,12 @@ async fn retention_changes_one_at_a_time_and_shorter_needs_a_confirmation() {
 
     // Configured back to the applied value: whatever waited is dropped.
     store.finish_retention_change(&t.name).await.unwrap();
-    let s = store.apply_retention(&t.name, 30).await.unwrap();
-    assert_eq!((s.days, s.changing_from), (30, Some(7)));
+    let s = store.apply_retention(&t.name, 45).await.unwrap();
+    assert_eq!((s.days, s.changing_from), (45, Some(7)));
     store.finish_retention_change(&t.name).await.unwrap();
     assert_eq!(store.apply_retention(&t.name, 7).await.unwrap().waiting, Some(7));
-    let s = store.apply_retention(&t.name, 30).await.unwrap();
-    assert_eq!((s.days, s.changing_from, s.waiting), (30, None, None));
+    let s = store.apply_retention(&t.name, 45).await.unwrap();
+    assert_eq!((s.days, s.changing_from, s.waiting), (45, None, None));
 }
 
 /// Shortening 90d → 7d: finished messages past 7 days are deleted with their deliveries, newer
@@ -1225,7 +1225,7 @@ async fn expired_partitions_are_dropped_unless_something_must_stay() {
     insert_at(&pool, &a, 30, 7, Status::Sent, "sent long ago").await;
     insert_at(&pool, &a, 20, 7, Status::Quarantined, "quarantined long ago").await;
     insert_at(&pool, &b, 15, 7, Status::Sent, "b's, kept longer now").await;
-    store.apply_retention(&b.name, 30).await.unwrap();
+    store.apply_retention(&b.name, 45).await.unwrap();
     let gone = seven_day_partition(&pool, 30).await;
     let quarantined = seven_day_partition(&pool, 20).await;
     let kept = seven_day_partition(&pool, 15).await;

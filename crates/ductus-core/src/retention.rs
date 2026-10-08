@@ -7,30 +7,32 @@
 use anyhow::{Result, bail};
 use serde::Deserialize;
 
-/// Days messages are kept: 7, 30, 90, 180 or 365.
+/// Days messages are kept: 7, 21, 45 or 90.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Retention(u16);
 
 impl Retention {
-    /// The windows, shortest first (the store's tiers: `ductus_store::TIERS`).
-    pub const DAYS: [u16; 5] = [7, 30, 90, 180, 365];
+    /// The windows, shortest first (the store's tiers: `ductus_store::TIERS`). Chosen for the
+    /// partitions they cost (about window / 7 each; the 7d tier one per day): longer history
+    /// belongs to the source systems or an archive.
+    pub const DAYS: [u16; 4] = [7, 21, 45, 90];
 
     /// When neither the interface nor ductus.yaml says: long enough to look into last month's
     /// problems, short enough not to fill a disk by surprise.
-    pub const DEFAULT: Retention = Retention(30);
+    pub const DEFAULT: Retention = Retention(45);
 
     pub fn days(self) -> u16 {
         self.0
     }
 
-    /// From `30d` (or `30`).
+    /// From `45d` (or `45`).
     pub fn parse(text: &str) -> Result<Self> {
         let trimmed = text.trim();
         let days: Option<u16> = trimmed.strip_suffix('d').unwrap_or(trimmed).trim().parse().ok();
         match days {
             Some(d) if Self::DAYS.contains(&d) => Ok(Self(d)),
             _ => bail!(
-                "retention `{trimmed}`: use one of 7d, 30d, 90d, 180d, 365d (fixed windows: old messages go by \
+                "retention `{trimmed}`: use one of 7d, 21d, 45d, 90d (fixed windows: old messages go by \
                  dropping whole partitions)"
             ),
         }
@@ -56,7 +58,7 @@ impl std::fmt::Display for Retention {
 
 impl<'de> Deserialize<'de> for Retention {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
-        // `30d` is a string in YAML; a bare `30` is a number.
+        // `45d` is a string in YAML; a bare `45` is a number.
         #[derive(Deserialize)]
         #[serde(untagged)]
         enum Text {
@@ -77,14 +79,14 @@ mod tests {
 
     #[test]
     fn only_the_fixed_windows() {
-        assert_eq!(Retention::parse("30d").unwrap().days(), 30);
-        assert_eq!(Retention::parse(" 365d ").unwrap().to_string(), "365d");
+        assert_eq!(Retention::parse("45d").unwrap().days(), 45);
+        assert_eq!(Retention::parse(" 21d ").unwrap().to_string(), "21d");
         assert_eq!(Retention::parse("7").unwrap(), Retention(7));
-        for bad in ["45d", "1y", "", "30 days", "-7d"] {
+        for bad in ["30d", "365d", "1y", "", "45 days", "-7d"] {
             let err = Retention::parse(bad).unwrap_err().to_string();
-            assert!(err.contains("7d, 30d, 90d, 180d, 365d"), "{bad}: {err}");
+            assert!(err.contains("7d, 21d, 45d, 90d"), "{bad}: {err}");
         }
-        assert_eq!(Retention::default().days(), 30);
+        assert_eq!(Retention::default().days(), 45);
         assert_eq!(Retention::from_days(90), Some(Retention(90)));
         assert_eq!(Retention::from_days(91), None);
     }
@@ -93,8 +95,8 @@ mod tests {
     fn reads_from_yaml() {
         let r: Retention = serde_yaml_ng::from_str("90d").unwrap();
         assert_eq!(r.days(), 90);
-        let r: Retention = serde_yaml_ng::from_str("180").unwrap();
-        assert_eq!(r.days(), 180);
+        let r: Retention = serde_yaml_ng::from_str("21").unwrap();
+        assert_eq!(r.days(), 21);
         assert!(serde_yaml_ng::from_str::<Retention>("31d").is_err());
     }
 }

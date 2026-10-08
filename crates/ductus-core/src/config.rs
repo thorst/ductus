@@ -69,8 +69,8 @@ pub struct InterfaceConfig {
     /// What it's for, who owns it, and the systems on each side (for `ductus impact`).
     #[serde(default)]
     pub about: About,
-    /// How long its messages are kept: 7d, 30d, 90d, 180d or 365d. Default: `retention` in
-    /// ductus.yaml (30d if that doesn't say).
+    /// How long its messages are kept: 7d, 21d, 45d or 90d. Default: `retention` in
+    /// ductus.yaml (45d if that doesn't say).
     #[serde(default)]
     pub retention: Option<crate::Retention>,
 
@@ -1041,7 +1041,7 @@ retry: { max_attempts: 3 }
         assert_eq!(load("").unwrap().retention, None, "ductus.yaml's applies");
         assert_eq!(load("retention: 90d").unwrap().retention.map(|r| r.days()), Some(90));
         let err = load("retention: 60d").unwrap_err().to_string();
-        assert!(err.contains("7d, 30d, 90d, 180d, 365d"), "{err}");
+        assert!(err.contains("7d, 21d, 45d, 90d"), "{err}");
 
         // Respond mode stores nothing, so it has nothing to keep.
         let dir = tempfile::tempdir().unwrap();

@@ -62,7 +62,9 @@ impl Retention {
 
     /// The tier an interface's new messages go to (shared with its intake).
     pub fn tier(&self, interface: &str) -> Arc<AtomicI16> {
-        self.get(interface).map(|m| m.tier.clone()).unwrap_or_else(|| Arc::new(AtomicI16::new(30)))
+        self.get(interface)
+            .map(|m| m.tier.clone())
+            .unwrap_or_else(|| Arc::new(AtomicI16::new(ductus_core::Retention::DEFAULT.days() as Tier)))
     }
 
     /// This engine's interfaces' retention, as stored.
