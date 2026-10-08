@@ -520,6 +520,10 @@ async fn drop_test_partitions(pool: &sqlx::PgPool) {
     }
 }
 
+/// Tests that hold long locks on `messages` on purpose take this, so they don't hold up each
+/// other's timing (an urgent maintenance waiting behind one test's read queues the other's inserts).
+static LONG_LOCKS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A long read of `messages` (a big report, say) must not make inserts, and so ACKs, wait
 /// behind partition maintenance. Creating a partition needs a lock that waits for the report;
 /// while it waits, every later statement on the table queues behind it. Maintenance gives up
@@ -527,6 +531,7 @@ async fn drop_test_partitions(pool: &sqlx::PgPool) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn partition_maintenance_never_holds_up_inserts() {
     let Some(store) = store().await else { return };
+    let _serial = LONG_LOCKS.lock().await;
     let t = Iface::single(&store, "convoy").await;
     let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
     let furthest = furthest_partition(&pool).await;
@@ -570,6 +575,36 @@ async fn partition_maintenance_never_holds_up_inserts() {
         let e = format!("{e:#}");
         assert!(e.contains("lock timeout"), "{e}");
     }
+}
+
+/// The last resort: when the missing partition is needed soon, maintenance doesn't give up on
+/// a long read; it waits for it, so the partition exists before messages need it. (Here "soon"
+/// is a far-off day: tests can't drop tomorrow's partitions, which other tests are using.)
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn partition_maintenance_waits_when_the_day_is_close() {
+    let Some(store) = store().await else { return };
+    let _serial = LONG_LOCKS.lock().await;
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let day = furthest_partition(&pool).await + 40; // far beyond what other tests create
+    assert!(store.first_missing_partition_day(day).await.unwrap() <= day, "there's a day to create");
+    assert_eq!(store.first_missing_partition_day(0).await.unwrap(), 1, "today's partitions exist");
+
+    // Short, so tests running alongside wait no longer than this for their inserts.
+    let mut report = pool.begin().await.unwrap();
+    sqlx::query("SELECT count(*) FROM messages").execute(&mut *report).await.unwrap();
+    let maintenance = {
+        let store = store.clone();
+        tokio::spawn(async move { store.ensure_partitions_urgent_within(day, day).await })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(2500)).await;
+    let waited = !maintenance.is_finished();
+    report.rollback().await.unwrap();
+    let result = tokio::time::timeout(std::time::Duration::from_secs(10), maintenance).await;
+    let exists = store.first_missing_partition_day(day).await.unwrap() > day;
+    drop_test_partitions(&pool).await;
+    assert!(waited, "past the 2 s lock timeout, still waiting for the read");
+    result.expect("done once the read ended").unwrap().unwrap();
+    assert!(exists, "every day up to {day} has both partitions");
 }
 
 /// Everything the engine does to the database, at once, for a while (`DUCTUS_STRESS_SECONDS`,

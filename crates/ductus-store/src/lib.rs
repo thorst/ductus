@@ -215,9 +215,33 @@ impl Store {
     ///   it waits, every later statement on the table queues behind it: inserts, so ACKs, would
     ///   stall for as long as the report runs. Partitions are made days ahead, so failing now
     ///   and trying again in an hour costs nothing.
+    /// - The last resort: when tomorrow's partitions are still missing (every try for days was
+    ///   blocked), it waits for the locks however long it takes. New messages then wait behind
+    ///   it for as long as the blocking query runs, which beats having no partition to store
+    ///   them in at midnight.
+    /// - Nothing to create: no statement takes a lock at all.
     pub async fn ensure_partitions(&self, days_ahead: i32) -> Result<()> {
+        self.ensure_partitions_urgent_within(days_ahead, 1).await
+    }
+
+    /// `ensure_partitions`, waiting without limit when a missing day is `urgent_within` days
+    /// ahead or nearer. Separate for tests, which can't drop tomorrow's partitions.
+    #[doc(hidden)]
+    pub async fn ensure_partitions_urgent_within(&self, days_ahead: i32, urgent_within: i32) -> Result<()> {
+        let missing = self.first_missing_partition_day(days_ahead).await?;
+        if missing > days_ahead {
+            return Ok(());
+        }
+        let urgent = missing <= urgent_within;
+        if urgent && missing > 0 {
+            tracing::warn!(
+                days_ahead = missing,
+                "a partition needed soon is missing (earlier tries were blocked by a long-held lock): waiting for the lock; new messages wait until it's created"
+            );
+        }
+        let lock = if urgent { "SET LOCAL lock_timeout = 0" } else { PARTITION_LOCK_TIMEOUT };
         let mut tx = self.pool.begin().await?;
-        sqlx::query(PARTITION_LOCK_TIMEOUT).execute(&mut *tx).await?;
+        sqlx::query(lock).execute(&mut *tx).await?;
         sqlx::query("SELECT ductus_ensure_message_partitions($1)")
             .bind(days_ahead)
             .execute(&mut *tx)
@@ -225,13 +249,28 @@ impl Store {
             .context("creating message partitions")?;
         tx.commit().await?;
         let mut tx = self.pool.begin().await?;
-        sqlx::query(PARTITION_LOCK_TIMEOUT).execute(&mut *tx).await?;
+        sqlx::query(lock).execute(&mut *tx).await?;
         sqlx::query("SELECT ductus_ensure_delivery_partitions()")
             .execute(&mut *tx)
             .await
             .context("creating delivery partitions")?;
         tx.commit().await?;
         Ok(())
+    }
+
+    /// The first day from today (0) to `days_ahead` without both its `messages` and its
+    /// `deliveries` partition; `days_ahead + 1` if none is missing. Reads the catalog only.
+    pub async fn first_missing_partition_day(&self, days_ahead: i32) -> Result<i32> {
+        let day = sqlx::query_scalar(
+            "SELECT coalesce(min(i), $1 + 1) FROM generate_series(0, $1) i
+             WHERE to_regclass('messages_' || to_char(current_date + i, 'YYYYMMDD')) IS NULL
+                OR to_regclass('deliveries_' || to_char(current_date + i, 'YYYYMMDD')) IS NULL",
+        )
+        .bind(days_ahead)
+        .fetch_one(&self.pool)
+        .await
+        .context("checking partitions")?;
+        Ok(day)
     }
 
     pub async fn insert(&self, m: NewMessage<'_>) -> Result<MessageRef> {
