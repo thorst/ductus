@@ -119,8 +119,11 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What to do:** choose a key that's as narrow as correctness allows. Set `retry.max_attempts` on destinations where waiting forever is worse than quarantining. When a destination is stalled, `ductus hotspots <interface>` names the message, its key and its worker (see Monitoring).
 
 ### Change `ordering.partitions` only with an empty queue (level 4)
-- **What:** each message's lane is computed from its key and `partitions` when it arrives, and stored. Change `partitions` while messages are waiting, and a patient's waiting messages stay in their old lane while new ones go to a different lane (maybe another worker): until the backlog drains, that patient's messages can be delivered out of order. Changing `workers` alone is safe (every lane still has one owner).
-- **What to do:** change `partitions` when the interface has nothing pending (`ductus status`), e.g. stop the sender, let it drain, restart with the new value. To give each of N workers 64 lanes, set `partitions: 64 * N`. (The engine will re-assign waiting messages itself later; until then, this is on you.)
+- **What:** each message's lane is computed from its key and `partitions` when it arrives, and stored. Change `partitions` while messages are waiting and two things can happen:
+  - **Lowered:** waiting messages in lanes at or above the new count belong to no worker and are **never sent** (and `ductus drain` never finishes) until `partitions` is set back. `ductus hotspots` lists them as "a lane no worker reads".
+  - **Raised:** a patient's waiting messages stay in their old lane while new ones go to a different lane (maybe another worker), so until the backlog drains that patient's messages can be delivered out of order.
+  - **`workers` alone:** safe (every lane still has one owner).
+- **What to do:** change `partitions` only when the interface has nothing pending: `ductus drain --wait` (or stop the sender and check `ductus status`), then restart with the new value. If you lowered it by mistake, set it back and restart: the stranded messages are sent, in order within their lanes (a patient who also got messages while it was lowered may get those out of order, as when raising it). To give each of N workers 64 lanes, set `partitions: 64 * N`. (The engine will refuse an unsafe change, then re-assign waiting messages itself, in later releases; until then, this is on you.)
 
 ### Without an ordering key, more workers don't help (level 3)
 - **What:** an interface with no `ordering.key` is one lane, and a lane has exactly one owner. `isolation: dedicated` with `workers: 8` still processes it one message at a time per destination (the other seven workers have no lanes).
