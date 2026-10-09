@@ -889,7 +889,8 @@ async fn messages_are_resent_and_corrected_through_the_api() {
     send("C3", "MRN3", "fine").await;
     assert!(eventually(async || quarantined().await == ["C2"]).await, "the lab rejected C2");
     assert!(eventually(async || accepted_ids().len() == 2).await);
-    assert_eq!(std::fs::read_dir(&out_dir).unwrap().count(), 3, "the archive has all three");
+    let archived = || std::fs::read_dir(&out_dir).map(|d| d.count()).unwrap_or(0);
+    assert!(eventually(async || archived() == 3).await, "the archive has all three");
     let page = get(&format!("/interfaces/{name}/messages")).await;
     let id = |control: &str| {
         page["messages"].as_array().unwrap().iter().find(|m| m["control_id"] == control).unwrap()["id"]
