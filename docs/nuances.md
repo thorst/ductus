@@ -305,6 +305,17 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** the REST API listens on `127.0.0.1:7700` by default (`api.listen` in ductus.yaml, `--api-listen`, or `off`). Every call except `/health` and `/openapi.json` needs a token. Tokens are made on the server with `ductus token create` and are stored only as hashes: a lost token can't be shown again; revoke it and make a new one.
 - **What to do:** put a TLS reverse proxy in front before opening it to the network (the engine's own listeners have no TLS yet).
 
+## The web UI
+
+### The UI works over https, or at localhost on the engine's own server (level 4)
+- **What:** the engine serves the web UI on the API's listener (`http://127.0.0.1:7700/` by default). Signing in trades a token for a session cookie marked `Secure`, which browsers keep only over https, or over plain http to `localhost`/`127.0.0.1`. Over plain http to another machine the browser drops it, and the sign-in page says so.
+- **Why:** the cookie is as good as the token while it lasts; sent in clear text over a hospital network, anyone on the path could take it.
+- **What to do:** to reach the UI from other machines, put a TLS reverse proxy in front of the engine (keep `api.listen` on `127.0.0.1` behind it), or use an SSH tunnel (`ssh -L 7700:127.0.0.1:7700 server`, then `http://localhost:7700`). The engine's own TLS comes in v0.6.
+
+### A UI session is a token in disguise (level 2)
+- **What:** a browser session acts with the role of the token it signed in with, and logs show that token's name. It ends after 12 hours unused, 7 days after sign-in, on sign-out, or when the token is revoked. Changes made with the session cookie (pausing, draining) must carry the `X-Ductus: 1` header, which the UI sends and other websites can't, so a page elsewhere can't act through someone's session. Scripts use the token itself and don't need the header.
+- **What to do:** until users and logins arrive (v0.5 step 8), give each person their own token (`ductus token create jane --role operator`) so the log says who looked at which message or paused what; revoke it when they leave. The theme is kept per browser until then.
+
 ## Monitoring
 
 ### Counts and timings start at zero when the engine starts (level 3)
@@ -348,5 +359,5 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What to do:** for a blocked message, check its last error and the message (`GET /api/v1/messages/{id}`); fix the data or the receiver, or set `retry.max_attempts` so it's quarantined and the others go on (resending a single message comes with step 7). For a receiver that's down, call the vendor; `ductus pause` stops the retries meanwhile. A hot key under a few hundred messages clears by itself; one that stays hot every day is a feed to discuss with the sender (a batch load sent as one patient's updates?). Lanes with fewer than 100 waiting are never called hot: a flowing queue always has some.
 
 ### Anyone with a viewer token can read message payloads (level 4)
-- **What:** `GET /api/v1/messages/{id}` returns the payload, which holds patient data. Each read is logged with the token's name; there are no finer permissions or audit log yet (they come with users and roles in v0.5 step 8).
+- **What:** `GET /api/v1/messages/{id}` (and the message page in the UI) returns the payload, which holds patient data. Each read is logged with the token's name; there are no finer permissions or audit log yet (they come with users and roles in v0.5 step 8).
 - **What to do:** give tokens only to people and tools that may see patient data, and name them so the log says who looked.

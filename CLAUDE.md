@@ -7,8 +7,8 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 ## Non-negotiables
 
 - The invariants in `docs/architecture.md` (persist before ACK, at-least-once, one owner per lane, expand-only migrations, no credentials in code). If a change seems to need breaking one, stop and discuss.
-- **Every change ships with tests.** Unit tests next to the code; DB tests in `crates/ductus-store/tests`; script/SDK tests in `crates/ductus-script/tests` and `sdk/tests/*.test.ts` (run inside the real engine); end-to-end in `scripts/demo-*.sh` (each ends with PASS/FAIL and runs in CI).
-- **Before every commit:** `scripts/dev/check.sh` must end with `ALL CHECKS PASSED` (fmt, build incl. the binary, clippy `-D warnings`, all tests). For runtime changes also run `scripts/dev/demos.sh`.
+- **Every change ships with tests.** Unit tests next to the code; DB tests in `crates/ductus-store/tests`; script/SDK tests in `crates/ductus-script/tests` and `sdk/tests/*.test.ts` (run inside the real engine); end-to-end in `scripts/demo-*.sh` (each ends with PASS/FAIL and runs in CI); the web UI's in `ui/src/**/*.test.ts` (Vitest) and `ui/e2e` (Playwright in a real browser against a real engine, run by `scripts/demo-ui.sh`).
+- **Before every commit:** `scripts/dev/check.sh` must end with `ALL CHECKS PASSED` (the web UI's format/types/lint/tests/build, fmt, build incl. the binary, the API document the UI is typed from, clippy `-D warnings`, all tests). For runtime or UI changes also run `scripts/dev/demos.sh`.
 - Commits: `git commit -s` (DCO), message explains what and why, ends with the Co-Authored-By trailer. Push to `main` (solo project, CI on every push).
 - **Nuances get documented, not hidden.** Any behaviour that could surprise an interface developer (limits, failure semantics, things that run twice) goes into `docs/nuances.md` in the same commit, with what/why/what to do and a level (1 foundations … 5 expert; these become the certification tracks).
 - Keep `../ductus-enterprise/planning/` current: decisions in `decisions.md`, progress in `roadmap.md` and `STATUS.md`.
@@ -71,6 +71,8 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - Python on Windows writes CRLF in text mode: pass `newline='
 '` when editing repo files from a script.
 - russh 0.64: `client::Handler::check_server_key(&PublicKeyOrCertificate)`; fingerprints via `key.fingerprint(HashAlg::Sha256)` print like `ssh-keygen -lf`. SFTP `rename` won't overwrite: remove the target first.
+- **utoipa `IntoParams` structs need `#[into_params(parameter_in = Query)]`**, or the document publishes their fields as *path* parameters (the message browser's `status`/`before`/`limit` were, until the UI's generated types caught it). `the_document_has_path_parameters_only_where_the_path_has_them` guards it.
+- **Web UI (`ui/`):** Node 24 in WSL is a per-user install in `~/.local/node` (check.sh and demos.sh put it on the PATH; non-interactive WSL shells don't read `.bashrc`). TypeScript is pinned to 6.0 (typescript-eslint doesn't support 7, the Go one); openapi-typescript's `typescript ^5` peer is overridden in package.json (`overrides`), not `--force`d. TS 6 deprecates `baseUrl`: `paths` alone. A new API field or route = run check.sh, which regenerates `ui/openapi.json` and `ui/src/api/schema.d.ts` and asks for a second run. A `<section>` is a landmark (`region`) only with a name: label cards that tests or screen readers look for (`aria-label`). axe runs in every theme in `demo-ui.sh` (AAA in high contrast): new colors must pass it. Under `set -o pipefail`, `curl` to a closed port fails the whole pipeline: capture its output first.
 
 ## Where things are
 
@@ -87,7 +89,8 @@ crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for th
                        stats.rs (counts and timings in memory: histograms, Prometheus text format),
                        activity.rs (last activity and pauses, kept in the database across restarts),
                        gate.rs (drain gate), retention.rs (applies retention, runs changes, drops partitions),
-                       api/ (REST API: status, messages, reports, retention, tokens, metrics, hotspots),
+                       api/ (REST API: status, messages, reports, retention, tokens, metrics, hotspots,
+                       session (browser sign-in), ui (serves the embedded web UI; build.rs embeds ui/dist)),
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
@@ -97,6 +100,8 @@ crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/imp
                        doctor.rs: runs `doctor` (what to check is runtime's `doctor::plan`); owners.rs: `owners` report and reassign;
                        tools.rs: gen/sink/status;
                        tests/cli.rs runs the binary on temp projects)
+ui/                    web UI (React + Vite; README.md): src/api (typed client, queries, live updates), src/pages,
+                       src/components, src/lib (format, hl7, health, theme); e2e/ (Playwright, run by scripts/demo-ui.sh)
 sdk/src                TypeScript SDK (embedded via include_str! in ductus-script/src/loader.rs: add new files there)
 sdk/tests              SDK tests (TypeScript)
 scripts/               demos (end-to-end, PASS/FAIL) and scripts/dev (check.sh, demos.sh)

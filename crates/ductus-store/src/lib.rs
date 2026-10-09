@@ -11,7 +11,7 @@ mod api;
 mod retention;
 
 pub use activity::{BaselineRow, DestinationActivity, InterfaceActivity, Oldest, PauseRow, Received, Seen};
-pub use api::{Browse, LaneRow, MessageRow, QueueCount, Role, TOKEN_PREFIX, Token};
+pub use api::{Browse, LaneRow, MessageRow, QueueCount, Role, SESSION_PREFIX, TOKEN_PREFIX, Token};
 pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};
 
 use anyhow::{Context, Result};

@@ -1,0 +1,2804 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Ductus API",
+    "description": "Status, messages, drain mode and reports of a running Ductus engine. Every call but `health` needs `Authorization: Bearer <token>` (create one with `ductus token create`). Browsers sign in instead (`POST /session`) and send the session cookie; their changes also carry `X-Ductus: 1`.",
+    "license": {
+      "name": "Apache-2.0",
+      "identifier": "Apache-2.0"
+    },
+    "version": "1"
+  },
+  "servers": [
+    {
+      "url": "/api/v1"
+    }
+  ],
+  "paths": {
+    "/doctor": {
+      "post": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "Check every connection the engine needs, from its server: DNS, TCP (with the address a\nfirewall request needs), TLS (certificate, expiry), then each system's own login. Never\nsends anything to a destination. Listening ports aren't checked (the engine holds them).\nOperator.",
+        "operationId": "doctor_report",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DoctorRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Report"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/drain": {
+      "get": {
+        "tags": [
+          "drain"
+        ],
+        "summary": "Drain mode: accepting, draining or drained, and what's still pending.",
+        "operationId": "drain_status",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrainStatus"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "drain"
+        ],
+        "summary": "Start draining: stop taking new messages (MLLP listeners close, queued HTTP answers 503,\nfile pickup and schedules pause) and keep delivering what's stored. Operator.",
+        "operationId": "drain",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DrainRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrainStatus"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "drain"
+        ],
+        "summary": "Stop draining: take messages again. Operator.",
+        "operationId": "resume",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DrainStatus"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/engine": {
+      "get": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "The engine: version, environment, uptime, drain state.",
+        "operationId": "engine",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EngineInfo"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/events": {
+      "get": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Live updates (Server-Sent Events): an `update` event with every interface's queues and the\ndrain state, sent at once and then whenever something changes (checked every 2 s).",
+        "operationId": "events",
+        "responses": {
+          "200": {
+            "description": "`text/event-stream` of `update` events",
+            "content": {
+              "text/event-stream": {
+                "schema": {
+                  "$ref": "#/components/schemas/LiveUpdate"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/health": {
+      "get": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Is the engine up? Needs no token (for load balancers and monitoring).",
+        "operationId": "health",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Health"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/hotspots": {
+      "get": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Where each destination's backlog sits: the lanes messages wait in (the ordering key's\nhash), the first message of each, and which worker a failing message holds up. Only\ndestinations with messages waiting are listed.",
+        "operationId": "hotspots",
+        "parameters": [
+          {
+            "name": "interface",
+            "in": "query",
+            "description": "Only this interface's destinations.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "lanes",
+            "in": "query",
+            "description": "Lanes to list per destination, most waiting first (default 10, at most 1000). Lanes\nwhose first message is failing, and lanes no worker reads, are always listed.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DestinationHotspots"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/impact": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "Which interfaces a vendor, application or host touches, how, and who owns them (for a\nvendor breach or a VPN/IP change). Exactly one of `vendor`, `application`, `host`.",
+        "operationId": "impact_report",
+        "parameters": [
+          {
+            "name": "vendor",
+            "in": "query",
+            "description": "e.g. `Epic Systems` (ignores case).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "application",
+            "in": "query",
+            "description": "e.g. `Sunquest Lab` (ignores case).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "host",
+            "in": "query",
+            "description": "An address, subnet (`10.20.30.0/24`) or host name.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "resolve",
+            "in": "query",
+            "description": "Look host names up in DNS (from the engine's server), so names and addresses match.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ImpactReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/interfaces": {
+      "get": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Every interface with its state and each destination's queue.",
+        "operationId": "interfaces",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/InterfaceStatus"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/interfaces/{name}": {
+      "get": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "One interface: its state, queues and what it connects.",
+        "operationId": "interface",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Interface name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterfaceDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/interfaces/{name}/destinations/{destination}/pause": {
+      "post": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Pause a destination at once: nothing is sent or retried until it's resumed (a send under way\nfinishes). Messages keep queueing. No reason needed; send one now or later (pausing again\nwith a reason adds it). Survives restarts. Operator.",
+        "operationId": "pause",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Interface name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "destination",
+            "in": "path",
+            "description": "Destination name (`default` for one given with `destination:`)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PauseRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseStatus"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Resume a paused destination: it sends its backlog in order. Operator.",
+        "operationId": "unpause",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Interface name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "destination",
+            "in": "path",
+            "description": "Destination name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PauseStatus"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/interfaces/{name}/messages": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "An interface's messages, newest first, a page at a time.",
+        "operationId": "list",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Interface name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "status",
+            "in": "query",
+            "description": "Only messages with this overall status.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Only messages older than this id (the previous page's `next_before`).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, at most 500 (default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessagePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/messages/{id}": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "One message: what was received, and what each destination did with it.",
+        "operationId": "message",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MessageDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/metrics": {
+      "get": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Metrics in Prometheus's text format: messages received and delivered, retries, timings\n(receipt to sent, sends, transforms, respond-mode requests, database and API calls), queue\nsizes, stopped interfaces, drain state.",
+        "operationId": "metrics",
+        "responses": {
+          "200": {
+            "description": "Prometheus text format (0.0.4)",
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/owners": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "Who owns which interface (`about.owner`) and destination (`owner` on one someone else owns).",
+        "operationId": "owners",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OwnerGroup"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/retention": {
+      "get": {
+        "tags": [
+          "retention"
+        ],
+        "summary": "Every interface's retention, expired partitions that had to stay, and the held area.",
+        "operationId": "retention",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/retention/{name}/confirm": {
+      "post": {
+        "tags": [
+          "retention"
+        ],
+        "summary": "Confirm an interface's shorter retention, which deletes its messages past it. It's applied\nat once (or when the running change finishes). Operator.",
+        "operationId": "confirm",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Interface name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/InterfaceRetention"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/session": {
+      "get": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Who is calling: the token (directly or through a session) and its role.",
+        "operationId": "whoami",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Sign a browser in with a token: answers with a session cookie (`ductus_session`), which then\nstands in for the token. Needs the `X-Ductus: 1` header.",
+        "operationId": "sign_in",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SignIn"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Session"
+                }
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        },
+        "security": [
+          {}
+        ]
+      },
+      "delete": {
+        "tags": [
+          "session"
+        ],
+        "summary": "Sign out: the session ends at once and the cookie is cleared.",
+        "operationId": "sign_out",
+        "responses": {
+          "204": {}
+        },
+        "security": [
+          {}
+        ]
+      }
+    },
+    "/tokens": {
+      "get": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Live tokens (never their secrets). Admin.",
+        "operationId": "list",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TokenInfo"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Create a token. Its secret is in this answer only. Admin.",
+        "operationId": "create",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/tokens/{name}": {
+      "delete": {
+        "tags": [
+          "tokens"
+        ],
+        "summary": "Revoke a token: it stops working at once. Admin.",
+        "operationId": "revoke",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Token name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "Revoked"
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Change": {
+        "type": "object",
+        "required": [
+          "from",
+          "to",
+          "started_at"
+        ],
+        "properties": {
+          "from": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "rows_left": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Messages still to move or delete (an estimate)."
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "to": {
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "Check": {
+        "type": "object",
+        "description": "The result for one thing the project connects to.",
+        "required": [
+          "what",
+          "endpoint",
+          "used_by",
+          "outcome",
+          "steps",
+          "advice"
+        ],
+        "properties": {
+          "advice": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What a failure or warning most likely means, and what to do about it."
+          },
+          "endpoint": {
+            "type": "string",
+            "description": "`epic.local:5000 MLLP`, a folder, `0.0.0.0:6661 MLLP`."
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/Outcome",
+            "description": "The worst step."
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Step"
+            }
+          },
+          "used_by": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "what": {
+            "type": "string",
+            "description": "`database patient_db`, `api empi`, `destination adt → lab`, `listener`."
+          }
+        }
+      },
+      "CreatedToken": {
+        "type": "object",
+        "required": [
+          "token",
+          "secret"
+        ],
+        "properties": {
+          "secret": {
+            "type": "string",
+            "description": "The token itself: shown this once, never stored (only its hash is)."
+          },
+          "token": {
+            "$ref": "#/components/schemas/TokenInfo"
+          }
+        }
+      },
+      "DeliveryInfo": {
+        "type": "object",
+        "required": [
+          "destination",
+          "status",
+          "attempts"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "destination": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What was sent, for destinations with `save_output: true`."
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending`, `sent`, `filtered` or `quarantined`."
+          }
+        }
+      },
+      "DestinationCounts": {
+        "type": "object",
+        "required": [
+          "sent",
+          "filtered",
+          "quarantined",
+          "retries",
+          "latency",
+          "send",
+          "transform"
+        ],
+        "properties": {
+          "filtered": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "latency": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "From receipt to sent, waiting in the queue included."
+          },
+          "quarantined": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "retries": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Temporary failures (each retry counts).",
+            "minimum": 0
+          },
+          "send": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "Each successful send (the receiver's time)."
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "transform": {
+            "$ref": "#/components/schemas/Timing",
+            "description": "The destination's function."
+          }
+        }
+      },
+      "DestinationHealth": {
+        "type": "object",
+        "required": [
+          "state",
+          "summary",
+          "causes",
+          "normal"
+        ],
+        "properties": {
+          "behind": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Which `behind` limit is past: `messages` or `age`."
+          },
+          "catch_up_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seconds to catch up at the last few minutes' rates (only while catching up).",
+            "minimum": 0
+          },
+          "causes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Why a backlog grows: `burst` (more arriving than normal for this hour of the week),\n`slow_receiver` (each send slower than normal)."
+          },
+          "last_error": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/LastError",
+                "description": "The last failure (a retry or a quarantine; kept across restarts)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_sent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it last delivered (kept across restarts)."
+          },
+          "normal": {
+            "$ref": "#/components/schemas/Rates",
+            "description": "Normal for this hour of the week, learned from the hours watched (none until then)."
+          },
+          "oldest_waiting_s": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Seconds the oldest waiting message has waited.",
+            "minimum": 0
+          },
+          "recent": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Rates",
+                "description": "The last few minutes (none in the engine's first half minute)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "state": {
+            "type": "string",
+            "description": "`ok`, `behind` (past its `behind` limit), `error` (has quarantined messages), `stalled`\n(messages wait, nothing finished for a minute) or `paused` (best to worst)."
+          },
+          "summary": {
+            "type": "string",
+            "description": "In operations' words: \"behind 1,240 (oldest 12 min), catching up ~6 min; burst: 400/min\nreceived (normal 80)\"."
+          }
+        }
+      },
+      "DestinationHotspots": {
+        "type": "object",
+        "required": [
+          "interface",
+          "destination",
+          "paused",
+          "lanes_total",
+          "workers_total",
+          "waiting",
+          "lanes_waiting",
+          "summary",
+          "findings",
+          "workers",
+          "lanes"
+        ],
+        "properties": {
+          "destination": {
+            "type": "string"
+          },
+          "findings": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FindingInfo"
+            }
+          },
+          "interface": {
+            "type": "string"
+          },
+          "lanes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LaneInfo"
+            },
+            "description": "The lanes with the most waiting, plus any blocked or unread one."
+          },
+          "lanes_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Lanes the interface has (`ordering.partitions`; 1 without an ordering key).",
+            "minimum": 0
+          },
+          "lanes_waiting": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "summary": {
+            "type": "string",
+            "description": "In operations' words: \"1,240 waiting in 3 of 64 lanes; worker 2 blocked by message ...\"."
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "workers": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/WorkerInfo"
+            },
+            "description": "Workers with something waiting."
+          },
+          "workers_total": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Workers each destination has (1 in the shared pool).",
+            "minimum": 0
+          }
+        }
+      },
+      "DestinationStatus": {
+        "type": "object",
+        "required": [
+          "name",
+          "connector",
+          "pending",
+          "quarantined",
+          "health",
+          "since_start"
+        ],
+        "properties": {
+          "connector": {
+            "type": "string",
+            "description": "Where it sends: `mllp lab.local:5000`, `http api billing /charges`, `file out`."
+          },
+          "health": {
+            "$ref": "#/components/schemas/DestinationHealth",
+            "description": "Its state and why: behind, stalled, errors, and how it compares with normal."
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when it isn't the interface's owner."
+          },
+          "paused": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PauseInfo",
+                "description": "Set while it's paused on purpose (nothing sent or retried until resumed)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Waiting to be delivered."
+          },
+          "quarantined": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Needing a person."
+          },
+          "since_start": {
+            "$ref": "#/components/schemas/DestinationCounts",
+            "description": "Counts and timings since the engine started."
+          }
+        }
+      },
+      "DoctorRequest": {
+        "type": "object",
+        "properties": {
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only what these interfaces use (the engine's database is always checked)."
+          },
+          "timeout_ms": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Longest wait per step, in milliseconds (default 5000, at most 60000).",
+            "minimum": 0
+          }
+        }
+      },
+      "DrainRequest": {
+        "type": "object",
+        "properties": {
+          "stop": {
+            "type": "boolean",
+            "description": "Exit the engine once drained (for an upgrade or a server move)."
+          }
+        }
+      },
+      "DrainStatus": {
+        "type": "object",
+        "required": [
+          "state",
+          "stop_when_drained",
+          "pending",
+          "waiting_for",
+          "paused"
+        ],
+        "properties": {
+          "paused": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Paused destinations (`interface/destination`): they keep their messages and don't hold\nthe drain up."
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Deliveries still to go, over all interfaces."
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When draining started, or when it finished."
+          },
+          "state": {
+            "type": "string",
+            "description": "`accepting`, `draining` or `drained`."
+          },
+          "stop_when_drained": {
+            "type": "boolean",
+            "description": "The engine exits once drained."
+          },
+          "waiting_for": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Interfaces still holding pending deliveries (a destination that's down, or a stopped\ninterface, keeps a drain from finishing)."
+          }
+        }
+      },
+      "EngineInfo": {
+        "type": "object",
+        "required": [
+          "version",
+          "environment",
+          "host",
+          "started_at",
+          "uptime_seconds",
+          "interfaces",
+          "stopped",
+          "drain",
+          "resources"
+        ],
+        "properties": {
+          "drain": {
+            "$ref": "#/components/schemas/DrainStatus"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string",
+            "description": "The server's name."
+          },
+          "interfaces": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResourceCalls"
+            },
+            "description": "Calls from interface code to each database and API in resources.yaml (`fetch`: URLs\ncalled directly), since the engine started."
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "stopped": {
+            "type": "integer",
+            "description": "Interfaces stopped because their code ran away (their messages wait).",
+            "minimum": 0
+          },
+          "uptime_seconds": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "ErrorBody": {
+        "type": "object",
+        "required": [
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string",
+            "description": "What went wrong, in plain words."
+          }
+        }
+      },
+      "FindingInfo": {
+        "type": "object",
+        "required": [
+          "kind",
+          "text"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`blocked` (a message keeps failing; its worker's lanes wait), `all_blocked` (every worker\nis retrying: the receiver looks down), `uneven` (one worker has most of the backlog),\n`hot_lane` (one lane has most of it), `unowned` (a lane no worker reads)."
+          },
+          "lane": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "share": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Its share of the backlog (0–1), for `uneven` and `hot_lane`."
+          },
+          "text": {
+            "type": "string"
+          },
+          "worker": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "HeadInfo": {
+        "type": "object",
+        "description": "The first message waiting in a lane: the next one its worker handles.",
+        "required": [
+          "id",
+          "received_at",
+          "waiting_s",
+          "attempts"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Failed attempts: above zero, its worker is retrying it and its lanes wait."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The message (`GET /messages/{id}`)."
+          },
+          "last_attempt_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ordering_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "waiting_s": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "Health": {
+        "type": "object",
+        "required": [
+          "status",
+          "drain"
+        ],
+        "properties": {
+          "drain": {
+            "type": "string",
+            "description": "`accepting`, `draining` or `drained`: a load balancer can stop sending when it isn't\n`accepting`."
+          },
+          "status": {
+            "type": "string",
+            "description": "Always `ok` when the engine answers."
+          }
+        }
+      },
+      "Held": {
+        "type": "object",
+        "required": [
+          "messages",
+          "pending",
+          "quarantined",
+          "bytes",
+          "months",
+          "interfaces"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Disk it uses, indexes included."
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HeldInterface"
+            },
+            "description": "Interfaces with unfinished messages in it."
+          },
+          "messages": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages in it, finished ones included (they go when their month drops)."
+          },
+          "months": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HeldMonth"
+            },
+            "description": "By month: a month is dropped once nothing in it is unfinished."
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "quarantined": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "HeldInterface": {
+        "type": "object",
+        "required": [
+          "name",
+          "pending",
+          "quarantined"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "quarantined": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "HeldMonth": {
+        "type": "object",
+        "required": [
+          "month",
+          "partition",
+          "messages",
+          "pending",
+          "quarantined",
+          "bytes"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "messages": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "month": {
+            "type": "string",
+            "description": "The month, `2026-09`."
+          },
+          "partition": {
+            "type": "string"
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "quarantined": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ImpactHit": {
+        "type": "object",
+        "required": [
+          "interface",
+          "role",
+          "reason",
+          "endpoints"
+        ],
+        "properties": {
+          "endpoints": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Hosts and ports, listening ports, folders to look at."
+          },
+          "interface": {
+            "type": "string"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why it matched."
+          },
+          "role": {
+            "type": "string",
+            "description": "`source`, `destination lab`, `database patient_db`, `api empi`."
+          }
+        }
+      },
+      "ImpactReport": {
+        "type": "object",
+        "required": [
+          "query",
+          "affected",
+          "interfaces",
+          "hits",
+          "known",
+          "incomplete"
+        ],
+        "properties": {
+          "affected": {
+            "type": "integer",
+            "description": "Interfaces affected, of `interfaces`.",
+            "minimum": 0
+          },
+          "hits": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ImpactHit"
+            }
+          },
+          "incomplete": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Interfaces that don't name every system they connect (they may be missing here)."
+          },
+          "interfaces": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "known": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "With no hits for a vendor or application: the names that are known."
+          },
+          "query": {
+            "type": "string",
+            "description": "What was looked for, e.g. `vendor \"Epic Systems\"`."
+          }
+        }
+      },
+      "InterfaceCounts": {
+        "type": "object",
+        "required": [
+          "received",
+          "duplicates",
+          "store_failures"
+        ],
+        "properties": {
+          "duplicates": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Stored as duplicates, not queued.",
+            "minimum": 0
+          },
+          "received": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Stored and queued.",
+            "minimum": 0
+          },
+          "request_errors": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "requests": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Timing",
+                "description": "Respond mode: requests answered, how long they took in the engine, and how many failed."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "store_failures": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Couldn't be stored (the sender was told to retry).",
+            "minimum": 0
+          }
+        }
+      },
+      "InterfaceDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/InterfaceStatus"
+          },
+          {
+            "type": "object",
+            "required": [
+              "from",
+              "from_hosts",
+              "to",
+              "timeout_ms",
+              "format",
+              "folder"
+            ],
+            "properties": {
+              "folder": {
+                "type": "string"
+              },
+              "format": {
+                "type": "string"
+              },
+              "from": {
+                "$ref": "#/components/schemas/SystemInfo",
+                "description": "The sending system and where its connections come from."
+              },
+              "from_hosts": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "timeout_ms": {
+                "type": "integer",
+                "format": "int64",
+                "description": "Longest the code may run without pausing.",
+                "minimum": 0
+              },
+              "to": {
+                "$ref": "#/components/schemas/SystemInfo",
+                "description": "The receiving system (destinations may name their own)."
+              }
+            }
+          }
+        ]
+      },
+      "InterfaceHealth": {
+        "type": "object",
+        "required": [
+          "state",
+          "summary"
+        ],
+        "properties": {
+          "last_received": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When something last arrived (kept across restarts)."
+          },
+          "state": {
+            "type": "string",
+            "description": "`ok`, `silent` (nothing within `active_within`), `missed` (nothing by `active_by`) or\n`stopped` (best to worst)."
+          },
+          "summary": {
+            "type": "string",
+            "description": "In operations' words: \"silent: nothing received for 47 min\"."
+          }
+        }
+      },
+      "InterfaceRetention": {
+        "type": "object",
+        "required": [
+          "name",
+          "configured",
+          "days",
+          "needs_confirmation"
+        ],
+        "properties": {
+          "change": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Change",
+                "description": "A change in progress (its older messages are being moved, or deleted when past the new\nretention), if any."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "configured": {
+            "type": "integer",
+            "format": "int32",
+            "description": "What interface.yaml (or ductus.yaml) says, in days."
+          },
+          "days": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The retention in force: its new messages are kept this many days."
+          },
+          "name": {
+            "type": "string"
+          },
+          "needs_confirmation": {
+            "type": "boolean",
+            "description": "The waiting value deletes messages: confirm it (`POST /retention/{name}/confirm`)."
+          },
+          "waiting": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "A configured value not applied yet: a change is running, or it's shorter and needs a\nconfirmation."
+          },
+          "would_delete": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How many messages the waiting value would delete now, when it needs a confirmation."
+          }
+        }
+      },
+      "InterfaceStatus": {
+        "type": "object",
+        "required": [
+          "name",
+          "state",
+          "accepting",
+          "source",
+          "isolation",
+          "workers",
+          "health",
+          "since_start",
+          "destinations"
+        ],
+        "properties": {
+          "accepting": {
+            "type": "boolean",
+            "description": "False while draining."
+          },
+          "description": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DestinationStatus"
+            }
+          },
+          "health": {
+            "$ref": "#/components/schemas/InterfaceHealth",
+            "description": "What it should have received (`monitor:` in interface.yaml), checked now."
+          },
+          "isolation": {
+            "type": "string",
+            "description": "`shared` or `dedicated`."
+          },
+          "name": {
+            "type": "string"
+          },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retention_days": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Days its messages are kept, as configured (none in respond mode: it stores nothing).\n`GET /retention` has changes in progress."
+          },
+          "since_start": {
+            "$ref": "#/components/schemas/InterfaceCounts",
+            "description": "Counts since the engine started (they start at zero with it)."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where messages come from: `mllp 0.0.0.0:6661`, `http POST /orders on 0.0.0.0:8080 (queue)`."
+          },
+          "state": {
+            "type": "string",
+            "description": "`running`, or `stopped` (its code ran away: its messages wait until it's fixed and the\nengine restarted)."
+          },
+          "stopped_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "workers": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Parallel workers (dedicated) or 1 (shared).",
+            "minimum": 0
+          }
+        }
+      },
+      "KeptPartition": {
+        "type": "object",
+        "required": [
+          "partition",
+          "tier",
+          "pending",
+          "quarantined",
+          "kept_for"
+        ],
+        "properties": {
+          "kept_for": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Interfaces that now keep their messages longer, with messages still in it."
+          },
+          "partition": {
+            "type": "string"
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "quarantined": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "tier": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Its retention tier, in days."
+          }
+        }
+      },
+      "LaneInfo": {
+        "type": "object",
+        "required": [
+          "lane",
+          "waiting",
+          "head"
+        ],
+        "properties": {
+          "head": {
+            "$ref": "#/components/schemas/HeadInfo"
+          },
+          "lane": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "worker": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "None: no worker reads it (`ordering.partitions` was lowered while it had messages).",
+            "minimum": 0
+          }
+        }
+      },
+      "LastError": {
+        "type": "object",
+        "required": [
+          "at",
+          "error"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "error": {
+            "type": "string"
+          }
+        }
+      },
+      "LiveDestination": {
+        "type": "object",
+        "required": [
+          "name",
+          "pending",
+          "quarantined",
+          "paused"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "quarantined": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "LiveInterface": {
+        "type": "object",
+        "required": [
+          "name",
+          "state",
+          "accepting",
+          "destinations"
+        ],
+        "properties": {
+          "accepting": {
+            "type": "boolean"
+          },
+          "destinations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LiveDestination"
+            }
+          },
+          "name": {
+            "type": "string"
+          },
+          "state": {
+            "type": "string"
+          }
+        }
+      },
+      "LiveUpdate": {
+        "type": "object",
+        "required": [
+          "at",
+          "drain",
+          "interfaces"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "drain": {
+            "$ref": "#/components/schemas/DrainStatus"
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/LiveInterface"
+            }
+          }
+        }
+      },
+      "MessageDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/MessageSummary"
+          },
+          {
+            "type": "object",
+            "required": [
+              "payload",
+              "deliveries"
+            ],
+            "properties": {
+              "deliveries": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/DeliveryInfo"
+                }
+              },
+              "payload": {
+                "type": "string",
+                "description": "The message as received (bytes that aren't UTF-8 are replaced)."
+              }
+            }
+          }
+        ]
+      },
+      "MessagePage": {
+        "type": "object",
+        "required": [
+          "messages"
+        ],
+        "properties": {
+          "messages": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MessageSummary"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Pass as `before` for the next (older) page; absent on the last page."
+          }
+        }
+      },
+      "MessageSummary": {
+        "type": "object",
+        "required": [
+          "id",
+          "received_at",
+          "interface",
+          "status",
+          "size",
+          "updated_at"
+        ],
+        "properties": {
+          "control_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "MSH-10 for HL7."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interface": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why it was quarantined or filtered (per destination when there are several)."
+          },
+          "ordering_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Routed from another interface: the id of the message there (`GET /messages/{origin}`)."
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Payload size in bytes."
+          },
+          "status": {
+            "type": "string",
+            "description": "`pending`, `sent`, `filtered`, `quarantined` or `duplicate`: the overall status (pending\nuntil every destination is done)."
+          },
+          "updated_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "NewToken": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "Who or what uses it, e.g. `ci` or `monitoring`."
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`viewer` (default), `operator` or `admin`."
+          }
+        }
+      },
+      "Outcome": {
+        "type": "string",
+        "enum": [
+          "ok",
+          "warn",
+          "fail"
+        ]
+      },
+      "Owned": {
+        "type": "object",
+        "required": [
+          "interface"
+        ],
+        "properties": {
+          "destination": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set for a destination owned by someone other than its interface's owner."
+          },
+          "interface": {
+            "type": "string"
+          }
+        }
+      },
+      "OwnerGroup": {
+        "type": "object",
+        "required": [
+          "owns"
+        ],
+        "properties": {
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absent for what nobody owns (listed last)."
+          },
+          "owns": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Owned"
+            }
+          }
+        }
+      },
+      "PauseInfo": {
+        "type": "object",
+        "required": [
+          "at",
+          "by"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "by": {
+            "type": "string",
+            "description": "The token that paused it."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why, once someone says (it can be added after the pause)."
+          },
+          "reason_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "reason_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "PauseRequest": {
+        "type": "object",
+        "properties": {
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why (optional: pause first, explain after; pausing again with a reason adds it)."
+          }
+        }
+      },
+      "PauseStatus": {
+        "type": "object",
+        "required": [
+          "interface",
+          "destination",
+          "pending"
+        ],
+        "properties": {
+          "destination": {
+            "type": "string"
+          },
+          "interface": {
+            "type": "string"
+          },
+          "paused": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PauseInfo",
+                "description": "The pause (on `DELETE`: the pause that was ended; none if it wasn't paused)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "pending": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Messages waiting for it."
+          }
+        }
+      },
+      "Rates": {
+        "type": "object",
+        "properties": {
+          "done_per_min": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Messages finished per minute (sent, filtered or quarantined)."
+          },
+          "received_per_min": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "Messages arriving per minute."
+          },
+          "send_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double",
+            "description": "A successful send's mean time."
+          }
+        }
+      },
+      "Report": {
+        "type": "object",
+        "description": "The whole report: what `ductus doctor` prints and `--report` saves.",
+        "required": [
+          "generated_at",
+          "environment",
+          "host",
+          "version",
+          "seconds",
+          "checks"
+        ],
+        "properties": {
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/Check"
+            }
+          },
+          "environment": {
+            "type": "string"
+          },
+          "generated_at": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "seconds": {
+            "type": "number",
+            "format": "double"
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "ResourceCalls": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name",
+          "calls",
+          "errors"
+        ],
+        "properties": {
+          "calls": {
+            "$ref": "#/components/schemas/Timing"
+          },
+          "errors": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Calls that failed (network, SQL, timeout; an HTTP error status is an answer, not a failure).",
+            "minimum": 0
+          },
+          "kind": {
+            "type": "string",
+            "description": "`db`, `api` or `fetch`."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
+      "RetentionReport": {
+        "type": "object",
+        "required": [
+          "interfaces",
+          "kept",
+          "held"
+        ],
+        "properties": {
+          "held": {
+            "$ref": "#/components/schemas/Held",
+            "description": "The held area as of the last drop: messages past their retention that someone still\nneeds (pending for a destination, or quarantined and kept until resolved)."
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/InterfaceRetention"
+            }
+          },
+          "kept": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/KeptPartition"
+            },
+            "description": "Expired partitions kept at the last drop, and why."
+          },
+          "last_drop_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When expired partitions were last dropped (hourly)."
+          }
+        }
+      },
+      "Session": {
+        "type": "object",
+        "required": [
+          "name",
+          "role"
+        ],
+        "properties": {
+          "ends_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the session ends at the latest (it also ends after 12 hours unused). None when the\ncall came with a token instead of a session."
+          },
+          "name": {
+            "type": "string",
+            "description": "The token's name."
+          },
+          "role": {
+            "type": "string",
+            "description": "`viewer`, `operator` or `admin`."
+          }
+        }
+      },
+      "SignIn": {
+        "type": "object",
+        "required": [
+          "token"
+        ],
+        "properties": {
+          "token": {
+            "type": "string",
+            "description": "An API token (`dux_...`)."
+          }
+        }
+      },
+      "Step": {
+        "type": "object",
+        "description": "One step of a check: `DNS`, `connect`, `TLS`, `login`, `HTTP`, `commits`, `folder`, `port`.",
+        "required": [
+          "name",
+          "outcome",
+          "detail"
+        ],
+        "properties": {
+          "detail": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/Outcome"
+          }
+        }
+      },
+      "SystemInfo": {
+        "type": "object",
+        "properties": {
+          "application": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "vendor": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "Timing": {
+        "type": "object",
+        "description": "How long something took, over every time since the engine started (estimated from histogram\nbuckets, like Prometheus does: good to a bucket's width).",
+        "required": [
+          "count"
+        ],
+        "properties": {
+          "count": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "mean_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "p50_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          },
+          "p95_ms": {
+            "type": [
+              "number",
+              "null"
+            ],
+            "format": "double"
+          }
+        }
+      },
+      "TokenInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "role",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "last_used_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "To the minute."
+          },
+          "name": {
+            "type": "string"
+          },
+          "role": {
+            "type": "string",
+            "description": "`viewer`, `operator` or `admin`."
+          }
+        }
+      },
+      "WorkerInfo": {
+        "type": "object",
+        "required": [
+          "worker",
+          "lanes_waiting",
+          "waiting"
+        ],
+        "properties": {
+          "blocked_by": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The lane whose first message it keeps retrying."
+          },
+          "lanes_waiting": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "worker": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          }
+        }
+      }
+    },
+    "securitySchemes": {
+      "session": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "ductus_session"
+      },
+      "token": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "dux_..."
+      }
+    }
+  },
+  "security": [
+    {
+      "token": []
+    },
+    {
+      "session": []
+    }
+  ],
+  "tags": [
+    {
+      "name": "engine",
+      "description": "The engine, its interfaces and live updates"
+    },
+    {
+      "name": "session",
+      "description": "Signing a browser in and out"
+    },
+    {
+      "name": "messages",
+      "description": "The message browser"
+    },
+    {
+      "name": "drain",
+      "description": "Stop taking messages and deliver what's stored"
+    },
+    {
+      "name": "reports",
+      "description": "Impact, owners and connection checks"
+    },
+    {
+      "name": "retention",
+      "description": "How long messages are kept, and changes to it"
+    },
+    {
+      "name": "tokens",
+      "description": "API tokens (admin)"
+    }
+  ]
+}

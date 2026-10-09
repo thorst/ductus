@@ -1518,6 +1518,7 @@ dependencies = [
  "ductus-mllp",
  "ductus-script",
  "ductus-store",
+ "flate2",
  "futures-util",
  "rcgen",
  "reqwest",

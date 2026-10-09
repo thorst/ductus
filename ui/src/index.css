@@ -1,0 +1,112 @@
+@import "tailwindcss";
+
+/*
+ * Themes. Every color comes from five: header, accent (links, buttons, focus), page background,
+ * panel (cards, tables, sidebar) and text. The rest is mixed from them (OKLCH), so the per-user
+ * scheme (five colors, decisions.md) always gives a coherent result. Status colors are set per
+ * theme for contrast; meaning is never carried by color alone (badges have an icon and a word).
+ *
+ * `data-theme` on <html>: none = follow the OS, `light`, `dark`, `contrast` (WCAG AAA, 7:1).
+ * Light and dark are one set of `light-dark()` pairs: the theme only picks `color-scheme`.
+ */
+:root {
+  color-scheme: light dark;
+  --header: light-dark(#17233b, #0b111c);
+  --header-fg: light-dark(#ffffff, #e9eef5);
+  --accent: light-dark(#2f5bd3, #7ca3ff);
+  --accent-fg: light-dark(#ffffff, #0a1020);
+  --bg: light-dark(#f3f5f8, #0e131a);
+  --panel: light-dark(#ffffff, #151c26);
+  --text: light-dark(#17202b, #e2e8f0);
+
+  --ok: light-dark(#17733f, #4cc987);
+  --warn: light-dark(#8f5300, #f0b04a);
+  --bad: light-dark(#b8232a, #ff7272);
+  --paused: light-dark(#5450c4, #a9a6ff);
+
+  --muted: color-mix(in oklch, var(--text) 66%, var(--panel));
+  --border: color-mix(in oklch, var(--text) 14%, var(--panel));
+  --hover: color-mix(in oklch, var(--text) 5%, var(--panel));
+  --accent-soft: color-mix(in oklch, var(--accent) 13%, var(--panel));
+  --focus: var(--accent);
+  --focus-width: 2px;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+/* High contrast: black and white, yellow accent; muted text and borders at full strength. */
+:root[data-theme="contrast"] {
+  color-scheme: dark;
+  --header: #000000;
+  --header-fg: #ffffff;
+  --accent: #ffd400;
+  --accent-fg: #000000;
+  --bg: #000000;
+  --panel: #000000;
+  --text: #ffffff;
+  --ok: #7dffa8;
+  --warn: #ffd400;
+  --bad: #ff9a9a;
+  --paused: #d4c8ff;
+  --muted: #ffffff;
+  --border: #ffffff;
+  --hover: #262626;
+  --accent-soft: #262000;
+  --focus-width: 3px;
+}
+
+@theme inline {
+  --color-header: var(--header);
+  --color-header-fg: var(--header-fg);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-accent-soft: var(--accent-soft);
+  --color-bg: var(--bg);
+  --color-panel: var(--panel);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-border: var(--border);
+  --color-hover: var(--hover);
+  --color-ok: var(--ok);
+  --color-warn: var(--warn);
+  --color-bad: var(--bad);
+  --color-paused: var(--paused);
+  --font-sans: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: ui-monospace, "Cascadia Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+@layer base {
+  html,
+  body {
+    background: var(--bg);
+    color: var(--text);
+    -webkit-font-smoothing: antialiased;
+  }
+  *,
+  ::before,
+  ::after {
+    border-color: var(--border);
+  }
+  :focus-visible {
+    outline: var(--focus-width) solid var(--focus);
+    outline-offset: 2px;
+  }
+  a {
+    color: var(--accent);
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+  ::selection {
+    background: color-mix(in oklch, var(--accent) 30%, transparent);
+  }
+  [data-theme="contrast"] a {
+    text-decoration: underline;
+  }
+}

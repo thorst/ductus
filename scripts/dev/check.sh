@@ -1,6 +1,10 @@
 #!/usr/bin/env bash
 # The gates every change must pass before commit (CI runs the same):
-#   format -> build (incl. the ductus binary) -> clippy -D warnings -> all tests.
+#   web UI (format, types, lint, tests, build) -> format -> build (incl. the ductus binary, with
+#   the UI embedded) -> the API document the UI is typed from is current -> clippy -D warnings
+#   -> all tests.
+#
+# Needs Node 24 for the UI (in WSL: a per-user install in ~/.local/node is picked up).
 #
 # Run from WSL/Linux:   bash scripts/dev/check.sh
 # From Windows:         wsl -d Ubuntu -- bash /mnt/d/Projects/integration_engine/ductus/scripts/dev/check.sh
@@ -22,8 +26,28 @@ if [ -z "${DUCTUS_TEST_SQLSERVER:-}" ]; then
   fi
 fi
 
+[ -x "$HOME/.local/node/bin/node" ] && export PATH="$HOME/.local/node/bin:$PATH"
+command -v npm >/dev/null || { echo "Node 24 is needed for the web UI (nodejs.org)"; exit 1; }
+echo "== ui"
+(
+  cd ui
+  [ -d node_modules ] || npm ci --no-audit --no-fund >/dev/null
+  npm run -s format >/dev/null
+  npm run -s check >/tmp/ductus-ui-check.log 2>&1 || { cat /tmp/ductus-ui-check.log; echo "UI CHECKS FAILED"; exit 1; }
+  sed 's/\x1b\[[0-9;]*m//g' /tmp/ductus-ui-check.log | grep -E '^ *Tests +[0-9]+ passed' || true
+  npm run -s build 2>&1 | grep -E 'error|UI size|over the' || true
+  [ -f dist/index.html ] || { echo "UI BUILD FAILED"; exit 1; }
+)
+export DUCTUS_REQUIRE_UI=1
 echo "== fmt";    cargo fmt --all
 echo "== build";  cargo build --release 2>&1 | grep -E '^(warning|error)|-->' || true
+# The UI's API types are generated from the API document; a changed API means new types.
+if ! "$CARGO_TARGET_DIR/release/ductus" api-spec | cmp -s - ui/openapi.json; then
+  "$CARGO_TARGET_DIR/release/ductus" api-spec >ui/openapi.json
+  (cd ui && npm run -s api-types >/dev/null)
+  echo "The API changed: updated ui/openapi.json and ui/src/api/schema.d.ts. Run check.sh again."
+  exit 1
+fi
 echo "== clippy"; cargo clippy --release --all-targets -- -D warnings 2>&1 | grep -E '^(warning|error)|-->' || true
 echo "== test"
 if cargo test --release -q 2>&1 | tee /tmp/ductus-test.log | grep -E 'test result: ok\. [1-9]|FAILED|panicked'; then :; fi

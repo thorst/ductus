@@ -803,3 +803,112 @@ async fn a_paused_destination_waits_until_resumed() {
     drop(engine);
     run(&["token", "revoke", &format!("{name}-ops")]);
 }
+
+/// The web UI comes with the engine: any path outside `/api` is the app (its router shows the
+/// page), with a CSP and the right caching. A browser signs in with a token and gets a session
+/// cookie that stands in for it; changes made with the cookie need the `X-Ductus` header (so
+/// other sites can't use someone's session); signing out or revoking the token ends it.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_ui_is_served_and_a_browser_signs_in_with_a_session() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let api = free_port();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("session-test-{nanos}");
+    let dir = project(&[(
+        format!("interfaces/{name}/interface.yaml").as_str(),
+        format!("name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestination: {{ file: {{ dir: out }} }}\n", free_port()).as_str(),
+    )]);
+    let run = |args: &[&str]| {
+        let out =
+            Command::new(env!("CARGO_BIN_EXE_ductus")).args(args).env("DUCTUS_DATABASE_URL", &db).output().unwrap();
+        (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string())
+    };
+    let (ok, token) = run(&["token", "create", &format!("{name}-ops"), "--role", "operator"]);
+    assert!(ok, "{token}");
+    let _engine = Child(
+        Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["run", "--root", &dir.path().to_string_lossy(), "--threads", "1"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let url = format!("http://127.0.0.1:{api}");
+    let base = format!("{url}/api/v1");
+    let http = reqwest::Client::new();
+    let mut up = false;
+    for _ in 0..100 {
+        if http.get(format!("{base}/health")).send().await.is_ok_and(|r| r.status().is_success()) {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(up, "the API never came up");
+
+    // The app, at every path its router knows (or doesn't: it shows "nothing here" itself).
+    for path in ["/", "/interfaces/adt", "/messages/12"] {
+        let page = http.get(format!("{url}{path}")).send().await.unwrap();
+        assert_eq!(page.status(), 200, "{path}");
+        let h = page.headers();
+        assert!(h["content-type"].to_str().unwrap().starts_with("text/html"), "{path}");
+        assert_eq!(h["cache-control"], "no-cache", "{path}: an upgrade must show at once");
+        assert!(h["content-security-policy"].to_str().unwrap().contains("frame-ancestors 'none'"), "{path}");
+        assert!(page.text().await.unwrap().contains("<title>Ductus</title>"), "{path}");
+    }
+    // A hashed file of another version is a 404, never HTML; unknown API paths answer in JSON.
+    assert_eq!(http.get(format!("{url}/assets/index-gone.js")).send().await.unwrap().status(), 404);
+    let missing = http.get(format!("{base}/nope")).send().await.unwrap();
+    assert_eq!(missing.status(), 404);
+    assert!(missing.text().await.unwrap().contains("\"error\""));
+    assert_eq!(http.post(format!("{url}/interfaces")).send().await.unwrap().status(), 405);
+
+    // Signing in: needs the header, and a live token.
+    let sign_in = |token: &str, header: bool| {
+        let request = http.post(format!("{base}/session")).json(&serde_json::json!({ "token": token }));
+        (if header { request.header("X-Ductus", "1") } else { request }).send()
+    };
+    assert_eq!(sign_in(&token, false).await.unwrap().status(), 403);
+    assert_eq!(sign_in("dux_wrong", true).await.unwrap().status(), 401);
+    let signed_in = sign_in(&token, true).await.unwrap();
+    assert_eq!(signed_in.status(), 200);
+    let set_cookie = signed_in.headers()["set-cookie"].to_str().unwrap().to_string();
+    for part in ["ductus_session=dus_", "HttpOnly", "Secure", "SameSite=Strict", "Path=/api", "Max-Age=6047"] {
+        assert!(set_cookie.contains(part), "{part} missing from {set_cookie}");
+    }
+    let me: serde_json::Value = signed_in.json().await.unwrap();
+    assert_eq!((&me["name"], &me["role"]), (&format!("{name}-ops").into(), &"operator".into()), "{me}");
+    assert!(me["ends_at"].is_string(), "{me}");
+    let cookie = set_cookie.split(';').next().unwrap().to_string();
+
+    // The cookie reads like the token; a change also needs the header.
+    let get = |path: &str| http.get(format!("{base}{path}")).header("cookie", &cookie).send();
+    let interfaces: serde_json::Value = get("/interfaces").await.unwrap().json().await.unwrap();
+    assert!(interfaces.to_string().contains(&name), "{interfaces}");
+    let pause = format!("{base}/interfaces/{name}/destinations/default/pause");
+    let refused = http.post(&pause).header("cookie", &cookie).send().await.unwrap();
+    assert_eq!(refused.status(), 403);
+    assert!(refused.text().await.unwrap().contains("X-Ductus"));
+    let paused = http.post(&pause).header("cookie", &cookie).header("X-Ductus", "1").send().await.unwrap();
+    assert_eq!(paused.status(), 200);
+    http.delete(&pause).header("cookie", &cookie).header("X-Ductus", "1").send().await.unwrap();
+    // Live updates take the cookie too (a browser's EventSource sends it).
+    let events = get("/events").await.unwrap();
+    assert_eq!(events.status(), 200);
+    assert_eq!(events.headers()["content-type"], "text/event-stream");
+    drop(events);
+
+    // Signing out ends it at once; so does revoking the token.
+    let out = http.delete(format!("{base}/session")).header("cookie", &cookie).send().await.unwrap();
+    assert_eq!(out.status(), 204);
+    assert!(out.headers()["set-cookie"].to_str().unwrap().contains("Max-Age=0"));
+    assert_eq!(get("/interfaces").await.unwrap().status(), 401);
+    let again = sign_in(&token, true).await.unwrap();
+    let cookie = again.headers()["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    assert_eq!(http.get(format!("{base}/session")).header("cookie", &cookie).send().await.unwrap().status(), 200);
+    run(&["token", "revoke", &format!("{name}-ops")]);
+    let ended = http.get(format!("{base}/session")).header("cookie", &cookie).send().await.unwrap();
+    assert_eq!(ended.status(), 401);
+    assert!(ended.text().await.unwrap().contains("sign in again"));
+}

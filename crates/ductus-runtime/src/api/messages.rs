@@ -63,6 +63,7 @@ pub struct MessagePage {
 }
 
 #[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListQuery {
     /// Only messages with this overall status.
     status: Option<String>,

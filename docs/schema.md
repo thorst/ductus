@@ -102,6 +102,21 @@ REST API tokens (`ductus token create`, or `POST /api/v1/tokens`). Only a hash o
 
 Indexes: primary key `id`; unique `hash`; `api_tokens_live_name (name) WHERE revoked_at IS NULL` (unique).
 
+## `api_sessions`
+
+Web UI sessions: a browser signs in with a token (`POST /api/v1/session`) and gets a cookie instead of keeping the token. A session acts with its token's role and ends when the token is revoked, when it's been idle for 12 hours, or 7 days after sign-in. Expired sessions are deleted when the next one is made.
+
+| column | type | |
+|---|---|---|
+| `id` | integer | Identity. |
+| `hash` | bytea | SHA-256 of the cookie's value (32 random bytes). |
+| `token_id` | integer | The token it signed in with (`api_tokens.id`). |
+| `created_at` | timestamptz | Sign-in. |
+| `last_seen_at` | timestamptz | Last use, to the minute (written at most once a minute). |
+| `expires_at` | timestamptz | 7 days after sign-in, whatever its use. |
+
+Indexes: primary key `id`; unique `hash`; `api_sessions_expires (expires_at)`.
+
 ## `retention`
 
 Each interface's retention as the engine applied it, and the change in progress. Changes run one at a time per interface: a different value configured meanwhile waits in `waiting`, and so does a shorter one (it deletes messages) until someone confirms it (`ductus retention confirm`).

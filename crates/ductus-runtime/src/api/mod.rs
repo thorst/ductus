@@ -4,16 +4,20 @@
 //! spec can't drift from the code.
 //!
 //! Every call but `health` and `openapi.json` needs a token (`Authorization: Bearer dux_...`,
-//! made with `ductus token create`). Roles: viewer reads, operator also drains and runs
-//! connection checks, admin also manages tokens.
+//! made with `ductus token create`) or a browser session made from one (`session.rs`). Roles:
+//! viewer reads, operator also drains and runs connection checks, admin also manages tokens.
+//!
+//! The same listener serves the web UI (`ui.rs`) at every path outside `/api`.
 
 mod hotspots;
 mod messages;
 mod metrics;
 mod reports;
 mod retention;
+mod session;
 mod status;
 mod tokens;
+mod ui;
 
 use crate::control::Engine;
 use axum::extract::{FromRequestParts, State};
@@ -21,10 +25,11 @@ use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
+use chrono::{DateTime, Utc};
 use ductus_store::{Role, Token};
 use serde::Serialize;
 use std::sync::Arc;
-use utoipa::openapi::security::{HttpAuthScheme, HttpBuilder, SecurityScheme};
+use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 
@@ -35,13 +40,14 @@ pub type Shared = Arc<Engine>;
     info(
         title = "Ductus API",
         version = "1",
-        description = "Status, messages, drain mode and reports of a running Ductus engine. Every call but `health` needs `Authorization: Bearer <token>` (create one with `ductus token create`)."
+        description = "Status, messages, drain mode and reports of a running Ductus engine. Every call but `health` needs `Authorization: Bearer <token>` (create one with `ductus token create`). Browsers sign in instead (`POST /session`) and send the session cookie; their changes also carry `X-Ductus: 1`."
     ),
     servers((url = "/api/v1")),
     modifiers(&BearerToken),
-    security(("token" = [])),
+    security(("token" = []), ("session" = [])),
     tags(
         (name = "engine", description = "The engine, its interfaces and live updates"),
+        (name = "session", description = "Signing a browser in and out"),
         (name = "messages", description = "The message browser"),
         (name = "drain", description = "Stop taking messages and deliver what's stored"),
         (name = "reports", description = "Impact, owners and connection checks"),
@@ -58,23 +64,38 @@ impl Modify for BearerToken {
         let components = openapi.components.get_or_insert_default();
         let scheme = HttpBuilder::new().scheme(HttpAuthScheme::Bearer).bearer_format("dux_...").build();
         components.add_security_scheme("token", SecurityScheme::Http(scheme));
+        let cookie = ApiKey::Cookie(ApiKeyValue::new(session::COOKIE));
+        components.add_security_scheme("session", SecurityScheme::ApiKey(cookie));
     }
 }
 
-/// The router (under `/api/v1`) and its OpenAPI document.
-pub fn router(engine: Shared) -> (Router, utoipa::openapi::OpenApi) {
-    let (api, doc) = OpenApiRouter::with_openapi(ApiDoc::openapi())
+fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
+    OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(status::routes())
+        .merge(session::routes())
         .merge(hotspots::routes())
         .merge(messages::routes())
         .merge(metrics::routes())
         .merge(reports::routes())
         .merge(retention::routes())
         .merge(tokens::routes())
-        .split_for_parts();
+        .split_for_parts()
+}
+
+/// The OpenAPI document, without an engine (`ductus api-spec`: the web UI's types are made
+/// from it).
+pub fn openapi() -> utoipa::openapi::OpenApi {
+    parts().1
+}
+
+/// The router (`/api/v1`, and the web UI at every other path) and its OpenAPI document.
+pub fn router(engine: Shared) -> (Router, utoipa::openapi::OpenApi) {
+    let (api, doc) = parts();
     let spec = doc.clone();
-    let api = api.route("/openapi.json", axum::routing::get(move || async move { Json(spec) }));
-    (Router::new().nest("/api/v1", api.with_state(engine)), doc)
+    let api = api
+        .route("/openapi.json", axum::routing::get(move || async move { Json(spec) }))
+        .fallback(|| async { ApiError::not_found("no such API path (the reference is at /api/v1/openapi.json)") });
+    (Router::new().nest("/api/v1", api.with_state(engine)).fallback(ui::serve), doc)
 }
 
 /// Serve the API at `host:port` until the engine shuts down. The task ends once the requests
@@ -140,24 +161,39 @@ impl IntoResponse for ApiError {
 
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
-/// Who is calling: the token that came with the request.
-pub struct Caller(pub Token);
+/// Who is calling: the token that came with the request, directly or through a browser's
+/// session (`session` is then when it ends).
+pub struct Caller {
+    pub token: Token,
+    pub session: Option<DateTime<Utc>>,
+}
 
 impl Caller {
     /// Refuse unless the token's role is at least `role`.
     pub fn require(&self, role: Role) -> Result<(), ApiError> {
-        if self.0.role >= role {
+        if self.token.role >= role {
             return Ok(());
         }
         Err(ApiError::new(
             StatusCode::FORBIDDEN,
-            format!("token `{}` is a {}; this needs {}", self.0.name, self.0.role.label(), role.label()),
+            format!("token `{}` is a {}; this needs {}", self.token.name, self.token.role.label(), role.label()),
         ))
     }
 
     pub fn name(&self) -> &str {
-        &self.0.name
+        &self.token.name
     }
+}
+
+/// A signed-in browser's requests that change something must carry this header. Other sites
+/// can't send it without the engine agreeing first (CORS, which it never does), so a page
+/// elsewhere can't use the session cookie to act. Scripts using a token don't need it.
+pub const BROWSER_HEADER: &str = "x-ductus";
+
+/// `Authorization: Bearer ...`, if given.
+fn bearer(parts: &Parts) -> Option<&str> {
+    let value = parts.headers.get(header::AUTHORIZATION)?.to_str().ok()?;
+    value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer ")).map(str::trim)
 }
 
 impl FromRequestParts<Shared> for Caller {
@@ -167,19 +203,50 @@ impl FromRequestParts<Shared> for Caller {
         let unauthorized = |message: &str| {
             ApiError::new(StatusCode::UNAUTHORIZED, format!("{message} (create a token with `ductus token create`)"))
         };
-        let secret = parts
-            .headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.strip_prefix("Bearer ").or_else(|| v.strip_prefix("bearer ")))
-            .map(str::trim)
-            .ok_or_else(|| unauthorized("missing `Authorization: Bearer <token>`"))?;
-        match engine.store.authenticate(secret).await? {
-            Some(token) => Ok(Caller(token)),
-            None => Err(unauthorized("unknown or revoked token")),
+        if let Some(secret) = bearer(parts) {
+            return match engine.store.authenticate(secret).await? {
+                Some(token) => Ok(Caller { token, session: None }),
+                None => Err(unauthorized("unknown or revoked token")),
+            };
+        }
+        let Some(secret) = session::cookie(parts) else {
+            return Err(unauthorized("missing `Authorization: Bearer <token>`"));
+        };
+        if !parts.method.is_safe() && !parts.headers.contains_key(BROWSER_HEADER) {
+            return Err(ApiError::new(
+                StatusCode::FORBIDDEN,
+                "a change made with a session cookie needs the `X-Ductus: 1` header",
+            ));
+        }
+        match engine.store.authenticate_session(secret).await? {
+            Some((token, ends)) => Ok(Caller { token, session: Some(ends) }),
+            None => Err(ApiError::new(StatusCode::UNAUTHORIZED, "the session has ended: sign in again")),
         }
     }
 }
 
 /// `State` for handlers, shorter.
 pub type Eng = State<Shared>;
+
+#[cfg(test)]
+mod tests {
+    /// A parameter struct without `#[into_params(parameter_in = Query)]` is published as path
+    /// parameters (the message browser's `status` once was): clients generated from the
+    /// document then can't call it.
+    #[test]
+    fn the_document_has_path_parameters_only_where_the_path_has_them() {
+        let doc = serde_json::to_value(super::openapi()).unwrap();
+        let mut checked = 0;
+        for (path, item) in doc["paths"].as_object().unwrap() {
+            for op in item.as_object().unwrap().values() {
+                for p in op["parameters"].as_array().into_iter().flatten() {
+                    let name = p["name"].as_str().unwrap();
+                    let in_path = path.contains(&format!("{{{name}}}"));
+                    assert_eq!(p["in"] == "path", in_path, "{path}: parameter `{name}` is in {}", p["in"]);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 10, "only {checked} parameters found: did the document's shape change?");
+    }
+}

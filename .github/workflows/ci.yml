@@ -17,6 +17,8 @@ env:
   DUCTUS_DATABASE_URL: postgres://ductus:ductus@localhost/ductus
   DUCTUS_TEST_DATABASE_URL: postgres://ductus:ductus@localhost/ductus
   DUCTUS_TEST_SQLSERVER: sa:Ductus-ci-1@localhost:1433
+  # The binary must embed the web UI (without it, build.rs embeds a "build the UI" page).
+  DUCTUS_REQUIRE_UI: "1"
 
 jobs:
   test:
@@ -55,6 +57,17 @@ jobs:
         with:
           key: ${{ env.RUNNER_IMAGE }}
 
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      # First: the engine embeds ui/dist, so clippy and the build need it.
+      - name: Web UI (types, lint, format, unit tests, size budget, build)
+        working-directory: ui
+        run: npm ci --no-audit --no-fund && npm run check && npm run build
+
       - name: Format
         run: cargo fmt --all -- --check
 
@@ -63,6 +76,11 @@ jobs:
 
       - name: Build
         run: cargo build --release --locked
+
+      - name: The UI's API types match the API (ui/openapi.json)
+        run: |
+          target/release/ductus api-spec | diff -u ui/openapi.json - || {
+            echo "::error::The API changed: run scripts/dev/check.sh (it updates ui/openapi.json and the UI's types)"; exit 1; }
 
       - name: Unit and integration tests
         run: cargo test --release --locked
@@ -113,6 +131,21 @@ jobs:
 
       - name: Hotspots demo (one patient's message blocks its worker, a receiver down, a hot patient)
         run: BIN=target/release/ductus bash scripts/demo-hotspots.sh
+
+      - name: Web UI demo (a real browser against the engine; sign-in, attention, messages, axe in every theme)
+        run: |
+          (cd ui && npx playwright install --with-deps chromium >/dev/null)
+          BIN=target/release/ductus bash scripts/demo-ui.sh
+
+      - name: Web UI report (on failure)
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: ui-report
+          path: |
+            ui/playwright-report
+            ui/test-results
+          if-no-files-found: ignore
 
       - name: Scale demo (300 shared interfaces + 1 dedicated, hot MRN)
         run: SHARED=300 EPIC_SECONDS=10 SAMPLED=50 BIN=target/release/ductus bash scripts/demo-scale.sh

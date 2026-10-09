@@ -1252,6 +1252,49 @@ async fn tokens_are_stored_hashed_and_can_be_revoked() {
     assert_ne!(again.id, token.id);
 }
 
+/// A browser signs in with a token and keeps a session instead: it acts as the token, ends on
+/// sign-out, when the token is revoked, or when it expires; a session is never a token.
+#[tokio::test]
+async fn sessions_act_as_their_token_until_they_end() {
+    let Some(url) = std::env::var("DUCTUS_TEST_DATABASE_URL").ok() else { return };
+    let store = Store::connect(&url, 4).await.unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let name = format!("test-session-{}", std::process::id());
+    let (token, token_secret) = store.create_token(&name, Role::Operator).await.unwrap();
+
+    let (secret, expires_at) = store.create_session(&token).await.unwrap();
+    assert!(secret.starts_with(ductus_store::SESSION_PREFIX) && secret.len() == 68, "{secret}");
+    let days = (expires_at - chrono::Utc::now()).num_hours();
+    assert!((167..=168).contains(&days), "a week from now: {expires_at}");
+    let (found, _) = store.authenticate_session(&secret).await.unwrap().expect("the session works");
+    assert_eq!((found.id, found.role), (token.id, Role::Operator));
+    assert!(store.authenticate(&secret).await.unwrap().is_none(), "a session isn't a token");
+    assert!(store.authenticate_session(&token_secret).await.unwrap().is_none(), "nor a token a session");
+
+    // Sign-out.
+    assert!(store.end_session(&secret).await.unwrap());
+    assert!(store.authenticate_session(&secret).await.unwrap().is_none());
+
+    // Idle too long, or past its end.
+    let (idle, _) = store.create_session(&token).await.unwrap();
+    let (old, _) = store.create_session(&token).await.unwrap();
+    let (live, _) = store.create_session(&token).await.unwrap();
+    for (set, secret) in
+        [("last_seen_at = now() - interval '13 hours'", &idle), ("expires_at = now() - interval '1 second'", &old)]
+    {
+        let sql = format!("UPDATE api_sessions SET {set} WHERE hash = sha256(convert_to($1, 'UTF8'))");
+        let changed = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(secret).execute(&pool).await.unwrap();
+        assert_eq!(changed.rows_affected(), 1);
+    }
+    assert!(store.authenticate_session(&idle).await.unwrap().is_none(), "idle 13 hours");
+    assert!(store.authenticate_session(&old).await.unwrap().is_none(), "past its end");
+    assert!(store.authenticate_session(&live).await.unwrap().is_some());
+
+    // Revoking the token ends its sessions.
+    store.revoke_token(&name).await.unwrap();
+    assert!(store.authenticate_session(&live).await.unwrap().is_none());
+}
+
 #[tokio::test]
 async fn messages_page_newest_first_and_queues_are_counted() {
     let Some(store) = store().await else { return };

@@ -1,0 +1,161 @@
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
+import { CircleCheck } from "lucide-react";
+import type { Schemas } from "@/api/client";
+import { engine, interfaces } from "@/api/queries";
+import { HealthBadge } from "@/components/health-badge";
+import { Loaded, PageHeader } from "@/components/page";
+import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
+import { Table, Td, Th } from "@/components/ui/table";
+import { count, duration, ms } from "@/lib/format";
+import { describe, problems } from "@/lib/health";
+import { cn } from "@/lib/utils";
+
+export function OverviewPage() {
+  const info = useQuery(engine);
+  const list = useQuery(interfaces);
+  return (
+    <>
+      <PageHeader title="Overview">
+        {info.data && (
+          <>
+            {count(info.data.interfaces)} interfaces · up {duration(info.data.uptime_seconds)}
+          </>
+        )}
+      </PageHeader>
+      <Loaded query={list}>
+        {(all) => (
+          <div className="space-y-6">
+            {info.data && <DrainBanner drain={info.data.drain} />}
+            <Totals all={all} />
+            <Attention all={all} />
+            {info.data && <Resources resources={info.data.resources.filter((r) => r.calls.count + r.errors > 0)} />}
+          </div>
+        )}
+      </Loaded>
+    </>
+  );
+}
+
+function DrainBanner({ drain }: { drain: Schemas["DrainStatus"] }) {
+  if (drain.state === "accepting") return null;
+  const drained = drain.state === "drained";
+  return (
+    <p role="status" className="rounded-md border border-warn/40 bg-warn/10 p-4 text-sm">
+      <strong>{drained ? "Drained:" : "Draining:"}</strong>{" "}
+      {drained
+        ? "no new messages are taken, and everything stored has been delivered."
+        : `no new messages are taken; ${count(drain.pending)} deliveries still to go` +
+          (drain.waiting_for.length ? ` (${drain.waiting_for.join(", ")})` : "") +
+          "."}
+      {drain.stop_when_drained && " The engine stops once drained."}
+    </p>
+  );
+}
+
+function Totals({ all }: { all: Schemas["InterfaceStatus"][] }) {
+  const destinations = all.flatMap((i) => i.destinations);
+  const waiting = destinations.reduce((n, d) => n + d.pending, 0);
+  const oldest = Math.max(0, ...destinations.map((d) => d.health.oldest_waiting_s ?? 0));
+  const quarantined = destinations.reduce((n, d) => n + d.quarantined, 0);
+  const attention = all.filter((i) => problems(i).some((p) => describe(p.state).rank >= 2)).length;
+  const stopped = all.filter((i) => i.state === "stopped").length;
+  return (
+    <dl className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+      <Tile label="Interfaces" value={count(all.length)} note={stopped ? `${stopped} stopped` : "all running"} />
+      <Tile label="Need attention" value={count(attention)} tone={attention ? "bad" : "ok"} />
+      <Tile label="Waiting" value={count(waiting)} note={waiting ? `oldest ${duration(oldest)}` : "nothing waiting"} />
+      <Tile label="Quarantined" value={count(quarantined)} tone={quarantined ? "bad" : undefined} />
+    </dl>
+  );
+}
+
+function Tile({ label, value, note, tone }: { label: string; value: string; note?: string; tone?: "ok" | "bad" }) {
+  return (
+    <div className="rounded-lg border bg-panel p-4">
+      <dt className="text-sm text-muted">{label}</dt>
+      <dd
+        className={cn(
+          "mt-1 text-2xl font-semibold tabular-nums",
+          tone === "bad" && "text-bad",
+          tone === "ok" && "text-ok",
+        )}
+      >
+        {value}
+      </dd>
+      {note && <dd className="mt-0.5 text-xs text-muted">{note}</dd>}
+    </div>
+  );
+}
+
+function Attention({ all }: { all: Schemas["InterfaceStatus"][] }) {
+  const rows = all
+    .flatMap((i) => problems(i).map((p) => ({ ...p, iface: i.name })))
+    .sort((a, b) => describe(b.state).rank - describe(a.state).rank || a.iface.localeCompare(b.iface));
+  return (
+    <Card aria-label="Needs attention">
+      <CardHeader>
+        <CardTitle>Needs attention</CardTitle>
+      </CardHeader>
+      {rows.length === 0 ? (
+        <CardBody className="flex items-center gap-2 text-sm text-ok">
+          <CircleCheck aria-hidden className="size-5" />
+          All {count(all.length)} interfaces are ok.
+        </CardBody>
+      ) : (
+        <ul className="divide-y">
+          {rows.map((p) => (
+            <li
+              key={`${p.iface}/${p.destination ?? ""}`}
+              className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3"
+            >
+              <HealthBadge state={p.state} />
+              <Link to="/interfaces/$name" params={{ name: p.iface }} className="font-medium">
+                {p.iface}
+                {/* An interface with one destination calls it `default`: nothing to add. */}
+                {p.destination && p.destination !== "default" && <span className="text-muted"> → {p.destination}</span>}
+              </Link>
+              <span className="text-sm text-muted">{p.summary}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </Card>
+  );
+}
+
+function Resources({ resources }: { resources: Schemas["ResourceCalls"][] }) {
+  if (resources.length === 0) return null;
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle>Databases and APIs</CardTitle>
+        <span className="text-xs text-muted">calls from interface code since the engine started</span>
+      </CardHeader>
+      <Table>
+        <thead>
+          <tr>
+            <Th>Name</Th>
+            <Th>Kind</Th>
+            <Th className="text-right">Calls</Th>
+            <Th className="text-right">p50</Th>
+            <Th className="text-right">p95</Th>
+            <Th className="text-right">Failed</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {resources.map((r) => (
+            <tr key={`${r.kind}/${r.name}`}>
+              <Td className="font-medium">{r.name}</Td>
+              <Td>{r.kind}</Td>
+              <Td className="text-right tabular-nums">{count(r.calls.count)}</Td>
+              <Td className="text-right tabular-nums">{ms(r.calls.p50_ms)}</Td>
+              <Td className="text-right tabular-nums">{ms(r.calls.p95_ms)}</Td>
+              <Td className={cn("text-right tabular-nums", r.errors > 0 && "text-bad")}>{count(r.errors)}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+    </Card>
+  );
+}

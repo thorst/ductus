@@ -193,6 +193,9 @@ enum Command {
         #[command(subcommand)]
         action: SecretAction,
     },
+    /// Print the REST API's OpenAPI document (the same as `GET /api/v1/openapi.json`, without a
+    /// running engine).
+    ApiSpec,
     /// Write editor typings (.ductus/types) and tsconfig.json for VS Code.
     Types {
         #[arg(long, default_value = ".")]
@@ -464,6 +467,10 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,
+        Command::ApiSpec => {
+            println!("{}", serde_json::to_string_pretty(&ductus_runtime::api::openapi())?);
+            Ok(())
+        }
         Command::Status { database_url, api } => {
             tools::status(&database_url).await?;
             if api.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {

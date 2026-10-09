@@ -20,6 +20,7 @@ const LANES: usize = 10;
 const MAX_LANES: usize = 1000;
 
 #[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct HotspotQuery {
     /// Only this interface's destinations.
     interface: Option<String>,

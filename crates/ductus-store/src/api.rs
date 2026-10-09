@@ -58,6 +58,14 @@ pub struct Token {
 /// Tokens start with this, so they're recognisable in a secret scanner or a leaked log.
 pub const TOKEN_PREFIX: &str = "dux_";
 
+/// Session cookies start with this (never accepted as a token, nor a token as a session).
+pub const SESSION_PREFIX: &str = "dus_";
+
+/// A session ends after this long unused (a shift, with room to spare)...
+const SESSION_IDLE: &str = "12 hours";
+/// ...and this long after sign-in, however it's used.
+const SESSION_MAX: &str = "7 days";
+
 fn hash(secret: &str) -> Vec<u8> {
     Sha256::digest(secret.as_bytes()).to_vec()
 }
@@ -190,6 +198,77 @@ impl Store {
                 .context("noting token use")?;
         }
         Ok(token)
+    }
+
+    /// Sign a browser in: a new session for `token` (already authenticated). Returns the secret
+    /// for the cookie, which is never stored. Expired sessions are cleared on the way.
+    pub async fn create_session(&self, token: &Token) -> Result<(String, DateTime<Utc>)> {
+        sqlx::query("DELETE FROM api_sessions WHERE expires_at < now() OR last_seen_at < now() - $1::interval")
+            .bind(SESSION_IDLE)
+            .execute(&self.pool)
+            .await
+            .context("clearing expired sessions")?;
+        let mut bytes = [0u8; 32];
+        getrandom::fill(&mut bytes).expect("OS random number generator");
+        let secret = format!("{SESSION_PREFIX}{}", bytes.iter().map(|b| format!("{b:02x}")).collect::<String>());
+        let expires_at: DateTime<Utc> = sqlx::query_scalar(
+            "INSERT INTO api_sessions (hash, token_id, expires_at) VALUES ($1, $2, now() + $3::interval)
+             RETURNING expires_at",
+        )
+        .bind(hash(&secret))
+        .bind(token.id)
+        .bind(SESSION_MAX)
+        .fetch_one(&self.pool)
+        .await
+        .context("creating session")?;
+        Ok((secret, expires_at))
+    }
+
+    /// The token behind a live session (not expired, not idle too long, token not revoked).
+    /// Notes the use at most once a minute, which keeps an idle session's clock honest.
+    pub async fn authenticate_session(&self, secret: &str) -> Result<Option<(Token, DateTime<Utc>)>> {
+        if !secret.starts_with(SESSION_PREFIX) {
+            return Ok(None);
+        }
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            #[sqlx(flatten)]
+            token: Token,
+            session_id: i32,
+            last_seen_at: DateTime<Utc>,
+            expires_at: DateTime<Utc>,
+        }
+        let row = sqlx::query_as::<_, Row>(
+            "SELECT t.id, t.name, t.role, t.created_at, t.last_used_at, t.revoked_at,
+                    s.id AS session_id, s.last_seen_at, s.expires_at
+             FROM api_sessions s JOIN api_tokens t ON t.id = s.token_id
+             WHERE s.hash = $1 AND t.revoked_at IS NULL AND s.expires_at > now()
+               AND s.last_seen_at > now() - $2::interval",
+        )
+        .bind(hash(secret))
+        .bind(SESSION_IDLE)
+        .fetch_optional(&self.pool)
+        .await
+        .context("checking session")?;
+        let Some(row) = row else { return Ok(None) };
+        if Utc::now() - row.last_seen_at > chrono::TimeDelta::minutes(1) {
+            sqlx::query("UPDATE api_sessions SET last_seen_at = now() WHERE id = $1")
+                .bind(row.session_id)
+                .execute(&self.pool)
+                .await
+                .context("noting session use")?;
+        }
+        Ok(Some((row.token, row.expires_at)))
+    }
+
+    /// Sign out: the session stops working at once. False if there was none.
+    pub async fn end_session(&self, secret: &str) -> Result<bool> {
+        let result = sqlx::query("DELETE FROM api_sessions WHERE hash = $1")
+            .bind(hash(secret))
+            .execute(&self.pool)
+            .await
+            .context("ending session")?;
+        Ok(result.rows_affected() > 0)
     }
 
     /// A page of an interface's messages, newest first.

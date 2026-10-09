@@ -35,6 +35,9 @@ utoipa = { version = "6.0.0", features = ["chrono"] }
 utoipa-axum = "0.3.0"
 x509-parser = "0.18.1"
 
+[build-dependencies]
+flate2 = "1.1.10"
+
 [dev-dependencies]
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "crypto"] }
 serde_yaml_ng = "0.10.0"

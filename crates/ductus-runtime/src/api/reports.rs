@@ -20,6 +20,7 @@ pub fn routes() -> OpenApiRouter<Shared> {
 }
 
 #[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ImpactParams {
     /// e.g. `Epic Systems` (ignores case).
     vendor: Option<String>,
