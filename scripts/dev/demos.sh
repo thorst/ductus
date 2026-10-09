@@ -17,4 +17,5 @@ echo "##### destinations";    bash scripts/demo-destinations.sh | tail -1
 echo "##### routing";         bash scripts/demo-routing.sh | tail -1
 echo "##### retention";       bash scripts/demo-retention.sh | tail -1
 echo "##### held area";       bash scripts/demo-held.sh | tail -1
+echo "##### hotspots";        bash scripts/demo-hotspots.sh | tail -1
 echo "##### scale";           SHARED=300 EPIC_SECONDS=10 SAMPLED=50 bash scripts/demo-scale.sh | tail -1

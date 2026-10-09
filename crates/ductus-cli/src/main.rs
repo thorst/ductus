@@ -176,6 +176,18 @@ enum Command {
         #[command(flatten)]
         api: ApiArgs,
     },
+    /// Where each destination's backlog sits: the lanes messages wait in (the ordering key's
+    /// hash), the first message of each (key, age, attempts, last error), and which worker a
+    /// failing message holds up. Through the running engine's REST API (viewer token).
+    Hotspots {
+        /// Only this interface.
+        interface: Option<String>,
+        /// Lanes to list per destination, most waiting first (default 10).
+        #[arg(long)]
+        lanes: Option<usize>,
+        #[command(flatten)]
+        api: ApiArgs,
+    },
     /// Manage encrypted secrets (secrets/<env>.json; key in DUCTUS_SECRET_KEY).
     Secret {
         #[command(subcommand)]
@@ -446,6 +458,9 @@ async fn run(cli: Cli) -> Result<()> {
                 None => admin::retention(remote).await,
                 Some(RetentionAction::Confirm { interface }) => admin::confirm_retention(remote, &interface).await,
             }
+        }
+        Command::Hotspots { interface, lanes, api } => {
+            admin::hotspots(admin::Remote::new(&api.api, api.token)?, interface.as_deref(), lanes).await
         }
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,

@@ -7,6 +7,7 @@
 //! made with `ductus token create`). Roles: viewer reads, operator also drains and runs
 //! connection checks, admin also manages tokens.
 
+mod hotspots;
 mod messages;
 mod metrics;
 mod reports;
@@ -64,6 +65,7 @@ impl Modify for BearerToken {
 pub fn router(engine: Shared) -> (Router, utoipa::openapi::OpenApi) {
     let (api, doc) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(status::routes())
+        .merge(hotspots::routes())
         .merge(messages::routes())
         .merge(metrics::routes())
         .merge(reports::routes())

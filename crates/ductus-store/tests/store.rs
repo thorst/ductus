@@ -283,6 +283,40 @@ async fn failures_count_attempts_and_keep_the_message_pending() {
 }
 
 #[tokio::test]
+async fn lanes_show_each_backlog_and_its_first_message() {
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "hotspots", &["lab", "billing"]).await;
+    let (lab, billing) = (t.id("lab"), t.id("billing"));
+    let keyed = |lane: i32, key: &'static str, payload: &'static [u8]| NewMessage {
+        ordering_key: Some(key),
+        ..t.msg(lane, payload)
+    };
+    let first = store.insert(keyed(3, "MRN7", b"a")).await.unwrap();
+    for (lane, key, body) in [(3, "MRN7", b"b"), (5, "MRN9", b"c"), (3, "MRN8", b"d")] {
+        store.insert(keyed(lane, key, body)).await.unwrap();
+    }
+    let in_five = store.pending(lab, &[5], 10).await.unwrap()[0].reference();
+    store.record_failure(first, lab, "HTTP 503: busy").await.unwrap();
+    store.finish(lab, &[sent(in_five)]).await.unwrap();
+
+    let lanes = store.lanes(lab).await.unwrap();
+    assert_eq!(lanes.len(), 1, "lane 5 is done for the lab: {lanes:?}");
+    let l = &lanes[0];
+    assert_eq!((l.lane, l.waiting, l.head_id), (3, 3, first.id));
+    assert_eq!(
+        (l.attempts, l.last_error.as_deref(), l.ordering_key.as_deref()),
+        (1, Some("HTTP 503: busy"), Some("MRN7"))
+    );
+    assert_eq!(l.received_at, first.received_at);
+
+    // Billing's queue is its own: both lanes, most waiting first, nothing failed.
+    let lanes = store.lanes(billing).await.unwrap();
+    assert_eq!(lanes.iter().map(|l| (l.lane, l.waiting, l.attempts)).collect::<Vec<_>>(), [(3, 3, 0), (5, 1, 0)]);
+    assert_eq!(lanes[1].ordering_key.as_deref(), Some("MRN9"));
+    assert!(store.lanes(DestinationId::MAX).await.unwrap().is_empty());
+}
+
+#[tokio::test]
 async fn each_destination_has_its_own_queue_and_the_message_its_overall_status() {
     let Some(store) = store().await else { return };
     let t = Iface::new(&store, "destinations", &["billing", "lab"]).await;

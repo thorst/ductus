@@ -571,6 +571,13 @@ async fn the_api_shows_the_engine_and_drains_it() {
     assert_eq!(get(&format!("/interfaces/{name}/messages?status=lost"), &viewer).await.unwrap().status(), 400);
     assert_eq!(get("/interfaces/nope", &viewer).await.unwrap().status(), 404);
 
+    let hot = json(&format!("/hotspots?interface={name}"), &viewer).await;
+    assert_eq!((&hot[0]["destination"], &hot[0]["waiting"]), (&"lab".into(), &3.into()), "{hot}");
+    assert_eq!(hot[0]["lanes"].as_array().map(Vec::len), hot[0]["lanes_waiting"].as_u64().map(|n| n as usize));
+    assert_eq!(get("/hotspots?interface=nope", &viewer).await.unwrap().status(), 404);
+    let (ok, out) = ductus(dir.path(), &["hotspots", &name, "--api", &api_url, "--token", &viewer]);
+    assert!(ok && out.contains("3 waiting in"), "{out}");
+
     let owners = json("/owners", &viewer).await;
     assert!(owners.to_string().contains("Lab team"), "{owners}");
     let spec: serde_json::Value = http.get(format!("{base}/openapi.json")).send().await.unwrap().json().await.unwrap();
@@ -583,6 +590,7 @@ async fn the_api_shows_the_engine_and_drains_it() {
         "/doctor",
         "/tokens",
         "/metrics",
+        "/hotspots",
     ] {
         assert!(spec["paths"][path].is_object(), "{path} missing from the OpenAPI document");
     }

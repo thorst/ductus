@@ -98,6 +98,20 @@ pub struct QueueCount {
     pub quarantined: i64,
 }
 
+/// One lane of a destination's queue: how many wait, and the first of them.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct LaneRow {
+    pub lane: i32,
+    pub waiting: i64,
+    pub head_id: i64,
+    pub received_at: DateTime<Utc>,
+    pub attempts: i32,
+    pub last_error: Option<String>,
+    /// When the head was last changed (its last failed attempt, when it has any).
+    pub updated_at: DateTime<Utc>,
+    pub ordering_key: Option<String>,
+}
+
 const MESSAGE_COLUMNS: &str = "id, received_at, interface, status, ordering_key, control_id,
     octet_length(payload) AS size, last_error, updated_at, origin_id";
 
@@ -225,6 +239,34 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .context("counting queues")
+    }
+
+    /// A destination's lanes with messages waiting, most first: the count and the first
+    /// message of each (the one its worker handles next). The counts come from the queue index
+    /// alone; then each head is looked up by its id (one probe per partition, as nothing else
+    /// about it is known yet), so the cost grows with the backlog and the number of lanes with
+    /// one, never with what was delivered.
+    pub async fn lanes(&self, destination: DestinationId) -> Result<Vec<LaneRow>> {
+        sqlx::query_as::<_, LaneRow>(
+            "WITH lanes AS (
+                 SELECT partition_key AS lane, count(*) AS waiting, min(message_id) AS head_id
+                 FROM deliveries WHERE destination_id = $1 AND status = 0 GROUP BY partition_key
+             )
+             SELECT l.lane, l.waiting, l.head_id, d.received_at, d.attempts, d.last_error, d.updated_at, m.ordering_key
+             FROM lanes l
+             CROSS JOIN LATERAL (
+                 SELECT received_at, attempts, last_error, updated_at FROM deliveries x
+                 WHERE x.message_id = l.head_id AND x.destination_id = $1 LIMIT 1
+             ) d
+             LEFT JOIN LATERAL (
+                 SELECT ordering_key FROM messages m WHERE m.id = l.head_id AND m.received_at = d.received_at LIMIT 1
+             ) m ON true
+             ORDER BY l.waiting DESC, l.lane",
+        )
+        .bind(destination)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the queue's lanes")
     }
 }
 

@@ -475,7 +475,7 @@ pub fn diagnose(facts: &Facts, now: DateTime<Utc>) -> Diagnosis {
         let since = now - Span::from_std(idle).unwrap_or_default();
         let why = match facts.last_error {
             Some((at, error)) if at >= since => format!("retrying: {}", first_line(error)),
-            _ => "no error: a blocked lane or a receiver that doesn't answer".to_string(),
+            _ => "no error: a blocked lane or a receiver that doesn't answer (`ductus hotspots` shows each lane's first message)".to_string(),
         };
         parts.push(format!("stalled: nothing sent for {}, {} waiting; {why}", human(idle), count(facts.waiting)));
     }
@@ -622,7 +622,7 @@ fn rate(x: f64) -> String {
     if x >= 10.0 { count(x.round() as u64) } else { format!("{:.1}", x) }
 }
 
-fn first_line(text: &str) -> String {
+pub(crate) fn first_line(text: &str) -> String {
     let line = text.lines().next().unwrap_or("");
     if line.chars().count() > 160 { format!("{}…", line.chars().take(160).collect::<String>()) } else { line.into() }
 }

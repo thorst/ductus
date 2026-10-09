@@ -1,6 +1,6 @@
 //! `ductus token` (API tokens, straight in the engine's database: that's how the first one is
 //! made), and through a running engine's REST API: `ductus drain` / `ductus resume`, `ductus
-//! pause`, `ductus retention`.
+//! pause`, `ductus retention`, `ductus hotspots`.
 
 use anyhow::{Context, Result, bail};
 use ductus_store::{Role, Store};
@@ -299,6 +299,74 @@ expired partitions kept:"
                 count(i, "pending"),
                 count(i, "quarantined")
             );
+        }
+    }
+    Ok(())
+}
+
+/// `ductus hotspots [interface]`: where each destination's backlog sits, lane by lane.
+pub async fn hotspots(remote: Remote, interface: Option<&str>, lanes: Option<usize>) -> Result<()> {
+    let mut query = Vec::new();
+    if let Some(i) = interface {
+        query.push(format!("interface={}", urlencoding(i)));
+    }
+    if let Some(n) = lanes {
+        query.push(format!("lanes={n}"));
+    }
+    let path = if query.is_empty() { "/hotspots".to_string() } else { format!("/hotspots?{}", query.join("&")) };
+    let report = remote.call(reqwest::Method::GET, &path, None).await?;
+    let destinations = report.as_array().cloned().unwrap_or_default();
+    if destinations.is_empty() {
+        println!("nothing waiting{}", interface.map(|i| format!(" for `{i}`")).unwrap_or_default());
+        return Ok(());
+    }
+    let int = |v: &Value| v.as_i64().unwrap_or(0);
+    for (n, d) in destinations.iter().enumerate() {
+        if n > 0 {
+            println!();
+        }
+        let destination = d["destination"].as_str().unwrap_or("?");
+        let name = match destination {
+            ductus_core::config::DEFAULT_DESTINATION => d["interface"].as_str().unwrap_or("?").to_string(),
+            _ => format!("{} → {destination}", d["interface"].as_str().unwrap_or("?")),
+        };
+        println!("{name}: {}", d["summary"].as_str().unwrap_or("?"));
+        let workers = d["workers"].as_array().cloned().unwrap_or_default();
+        if int(&d["workers_total"]) > 1 {
+            println!("  {:<8} {:>6} {:>10}", "worker", "lanes", "waiting");
+            for w in &workers {
+                let blocked = w["blocked_by"].as_i64().map(|l| format!("  blocked (lane {l})")).unwrap_or_default();
+                println!(
+                    "  {:<8} {:>6} {:>10}{blocked}",
+                    int(&w["worker"]),
+                    int(&w["lanes_waiting"]),
+                    int(&w["waiting"])
+                );
+            }
+        }
+        println!(
+            "  {:<6} {:<7} {:>9}  {:<12} {:<16} {:>10} {:>8}  last error",
+            "lane", "worker", "waiting", "first msg", "key", "age", "attempts"
+        );
+        for l in d["lanes"].as_array().into_iter().flatten() {
+            let head = &l["head"];
+            let worker = l["worker"].as_i64().map(|w| w.to_string()).unwrap_or_else(|| "none".into());
+            let waited = ductus_core::monitor::human(Duration::from_secs(int(&head["waiting_s"]).max(0) as u64));
+            let error = head["last_error"].as_str().and_then(|e| e.lines().next()).unwrap_or("");
+            println!(
+                "  {:<6} {:<7} {:>9}  {:<12} {:<16} {:>10} {:>8}  {error}",
+                int(&l["lane"]),
+                worker,
+                int(&l["waiting"]),
+                int(&head["id"]),
+                head["ordering_key"].as_str().unwrap_or("-"),
+                waited,
+                int(&head["attempts"]),
+            );
+        }
+        let listed = d["lanes"].as_array().map_or(0, Vec::len) as i64;
+        if int(&d["lanes_waiting"]) > listed {
+            println!("  ({} more lanes waiting: --lanes N lists more)", int(&d["lanes_waiting"]) - listed);
         }
     }
     Ok(())
