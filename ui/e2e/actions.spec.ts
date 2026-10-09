@@ -14,6 +14,7 @@ async function signIn(page: Page, path: string, as = token) {
   await page.goto(path);
   await page.getByLabel("Token").fill(as);
   await page.getByRole("button", { name: "Sign in" }).click();
+  await expect(page).not.toHaveURL(/\/sign-in/); // the sign-in page has an h1 too
   await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
 }
 

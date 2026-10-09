@@ -12,6 +12,9 @@ async function signIn(page: Page, path = "/") {
   await expect(page).toHaveURL(/\/sign-in/);
   await page.getByLabel("Token").fill(token);
   await page.getByRole("button", { name: "Sign in" }).click();
+  // Signed in only once it's left this page: navigating sooner can cancel the sign-in request
+  // (a CI run went to the next page while still signed out).
+  await expect(page).not.toHaveURL(/\/sign-in/);
 }
 
 async function theme(page: Page, name: string) {
