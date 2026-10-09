@@ -14,6 +14,7 @@
 //! (`health.rs`). The other interfaces on the thread carry on.
 
 use crate::Wake;
+use crate::activity::Pause;
 use crate::destination::{SendError, Sender};
 use crate::health::Health;
 use crate::http::HttpCall;
@@ -72,6 +73,8 @@ pub struct Outlet {
     pub route: Option<Arc<Intake>>,
     /// Its counts and timings, shared by its slots.
     pub stats: Arc<DestinationStats>,
+    /// Paused on purpose: its workers send nothing, and retry nothing, until it's resumed.
+    pub pause: Arc<Pause>,
 }
 
 /// Readiness report for one job: its interface name and whether its code loaded.
@@ -285,6 +288,7 @@ struct Worker {
     routed_since: Option<std::time::Instant>,
     health: Arc<Health>,
     stats: Arc<DestinationStats>,
+    pause: Arc<Pause>,
 }
 
 /// What the interface logic decided to do with a message.
@@ -331,6 +335,7 @@ impl Worker {
             routed_since: None,
             health: job.health.clone(),
             stats: outlet.stats,
+            pause: outlet.pause,
             config,
         }
     }
@@ -341,6 +346,7 @@ impl Worker {
         }
         // A stopped interface's messages stay pending until it's fixed and restarted.
         while self.health.stopped().is_none() {
+            self.hold_while_paused().await;
             let (destination, lanes) = (self.destination_id, self.lanes.clone());
             let read = |store: Store| async move { store.pending(destination, &lanes, BATCH).await };
             let batch = match self.db(read).await {
@@ -359,7 +365,7 @@ impl Worker {
                 continue;
             }
             for message in batch {
-                if self.health.stopped().is_some() {
+                if self.health.stopped().is_some() || self.pause.is_paused() {
                     break;
                 }
                 self.process(message).await;
@@ -438,6 +444,7 @@ impl Worker {
                     tracing::warn!(interface = %self.config.name, destination = %self.destination, id = reference.id, attempts, %error, "temporary failure; retrying in {backoff:?}");
                     self.flush().await;
                     tokio::time::sleep(backoff).await;
+                    self.hold_while_paused().await;
                     backoff = (backoff * 2).min(Duration::from_millis(self.retry.max_backoff_ms));
                     continue;
                 }
@@ -456,6 +463,7 @@ impl Worker {
     /// Count a message delivered (or routed), and how long it took since it was received.
     fn sent(&self, reference: MessageRef) {
         stats::add(&self.stats.sent);
+        self.stats.last_sent.now();
         let waited = chrono::Utc::now() - reference.received_at;
         self.stats.latency.observe(waited.to_std().unwrap_or_default());
     }
@@ -478,6 +486,7 @@ impl Worker {
             }
         }
         if self.sender.is_none() {
+            self.hold_while_paused().await;
             // A route: stored in the target interface with the next flush, in the same
             // transaction as this status.
             let output = self.save_output.then(|| payload.clone());
@@ -489,6 +498,8 @@ impl Worker {
         let retry = self.retry.clone();
         let mut backoff = Duration::from_millis(retry.initial_backoff_ms);
         loop {
+            // Paused meanwhile (while its function ran, a rate-limit wait, a retry's back-off).
+            self.hold_while_paused().await;
             let sender = self.sender.as_mut().expect("not a route");
             let started = std::time::Instant::now();
             match sender.send(reference.id, &payload).await {
@@ -518,6 +529,17 @@ impl Worker {
         }
     }
 
+    /// While the destination is paused: save what's done, then wait until it's resumed. A send
+    /// already under way finishes; nothing new starts, and nothing is retried.
+    async fn hold_while_paused(&mut self) {
+        if self.pause.is_paused() {
+            self.flush().await;
+            tracing::info!(interface = %self.config.name, destination = %self.destination, slot = self.slot, "paused: waiting to be resumed");
+            self.pause.until_resumed().await;
+            tracing::info!(interface = %self.config.name, destination = %self.destination, slot = self.slot, "resumed");
+        }
+    }
+
     /// Run a store call on the main runtime. Connections are pooled and shared with intake,
     /// and a connection's socket is served by the runtime that opened it: one opened on this
     /// thread would hold up intake's commits (and so the senders' ACKs) whenever this thread
@@ -532,6 +554,7 @@ impl Worker {
 
     async fn record_failure(&self, reference: MessageRef, error: &str) -> Option<i32> {
         stats::add(&self.stats.retries);
+        self.stats.failed(error);
         let (error, destination) = (error.to_string(), self.destination_id);
         match self.db(|store| async move { store.record_failure(reference, destination, &error).await }).await {
             Ok(attempts) => Some(attempts),
@@ -580,6 +603,7 @@ impl Worker {
     async fn finish(&self, reference: MessageRef, status: Status, error: Option<&str>) {
         if status == Status::Quarantined {
             stats::add(&self.stats.quarantined);
+            self.stats.failed(error.unwrap_or("quarantined"));
         }
         let save = || {
             let (done, destination) = (Done::with(reference, status, error), self.destination_id);

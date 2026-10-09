@@ -1,5 +1,6 @@
 //! Runs interfaces: receive → persist → ACK, then workers transform and deliver.
 
+pub mod activity;
 pub mod api;
 pub mod control;
 mod destination;
@@ -161,6 +162,13 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         }
         parts.push((config, wake, destination_ids, gate, stats));
     }
+    // Last activity and pauses, before any worker starts (a paused destination sends nothing).
+    let watched = parts
+        .iter()
+        .filter(|(config, ..)| !config.responds())
+        .map(|(_, _, ids, _, stats)| activity::Watched { stats: stats.clone(), destinations: ids.clone() })
+        .collect();
+    let activity = activity::Activity::start(store.clone(), watched).await.context("loading last activity")?;
     for (config, wake, destination_ids, gate, stats) in parts {
         let health = Arc::new(health::Health::default());
         let outlets: Vec<worker::Outlet> = config
@@ -170,6 +178,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
             .map(|(((_, d), &id), destination_stats)| worker::Outlet {
                 id,
                 stats: destination_stats.clone(),
+                pause: activity.pauses[&id].clone(),
                 limiter: config
                     .rate_limit_for(d)
                     .map(|r| Arc::new(limiter::Limiter::new(r.clone(), std::time::Instant::now()))),
@@ -288,9 +297,11 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         interfaces: running,
         retention,
         calls: services.calls(),
+        activity,
     });
+    let mut api_server = None;
     if let Some((host, port)) = &api_address {
-        api::serve(engine.clone(), host, *port).await?;
+        api_server = Some(api::serve(engine.clone(), host, *port).await?);
     }
     tracing::info!(
         interfaces = interfaces.len(),
@@ -317,7 +328,14 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
 
     tokio::select! {
         signal = tokio::signal::ctrl_c() => signal?,
-        _ = engine.shutdown.cancelled() => tracing::info!("drained and asked to stop"),
+        _ = engine.shutdown.cancelled() => {
+            tracing::info!("drained and asked to stop");
+            // Answer the requests in flight first (the drain's own, say). Live-update streams
+            // never end by themselves, hence the limit.
+            if let Some(server) = api_server {
+                let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+            }
+        }
     }
     tracing::info!("shutting down");
     Ok(())

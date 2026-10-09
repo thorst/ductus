@@ -102,6 +102,56 @@ async fn pending_returns_only_owned_lanes_in_arrival_order() {
 }
 
 #[tokio::test]
+async fn activity_and_pauses_survive_a_restart() {
+    use chrono::{Duration, Utc};
+    use ductus_store::Seen;
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "activity", &["lab", "billing"]).await;
+    let (lab, billing) = (t.id("lab"), t.id("billing"));
+    let (interfaces, destinations) = store.activity(&[&t.name], &t.ids).await.unwrap();
+    assert_eq!(interfaces.len(), 1);
+    assert_eq!(interfaces[0].last_received, None, "never received");
+    let watched = interfaces[0].watched_since;
+    assert!(destinations.iter().all(|d| d.last_sent.is_none() && d.pause.paused_at.is_none()));
+
+    // Times only move forward: an older one (another engine's, say) doesn't overwrite.
+    let now = Utc::now();
+    let earlier = now - Duration::minutes(5);
+    let error = Some((now, "connection refused".to_string()));
+    let seen = [Seen { destination: lab, last_sent: Some(now), last_error: error.clone() }];
+    store.save_activity(&[(&t.name, now)], &seen).await.unwrap();
+    let older = [Seen { destination: lab, last_sent: Some(earlier), last_error: Some((earlier, "old".into())) }];
+    store.save_activity(&[(&t.name, earlier)], &older).await.unwrap();
+
+    // Pause, then add the reason later (act first, explain after).
+    let paused = store.pause(billing, "ops-token", None).await.unwrap();
+    assert_eq!((paused.paused_by.as_deref(), paused.pause_reason.as_deref()), (Some("ops-token"), None));
+    let explained = store.pause(billing, "todd", Some("vendor breach: hold until cleared")).await.unwrap();
+    assert_eq!(explained.paused_at, paused.paused_at, "still the same pause");
+    assert_eq!(explained.paused_by.as_deref(), Some("ops-token"));
+    assert_eq!(explained.reason_by.as_deref(), Some("todd"));
+    assert!(explained.reason_at.is_some());
+
+    // What a restart loads: the same, and the interface is still watched from the first time.
+    let (interfaces, destinations) = store.activity(&[&t.name], &t.ids).await.unwrap();
+    assert_eq!(interfaces[0].watched_since, watched);
+    let ms = |t: Option<chrono::DateTime<Utc>>| t.map(|t| t.timestamp_millis());
+    assert_eq!(ms(interfaces[0].last_received), ms(Some(now)));
+    let lab_row = destinations.iter().find(|d| d.destination_id == lab).unwrap();
+    assert_eq!(ms(lab_row.last_sent), ms(Some(now)));
+    assert_eq!(lab_row.last_error.as_deref(), Some("connection refused"));
+    let billing_row = destinations.iter().find(|d| d.destination_id == billing).unwrap();
+    assert_eq!(billing_row.pause.pause_reason.as_deref(), Some("vendor breach: hold until cleared"));
+
+    // Resuming returns the pause it ended; resuming again finds none.
+    let ended = store.unpause(billing).await.unwrap();
+    assert_eq!(ended.pause_reason.as_deref(), Some("vendor breach: hold until cleared"));
+    assert_eq!(store.unpause(billing).await.unwrap().paused_at, None);
+    let (_, destinations) = store.activity(&[&t.name], &t.ids).await.unwrap();
+    assert!(destinations.iter().all(|d| d.pause == ductus_store::PauseRow::default()));
+}
+
+#[tokio::test]
 async fn finished_messages_leave_the_queue() {
     let Some(store) = store().await else { return };
     let t = Iface::single(&store, "finish").await;
@@ -905,11 +955,27 @@ async fn everything_at_once_without_lock_errors() {
             }
         }));
     }
-    // The REST API's reads: the monitor's queue counts and someone paging through messages.
+    // The REST API's reads: the monitor's queue counts and someone paging through messages;
+    // monitoring saving last activity, and someone pausing and resuming a destination.
+    store.activity(&[&t.name], &t.ids).await.unwrap();
     {
         let (store, t, stop) = (store.clone(), t.clone(), stop.clone());
         tasks.push(tokio::spawn(async move {
+            let mut round = 0usize;
             while !stop.load(Relaxed) {
+                round += 1;
+                let now = chrono::Utc::now();
+                let seen: Vec<_> = t
+                    .ids
+                    .iter()
+                    .map(|&destination| ductus_store::Seen { destination, last_sent: Some(now), last_error: None })
+                    .collect();
+                store.save_activity(&[(&t.name, now)], &seen).await.unwrap();
+                if round.is_multiple_of(2) {
+                    store.pause(t.id("lab"), "stress", Some("testing")).await.unwrap();
+                } else {
+                    store.unpause(t.id("lab")).await.unwrap();
+                }
                 store.queue_counts().await.unwrap();
                 let page = Browse { interface: &t.name, status: None, before: None, limit: 50 };
                 let rows = store.browse(&page).await.unwrap();

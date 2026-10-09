@@ -1,5 +1,5 @@
 //! The running engine as the REST API sees it and steers it: its interfaces and their health,
-//! queue counts, and drain mode.
+//! queue counts, drain mode, and pausing a destination.
 //!
 //! **Drain mode** stops taking new messages and keeps delivering what's stored, until nothing
 //! is pending: for server moves, upgrades, and config changes that need an empty queue. MLLP
@@ -8,6 +8,7 @@
 //! answering: it stores nothing. "Drained" means the gates are closed, nothing is being
 //! stored, and no delivery is pending; with `stop`, the engine then exits.
 
+use crate::activity::{Activity, Pause, Paused};
 use crate::gate::Gate;
 use crate::health::Health;
 use anyhow::Result;
@@ -74,6 +75,8 @@ pub struct Engine {
     pub retention: Arc<crate::retention::Retention>,
     /// Calls to each database and API in resources.yaml (`fetch` for URLs called directly).
     pub calls: Arc<crate::stats::ResourceCalls>,
+    /// When each interface was first watched, and every destination's pause switch.
+    pub activity: Activity,
     drain: watch::Sender<DrainState>,
     monitor: watch::Sender<Arc<Snapshot>>,
     /// What each interface's code uses, worked out on first request (it needs the TypeScript
@@ -93,11 +96,12 @@ pub struct Parts {
     pub interfaces: Vec<Running>,
     pub retention: Arc<crate::retention::Retention>,
     pub calls: Arc<crate::stats::ResourceCalls>,
+    pub activity: Activity,
 }
 
 impl Engine {
     pub fn new(parts: Parts) -> Arc<Self> {
-        let Parts { environment, root, database_url, store, resources, interfaces, retention, calls } = parts;
+        let Parts { environment, root, database_url, store, resources, interfaces, retention, calls, activity } = parts;
         let engine = Arc::new(Self {
             started_at: Utc::now(),
             environment,
@@ -108,6 +112,7 @@ impl Engine {
             interfaces,
             retention,
             calls,
+            activity,
             drain: watch::Sender::new(DrainState::Accepting),
             monitor: watch::Sender::new(Arc::default()),
             code: OnceCell::new(),
@@ -123,6 +128,51 @@ impl Engine {
 
     fn destination_ids(&self) -> impl Iterator<Item = DestinationId> + '_ {
         self.interfaces.iter().flat_map(|i| i.destinations.iter().map(|(_, id)| *id))
+    }
+
+    /// A destination's pause, if it's paused.
+    pub fn paused(&self, destination: DestinationId) -> Option<Paused> {
+        self.activity.pauses.get(&destination).and_then(|p| p.get())
+    }
+
+    /// An interface's destination by name: `Err` says what's wrong in plain words (no such
+    /// interface or destination).
+    pub fn destination(&self, interface: &str, destination: &str) -> Result<(&Running, DestinationId), String> {
+        let i = self.interface(interface).ok_or_else(|| format!("no interface named `{interface}`"))?;
+        match i.destinations.iter().find(|(name, _)| name == destination) {
+            Some((_, id)) => Ok((i, *id)),
+            None if i.destinations.is_empty() => Err(format!("`{interface}` has no destinations (respond mode)")),
+            None => {
+                let names: Vec<&str> = i.destinations.iter().map(|(n, _)| n.as_str()).collect();
+                Err(format!("`{interface}` has no destination `{destination}` (it has {})", names.join(", ")))
+            }
+        }
+    }
+
+    fn pause_switch(&self, destination: DestinationId) -> Result<&Arc<Pause>> {
+        self.activity.pauses.get(&destination).ok_or_else(|| anyhow::anyhow!("destination {destination} isn't watched"))
+    }
+
+    /// Pause a destination: from now on its workers send nothing and retry nothing (a send under
+    /// way finishes). No questions asked: a reason is optional, and can be added later by
+    /// pausing again with one. Saved first, so it holds across a restart.
+    pub async fn pause(&self, destination: DestinationId, by: &str, reason: Option<&str>) -> Result<Paused> {
+        let row = self.store.pause(destination, by, reason).await?;
+        let switch = self.pause_switch(destination)?;
+        switch.set(row);
+        self.monitor.send_modify(|_| {}); // live updates show it at once
+        switch.get().ok_or_else(|| anyhow::anyhow!("the pause wasn't saved"))
+    }
+
+    /// Resume a paused destination; returns the pause it ended (`None`: it wasn't paused).
+    pub async fn unpause(&self, destination: DestinationId) -> Result<Option<Paused>> {
+        let switch = self.pause_switch(destination)?;
+        let ended = switch.get();
+        let row = self.store.unpause(destination).await?;
+        switch.set(Default::default());
+        self.monitor.send_modify(|_| {});
+        // Paused by another engine sharing the database: what was stored.
+        Ok(ended.or_else(|| Paused::from_row(row)))
     }
 
     /// This engine's queue counts now (one quick query). Destinations the database knows from
@@ -188,7 +238,8 @@ impl Engine {
             return Ok(None);
         }
         let snapshot = self.snapshot().await?;
-        Ok(Some(self.destination_ids().map(|d| snapshot.queue(d).pending).sum()))
+        // A paused destination keeps its messages on purpose: it doesn't hold the drain up.
+        Ok(Some(self.destination_ids().filter(|d| self.paused(*d).is_none()).map(|d| snapshot.queue(d).pending).sum()))
     }
 
     /// What each interface's code uses (`db`/`api` names), worked out once.

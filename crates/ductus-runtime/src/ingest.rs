@@ -105,6 +105,9 @@ impl Intake {
                 let (queued, duplicates) = queued(r);
                 self.stats.received.fetch_add(queued, Relaxed);
                 self.stats.duplicates.fetch_add(duplicates, Relaxed);
+                if queued + duplicates > 0 {
+                    self.stats.last_received.now();
+                }
             }
             Err(e) if e.is::<Closed>() => {}
             Err(_) => stats::add(&self.stats.store_failures),

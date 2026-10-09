@@ -6,9 +6,11 @@
 //! destination is done. Anything pending after a crash is simply picked up again:
 //! at-least-once delivery.
 
+mod activity;
 mod api;
 mod retention;
 
+pub use activity::{DestinationActivity, InterfaceActivity, PauseRow, Received, Seen};
 pub use api::{Browse, MessageRow, QueueCount, Role, TOKEN_PREFIX, Token};
 pub use retention::{Expired, Held, RetentionState, Step, TIERS, Tier};
 

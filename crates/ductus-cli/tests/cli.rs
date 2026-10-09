@@ -640,3 +640,129 @@ async fn the_api_shows_the_engine_and_drains_it() {
         run(&["token", "revoke", &format!("{name}-{role}")]);
     }
 }
+
+/// Pausing a destination (act first, explain after): nothing is sent to it while the others
+/// carry on, a drain doesn't wait for it, the pause holds across a restart, and resuming sends
+/// the backlog in order.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_paused_destination_waits_until_resumed() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (mllp, receiver, api) = (free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("pause-test-{nanos}");
+    let config = format!(
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\ndestinations:\n  lab: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 500 }} }}\n  archive: {{ file: {{ dir: out }} }}\n"
+    );
+    let dir = project(&[(format!("interfaces/{name}/interface.yaml").as_str(), config.as_str())]);
+    let out_dir = dir.path().join(format!("interfaces/{name}/out"));
+    let run = |args: &[&str]| {
+        let out =
+            Command::new(env!("CARGO_BIN_EXE_ductus")).args(args).env("DUCTUS_DATABASE_URL", &db).output().unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let (ok, out) = run(&["token", "create", &format!("{name}-ops"), "--role", "operator"]);
+    assert!(ok, "{out}");
+    let ops = out.lines().next().unwrap().to_string();
+    let api_url = format!("http://127.0.0.1:{api}");
+    let base = format!("{api_url}/api/v1");
+    let http = reqwest::Client::new();
+    let start = || async {
+        let engine = Child(
+            Command::new(env!("CARGO_BIN_EXE_ductus"))
+                .args(["run", "--root", &dir.path().to_string_lossy(), "--threads", "1"])
+                .args(["--api-listen", &format!("127.0.0.1:{api}")])
+                .env("DUCTUS_DATABASE_URL", &db)
+                .stdout(std::process::Stdio::null())
+                .spawn()
+                .unwrap(),
+        );
+        for _ in 0..100 {
+            if http.get(format!("{base}/health")).send().await.is_ok_and(|r| r.status().is_success()) {
+                return engine;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("the API never came up");
+    };
+    let lab = async || -> serde_json::Value {
+        let detail: serde_json::Value =
+            http.get(format!("{base}/interfaces/{name}")).bearer_auth(&ops).send().await.unwrap().json().await.unwrap();
+        detail["destinations"].as_array().unwrap().iter().find(|d| d["name"] == "lab").unwrap().clone()
+    };
+    let cli = |args: &[&str]| {
+        let mut all = args.to_vec();
+        all.extend(["--api", &api_url, "--token", &ops]);
+        ductus(dir.path(), &all)
+    };
+
+    // The receiver is up, and counts what it gets, in order.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", receiver)).await.unwrap();
+    let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let got = received.clone();
+    tokio::spawn(ductus_mllp::serve(listener, move |m: bytes::Bytes| {
+        let text = String::from_utf8_lossy(&m).to_string();
+        let control = text.split('|').nth(9).unwrap_or("").to_string();
+        got.lock().unwrap().push(control);
+        async { bytes::Bytes::from_static(b"MSH|^~\\&|LAB|H|EPIC|H|20260101||ACK|1|P|2.5\rMSA|AA|1\r") }
+    }));
+    let count = || received.lock().unwrap().len();
+
+    let mut engine = start().await;
+    // Pause first, no questions; the reason comes later.
+    let (ok, out) = cli(&["pause", &name, "lab"]);
+    assert!(ok && out.contains("paused by") && out.contains("no reason yet"), "{out}");
+    let (ok, out) = cli(&["pause", &name]);
+    assert!(!ok && out.contains("no destination `default` (it has archive, lab)"), "{out}");
+
+    let mut sender = ductus_mllp::Client::new(format!("127.0.0.1:{mllp}"), std::time::Duration::from_secs(5));
+    for n in 1..=3 {
+        let msg = format!("MSH|^~\\&|EPIC|H|LAB|H|20260101||ADT^A01|C{n}|P|2.5\rPID|1||MRN{n}\r");
+        assert!(String::from_utf8_lossy(&sender.send(msg.as_bytes()).await.unwrap()).contains("MSA|AA"));
+    }
+    // The other destination carries on; the paused one gets nothing.
+    let archived = eventually(async || std::fs::read_dir(&out_dir).map(|d| d.count()).unwrap_or(0) == 3);
+    assert!(archived.await, "archive isn't paused");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(count(), 0, "nothing sent while paused");
+    let (ok, out) = cli(&["pause", &name, "lab", "--reason", "lab vendor breach: hold until cleared"]);
+    assert!(ok && out.contains("reason: lab vendor breach"), "{out}");
+    let status = lab().await;
+    assert_eq!(
+        (&status["pending"], &status["paused"]["reason"]),
+        (&3.into(), &"lab vendor breach: hold until cleared".into())
+    );
+    assert_eq!(status["paused"]["by"], format!("{name}-ops"));
+    let metrics = http.get(format!("{base}/metrics")).bearer_auth(&ops).send().await.unwrap().text().await.unwrap();
+    assert!(
+        metrics.contains(&format!("ductus_destination_paused{{interface=\"{name}\",destination=\"lab\"}} 1")),
+        "{metrics}"
+    );
+
+    // A drain doesn't wait for a paused destination.
+    let (ok, out) = cli(&["drain", "--wait"]);
+    assert!(ok && out.contains("drained"), "{out}");
+    assert!(cli(&["resume"]).0);
+
+    // A restart (or a failover) keeps the pause.
+    drop(engine);
+    engine = start().await;
+    let status = lab().await;
+    assert_eq!(status["paused"]["reason"], "lab vendor breach: hold until cleared", "{status}");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    assert_eq!(count(), 0, "still paused after the restart");
+
+    // Resume: the backlog goes, in order.
+    let (ok, out) = cli(&["resume", &name, "lab"]);
+    assert!(ok && out.contains("resumed") && out.contains("sending 3 waiting"), "{out}");
+    assert!(eventually(async || count() == 3).await, "sent once resumed");
+    assert_eq!(*received.lock().unwrap(), ["C1", "C2", "C3"]);
+    let (ok, out) = cli(&["resume", &name, "lab"]);
+    assert!(ok && out.contains("wasn't paused"), "{out}");
+    assert!(lab().await["paused"].is_null());
+
+    drop(engine);
+    run(&["token", "revoke", &format!("{name}-ops")]);
+}

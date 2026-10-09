@@ -1,6 +1,7 @@
 //! The engine, its interfaces, drain mode and live updates.
 
 use super::{ApiError, ApiResult, Caller, Eng, Shared};
+use crate::activity::Paused;
 use crate::control::{DrainState, Engine, Running, Snapshot};
 use crate::stats::{self, DestinationStats, Histogram, InterfaceStats};
 use axum::Json;
@@ -23,6 +24,7 @@ pub fn routes() -> OpenApiRouter<Shared> {
         .routes(routes!(interfaces))
         .routes(routes!(interface))
         .routes(routes!(drain_status, drain, resume))
+        .routes(routes!(pause, unpause))
         .routes(routes!(events))
 }
 
@@ -54,6 +56,9 @@ pub struct DrainStatus {
     /// Interfaces still holding pending deliveries (a destination that's down, or a stopped
     /// interface, keeps a drain from finishing).
     waiting_for: Vec<String>,
+    /// Paused destinations (`interface/destination`): they keep their messages and don't hold
+    /// the drain up.
+    paused: Vec<String>,
 }
 
 fn drain_label(state: DrainState) -> &'static str {
@@ -70,13 +75,21 @@ fn drain_report(engine: &Engine, snapshot: &Snapshot) -> DrainStatus {
         DrainState::Accepting => (None, false),
         DrainState::Draining { since, stop } | DrainState::Drained { since, stop } => (Some(since), stop),
     };
-    let pending = |i: &Running| i.destinations.iter().map(|(_, id)| snapshot.queue(*id).pending).sum::<i64>();
+    let pending = |i: &Running| {
+        let live = i.destinations.iter().filter(|(_, id)| engine.paused(*id).is_none());
+        live.map(|(_, id)| snapshot.queue(*id).pending).sum::<i64>()
+    };
+    let paused = engine.interfaces.iter().flat_map(|i| {
+        let paused = i.destinations.iter().filter(|(_, id)| engine.paused(*id).is_some());
+        paused.map(|(name, _)| format!("{}/{name}", i.config.name))
+    });
     DrainStatus {
         state: drain_label(state),
         since,
         stop_when_drained: stop,
         pending: engine.interfaces.iter().map(pending).sum(),
         waiting_for: engine.interfaces.iter().filter(|i| pending(i) > 0).map(|i| i.config.name.clone()).collect(),
+        paused: paused.collect(),
     }
 }
 
@@ -238,8 +251,27 @@ pub struct DestinationStatus {
     pending: i64,
     /// Needing a person.
     quarantined: i64,
+    /// Set while it's paused on purpose (nothing sent or retried until resumed).
+    paused: Option<PauseInfo>,
     /// Counts and timings since the engine started.
     since_start: DestinationCounts,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PauseInfo {
+    at: DateTime<Utc>,
+    /// The token that paused it.
+    by: String,
+    /// Why, once someone says (it can be added after the pause).
+    reason: Option<String>,
+    reason_by: Option<String>,
+    reason_at: Option<DateTime<Utc>>,
+}
+
+impl From<Paused> for PauseInfo {
+    fn from(p: Paused) -> Self {
+        Self { at: p.at, by: p.by, reason: p.reason, reason_by: p.reason_by, reason_at: p.reason_at }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -353,6 +385,7 @@ fn interface_status(engine: &Engine, i: &Running, snapshot: &Snapshot) -> Interf
                         .map(Into::into),
                     pending: queue.pending,
                     quarantined: queue.quarantined,
+                    paused: engine.paused(*id).map(Into::into),
                     since_start: destination_counts(stats),
                 }
             })
@@ -434,6 +467,68 @@ async fn resume(engine: Eng, caller: Caller) -> ApiResult<DrainStatus> {
     Ok(Json(drain_report(&engine, &snapshot)))
 }
 
+#[derive(Deserialize, ToSchema, Default)]
+pub struct PauseRequest {
+    /// Why (optional: pause first, explain after; pausing again with a reason adds it).
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PauseStatus {
+    interface: String,
+    destination: String,
+    /// The pause (on `DELETE`: the pause that was ended; none if it wasn't paused).
+    paused: Option<PauseInfo>,
+    /// Messages waiting for it.
+    pending: i64,
+}
+
+/// Pause a destination at once: nothing is sent or retried until it's resumed (a send under way
+/// finishes). Messages keep queueing. No reason needed; send one now or later (pausing again
+/// with a reason adds it). Survives restarts. Operator.
+#[utoipa::path(
+    post, path = "/interfaces/{name}/destinations/{destination}/pause", tag = "engine",
+    params(("name" = String, Path, description = "Interface name"), ("destination" = String, Path, description = "Destination name (`default` for one given with `destination:`)")),
+    request_body(content = PauseRequest, content_type = "application/json"),
+    responses((status = 200, body = PauseStatus), (status = 403, body = super::ErrorBody), (status = 404, body = super::ErrorBody))
+)]
+async fn pause(
+    engine: Eng,
+    caller: Caller,
+    Path((name, destination)): Path<(String, String)>,
+    body: Option<Json<PauseRequest>>,
+) -> ApiResult<PauseStatus> {
+    caller.require(Role::Operator)?;
+    let (_, id) = engine.destination(&name, &destination).map_err(ApiError::not_found)?;
+    let reason = body.and_then(|Json(b)| b.reason).filter(|r| !r.trim().is_empty());
+    let paused = engine.pause(id, caller.name(), reason.as_deref()).await?;
+    tracing::warn!(interface = %name, %destination, by = caller.name(), reason = reason.as_deref().unwrap_or("none yet"), "destination paused");
+    let pending = engine.snapshot().await?.queue(id).pending;
+    Ok(Json(PauseStatus { interface: name, destination, paused: Some(paused.into()), pending }))
+}
+
+/// Resume a paused destination: it sends its backlog in order. Operator.
+#[utoipa::path(
+    delete, path = "/interfaces/{name}/destinations/{destination}/pause", tag = "engine",
+    params(("name" = String, Path, description = "Interface name"), ("destination" = String, Path, description = "Destination name")),
+    responses((status = 200, body = PauseStatus), (status = 403, body = super::ErrorBody), (status = 404, body = super::ErrorBody))
+)]
+async fn unpause(
+    engine: Eng,
+    caller: Caller,
+    Path((name, destination)): Path<(String, String)>,
+) -> ApiResult<PauseStatus> {
+    caller.require(Role::Operator)?;
+    let (_, id) = engine.destination(&name, &destination).map_err(ApiError::not_found)?;
+    let ended = engine.unpause(id).await?;
+    if ended.is_some() {
+        tracing::warn!(interface = %name, %destination, by = caller.name(), "destination resumed");
+    }
+    let pending = engine.snapshot().await?.queue(id).pending;
+    Ok(Json(PauseStatus { interface: name, destination, paused: ended.map(Into::into), pending }))
+}
+
 #[derive(Serialize, ToSchema)]
 pub struct LiveUpdate {
     at: DateTime<Utc>,
@@ -454,6 +549,7 @@ pub struct LiveDestination {
     name: String,
     pending: i64,
     quarantined: i64,
+    paused: bool,
 }
 
 fn live_update(engine: &Engine, snapshot: &Snapshot) -> LiveUpdate {
@@ -472,7 +568,12 @@ fn live_update(engine: &Engine, snapshot: &Snapshot) -> LiveUpdate {
                     .iter()
                     .map(|(name, id)| {
                         let q = snapshot.queue(*id);
-                        LiveDestination { name: name.clone(), pending: q.pending, quarantined: q.quarantined }
+                        LiveDestination {
+                            name: name.clone(),
+                            pending: q.pending,
+                            quarantined: q.quarantined,
+                            paused: engine.paused(*id).is_some(),
+                        }
                     })
                     .collect(),
             })

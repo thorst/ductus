@@ -82,6 +82,14 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** each destination has its own queue, order and retries. While the lab is down, billing and the archive keep receiving; the lab's messages wait, in order, and go once it's back. A message's overall status stays `pending` until every destination is done with it. Then it's `quarantined` if any destination quarantined it, `sent` if any destination got it, and `filtered` if all of them filtered it. The status per destination says which (`ductus status` lists them).
 - **What to do:** watch each destination's queue, not just the interface's.
 
+### Pausing a destination: at once, no questions, and it holds (level 2)
+- **What:** `ductus pause <interface> [destination]` (or the API) stops sending to that destination at once: no new sends and no retries. A send already under way finishes. Messages keep arriving and wait, in order. No reason is needed to pause. Add one when there's time by running it again with `--reason "..."` (until then it shows "no reason yet"). The pause is stored, so a restart or a failover keeps it. A paused destination doesn't hold up a drain. `ductus resume <interface> [destination]` sends the backlog in order. Without arguments, `ductus resume` ends a drain.
+- **Why:** in an emergency (a receiver breached, a vendor sending garbage back) you stop the damage first and explain after. A destination that's merely down already waits and retries by itself, so it needs no pause.
+- **What to do:**
+  - Down for minutes to hours: do nothing; it retries.
+  - Cut off on purpose, or down for days to weeks: pause it, so it stops retrying and shows as *paused*, not *stalled*. Add the reason.
+  - Longer than the interface's retention window: for now, waiting messages keep their week's partition for every interface in the tier, so disk grows. The held area (v0.5 step 6e) will move them aside. Agree a release plan with the vendor before they're back: the backlog goes at the destination's rate limit.
+
 ### Filtering and quarantine are per destination (level 2)
 - **What:** `return null`, `kill()` and `quarantine()` in a destination's function apply to that destination only. The message still goes to the others.
 

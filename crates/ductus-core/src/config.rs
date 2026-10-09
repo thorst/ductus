@@ -73,6 +73,10 @@ pub struct InterfaceConfig {
     /// that doesn't say).
     #[serde(default)]
     pub retention: Option<crate::Retention>,
+    /// What operations expects: something received within a time or by a deadline, queues
+    /// not behind. Nothing by default (see `monitor.rs`).
+    #[serde(default)]
+    pub monitor: crate::monitor::Monitor,
 
     /// Folder the config was loaded from.
     #[serde(skip)]
@@ -337,6 +341,8 @@ pub struct DestinationConfig {
     /// Who to call about this destination, when it isn't `about.owner` (e.g. its code is
     /// another team's).
     pub owner: Option<String>,
+    /// Its own `behind` limit, instead of the interface's `monitor.behind`.
+    pub monitor: crate::monitor::DestinationMonitor,
 }
 
 impl DestinationConfig {
@@ -399,6 +405,8 @@ struct RawDestination {
     vendor: Option<String>,
     #[serde(default)]
     owner: Option<String>,
+    #[serde(default)]
+    monitor: crate::monitor::DestinationMonitor,
 }
 
 impl TryFrom<RawDestination> for DestinationConfig {
@@ -430,6 +438,7 @@ impl TryFrom<RawDestination> for DestinationConfig {
             application: raw.application,
             vendor: raw.vendor,
             owner: raw.owner,
+            monitor: raw.monitor,
         })
     }
 }
@@ -807,6 +816,10 @@ impl InterfaceConfig {
         if self.responds() && (self.ordering.key.is_some() || self.dedupe.is_some() || self.rate_limit.is_some()) {
             bail!("ordering, dedupe and rate_limit apply to queued messages, not `respond` mode");
         }
+        if self.responds() && !self.monitor.is_empty() {
+            bail!("`monitor` watches queued messages; an HTTP source in `respond` mode has none");
+        }
+        self.monitor.validate()?;
         match &self.source {
             Source::File(f) | Source::Sftp(f) => {
                 let sftp = matches!(self.source, Source::Sftp(_));
@@ -880,6 +893,11 @@ impl InterfaceConfig {
     /// allowance either way).
     pub fn rate_limit_for<'a>(&'a self, destination: &'a DestinationConfig) -> Option<&'a RateLimit> {
         destination.rate_limit.as_ref().or(self.rate_limit.as_ref())
+    }
+
+    /// When a destination's queue counts as behind: its own limit, or the interface's.
+    pub fn behind_for(&self, destination: &DestinationConfig) -> Option<crate::monitor::Behind> {
+        destination.monitor.behind.or(self.monitor.behind)
     }
 
     /// The format a destination's results are serialized in.
@@ -1371,6 +1389,43 @@ destinations:
         assert!(err("name: a\nsource: internal\ndestination: { interface: a }\n").contains("route to itself"));
         assert!(err("name: a\nsource: internal\ndestination: { interface: ' ' }\n").contains("needs the name"));
         assert!(err("name: a\nsource: internal\n").contains("is required"));
+    }
+
+    #[test]
+    fn monitor_expectations_with_a_destination_of_its_own() {
+        let yaml = r#"
+name: adt
+source: { mllp: { port: 6661 } }
+monitor: { active_within: 30m, between: "06:00-22:00", behind: 500 }
+destinations:
+  lab: { mllp: { host: lab, port: 6662 } }
+  billing: { file: { dir: o }, monitor: { behind: { age: 10m } } }
+"#;
+        let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
+        assert!(c.validate().is_ok());
+        let all: Vec<_> = c.destinations().collect();
+        let (billing, lab) = (all[0].1, all[1].1);
+        assert_eq!(c.behind_for(lab).unwrap().messages, Some(500));
+        let own = c.behind_for(billing).unwrap();
+        assert_eq!((own.messages, own.age), (None, Some(Duration::from_secs(600))), "replaces, not merges");
+
+        let err = |yaml: &str| match serde_yaml_ng::from_str::<InterfaceConfig>(yaml) {
+            Ok(c) => format!("{:#}", c.validate().unwrap_err()),
+            Err(e) => e.to_string(),
+        };
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("t.ts"), "").unwrap();
+        let mut respond: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: api\nsource: { http: { port: 8080, path: /p, mode: respond } }\nscript: t.ts\nformat: json\nmonitor: { behind: 5 }\n",
+        )
+        .unwrap();
+        respond.dir = dir.path().to_path_buf();
+        assert!(respond.validate().unwrap_err().to_string().contains("`respond` mode has none"));
+        let head = "name: x\nsource: { mllp: { port: 1 } }\n";
+        assert!(
+            err(&format!("{head}destination: {{ file: {{ dir: o }}, monitor: {{ active_within: 5m }} }}"))
+                .contains("active_within")
+        );
     }
 
     #[test]

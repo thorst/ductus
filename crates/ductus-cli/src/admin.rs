@@ -1,6 +1,6 @@
 //! `ductus token` (API tokens, straight in the engine's database: that's how the first one is
 //! made), and through a running engine's REST API: `ductus drain` / `ductus resume`, `ductus
-//! retention`.
+//! pause`, `ductus retention`.
 
 use anyhow::{Context, Result, bail};
 use ductus_store::{Role, Store};
@@ -139,6 +139,67 @@ pub async fn drain(remote: Remote, stop: bool, wait: bool) -> Result<()> {
 pub async fn resume(remote: Remote) -> Result<()> {
     let status = remote.call(reqwest::Method::DELETE, "/drain", None).await?;
     println!("{}: taking new messages", status["state"].as_str().unwrap_or("?"));
+    Ok(())
+}
+
+/// The API path of a destination's pause. One given with `destination:` is named `default`.
+fn pause_path(interface: &str, destination: Option<&str>) -> String {
+    let destination = destination.unwrap_or(ductus_core::config::DEFAULT_DESTINATION);
+    format!("/interfaces/{}/destinations/{}/pause", urlencoding(interface), urlencoding(destination))
+}
+
+/// "`adt` destination `lab`" (or "`adt`" for its only destination).
+fn destination_label(status: &Value) -> String {
+    let (interface, destination) = (status["interface"].as_str().unwrap_or("?"), status["destination"].as_str());
+    match destination {
+        Some(d) if d != ductus_core::config::DEFAULT_DESTINATION => format!("`{interface}` destination `{d}`"),
+        _ => format!("`{interface}`"),
+    }
+}
+
+fn local_time(value: &Value) -> String {
+    value
+        .as_str()
+        .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+        .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+        .unwrap_or_else(|| "?".into())
+}
+
+/// `ductus pause <interface> [destination] [--reason]`.
+pub async fn pause(remote: Remote, interface: &str, destination: Option<&str>, reason: Option<&str>) -> Result<()> {
+    let body = serde_json::json!({ "reason": reason });
+    let status = remote.call(reqwest::Method::POST, &pause_path(interface, destination), Some(body)).await?;
+    let paused = &status["paused"];
+    let pending = status["pending"].as_i64().unwrap_or(0);
+    println!(
+        "{} paused by {} at {}: nothing is sent until `ductus resume {interface}{}` ({pending} waiting)",
+        destination_label(&status),
+        paused["by"].as_str().unwrap_or("?"),
+        local_time(&paused["at"]),
+        destination.map(|d| format!(" {d}")).unwrap_or_default(),
+    );
+    match paused["reason"].as_str() {
+        Some(reason) => println!("reason: {reason}"),
+        None => println!(
+            "no reason yet: add one when you can with `ductus pause {interface}{} --reason \"...\"`",
+            destination.map(|d| format!(" {d}")).unwrap_or_default()
+        ),
+    }
+    Ok(())
+}
+
+/// `ductus resume <interface> [destination]`: end a destination's pause.
+pub async fn unpause(remote: Remote, interface: &str, destination: Option<&str>) -> Result<()> {
+    let status = remote.call(reqwest::Method::DELETE, &pause_path(interface, destination), None).await?;
+    let pending = status["pending"].as_i64().unwrap_or(0);
+    match status["paused"].as_object() {
+        Some(_) => println!(
+            "{} resumed (paused since {}): sending {pending} waiting, in order",
+            destination_label(&status),
+            local_time(&status["paused"]["at"])
+        ),
+        None => println!("{} wasn't paused ({pending} waiting)", destination_label(&status)),
+    }
     Ok(())
 }
 

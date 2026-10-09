@@ -74,15 +74,17 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 ## Where things are
 
 ```
-crates/ductus-core     config, formats, environments, secrets, resources (databases, sftp, apis), retention, about (systems,
+crates/ductus-core     config, formats, environments, secrets, resources (databases, sftp, apis), retention, monitor
+                       (`monitor:` expectations and their time rules), about (systems,
                        host/subnet matching), impact, owners (report + in-place reassign), schedule timing, ports,
                        settings (ductus.yaml)
 crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
-crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations); retention.rs (tiers, changes, drops)
+crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations); retention.rs (tiers, changes, drops); activity.rs (last activity, pauses)
 crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker (+ tests/script.rs)
-crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for the API: health, queues, drain),
+crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for the API: health, queues, drain, pauses),
                        stats.rs (counts and timings in memory: histograms, Prometheus text format),
+                       activity.rs (last activity and pauses, kept in the database across restarts),
                        gate.rs (drain gate), retention.rs (applies retention, runs changes, drops partitions),
                        api/ (REST API: status, messages, reports, retention, tokens, metrics),
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
@@ -90,7 +92,7 @@ crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for th
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
                        services.rs + mssql.rs (DB calls), limiter.rs, doctor.rs (connection checks)
 crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/impact/types/secret; new.rs: `new interface`;
-                       admin.rs: `token`, `drain`, `resume`, `retention`;
+                       admin.rs: `token`, `drain`, `resume`, `pause`, `retention`;
                        doctor.rs: runs `doctor` (what to check is runtime's `doctor::plan`); owners.rs: `owners` report and reassign;
                        tools.rs: gen/sink/status;
                        tests/cli.rs runs the binary on temp projects)

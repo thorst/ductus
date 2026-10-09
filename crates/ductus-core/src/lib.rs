@@ -5,6 +5,7 @@ pub mod config;
 pub mod env;
 pub mod format;
 pub mod impact;
+pub mod monitor;
 pub mod owners;
 pub mod ports;
 pub mod resources;

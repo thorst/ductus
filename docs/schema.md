@@ -117,6 +117,38 @@ Each interface's retention as the engine applied it, and the change in progress.
 
 Index: primary key `interface`.
 
+## `interface_activity`
+
+What monitoring must remember across a restart or a failover: when each interface last received something. Written every few seconds by one task (only the times that changed; a time never moves back).
+
+| column | type | |
+|---|---|---|
+| `interface` | text | The interface's name. |
+| `watched_since` | timestamptz | When an engine first ran the interface: `active_by` deadlines before it don't count. |
+| `last_received` | timestamptz | When a message (or a duplicate) last arrived. |
+| `updated_at` | timestamptz | Last change. |
+
+Index: primary key `interface`.
+
+## `destination_activity`
+
+Each destination's last send and failure (written like `interface_activity`), and its pause (written at once).
+
+| column | type | |
+|---|---|---|
+| `destination_id` | integer | `destinations.id`. |
+| `last_sent` | timestamptz | When a message was last delivered (or routed). |
+| `last_error` | text | The last failure: a retry's error or a quarantine's reason. |
+| `last_error_at` | timestamptz | When. |
+| `paused_at` | timestamptz | Set while the destination is paused on purpose (`ductus pause`): nothing is sent or retried. |
+| `paused_by` | text | The API token that paused it. |
+| `pause_reason` | text | Why, once someone says (often added after the pause). |
+| `reason_by` | text | The token that gave the reason. |
+| `reason_at` | timestamptz | When. |
+| `updated_at` | timestamptz | Last change. |
+
+Index: primary key `destination_id`.
+
 ## Functions
 
 - `ductus_tiers()`: the tiers in days, `{7,21,49}`. `ductus_tier_unit(tier)`: the period one partition of a tier covers (`day` for 7, else `week`).

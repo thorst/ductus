@@ -144,8 +144,26 @@ enum Command {
         #[command(flatten)]
         api: ApiArgs,
     },
-    /// Take new messages again after `ductus drain`.
+    /// Take new messages again after `ductus drain`; or, with an interface, resume its paused
+    /// destination (it sends its backlog in order).
     Resume {
+        /// Resume this interface's paused destination (instead of ending a drain).
+        interface: Option<String>,
+        /// Which destination (needed when the interface has several).
+        destination: Option<String>,
+        #[command(flatten)]
+        api: ApiArgs,
+    },
+    /// Pause a destination at once: nothing is sent or retried until `ductus resume <interface>
+    /// [destination]`; messages keep queueing. Act first, explain after: the reason is optional,
+    /// and running it again with --reason adds one. Through the running engine's REST API.
+    Pause {
+        interface: String,
+        /// Which destination (needed when the interface has several).
+        destination: Option<String>,
+        /// Why (can be added later).
+        #[arg(long)]
+        reason: Option<String>,
         #[command(flatten)]
         api: ApiArgs,
     },
@@ -410,7 +428,14 @@ async fn run(cli: Cli) -> Result<()> {
             admin::token(&database_url, command).await
         }
         Command::Drain { stop, wait, api } => admin::drain(admin::Remote::new(&api.api, api.token)?, stop, wait).await,
-        Command::Resume { api } => admin::resume(admin::Remote::new(&api.api, api.token)?).await,
+        Command::Resume { interface: None, api, .. } => admin::resume(admin::Remote::new(&api.api, api.token)?).await,
+        Command::Resume { interface: Some(interface), destination, api } => {
+            admin::unpause(admin::Remote::new(&api.api, api.token)?, &interface, destination.as_deref()).await
+        }
+        Command::Pause { interface, destination, reason, api } => {
+            let remote = admin::Remote::new(&api.api, api.token)?;
+            admin::pause(remote, &interface, destination.as_deref(), reason.as_deref()).await
+        }
         Command::Retention { action, api } => {
             let remote = admin::Remote::new(&api.api, api.token)?;
             match action {

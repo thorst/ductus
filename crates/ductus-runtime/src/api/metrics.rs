@@ -117,6 +117,16 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
             out.sample("ductus_queue_quarantined", &dest(&i.config.name, name), snapshot.queue(*id).quarantined);
         }
     }
+    out.family("ductus_destination_paused", "gauge", "1 while a destination is paused on purpose (`ductus pause`).");
+    for i in queued() {
+        for (name, id) in &i.destinations {
+            out.sample(
+                "ductus_destination_paused",
+                &dest(&i.config.name, name),
+                u8::from(engine.paused(*id).is_some()),
+            );
+        }
+    }
 
     let responding = || engine.interfaces.iter().filter(|i| i.config.responds());
     out.family("ductus_http_request_seconds", "histogram", "Respond-mode HTTP requests: time in the engine.");

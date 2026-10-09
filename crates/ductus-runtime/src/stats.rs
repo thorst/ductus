@@ -6,8 +6,9 @@
 //! its `rate()` handles it. What monitoring must remember across a restart or a failover (last
 //! activity, expectations) lives in the database instead.
 
+use chrono::{DateTime, Utc};
 use std::fmt::Write;
-use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicI64, AtomicU64, Ordering::Relaxed};
 use std::time::Duration;
 
 /// Upper bounds of the histogram buckets, in seconds: 1, 2.5 and 5 per decade from half a
@@ -77,6 +78,28 @@ impl Histogram {
     }
 }
 
+/// When something last happened (to the millisecond), lock-free. Never moves back. Loaded from
+/// the database at startup and saved by `activity.rs`, so unlike the counts it survives restarts.
+#[derive(Default)]
+pub struct Moment(AtomicI64);
+
+impl Moment {
+    pub fn now(&self) {
+        self.at(Utc::now());
+    }
+
+    pub fn at(&self, t: DateTime<Utc>) {
+        self.0.fetch_max(t.timestamp_millis(), Relaxed);
+    }
+
+    pub fn get(&self) -> Option<DateTime<Utc>> {
+        match self.0.load(Relaxed) {
+            0 => None,
+            ms => DateTime::from_timestamp_millis(ms),
+        }
+    }
+}
+
 /// One interface's counts: what it received, and each destination's.
 pub struct InterfaceStats {
     pub name: String,
@@ -92,6 +115,8 @@ pub struct InterfaceStats {
     /// answer (the HTTP server adds microseconds).
     pub requests: Histogram,
     pub request_errors: AtomicU64,
+    /// When a message (or a duplicate) last arrived.
+    pub last_received: Moment,
 }
 
 impl InterfaceStats {
@@ -104,6 +129,7 @@ impl InterfaceStats {
             destinations: destinations.into_iter().map(|d| std::sync::Arc::new(DestinationStats::new(d))).collect(),
             requests: Histogram::default(),
             request_errors: AtomicU64::new(0),
+            last_received: Moment::default(),
         }
     }
 }
@@ -122,9 +148,23 @@ pub struct DestinationStats {
     pub send: Histogram,
     /// From receipt to sent: what a message's journey through the engine took, backlog included.
     pub latency: Histogram,
+    /// When a message was last delivered (or routed).
+    pub last_sent: Moment,
+    /// The last failure (a retry or a quarantine) and when.
+    pub last_error: std::sync::Mutex<Option<(DateTime<Utc>, String)>>,
 }
 
 impl DestinationStats {
+    /// Remember a failure (a retry or a quarantine).
+    pub fn failed(&self, error: &str) {
+        let error = error.chars().take(2000).collect();
+        *self.last_error.lock().unwrap_or_else(|p| p.into_inner()) = Some((Utc::now(), error));
+    }
+
+    pub fn last_error(&self) -> Option<(DateTime<Utc>, String)> {
+        self.last_error.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
     fn new(name: String) -> Self {
         Self {
             name,
@@ -135,6 +175,8 @@ impl DestinationStats {
             transform: Histogram::default(),
             send: Histogram::default(),
             latency: Histogram::default(),
+            last_sent: Moment::default(),
+            last_error: Default::default(),
         }
     }
 }

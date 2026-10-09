@@ -75,20 +75,22 @@ pub fn router(engine: Shared) -> (Router, utoipa::openapi::OpenApi) {
     (Router::new().nest("/api/v1", api.with_state(engine)), doc)
 }
 
-/// Serve the API at `host:port` until the process ends.
-pub async fn serve(engine: Shared, host: &str, port: u16) -> anyhow::Result<()> {
+/// Serve the API at `host:port` until the engine shuts down. The task ends once the requests
+/// in flight have been answered: the one that asked for the shutdown (a drain with `stop`) gets
+/// its answer before the process exits.
+pub async fn serve(engine: Shared, host: &str, port: u16) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     use anyhow::Context;
     let listener = tokio::net::TcpListener::bind((host, port)).await.with_context(|| {
         format!("binding the REST API to {host}:{port} (`api.listen` in ductus.yaml; `off` to run without it)")
     })?;
     tracing::info!(%host, port, "REST API listening (/api/v1)");
+    let shutdown = engine.shutdown.clone();
     let (router, _) = router(engine);
-    tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).await {
+    Ok(tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, router).with_graceful_shutdown(shutdown.cancelled_owned()).await {
             tracing::error!(error = %e, "REST API stopped");
         }
-    });
-    Ok(())
+    }))
 }
 
 /// An error answer: `{"error": "..."}` with a status.
