@@ -6,10 +6,12 @@
 //! destination is done. Anything pending after a crash is simply picked up again:
 //! at-least-once delivery.
 
+mod actions;
 mod activity;
 mod api;
 mod retention;
 
+pub use actions::{Action, Actor, Copy, Edited, Quarantined, Resend, Resent};
 pub use activity::{BaselineRow, DestinationActivity, InterfaceActivity, Oldest, PauseRow, Received, Seen};
 pub use api::{Browse, LaneRow, MessageRow, QueueCount, Role, SESSION_PREFIX, TOKEN_PREFIX, Token};
 pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};
@@ -413,7 +415,7 @@ impl Store {
         let mut duplicate = duplicate.into_iter();
         let queued = routed.messages.iter().map(|m| fresh(&finished, m) && !duplicate.next().unwrap_or(true)).collect();
         let messages: Vec<MessageRef> = done.iter().map(|d| d.message).collect();
-        self.settle(&messages).await?;
+        self.settle_saved(&messages).await?;
         Ok(queued)
     }
 
@@ -519,7 +521,7 @@ impl Store {
         })
         .await?;
         let messages: Vec<MessageRef> = done.iter().map(|d| d.message).collect();
-        self.settle(&messages).await
+        self.settle_saved(&messages).await
     }
 
     /// Bring the overall status of `messages` up to date with their deliveries: still pending
@@ -531,10 +533,17 @@ impl Store {
     /// (In one statement or transaction, each could see the other still pending, and the
     /// message would stay pending forever.)
     ///
-    /// Several destinations settle overlapping sets of messages at once, so the rows are locked
-    /// in id order first (`locked`), by primary key: left to the plan, the order followed a hash
-    /// join or a scan, and two settles could lock the same rows in opposite orders (a deadlock,
-    /// seen with routes, which settle the same messages within milliseconds of each other).
+    /// The pending messages are locked first, in id order, in a statement of their own; the
+    /// deliveries are read after, by a second statement (a fresh snapshot). Both matter:
+    /// - Several destinations settle overlapping sets of messages at once: left to the plan, the
+    ///   lock order followed a hash join or a scan, and two settles could lock the same rows in
+    ///   opposite orders (a deadlock, seen with routes, which settle the same messages within
+    ///   milliseconds of each other).
+    /// - A resend puts a finished delivery back to pending (`Store::resend`, holding the
+    ///   message's lock). A statement reads as of when it started, so one that read the
+    ///   deliveries and then waited for the lock would settle from the delivery as it was before
+    ///   the resend: the message quarantined with a delivery pending again, and startup's
+    ///   `reconcile` would then undo the resend. Reading after the lock sees it.
     ///
     /// A retention change (or the held area) can move a message another destination just
     /// finished to another tier while this statement has it in view. Postgres then can't
@@ -545,10 +554,43 @@ impl Store {
         retrying(|| self.settle_once(messages)).await
     }
 
+    /// `settle` for statuses a destination has just saved, trying until it works. They're
+    /// committed: returning an error would make the worker save them again, and by then an
+    /// operator may have resent one of those deliveries (pending again), which saving again
+    /// would mark done without sending it. Until the database answers, the worker waits here
+    /// instead of in its own retry loop.
+    async fn settle_saved(&self, messages: &[MessageRef]) -> Result<()> {
+        let mut wait = std::time::Duration::from_millis(100);
+        loop {
+            match self.settle(messages).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!(error = %format!("{e:#}"), "statuses saved, settling their messages failed; trying again");
+                    tokio::time::sleep(wait).await;
+                    wait = (wait * 2).min(std::time::Duration::from_secs(5));
+                }
+            }
+        }
+    }
+
     async fn settle_once(&self, messages: &[MessageRef]) -> Result<()> {
         let ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
         let times: Vec<DateTime<Utc>> = messages.iter().map(|m| m.received_at).collect();
         let Some((first, last)) = span(&times) else { return Ok(()) };
+        let mut tx = self.pool.begin().await.context("starting transaction")?;
+        sqlx::query(
+            "SELECT 1 FROM messages
+             WHERE (id, received_at) IN (SELECT * FROM unnest($1::bigint[], $2::timestamptz[]))
+               AND received_at BETWEEN $3 AND $4 AND status = 0
+             ORDER BY id FOR UPDATE",
+        )
+        .bind(&ids)
+        .bind(&times)
+        .bind(first)
+        .bind(last)
+        .execute(&mut *tx)
+        .await
+        .context("locking messages to settle")?;
         sqlx::query(
             "WITH done AS (
                  SELECT message_id, received_at, count(*) AS n,
@@ -558,12 +600,6 @@ impl Store {
                    AND received_at BETWEEN $3 AND $4
                  GROUP BY message_id, received_at
                  HAVING NOT bool_or(status = 0)
-             ), locked AS (
-                 SELECT m.id, m.received_at FROM messages m
-                 WHERE (m.id, m.received_at) IN (SELECT message_id, received_at FROM done) AND m.status = 0
-                   AND m.received_at BETWEEN $3 AND $4
-                 ORDER BY m.id
-                 FOR UPDATE
              )
              UPDATE messages m
              SET status = done.status, updated_at = now(),
@@ -575,17 +611,18 @@ impl Store {
                      WHERE d.message_id = done.message_id AND d.received_at = done.received_at
                        AND d.status = done.status AND done.status <> 1
                  ), m.last_error)
-             FROM done JOIN locked ON locked.id = done.message_id AND locked.received_at = done.received_at
-             WHERE m.id = locked.id AND m.received_at = locked.received_at AND m.status = 0
+             FROM done
+             WHERE m.id = done.message_id AND m.received_at = done.received_at AND m.status = 0
                AND m.received_at BETWEEN $3 AND $4",
         )
         .bind(&ids)
         .bind(&times)
         .bind(first)
         .bind(last)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("updating message status")?;
+        tx.commit().await.context("committing message status")?;
         Ok(())
     }
 

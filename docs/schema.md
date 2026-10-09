@@ -117,6 +117,30 @@ Web UI sessions: a browser signs in with a token (`POST /api/v1/session`) and ge
 
 Indexes: primary key `id`; unique `hash`; `api_sessions_expires (expires_at)`.
 
+## `message_actions`
+
+What people did to messages through the API (`POST /api/v1/messages/{id}/resend`, `/messages/resend`, `/messages/{id}/edit`): one row per message and destination acted on, with the delivery as it was before, so nothing an action changes is lost. A **resend** puts the delivery back to pending in place (same message, same id); an **edit** queues a corrected copy (a new message) and marks the original's quarantined delivery to that destination filtered ("replaced by edited copy N"). Not dropped with the messages' partitions: it's the record of who did what (step 8's audit log builds on it; no purge yet).
+
+| column | type | |
+|---|---|---|
+| `id` | bigint | Identity. |
+| `at` | timestamptz | When. |
+| `action` | text | `resend` or `edit`. |
+| `token_id` | integer | The API token used (`api_tokens.id`). |
+| `actor` | text | The token's name at the time (names can be reused once a token is revoked). |
+| `reason` | text | Why, if given. |
+| `message_id` | bigint | The message acted on (for an edit: the original). |
+| `received_at` | timestamptz | Its `received_at` (with `message_id`, finds it in its partition while it's kept). |
+| `interface` | text | Its interface. |
+| `destination_id` | integer | The destination (`destinations.id`). |
+| `previous_status` | smallint | The delivery's status before (as `deliveries.status`); none if the message had no delivery for that destination. |
+| `previous_attempts` | integer | Its attempts before (a resend starts them over). |
+| `previous_error` | text | Its `last_error` before. |
+| `previous_output` | bytea | What was sent before, for destinations with `save_output: true` (sending again replaces it). |
+| `copy_id` | bigint | `edit`: the copy's message id. |
+
+Indexes: primary key `id`; `message_actions_message (message_id)`; `message_actions_copy (copy_id) WHERE copy_id IS NOT NULL`.
+
 ## `retention`
 
 Each interface's retention as the engine applied it, and the change in progress. Changes run one at a time per interface: a different value configured meanwhile waits in `waiting`, and so does a shorter one (it deletes messages) until someone confirms it (`ductus retention confirm`).

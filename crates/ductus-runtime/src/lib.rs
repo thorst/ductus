@@ -290,6 +290,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
             gate: gate.clone(),
             stats: stats.clone(),
             destinations: config.destinations().map(|(name, _)| name.to_string()).zip(ids.iter().copied()).collect(),
+            intake: intakes.get(&config.name).cloned(),
         })
         .collect();
     let engine = control::Engine::new(control::Parts {

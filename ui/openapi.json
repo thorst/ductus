@@ -596,6 +596,54 @@
         }
       }
     },
+    "/messages/resend": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Send many messages again at once (the quarantine screen's \"resend selected\"): as\n`POST /messages/{id}/resend` for each, in one transaction. Operator.",
+        "operationId": "resend_many",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkResendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BulkResendResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/messages/{id}": {
       "get": {
         "tags": [
@@ -626,6 +674,164 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/messages/{id}/edit": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Queue a corrected copy of a message. The original stays as it was received; its quarantined\ndeliveries to the copy's destinations are marked replaced. The copy is a new message (new\nid, so a new `meta.id`), never deduplicated, with the original's `origin`. Refused for a\ndestination where the original is still pending (it may be being sent right now). Operator.",
+        "operationId": "edit",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The message to correct",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EditRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/EditResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Still pending for a destination",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/messages/{id}/resend": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Send a message again: its quarantined deliveries, or those to the destinations named\n(whatever they ended as: a replay). Each goes back to pending in place and is sent next in\nits lane. Pending deliveries are left alone. Operator.",
+        "operationId": "resend",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ResentMessage"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing to resend",
             "content": {
               "application/json": {
                 "schema": {
@@ -674,6 +880,83 @@
                   "items": {
                     "$ref": "#/components/schemas/OwnerGroup"
                   }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/quarantine": {
+      "get": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Quarantined deliveries across this engine's interfaces (or one interface or destination),\nnewest message first: what needs a person. Counts per destination are in `GET /interfaces`.",
+        "operationId": "quarantine",
+        "parameters": [
+          {
+            "name": "interface",
+            "in": "query",
+            "description": "Only this interface's.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "destination",
+            "in": "query",
+            "description": "Only this destination's (with `interface`, that interface's; without, any interface's\ndestination of that name).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "The previous page's `next_before`.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, at most 500 (default 100).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/QuarantinePage"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
                 }
               }
             }
@@ -965,6 +1248,120 @@
   },
   "components": {
     "schemas": {
+      "ActionInfo": {
+        "type": "object",
+        "required": [
+          "at",
+          "action",
+          "by",
+          "destination"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`resend` (the delivery went back to pending) or `edit` (a corrected copy was queued)."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "by": {
+            "type": "string",
+            "description": "The token that did it."
+          },
+          "copy": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "`edit`: the copy's id."
+          },
+          "destination": {
+            "type": "string"
+          },
+          "previous_attempts": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32"
+          },
+          "previous_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous_status": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The delivery before: `sent`, `filtered` or `quarantined` (none: there was none)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "BulkResendRequest": {
+        "type": "object",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "destination": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Resend to the destination with this name in each message's interface, whatever its\ndelivery ended as (a replay). Without it: every destination that quarantined each message."
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Message ids (at most 500), from any interfaces."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why (kept with each action)."
+          }
+        }
+      },
+      "BulkResendResult": {
+        "type": "object",
+        "required": [
+          "resent",
+          "skipped"
+        ],
+        "properties": {
+          "resent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResentMessage"
+            },
+            "description": "The messages sent again, by id."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Ids with nothing to resend: not found, not run by this engine, a duplicate, or no\ndelivery that matched (pending already, or not quarantined)."
+          }
+        }
+      },
       "Change": {
         "type": "object",
         "required": [
@@ -1424,6 +1821,74 @@
               "type": "string"
             },
             "description": "Interfaces still holding pending deliveries (a destination that's down, or a stopped\ninterface, keeps a drain from finishing)."
+          }
+        }
+      },
+      "EditRequest": {
+        "type": "object",
+        "required": [
+          "payload"
+        ],
+        "properties": {
+          "destinations": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Where the copy goes. Without it: the destinations that quarantined the original."
+          },
+          "payload": {
+            "type": "string",
+            "description": "The corrected message, in full (HL7 segments separated by `\\r`)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why (kept with the action)."
+          }
+        }
+      },
+      "EditResult": {
+        "type": "object",
+        "required": [
+          "id",
+          "original",
+          "interface",
+          "destinations",
+          "replaced"
+        ],
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Where the copy goes."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The copy's id (a new message, queued at the back of its lane)."
+          },
+          "interface": {
+            "type": "string"
+          },
+          "original": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The message it corrects."
+          },
+          "replaced": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Destinations whose quarantined delivery of the original is now filtered (\"replaced by\nedited copy N\")."
           }
         }
       },
@@ -2200,9 +2665,25 @@
             "type": "object",
             "required": [
               "payload",
-              "deliveries"
+              "deliveries",
+              "actions"
             ],
             "properties": {
+              "actions": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/ActionInfo"
+                },
+                "description": "What people did to it (resends, edits), oldest first."
+              },
+              "copy_of": {
+                "type": [
+                  "integer",
+                  "null"
+                ],
+                "format": "int64",
+                "description": "An edited copy: the message it corrects."
+              },
               "deliveries": {
                 "type": "array",
                 "items": {
@@ -2452,6 +2933,90 @@
           }
         }
       },
+      "QuarantinePage": {
+        "type": "object",
+        "required": [
+          "deliveries"
+        ],
+        "properties": {
+          "deliveries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/QuarantinedDelivery"
+            },
+            "description": "Newest message first; a message quarantined by two destinations is listed twice."
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next page; absent on the last page."
+          }
+        }
+      },
+      "QuarantinedDelivery": {
+        "type": "object",
+        "required": [
+          "id",
+          "received_at",
+          "interface",
+          "destination",
+          "attempts",
+          "quarantined_at",
+          "size"
+        ],
+        "properties": {
+          "attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "control_id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "MSH-10 for HL7."
+          },
+          "destination": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The message's id."
+          },
+          "interface": {
+            "type": "string"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why."
+          },
+          "ordering_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "quarantined_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "received_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Payload size in bytes."
+          }
+        }
+      },
       "Rates": {
         "type": "object",
         "properties": {
@@ -2513,6 +3078,79 @@
             "format": "double"
           },
           "version": {
+            "type": "string"
+          }
+        }
+      },
+      "ResendRequest": {
+        "type": "object",
+        "properties": {
+          "destinations": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Resend to these destinations, whatever their delivery ended as (sent and filtered too: a\nreplay). Without it: every destination that quarantined the message."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why (kept with the action)."
+          }
+        }
+      },
+      "ResentDelivery": {
+        "type": "object",
+        "required": [
+          "destination",
+          "previous_status",
+          "previous_attempts"
+        ],
+        "properties": {
+          "destination": {
+            "type": "string"
+          },
+          "previous_attempts": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "previous_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "previous_status": {
+            "type": "string",
+            "description": "What the delivery was before: `sent`, `filtered` or `quarantined`."
+          }
+        }
+      },
+      "ResentMessage": {
+        "type": "object",
+        "required": [
+          "id",
+          "interface",
+          "destinations"
+        ],
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResentDelivery"
+            },
+            "description": "The deliveries now pending again."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interface": {
             "type": "string"
           }
         }
@@ -2782,7 +3420,7 @@
     },
     {
       "name": "messages",
-      "description": "The message browser"
+      "description": "The message browser, the quarantine, and resending or correcting messages"
     },
     {
       "name": "drain",

@@ -36,6 +36,8 @@ pub struct Running {
     pub stats: Arc<crate::stats::InterfaceStats>,
     /// Its destinations' names and store ids, in config order.
     pub destinations: Vec<(String, DestinationId)>,
+    /// Where its messages are stored and its workers woken (none in respond mode: no queue).
+    pub intake: Option<Arc<crate::ingest::Intake>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

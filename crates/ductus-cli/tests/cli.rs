@@ -804,6 +804,185 @@ async fn a_paused_destination_waits_until_resumed() {
     run(&["token", "revoke", &format!("{name}-ops")]);
 }
 
+/// Acting on messages through the API: the quarantine across interfaces, an edited copy that
+/// replaces a rejected message, a replay to one destination of what it was already sent, and a
+/// bulk resend; each recorded with who did it and what the delivery was before.
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_are_resent_and_corrected_through_the_api() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (mllp, receiver, api) = (free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("actions-test-{nanos}");
+    let config = format!(
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\nordering: {{ key: PID-3 }}\ndestinations:\n  lab: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 500 }} }}\n  archive: {{ file: {{ dir: out }} }}\n"
+    );
+    let dir = project(&[(format!("interfaces/{name}/interface.yaml").as_str(), config.as_str())]);
+    let out_dir = dir.path().join(format!("interfaces/{name}/out"));
+    let run = |args: &[&str]| {
+        let out =
+            Command::new(env!("CARGO_BIN_EXE_ductus")).args(args).env("DUCTUS_DATABASE_URL", &db).output().unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let token = |role: &str| {
+        let (ok, out) = run(&["token", "create", &format!("{name}-{role}"), "--role", role]);
+        assert!(ok, "{out}");
+        out.lines().next().unwrap().to_string()
+    };
+    let (ops, viewer) = (token("operator"), token("viewer"));
+
+    // The lab rejects (AR) anything with BAD in it, and keeps the control ids it accepted.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", receiver)).await.unwrap();
+    let accepted = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let got = accepted.clone();
+    tokio::spawn(ductus_mllp::serve(listener, move |m: bytes::Bytes| {
+        let text = String::from_utf8_lossy(&m).to_string();
+        let code = if text.contains("BAD") { "AR" } else { "AA" };
+        if code == "AA" {
+            got.lock().unwrap().push(text.split('|').nth(9).unwrap_or("").to_string());
+        }
+        async move { bytes::Bytes::from(format!("MSH|^~\\&|LAB|H|EPIC|H|20260101||ACK|1|P|2.5\rMSA|{code}|1\r")) }
+    }));
+    let accepted_ids = || accepted.lock().unwrap().clone();
+
+    let _engine = Child(
+        Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["run", "--root", &dir.path().to_string_lossy(), "--threads", "1"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let base = format!("http://127.0.0.1:{api}/api/v1");
+    let http = reqwest::Client::new();
+    let mut up = false;
+    for _ in 0..100 {
+        if http.get(format!("{base}/health")).send().await.is_ok_and(|r| r.status().is_success()) {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(up, "the API never came up");
+    let get = async |path: &str| -> serde_json::Value {
+        http.get(format!("{base}{path}")).bearer_auth(&viewer).send().await.unwrap().json().await.unwrap()
+    };
+    let post = async |path: &str, token: &str, body: serde_json::Value| -> (u16, serde_json::Value) {
+        let r = http.post(format!("{base}{path}")).bearer_auth(token).json(&body).send().await.unwrap();
+        (r.status().as_u16(), r.json().await.unwrap_or_default())
+    };
+    let quarantined = async || -> Vec<String> {
+        let page = get(&format!("/quarantine?interface={name}")).await;
+        page["deliveries"].as_array().unwrap().iter().map(|d| d["control_id"].as_str().unwrap().to_string()).collect()
+    };
+
+    let mut sender = ductus_mllp::Client::new(format!("127.0.0.1:{mllp}"), std::time::Duration::from_secs(5));
+    let mut send = async |control: &str, mrn: &str, note: &str| {
+        let msg = format!("MSH|^~\\&|EPIC|H|LAB|H|20260101||ADT^A01|{control}|P|2.5\rPID|1||{mrn}\rNTE|1||{note}\r");
+        assert!(String::from_utf8_lossy(&sender.send(msg.as_bytes()).await.unwrap()).contains("MSA|AA"));
+    };
+    send("C1", "MRN1", "fine").await;
+    send("C2", "MRN2", "BAD unit").await;
+    send("C3", "MRN3", "fine").await;
+    assert!(eventually(async || quarantined().await == ["C2"]).await, "the lab rejected C2");
+    assert!(eventually(async || accepted_ids().len() == 2).await);
+    assert_eq!(std::fs::read_dir(&out_dir).unwrap().count(), 3, "the archive has all three");
+    let page = get(&format!("/interfaces/{name}/messages")).await;
+    let id = |control: &str| {
+        page["messages"].as_array().unwrap().iter().find(|m| m["control_id"] == control).unwrap()["id"]
+            .as_i64()
+            .unwrap()
+    };
+    let (c1, c2) = (id("C1"), id("C2"));
+    let entry = &get("/quarantine").await["deliveries"].as_array().unwrap().iter().find(|d| d["id"] == c2).cloned();
+    let entry = entry.as_ref().expect("across interfaces too");
+    assert_eq!((&entry["destination"], &entry["interface"]), (&"lab".into(), &name.as_str().into()), "{entry}");
+
+    // Viewers can't act; unknown messages and destinations are said plainly.
+    assert_eq!(post(&format!("/messages/{c2}/resend"), &viewer, serde_json::json!({})).await.0, 403);
+    assert_eq!(post("/messages/999999999999/resend", &ops, serde_json::json!({})).await.0, 404);
+    let (status, body) =
+        post(&format!("/messages/{c2}/resend"), &ops, serde_json::json!({"destinations": ["billing"]})).await;
+    assert_eq!(status, 400);
+    assert!(body["error"].as_str().unwrap().contains("no destination `billing` (it has archive, lab)"), "{body}");
+
+    // Correct C2: a new message, with its own keys, for the lab only; the original's rejected
+    // delivery is replaced, so the original counts as done.
+    let fixed = "MSH|^~\\&|EPIC|H|LAB|H|20260101||ADT^A01|C2-FIX|P|2.5\rPID|1||MRN2\rNTE|1||unit corrected\r";
+    let (status, edit) =
+        post(&format!("/messages/{c2}/edit"), &ops, serde_json::json!({"payload": fixed, "reason": "unit typo"})).await;
+    assert_eq!(status, 201, "{edit}");
+    assert_eq!((&edit["destinations"], &edit["replaced"]), (&serde_json::json!(["lab"]), &serde_json::json!(["lab"])));
+    let copy = edit["id"].as_i64().unwrap();
+    assert!(eventually(async || accepted_ids().contains(&"C2-FIX".to_string())).await, "the copy is sent");
+    assert!(eventually(async || quarantined().await.is_empty()).await);
+    let original = get(&format!("/messages/{c2}")).await;
+    assert_eq!(original["status"], "sent", "{original}");
+    let lab = original["deliveries"].as_array().unwrap().iter().find(|d| d["destination"] == "lab").unwrap();
+    assert_eq!(
+        (&lab["status"], &lab["last_error"]),
+        (&"filtered".into(), &format!("replaced by edited copy {copy}").into())
+    );
+    let action = &original["actions"][0];
+    assert_eq!(
+        (&action["action"], &action["by"], &action["reason"]),
+        (&"edit".into(), &format!("{name}-operator").into(), &"unit typo".into())
+    );
+    assert_eq!((&action["previous_status"], &action["copy"]), (&"quarantined".into(), &copy.into()));
+    let made = get(&format!("/messages/{copy}")).await;
+    assert_eq!(
+        (&made["copy_of"], &made["control_id"], &made["status"]),
+        (&c2.into(), &"C2-FIX".into(), &"sent".into())
+    );
+    assert_eq!(made["deliveries"].as_array().unwrap().len(), 1, "for the lab only: {made}");
+    assert_eq!(std::fs::read_dir(&out_dir).unwrap().count(), 3, "the archive isn't sent the copy");
+
+    // A replay: the lab says it lost C1. Without a destination, nothing is quarantined to resend.
+    let (status, body) = post(&format!("/messages/{c1}/resend"), &ops, serde_json::json!({})).await;
+    assert_eq!(status, 409);
+    assert!(body["error"].as_str().unwrap().contains("name the destination"), "{body}");
+    let (status, body) =
+        post(&format!("/messages/{c1}/resend"), &ops, serde_json::json!({"destinations": ["lab"]})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(
+        (&body["destinations"][0]["destination"], &body["destinations"][0]["previous_status"]),
+        (&"lab".into(), &"sent".into())
+    );
+    assert!(eventually(async || accepted_ids().iter().filter(|c| *c == "C1").count() == 2).await, "C1 again");
+    assert_eq!(std::fs::read_dir(&out_dir).unwrap().count(), 3, "only the lab gets it again");
+
+    // Bulk: two rejected again (still BAD), and one with nothing quarantined is skipped.
+    send("C4", "MRN4", "BAD").await;
+    send("C5", "MRN5", "BAD").await;
+    assert!(eventually(async || quarantined().await.len() == 2).await);
+    let page = get(&format!("/interfaces/{name}/messages")).await;
+    let ids: Vec<i64> = ["C4", "C5"]
+        .iter()
+        .map(|c| {
+            page["messages"].as_array().unwrap().iter().find(|m| m["control_id"] == *c).unwrap()["id"].as_i64().unwrap()
+        })
+        .collect();
+    let (status, body) = post("/messages/resend", &ops, serde_json::json!({"ids": [ids[0], ids[1], c1]})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!((body["resent"].as_array().unwrap().len(), &body["skipped"]), (2, &serde_json::json!([c1])));
+    let resent =
+        eventually(async || get(&format!("/messages/{}", ids[0])).await["actions"].as_array().unwrap().len() == 1);
+    assert!(resent.await);
+    assert!(eventually(async || quarantined().await.len() == 2).await, "rejected again");
+    assert_eq!(post("/messages/resend", &ops, serde_json::json!({"ids": []})).await.0, 400);
+
+    let spec: serde_json::Value = http.get(format!("{base}/openapi.json")).send().await.unwrap().json().await.unwrap();
+    for path in ["/messages/{id}/resend", "/messages/resend", "/messages/{id}/edit", "/quarantine"] {
+        assert!(spec["paths"][path].is_object(), "{path} missing from the OpenAPI document");
+    }
+    for role in ["operator", "viewer"] {
+        run(&["token", "revoke", &format!("{name}-{role}")]);
+    }
+}
+
 /// The web UI comes with the engine: any path outside `/api` is the app (its router shows the
 /// page), with a CSP and the right caching. A browser signs in with a token and gets a session
 /// cookie that stands in for it; changes made with the cookie need the `X-Ductus` header (so

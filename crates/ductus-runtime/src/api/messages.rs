@@ -119,6 +119,27 @@ pub struct MessageDetail {
     /// The message as received (bytes that aren't UTF-8 are replaced).
     payload: String,
     deliveries: Vec<DeliveryInfo>,
+    /// What people did to it (resends, edits), oldest first.
+    actions: Vec<ActionInfo>,
+    /// An edited copy: the message it corrects.
+    copy_of: Option<i64>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ActionInfo {
+    at: DateTime<Utc>,
+    /// `resend` (the delivery went back to pending) or `edit` (a corrected copy was queued).
+    action: String,
+    /// The token that did it.
+    by: String,
+    reason: Option<String>,
+    destination: String,
+    /// The delivery before: `sent`, `filtered` or `quarantined` (none: there was none).
+    previous_status: Option<&'static str>,
+    previous_attempts: Option<i32>,
+    previous_error: Option<String>,
+    /// `edit`: the copy's id.
+    copy: Option<i64>,
 }
 
 /// One message: what was received, and what each destination did with it.
@@ -145,5 +166,23 @@ async fn message(engine: Eng, caller: Caller, Path(id): Path<i64>) -> ApiResult<
             output: d.output.map(|o| String::from_utf8_lossy(&o).into_owned()),
         })
         .collect();
-    Ok(Json(MessageDetail { message: row.into(), payload: String::from_utf8_lossy(&payload).into_owned(), deliveries }))
+    let (made_by, done_to): (Vec<_>, Vec<_>) =
+        engine.store.actions(id).await?.into_iter().partition(|a| a.copy_id == Some(id));
+    let actions = done_to
+        .into_iter()
+        .map(|a| ActionInfo {
+            at: a.at,
+            action: a.action,
+            by: a.actor,
+            reason: a.reason,
+            destination: a.destination,
+            previous_status: a.previous_status.and_then(Status::from_i16).map(Status::label),
+            previous_attempts: a.previous_attempts,
+            previous_error: a.previous_error,
+            copy: a.copy_id,
+        })
+        .collect();
+    let copy_of = made_by.first().map(|a| a.message_id);
+    let payload = String::from_utf8_lossy(&payload).into_owned();
+    Ok(Json(MessageDetail { message: row.into(), payload, deliveries, actions, copy_of }))
 }

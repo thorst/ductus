@@ -46,7 +46,7 @@ pub struct Intake {
 impl Intake {
     /// `destinations`: the ids of the interface's destinations (`Store::destination_ids`);
     /// `tier`: its retention tier (`Retention::tier`).
-    pub fn new(
+    pub(crate) fn new(
         config: Arc<InterfaceConfig>,
         store: Store,
         wake: Arc<Wake>,
@@ -92,9 +92,40 @@ impl Intake {
         self.config.durability == Durability::Relaxed
     }
 
-    /// Wake only the lane's owners: one worker per destination.
-    fn wake(&self, partition: i32) {
+    /// Wake only the lane's owners: one worker per destination. (Also after a resend, which puts
+    /// a delivery back in the lane's queue.)
+    pub(crate) fn wake(&self, partition: i32) {
         self.wake.lane(partition);
+    }
+
+    /// Queue an operator's corrected copy of message `original` for `destinations` (see
+    /// `Store::copy_edited`). Its lane, ordering key and control id are read from the edited
+    /// payload, as for any message; it's never deduplicated (sending it is the point) and isn't
+    /// counted as received (no sender sent it). Not held back by the drain gate: like a resend,
+    /// it adds to what a drain waits for, and someone asked for it.
+    pub async fn copy_edited(
+        &self,
+        original: i64,
+        payload: &[u8],
+        destinations: &[DestinationId],
+        by: ductus_store::Actor<'_>,
+    ) -> Result<ductus_store::Edited> {
+        let keys = self.keys(payload);
+        let copy = ductus_store::Copy {
+            original,
+            interface: &self.config.name,
+            partition_key: keys.partition,
+            ordering_key: keys.ordering_key.as_deref(),
+            control_id: keys.control_id.as_deref(),
+            payload,
+            tier: self.tier(),
+            destinations,
+        };
+        let edited = self.store.copy_edited(copy, by).await?;
+        if matches!(edited, ductus_store::Edited::Copied { .. }) {
+            self.wake(keys.partition);
+        }
+        Ok(edited)
     }
 
     /// Count what storing gave: `queued` new messages, `duplicates`, or a failure (not a closed

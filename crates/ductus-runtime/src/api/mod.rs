@@ -5,10 +5,12 @@
 //!
 //! Every call but `health` and `openapi.json` needs a token (`Authorization: Bearer dux_...`,
 //! made with `ductus token create`) or a browser session made from one (`session.rs`). Roles:
-//! viewer reads, operator also drains and runs connection checks, admin also manages tokens.
+//! viewer reads, operator also drains, pauses, resends and corrects messages and runs connection
+//! checks, admin also manages tokens.
 //!
 //! The same listener serves the web UI (`ui.rs`) at every path outside `/api`.
 
+mod actions;
 mod hotspots;
 mod messages;
 mod metrics;
@@ -48,7 +50,7 @@ pub type Shared = Arc<Engine>;
     tags(
         (name = "engine", description = "The engine, its interfaces and live updates"),
         (name = "session", description = "Signing a browser in and out"),
-        (name = "messages", description = "The message browser"),
+        (name = "messages", description = "The message browser, the quarantine, and resending or correcting messages"),
         (name = "drain", description = "Stop taking messages and deliver what's stored"),
         (name = "reports", description = "Impact, owners and connection checks"),
         (name = "retention", description = "How long messages are kept, and changes to it"),
@@ -75,6 +77,7 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
         .merge(session::routes())
         .merge(hotspots::routes())
         .merge(messages::routes())
+        .merge(actions::routes())
         .merge(metrics::routes())
         .merge(reports::routes())
         .merge(retention::routes())

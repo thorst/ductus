@@ -398,6 +398,222 @@ async fn destinations_finishing_at_once_never_leave_a_message_pending() {
     assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), 300);
 }
 
+const OPERATOR: ductus_store::Actor<'static> =
+    ductus_store::Actor { token_id: None, name: "test-operator", reason: Some("vendor fixed their side") };
+
+async fn status_by_id(store: &Store, id: i64) -> Status {
+    store.message(id).await.unwrap().expect("the message exists").0.status
+}
+
+async fn delivery_states(store: &Store, m: MessageRef) -> Vec<(String, Status, i32)> {
+    store.deliveries(m).await.unwrap().into_iter().map(|d| (d.destination, d.status, d.attempts)).collect()
+}
+
+#[tokio::test]
+async fn resend_puts_deliveries_back_in_place_and_records_what_they_were() {
+    use ductus_store::Resend;
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "resend", &["billing", "lab"]).await;
+    let (lab, billing) = (t.id("lab"), t.id("billing"));
+    let a = store.insert(t.msg(3, b"a")).await.unwrap();
+    let b = store.insert(t.msg(3, b"b")).await.unwrap();
+    store.record_failure(a, lab, "timeout").await.unwrap();
+    store.finish(lab, &[Done::with(a, Status::Quarantined, Some("HTTP 400: bad PID-3"))]).await.unwrap();
+    store.finish(billing, &[sent(a)]).await.unwrap();
+    assert_eq!(status_by_id(&store, a.id).await, Status::Quarantined);
+
+    // Without destinations named: the quarantined ones only (billing has it already).
+    let quarantined = Resend { messages: &[a.id, b.id], destinations: &t.ids, quarantined_only: true };
+    let resent = store.resend(quarantined, OPERATOR).await.unwrap();
+    assert_eq!(resent.len(), 1, "b is still pending: nothing to resend");
+    let r = &resent[0];
+    assert_eq!((r.message_id, r.destination.as_str(), r.partition_key), (a.id, "lab", 3));
+    assert_eq!(
+        (r.previous_status, r.previous_attempts, r.previous_error.as_deref()),
+        (Status::Quarantined, 1, Some("HTTP 400: bad PID-3"))
+    );
+    assert_eq!(status_by_id(&store, a.id).await, Status::Pending, "pending again until the lab is done");
+    assert_eq!(
+        delivery_states(&store, a).await,
+        [("billing".into(), Status::Sent, 0), ("lab".into(), Status::Pending, 0)],
+        "attempts start over (the old count is in the record)"
+    );
+    // In place: the lab's worker takes it first in its lane, ahead of b.
+    let queue = store.pending(lab, &[3], 10).await.unwrap();
+    assert_eq!(queue.iter().map(|p| p.id).collect::<Vec<_>>(), [a.id, b.id]);
+    assert!(store.resend(quarantined, OPERATOR).await.unwrap().is_empty(), "pending again: nothing to resend");
+
+    store.finish(lab, &[sent(a), sent(b)]).await.unwrap();
+    store.finish(billing, &[sent(b)]).await.unwrap();
+    assert_eq!(status_by_id(&store, a.id).await, Status::Sent);
+
+    // Naming a destination resends whatever it ended as: a replay of what billing was sent.
+    let replay = Resend { messages: &[a.id], destinations: &[billing], quarantined_only: false };
+    let resent = store.resend(replay, OPERATOR).await.unwrap();
+    assert_eq!(
+        resent.iter().map(|r| (r.destination.as_str(), r.previous_status)).collect::<Vec<_>>(),
+        [("billing", Status::Sent)]
+    );
+    assert_eq!(status_by_id(&store, a.id).await, Status::Pending);
+    assert!(store.pending(lab, &[3], 10).await.unwrap().is_empty(), "the lab isn't sent it again");
+    store.finish(billing, &[sent(a)]).await.unwrap();
+    assert_eq!(status_by_id(&store, a.id).await, Status::Sent);
+
+    let actions = store.actions(a.id).await.unwrap();
+    let actions: Vec<_> = actions
+        .iter()
+        .map(|a| (a.action.as_str(), a.destination.as_str(), a.previous_status, a.actor.as_str()))
+        .collect();
+    assert_eq!(actions, [("resend", "lab", Some(3), "test-operator"), ("resend", "billing", Some(1), "test-operator")]);
+
+    // Duplicates are never queued, so never resent.
+    let window = std::time::Duration::from_secs(60);
+    let key = format!("{}-dup", t.name);
+    store.insert_deduped(t.msg(0, b"d1"), DedupeKey { key: &key, window }).await.unwrap();
+    let dup = store.insert_deduped(t.msg(0, b"d2"), DedupeKey { key: &key, window }).await.unwrap();
+    assert!(dup.duplicate);
+    let r = Resend { messages: &[dup.message.id], destinations: &t.ids, quarantined_only: false };
+    assert!(store.resend(r, OPERATOR).await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn an_edited_copy_replaces_the_quarantined_delivery() {
+    use ductus_store::{Copy, Edited};
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "edit", &["billing", "lab"]).await;
+    let (lab, billing) = (t.id("lab"), t.id("billing"));
+    // A routed message, so the copy's `origin` can be checked.
+    let source = store.insert(t.msg(0, b"source")).await.unwrap();
+    let mut routed = batch(&t, &[("MSH|bad", None)], None);
+    routed.messages[0].origin = Some(source.id);
+    store.insert_batch(&routed).await.unwrap();
+    let newest = Browse { interface: &t.name, status: None, before: None, limit: 1 };
+    let row = store.browse(&newest).await.unwrap().remove(0);
+    let original = MessageRef { id: row.id, received_at: row.received_at };
+    let copy = |destinations| Copy {
+        original: original.id,
+        interface: &t.name,
+        partition_key: 5,
+        ordering_key: Some("MRN-1"),
+        control_id: Some("CTL-2"),
+        payload: b"MSH|fixed",
+        tier: TIER,
+        destinations,
+    };
+    let (lab_only, billing_only) = ([lab], [billing]);
+
+    // Pending for the lab: a worker may be sending it, so it can't be replaced.
+    match store.copy_edited(copy(&lab_only), OPERATOR).await.unwrap() {
+        Edited::StillPending(d) => assert_eq!(d, [lab]),
+        other => panic!("expected StillPending, got {other:?}"),
+    }
+    assert!(store.actions(original.id).await.unwrap().is_empty(), "nothing recorded");
+
+    store.finish(lab, &[Done::with(original, Status::Quarantined, Some("AR: bad PID-3"))]).await.unwrap();
+    store.finish(billing, &[sent(original)]).await.unwrap();
+    let Edited::Copied { copy: made, replaced } = store.copy_edited(copy(&lab_only), OPERATOR).await.unwrap() else {
+        panic!("expected a copy")
+    };
+    assert_eq!(replaced, [lab]);
+    assert!(made.id > original.id);
+
+    // The original: the lab's delivery replaced (filtered), billing's untouched, so it's sent.
+    let deliveries = store.deliveries(original).await.unwrap();
+    let lab_delivery = deliveries.iter().find(|d| d.destination == "lab").unwrap();
+    assert_eq!(lab_delivery.status, Status::Filtered);
+    assert_eq!(lab_delivery.last_error.as_deref(), Some(format!("replaced by edited copy {}", made.id).as_str()));
+    assert_eq!(status_by_id(&store, original.id).await, Status::Sent);
+
+    // The copy: the edited payload, its own keys, the original's origin, queued for the lab only.
+    let (row, payload) = store.message(made.id).await.unwrap().unwrap();
+    assert_eq!((payload.as_slice(), row.status, row.origin_id), (&b"MSH|fixed"[..], Status::Pending, Some(source.id)));
+    assert_eq!((row.ordering_key.as_deref(), row.control_id.as_deref()), (Some("MRN-1"), Some("CTL-2")));
+    assert_eq!(delivery_states(&store, made).await, [("lab".into(), Status::Pending, 0)]);
+    assert_eq!(store.pending(lab, &[5], 10).await.unwrap().iter().map(|p| p.id).collect::<Vec<_>>(), [made.id]);
+
+    let actions = store.actions(original.id).await.unwrap();
+    assert_eq!(actions.len(), 1);
+    assert_eq!(
+        (actions[0].action.as_str(), actions[0].previous_status, actions[0].copy_id),
+        ("edit", Some(3), Some(made.id))
+    );
+    assert_eq!(store.actions(made.id).await.unwrap().len(), 1, "the copy finds the edit that made it");
+
+    // Copying again (to billing, which has it): nothing replaced, the copy still recorded.
+    let Edited::Copied { replaced, .. } = store.copy_edited(copy(&billing_only), OPERATOR).await.unwrap() else {
+        panic!("expected a copy")
+    };
+    assert!(replaced.is_empty());
+    assert_eq!(status_by_id(&store, original.id).await, Status::Sent);
+}
+
+/// A resend puts a finished delivery back to pending while another destination may be settling
+/// the same message. Settling must read the deliveries after it holds the message's lock, or it
+/// settles from the delivery as it was before the resend: quarantined with a delivery pending,
+/// which nothing would ever correct (and startup's reconcile would undo the resend).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_resend_while_another_destination_settles_leaves_the_message_pending() {
+    use ductus_store::Resend;
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "resend-race", &["a", "b"]).await;
+    let (a, b) = (t.id("a"), t.id("b"));
+    let mut refs = Vec::new();
+    for i in 0..300 {
+        refs.push(store.insert(t.msg(0, format!("m{i}").as_bytes())).await.unwrap());
+    }
+    let quarantined: Vec<Done> = refs.iter().map(|m| Done::with(*m, Status::Quarantined, Some("rejected"))).collect();
+    store.finish(a, &quarantined).await.unwrap();
+    let settle_b = {
+        let (store, refs) = (store.clone(), refs.clone());
+        tokio::spawn(async move {
+            for m in refs {
+                store.finish(b, &[sent(m)]).await.unwrap();
+            }
+        })
+    };
+    let resend_a = {
+        let (store, refs) = (store.clone(), refs.clone());
+        tokio::spawn(async move {
+            for m in refs {
+                let r = Resend { messages: &[m.id], destinations: &[a], quarantined_only: true };
+                assert_eq!(store.resend(r, OPERATOR).await.unwrap().len(), 1);
+            }
+        })
+    };
+    let (x, y) = tokio::join!(settle_b, resend_a);
+    x.unwrap();
+    y.unwrap();
+    assert!(store.payloads(&t.name, Status::Quarantined).await.unwrap().is_empty(), "every message waits for a again");
+    assert_eq!(store.payloads(&t.name, Status::Pending).await.unwrap().len(), 300);
+    let done: Vec<Done> = refs.iter().map(|m| sent(*m)).collect();
+    store.finish(a, &done).await.unwrap();
+    assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), 300);
+}
+
+#[tokio::test]
+async fn the_quarantine_lists_newest_first_a_page_at_a_time() {
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "quarantine", &["billing", "lab"]).await;
+    let (lab, billing) = (t.id("lab"), t.id("billing"));
+    let mut refs = Vec::new();
+    for i in 0..3 {
+        refs.push(store.insert(t.msg(0, format!("q{i}").as_bytes())).await.unwrap());
+    }
+    let rejected = |m: MessageRef| Done::with(m, Status::Quarantined, Some("AR"));
+    store.finish(lab, &refs.iter().map(|m| rejected(*m)).collect::<Vec<_>>()).await.unwrap();
+    store.finish(billing, &[rejected(refs[1]), sent(refs[0]), sent(refs[2])]).await.unwrap();
+
+    let page = store.quarantined(&t.ids, None, 3).await.unwrap();
+    let seen: Vec<_> = page.iter().map(|q| (q.message_id, q.destination_id)).collect();
+    let (high, low) = (lab.max(billing), lab.min(billing));
+    assert_eq!(seen, [(refs[2].id, lab), (refs[1].id, high), (refs[1].id, low)]);
+    assert_eq!((page[0].interface.as_str(), page[0].last_error.as_deref()), (t.name.as_str(), Some("AR")));
+    let last = page.last().unwrap();
+    let rest = store.quarantined(&t.ids, Some((last.message_id, last.destination_id)), 3).await.unwrap();
+    assert_eq!(rest.iter().map(|q| (q.message_id, q.destination_id)).collect::<Vec<_>>(), [(refs[0].id, lab)]);
+    assert_eq!(store.quarantined(&[billing], None, 10).await.unwrap().len(), 1, "one destination's");
+}
+
 #[tokio::test]
 async fn reconcile_matches_deliveries_to_the_configured_destinations() {
     let Some(url) = std::env::var("DUCTUS_TEST_DATABASE_URL").ok() else { return };
@@ -962,6 +1178,24 @@ async fn everything_at_once_without_lock_errors() {
     // last task; it stops once the first ones have stopped.
     let routed = Arc::new(Iface::single(&store, "stress-routed").await);
     let sources_done = Arc::new(AtomicUsize::new(0));
+    // An operator replaying sent messages to the lab (`Store::resend`) the whole time: the source
+    // drains keep going until the last replay is delivered too.
+    let resends_done = Arc::new(AtomicBool::new(false));
+    let resender = {
+        let (store, t, stop, resends_done) = (store.clone(), t.clone(), stop.clone(), resends_done.clone());
+        tokio::spawn(async move {
+            let mut resent = 0;
+            while !stop.load(Relaxed) {
+                let page = Browse { interface: &t.name, status: Some(Status::Sent), before: None, limit: 5 };
+                let ids: Vec<i64> = store.browse(&page).await.unwrap().iter().map(|m| m.id).collect();
+                let r = ductus_store::Resend { messages: &ids, destinations: &[t.id("lab")], quarantined_only: false };
+                resent += store.resend(r, OPERATOR).await.unwrap().len();
+                tokio::time::sleep(std::time::Duration::from_millis(15)).await;
+            }
+            resends_done.store(true, Relaxed);
+            resent
+        })
+    };
     // (destination, where it routes to, whether it's the routed interface's own drain)
     let drains = [
         (t.id("lab"), None, false),
@@ -971,6 +1205,7 @@ async fn everything_at_once_without_lock_errors() {
     ];
     for (n, (destination, route, is_route_target)) in drains.into_iter().enumerate() {
         let (store, stop, lanes, sources_done) = (store.clone(), stop.clone(), lanes.clone(), sources_done.clone());
+        let resends_done = resends_done.clone();
         tasks.push(tokio::spawn(async move {
             // A source drain counts as done however it ends: one that panics must fail the test,
             // not leave the routed drain waiting for it forever.
@@ -985,7 +1220,11 @@ async fn everything_at_once_without_lock_errors() {
             let _done = Done(sources_done.clone(), is_route_target);
             let mut rounds = 0usize;
             loop {
-                let stopped = if is_route_target { sources_done.load(Relaxed) == 3 } else { stop.load(Relaxed) };
+                let stopped = if is_route_target {
+                    sources_done.load(Relaxed) == 3
+                } else {
+                    stop.load(Relaxed) && resends_done.load(Relaxed)
+                };
                 let pending = store.pending(destination, &lanes, 50).await.unwrap();
                 if pending.is_empty() {
                     if stopped {
@@ -1134,10 +1373,13 @@ async fn everything_at_once_without_lock_errors() {
     let days = maintenance.await;
     let moved = mover.await;
     let held = holder.await;
+    let resent = resender.await;
     drop_test_partitions(&pool).await;
     for r in results {
         r.expect("a writer or drain failed");
     }
+    let resent = resent.expect("resending failed");
+    assert!(resent > 0, "something was resent");
     let days = days.expect("maintenance failed");
     let moved = moved.expect("moving to another tier failed");
     assert!(moved > 0, "the retention change moved something");
@@ -1172,7 +1414,7 @@ async fn everything_at_once_without_lock_errors() {
     assert!(store.payloads(&routed.name, Status::Pending).await.unwrap().is_empty(), "routed: nothing left pending");
     assert_eq!(store.payloads(&routed.name, Status::Sent).await.unwrap().len(), queued, "each routed exactly once");
     println!(
-        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations (one routing {queued} to another interface), {moved} moved to another tier and {held} to the held area meanwhile, {days} maintenance rounds, {seconds}s",
+        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations (one routing {queued} to another interface), {resent} resent, {moved} moved to another tier and {held} to the held area meanwhile, {days} maintenance rounds, {seconds}s",
         queued + duplicates
     );
 }

@@ -216,6 +216,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/messages/resend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send many messages again at once (the quarantine screen's "resend selected"): as
+         *     `POST /messages/{id}/resend` for each, in one transaction. Operator.
+         */
+        post: operations["resend_many"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/messages/{id}": {
         parameters: {
             query?: never;
@@ -227,6 +247,49 @@ export interface paths {
         get: operations["message"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/messages/{id}/edit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Queue a corrected copy of a message. The original stays as it was received; its quarantined
+         *     deliveries to the copy's destinations are marked replaced. The copy is a new message (new
+         *     id, so a new `meta.id`), never deduplicated, with the original's `origin`. Refused for a
+         *     destination where the original is still pending (it may be being sent right now). Operator.
+         */
+        post: operations["edit"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/messages/{id}/resend": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a message again: its quarantined deliveries, or those to the destinations named
+         *     (whatever they ended as: a replay). Each goes back to pending in place and is sent next in
+         *     its lane. Pending deliveries are left alone. Operator.
+         */
+        post: operations["resend"];
         delete?: never;
         options?: never;
         head?: never;
@@ -263,6 +326,26 @@ export interface paths {
         };
         /** Who owns which interface (`about.owner`) and destination (`owner` on one someone else owns). */
         get: operations["owners"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/quarantine": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Quarantined deliveries across this engine's interfaces (or one interface or destination),
+         *     newest message first: what needs a person. Counts per destination are in `GET /interfaces`.
+         */
+        get: operations["quarantine"];
         put?: never;
         post?: never;
         delete?: never;
@@ -369,6 +452,46 @@ export interface paths {
 export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
+        ActionInfo: {
+            /** @description `resend` (the delivery went back to pending) or `edit` (a corrected copy was queued). */
+            action: string;
+            /** Format: date-time */
+            at: string;
+            /** @description The token that did it. */
+            by: string;
+            /**
+             * Format: int64
+             * @description `edit`: the copy's id.
+             */
+            copy?: number | null;
+            destination: string;
+            /** Format: int32 */
+            previous_attempts?: number | null;
+            previous_error?: string | null;
+            /** @description The delivery before: `sent`, `filtered` or `quarantined` (none: there was none). */
+            previous_status?: string | null;
+            reason?: string | null;
+        };
+        BulkResendRequest: {
+            /**
+             * @description Resend to the destination with this name in each message's interface, whatever its
+             *     delivery ended as (a replay). Without it: every destination that quarantined each message.
+             */
+            destination?: string | null;
+            /** @description Message ids (at most 500), from any interfaces. */
+            ids: number[];
+            /** @description Why (kept with each action). */
+            reason?: string | null;
+        };
+        BulkResendResult: {
+            /** @description The messages sent again, by id. */
+            resent: components["schemas"]["ResentMessage"][];
+            /**
+             * @description Ids with nothing to resend: not found, not run by this engine, a duplicate, or no
+             *     delivery that matched (pending already, or not quarantined).
+             */
+            skipped: number[];
+        };
         Change: {
             /** Format: int32 */
             from: number;
@@ -552,6 +675,34 @@ export interface components {
              *     interface, keeps a drain from finishing).
              */
             waiting_for: string[];
+        };
+        EditRequest: {
+            /** @description Where the copy goes. Without it: the destinations that quarantined the original. */
+            destinations?: string[] | null;
+            /** @description The corrected message, in full (HL7 segments separated by `\r`). */
+            payload: string;
+            /** @description Why (kept with the action). */
+            reason?: string | null;
+        };
+        EditResult: {
+            /** @description Where the copy goes. */
+            destinations: string[];
+            /**
+             * Format: int64
+             * @description The copy's id (a new message, queued at the back of its lane).
+             */
+            id: number;
+            interface: string;
+            /**
+             * Format: int64
+             * @description The message it corrects.
+             */
+            original: number;
+            /**
+             * @description Destinations whose quarantined delivery of the original is now filtered ("replaced by
+             *     edited copy N").
+             */
+            replaced: string[];
         };
         EngineInfo: {
             drain: components["schemas"]["DrainStatus"];
@@ -846,6 +997,13 @@ export interface components {
             interfaces: components["schemas"]["LiveInterface"][];
         };
         MessageDetail: components["schemas"]["MessageSummary"] & {
+            /** @description What people did to it (resends, edits), oldest first. */
+            actions: components["schemas"]["ActionInfo"][];
+            /**
+             * Format: int64
+             * @description An edited copy: the message it corrects.
+             */
+            copy_of?: number | null;
             deliveries: components["schemas"]["DeliveryInfo"][];
             /** @description The message as received (bytes that aren't UTF-8 are replaced). */
             payload: string;
@@ -931,6 +1089,37 @@ export interface components {
              */
             pending: number;
         };
+        QuarantinePage: {
+            /** @description Newest message first; a message quarantined by two destinations is listed twice. */
+            deliveries: components["schemas"]["QuarantinedDelivery"][];
+            /** @description Pass as `before` for the next page; absent on the last page. */
+            next_before?: string | null;
+        };
+        QuarantinedDelivery: {
+            /** Format: int32 */
+            attempts: number;
+            /** @description MSH-10 for HL7. */
+            control_id?: string | null;
+            destination: string;
+            /**
+             * Format: int64
+             * @description The message's id.
+             */
+            id: number;
+            interface: string;
+            /** @description Why. */
+            last_error?: string | null;
+            ordering_key?: string | null;
+            /** Format: date-time */
+            quarantined_at: string;
+            /** Format: date-time */
+            received_at: string;
+            /**
+             * Format: int32
+             * @description Payload size in bytes.
+             */
+            size: number;
+        };
         Rates: {
             /**
              * Format: double
@@ -957,6 +1146,30 @@ export interface components {
             /** Format: double */
             seconds: number;
             version: string;
+        };
+        ResendRequest: {
+            /**
+             * @description Resend to these destinations, whatever their delivery ended as (sent and filtered too: a
+             *     replay). Without it: every destination that quarantined the message.
+             */
+            destinations?: string[] | null;
+            /** @description Why (kept with the action). */
+            reason?: string | null;
+        };
+        ResentDelivery: {
+            destination: string;
+            /** Format: int32 */
+            previous_attempts: number;
+            previous_error?: string | null;
+            /** @description What the delivery was before: `sent`, `filtered` or `quarantined`. */
+            previous_status: string;
+        };
+        ResentMessage: {
+            /** @description The deliveries now pending again. */
+            destinations: components["schemas"]["ResentDelivery"][];
+            /** Format: int64 */
+            id: number;
+            interface: string;
         };
         ResourceCalls: {
             calls: components["schemas"]["Timing"];
@@ -1480,6 +1693,45 @@ export interface operations {
             };
         };
     };
+    resend_many: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkResendRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["BulkResendResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     message: {
         parameters: {
             query?: never;
@@ -1501,6 +1753,124 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    edit: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The message to correct */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["EditRequest"];
+            };
+        };
+        responses: {
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["EditResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Still pending for a destination */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    resend: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Message id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResendRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ResentMessage"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Nothing to resend */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };
@@ -1545,6 +1915,53 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OwnerGroup"][];
+                };
+            };
+        };
+    };
+    quarantine: {
+        parameters: {
+            query?: {
+                /** @description Only this interface's. */
+                interface?: string;
+                /**
+                 * @description Only this destination's (with `interface`, that interface's; without, any interface's
+                 *     destination of that name).
+                 */
+                destination?: string;
+                /** @description The previous page's `next_before`. */
+                before?: string;
+                /** @description Page size, at most 500 (default 100). */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["QuarantinePage"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
                 };
             };
         };
