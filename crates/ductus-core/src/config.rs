@@ -73,6 +73,11 @@ pub struct InterfaceConfig {
     /// that doesn't say).
     #[serde(default)]
     pub retention: Option<crate::Retention>,
+    /// Quarantined messages past the retention: `keep` them in the held area until resolved
+    /// (the default), or `purge` them with the regular messages. Default: `quarantined` in
+    /// ductus.yaml.
+    #[serde(default)]
+    pub quarantined: Option<crate::Quarantined>,
     /// What operations expects: something received within a time or by a deadline, queues
     /// not behind. Nothing by default (see `monitor.rs`).
     #[serde(default)]
@@ -750,6 +755,9 @@ impl InterfaceConfig {
             (true, false) if self.retention.is_some() => {
                 bail!("an HTTP source in `respond` mode stores no messages; remove `retention`")
             }
+            (true, false) if self.quarantined.is_some() => {
+                bail!("an HTTP source in `respond` mode stores no messages; remove `quarantined`")
+            }
             (false, false) => bail!("`destination` is required (or `destinations`, to send to several places)"),
             _ => {}
         }
@@ -1060,6 +1068,8 @@ retry: { max_attempts: 3 }
         assert_eq!(load("retention: 3w").unwrap().retention.map(|r| r.days()), Some(21));
         let err = load("retention: 60d").unwrap_err().to_string();
         assert!(err.contains("1w, 3w or 7w"), "{err}");
+        assert_eq!(load("").unwrap().quarantined, None);
+        assert_eq!(load("quarantined: purge").unwrap().quarantined, Some(crate::Quarantined::Purge));
 
         // Respond mode stores nothing, so it has nothing to keep.
         let dir = tempfile::tempdir().unwrap();
@@ -1070,6 +1080,9 @@ retry: { max_attempts: 3 }
         .unwrap();
         respond.dir = dir.path().to_path_buf();
         assert!(respond.validate().unwrap_err().to_string().contains("remove `retention`"));
+        respond.retention = None;
+        respond.quarantined = Some(crate::Quarantined::Keep);
+        assert!(respond.validate().unwrap_err().to_string().contains("remove `quarantined`"));
     }
 
     #[test]

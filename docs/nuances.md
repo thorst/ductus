@@ -53,10 +53,15 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** a partition covers a day (1w) or a week (3w, 7w), and it's dropped once all of it is older than the window. So a 1w message lives 7 to 8 days, a 7w one 49 to 56. Partitions are checked hourly.
 - **What to do:** treat the window as "at least". If something must be gone sooner, use a shorter tier.
 
-### Pending and quarantined messages are never purged (level 2)
-- **What:** an expired partition that still holds pending (undelivered) or quarantined messages stays, with all its other messages, until they're resolved. `ductus retention` lists such partitions and why. The same goes for a shorter retention: it never deletes pending or quarantined messages.
-- **Why:** a destination that was down for a month must not lose its backlog, and quarantined messages wait for a person.
-- **What to do:** resolve quarantines; a long-held partition costs disk, not correctness.
+### Pending messages are never purged; past the window they're held (level 2)
+- **What:** when a partition expires, the messages in it that someone still needs (pending for a destination, and quarantined ones) move to the **held area** with all their deliveries, and the partition drops as usual. Held messages stay in their destination's queue, in order, and in the message browser; they're delivered or resolved like any other. A month of the held area is dropped whole once it's over and nothing in it is pending or quarantined (its finished messages go with it). `ductus retention` shows the held area by month and interface, and `/metrics` has `ductus_held_messages` and `ductus_held_bytes` (both counted at the hourly retention run). A shorter retention never deletes pending or quarantined messages either.
+- **Why:** a destination that was down for a month must not lose its backlog, and quarantined messages wait for a person. Before the held area, one waiting message kept its whole week for every interface in the tier.
+- **What to do:** watch `ductus_held_messages` (alert on quarantined ones growing: each is a question nobody has answered). Moving a backlog writes each message once more, once, in the background: about 5,000 messages a second with two destinations each (300,000 in 58 s on a dev machine, busy half the time), so a day of a 1M-message feed held for one receiver takes 3 to 4 minutes to move, and 90M about 5 hours. Nothing to do unless the database is already at its limit at the top of the hour.
+
+### Quarantined messages are kept until resolved, unless you say `purge` (level 2)
+- **What:** `quarantined: keep` (the default) holds quarantined messages past the retention window until someone resolves them. `quarantined: purge` (in interface.yaml, or ductus.yaml for every interface) lets them go with their partition, like the finished ones. There's no second time limit.
+- **Why:** in most engines unresolved quarantines pile up for years; keeping them is the safe default, and purging is a decision someone makes on purpose for a feed where a missed message is resent anyway.
+- **What to do:** keep the default unless the feed's quarantines are routinely ignored and resent by the sender; then `purge`, and say why in `about:`.
 
 ### Shortening retention deletes messages, so it needs a confirmation (level 2)
 - **What:** deploying a shorter `retention:` doesn't apply it. The engine logs a warning and keeps the old one, and `ductus retention` shows how many messages the new value would delete. `ductus retention confirm <interface>` (an operator token) applies it: its finished messages past the new window are deleted in the background, the others move into the new tier. Lengthening needs no confirmation and keeps everything not yet dropped.
@@ -88,7 +93,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What to do:**
   - Down for minutes to hours: do nothing; it retries.
   - Cut off on purpose, or down for days to weeks: pause it, so it stops retrying and shows as *paused*, not *stalled*. Add the reason.
-  - Longer than the interface's retention window: for now, waiting messages keep their week's partition for every interface in the tier, so disk grows. The held area (v0.5 step 6e) will move them aside. Agree a release plan with the vendor before they're back: the backlog goes at the destination's rate limit.
+  - Longer than the interface's retention window: the waiting messages move to the held area as their partitions expire, and the rest of the history goes on schedule, so the disk holds the normal window plus the backlog (not the whole period it spans). Watch the held area's size (`ductus retention`). Agree a release plan with the vendor before they're back: the backlog goes in order, at the destination's rate limit (90M at 200/s is about 5 days).
 
 ### Filtering and quarantine are per destination (level 2)
 - **What:** `return null`, `kill()` and `quarantine()` in a destination's function apply to that destination only. The message still goes to the others.

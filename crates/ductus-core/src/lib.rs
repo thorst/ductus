@@ -17,7 +17,7 @@ pub mod settings;
 pub use config::InterfaceConfig;
 pub use env::Environment;
 pub use resources::Resources;
-pub use retention::Retention;
+pub use retention::{Quarantined, Retention};
 
 /// Map an ordering-key value to a virtual partition.
 ///

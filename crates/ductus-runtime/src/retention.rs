@@ -1,10 +1,11 @@
 //! Retention as the engine runs it: each interface's configured retention is applied at
 //! startup (one change at a time; shorter ones wait for a confirmation), changes run in the
-//! background, and expired partitions are dropped every hour. See `ductus_store::retention`.
+//! background, and expired partitions are dropped every hour, their unfinished messages moved
+//! to the held area first. See `ductus_store::retention`.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use ductus_store::{Held, RetentionState, Store, Tier};
+use ductus_store::{HeldArea, Kept, RetentionState, Store, Tier};
 use std::sync::atomic::{AtomicI16, Ordering::Relaxed};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -31,19 +32,43 @@ pub struct Retention {
     kick: Arc<Notify>,
     /// Wakes the partition dropper (a change finished: partitions it emptied can go).
     drop_now: Arc<Notify>,
-    /// The last drop run: when, and what it had to keep.
-    last_drop: Mutex<Option<(DateTime<Utc>, Vec<Held>)>>,
+    /// The last drop run.
+    last_drop: Mutex<Option<LastDrop>>,
+}
+
+/// What the last hourly run found.
+#[derive(Debug, Clone)]
+pub struct LastDrop {
+    pub at: DateTime<Utc>,
+    /// Expired partitions it had to keep, and why.
+    pub kept: Vec<Kept>,
+    /// The held area afterwards.
+    pub held: HeldArea,
+}
+
+/// One interface's retention as configured.
+pub struct Configured {
+    pub name: String,
+    pub days: Tier,
+    /// `quarantined: purge`.
+    pub purge_quarantined: bool,
 }
 
 impl Retention {
     /// Apply every interface's configured retention and start the background work.
-    pub async fn start(store: Store, configured: Vec<(String, Tier)>) -> Result<Arc<Self>> {
+    pub async fn start(store: Store, configured: Vec<Configured>) -> Result<Arc<Self>> {
         let mut interfaces = Vec::with_capacity(configured.len());
-        for (name, days) in configured {
-            let state = store.apply_retention(&name, days).await?;
-            report(&state, days);
-            interfaces.push(Managed { name, configured: days, tier: Arc::new(AtomicI16::new(state.days)) });
+        for c in &configured {
+            let state = store.apply_retention(&c.name, c.days).await?;
+            report(&state, c.days);
+            interfaces.push(Managed {
+                name: c.name.clone(),
+                configured: c.days,
+                tier: Arc::new(AtomicI16::new(state.days)),
+            });
         }
+        let purge: Vec<(String, bool)> = configured.into_iter().map(|c| (c.name, c.purge_quarantined)).collect();
+        store.set_quarantined(&purge).await?;
         let retention = Arc::new(Self {
             store,
             interfaces,
@@ -94,9 +119,61 @@ impl Retention {
         Ok(Some(state))
     }
 
-    /// When expired partitions were last dropped, and those that had to stay.
-    pub fn last_drop(&self) -> Option<(DateTime<Utc>, Vec<Held>)> {
+    /// When expired partitions were last dropped, those that had to stay, and the held area.
+    pub fn last_drop(&self) -> Option<LastDrop> {
         self.last_drop.lock().unwrap().clone()
+    }
+
+    /// The hourly run: drop expired partitions; move the unfinished messages of the ones that
+    /// had to stay to the held area, then drop those too; drop the held area's finished months.
+    async fn tidy(&self) -> Result<LastDrop> {
+        let mut expired = self.store.drop_expired().await?;
+        let mut moved_any = false;
+        for kept in expired.kept.iter().filter(|k| k.to_hold()) {
+            match self.hold(&kept.partition).await {
+                Ok(moved) => {
+                    moved_any |= moved > 0;
+                    tracing::info!(
+                        partition = %kept.partition,
+                        moved,
+                        pending = kept.pending,
+                        quarantined = kept.quarantined,
+                        "expired partition: messages still needed moved to the held area"
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(partition = %kept.partition, error = %format!("{e:#}"), "moving messages to the held area failed; trying again in an hour")
+                }
+            }
+        }
+        if moved_any {
+            let again = self.store.drop_expired().await?;
+            expired.dropped.extend(again.dropped);
+            expired.kept = again.kept;
+        }
+        if !expired.dropped.is_empty() {
+            tracing::info!(partitions = %expired.dropped.join(", "), "expired partitions dropped");
+        }
+        let finished = self.store.drop_finished_held().await?;
+        if !finished.is_empty() {
+            tracing::info!(partitions = %finished.join(", "), "held area: months with nothing left to deliver dropped");
+        }
+        let held = self.store.held_area().await?;
+        Ok(LastDrop { at: Utc::now(), kept: expired.kept, held })
+    }
+
+    /// Move an expired partition's unfinished messages to the held area, in batches, busy at
+    /// most half the time (it can be millions after a long outage). Returns how many moved.
+    async fn hold(&self, partition: &str) -> Result<u64> {
+        let (mut after, mut moved) = (0, 0);
+        loop {
+            let started = Instant::now();
+            let (n, last) = self.store.hold_step(partition, after, BATCH).await?;
+            moved += n;
+            let Some(last) = last else { return Ok(moved) };
+            after = last;
+            tokio::time::sleep(started.elapsed().max(Duration::from_millis(20))).await;
+        }
     }
 
     /// Run one interface's change to the end: move (or delete) its rows in other tiers, in
@@ -126,7 +203,7 @@ impl Retention {
         let left = self.store.finish_retention_change(name).await?;
         tracing::info!(interface = %name, retention = days, moved, deleted, kept_in_old_tier = left, "retention change done");
         if left > 0 {
-            tracing::info!(interface = %name, count = left, "messages past the new retention that were pending or quarantined stay in their old tier until it expires");
+            tracing::info!(interface = %name, count = left, "messages past the new retention that were pending or quarantined stay in their old tier (or the held area) until they're finished");
         }
         self.drop_now.notify_one();
         let next = self.store.apply_retention(name, m.configured).await?;
@@ -179,8 +256,8 @@ async fn run_changes(retention: std::sync::Weak<Retention>) {
     }
 }
 
-/// Drops expired partitions every hour and after each retention change, the first time just
-/// after startup.
+/// Drops expired partitions (`Retention::tidy`) every hour and after each retention change, the
+/// first time just after startup.
 async fn drop_expired(retention: std::sync::Weak<Retention>) {
     let mut wait = Duration::from_secs(5);
     loop {
@@ -191,21 +268,25 @@ async fn drop_expired(retention: std::sync::Weak<Retention>) {
         }
         wait = DROP_EVERY;
         let Some(r) = retention.upgrade() else { return };
-        match r.store.drop_expired().await {
-            Ok(expired) => {
-                if !expired.dropped.is_empty() {
-                    tracing::info!(partitions = %expired.dropped.join(", "), "expired partitions dropped");
-                }
-                for held in &expired.held {
+        match r.tidy().await {
+            Ok(run) => {
+                for kept in &run.kept {
                     tracing::warn!(
-                        partition = %held.partition,
-                        pending = held.pending,
-                        quarantined = held.quarantined,
-                        kept_for = %held.kept_for.join(", "),
+                        partition = %kept.partition,
+                        pending = kept.pending,
+                        quarantined = kept.quarantined,
+                        kept_for = %kept.kept_for.join(", "),
                         "expired partition kept: it still holds messages someone needs"
                     );
                 }
-                *r.last_drop.lock().unwrap() = Some((Utc::now(), expired.held));
+                let quarantined: i64 = run.held.interfaces.iter().map(|i| i.quarantined).sum();
+                if quarantined > 0 {
+                    tracing::warn!(
+                        quarantined,
+                        "quarantined messages past their retention are kept in the held area until someone resolves them"
+                    );
+                }
+                *r.last_drop.lock().unwrap() = Some(run);
             }
             Err(e) => {
                 tracing::warn!(error = %format!("{e:#}"), "dropping expired partitions failed; trying again in an hour")

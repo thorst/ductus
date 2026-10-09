@@ -123,7 +123,11 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     let configured = configs
         .iter()
         .filter(|c| !c.responds())
-        .map(|c| (c.name.clone(), c.retention.unwrap_or(settings.retention).days() as ductus_store::Tier))
+        .map(|c| retention::Configured {
+            name: c.name.clone(),
+            days: c.retention.unwrap_or(settings.retention).days() as ductus_store::Tier,
+            purge_quarantined: c.quarantined.unwrap_or(settings.quarantined) == ductus_core::Quarantined::Purge,
+        })
         .collect();
     let retention = retention::Retention::start(store.clone(), configured).await.context("applying retention")?;
     // Keep dedupe keys a little longer than the longest window that uses them.

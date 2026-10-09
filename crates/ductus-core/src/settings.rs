@@ -10,6 +10,7 @@
 //! api:
 //!   listen: 127.0.0.1:7700  # the REST API (`/api/v1`); `off` to run without it
 //! retention: 7w       # how long messages are kept when an interface doesn't say (1w, 3w, 7w)
+//! quarantined: keep   # quarantined messages past it: keep until resolved, or purge
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -34,6 +35,10 @@ pub struct Settings {
     /// How long messages are kept, for interfaces whose interface.yaml doesn't say.
     #[serde(default)]
     pub retention: crate::Retention,
+    /// Quarantined messages past the retention: `keep` (until resolved) or `purge`, for
+    /// interfaces whose interface.yaml doesn't say.
+    #[serde(default)]
+    pub quarantined: crate::Quarantined,
 }
 
 /// The REST API the engine serves (`/api/v1`).
@@ -206,8 +211,10 @@ mod tests {
         let s = Settings::load(dir.path()).unwrap();
         assert_eq!((s.isolates.heap_mb, s.require_about), (2048, true));
         assert_eq!(s.retention.days(), 49, "the default");
-        std::fs::write(dir.path().join(FILE), "retention: 3w\n").unwrap();
-        assert_eq!(Settings::load(dir.path()).unwrap().retention.days(), 21);
+        assert_eq!(s.quarantined, crate::Quarantined::Keep, "the default");
+        std::fs::write(dir.path().join(FILE), "retention: 3w\nquarantined: purge\n").unwrap();
+        let s = Settings::load(dir.path()).unwrap();
+        assert_eq!((s.retention.days(), s.quarantined), (21, crate::Quarantined::Purge));
         std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 8 }\n").unwrap();
         let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
         assert!(err.contains("at least 64"), "{err}");

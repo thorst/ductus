@@ -60,6 +60,19 @@ impl std::fmt::Display for Retention {
     }
 }
 
+/// What happens to quarantined messages when their retention window has passed.
+///
+/// `keep` (the default): they move to the held area with anything still pending, and stay
+/// until someone resolves them: a quarantined message is a question nobody has answered yet.
+/// `purge`: they go with the regular messages when their partition expires (no second limit).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Quarantined {
+    #[default]
+    Keep,
+    Purge,
+}
+
 impl<'de> Deserialize<'de> for Retention {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
         // `3w` is a string in YAML; a bare `21` (days) is a number.
@@ -103,5 +116,13 @@ mod tests {
         let r: Retention = serde_yaml_ng::from_str("21").unwrap();
         assert_eq!(r.days(), 21);
         assert!(serde_yaml_ng::from_str::<Retention>("31d").is_err());
+    }
+
+    #[test]
+    fn quarantined_keep_or_purge() {
+        assert_eq!(serde_yaml_ng::from_str::<Quarantined>("purge").unwrap(), Quarantined::Purge);
+        assert_eq!(serde_yaml_ng::from_str::<Quarantined>("keep").unwrap(), Quarantined::Keep);
+        assert_eq!(Quarantined::default(), Quarantined::Keep);
+        assert!(serde_yaml_ng::from_str::<Quarantined>("delete").is_err());
     }
 }

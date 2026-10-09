@@ -10,6 +10,8 @@ Statuses (`status` columns): `0` pending, `1` sent, `2` filtered, `3` quarantine
 
 Every message received, as received (the original is never changed). **Partitioned by retention tier, then by time** (migration 0010): `messages_t21` holds the 3-week tier (21 days), and its partitions cover a period each, named by their first day (`messages_t21_20261005`): a day for the 1w tier, a week (from Monday, midnight UTC) for 3w and 7w, about 24 partitions in all. They're created 3 days ahead; a partition is dropped once its whole period is older than its tier's days (see `retention`).
 
+**The held area** (migration 0014) is tier `0`: `messages_held`, partitioned by month (`messages_held_202609`, bounds at midnight UTC). When a partition expires with messages someone still needs (pending, or quarantined for an interface that keeps them), those move here with their deliveries, and the partition drops. A month that's over is dropped once nothing in it is unfinished. The held tables are created when first needed.
+
 | column | type | |
 |---|---|---|
 | `id` | bigint | From a sequence: arrival order within an interface. With `received_at`, the primary key (a partitioned table's key must include the partition column). |
@@ -24,7 +26,7 @@ Every message received, as received (the original is never changed). **Partition
 | `last_error` | text | Why it was quarantined or filtered (`destination: reason; ...` with several destinations). |
 | `updated_at` | timestamptz | Last status change. |
 | `origin_id` | bigint | Routed from another interface (`source: internal`): the `id` of the message there. NULL for messages received from outside. Not indexed. |
-| `tier` | smallint | The retention tier the row is stored in, in days (7, 21, 49: 1w, 3w, 7w): its interface's retention when it was stored, until a retention change moves it. 49 for rows stored by engines that don't know tiers. |
+| `tier` | smallint | The retention tier the row is stored in, in days (7, 21, 49: 1w, 3w, 7w): its interface's retention when it was stored, until a retention change moves it. 49 for rows stored by engines that don't know tiers. 0: in the held area. |
 
 Indexes: primary key `(id, received_at, tier)` (a partitioned table's key must include its partition columns); `messages_pending (interface, partition_key, id) WHERE status = 0`; `messages_by_interface (interface, id)` (the message browser, newest first); `messages_quarantined (interface, id) WHERE status = 3`.
 
@@ -43,7 +45,7 @@ One row per queued message and destination: each destination's work queue and it
 | `last_error` | text | Last failure or the reason it was filtered/quarantined. |
 | `output` | bytea | Exactly what was sent, only for destinations with `save_output: true`. |
 | `updated_at` | timestamptz | Last change. |
-| `tier` | smallint | Always its message's tier (a retention change moves both in one statement). |
+| `tier` | smallint | Always its message's tier (a retention change, or the move to the held area, moves both in one statement). |
 
 Indexes: primary key `(message_id, received_at, destination_id, tier)`; `deliveries_queue (destination_id, message_id, partition_key) WHERE status = 0`, which is each destination's queue in arrival order (the lane is checked inside the index; migration 0011 replaced `deliveries_pending`, which had the lane second); `deliveries_quarantined (destination_id, message_id) WHERE status = 3` (quarantine counts without reading the table).
 
@@ -114,6 +116,7 @@ Each interface's retention as the engine applied it, and the change in progress.
 | `confirmed` | smallint | A shorter `waiting` value someone confirmed. |
 | `changed_at` | timestamptz | When the current value, or the running change, started. |
 | `updated_at` | timestamptz | Last change. |
+| `purge_quarantined` | boolean | `quarantined: purge`: its quarantined messages go with their expired partition instead of moving to the held area (`false`, the default: kept until resolved). |
 
 Index: primary key `interface`.
 
@@ -155,5 +158,6 @@ Index: primary key `destination_id`.
 
 - `ductus_tiers()`: the tiers in days, `{7,21,49}`. `ductus_tier_unit(tier)`: the period one partition of a tier covers (`day` for 7, else `week`).
 - `ductus_create_tier_partition(table, tier, day)`: the partition of `messages` or `deliveries` holding that tier's rows of that day, created if missing.
+- `ductus_create_held_partition(table, day)`: the held area's partition of `messages` or `deliveries` for that day's month (and the held table itself), created if missing.
 - `ductus_ensure_tier_partitions(table, tier, days_ahead)`, `ductus_ensure_delivery_partitions(tier)`: one tier's missing partitions; the engine runs them hourly, one table and tier per transaction, with a short lock timeout (see architecture.md, Storage).
 - `ductus_ensure_message_partitions(days_ahead)`, `ductus_ensure_delivery_partitions()`, `ductus_ensure_partitions(days_ahead)`: every tier at once, shortest tier first: what older engines call. Removed when the migrations are squashed.

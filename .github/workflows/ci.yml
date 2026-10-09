@@ -108,5 +108,8 @@ jobs:
       - name: Retention demo (expired partitions dropped, shorter retention confirmed, longer moves)
         run: BIN=target/release/ductus bash scripts/demo-retention.sh
 
+      - name: Held area demo (a receiver cut off for weeks, its backlog held past retention, then delivered)
+        run: BIN=target/release/ductus bash scripts/demo-held.sh
+
       - name: Scale demo (300 shared interfaces + 1 dedicated, hot MRN)
         run: SHARED=300 EPIC_SECONDS=10 SAMPLED=50 BIN=target/release/ductus bash scripts/demo-scale.sh

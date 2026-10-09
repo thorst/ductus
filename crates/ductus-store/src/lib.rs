@@ -12,7 +12,7 @@ mod retention;
 
 pub use activity::{BaselineRow, DestinationActivity, InterfaceActivity, Oldest, PauseRow, Received, Seen};
 pub use api::{Browse, MessageRow, QueueCount, Role, TOKEN_PREFIX, Token};
-pub use retention::{Expired, Held, RetentionState, Step, TIERS, Tier};
+pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -395,15 +395,23 @@ impl Store {
         done: &[Done],
         routed: &Batch<'_>,
     ) -> Result<Vec<bool>> {
-        let mut tx = self.pool.begin().await.context("starting transaction")?;
-        sqlx::query("SET LOCAL synchronous_commit = off").execute(&mut *tx).await.context("relaxing commit")?;
-        let finished: std::collections::HashSet<i64> =
-            update_deliveries(&mut tx, destination, done).await?.into_iter().collect();
-        let fresh = |m: &BatchMessage| m.origin.is_some_and(|o| finished.contains(&o));
-        let batch = Batch { messages: routed.messages.iter().filter(|m| fresh(m)).cloned().collect(), ..*routed };
-        let mut duplicate = insert_batch_in(&mut tx, &batch).await.context("routing")?.into_iter();
-        tx.commit().await.context("committing routed messages")?;
-        let queued = routed.messages.iter().map(|m| fresh(m) && !duplicate.next().unwrap_or(true)).collect();
+        let fresh = |finished: &std::collections::HashSet<i64>, m: &BatchMessage| {
+            m.origin.is_some_and(|o| finished.contains(&o))
+        };
+        // The whole transaction runs again if a delivery moved under it (`retrying`).
+        let (finished, duplicate) = retrying(|| async {
+            let mut tx = self.pool.begin().await.context("starting transaction")?;
+            sqlx::query("SET LOCAL synchronous_commit = off").execute(&mut *tx).await.context("relaxing commit")?;
+            let finished: std::collections::HashSet<i64> =
+                update_deliveries(&mut tx, destination, done).await?.into_iter().collect();
+            let messages = routed.messages.iter().filter(|m| fresh(&finished, m)).cloned().collect();
+            let duplicate = insert_batch_in(&mut tx, &Batch { messages, ..*routed }).await.context("routing")?;
+            tx.commit().await.context("committing routed messages")?;
+            anyhow::Ok((finished, duplicate))
+        })
+        .await?;
+        let mut duplicate = duplicate.into_iter();
+        let queued = routed.messages.iter().map(|m| fresh(&finished, m) && !duplicate.next().unwrap_or(true)).collect();
         let messages: Vec<MessageRef> = done.iter().map(|d| d.message).collect();
         self.settle(&messages).await?;
         Ok(queued)
@@ -505,9 +513,11 @@ impl Store {
         if done.is_empty() {
             return Ok(());
         }
-        let mut connection = self.pool.acquire().await.context("connecting")?;
-        update_deliveries(&mut connection, destination, done).await?;
-        drop(connection);
+        retrying(|| async {
+            let mut connection = self.pool.acquire().await.context("connecting")?;
+            update_deliveries(&mut connection, destination, done).await
+        })
+        .await?;
         let messages: Vec<MessageRef> = done.iter().map(|d| d.message).collect();
         self.settle(&messages).await
     }
@@ -526,18 +536,13 @@ impl Store {
     /// join or a scan, and two settles could lock the same rows in opposite orders (a deadlock,
     /// seen with routes, which settle the same messages within milliseconds of each other).
     ///
-    /// A retention change can move a message another destination just finished to another
-    /// tier while this statement has it in view. Postgres then can't re-check the row (as it does
-    /// after an ordinary update) and fails the statement ("already moved to another partition",
-    /// a serialization failure). Settling again is safe and finds that message done.
+    /// A retention change (or the held area) can move a message another destination just
+    /// finished to another tier while this statement has it in view. Postgres then can't
+    /// re-check the row (as it does after an ordinary update) and fails the statement ("already
+    /// moved to another partition", a serialization failure). Settling again is safe and finds
+    /// that message done (`retrying`).
     async fn settle(&self, messages: &[MessageRef]) -> Result<()> {
-        let mut tries = 0;
-        loop {
-            match self.settle_once(messages).await {
-                Err(e) if tries < 5 && is_serialization_failure(&e) => tries += 1,
-                result => return result,
-            }
-        }
+        retrying(|| self.settle_once(messages)).await
     }
 
     async fn settle_once(&self, messages: &[MessageRef]) -> Result<()> {
@@ -586,15 +591,17 @@ impl Store {
 
     /// Record a failed attempt to deliver to a destination; returns its new attempt count.
     pub async fn record_failure(&self, m: MessageRef, destination: DestinationId, error: &str) -> Result<i32> {
-        let (attempts,) = sqlx::query_as::<_, (i32,)>(
-            "UPDATE deliveries SET attempts = attempts + 1, last_error = $4, updated_at = now()
-             WHERE message_id = $1 AND received_at = $2 AND destination_id = $3 RETURNING attempts",
-        )
-        .bind(m.id)
-        .bind(m.received_at)
-        .bind(destination)
-        .bind(error)
-        .fetch_one(&self.pool)
+        let (attempts,) = retrying(|| {
+            sqlx::query_as::<_, (i32,)>(
+                "UPDATE deliveries SET attempts = attempts + 1, last_error = $4, updated_at = now()
+                 WHERE message_id = $1 AND received_at = $2 AND destination_id = $3 RETURNING attempts",
+            )
+            .bind(m.id)
+            .bind(m.received_at)
+            .bind(destination)
+            .bind(error)
+            .fetch_one(&self.pool)
+        })
         .await
         .context("recording failure")?;
         Ok(attempts)
@@ -756,11 +763,38 @@ fn span(times: &[DateTime<Utc>]) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
     Some((*times.iter().min()?, *times.iter().max()?))
 }
 
-/// Postgres's serialization failure (40001): the statement can simply run again.
-fn is_serialization_failure(e: &anyhow::Error) -> bool {
+/// Run a statement (or transaction) again, up to 5 times, when Postgres failed it in a way that
+/// running it again fixes: a serialization failure (40001) or a deadlock (40P01). Every
+/// statement that updates messages or deliveries goes through it.
+///
+/// Rows move between partitions: retention changes move finished messages to another tier, and
+/// expired partitions' unfinished messages move to the held area while their destinations'
+/// workers are updating them. A statement that saw a row before it moved can't re-check it (as
+/// it would after an ordinary update) and fails with 40001; run again, it finds the row where it
+/// is now (nothing reads or writes by tier). Moving locks rows in id order, as every statement
+/// that locks many does; a deadlock with a statement that doesn't is broken by Postgres, and the
+/// loser runs again here.
+pub(crate) async fn retrying<T, E, F, Fut>(mut statement: F) -> Result<T>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = std::result::Result<T, E>>,
+    E: Into<anyhow::Error>,
+{
+    let mut tries = 0;
+    loop {
+        match statement().await.map_err(Into::into) {
+            Err(e) if tries < 5 && can_run_again(&e) => tries += 1,
+            result => return result,
+        }
+    }
+}
+
+/// Postgres's serialization failure (40001) or deadlock (40P01): the transaction was rolled
+/// back and can simply run again.
+fn can_run_again(e: &anyhow::Error) -> bool {
     e.downcast_ref::<sqlx::Error>()
         .and_then(|e| e.as_database_error())
-        .is_some_and(|e| e.code().as_deref() == Some("40001"))
+        .is_some_and(|e| matches!(e.code().as_deref(), Some("40001" | "40P01")))
 }
 
 /// `Store::pending`: destination `$1`'s oldest `$3` pending deliveries in lanes `$2`, with their

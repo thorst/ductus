@@ -1051,6 +1051,29 @@ async fn everything_at_once_without_lock_errors() {
             moved
         })
     };
+    // The held area: today's unfinished messages (pending ones, which the destinations are
+    // draining right now) move out of their partition with their deliveries, as an expired
+    // partition's do. A drain whose update meets a row moved under it must run it again and find
+    // the row in the held area.
+    let holder = {
+        let (store, stop, pool) = (store.clone(), stop.clone(), pool.clone());
+        tokio::spawn(async move {
+            let partition: String =
+                sqlx::query_scalar("SELECT ductus_create_tier_partition('messages', $1, current_date)")
+                    .bind(i32::from(TIER))
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            let (mut after, mut held) = (0, 0);
+            while !stop.load(Relaxed) {
+                let (n, last) = store.hold_step(&partition, after, 100).await.unwrap();
+                held += n;
+                after = last.unwrap_or(0); // from the start again once through
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            held
+        })
+    };
     let maintenance = {
         let (store, stop) = (store.clone(), stop.clone());
         tokio::spawn(async move {
@@ -1076,6 +1099,7 @@ async fn everything_at_once_without_lock_errors() {
     }
     let days = maintenance.await;
     let moved = mover.await;
+    let held = holder.await;
     drop_test_partitions(&pool).await;
     for r in results {
         r.expect("a writer or drain failed");
@@ -1083,7 +1107,10 @@ async fn everything_at_once_without_lock_errors() {
     let days = days.expect("maintenance failed");
     let moved = moved.expect("moving to another tier failed");
     assert!(moved > 0, "the retention change moved something");
-    // What's left moves now; then every message is in the 49d tier, each with its deliveries.
+    let held = held.expect("moving to the held area failed");
+    assert!(held > 0, "something moved to the held area");
+    // What's left moves now (from the held area too: all of it is finished and within the
+    // window); then every message is in the 49d tier, each with its deliveries.
     while !store.retention_step(&t.name, 49, 1000).await.unwrap().is_empty() {}
     let misplaced: i64 = sqlx::query_scalar(
         "SELECT (SELECT count(*) FROM messages WHERE interface = $1 AND tier <> 49)
@@ -1111,7 +1138,7 @@ async fn everything_at_once_without_lock_errors() {
     assert!(store.payloads(&routed.name, Status::Pending).await.unwrap().is_empty(), "routed: nothing left pending");
     assert_eq!(store.payloads(&routed.name, Status::Sent).await.unwrap().len(), queued, "each routed exactly once");
     println!(
-        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations (one routing {queued} to another interface), {moved} moved to another tier meanwhile, {days} maintenance rounds, {seconds}s",
+        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations (one routing {queued} to another interface), {moved} moved to another tier and {held} to the held area meanwhile, {days} maintenance rounds, {seconds}s",
         queued + duplicates
     );
 }
@@ -1399,7 +1426,7 @@ async fn expired_partitions_are_dropped_unless_something_must_stay() {
 
     let expired = store.drop_expired().await.unwrap();
     assert!(expired.dropped.contains(&gone), "{expired:?}");
-    let held = |name: &str| expired.held.iter().find(|h| h.partition == name).cloned();
+    let held = |name: &str| expired.kept.iter().find(|h| h.partition == name).cloned();
     let q = held(&quarantined).expect("quarantined messages keep their partition");
     assert_eq!((q.tier, q.pending, q.quarantined, q.kept_for.len()), (7, 0, 1, 0));
     assert_eq!(held(&kept).expect("b keeps it").kept_for, [b.name.as_str()]);
@@ -1418,4 +1445,112 @@ async fn expired_partitions_are_dropped_unless_something_must_stay() {
     let expired = store.drop_expired().await.unwrap();
     assert!(expired.dropped.contains(&quarantined) && expired.dropped.contains(&kept), "{expired:?}");
     assert!(!exists(&pool, &quarantined).await && !exists(&pool, &kept).await);
+}
+
+/// An expired partition's unfinished messages move to the held area with all their deliveries
+/// (quarantined ones too, unless the interface purges them), then the partition drops. Held
+/// messages stay in their destination's queue and finish there; a past month drops once
+/// nothing in it is unfinished.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn expired_unfinished_messages_move_to_the_held_area() {
+    let Some(store) = store().await else { return };
+    let _serial = LONG_LOCKS.lock().await;
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let keep = Iface::new(&store, "held-keep", &["lab", "billing"]).await;
+    let purge = Iface::single(&store, "held-purge").await;
+    for t in [&keep, &purge] {
+        store.apply_retention(&t.name, 7).await.unwrap();
+    }
+    store.set_quarantined(&[(keep.name.clone(), false), (purge.name.clone(), true)]).await.unwrap();
+    // 33 days ago: always last month or earlier, so its held month can be dropped.
+    insert_at(&pool, &keep, 33, 7, Status::Sent, "a sent").await;
+    let pending = insert_at(&pool, &keep, 33, 7, Status::Pending, "b pending").await;
+    insert_at(&pool, &keep, 33, 7, Status::Quarantined, "c quarantined").await;
+    insert_at(&pool, &purge, 33, 7, Status::Quarantined, "d quarantined, purged").await;
+    // b: lab has it, billing is down.
+    sqlx::query("UPDATE deliveries SET status = 1 WHERE message_id = $1 AND destination_id = $2")
+        .bind(pending)
+        .bind(keep.id("lab"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let partition = seven_day_partition(&pool, 33).await;
+
+    let expired = store.drop_expired().await.unwrap();
+    let kept = expired.kept.iter().find(|k| k.partition == partition).expect("kept: b and c are unfinished");
+    // (At least: a run that failed midway leaves its messages in the same partition.)
+    assert!(kept.pending >= 1 && kept.quarantined >= 1, "{kept:?}");
+    assert!(kept.to_hold());
+    let purged: i64 = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT count(*) FROM {partition} WHERE interface = $1 AND status = 3"
+    )))
+    .bind(&purge.name)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(purged, 1);
+
+    let (mut after, mut moved) = (0, 0);
+    loop {
+        let (n, last) = store.hold_step(&partition, after, 1).await.unwrap();
+        moved += n;
+        match last {
+            Some(id) => after = id,
+            None => break,
+        }
+    }
+    assert!(moved >= 2, "b and c (d's interface purges quarantined messages)");
+    assert_eq!(
+        tiers_of(&pool, &keep.name).await,
+        [("a sent".into(), 7), ("b pending".into(), ductus_store::HELD), ("c quarantined".into(), ductus_store::HELD)]
+    );
+    let held_deliveries: i64 = sqlx::query_scalar("SELECT count(*) FROM deliveries WHERE message_id = $1 AND tier = 0")
+        .bind(pending)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(held_deliveries, 2, "every delivery went with its message, finished or not");
+
+    // The partition drops now, with the finished message and the purged quarantined one.
+    let expired = store.drop_expired().await.unwrap();
+    assert!(expired.dropped.contains(&partition), "{expired:?}");
+    assert!(tiers_of(&pool, &purge.name).await.is_empty(), "purged with its partition");
+
+    // Still in billing's queue; finishing it works as before.
+    let queue = store.pending(keep.id("billing"), &[0], 10).await.unwrap();
+    assert_eq!(payloads(queue), [b"b pending".to_vec()]);
+    let received_at: chrono::DateTime<chrono::Utc> =
+        sqlx::query_scalar("SELECT received_at FROM messages WHERE id = $1")
+            .bind(pending)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    store.finish(keep.id("billing"), &[sent(MessageRef { id: pending, received_at })]).await.unwrap();
+    assert_eq!(status_of(&store, &keep.name, b"b pending").await, Status::Sent);
+
+    let area = store.held_area().await.unwrap();
+    let mine = area.interfaces.iter().find(|i| i.interface == keep.name).expect("c is still held");
+    assert_eq!((mine.pending, mine.quarantined), (0, 1));
+    let month: String = sqlx::query_scalar("SELECT 'messages_held_' || to_char(current_date - 33, 'YYYYMM')")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let m = area.months.iter().find(|m| m.partition == month).expect("its month");
+    assert!(m.messages >= 2 && m.quarantined >= 1 && m.bytes > 0, "{m:?}");
+
+    // The month stays while c is unresolved; once it is, the month goes whole.
+    assert!(!store.drop_finished_held().await.unwrap().contains(&month));
+    assert!(exists(&pool, &month).await);
+    // Resolved (with anything a failed run left in past months: only tests put rows there).
+    for table in ["deliveries", "messages"] {
+        sqlx::query(sqlx::AssertSqlSafe(format!(
+            "UPDATE {table} SET status = 1
+             WHERE tier = 0 AND status IN (0, 3) AND received_at < date_trunc('month', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'"
+        )))
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    assert!(store.drop_finished_held().await.unwrap().contains(&month), "nothing unfinished in it now");
+    assert!(!exists(&pool, &month).await && !exists(&pool, &month.replace("messages", "deliveries")).await);
 }

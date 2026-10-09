@@ -1,5 +1,5 @@
 //! Retention: how long each interface keeps its messages, changes in progress, shorter values
-//! waiting for a confirmation, and expired partitions that had to stay.
+//! waiting for a confirmation, expired partitions that had to stay, and the held area.
 
 use super::{ApiError, ApiResult, Caller, Eng};
 use crate::retention::Retention;
@@ -22,7 +22,76 @@ pub struct RetentionReport {
     /// When expired partitions were last dropped (hourly).
     last_drop_at: Option<DateTime<Utc>>,
     /// Expired partitions kept at the last drop, and why.
-    held: Vec<HeldPartition>,
+    kept: Vec<KeptPartition>,
+    /// The held area as of the last drop: messages past their retention that someone still
+    /// needs (pending for a destination, or quarantined and kept until resolved).
+    held: Held,
+}
+
+#[derive(Serialize, ToSchema, Default)]
+pub struct Held {
+    /// Messages in it, finished ones included (they go when their month drops).
+    messages: i64,
+    pending: i64,
+    quarantined: i64,
+    /// Disk it uses, indexes included.
+    bytes: i64,
+    /// By month: a month is dropped once nothing in it is unfinished.
+    months: Vec<HeldMonth>,
+    /// Interfaces with unfinished messages in it.
+    interfaces: Vec<HeldInterface>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct HeldMonth {
+    /// The month, `2026-09`.
+    month: String,
+    partition: String,
+    messages: i64,
+    pending: i64,
+    quarantined: i64,
+    bytes: i64,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct HeldInterface {
+    name: String,
+    pending: i64,
+    quarantined: i64,
+}
+
+impl From<ductus_store::HeldArea> for Held {
+    fn from(area: ductus_store::HeldArea) -> Self {
+        let sum = |f: fn(&ductus_store::HeldMonth) -> i64| area.months.iter().map(f).sum();
+        Held {
+            messages: sum(|m| m.messages),
+            pending: sum(|m| m.pending),
+            quarantined: sum(|m| m.quarantined),
+            bytes: sum(|m| m.bytes),
+            months: area
+                .months
+                .iter()
+                .map(|m| {
+                    // `messages_held_202609` (the store only lists names of that shape).
+                    let (year, month) =
+                        m.partition.rsplit('_').next().unwrap_or_default().split_at_checked(4).unwrap_or_default();
+                    HeldMonth {
+                        month: format!("{year}-{month}"),
+                        partition: m.partition.clone(),
+                        messages: m.messages,
+                        pending: m.pending,
+                        quarantined: m.quarantined,
+                        bytes: m.bytes,
+                    }
+                })
+                .collect(),
+            interfaces: area
+                .interfaces
+                .into_iter()
+                .map(|i| HeldInterface { name: i.interface, pending: i.pending, quarantined: i.quarantined })
+                .collect(),
+        }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -54,7 +123,7 @@ pub struct Change {
 }
 
 #[derive(Serialize, ToSchema)]
-pub struct HeldPartition {
+pub struct KeptPartition {
     partition: String,
     /// Its retention tier, in days.
     tier: i16,
@@ -83,7 +152,7 @@ async fn describe(retention: &Retention, state: RetentionState) -> anyhow::Resul
     })
 }
 
-/// Every interface's retention, and expired partitions that had to stay.
+/// Every interface's retention, expired partitions that had to stay, and the held area.
 #[utoipa::path(get, path = "/retention", tag = "retention", responses((status = 200, body = RetentionReport)))]
 async fn retention(engine: Eng, _caller: Caller) -> ApiResult<RetentionReport> {
     let r = &engine.retention;
@@ -91,21 +160,24 @@ async fn retention(engine: Eng, _caller: Caller) -> ApiResult<RetentionReport> {
     for state in r.states().await? {
         interfaces.push(describe(r, state).await?);
     }
-    let (last_drop_at, held) = r.last_drop().unzip();
+    let last = r.last_drop();
     Ok(Json(RetentionReport {
         interfaces,
-        last_drop_at,
-        held: held
+        last_drop_at: last.as_ref().map(|l| l.at),
+        kept: last
+            .as_ref()
+            .map(|l| l.kept.clone())
             .unwrap_or_default()
             .into_iter()
-            .map(|h| HeldPartition {
-                partition: h.partition,
-                tier: h.tier,
-                pending: h.pending,
-                quarantined: h.quarantined,
-                kept_for: h.kept_for,
+            .map(|k| KeptPartition {
+                partition: k.partition,
+                tier: k.tier,
+                pending: k.pending,
+                quarantined: k.quarantined,
+                kept_for: k.kept_for,
             })
             .collect(),
+        held: last.map(|l| l.held.into()).unwrap_or_default(),
     }))
 }
 

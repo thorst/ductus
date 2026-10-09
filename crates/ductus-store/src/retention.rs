@@ -6,9 +6,12 @@
 //! current retention is when it goes: changing it moves the interface's rows into the new tier
 //! (or deletes the ones past a shorter window), in small batches, in the background.
 //!
-//! A partition is never dropped while it holds pending or quarantined messages (a destination
-//! stuck for a month keeps its backlog), or rows of an interface that now keeps them longer (a
-//! change still moving them).
+//! An expired partition's pending and quarantined messages (a destination stuck for months, a
+//! question nobody answered) move to the **held area** with their deliveries, then the partition
+//! drops (migration 0014). Held is tier `HELD`, partitioned by month; a month drops whole once
+//! nothing in it is unfinished. `quarantined: purge` lets an interface's quarantined messages go
+//! with their partition instead. A partition with rows of an interface that now keeps them longer
+//! (a change still moving them) waits for the change.
 
 use super::Store;
 use anyhow::{Context, Result, bail};
@@ -19,6 +22,10 @@ pub type Tier = i16;
 
 /// The tiers, shortest first (`ductus_tiers()` in the database).
 pub const TIERS: [Tier; 3] = [7, 21, 49];
+
+/// The held area's tier (`messages_held`, `deliveries_held`): messages past their window that
+/// someone still needs. Kept until they're finished, whatever the interface's retention.
+pub const HELD: Tier = 0;
 
 /// The tier rows stored without one go to (older binaries; before migration 0010).
 const LEGACY_TIER: Tier = 49;
@@ -69,22 +76,58 @@ pub struct Expired {
     /// The `messages` partitions dropped (with their `deliveries` partitions).
     pub dropped: Vec<String>,
     /// Expired partitions kept, and why.
-    pub held: Vec<Held>,
+    pub kept: Vec<Kept>,
 }
 
 /// An expired partition that can't be dropped yet.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Held {
-    /// The `messages` partition, e.g. `messages_t30_20260901`.
+pub struct Kept {
+    /// The `messages` partition, e.g. `messages_t21_20260901`.
     pub partition: String,
     pub tier: Tier,
-    /// Messages still to be delivered: a destination that's down, or a stopped interface.
+    /// Messages still to be delivered: a destination that's down or paused, or a stopped
+    /// interface. They go to the held area (`Store::hold_step`).
     pub pending: i64,
-    /// Messages waiting for a person.
+    /// Messages waiting for a person (of interfaces that keep them): to the held area too.
     pub quarantined: i64,
     /// Interfaces that keep their messages longer now, with rows still here (their change is
-    /// moving them).
+    /// moving them). The partition waits for the change.
     pub kept_for: Vec<String>,
+}
+
+impl Kept {
+    /// Its unfinished messages can go to the held area now (no change is moving its rows).
+    pub fn to_hold(&self) -> bool {
+        self.kept_for.is_empty() && self.pending + self.quarantined > 0
+    }
+}
+
+/// What the held area holds (`Store::held_area`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HeldArea {
+    pub months: Vec<HeldMonth>,
+    /// Interfaces with unfinished messages in it, by name.
+    pub interfaces: Vec<HeldInterface>,
+}
+
+/// One month of the held area: dropped once nothing in it is unfinished.
+#[derive(Debug, Clone, PartialEq)]
+pub struct HeldMonth {
+    /// The `messages` partition, e.g. `messages_held_202609`.
+    pub partition: String,
+    /// Messages in it, finished ones included (they go with the month).
+    pub messages: i64,
+    pub pending: i64,
+    pub quarantined: i64,
+    /// Disk used by its messages and deliveries, indexes included.
+    pub bytes: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct HeldInterface {
+    pub interface: String,
+    pub pending: i64,
+    pub quarantined: i64,
 }
 
 /// Is `days` a tier? (Config validation says the same to users; this guards the store.)
@@ -98,15 +141,17 @@ pub fn check_tier(days: Tier) -> Result<()> {
 const SELECT_STATE: &str =
     "SELECT interface, days, changing_from, rows_left, waiting, confirmed, changed_at FROM retention";
 
-/// A partition's name as the migration makes them: `messages_t30_20261008`. Names are put into
-/// SQL text (DDL can't take parameters), so anything else is refused.
+/// A partition's name as the migrations make them: `messages_t21_20261008` (a tier's period) or
+/// `messages_held_202609` (a month of the held area). Names are put into SQL text (DDL can't take
+/// parameters), so anything else is refused.
 fn leaf(name: &str) -> Result<&str> {
-    let ok = ["messages_t", "deliveries_t"].iter().any(|prefix| {
-        name.strip_prefix(prefix).and_then(|rest| rest.split_once('_')).is_some_and(|(tier, day)| {
-            !tier.is_empty()
-                && tier.bytes().all(|b| b.is_ascii_digit())
-                && day.len() == 8
-                && day.bytes().all(|b| b.is_ascii_digit())
+    let digits = |s: &str, n: usize| s.len() == n && s.bytes().all(|b| b.is_ascii_digit());
+    let ok = ["messages_", "deliveries_"].iter().any(|prefix| {
+        name.strip_prefix(prefix).is_some_and(|rest| match rest.strip_prefix("held_") {
+            Some(month) => digits(month, 6),
+            None => rest.strip_prefix('t').and_then(|rest| rest.split_once('_')).is_some_and(|(tier, day)| {
+                !tier.is_empty() && tier.bytes().all(|b| b.is_ascii_digit()) && digits(day, 8)
+            }),
         })
     });
     if !ok {
@@ -115,9 +160,33 @@ fn leaf(name: &str) -> Result<&str> {
     Ok(name)
 }
 
-/// `messages_t30_20261008` → `messages_t30`.
+/// `messages_t21_20261008` → `messages_t21`; `messages_held_202609` → `messages_held`.
 fn parent_of(leaf: &str) -> &str {
     &leaf[..leaf.rfind('_').unwrap_or(leaf.len())]
+}
+
+/// The tier of a partition `leaf` accepted: `HELD` for the held area.
+fn tier_of(leaf: &str) -> Result<Tier> {
+    let parent = parent_of(leaf);
+    if parent.ends_with("_held") {
+        return Ok(HELD);
+    }
+    let days = parent.rsplit_once("_t").map(|(_, days)| days).unwrap_or_default();
+    days.parse().with_context(|| format!("no tier in {leaf}"))
+}
+
+/// Unfinished rows of a partition: pending, or quarantined unless the interface lets them go
+/// (`quarantined: purge`). For `messages` (alias `x`) or `deliveries` (whose interface is its
+/// destination's).
+fn unfinished_sql(table: &str) -> &'static str {
+    if table.starts_with("messages") {
+        "(x.status = 0 OR (x.status = 3 AND NOT EXISTS (
+             SELECT 1 FROM retention r WHERE r.interface = x.interface AND r.purge_quarantined)))"
+    } else {
+        "(x.status = 0 OR (x.status = 3 AND NOT EXISTS (
+             SELECT 1 FROM destinations t JOIN retention r ON r.interface = t.interface
+             WHERE t.id = x.destination_id AND r.purge_quarantined)))"
+    }
 }
 
 /// The `deliveries` partition with the same tier and period as a `messages` one.
@@ -276,7 +345,8 @@ impl Store {
     /// fail its update) and moved once delivered. Quarantined ones are moved but never deleted.
     pub async fn retention_step(&self, interface: &str, days: Tier, limit: i64) -> Result<Step> {
         check_tier(days)?;
-        let deleted = sqlx::query(
+        // Retried when a row moved under it (to the held area, say): see `super::retrying`.
+        let deleted = super::retrying(|| sqlx::query(
             "WITH victims AS (
                  SELECT id, received_at, tier FROM messages
                  WHERE interface = $1 AND tier <> $2 AND received_at < current_date - $2::integer AND status IN (1, 2, 4)
@@ -291,15 +361,16 @@ impl Store {
         .bind(interface)
         .bind(days)
         .bind(limit)
-        .execute(&self.pool)
+        .execute(&self.pool))
         .await
         .context("deleting messages past the retention window")?
         .rows_affected();
         let moved = if deleted > 0 {
             0
         } else {
-            sqlx::query(
-                "WITH moving AS (
+            super::retrying(|| {
+                sqlx::query(
+                    "WITH moving AS (
                      SELECT id, received_at, tier FROM messages
                      WHERE interface = $1 AND tier <> $2 AND received_at >= current_date - $2::integer AND status <> 0
                      LIMIT $3
@@ -309,11 +380,12 @@ impl Store {
                  )
                  UPDATE messages m SET tier = $2 FROM moving v
                  WHERE m.id = v.id AND m.received_at = v.received_at AND m.tier = v.tier",
-            )
-            .bind(interface)
-            .bind(days)
-            .bind(limit)
-            .execute(&self.pool)
+                )
+                .bind(interface)
+                .bind(days)
+                .bind(limit)
+                .execute(&self.pool)
+            })
             .await
             .context("moving messages to their retention tier")?
             .rows_affected()
@@ -347,8 +419,8 @@ impl Store {
     }
 
     /// The running change is done. Returns the interface's messages left in other tiers: pending
-    /// or quarantined ones past the new window, which stay where they are (and go with that
-    /// tier's partitions).
+    /// or quarantined ones past the new window, which stay where they are (and go to the held
+    /// area when their partition expires), and any already in the held area.
     pub async fn finish_retention_change(&self, interface: &str) -> Result<i64> {
         let left: i64 = sqlx::query_scalar(
             "SELECT count(*) FROM messages m JOIN retention r ON r.interface = m.interface
@@ -369,8 +441,202 @@ impl Store {
         Ok(left)
     }
 
+    /// Which interfaces let their quarantined messages go with their expired partitions
+    /// (`quarantined: purge`); the others keep them in the held area. After `apply_retention`.
+    pub async fn set_quarantined(&self, purge: &[(String, bool)]) -> Result<()> {
+        let (interfaces, flags): (Vec<&str>, Vec<bool>) = purge.iter().map(|(i, p)| (i.as_str(), *p)).unzip();
+        sqlx::query(
+            "UPDATE retention r SET purge_quarantined = c.purge, updated_at = now()
+             FROM unnest($1::text[], $2::bool[]) AS c(interface, purge)
+             WHERE r.interface = c.interface AND r.purge_quarantined <> c.purge",
+        )
+        .bind(&interfaces)
+        .bind(&flags)
+        .execute(&self.pool)
+        .await
+        .context("saving what happens to quarantined messages")?;
+        Ok(())
+    }
+
+    /// One batch of moving an expired partition's unfinished messages (`Kept::to_hold`) to the
+    /// held area, each with its deliveries, in one statement: at most `limit` messages after id
+    /// `after`, in id order. Returns how many moved and the last id looked at (`None`: none left,
+    /// the partition is done). The held partitions for its period are created first if missing.
+    ///
+    /// Walking the primary key from `after` reads each row once however many batches it takes
+    /// (starting over each time would read the rows already moved again, and finished ones).
+    ///
+    /// Workers may be updating these rows (a destination retrying its oldest message). Rows are
+    /// locked in id order, messages then deliveries, like every statement that locks many; a
+    /// worker's update that finds its row moved meanwhile fails and runs again (`retrying`), and
+    /// finds it in the held area: nothing reads or writes by tier.
+    pub async fn hold_step(&self, messages: &str, after: i64, limit: i64) -> Result<(u64, Option<i64>)> {
+        let messages = leaf(messages)?;
+        let tier = tier_of(messages)?;
+        if tier == HELD || !messages.starts_with("messages") {
+            bail!("{messages} isn't a tier partition of messages");
+        }
+        let (from, until) = self.period_of(messages).await?;
+        self.ensure_held_partitions(from, until).await?;
+        let sql = format!(
+            "WITH moving AS (
+                 SELECT x.id, x.received_at FROM {messages} x
+                 WHERE x.id > $1 AND {unfinished}
+                 ORDER BY x.id LIMIT $2
+                 FOR UPDATE
+             ), locked AS (
+                 SELECT d.message_id, d.received_at, d.destination_id
+                 FROM deliveries d JOIN moving v ON d.message_id = v.id AND d.received_at = v.received_at
+                 WHERE d.tier = $3 AND d.received_at >= $4 AND d.received_at < $5
+                 ORDER BY d.message_id, d.destination_id
+                 FOR UPDATE OF d
+             ), deliveries_moved AS (
+                 UPDATE deliveries d SET tier = {HELD} FROM locked l
+                 WHERE d.message_id = l.message_id AND d.received_at = l.received_at
+                   AND d.destination_id = l.destination_id
+                   AND d.tier = $3 AND d.received_at >= $4 AND d.received_at < $5
+             ), moved AS (
+                 UPDATE messages m SET tier = {HELD} FROM moving v
+                 WHERE m.id = v.id AND m.received_at = v.received_at
+                   AND m.tier = $3 AND m.received_at >= $4 AND m.received_at < $5
+                 RETURNING m.id
+             )
+             SELECT (SELECT count(*) FROM moved), (SELECT max(id) FROM moving)",
+            unfinished = unfinished_sql(messages),
+        );
+        let (moved, last): (i64, Option<i64>) = super::retrying(|| {
+            sqlx::query_as(sqlx::AssertSqlSafe(sql.as_str()))
+                .bind(after)
+                .bind(limit)
+                .bind(tier)
+                .bind(from)
+                .bind(until)
+                .fetch_one(&self.pool)
+        })
+        .await
+        .with_context(|| format!("moving unfinished messages of {messages} to the held area"))?;
+        Ok((moved as u64, last))
+    }
+
+    /// The time a partition covers: `[from, until)`.
+    async fn period_of(&self, leaf_name: &str) -> Result<(DateTime<Utc>, DateTime<Utc>)> {
+        let name = leaf(leaf_name)?;
+        sqlx::query_as(
+            "SELECT d::timestamp AT TIME ZONE 'UTC', (d + ('1 ' || u)::interval) AT TIME ZONE 'UTC'
+             FROM (SELECT CASE WHEN $2 = 0 THEN to_date(right($1, 6), 'YYYYMM') ELSE to_date(right($1, 8), 'YYYYMMDD') END AS d,
+                          CASE WHEN $2 = 0 THEN 'month' ELSE ductus_tier_unit($2) END AS u) p",
+        )
+        .bind(name)
+        .bind(i32::from(tier_of(name)?))
+        .fetch_one(&self.pool)
+        .await
+        .with_context(|| format!("reading the period of {name}"))
+    }
+
+    /// The held area's partitions for every month in `[from, until)`, `messages` then
+    /// `deliveries`, one table per transaction and with the usual lock timeout (as
+    /// `ensure_partitions`). Nothing is locked when they exist.
+    async fn ensure_held_partitions(&self, from: DateTime<Utc>, until: DateTime<Utc>) -> Result<()> {
+        for table in ["messages", "deliveries"] {
+            let mut tx = self.pool.begin().await?;
+            sqlx::query(super::PARTITION_LOCK_TIMEOUT).execute(&mut *tx).await?;
+            sqlx::query(
+                "SELECT ductus_create_held_partition($1, m::date)
+                 FROM generate_series(date_trunc('month', $2 AT TIME ZONE 'UTC'),
+                                      ($3 - interval '1 microsecond') AT TIME ZONE 'UTC', interval '1 month') m",
+            )
+            .bind(table)
+            .bind(from)
+            .bind(until)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| format!("creating the held area's {table} partitions"))?;
+            tx.commit().await?;
+        }
+        Ok(())
+    }
+
+    /// Drop the held area's past months with nothing unfinished left (finished messages go with
+    /// them), `deliveries` first. Returns the `messages` partitions dropped.
+    ///
+    /// Not the current month: more of its messages can still come (as the partitions covering
+    /// it expire), so it would only be made again.
+    pub async fn drop_finished_held(&self) -> Result<Vec<String>> {
+        let months: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT right(c.relname, 6)
+             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_class t ON t.oid = i.inhparent
+             WHERE t.relname IN ('messages_held', 'deliveries_held') AND NOT i.inhdetachpending
+               AND c.relname ~ '^(messages|deliveries)_held_[0-9]{6}$'
+               AND right(c.relname, 6) < to_char(now() AT TIME ZONE 'UTC', 'YYYYMM')
+             ORDER BY 1",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("listing the held area's months")?;
+        let mut dropped = Vec::new();
+        for month in months {
+            let (messages, deliveries) = (format!("messages_held_{month}"), format!("deliveries_held_{month}"));
+            let mut busy = false;
+            for table in [&messages, &deliveries] {
+                if self.is_partition(table).await? {
+                    let (pending, quarantined) = self.unfinished(table).await?;
+                    busy |= pending + quarantined > 0;
+                }
+            }
+            if busy {
+                continue;
+            }
+            if self.is_partition(&deliveries).await? && !self.detach_and_drop(&deliveries).await? {
+                continue;
+            }
+            if self.is_partition(&messages).await? && self.detach_and_drop(&messages).await? {
+                dropped.push(messages);
+            }
+        }
+        Ok(dropped)
+    }
+
+    /// What the held area holds, month by month and per interface. Counts every held row, so
+    /// it's for a background task (hourly), not for each API call.
+    pub async fn held_area(&self) -> Result<HeldArea> {
+        let partitions: Vec<String> = sqlx::query_scalar(
+            "SELECT c.relname::text
+             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_class t ON t.oid = i.inhparent
+             WHERE t.relname = 'messages_held' AND NOT i.inhdetachpending AND c.relname ~ '^messages_held_[0-9]{6}$'
+             ORDER BY 1",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("listing the held area's months")?;
+        let mut months = Vec::with_capacity(partitions.len());
+        for partition in partitions {
+            let messages = leaf(&partition)?;
+            let (count, pending, quarantined, bytes): (i64, i64, i64, i64) =
+                sqlx::query_as(sqlx::AssertSqlSafe(format!(
+                    "SELECT count(*), count(*) FILTER (WHERE status = 0), count(*) FILTER (WHERE status = 3),
+                            pg_total_relation_size($1::regclass)
+                              + coalesce(pg_total_relation_size(to_regclass($2)), 0)
+                     FROM {messages}"
+                )))
+                .bind(messages)
+                .bind(deliveries_of(messages))
+                .fetch_one(&self.pool)
+                .await
+                .with_context(|| format!("counting {messages}"))?;
+            months.push(HeldMonth { partition, messages: count, pending, quarantined, bytes });
+        }
+        let interfaces = sqlx::query_as(
+            "SELECT interface, count(*) FILTER (WHERE status = 0) AS pending, count(*) FILTER (WHERE status = 3) AS quarantined
+             FROM messages WHERE tier = 0 AND status IN (0, 3) GROUP BY 1 ORDER BY 1",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .context("counting the held area's messages per interface")?;
+        Ok(HeldArea { months, interfaces })
+    }
+
     /// Drop every partition past its tier's window (all of its period older than the tier's
-    /// days), `deliveries` first, unless it must be kept (`Held`).
+    /// days), `deliveries` first, unless it must be kept (`Kept`).
     ///
     /// Each partition is detached with `DETACH PARTITION CONCURRENTLY`, which never blocks
     /// inserts or reads of the table (it waits for the queries that started before it instead),
@@ -398,8 +664,8 @@ impl Store {
                 .fetch_all(&self.pool)
                 .await
                 .context("reading retention")?;
-            if let Some(held) = self.held(&messages, tier, &keep).await? {
-                out.held.push(held);
+            if let Some(kept) = self.why_kept(&messages, tier, &keep).await? {
+                out.kept.push(kept);
                 continue;
             }
             let deliveries = deliveries_of(&messages);
@@ -430,7 +696,7 @@ impl Store {
     }
 
     /// Why an expired `messages` partition (and its `deliveries` one) must stay, if it must.
-    async fn held(&self, messages: &str, tier: Tier, keep: &[String]) -> Result<Option<Held>> {
+    async fn why_kept(&self, messages: &str, tier: Tier, keep: &[String]) -> Result<Option<Kept>> {
         let (pending, quarantined) = self.unfinished(messages).await?;
         let deliveries = deliveries_of(messages);
         let (dp, dq) = if self.is_partition(&deliveries).await? { self.unfinished(&deliveries).await? } else { (0, 0) };
@@ -442,19 +708,24 @@ impl Store {
         .fetch_all(&self.pool)
         .await
         .with_context(|| format!("checking {messages} for interfaces that keep messages longer"))?;
-        let (pending, quarantined) = (pending.max(dp), quarantined.max(dq));
+        // Messages, as people count them (a message waits once, whatever its destinations); the
+        // deliveries' counts only when the messages say nothing is left (rows from an older
+        // engine that reconcile hasn't matched yet).
+        let (pending, quarantined) = if pending + quarantined > 0 { (pending, quarantined) } else { (dp, dq) };
         if pending == 0 && quarantined == 0 && kept_for.is_empty() {
             return Ok(None);
         }
-        Ok(Some(Held { partition: messages.to_string(), tier, pending, quarantined, kept_for }))
+        Ok(Some(Kept { partition: messages.to_string(), tier, pending, quarantined, kept_for }))
     }
 
-    /// Pending and quarantined rows in a partition (`messages` or `deliveries`).
+    /// Unfinished rows in a partition (`messages` or `deliveries`): pending, and quarantined of
+    /// interfaces that keep them (`unfinished_sql`).
     async fn unfinished(&self, table: &str) -> Result<(i64, i64)> {
         sqlx::query_as(sqlx::AssertSqlSafe(format!(
-            "SELECT count(*) FILTER (WHERE status = 0), count(*) FILTER (WHERE status = 3) FROM {}
-             WHERE status IN (0, 3)",
-            leaf(table)?
+            "SELECT count(*) FILTER (WHERE x.status = 0), count(*) FILTER (WHERE x.status = 3) FROM {} x
+             WHERE {}",
+            leaf(table)?,
+            unfinished_sql(table)
         )))
         .fetch_one(&self.pool)
         .await
@@ -489,19 +760,12 @@ impl Store {
         let name = leaf(name)?;
         let (pending, quarantined) = self.unfinished(name).await?;
         if pending + quarantined > 0 {
-            let tier: i32 = parent_of(name).rsplit('t').next().unwrap_or_default().parse()?;
-            let bounds: String = sqlx::query_scalar(
-                "SELECT format('FOR VALUES FROM (%L) TO (%L)', d::timestamp AT TIME ZONE 'UTC',
-                               (d + ('1 ' || ductus_tier_unit($2))::interval) AT TIME ZONE 'UTC')
-                 FROM to_date(right($1, 8), 'YYYYMMDD') d",
-            )
-            .bind(name)
-            .bind(tier)
-            .fetch_one(&self.pool)
-            .await?;
+            let (from, until) = self.period_of(name).await?;
             sqlx::query(sqlx::AssertSqlSafe(format!(
-                "ALTER TABLE {} ATTACH PARTITION {name} {bounds}",
-                parent_of(name)
+                "ALTER TABLE {} ATTACH PARTITION {name} FOR VALUES FROM ('{}') TO ('{}')",
+                parent_of(name),
+                from.to_rfc3339(),
+                until.to_rfc3339()
             )))
             .execute(&self.pool)
             .await
@@ -527,7 +791,7 @@ impl Store {
         let pending: Vec<(String, String)> = sqlx::query_as(
             "SELECT t.relname::text, c.relname::text
              FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_class t ON t.oid = i.inhparent
-             WHERE i.inhdetachpending AND t.relname ~ '^(messages|deliveries)_t[0-9]+$'",
+             WHERE i.inhdetachpending AND t.relname ~ '^(messages|deliveries)_(t[0-9]+|held)$'",
         )
         .fetch_all(&self.pool)
         .await
@@ -546,7 +810,7 @@ impl Store {
         let detached: Vec<String> = sqlx::query_scalar(
             "SELECT relname::text FROM pg_class
              WHERE relkind = 'r' AND NOT relispartition AND relnamespace = current_schema()::regnamespace
-               AND relname ~ '^(messages|deliveries)_t[0-9]+_[0-9]{8}$'
+               AND relname ~ '^(messages|deliveries)_(t[0-9]+_[0-9]{8}|held_[0-9]{6})$'
              ORDER BY relname LIKE 'messages%', relname",
         )
         .fetch_all(&self.pool)
@@ -572,6 +836,19 @@ mod tests {
         }
         assert_eq!(parent_of("messages_t30_20261008"), "messages_t30");
         assert_eq!(deliveries_of("messages_t30_20261008"), "deliveries_t30_20261008");
+        assert_eq!(tier_of("deliveries_t21_20261005").unwrap(), 21);
+    }
+
+    #[test]
+    fn held_area_partition_names() {
+        assert!(leaf("messages_held_202609").is_ok());
+        assert!(leaf("deliveries_held_202612").is_ok());
+        for bad in ["messages_held", "messages_held_20260901", "messages_held_2026x9", "held_202609"] {
+            assert!(leaf(bad).is_err(), "{bad}");
+        }
+        assert_eq!(parent_of("messages_held_202609"), "messages_held");
+        assert_eq!(deliveries_of("messages_held_202609"), "deliveries_held_202609");
+        assert_eq!(tier_of("messages_held_202609").unwrap(), HELD);
     }
 
     #[test]

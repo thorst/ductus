@@ -6,12 +6,13 @@
 #   lab  (MLLP, no retention: this project's ductus.yaml says 3w): history 28 and 35 days old.
 #
 # 1. Startup drops what's expired: adt's 120-day-old partition, lab's 35-day-old one. Lab's
-#    28-day-old partition stays: it holds quarantined messages (someone must look at them).
+#    28-day-old partition holds quarantined messages (someone must look at them): they move to
+#    the held area, and the partition drops too (demo-held.sh shows the held area in full).
 # 2. adt is shortened to 3w while ADT keeps flowing. That deletes messages, so the engine waits
 #    for `ductus retention confirm adt`; then it deletes adt's finished messages past 21 days
 #    (never quarantined ones) and moves the rest into the 3w tier, in the background.
 # 3. lab is lengthened to 7w: no confirmation, it starts at once and keeps everything; its
-#    quarantined messages move to the 7w tier, so their old partition can finally go.
+#    quarantined messages are within 7 weeks again, so they move from the held area to the 7w tier.
 set -euo pipefail
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
@@ -96,14 +97,15 @@ start_engine 2
 "$BIN" gen --to 127.0.0.1:6693 --count $LIVE --patients 100 --connections 4 >"$P/gen.log" &
 GEN=$!
 sleep 6 # the first drop of expired partitions runs 5 s after startup
+wait_for 30 '! exists "$lab28"'
 grep -o 'shorter retention not applied.*' run.log | sed 's/^/   log: /'
 echo "   \$ ductus retention"
 "$BIN" retention | sed 's/^/     /'
 deleted_before=$(q "SELECT count(*) FROM messages WHERE interface = 'adt' AND received_at < current_date - 21 AND status = 1")
 exists "$adt120" && dropped_adt120=no || dropped_adt120=yes
 exists "$lab35" && dropped_lab35=no || dropped_lab35=yes
-exists "$lab28" && kept_lab28=yes || kept_lab28=no
-echo "   expired partitions dropped: $adt120 $dropped_adt120, $lab35 $dropped_lab35; $lab28 kept: $kept_lab28"
+lab_held=$(q "SELECT count(*) FROM messages WHERE interface = 'lab' AND tier = 0 AND status = 3")
+echo "   expired partitions dropped: $adt120 $dropped_adt120, $lab35 $dropped_lab35, $lab28 yes (its $lab_held quarantined messages are in the held area)"
 
 echo "== \$ ductus retention confirm adt"
 start=$(date +%s%N)
@@ -121,8 +123,7 @@ stop_engine
 echo "retention: 7w" >>interfaces/lab/interface.yaml
 start_engine 3
 wait_for 60 '"$BIN" retention | grep -E "^lab +7w *$" >/dev/null'
-for _ in $(seq 1 50); do exists "$lab28" || break; sleep 0.2; done
-echo "   lab: $(tier_counts lab); $lab28 $(exists "$lab28" && echo still there || echo dropped)"
+echo "   lab: $(tier_counts lab)"
 "$BIN" retention | sed 's/^/   /'
 stop_engine
 "$BIN" token revoke "demo-$$" >/dev/null
@@ -130,7 +131,7 @@ stop_engine
 fail=""
 [ "$dropped_adt120" = yes ] || fail+=" adt-120-days-not-dropped"
 [ "$dropped_lab35" = yes ] || fail+=" lab-35-days-not-dropped"
-[ "$kept_lab28" = yes ] || fail+=" quarantined-partition-dropped"
+[ "$lab_held" = 3 ] || fail+=" lab-quarantined-not-held($lab_held)"
 [ "$deleted_before" = $HISTORY ] || fail+=" deleted-before-confirmation($deleted_before)"
 [ "$(tier_counts adt)" = "21d: $((2 * HISTORY + LIVE)), 49d: 5" ] || fail+=" adt-tiers($(tier_counts adt))"
 [ "$(q "SELECT count(*) FROM messages WHERE interface = 'adt' AND status = 3")" = 5 ] || fail+=" adt-quarantined"

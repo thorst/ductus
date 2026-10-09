@@ -252,14 +252,14 @@ pub async fn retention(remote: Remote) -> Result<()> {
     for i in report["interfaces"].as_array().into_iter().flatten() {
         println!("{}", retention_line(i));
     }
-    let held = report["held"].as_array().cloned().unwrap_or_default();
-    if !held.is_empty() {
+    let kept = report["kept"].as_array().cloned().unwrap_or_default();
+    if !kept.is_empty() {
         println!(
             "
 expired partitions kept:"
         );
     }
-    for h in &held {
+    for h in &kept {
         let mut why = Vec::new();
         for (what, key) in [("pending", "pending"), ("quarantined", "quarantined")] {
             if let Some(n) = h[key].as_i64().filter(|n| *n > 0) {
@@ -272,7 +272,48 @@ expired partitions kept:"
         }
         println!("  {}: {}", h["partition"].as_str().unwrap_or("?"), why.join("; "));
     }
+    let held = &report["held"];
+    let count = |v: &Value, key: &str| v[key].as_i64().unwrap_or(0);
+    if count(held, "messages") > 0 {
+        println!(
+            "\nheld area (messages past their retention that someone still needs): {} pending, {} quarantined, {} in all, {}",
+            count(held, "pending"),
+            count(held, "quarantined"),
+            count(held, "messages"),
+            size(count(held, "bytes")),
+        );
+        for m in held["months"].as_array().into_iter().flatten() {
+            println!(
+                "  {}: {} pending, {} quarantined, {} in all, {}",
+                m["month"].as_str().unwrap_or("?"),
+                count(m, "pending"),
+                count(m, "quarantined"),
+                count(m, "messages"),
+                size(count(m, "bytes")),
+            );
+        }
+        for i in held["interfaces"].as_array().into_iter().flatten() {
+            println!(
+                "  {:<28} {} pending, {} quarantined",
+                i["name"].as_str().unwrap_or("?"),
+                count(i, "pending"),
+                count(i, "quarantined")
+            );
+        }
+    }
     Ok(())
+}
+
+/// Bytes as people read them: `512 KB`, `3.2 GB`.
+fn size(bytes: i64) -> String {
+    let mut value = bytes as f64;
+    for unit in ["bytes", "KB", "MB", "GB"] {
+        if value < 1024.0 {
+            return if unit == "bytes" { format!("{bytes} bytes") } else { format!("{value:.1} {unit}") };
+        }
+        value /= 1024.0;
+    }
+    format!("{value:.1} TB")
 }
 
 /// `ductus retention confirm <interface>`: apply a shorter retention, which deletes messages.

@@ -159,6 +159,25 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
         }
     }
 
+    // Counted by the hourly retention run (counting every held row at each scrape could be slow).
+    if let Some(last) = engine.retention.last_drop() {
+        out.family(
+            "ductus_held_messages",
+            "gauge",
+            "Unfinished messages past their retention, in the held area (as of the hourly retention run).",
+        );
+        for i in &last.held.interfaces {
+            let labels = iface(&i.interface);
+            out.sample("ductus_held_messages", &format!("{labels},status=\"pending\""), i.pending).sample(
+                "ductus_held_messages",
+                &format!("{labels},status=\"quarantined\""),
+                i.quarantined,
+            );
+        }
+        out.family("ductus_held_bytes", "gauge", "Disk used by the held area (as of the hourly retention run).")
+            .sample("ductus_held_bytes", "", last.held.months.iter().map(|m| m.bytes).sum::<i64>());
+    }
+
     let responding = || engine.interfaces.iter().filter(|i| i.config.responds());
     out.family("ductus_http_request_seconds", "histogram", "Respond-mode HTTP requests: time in the engine.");
     for i in responding() {
