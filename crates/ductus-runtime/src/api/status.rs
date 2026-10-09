@@ -166,9 +166,112 @@ pub struct InterfaceStatus {
     retention_days: Option<i16>,
     description: Option<String>,
     owner: Option<String>,
+    /// What it should have received (`monitor:` in interface.yaml), checked now.
+    health: InterfaceHealth,
     /// Counts since the engine started (they start at zero with it).
     since_start: InterfaceCounts,
     destinations: Vec<DestinationStatus>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct InterfaceHealth {
+    /// `ok`, `silent` (nothing within `active_within`), `missed` (nothing by `active_by`) or
+    /// `stopped` (best to worst).
+    state: &'static str,
+    /// In operations' words: "silent: nothing received for 47 min".
+    summary: String,
+    /// When something last arrived (kept across restarts).
+    last_received: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DestinationHealth {
+    /// `ok`, `behind` (past its `behind` limit), `error` (has quarantined messages), `stalled`
+    /// (messages wait, nothing finished for a minute) or `paused` (best to worst).
+    state: &'static str,
+    /// In operations' words: "behind 1,240 (oldest 12 min), catching up ~6 min; burst: 400/min
+    /// received (normal 80)".
+    summary: String,
+    /// Which `behind` limit is past: `messages` or `age`.
+    behind: Option<&'static str>,
+    /// Seconds the oldest waiting message has waited.
+    oldest_waiting_s: Option<u64>,
+    /// Seconds to catch up at the last few minutes' rates (only while catching up).
+    catch_up_s: Option<u64>,
+    /// Why a backlog grows: `burst` (more arriving than normal for this hour of the week),
+    /// `slow_receiver` (each send slower than normal).
+    causes: Vec<&'static str>,
+    /// When it last delivered (kept across restarts).
+    last_sent: Option<DateTime<Utc>>,
+    /// The last failure (a retry or a quarantine; kept across restarts).
+    last_error: Option<LastError>,
+    /// The last few minutes (none in the engine's first half minute).
+    recent: Option<Rates>,
+    /// Normal for this hour of the week, learned from the hours watched (none until then).
+    normal: Rates,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct LastError {
+    at: DateTime<Utc>,
+    error: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct Rates {
+    /// Messages arriving per minute.
+    received_per_min: Option<f64>,
+    /// Messages finished per minute (sent, filtered or quarantined).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    done_per_min: Option<f64>,
+    /// A successful send's mean time.
+    send_ms: Option<f64>,
+}
+
+fn round1(x: f64) -> f64 {
+    (x * 10.0).round() / 10.0
+}
+
+fn destination_health(engine: &Engine, i: &Running, n: usize, snapshot: &Snapshot) -> DestinationHealth {
+    use ductus_core::monitor::{Cause, Trend, Tripped};
+    let now = Utc::now();
+    let d = engine.diagnose(i, n, snapshot, now);
+    let id = i.destinations[n].1;
+    let stats = &i.stats.destinations[n];
+    let (recent, normal_inflow, normal_send_ms) = engine.activity.trend(id, now);
+    DestinationHealth {
+        state: d.state.label(),
+        summary: d.summary,
+        behind: d.tripped.map(|t| match t {
+            Tripped::Messages(_) => "messages",
+            Tripped::Age(_) => "age",
+        }),
+        oldest_waiting_s: snapshot.oldest_age(id).map(|a| a.as_secs()),
+        catch_up_s: match d.trend {
+            Some(Trend::CatchingUp { eta }) => Some(eta.as_secs()),
+            _ => None,
+        },
+        causes: d
+            .causes
+            .iter()
+            .map(|c| match c {
+                Cause::Burst { .. } => "burst",
+                Cause::SlowReceiver { .. } => "slow_receiver",
+            })
+            .collect(),
+        last_sent: stats.last_sent.get(),
+        last_error: stats.last_error().map(|(at, error)| LastError { at, error }),
+        recent: recent.map(|r| Rates {
+            received_per_min: Some(round1(r.received as f64 / r.minutes)),
+            done_per_min: Some(round1(r.done as f64 / r.minutes)),
+            send_ms: r.send_ms.map(round1),
+        }),
+        normal: Rates {
+            received_per_min: normal_inflow.map(round1),
+            done_per_min: None,
+            send_ms: normal_send_ms.map(round1),
+        },
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -253,6 +356,8 @@ pub struct DestinationStatus {
     quarantined: i64,
     /// Set while it's paused on purpose (nothing sent or retried until resumed).
     paused: Option<PauseInfo>,
+    /// Its state and why: behind, stalled, errors, and how it compares with normal.
+    health: DestinationHealth,
     /// Counts and timings since the engine started.
     since_start: DestinationCounts,
 }
@@ -370,12 +475,17 @@ fn interface_status(engine: &Engine, i: &Running, snapshot: &Snapshot) -> Interf
         retention_days: engine.retention.get(&c.name).map(|m| m.configured),
         description: given(&c.about.description).map(Into::into),
         owner: owner.map(Into::into),
+        health: {
+            let (state, summary) = engine.interface_state(i, Utc::now());
+            InterfaceHealth { state: state.label(), summary, last_received: i.stats.last_received.get() }
+        },
         since_start: interface_counts(&i.stats, c.responds()),
         destinations: c
             .destinations()
             .zip(&i.destinations)
             .zip(&i.stats.destinations)
-            .map(|(((name, d), (_, id)), stats)| {
+            .enumerate()
+            .map(|(n, (((name, d), (_, id)), stats))| {
                 let queue = snapshot.queue(*id);
                 DestinationStatus {
                     name: name.into(),
@@ -386,6 +496,7 @@ fn interface_status(engine: &Engine, i: &Running, snapshot: &Snapshot) -> Interf
                     pending: queue.pending,
                     quarantined: queue.quarantined,
                     paused: engine.paused(*id).map(Into::into),
+                    health: destination_health(engine, i, n, snapshot),
                     since_start: destination_counts(stats),
                 }
             })

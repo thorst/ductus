@@ -14,6 +14,7 @@ use crate::health::Health;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ductus_core::impact::CodeUses;
+use ductus_core::monitor::{self, Diagnosis, Facts, InterfaceState};
 use ductus_core::{InterfaceConfig, Resources};
 use ductus_store::{DestinationId, QueueCount, Store};
 use std::collections::HashMap;
@@ -52,9 +53,16 @@ pub enum DrainState {
 pub struct Snapshot {
     pub at: DateTime<Utc>,
     pub queues: HashMap<DestinationId, QueueCount>,
+    /// When the oldest waiting message was received, for destinations with any.
+    pub oldest: HashMap<DestinationId, DateTime<Utc>>,
 }
 
 impl Snapshot {
+    /// How long the oldest message waiting for a destination has waited.
+    pub fn oldest_age(&self, destination: DestinationId) -> Option<Duration> {
+        self.oldest.get(&destination).map(|t| (self.at - *t).to_std().unwrap_or_default())
+    }
+
     pub fn queue(&self, destination: DestinationId) -> QueueCount {
         self.queues.get(&destination).copied().unwrap_or(QueueCount {
             destination_id: destination,
@@ -181,8 +189,54 @@ impl Engine {
     pub async fn snapshot(&self) -> Result<Snapshot> {
         let mine: std::collections::HashSet<DestinationId> = self.destination_ids().collect();
         let counts = self.store.queue_counts().await?;
-        let queues = counts.into_iter().filter(|c| mine.contains(&c.destination_id)).map(|c| (c.destination_id, c));
-        Ok(Snapshot { at: Utc::now(), queues: queues.collect() })
+        let queues: HashMap<_, _> =
+            counts.into_iter().filter(|c| mine.contains(&c.destination_id)).map(|c| (c.destination_id, c)).collect();
+        let waiting: Vec<DestinationId> = queues.values().filter(|q| q.pending > 0).map(|q| q.destination_id).collect();
+        let oldest = self.store.oldest_pending(&waiting).await?;
+        let oldest = oldest.into_iter().map(|o| (o.destination_id, o.received_at)).collect();
+        Ok(Snapshot { at: Utc::now(), queues, oldest })
+    }
+
+    /// An interface's own state: what it should have received (`monitor:`), or stopped.
+    pub fn interface_state(&self, i: &Running, now: DateTime<Utc>) -> (InterfaceState, String) {
+        let watched_since = self.activity.watched_since.get(&i.config.name).copied().unwrap_or(self.started_at);
+        let stopped = i.health.stopped();
+        monitor::interface_state(&i.config.monitor, i.stats.last_received.get(), watched_since, stopped, now)
+    }
+
+    /// A destination's state and why (`n`: its place in `i.destinations`).
+    pub fn diagnose(&self, i: &Running, n: usize, snapshot: &Snapshot, now: DateTime<Utc>) -> Diagnosis {
+        let (Some((_, id)), Some(stats), Some((_, config))) =
+            (i.destinations.get(n), i.stats.destinations.get(n), i.config.destinations().nth(n))
+        else {
+            return monitor::diagnose(&Facts::default(), now);
+        };
+        let queue = snapshot.queue(*id);
+        let (recent, normal_inflow, normal_send_ms) = self.activity.trend(*id, now);
+        let last_error = stats.last_error();
+        let paused = self.paused(*id).map(|p| {
+            let day = |t: DateTime<Utc>| t.with_timezone(&chrono::Local).date_naive();
+            let at = if day(p.at) == day(now) { "%H:%M" } else { "%Y-%m-%d %H:%M" };
+            let at = p.at.with_timezone(&chrono::Local).format(at);
+            match p.reason {
+                Some(reason) => format!("paused by {} at {at}: {reason}", p.by),
+                None => format!("paused by {} at {at} (no reason yet)", p.by),
+            }
+        });
+        let facts = Facts {
+            waiting: queue.pending.max(0) as u64,
+            oldest: snapshot.oldest_age(*id),
+            quarantined: queue.quarantined.max(0) as u64,
+            last_sent: stats.last_sent.get(),
+            last_error: last_error.as_ref().map(|(at, e)| (*at, e.as_str())),
+            paused,
+            stopped: i.health.stopped(),
+            recent,
+            behind: i.config.behind_for(config),
+            normal_inflow,
+            normal_send_ms,
+        };
+        monitor::diagnose(&facts, now)
     }
 
     /// Queue counts as they change, every few seconds while anyone is subscribed.

@@ -145,6 +145,8 @@ Each destination's last send and failure (written like `interface_activity`), an
 | `pause_reason` | text | Why, once someone says (often added after the pause). |
 | `reason_by` | text | The token that gave the reason. |
 | `reason_at` | timestamptz | When. |
+| `baseline_inflow` | real[] | What's normal, per hour of the week (168 values, Monday 00:00 local first; NULL for hours not watched yet): messages arriving per minute. Learned at the end of each hour the engine watched for 15 minutes or more (migration 0013). |
+| `baseline_send_ms` | real[] | The same for a successful send's mean time, in ms. |
 | `updated_at` | timestamptz | Last change. |
 
 Index: primary key `destination_id`.

@@ -10,7 +10,7 @@ mod activity;
 mod api;
 mod retention;
 
-pub use activity::{DestinationActivity, InterfaceActivity, PauseRow, Received, Seen};
+pub use activity::{BaselineRow, DestinationActivity, InterfaceActivity, Oldest, PauseRow, Received, Seen};
 pub use api::{Browse, MessageRow, QueueCount, Role, TOKEN_PREFIX, Token};
 pub use retention::{Expired, Held, RetentionState, Step, TIERS, Tier};
 

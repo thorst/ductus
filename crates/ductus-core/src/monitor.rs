@@ -275,6 +275,358 @@ impl<'de> Deserialize<'de> for Behind {
     }
 }
 
+/// Hours in a week: what "normal" is kept for (Monday 07:00 compares with past Mondays at 07:00).
+pub const HOURS_OF_WEEK: usize = 168;
+
+/// The hour of the week of `t` in local time: Monday 00:00-01:00 is 0, Sunday 23:00 is 167.
+pub fn hour_of_week(t: DateTime<Utc>) -> usize {
+    use chrono::{Datelike, Timelike};
+    let local = t.with_timezone(&Local);
+    local.weekday().num_days_from_monday() as usize * 24 + local.hour() as usize
+}
+
+/// What's normal for a destination in each hour of the week: messages arriving per minute, and
+/// how long a send takes. Learned from the hours the engine watched; recent weeks weigh more
+/// (each hour moves its value `LEARN` of the way), so a feed that grows or a receiver that got
+/// faster becomes the new normal within a few weeks.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Baseline {
+    pub inflow: Vec<Option<f32>>,
+    pub send_ms: Vec<Option<f32>>,
+}
+
+impl Default for Baseline {
+    fn default() -> Self {
+        Self { inflow: vec![None; HOURS_OF_WEEK], send_ms: vec![None; HOURS_OF_WEEK] }
+    }
+}
+
+impl Baseline {
+    const LEARN: f32 = 0.3;
+
+    /// From stored values (any length that isn't 168 starts over).
+    pub fn from_stored(inflow: Option<Vec<Option<f32>>>, send_ms: Option<Vec<Option<f32>>>) -> Self {
+        let slots = |v: Option<Vec<Option<f32>>>| v.filter(|v| v.len() == HOURS_OF_WEEK);
+        let empty = Self::default();
+        Self { inflow: slots(inflow).unwrap_or(empty.inflow), send_ms: slots(send_ms).unwrap_or(empty.send_ms) }
+    }
+
+    /// Learn from one hour watched: messages per minute arriving, and the mean send (if any).
+    pub fn learn(&mut self, hour: usize, inflow_per_min: f64, send_ms: Option<f64>) {
+        let blend = |slot: &mut Option<f32>, x: f64| {
+            let x = x as f32;
+            *slot = Some(slot.map_or(x, |old| old + (x - old) * Self::LEARN));
+        };
+        blend(&mut self.inflow[hour % HOURS_OF_WEEK], inflow_per_min);
+        if let Some(ms) = send_ms {
+            blend(&mut self.send_ms[hour % HOURS_OF_WEEK], ms);
+        }
+    }
+
+    /// Messages per minute normally arriving in this hour of the week (unknown until it was watched).
+    pub fn inflow(&self, hour: usize) -> Option<f64> {
+        self.inflow[hour % HOURS_OF_WEEK].map(f64::from)
+    }
+
+    /// A send's normal time in this hour; until that hour was watched, the mean over the hours
+    /// that were (a receiver's speed depends less on the hour than its traffic does).
+    pub fn send_ms(&self, hour: usize) -> Option<f64> {
+        if let Some(ms) = self.send_ms[hour % HOURS_OF_WEEK] {
+            return Some(ms.into());
+        }
+        let known: Vec<f64> = self.send_ms.iter().flatten().map(|&v| v.into()).collect();
+        (!known.is_empty()).then(|| known.iter().sum::<f64>() / known.len() as f64)
+    }
+}
+
+/// A destination over the last few minutes (the engine samples its counts every few seconds).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Recent {
+    /// How long the samples cover.
+    pub minutes: f64,
+    /// Messages received for it (the interface's).
+    pub received: u64,
+    /// Messages it finished (sent, filtered or quarantined): what shrinks its queue.
+    pub done: u64,
+    /// Mean time of its successful sends.
+    pub send_ms: Option<f64>,
+    /// Since it last finished a message (or since the engine started watching).
+    pub since_progress: Duration,
+}
+
+impl Recent {
+    fn per_minute(&self, n: u64) -> f64 {
+        n as f64 / self.minutes.max(1.0 / 60.0)
+    }
+}
+
+/// What's known about one destination now.
+#[derive(Debug, Clone, Default)]
+pub struct Facts<'a> {
+    pub waiting: u64,
+    /// How long the oldest waiting message has waited.
+    pub oldest: Option<Duration>,
+    pub quarantined: u64,
+    pub last_sent: Option<DateTime<Utc>>,
+    pub last_error: Option<(DateTime<Utc>, &'a str)>,
+    /// Paused on purpose: how to say it ("paused by ann at 14:02 (no reason yet)").
+    pub paused: Option<String>,
+    /// Its interface was stopped (its code ran away): why.
+    pub stopped: Option<&'a str>,
+    pub recent: Option<Recent>,
+    /// Its `behind` limit, if operations set one.
+    pub behind: Option<Behind>,
+    /// Normal for this hour of the week.
+    pub normal_inflow: Option<f64>,
+    pub normal_send_ms: Option<f64>,
+}
+
+/// A destination's state, best to worst. The numbers are Prometheus's
+/// (`ductus_destination_state`): never change them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum State {
+    Ok = 0,
+    /// Past its `behind` limit.
+    Behind = 1,
+    /// Has quarantined messages: someone has to look.
+    Error = 2,
+    /// Messages wait and nothing is finished.
+    Stalled = 3,
+    /// Paused on purpose (said instead of stalled).
+    Paused = 4,
+}
+
+impl State {
+    pub fn label(self) -> &'static str {
+        match self {
+            State::Ok => "ok",
+            State::Behind => "behind",
+            State::Error => "error",
+            State::Stalled => "stalled",
+            State::Paused => "paused",
+        }
+    }
+}
+
+/// Why a queue grows.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Cause {
+    /// More is arriving than normal for this hour (sending is normal).
+    Burst { per_min: f64, normal: f64 },
+    /// Each send takes longer than normal.
+    SlowReceiver { ms: f64, normal: f64 },
+}
+
+/// Where a backlog is heading at the current rates.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Trend {
+    CatchingUp {
+        eta: Duration,
+    },
+    /// Arriving as fast as or faster than it's finished.
+    FallingBehind {
+        in_per_min: f64,
+        out_per_min: f64,
+    },
+}
+
+/// A destination's state, why, and how to say it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Diagnosis {
+    pub state: State,
+    /// Which `behind` limit is past.
+    pub tripped: Option<Tripped>,
+    pub causes: Vec<Cause>,
+    pub trend: Option<Trend>,
+    /// In operations' words, e.g. "behind 1,240 (oldest 12 min), catching up ~6 min".
+    pub summary: String,
+}
+
+/// A backlog whose oldest message waited less than this isn't diagnosed (a queue that flows
+/// always has a few messages in it), and a destination is stalled once it finished nothing for
+/// this long with messages waiting.
+pub const STALL_AFTER: Duration = Duration::from_secs(60);
+
+/// A receiver is slow when a send takes over twice its normal time and at least this much more
+/// (2 ms → 5 ms is noise, not a slow receiver).
+const SLOW_BY_MS: f64 = 5.0;
+/// A burst: over twice the normal inflow, and at least this many more per minute.
+const BURST_BY_PER_MIN: f64 = 5.0;
+
+/// Diagnose a destination from what's known about it now.
+pub fn diagnose(facts: &Facts, now: DateTime<Utc>) -> Diagnosis {
+    let backlog = facts.waiting > 0 && facts.oldest.is_some_and(|age| age >= STALL_AFTER);
+    let tripped = facts.behind.and_then(|b| b.tripped(facts.waiting, facts.oldest));
+    let mut causes = Vec::new();
+    let mut trend = None;
+    let mut parts = Vec::new();
+    let mut state = State::Ok;
+
+    let stalled = backlog && facts.recent.as_ref().is_some_and(|r| r.since_progress >= STALL_AFTER);
+    if let Some(paused) = &facts.paused {
+        state = State::Paused;
+        parts.push(format!("{paused}, {} waiting", count(facts.waiting)));
+    } else if let Some(reason) = facts.stopped {
+        state = State::Stalled;
+        parts.push(format!("stalled: interface stopped ({reason}), {} waiting", count(facts.waiting)));
+    } else if stalled {
+        state = State::Stalled;
+        let idle = facts.recent.map(|r| r.since_progress).unwrap_or_default();
+        let since = now - Span::from_std(idle).unwrap_or_default();
+        let why = match facts.last_error {
+            Some((at, error)) if at >= since => format!("retrying: {}", first_line(error)),
+            _ => "no error: a blocked lane or a receiver that doesn't answer".to_string(),
+        };
+        parts.push(format!("stalled: nothing sent for {}, {} waiting; {why}", human(idle), count(facts.waiting)));
+    }
+
+    if facts.quarantined > 0 {
+        state = state.max(State::Error);
+        let last = facts.last_error.map(|(_, e)| format!(" (last error: {})", first_line(e))).unwrap_or_default();
+        parts.push(format!("error: {} quarantined{last}", count(facts.quarantined)));
+    }
+
+    if state < State::Stalled && (backlog || tripped.is_some()) {
+        if tripped.is_some() {
+            state = state.max(State::Behind);
+        }
+        let oldest = facts.oldest.map(|a| format!(" (oldest {})", human(a))).unwrap_or_default();
+        // Without a limit past, it's information, not a problem.
+        let mut text = match tripped {
+            Some(_) => format!("behind {}{oldest}", count(facts.waiting)),
+            None => format!("{} waiting{oldest}", count(facts.waiting)),
+        };
+        if let Some(r) = facts.recent {
+            let (inflow, out) = (r.per_minute(r.received), r.per_minute(r.done));
+            if out > inflow {
+                let eta = Duration::from_secs_f64(facts.waiting as f64 / (out - inflow) * 60.0);
+                trend = Some(Trend::CatchingUp { eta });
+                text += &format!(", catching up ~{}", human(eta.max(Duration::from_secs(60))));
+            } else if out > 0.0 {
+                trend = Some(Trend::FallingBehind { in_per_min: inflow, out_per_min: out });
+                text += &format!(", not catching up: {}/min in, {}/min out", rate(inflow), rate(out));
+            }
+            if let (Some(ms), Some(normal)) = (r.send_ms, facts.normal_send_ms)
+                && ms > 2.0 * normal
+                && ms - normal >= SLOW_BY_MS
+            {
+                causes.push(Cause::SlowReceiver { ms, normal });
+                text += &format!("; slow receiver: {} ms/msg (normal {})", rate(ms), rate(normal));
+            }
+            if let Some(normal) = facts.normal_inflow
+                && inflow > 2.0 * normal
+                && inflow - normal >= BURST_BY_PER_MIN
+            {
+                causes.push(Cause::Burst { per_min: inflow, normal });
+                text += &format!("; burst: {}/min received (normal {})", rate(inflow), rate(normal));
+            }
+        }
+        parts.push(text);
+    }
+
+    if parts.is_empty() || state == State::Ok {
+        let ok = match facts.last_sent {
+            Some(at) => format!("ok, sent {} ago", human((now - at).to_std().unwrap_or_default())),
+            None => "ok, nothing sent yet".to_string(),
+        };
+        parts.insert(0, ok);
+    }
+    Diagnosis { state, tripped, causes, trend, summary: parts.join("; ") }
+}
+
+/// An interface's own state: its expectations of what it receives. The numbers are
+/// Prometheus's (`ductus_interface_state`): never change them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum InterfaceState {
+    Ok = 0,
+    /// Nothing received within `active_within`.
+    Silent = 1,
+    /// Nothing received by `active_by`.
+    Missed = 2,
+    /// Its code ran away; nothing is processed until it's fixed and the engine restarted.
+    Stopped = 3,
+}
+
+impl InterfaceState {
+    pub fn label(self) -> &'static str {
+        match self {
+            InterfaceState::Ok => "ok",
+            InterfaceState::Silent => "silent",
+            InterfaceState::Missed => "missed",
+            InterfaceState::Stopped => "stopped",
+        }
+    }
+}
+
+/// An interface's state and how to say it ("silent: nothing received for 47 min").
+pub fn interface_state(
+    monitor: &Monitor,
+    last_received: Option<DateTime<Utc>>,
+    watched_since: DateTime<Utc>,
+    stopped: Option<&str>,
+    now: DateTime<Utc>,
+) -> (InterfaceState, String) {
+    let mut state = InterfaceState::Ok;
+    let mut parts = Vec::new();
+    if let Some(reason) = stopped {
+        state = InterfaceState::Stopped;
+        parts.push(format!("stopped: {reason}"));
+    }
+    if let Some((start, deadline)) = monitor.missed(last_received, watched_since, now) {
+        state = state.max(InterfaceState::Missed);
+        let at = |t: DateTime<Utc>| t.with_timezone(&Local).format("%a %H:%M").to_string();
+        parts.push(format!("missed {}: nothing received since {}", at(deadline), at(start)));
+    }
+    if let Some(quiet) = monitor.silent(last_received.unwrap_or(watched_since), now) {
+        state = state.max(InterfaceState::Silent);
+        parts.push(format!("silent: nothing received for {}", human(quiet.to_std().unwrap_or_default())));
+    }
+    if parts.is_empty() {
+        parts.push(match last_received {
+            Some(at) => format!("ok, received {} ago", human((now - at).to_std().unwrap_or_default())),
+            None => "ok, nothing received yet".to_string(),
+        });
+    }
+    (state, parts.join("; "))
+}
+
+/// A duration the way people say it: "4s", "47 min", "3 h 10 min", "5 days".
+pub fn human(d: Duration) -> String {
+    let s = d.as_secs();
+    match s {
+        0..60 => format!("{s}s"),
+        60..3600 => format!("{} min", s / 60),
+        3600..172_800 => match (s / 3600, s % 3600 / 60) {
+            (h, 0) => format!("{h} h"),
+            (h, m) => format!("{h} h {m} min"),
+        },
+        _ => format!("{} days", s / 86_400),
+    }
+}
+
+/// 1240 → "1,240".
+pub fn count(n: u64) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, c) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(c);
+    }
+    out
+}
+
+/// A rate or a time: whole above 10, one decimal below ("180", "2.5").
+fn rate(x: f64) -> String {
+    if x >= 10.0 { count(x.round() as u64) } else { format!("{:.1}", x) }
+}
+
+fn first_line(text: &str) -> String {
+    let line = text.lines().next().unwrap_or("");
+    if line.chars().count() > 160 { format!("{}…", line.chars().take(160).collect::<String>()) } else { line.into() }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -384,5 +736,170 @@ mod tests {
         assert_eq!(both.tripped(3, Some(Duration::from_secs(900))), Some(Tripped::Age(Duration::from_secs(600))));
         let age = Behind { messages: None, age: Some(Duration::from_secs(600)) };
         assert_eq!(age.tripped(0, None), None);
+    }
+
+    fn mins(m: u64) -> Duration {
+        Duration::from_secs(m * 60)
+    }
+
+    /// Five minutes of traffic: `received` and `done` per minute, sends taking `send_ms`.
+    fn recent(received: u64, done: u64, send_ms: f64) -> Recent {
+        Recent {
+            minutes: 5.0,
+            received: received * 5,
+            done: done * 5,
+            send_ms: Some(send_ms),
+            since_progress: Duration::from_secs(1),
+        }
+    }
+
+    #[test]
+    fn a_flowing_queue_is_ok() {
+        let now = Utc::now();
+        let facts = Facts {
+            waiting: 12,
+            oldest: Some(Duration::from_millis(300)),
+            last_sent: Some(now - Span::seconds(2)),
+            recent: Some(recent(100, 100, 12.0)),
+            behind: Some(Behind { messages: Some(500), age: Some(mins(10)) }),
+            ..Default::default()
+        };
+        let d = diagnose(&facts, now);
+        assert_eq!((d.state, d.summary.as_str()), (State::Ok, "ok, sent 2s ago"));
+        assert_eq!(diagnose(&Facts::default(), now).summary, "ok, nothing sent yet");
+    }
+
+    #[test]
+    fn behind_and_why() {
+        let now = Utc::now();
+        let base = Facts {
+            waiting: 1240,
+            oldest: Some(mins(12)),
+            last_sent: Some(now),
+            behind: Some(Behind { messages: Some(500), age: None }),
+            normal_inflow: Some(80.0),
+            normal_send_ms: Some(12.0),
+            ..Default::default()
+        };
+        // A burst, sending normally and catching up: 400/min in, 600/min out → 1,240 in ~6 min.
+        let burst = diagnose(&Facts { recent: Some(recent(400, 600, 12.0)), ..base.clone() }, now);
+        assert_eq!(burst.state, State::Behind);
+        assert_eq!(burst.tripped, Some(Tripped::Messages(500)));
+        assert_eq!(burst.causes, vec![Cause::Burst { per_min: 400.0, normal: 80.0 }]);
+        assert_eq!(
+            burst.summary,
+            "behind 1,240 (oldest 12 min), catching up ~6 min; burst: 400/min received (normal 80)"
+        );
+        // A slow receiver, normal inflow, losing ground.
+        let slow = diagnose(&Facts { recent: Some(recent(80, 60, 180.0)), ..base.clone() }, now);
+        assert_eq!(slow.causes, vec![Cause::SlowReceiver { ms: 180.0, normal: 12.0 }]);
+        assert!(matches!(slow.trend, Some(Trend::FallingBehind { .. })));
+        assert_eq!(
+            slow.summary,
+            "behind 1,240 (oldest 12 min), not catching up: 80/min in, 60/min out; slow receiver: 180 ms/msg (normal 12)"
+        );
+        // Small differences are not causes.
+        let noise =
+            diagnose(&Facts { recent: Some(recent(84, 100, 4.0)), normal_send_ms: Some(1.5), ..base.clone() }, now);
+        assert!(noise.causes.is_empty(), "{:?}", noise.causes);
+        // No limit set: the backlog is shown, the state stays ok.
+        let info = diagnose(&Facts { behind: None, recent: Some(recent(80, 200, 12.0)), ..base }, now);
+        assert_eq!(info.state, State::Ok);
+        assert_eq!(info.summary, "ok, sent 0s ago; 1,240 waiting (oldest 12 min), catching up ~10 min");
+    }
+
+    #[test]
+    fn stalled_says_why_and_paused_says_who() {
+        let now = Utc::now();
+        let idle = Recent { since_progress: mins(3), ..recent(10, 0, 0.0) };
+        let facts = Facts {
+            waiting: 40,
+            oldest: Some(mins(4)),
+            last_sent: Some(now - Span::minutes(3)),
+            last_error: Some((now - Span::seconds(5), "connection refused (lab.local:5000)\nmore detail")),
+            recent: Some(idle),
+            ..Default::default()
+        };
+        let d = diagnose(&facts, now);
+        assert_eq!(d.state, State::Stalled);
+        assert_eq!(
+            d.summary,
+            "stalled: nothing sent for 3 min, 40 waiting; retrying: connection refused (lab.local:5000)"
+        );
+        // An error older than the stall isn't the reason.
+        let old_error = Facts { last_error: Some((now - Span::minutes(30), "old")), ..facts.clone() };
+        assert!(diagnose(&old_error, now).summary.contains("no error: a blocked lane"));
+        // Quarantined messages are an error at once, also while stalled.
+        let both = diagnose(&Facts { quarantined: 2, ..facts.clone() }, now);
+        assert_eq!(both.state, State::Stalled);
+        assert!(both.summary.ends_with("; error: 2 quarantined (last error: connection refused (lab.local:5000))"));
+        let error = diagnose(&Facts { quarantined: 2, waiting: 0, oldest: None, ..facts.clone() }, now);
+        assert_eq!(error.state, State::Error);
+        // Paused is said instead of stalled.
+        let paused = Facts { paused: Some("paused by ann at 14:02 (no reason yet)".into()), ..facts.clone() };
+        let d = diagnose(&paused, now);
+        assert_eq!(
+            (d.state, d.summary.as_str()),
+            (State::Paused, "paused by ann at 14:02 (no reason yet), 40 waiting")
+        );
+        // A stopped interface stalls every destination.
+        let stopped = diagnose(&Facts { stopped: Some("ran past its timeout 3 times"), recent: None, ..facts }, now);
+        assert_eq!(stopped.state, State::Stalled);
+        assert!(stopped.summary.starts_with("stalled: interface stopped (ran past its timeout 3 times)"));
+    }
+
+    #[test]
+    fn interface_states() {
+        let m = monitor("{ active_within: 30m, active_by: '09:00' }");
+        let now = local("2026-10-08 09:47");
+        let watched = local("2026-10-01 00:00");
+        let (state, text) = interface_state(&m, Some(local("2026-10-07 23:00")), watched, None, now);
+        assert_eq!(state, InterfaceState::Missed);
+        assert_eq!(
+            text,
+            "missed Thu 09:00: nothing received since Thu 00:00; silent: nothing received for 10 h 47 min"
+        );
+        let (state, text) = interface_state(&m, Some(local("2026-10-08 09:46")), watched, None, now);
+        assert_eq!((state, text.as_str()), (InterfaceState::Ok, "ok, received 1 min ago"));
+        let (state, _) = interface_state(&m, Some(local("2026-10-08 09:46")), watched, Some("heap"), now);
+        assert_eq!(state, InterfaceState::Stopped);
+        // Never received: quiet since it was first watched.
+        let (_, text) = interface_state(&m, None, local("2026-10-08 09:00"), None, now);
+        assert_eq!(text, "silent: nothing received for 47 min");
+    }
+
+    #[test]
+    fn the_baseline_learns_each_hour_of_the_week() {
+        let mut b = Baseline::default();
+        assert_eq!((b.inflow(7), b.send_ms(7)), (None, None));
+        b.learn(7, 100.0, Some(10.0));
+        assert_eq!((b.inflow(7), b.send_ms(7)), (Some(100.0), Some(10.0)));
+        // Recent weeks weigh more, but one odd hour doesn't replace normal.
+        b.learn(7, 200.0, None);
+        assert!((b.inflow(7).unwrap() - 130.0).abs() < 1e-3);
+        // Another hour: no inflow known; send time falls back to the hours known.
+        b.learn(8, 50.0, Some(20.0));
+        assert_eq!(b.inflow(9), None);
+        assert_eq!(b.send_ms(9), Some(15.0));
+        // Stored values of the wrong shape start over.
+        assert_eq!(Baseline::from_stored(Some(vec![Some(1.0)]), None), Baseline::default());
+        // 2026-10-05 is a Monday.
+        assert_eq!(hour_of_week(local("2026-10-05 00:30")), 0);
+        assert_eq!(hour_of_week(local("2026-10-05 07:59")), 7);
+        assert_eq!(hour_of_week(local("2026-10-11 23:00")), 167);
+    }
+
+    #[test]
+    fn words_and_numbers() {
+        assert_eq!(human(Duration::from_secs(4)), "4s");
+        assert_eq!(human(mins(47)), "47 min");
+        assert_eq!(human(mins(190)), "3 h 10 min");
+        assert_eq!(human(mins(120)), "2 h");
+        assert_eq!(human(mins(60 * 24 * 5)), "5 days");
+        assert_eq!(count(0), "0");
+        assert_eq!(count(999), "999");
+        assert_eq!(count(1240), "1,240");
+        assert_eq!(count(90_000_000), "90,000,000");
+        assert_eq!(rate(2.54), "2.5");
     }
 }

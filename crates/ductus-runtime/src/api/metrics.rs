@@ -117,6 +117,37 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
             out.sample("ductus_queue_quarantined", &dest(&i.config.name, name), snapshot.queue(*id).quarantined);
         }
     }
+    out.family(
+        "ductus_queue_oldest_seconds",
+        "gauge",
+        "How long the oldest message waiting for a destination has waited.",
+    );
+    for i in queued() {
+        for (name, id) in &i.destinations {
+            let age = snapshot.oldest_age(*id).map_or(0.0, |a| a.as_secs_f64());
+            out.sample("ductus_queue_oldest_seconds", &dest(&i.config.name, name), age);
+        }
+    }
+    let now = chrono::Utc::now();
+    out.family(
+        "ductus_destination_state",
+        "gauge",
+        "0 ok, 1 behind (past its `behind` limit), 2 error (quarantined messages), 3 stalled, 4 paused.",
+    );
+    for i in queued() {
+        for (n, (name, _)) in i.destinations.iter().enumerate() {
+            let state = engine.diagnose(i, n, &snapshot, now).state as u8;
+            out.sample("ductus_destination_state", &dest(&i.config.name, name), state);
+        }
+    }
+    out.family(
+        "ductus_interface_state",
+        "gauge",
+        "0 ok, 1 silent (nothing within `active_within`), 2 missed (nothing by `active_by`), 3 stopped.",
+    );
+    for i in queued() {
+        out.sample("ductus_interface_state", &iface(&i.config.name), engine.interface_state(i, now).0 as u8);
+    }
     out.family("ductus_destination_paused", "gauge", "1 while a destination is paused on purpose (`ductus pause`).");
     for i in queued() {
         for (name, id) in &i.destinations {

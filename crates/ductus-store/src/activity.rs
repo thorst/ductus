@@ -22,6 +22,25 @@ pub struct DestinationActivity {
     pub last_error_at: Option<DateTime<Utc>>,
     #[sqlx(flatten)]
     pub pause: PauseRow,
+    /// Normal per hour of the week (168 values each, or none yet): messages per minute arriving,
+    /// and a send's mean time in ms.
+    pub baseline_inflow: Option<Vec<Option<f32>>>,
+    pub baseline_send_ms: Option<Vec<Option<f32>>>,
+}
+
+/// A destination's learned normal, to save: 168 values each.
+#[derive(Debug, Clone)]
+pub struct BaselineRow {
+    pub destination: DestinationId,
+    pub inflow: Vec<Option<f32>>,
+    pub send_ms: Vec<Option<f32>>,
+}
+
+/// The oldest message waiting for a destination.
+#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
+pub struct Oldest {
+    pub destination_id: DestinationId,
+    pub received_at: DateTime<Utc>,
 }
 
 /// A pause as stored: all `None` when not paused.
@@ -75,7 +94,7 @@ impl Store {
         .context("reading interface activity")?;
         let destinations = sqlx::query_as(
             "SELECT destination_id, last_sent, last_error, last_error_at,
-                    paused_at, paused_by, pause_reason, reason_by, reason_at
+                    paused_at, paused_by, pause_reason, reason_by, reason_at, baseline_inflow, baseline_send_ms
              FROM destination_activity WHERE destination_id = ANY($1) ORDER BY destination_id",
         )
         .bind(destinations)
@@ -124,6 +143,55 @@ impl Store {
             .context("saving when destinations last sent")?;
         }
         Ok(())
+    }
+
+    /// Save destinations' learned normal (once an hour: one statement for all of them).
+    pub async fn save_baselines(&self, rows: &[BaselineRow]) -> Result<()> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        if rows.iter().any(|r| r.inflow.len() != 168 || r.send_ms.len() != 168) {
+            anyhow::bail!("a baseline has 168 values (one per hour of the week)");
+        }
+        let ids: Vec<DestinationId> = rows.iter().map(|r| r.destination).collect();
+        // Flattened, 168 per destination: Postgres arrays of arrays can't be unnested by row.
+        let inflow: Vec<Option<f32>> = rows.iter().flat_map(|r| r.inflow.iter().copied()).collect();
+        let send_ms: Vec<Option<f32>> = rows.iter().flat_map(|r| r.send_ms.iter().copied()).collect();
+        sqlx::query(
+            "UPDATE destination_activity a
+             SET baseline_inflow = ($2::real[])[(u.n::int - 1) * 168 + 1 : u.n::int * 168],
+                 baseline_send_ms = ($3::real[])[(u.n::int - 1) * 168 + 1 : u.n::int * 168],
+                 updated_at = now()
+             FROM unnest($1::int[]) WITH ORDINALITY AS u(id, n) WHERE a.destination_id = u.id",
+        )
+        .bind(&ids)
+        .bind(&inflow)
+        .bind(&send_ms)
+        .execute(&self.pool)
+        .await
+        .context("saving what's normal for destinations")?;
+        Ok(())
+    }
+
+    /// When the oldest message waiting for each of these destinations was received (none for a
+    /// destination with nothing waiting). One index probe per destination and partition: the
+    /// queue index is in message order.
+    pub async fn oldest_pending(&self, destinations: &[DestinationId]) -> Result<Vec<Oldest>> {
+        if destinations.is_empty() {
+            return Ok(Vec::new());
+        }
+        sqlx::query_as(
+            "SELECT d.id AS destination_id, o.received_at
+             FROM unnest($1::int[]) AS d(id)
+             CROSS JOIN LATERAL (
+                 SELECT received_at FROM deliveries x WHERE x.destination_id = d.id AND x.status = 0
+                 ORDER BY x.message_id LIMIT 1
+             ) o",
+        )
+        .bind(destinations)
+        .fetch_all(&self.pool)
+        .await
+        .context("finding the oldest waiting messages")
     }
 
     /// Pause a destination (by `by`, the API token's name), or add a reason to its pause. A pause

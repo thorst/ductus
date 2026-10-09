@@ -124,7 +124,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 
 ### Temporary failures retry forever by default (level 3)
 - **What:** a destination that's down, or a transform that hits a temporary error, is retried with back-off (1 s up to 60 s) until it works. `retry.max_attempts` limits delivery attempts; transform retries (database or API down) have no limit.
-- **What to do:** monitor queue depth ("behind-by" comes in v0.5) rather than expecting failures to show up as quarantined messages.
+- **What to do:** set `monitor: { behind: ... }` (see Monitoring) rather than expecting failures to show up as quarantined messages. A destination retrying for a minute with messages waiting shows as *stalled* with the error it gets.
 
 ### Database login failures make messages wait, not fail (level 3)
 - **What:** a wrong password or a missing database counts as *temporary*: messages wait and retry instead of being quarantined.
@@ -315,6 +315,20 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 ### In respond mode, calls run one after another unless you await them together (level 2)
 - **What:** each `await` waits for its call before the next starts. Measured in the v0.4 demo (a patient lookup API: 2 database queries and 1 EMPI call): 2.1–3.0 ms in the engine on average, of which ~1.5–2.1 ms is the three calls one after another (~0.5–0.7 ms each on a local database; a remote one takes longer) and ~0.6 ms the engine itself.
 - **What to do:** when calls don't depend on each other, start them together: `const [patient, empi] = await Promise.all([db("patient_db").one(...), fetch(...)])`. The response then takes about as long as the slowest call instead of the sum. `GET /api/v1/engine` (`resources`) shows each database's and API's call times, to see which one to work on.
+
+### Nothing is expected until you say so (level 2)
+- **What:** `monitor:` in interface.yaml says what operations expects: `active_within: 30m` (with optional `between: "06:00-22:00"`), `active_by: "Mon-Fri 09:00"` (with optional `from:`), `behind: 500`, `behind: 10m` or `behind: { messages: 500, age: 10m }` (a destination can set its own `behind`). Without it, an interface is *ok* however quiet it is, and a destination is *behind* only past a limit you set. Times are the server's local time.
+- **Why:** how quiet is too quiet, and how far behind is too far, depends on the feed: a lab feed that sleeps at night, a nightly file, a 1M/day ADT feed. A default would alert on the wrong things.
+- **What to do:** set `behind` with both a count and an age on every feed someone would call about (count alone misses an overnight stall when little arrives; age alone misses a daytime pile-up that still moves). Set `active_within` on steady feeds and `active_by` on scheduled ones. Alert on `ductus_destination_state > 0` and `ductus_interface_state > 0` in Prometheus (alerts in the engine come in step 8).
+
+### What each state means, and when it shows (level 2)
+- **What:** a destination is *ok*, *behind* (past its `behind` limit), *error* (has quarantined messages), *stalled* (messages waiting over a minute and nothing finished for a minute: retrying, a blocked lane, or a stopped interface) or *paused*, from best to worst (it shows the worst that applies; `summary` lists them all); says it in words ("behind 1,240 (oldest 12 min), catching up ~6 min"). An interface is *ok*, *silent*, *missed* (its `active_by` deadline) or *stopped*.
+- **Why:** "it's backing up but still sending" and "it's not sending at all" need different calls: the first is the vendor's capacity, the second is down.
+- **What to do:** treat *stalled* as the urgent one. *error* stays until the quarantined messages are dealt with, so clear them (or they hide the next real error). A backlog under a minute old isn't diagnosed at all: a flowing queue always has a few messages in it.
+
+### Burst and slow receiver need a few weeks of history (level 3)
+- **What:** "normal" is learned per hour of the week (Monday 07:00 compares with past Mondays at 07:00), from each hour the engine watched for at least 15 minutes; recent weeks weigh more. Until an hour has been watched once, a backlog shows its trend (catching up, or not) but no cause; for send times, the other hours' average stands in. The last few minutes are compared with it: a burst is over twice the normal arrivals, a slow receiver over twice the normal send time (and at least 5 ms more). The rates and the catch-up time cover the last 5 minutes and start over when the engine does; "normal" is kept in the database.
+- **What to do:** expect causes after the first week, and good ones after three or four. A feed whose traffic changed for good (a new hospital on it) becomes the new normal within a few weeks.
 
 ### Anyone with a viewer token can read message payloads (level 4)
 - **What:** `GET /api/v1/messages/{id}` returns the payload, which holds patient data. Each read is logged with the token's name; there are no finer permissions or audit log yet (they come with users and roles in v0.5 step 8).

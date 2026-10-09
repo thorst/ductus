@@ -443,7 +443,7 @@ async fn the_api_shows_the_engine_and_drains_it() {
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let name = format!("api-test-{nanos}");
     let config = format!(
-        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\nabout: {{ owner: Lab team }}\ndestinations:\n  lab: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 500 }} }}\n"
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\nabout: {{ owner: Lab team }}\nmonitor: {{ behind: 2 }}\ndestinations:\n  lab: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 500 }} }}\n"
     );
     let dir = project(&[(format!("interfaces/{name}/interface.yaml").as_str(), config.as_str())]);
     let run = |args: &[&str]| {
@@ -506,6 +506,19 @@ async fn the_api_shows_the_engine_and_drains_it() {
     assert_eq!(mine["destinations"][0]["connector"], format!("mllp 127.0.0.1:{receiver}"));
     assert_eq!(mine["destinations"][0]["pending"], 3);
     assert_eq!(mine["since_start"]["received"], 3, "{mine}");
+    // Past `behind: 2`, retrying: said in operations' words, with the last error.
+    let health = &mine["destinations"][0]["health"];
+    assert_eq!((&health["state"], &health["behind"]), (&"behind".into(), &"messages".into()), "{health}");
+    assert!(health["summary"].as_str().unwrap().starts_with("behind 3"), "{health}");
+    assert!(health["oldest_waiting_s"].is_u64(), "{health}");
+    let failed = eventually(async || {
+        let interfaces = json("/interfaces", &viewer).await;
+        let mine = interfaces.as_array().unwrap().iter().find(|i| i["name"] == name.as_str()).unwrap().clone();
+        mine["destinations"][0]["health"]["last_error"]["error"].is_string()
+    });
+    assert!(failed.await, "the receiver is down: the last error shows");
+    assert_eq!(mine["health"]["state"], "ok", "no expectation of what it receives: {mine}");
+    assert!(mine["health"]["summary"].as_str().unwrap().starts_with("ok, received"), "{mine}");
 
     // Prometheus metrics (a token too).
     assert_eq!(http.get(format!("{base}/metrics")).send().await.unwrap().status(), 401);
@@ -528,6 +541,9 @@ async fn the_api_shows_the_engine_and_drains_it() {
             "ductus_interface_stopped{{interface=\"{name}\"}} 0
 "
         ),
+        format!("ductus_destination_state{{{labels}}} 1\n"),
+        format!("ductus_interface_state{{interface=\"{name}\"}} 0\n"),
+        format!("ductus_queue_oldest_seconds{{{labels}}} "),
         "# TYPE ductus_delivery_latency_seconds histogram
 "
         .to_string(),
@@ -740,6 +756,19 @@ async fn a_paused_destination_waits_until_resumed() {
         metrics.contains(&format!("ductus_destination_paused{{interface=\"{name}\",destination=\"lab\"}} 1")),
         "{metrics}"
     );
+    // Its health says paused (not stalled), by whom and why; the other destination is fine.
+    assert_eq!(status["health"]["state"], "paused", "{status}");
+    let summary = status["health"]["summary"].as_str().unwrap();
+    assert!(
+        summary.starts_with(&format!("paused by {name}-ops at "))
+            && summary.ends_with(": lab vendor breach: hold until cleared, 3 waiting"),
+        "{summary}"
+    );
+    assert!(metrics.contains(&format!("ductus_destination_state{{interface=\"{name}\",destination=\"lab\"}} 4")));
+    let (ok, out) = run(&["status", "--api", &api_url, "--token", &ops]);
+    assert!(ok && out.contains("health:"), "{out}");
+    assert!(out.lines().any(|l| l.contains("→ lab") && l.contains("paused by")), "{out}");
+    assert!(out.lines().any(|l| l.contains("→ archive") && l.contains("ok, sent")), "{out}");
 
     // A drain doesn't wait for a paused destination.
     let (ok, out) = cli(&["drain", "--wait"]);

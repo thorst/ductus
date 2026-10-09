@@ -152,6 +152,45 @@ async fn activity_and_pauses_survive_a_restart() {
 }
 
 #[tokio::test]
+async fn baselines_and_the_oldest_waiting_message() {
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "baseline", &["lab", "billing"]).await;
+    let (lab, billing) = (t.id("lab"), t.id("billing"));
+    let (_, rows) = store.activity(&[&t.name], &t.ids).await.unwrap();
+    assert!(rows.iter().all(|r| r.baseline_inflow.is_none()), "nothing learned yet");
+
+    // Two destinations in one statement, each its own 168 values (NULLs kept).
+    let hours = |f: fn(usize) -> Option<f32>| (0..168).map(f).collect::<Vec<_>>();
+    let saved = [
+        ductus_store::BaselineRow {
+            destination: lab,
+            inflow: hours(|h| (h == 7).then_some(120.0)),
+            send_ms: hours(|h| (h == 7).then_some(12.5)),
+        },
+        ductus_store::BaselineRow { destination: billing, inflow: hours(|h| Some(h as f32)), send_ms: hours(|_| None) },
+    ];
+    store.save_baselines(&saved).await.unwrap();
+    let (_, rows) = store.activity(&[&t.name], &t.ids).await.unwrap();
+    for s in &saved {
+        let row = rows.iter().find(|r| r.destination_id == s.destination).unwrap();
+        assert_eq!(row.baseline_inflow.as_ref(), Some(&s.inflow));
+        assert_eq!(row.baseline_send_ms.as_ref(), Some(&s.send_ms));
+    }
+    let short = ductus_store::BaselineRow { destination: lab, inflow: vec![None], send_ms: vec![None] };
+    assert!(store.save_baselines(&[short]).await.is_err());
+
+    // The oldest waiting message per destination; none once it's delivered.
+    assert!(store.oldest_pending(&t.ids).await.unwrap().is_empty());
+    let first = store.insert(t.msg(3, b"first")).await.unwrap();
+    store.insert(t.msg(1, b"second")).await.unwrap();
+    store.finish(billing, &[sent(first)]).await.unwrap();
+    let oldest = store.oldest_pending(&t.ids).await.unwrap();
+    let at = |id| oldest.iter().find(|o| o.destination_id == id).map(|o| o.received_at.timestamp_micros());
+    assert_eq!(at(lab), Some(first.received_at.timestamp_micros()), "lab still has the first");
+    assert!(at(billing).is_some_and(|t| t >= first.received_at.timestamp_micros()), "billing: the second");
+}
+
+#[tokio::test]
 async fn finished_messages_leave_the_queue() {
     let Some(store) = store().await else { return };
     let t = Iface::single(&store, "finish").await;
@@ -977,6 +1016,19 @@ async fn everything_at_once_without_lock_errors() {
                     store.unpause(t.id("lab")).await.unwrap();
                 }
                 store.queue_counts().await.unwrap();
+                store.oldest_pending(&t.ids).await.unwrap();
+                if round.is_multiple_of(10) {
+                    let baselines: Vec<_> = t
+                        .ids
+                        .iter()
+                        .map(|&destination| ductus_store::BaselineRow {
+                            destination,
+                            inflow: vec![Some(round as f32); 168],
+                            send_ms: vec![None; 168],
+                        })
+                        .collect();
+                    store.save_baselines(&baselines).await.unwrap();
+                }
                 let page = Browse { interface: &t.name, status: None, before: None, limit: 50 };
                 let rows = store.browse(&page).await.unwrap();
                 if let Some(last) = rows.last() {

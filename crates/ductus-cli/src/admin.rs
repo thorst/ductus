@@ -90,6 +90,20 @@ impl Remote {
     }
 }
 
+/// Each interface's and destination's state from the running engine (`ductus status`).
+pub async fn health(remote: &Remote) -> Result<String> {
+    let interfaces = remote.call(reqwest::Method::GET, "/interfaces", None).await?;
+    let mut out = String::new();
+    for i in interfaces.as_array().into_iter().flatten() {
+        let text = |v: &Value| v["health"]["summary"].as_str().unwrap_or("?").to_string();
+        out += &format!("{:<20} {}\n", i["name"].as_str().unwrap_or("?"), text(i));
+        for d in i["destinations"].as_array().into_iter().flatten() {
+            out += &format!("{:<20} {}\n", format!("  → {}", d["name"].as_str().unwrap_or("?")), text(d));
+        }
+    }
+    Ok(out)
+}
+
 fn describe(drain: &Value) -> String {
     let pending = drain["pending"].as_i64().unwrap_or(0);
     let waiting: Vec<&str> = drain["waiting_for"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();

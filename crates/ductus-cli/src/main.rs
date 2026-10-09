@@ -186,10 +186,14 @@ enum Command {
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
-    /// Show message counts by interface and status.
+    /// Show message counts by interface and status (from the database, also while the engine is
+    /// down); with a token, also each interface's and destination's health from the running
+    /// engine (silent, behind, stalled, paused, catching up...).
     Status {
         #[arg(long, env = "DUCTUS_DATABASE_URL", default_value = tools::DEFAULT_DB)]
         database_url: String,
+        #[command(flatten)]
+        api: ApiArgs,
     },
     /// Send synthetic ADT messages over MLLP.
     Gen {
@@ -445,7 +449,17 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,
-        Command::Status { database_url } => tools::status(&database_url).await,
+        Command::Status { database_url, api } => {
+            tools::status(&database_url).await?;
+            if api.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
+                println!("\nhealth:");
+                match admin::health(&admin::Remote::new(&api.api, api.token)?).await {
+                    Ok(text) => print!("{text}"),
+                    Err(e) => println!("(not from the engine: {e:#})"),
+                }
+            }
+            Ok(())
+        }
         Command::Gen { to, count, patients, rate, connections, hot, offset } => {
             tools::generate(tools::GenOptions { to, count, patients, rate, connections, hot, offset }).await
         }

@@ -37,6 +37,11 @@ impl Histogram {
         self.counts.iter().map(|c| c.load(Relaxed)).sum()
     }
 
+    /// Everything observed, added up.
+    pub fn sum(&self) -> Duration {
+        Duration::from_micros(self.sum_micros.load(Relaxed))
+    }
+
     pub fn mean(&self) -> Option<Duration> {
         let count = self.count();
         (count > 0).then(|| Duration::from_micros(self.sum_micros.load(Relaxed) / count))
@@ -163,6 +168,11 @@ impl DestinationStats {
 
     pub fn last_error(&self) -> Option<(DateTime<Utc>, String)> {
         self.last_error.lock().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Messages it finished (sent, filtered or quarantined): what shrinks its queue.
+    pub fn done(&self) -> u64 {
+        get(&self.sent) + get(&self.filtered) + get(&self.quarantined)
     }
 
     fn new(name: String) -> Self {
