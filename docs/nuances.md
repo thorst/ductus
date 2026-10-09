@@ -267,6 +267,10 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** `about.owner` owns the interface and every destination; `owner:` on a destination overrides it for that destination only (e.g. its code is another team's). `ductus owners` lists destinations separately only when their owner differs. `ductus owners reassign --from A --to B` changes only `owner:` values that are written down: a destination that inherits moves with its interface.
 - **What to do:** to hand one destination to someone else, add `owner:` to it by hand; to split a person's interfaces, run `reassign` once per group with `--interface`. It edits interface.yaml in place (comments and layout kept), so commit and deploy the change like any other.
 
+### Moving ownership in the web UI is a preview, not a change (level 1)
+- **What:** the Owners screen (and `POST /owners/reassign/preview`) shows what would change and gives a patch and the `ductus owners reassign` command; it writes nothing. The engine never edits its own project: interface.yaml lives in your repository, and a change made on the server would be undone by the next deploy. Owners shown stay as they are until the change is deployed.
+- **What to do:** apply the patch in the project's repository (`git apply owners.patch`) or run the command there, review, commit and deploy. The preview reads the files on the engine's server, so preview against the engine running the version you'll change.
+
 ## Checking connections (`ductus doctor`)
 
 ### Doctor checks from where it runs (level 2)

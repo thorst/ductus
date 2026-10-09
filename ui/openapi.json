@@ -887,6 +887,45 @@
         }
       }
     },
+    "/owners/reassign/preview": {
+      "post": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "What moving ownership from one owner to another would change, as `ductus owners reassign\n--dry-run` shows it, plus a patch to apply in the project's repository. Writes nothing: the\ninterfaces' files are the project's (in git), so the change is made there and deployed. Reads\nthe files as they are on the engine's server now.",
+        "operationId": "reassign_preview",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReassignRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReassignPreview"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/quarantine": {
       "get": {
         "tags": [
@@ -1130,7 +1169,7 @@
           "tokens"
         ],
         "summary": "Live tokens (never their secrets). Admin.",
-        "operationId": "list",
+        "operationId": "list_tokens",
         "responses": {
           "200": {
             "content": {
@@ -1160,7 +1199,7 @@
           "tokens"
         ],
         "summary": "Create a token. Its secret is in this answer only. Admin.",
-        "operationId": "create",
+        "operationId": "create_token",
         "requestBody": {
           "content": {
             "application/json": {
@@ -1208,7 +1247,7 @@
           "tokens"
         ],
         "summary": "Revoke a token: it stops working at once. Admin.",
-        "operationId": "revoke",
+        "operationId": "revoke_token",
         "parameters": [
           {
             "name": "name",
@@ -3075,6 +3114,140 @@
             ],
             "format": "double",
             "description": "A successful send's mean time."
+          }
+        }
+      },
+      "ReassignFile": {
+        "type": "object",
+        "required": [
+          "interface",
+          "path",
+          "lines"
+        ],
+        "properties": {
+          "interface": {
+            "type": "string"
+          },
+          "lines": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReassignLine"
+            }
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative to the project, `/`-separated."
+          }
+        }
+      },
+      "ReassignLine": {
+        "type": "object",
+        "required": [
+          "line",
+          "before",
+          "after"
+        ],
+        "properties": {
+          "after": {
+            "type": "string"
+          },
+          "before": {
+            "type": "string"
+          },
+          "line": {
+            "type": "integer",
+            "description": "1-based.",
+            "minimum": 0
+          }
+        }
+      },
+      "ReassignPreview": {
+        "type": "object",
+        "required": [
+          "files",
+          "refused",
+          "changed",
+          "patch",
+          "command",
+          "known"
+        ],
+        "properties": {
+          "changed": {
+            "type": "integer",
+            "description": "Owner values that would change, over all files.",
+            "minimum": 0
+          },
+          "command": {
+            "type": "string",
+            "description": "The same change made with the CLI in the project's folder."
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReassignFile"
+            },
+            "description": "Files that would change, each with its changed lines."
+          },
+          "known": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The owners there are, when nothing matched `from`."
+          },
+          "patch": {
+            "type": "string",
+            "description": "The whole change as a unified diff, for `git apply` in the project's repository."
+          },
+          "refused": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReassignRefused"
+            },
+            "description": "Files with `owner: <from>` that can't be changed safely by a program (an unusual\nlayout): change them by hand. While any is listed, `patch` and `command` are empty."
+          }
+        }
+      },
+      "ReassignRefused": {
+        "type": "object",
+        "required": [
+          "interface",
+          "path",
+          "error"
+        ],
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "interface": {
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        }
+      },
+      "ReassignRequest": {
+        "type": "object",
+        "required": [
+          "from",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "The current owner (ignores case)."
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only these interfaces (all when empty)."
+          },
+          "to": {
+            "type": "string",
+            "description": "The new owner."
           }
         }
       },

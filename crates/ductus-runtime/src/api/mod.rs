@@ -252,4 +252,22 @@ mod tests {
         }
         assert!(checked > 10, "only {checked} parameters found: did the document's shape change?");
     }
+
+    /// utoipa names an operation after its handler, and two modules' `list` once shared one
+    /// id: the UI's generated types then gave `GET /tokens` the message browser's answer.
+    /// Name a clashing handler's operation with `operation_id = "..."`.
+    #[test]
+    fn every_operation_has_its_own_id() {
+        let doc = serde_json::to_value(super::openapi()).unwrap();
+        let mut seen = std::collections::HashMap::new();
+        for (path, item) in doc["paths"].as_object().unwrap() {
+            for (method, op) in item.as_object().unwrap() {
+                let id = op["operationId"].as_str().unwrap();
+                if let Some(other) = seen.insert(id.to_string(), format!("{method} {path}")) {
+                    panic!("operationId `{id}` is used by {other} and {method} {path}");
+                }
+            }
+        }
+        assert!(seen.len() > 20, "only {} operations found", seen.len());
+    }
 }

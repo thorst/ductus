@@ -195,6 +195,51 @@ fn owner_values(line: &str) -> Vec<OwnerValue> {
     found
 }
 
+/// A reassignment as a unified diff of `path` (relative to the project, `/`-separated), for
+/// `git apply` in the project's repository: how the web UI hands the change to whoever commits
+/// it (the engine doesn't edit its own project). `after` must be `reassign`'s output for
+/// `before`: lines are replaced one for one, never added or removed. Empty if nothing changed.
+pub fn patch(path: &str, before: &str, after: &str) -> String {
+    const CONTEXT: usize = 3;
+    let old: Vec<&str> = before.split_inclusive('\n').collect();
+    let new: Vec<&str> = after.split_inclusive('\n').collect();
+    debug_assert_eq!(old.len(), new.len(), "reassign keeps every line");
+    let changed: Vec<usize> = (0..old.len().min(new.len())).filter(|&n| old[n] != new[n]).collect();
+    if changed.is_empty() {
+        return String::new();
+    }
+    // Hunks: changed lines with their context, merged where the context would overlap.
+    let mut hunks: Vec<(usize, usize)> = Vec::new();
+    for &n in &changed {
+        let (start, end) = (n.saturating_sub(CONTEXT), (n + CONTEXT + 1).min(old.len()));
+        match hunks.last_mut() {
+            Some(last) if start <= last.1 => last.1 = end,
+            _ => hunks.push((start, end)),
+        }
+    }
+    let mut out = format!("--- a/{path}\n+++ b/{path}\n");
+    let line = |out: &mut String, sign: char, text: &str| {
+        out.push(sign);
+        out.push_str(text);
+        if !text.ends_with('\n') {
+            out.push_str("\n\\ No newline at end of file\n");
+        }
+    };
+    for (start, end) in hunks {
+        let len = end - start;
+        out.push_str(&format!("@@ -{},{len} +{},{len} @@\n", start + 1, start + 1));
+        for n in start..end {
+            if old[n] == new[n] {
+                line(&mut out, ' ', old[n]);
+            } else {
+                line(&mut out, '-', old[n]);
+                line(&mut out, '+', new[n]);
+            }
+        }
+    }
+    out
+}
+
 /// The new value written like the old one: same quotes, or quoted if it can't stay plain.
 fn render(value: &str, quote: Quote, flow: bool) -> String {
     let double = || format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""));
@@ -295,6 +340,53 @@ destinations:
         let (out, changes) = reassign(YAML, "Nobody", "X").unwrap();
         assert!(changes.is_empty() && out == YAML);
         assert!(reassign(YAML, "Ann Smith", "  ").is_err());
+    }
+
+    #[test]
+    fn a_reassignment_as_a_patch_git_applies() {
+        let (out, _) = reassign(YAML, "Ann Smith", "Bob Jones").unwrap();
+        let diff = patch("interfaces/results/interface.yaml", YAML, &out);
+        assert_eq!(
+            diff,
+            "--- a/interfaces/results/interface.yaml\n+++ b/interfaces/results/interface.yaml\n\
+             @@ -2,11 +2,11 @@\n source: { sftp: { server: quest, dir: /out } }\n about:\n   description: Results from Quest\n\
+             -  owner: Ann Smith            # since 2024\n+  owner: Bob Jones            # since 2024\n\
+             \x20  from: { vendor: Quest }\n destinations:\n\
+             -  emr: { mllp: { host: epic, port: 7000 }, owner: 'ann smith' }\n\
+             +  emr: { mllp: { host: epic, port: 7000 }, owner: 'Bob Jones' }\n\
+             \x20  billing:\n     http: { api: billing, headers: { co_owner: Ann Smith } }\n     owner: \"Billing team\"\n\
+             -  archive: { file: { dir: out }, owner: Ann Smith, vendor: Local }\n\
+             +  archive: { file: { dir: out }, owner: Bob Jones, vendor: Local }\n"
+        );
+        assert_eq!(patch("x.yaml", YAML, YAML), "", "nothing changed, no patch");
+
+        // Far apart: two hunks. No newline at the end: said the way git says it.
+        let far =
+            format!("about:\n  owner: Ann\n{}destination: {{ file: {{ dir: o }}, owner: Ann }}", "# -\n".repeat(8));
+        let (out, _) = reassign(&far, "Ann", "Bob").unwrap();
+        let diff = patch("i.yaml", &far, &out);
+        assert_eq!(diff.matches("@@ -").count(), 2, "{diff}");
+        assert!(diff.ends_with("+destination: { file: { dir: o }, owner: Bob }\n\\ No newline at end of file\n"));
+
+        // The real check: git applies both (skipped where git isn't installed).
+        let dir = std::env::temp_dir().join(format!("ductus-patch-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("interfaces/results")).unwrap();
+        let results = reassign(YAML, "Ann Smith", "Bob Jones").unwrap().0;
+        for (file, before, after) in
+            [("interfaces/results/interface.yaml", YAML, results.as_str()), ("i.yaml", far.as_str(), out.as_str())]
+        {
+            std::fs::write(dir.join(file), before).unwrap();
+            std::fs::write(dir.join("change.patch"), patch(file, before, after)).unwrap();
+            let Ok(status) =
+                std::process::Command::new("git").arg("apply").arg("change.patch").current_dir(&dir).status()
+            else {
+                eprintln!("git not found: patch not applied");
+                break;
+            };
+            assert!(status.success(), "git apply failed for {file}");
+            assert_eq!(std::fs::read_to_string(dir.join(file)).unwrap(), after);
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

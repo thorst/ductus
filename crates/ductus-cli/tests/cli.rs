@@ -580,6 +580,28 @@ async fn the_api_shows_the_engine_and_drains_it() {
 
     let owners = json("/owners", &viewer).await;
     assert!(owners.to_string().contains("Lab team"), "{owners}");
+    // Reassigning is previewed, as a patch for the project's repository: nothing is written.
+    let file = dir.path().join(format!("interfaces/{name}/interface.yaml"));
+    let preview = async |body: serde_json::Value| -> (u16, serde_json::Value) {
+        let r = http.post(format!("{base}/owners/reassign/preview")).bearer_auth(&viewer).json(&body).send().await;
+        let r = r.unwrap();
+        (r.status().as_u16(), r.json().await.unwrap())
+    };
+    let (status, p) = preview(serde_json::json!({ "from": "lab TEAM", "to": "Integration team" })).await;
+    assert_eq!(status, 200, "{p}");
+    assert_eq!(
+        (&p["changed"], &p["files"][0]["path"]),
+        (&1.into(), &format!("interfaces/{name}/interface.yaml").into())
+    );
+    assert_eq!(p["files"][0]["lines"][0]["after"], "about: { owner: Integration team }", "{p}");
+    assert!(p["patch"].as_str().unwrap().contains("\n+about: { owner: Integration team }\n"), "{p}");
+    assert_eq!(p["command"], "ductus owners reassign --from 'lab TEAM' --to 'Integration team'");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), config, "a preview writes nothing");
+    let (_, p) = preview(serde_json::json!({ "from": "Nobody", "to": "X" })).await;
+    assert_eq!((&p["changed"], &p["known"]), (&0.into(), &serde_json::json!(["Lab team"])), "{p}");
+    assert_eq!(p["patch"], "");
+    let (status, _) = preview(serde_json::json!({ "from": "Lab team", "to": "X", "interfaces": ["nope"] })).await;
+    assert_eq!(status, 400);
     let spec: serde_json::Value = http.get(format!("{base}/openapi.json")).send().await.unwrap().json().await.unwrap();
     for path in [
         "/interfaces",
@@ -591,6 +613,7 @@ async fn the_api_shows_the_engine_and_drains_it() {
         "/tokens",
         "/metrics",
         "/hotspots",
+        "/owners/reassign/preview",
     ] {
         assert!(spec["paths"][path].is_object(), "{path} missing from the OpenAPI document");
     }

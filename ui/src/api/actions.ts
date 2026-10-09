@@ -12,13 +12,19 @@ export function useCanOperate(): boolean {
   return data?.role === "operator" || data?.role === "admin";
 }
 
+/** Admins manage tokens. */
+export function useIsAdmin(): boolean {
+  const { data } = useQuery(session);
+  return data?.role === "admin";
+}
+
 /** Fetch again everything an action can change. */
 export function useRefresh() {
   const queryClient = useQueryClient();
   return () =>
     Promise.all(
-      ["message", "messages", "quarantine", "interfaces"].map((key) =>
-        queryClient.invalidateQueries({ queryKey: [key] }),
+      ["message", "messages", "quarantine", "interfaces", "hotspots", "retention", "drain", "engine", "tokens"].map(
+        (key) => queryClient.invalidateQueries({ queryKey: [key] }),
       ),
     );
 }
@@ -89,4 +95,38 @@ export async function resume(name: string, destination: string) {
       params: { path: { name, destination } },
     }),
   );
+}
+
+/** What moving ownership would change (writes nothing; `interfaces` empty = all of `from`'s). */
+export async function previewReassign(from: string, to: string, interfaces: string[]) {
+  return unwrap(await api.POST("/owners/reassign/preview", { body: { from, to, interfaces } }));
+}
+
+/** Confirm a shorter retention: deletes the interface's messages past it. */
+export async function confirmRetention(name: string) {
+  return unwrap(await api.POST("/retention/{name}/confirm", { params: { path: { name } } }));
+}
+
+/** Stop taking messages and deliver what's stored; with `stop`, the engine exits once drained. */
+export async function startDrain(stop: boolean) {
+  return unwrap(await api.POST("/drain", { body: { stop } }));
+}
+
+/** Take messages again. */
+export async function endDrain() {
+  return unwrap(await api.DELETE("/drain"));
+}
+
+/** Check every connection (or only what `interfaces` use) from the engine's server. */
+export async function runDoctor(interfaces: string[], timeoutMs: number) {
+  return unwrap(await api.POST("/doctor", { body: { interfaces, timeout_ms: timeoutMs } }));
+}
+
+export async function createToken(name: string, role: string) {
+  return unwrap(await api.POST("/tokens", { body: { name, role } }));
+}
+
+export async function revokeToken(name: string) {
+  const { response, error } = await api.DELETE("/tokens/{name}", { params: { path: { name } } });
+  if (!response.ok) unwrap({ response, error });
 }

@@ -33,7 +33,7 @@ impl From<Token> for TokenInfo {
 }
 
 /// Live tokens (never their secrets). Admin.
-#[utoipa::path(get, path = "/tokens", tag = "tokens", responses((status = 200, body = Vec<TokenInfo>), (status = 403, body = super::ErrorBody)))]
+#[utoipa::path(get, path = "/tokens", tag = "tokens", operation_id = "list_tokens", responses((status = 200, body = Vec<TokenInfo>), (status = 403, body = super::ErrorBody)))]
 async fn list(engine: Eng, caller: Caller) -> ApiResult<Vec<TokenInfo>> {
     caller.require(Role::Admin)?;
     Ok(Json(engine.store.tokens(false).await?.into_iter().map(Into::into).collect()))
@@ -56,7 +56,7 @@ pub struct CreatedToken {
 
 /// Create a token. Its secret is in this answer only. Admin.
 #[utoipa::path(
-    post, path = "/tokens", tag = "tokens", request_body = NewToken,
+    post, path = "/tokens", tag = "tokens", operation_id = "create_token", request_body = NewToken,
     responses((status = 200, body = CreatedToken), (status = 400, body = super::ErrorBody), (status = 403, body = super::ErrorBody))
 )]
 async fn create(engine: Eng, caller: Caller, Json(new): Json<NewToken>) -> ApiResult<CreatedToken> {
@@ -74,7 +74,7 @@ async fn create(engine: Eng, caller: Caller, Json(new): Json<NewToken>) -> ApiRe
 
 /// Revoke a token: it stops working at once. Admin.
 #[utoipa::path(
-    delete, path = "/tokens/{name}", tag = "tokens",
+    delete, path = "/tokens/{name}", tag = "tokens", operation_id = "revoke_token",
     params(("name" = String, Path, description = "Token name")),
     responses((status = 204, description = "Revoked"), (status = 403, body = super::ErrorBody), (status = 404, body = super::ErrorBody))
 )]

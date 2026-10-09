@@ -16,7 +16,11 @@ use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
 
 pub fn routes() -> OpenApiRouter<Shared> {
-    OpenApiRouter::new().routes(routes!(impact_report)).routes(routes!(owners)).routes(routes!(doctor_report))
+    OpenApiRouter::new()
+        .routes(routes!(impact_report))
+        .routes(routes!(owners))
+        .routes(routes!(reassign_preview))
+        .routes(routes!(doctor_report))
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -148,6 +152,144 @@ async fn owners(engine: Eng, _caller: Caller) -> ApiResult<Vec<OwnerGroup>> {
             })
             .collect(),
     ))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct ReassignRequest {
+    /// The current owner (ignores case).
+    from: String,
+    /// The new owner.
+    to: String,
+    /// Only these interfaces (all when empty).
+    #[serde(default)]
+    interfaces: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ReassignPreview {
+    /// Files that would change, each with its changed lines.
+    files: Vec<ReassignFile>,
+    /// Files with `owner: <from>` that can't be changed safely by a program (an unusual
+    /// layout): change them by hand. While any is listed, `patch` and `command` are empty.
+    refused: Vec<ReassignRefused>,
+    /// Owner values that would change, over all files.
+    changed: usize,
+    /// The whole change as a unified diff, for `git apply` in the project's repository.
+    patch: String,
+    /// The same change made with the CLI in the project's folder.
+    command: String,
+    /// The owners there are, when nothing matched `from`.
+    known: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ReassignFile {
+    interface: String,
+    /// Relative to the project, `/`-separated.
+    path: String,
+    lines: Vec<ReassignLine>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ReassignLine {
+    /// 1-based.
+    line: usize,
+    before: String,
+    after: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ReassignRefused {
+    interface: String,
+    path: String,
+    error: String,
+}
+
+/// What moving ownership from one owner to another would change, as `ductus owners reassign
+/// --dry-run` shows it, plus a patch to apply in the project's repository. Writes nothing: the
+/// interfaces' files are the project's (in git), so the change is made there and deployed. Reads
+/// the files as they are on the engine's server now.
+#[utoipa::path(
+    post, path = "/owners/reassign/preview", tag = "reports", request_body = ReassignRequest,
+    responses((status = 200, body = ReassignPreview), (status = 400, body = super::ErrorBody))
+)]
+async fn reassign_preview(
+    engine: Eng,
+    _caller: Caller,
+    Json(request): Json<ReassignRequest>,
+) -> ApiResult<ReassignPreview> {
+    let unknown: Vec<&str> =
+        request.interfaces.iter().filter(|n| engine.interface(n).is_none()).map(String::as_str).collect();
+    if !unknown.is_empty() {
+        return Err(ApiError::bad_request(format!("no interface named {}", unknown.join(", "))));
+    }
+    if request.from.trim().is_empty() {
+        return Err(ApiError::bad_request("say whose interfaces move (`from`)"));
+    }
+    let mut preview = ReassignPreview {
+        files: Vec::new(),
+        refused: Vec::new(),
+        changed: 0,
+        patch: String::new(),
+        command: String::new(),
+        known: Vec::new(),
+    };
+    let mut patch = String::new();
+    for i in engine
+        .interfaces
+        .iter()
+        .filter(|i| request.interfaces.is_empty() || request.interfaces.contains(&i.config.name))
+    {
+        let file = i.config.dir.join("interface.yaml");
+        let path = file.strip_prefix(&engine.root).unwrap_or(&file).display().to_string().replace('\\', "/");
+        let text = tokio::fs::read_to_string(&file)
+            .await
+            .map_err(|e| ApiError::bad_request(format!("reading {path}: {e}")))?;
+        match ductus_core::owners::reassign(&text, &request.from, &request.to) {
+            Ok((_, changes)) if changes.is_empty() => {}
+            Ok((out, changes)) => {
+                preview.changed += changes.len();
+                patch.push_str(&ductus_core::owners::patch(&path, &text, &out));
+                preview.files.push(ReassignFile {
+                    interface: i.config.name.clone(),
+                    path,
+                    lines: changes
+                        .into_iter()
+                        .map(|c| ReassignLine { line: c.line, before: c.before, after: c.after })
+                        .collect(),
+                });
+            }
+            Err(e) => preview.refused.push(ReassignRefused {
+                interface: i.config.name.clone(),
+                path,
+                error: format!("{e:#}"),
+            }),
+        }
+    }
+    if preview.files.is_empty() && preview.refused.is_empty() {
+        let groups =
+            ductus_core::owners::by_owner(ductus_core::owners::owned(engine.interfaces.iter().map(|i| &*i.config)));
+        preview.known = groups.into_iter().map(|(owner, _)| owner).filter(|o| !o.is_empty()).collect();
+    }
+    if preview.refused.is_empty() && !preview.files.is_empty() {
+        preview.patch = patch;
+        let only: String = request.interfaces.iter().map(|n| format!(" --interface {}", shell_quote(n))).collect();
+        preview.command = format!(
+            "ductus owners reassign --from {} --to {}{only}",
+            shell_quote(request.from.trim()),
+            shell_quote(request.to.trim())
+        );
+    }
+    Ok(Json(preview))
+}
+
+/// Quoted for a POSIX shell when it needs it: `'Ann Smith'`, `'O'"'"'Brien'`.
+fn shell_quote(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./@".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\"'\"'"))
+    }
 }
 
 #[derive(Deserialize, ToSchema, Default)]

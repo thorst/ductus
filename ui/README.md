@@ -11,12 +11,16 @@ npm ci
 npm run dev          # http://localhost:5173, hot reload; /api goes to a running engine
                      # (DUCTUS_API_URL, default http://127.0.0.1:7700). Sign in with a token.
 npm run check        # types, lint, format, unit tests (what check.sh runs)
-npm run build        # dist/, and the size budget (scripts/budget.mjs: 300 KB gzipped)
+npm run build        # dist/, and the size budget (scripts/budget.mjs: 300 KB gzipped for what
+                     # index.html loads; 50 KB for each page loaded on demand)
 ```
 
 - **API types** (`src/api/schema.d.ts`) are generated from the engine's OpenAPI document: `ductus api-spec > openapi.json && npm run api-types`. `scripts/dev/check.sh` does it when the API changed; CI fails if they're out of date.
 - **Signing in:** a token is traded once for a session cookie (`POST /api/v1/session`) that page scripts can't read. Every request sends `X-Ductus: 1`, which the engine requires for changes made with the cookie.
 - **Themes:** `src/index.css`. Every color derives from five (header, accent, page background, panel, text); light and dark are `light-dark()` pairs; high contrast meets WCAG AAA. The theme is kept in the browser until users exist (v0.5 step 8).
-- **End-to-end:** `scripts/demo-ui.sh` starts an engine with three interfaces and runs the Playwright tests in `e2e/` against it, including axe accessibility checks in every theme (`npx playwright install --with-deps chromium` once). Two projects: `ui.spec.ts` reads as a viewer (and checks the demo's counts), then `actions.spec.ts` acts as an operator (edits, resends, pauses), which changes them.
-- **Actions** (`src/api/actions.ts`): buttons show for operators and admins only (the engine enforces it); each confirms in an `ActionDialog` with an optional reason, which the engine keeps with the action, and shows the engine's refusal in its own words.
+- **End-to-end:** `scripts/demo-ui.sh` starts an engine with three interfaces and runs the Playwright tests in `e2e/` against it, including axe accessibility checks in every theme (`npx playwright install --with-deps chromium` once). Two projects: `ui.spec.ts` reads as a viewer (and checks the demo's counts), then `actions.spec.ts` acts as an operator (edits, resends, pauses, confirms retention, runs the connection checks, drains) and as an admin (tokens), which changes them.
+- **Actions** (`src/api/actions.ts`): buttons show for operators and admins only (the engine enforces it); each confirms in an `ActionDialog` with an optional reason, which the engine keeps with the action, and shows the engine's refusal in its own words. Tokens are admin-only (hidden from the navigation otherwise). What deletes data asks for the interface's name to be typed (shortening retention).
+- **Heavy pages load on demand:** a page used rarely and costly to load goes behind `lazyRouteComponent(() => import(...))` in `router.tsx` (the API reference: 3.7 KB, its document fetched from `/api/v1/openapi.json` when opened). The budget counts only what `index.html` loads, so such a page costs a first visit nothing; `e2e/ui.spec.ts` checks the chunk isn't fetched before the page opens.
+- **Owners: preview only.** Moving ownership shows the change and offers a patch and the CLI command; the engine never edits its own project (it's in git; the change is committed and deployed). Committing from the UI is planned with the Git client (v1.4).
+- **Links inside sentences are underlined** (`p a` in `index.css`): axe's `link-in-text-block` (WCAG 1.4.1) fails a link told apart by color alone. A link in a list item with other text needs `className="underline"`.
 - TypeScript stays on 6.0 (as the engine vendors it) until typescript-eslint supports 7.

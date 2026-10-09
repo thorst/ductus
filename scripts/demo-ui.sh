@@ -4,12 +4,17 @@
 #   adt     two destinations: `lab` (nobody listens: stalled, last error shown) and `archive`
 #           (files, all sent)
 #   orders  its code quarantines one patient's messages ("unknown patient 100003")
-#   billing its only destination is paused, with a reason
+#   billing its only destination is paused, with a reason; configured to keep 1w while 7w is
+#           applied, so the shorter window waits for a confirmation
 # The browser signs in with a token (wrong one first), finds what needs attention, filters the
-# interfaces, reads a destination's state, opens a quarantined message and its HL7 fields, lists
-# the quarantine, checks accessibility (axe) in every theme, and signs out. Then, as an operator,
-# it corrects a quarantined message (an edited copy), resends from the quarantine screen, and
-# pauses and resumes a destination. Screenshots: ui/test-results/.
+# interfaces, reads a destination's state, follows a behind destination to its hotspots, opens a
+# quarantined message and its HL7 fields, lists the quarantine, looks up a vendor's impact,
+# previews moving an owner's interfaces (a patch), reads retention, drain and the API reference
+# (loaded only when opened), checks accessibility (axe) in every theme, and signs out. Then, as
+# an operator, it corrects a quarantined message (an edited copy), resends from the quarantine
+# screen, pauses and resumes a destination, confirms the shorter retention, runs the connection
+# checks, and drains and resumes the engine; as an admin, it creates a token (its secret works),
+# then revokes it (it doesn't). Screenshots: ui/test-results/.
 #
 # Needs Node and the UI's packages (cd ui && npm ci), and Playwright's Chromium
 # (npx playwright install --with-deps chromium).
@@ -59,9 +64,13 @@ EOF
 cat >"$P/interfaces/billing/interface.yaml" <<'EOF'
 name: billing
 source: { mllp: { port: 6723 } }
+retention: 1w
 about: { owner: Finance }
 destination: { file: { dir: out/billing } }
 EOF
+# As if billing had kept 7 weeks until now: its shorter 1w waits for someone to confirm it.
+psql -q "$DB" -c "DELETE FROM retention WHERE interface IN ('adt', 'orders', 'billing')" \
+  -c "INSERT INTO retention (interface, days) VALUES ('billing', 49)"
 
 cd "$P"
 "$BIN" validate >/dev/null || { "$BIN" validate; echo "FAIL: validation"; exit 1; }
@@ -72,6 +81,7 @@ until grep "started interfaces=" "$P/run.log" >/dev/null; do kill -0 $ENGINE || 
 echo "engine log: $P/run.log"
 export DUCTUS_API_TOKEN=$("$BIN" token create "ui-demo-operator-$$" --role operator 2>/dev/null)
 VIEWER=$("$BIN" token create "ui-demo-viewer-$$" --role viewer 2>/dev/null)
+ADMIN=$("$BIN" token create "ui-demo-admin-$$" --role admin 2>/dev/null)
 
 echo "== traffic"
 "$BIN" pause billing --reason "invoice system upgrade tonight" | sed 's/^/   /'
@@ -95,7 +105,8 @@ echo "   /interfaces/adt → index.html, gzip, CSP"
 
 echo "== the browser (Playwright)"
 cd "$UI"
-export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN
+export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN \
+  DUCTUS_ADMIN_TOKEN=$ADMIN
 if npx playwright test --reporter=line; then
   echo PASS
 else

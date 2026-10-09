@@ -335,6 +335,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/owners/reassign/preview": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * What moving ownership from one owner to another would change, as `ductus owners reassign
+         *     --dry-run` shows it, plus a patch to apply in the project's repository. Writes nothing: the
+         *     interfaces' files are the project's (in git), so the change is made there and deployed. Reads
+         *     the files as they are on the engine's server now.
+         */
+        post: operations["reassign_preview"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/quarantine": {
         parameters: {
             query?: never;
@@ -422,10 +444,10 @@ export interface paths {
             cookie?: never;
         };
         /** Live tokens (never their secrets). Admin. */
-        get: operations["list"];
+        get: operations["list_tokens"];
         put?: never;
         /** Create a token. Its secret is in this answer only. Admin. */
-        post: operations["create"];
+        post: operations["create_token"];
         delete?: never;
         options?: never;
         head?: never;
@@ -443,7 +465,7 @@ export interface paths {
         put?: never;
         post?: never;
         /** Revoke a token: it stops working at once. Admin. */
-        delete: operations["revoke"];
+        delete: operations["revoke_token"];
         options?: never;
         head?: never;
         patch?: never;
@@ -1154,6 +1176,48 @@ export interface components {
              * @description A successful send's mean time.
              */
             send_ms?: number | null;
+        };
+        ReassignFile: {
+            interface: string;
+            lines: components["schemas"]["ReassignLine"][];
+            /** @description Relative to the project, `/`-separated. */
+            path: string;
+        };
+        ReassignLine: {
+            after: string;
+            before: string;
+            /** @description 1-based. */
+            line: number;
+        };
+        ReassignPreview: {
+            /** @description Owner values that would change, over all files. */
+            changed: number;
+            /** @description The same change made with the CLI in the project's folder. */
+            command: string;
+            /** @description Files that would change, each with its changed lines. */
+            files: components["schemas"]["ReassignFile"][];
+            /** @description The owners there are, when nothing matched `from`. */
+            known: string[];
+            /** @description The whole change as a unified diff, for `git apply` in the project's repository. */
+            patch: string;
+            /**
+             * @description Files with `owner: <from>` that can't be changed safely by a program (an unusual
+             *     layout): change them by hand. While any is listed, `patch` and `command` are empty.
+             */
+            refused: components["schemas"]["ReassignRefused"][];
+        };
+        ReassignRefused: {
+            error: string;
+            interface: string;
+            path: string;
+        };
+        ReassignRequest: {
+            /** @description The current owner (ignores case). */
+            from: string;
+            /** @description Only these interfaces (all when empty). */
+            interfaces?: string[];
+            /** @description The new owner. */
+            to: string;
         };
         /** @description The whole report: what `ductus doctor` prints and `--report` saves. */
         Report: {
@@ -1937,6 +2001,37 @@ export interface operations {
             };
         };
     };
+    reassign_preview: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReassignRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReassignPreview"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     quarantine: {
         parameters: {
             query?: {
@@ -2124,7 +2219,7 @@ export interface operations {
             };
         };
     };
-    list: {
+    list_tokens: {
         parameters: {
             query?: never;
             header?: never;
@@ -2151,7 +2246,7 @@ export interface operations {
             };
         };
     };
-    create: {
+    create_token: {
         parameters: {
             query?: never;
             header?: never;
@@ -2190,7 +2285,7 @@ export interface operations {
             };
         };
     };
-    revoke: {
+    revoke_token: {
         parameters: {
             query?: never;
             header?: never;

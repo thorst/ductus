@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, CirclePause, CirclePlay, MessageSquareText } from "lucide-react";
+import { ArrowRight, CirclePause, CirclePlay, Flame, MessageSquareText } from "lucide-react";
 import { useState } from "react";
 import { pause, resume, useCanOperate, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
@@ -172,6 +172,16 @@ function DestinationCard({ interfaceName, d }: { interfaceName: string; d: Schem
             <div className="text-xs text-muted">Last error, {ago(h.last_error.at)}</div>
             <div className="mt-1 font-mono text-xs break-words">{h.last_error.error}</div>
           </div>
+        )}
+        {(h.state === "stalled" || h.state === "behind") && (
+          <Link
+            to="/hotspots"
+            search={{ interface: interfaceName, destination: d.name }}
+            className="inline-flex items-center gap-1.5 text-sm font-medium"
+          >
+            <Flame aria-hidden className="size-4" />
+            Where it's stuck
+          </Link>
         )}
         <details className="text-sm">
           <summary className="cursor-pointer text-muted">Since the engine started</summary>

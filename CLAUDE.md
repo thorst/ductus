@@ -74,6 +74,8 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - russh 0.64: `client::Handler::check_server_key(&PublicKeyOrCertificate)`; fingerprints via `key.fingerprint(HashAlg::Sha256)` print like `ssh-keygen -lf`. SFTP `rename` won't overwrite: remove the target first.
 - **utoipa `IntoParams` structs need `#[into_params(parameter_in = Query)]`**, or the document publishes their fields as *path* parameters (the message browser's `status`/`before`/`limit` were, until the UI's generated types caught it). `the_document_has_path_parameters_only_where_the_path_has_them` guards it.
 - **Web UI (`ui/`):** Node 24 in WSL is a per-user install in `~/.local/node` (check.sh and demos.sh put it on the PATH; non-interactive WSL shells don't read `.bashrc`). TypeScript is pinned to 6.0 (typescript-eslint doesn't support 7, the Go one); openapi-typescript's `typescript ^5` peer is overridden in package.json (`overrides`), not `--force`d. TS 6 deprecates `baseUrl`: `paths` alone. A new API field or route = run check.sh, which regenerates `ui/openapi.json` and `ui/src/api/schema.d.ts` and asks for a second run. A `<section>` is a landmark (`region`) only with a name: label cards that tests or screen readers look for (`aria-label`). axe runs in every theme in `demo-ui.sh` (AAA in high contrast): new colors must pass it. Under `set -o pipefail`, `curl` to a closed port fails the whole pipeline: capture its output first.
+- **utoipa names each operation after its handler function**: two modules' `list` once shared the operationId `list`, and the UI's generated types gave `GET /tokens` the message browser's answer. A handler named like another gets `operation_id = "..."` in `#[utoipa::path]` (`every_operation_has_its_own_id` guards it).
+- **Accessible names in the UI:** an `sr-only` span adds a space before itself ("Where it's stuck" + `<span sr-only>: lab</span>` reads "Where it's stuck : lab"): start sr-only text with a space and a word, or scope the test by its region instead. A `<label>` wrapping a `<select>` includes the options' text in its name, so `getByLabel("Vendor")` matched both the select (option "Vendor") and the textbox: use `getByRole("textbox", { name })`. Links inside running text need more than color (axe `link-in-text-block`): `p a` is underlined in `index.css`.
 
 ## Where things are
 
@@ -91,7 +93,8 @@ crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for th
                        stats.rs (counts and timings in memory: histograms, Prometheus text format),
                        activity.rs (last activity and pauses, kept in the database across restarts),
                        gate.rs (drain gate), retention.rs (applies retention, runs changes, drops partitions),
-                       api/ (REST API: status, messages, actions (resend, edit, quarantine), reports, retention, tokens, metrics, hotspots,
+                       api/ (REST API: status, messages, actions (resend, edit, quarantine), reports (impact, owners + reassign
+                       preview, doctor), retention, tokens, metrics, hotspots,
                        session (browser sign-in), ui (serves the embedded web UI; build.rs embeds ui/dist)),
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
@@ -103,7 +106,8 @@ crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/imp
                        tools.rs: gen/sink/status;
                        tests/cli.rs runs the binary on temp projects)
 ui/                    web UI (React + Vite; README.md): src/api (typed client, queries, live updates), src/pages,
-                       src/components, src/lib (format, hl7, health, theme); e2e/ (Playwright, run by scripts/demo-ui.sh)
+                       src/components, src/lib (format, hl7, health, theme, openapi: the API reference's reading of the
+                       document); e2e/ (Playwright, run by scripts/demo-ui.sh)
 sdk/src                TypeScript SDK (embedded via include_str! in ductus-script/src/loader.rs: add new files there)
 sdk/tests              SDK tests (TypeScript)
 scripts/               demos (end-to-end, PASS/FAIL) and scripts/dev (check.sh, demos.sh)

@@ -1,6 +1,7 @@
 // The web UI against a real engine (scripts/demo-ui.sh sets it up: adt's lab behind, orders
 // quarantining patient 100003, billing paused).
 
+import { readFileSync } from "node:fs";
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";
 
@@ -119,9 +120,144 @@ test("the quarantine across interfaces", async ({ page }) => {
   await expect(page.getByRole("button", { name: /Resend/ })).toHaveCount(0); // a viewer
 });
 
-test("no accessibility violations in any theme", async ({ page }) => {
+test("a behind destination links to where its messages are stuck", async ({ page }) => {
+  await signIn(page, "/interfaces/adt");
+  await expect(page.getByRole("region", { name: "archive" }).getByRole("link", { name: /stuck/ })).toHaveCount(0);
+  await page.getByRole("region", { name: "lab", exact: true }).getByRole("link", { name: "Where it's stuck" }).click();
+  await expect(page).toHaveURL(/\/hotspots\?interface=adt&destination=lab$/);
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Hotspots: adt → lab");
+  const lab = page.getByRole("region", { name: "adt → lab" });
+  await expect(lab).toContainText(/\d+ waiting in \d+ of \d+ lanes/);
+  const lanes = lab.getByRole("table", { name: "Lanes waiting for lab" }).locator("tbody tr");
+  await expect(lanes.first()).toBeVisible();
+  // One lane's first message is the one the worker keeps retrying; the others wait behind it.
+  const blocked = lanes.filter({ hasText: /refused/i });
+  await expect(blocked).toHaveCount(1);
+  await expect(lanes.first()).toContainText(/refused/i); // listed first
+  await expect(lab).toContainText(/blocked by message \d+/);
+  await page.screenshot({ path: "test-results/hotspots.png", fullPage: true });
+  await blocked.getByRole("link").click();
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("pending");
+});
+
+test("which interfaces a vendor touches, and the names known when none", async ({ page }) => {
+  await signIn(page, "/impact");
+  await page.getByLabel("Look for").selectOption("vendor");
+  // (A label wrapping a select includes its options' text: "Look for" holds "Vendor" too.)
+  const vendor = page.getByRole("textbox", { name: "Vendor" });
+  await vendor.fill("epic systems");
+  await page.getByRole("button", { name: "Find" }).click();
+  await expect(page).toHaveURL(/vendor=epic/);
+  await expect(page.getByRole("status")).toContainText("1 of 3 interfaces touch");
+  const hits = page.getByRole("table", { name: "Affected interfaces" }).locator("tbody tr");
+  await expect(hits.first()).toContainText("adt");
+  await expect(hits.first()).toContainText("ADT team");
+
+  await vendor.fill("Nobody Inc");
+  await page.getByRole("button", { name: "Find" }).click();
+  await expect(page.getByRole("status")).toContainText("No interface touches");
+  await page.getByRole("button", { name: "Epic Systems" }).click();
+  await expect(hits.first()).toContainText("adt");
+});
+
+test("moving an owner's interfaces is previewed as a patch for the repository", async ({ page }) => {
+  await signIn(page, "/owners");
+  const owners = page.getByRole("region", { name: "Owners", exact: true });
+  for (const owner of ["ADT team", "Finance", "Orders team"]) await expect(owners).toContainText(owner);
+
+  const move = page.getByRole("region", { name: "Move ownership" });
+  await move.getByRole("combobox").selectOption("ADT team");
+  await move.getByRole("textbox", { name: "To" }).fill("Integration team");
+  await move.getByRole("button", { name: "Preview" }).click();
+  const preview = page.getByRole("region", { name: "Preview" });
+  await expect(preview).toContainText("1 owner value in 1 file would change. Nothing has been written.");
+  await expect(preview).toContainText("interfaces/adt/interface.yaml");
+  await expect(preview).toContainText("+   owner: Integration team");
+  await expect(preview).toContainText("ductus owners reassign --from 'ADT team' --to 'Integration team'");
+  const [download] = await Promise.all([
+    page.waitForEvent("download"),
+    preview.getByRole("button", { name: "Download the patch" }).click(),
+  ]);
+  const patch = readFileSync((await download.path())!, "utf8");
+  expect(patch).toContain("--- a/interfaces/adt/interface.yaml");
+  expect(patch).toContain("\n+  owner: Integration team\n");
+  await page.screenshot({ path: "test-results/owners.png", fullPage: true });
+  // Nothing was written: the owners are as they were.
+  await page.reload();
+  await expect(owners).toContainText("ADT team");
+});
+
+test("retention, the shorter window waiting, drain and connection checks, as a viewer", async ({ page }) => {
+  await signIn(page, "/retention");
+  const billing = page.getByRole("table", { name: "Retention by interface" }).getByRole("row", { name: /billing/ });
+  await expect(billing).toContainText("7w (49 days)");
+  await expect(billing).toContainText("Shorter (7 days) waits for a confirmation");
+  await expect(page.getByRole("status")).toContainText("billing has a shorter retention waiting");
+  await expect(page.getByRole("region", { name: "Held area" })).toContainText("Nothing held.");
+  await expect(page.getByRole("button", { name: /Confirm/ })).toHaveCount(0); // a viewer
+
+  await page.goto("/drain");
+  await expect(page.getByRole("status")).toContainText("Taking messages.");
+  await expect(page.getByRole("button", { name: "Start draining" })).toHaveCount(0);
+
+  await page.goto("/connections");
+  await expect(page.getByText("Running the checks needs an operator token.")).toBeVisible();
+
+  // Tokens are an admin's: not in a viewer's navigation, and the page says why.
+  await expect(page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "Tokens" })).toHaveCount(0);
+  await page.goto("/tokens");
+  await expect(page.getByText("Managing tokens needs an admin token.")).toBeVisible();
+});
+
+test("the API reference is in the binary and loads only when opened", async ({ page }) => {
+  const chunks: string[] = [];
+  page.on("request", (r) => {
+    if (/\/assets\/api-reference-[^/]+\.js$/.test(r.url())) chunks.push(r.url());
+  });
   await signIn(page);
-  const pages = ["/", "/interfaces", "/interfaces/adt", "/interfaces/orders?tab=messages", "/quarantine"];
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("Overview");
+  expect(chunks, "a first visit doesn't load the reference").toEqual([]);
+
+  await page.getByRole("navigation", { name: "Main" }).getByRole("link", { name: "API reference" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveText("API reference");
+  expect(chunks).toHaveLength(1);
+  // Every endpoint, in the engine's own words, with who may call it and a curl example.
+  const health = page.getByRole("region", { name: "GET /health" });
+  await expect(health).toContainText("no token");
+  await expect(health).toContainText(`curl -s '${new URL(page.url()).origin}/api/v1/health'`);
+  await page.getByLabel("Find an endpoint").fill("resend");
+  const resend = page.getByRole("region", { name: "POST /messages/{id}/resend" });
+  await expect(resend).toContainText("operator");
+  await expect(resend).toContainText("-X POST");
+  await expect(page.getByRole("region", { name: "GET /health" })).toHaveCount(0);
+  await page.screenshot({ path: "test-results/api-reference.png", fullPage: true });
+  await page.getByLabel("Find an endpoint").fill("");
+  await page
+    .getByRole("region", { name: "POST /messages/{id}/resend" })
+    .getByRole("link", { name: "ResentMessage" })
+    .click();
+  await expect(page.getByRole("region", { name: "ResentMessage", exact: true })).toBeInViewport();
+});
+
+test("no accessibility violations in any theme", async ({ page }) => {
+  test.setTimeout(180_000);
+  await signIn(page);
+  const pages = [
+    "/",
+    "/interfaces",
+    "/interfaces/adt",
+    "/interfaces/orders?tab=messages",
+    "/quarantine",
+    "/hotspots",
+    "/hotspots?interface=adt&destination=lab",
+    "/impact?vendor=Epic%20Systems",
+    "/owners",
+    "/retention",
+    "/drain",
+    "/connections",
+    "/tokens",
+    "/api-reference",
+  ];
   for (const t of ["light", "dark", "contrast"]) {
     await theme(page, t);
     for (const path of pages) {
@@ -139,7 +275,19 @@ test("no accessibility violations in any theme", async ({ page }) => {
 test("a phone-sized screen gets the navigation on top and no sideways page scroll", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page);
-  for (const path of ["/", "/interfaces", "/interfaces/adt", "/interfaces/orders?tab=messages", "/quarantine"]) {
+  for (const path of [
+    "/",
+    "/interfaces",
+    "/interfaces/adt",
+    "/interfaces/orders?tab=messages",
+    "/quarantine",
+    "/hotspots",
+    "/impact?vendor=Epic%20Systems",
+    "/owners",
+    "/retention",
+    "/drain",
+    "/api-reference",
+  ]) {
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     await expect(

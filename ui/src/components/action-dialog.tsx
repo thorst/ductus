@@ -16,6 +16,7 @@ export function ActionDialog({
   confirm,
   onConfirm,
   reason = true,
+  disabled,
   wide,
   children,
 }: {
@@ -28,6 +29,8 @@ export function ActionDialog({
   onConfirm: (reason: string) => Promise<unknown>;
   /** Ask for a reason (optional to give). */
   reason?: boolean;
+  /** Not yet confirmable (e.g. a name still to be typed). */
+  disabled?: boolean;
   wide?: boolean;
   children?: ReactNode;
 }) {
@@ -76,7 +79,7 @@ export function ActionDialog({
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button type="submit" disabled={busy}>
+          <Button type="submit" disabled={busy || disabled}>
             {busy ? "Working…" : confirm}
           </Button>
         </div>

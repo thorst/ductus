@@ -70,3 +70,46 @@ export const message = (id: number) =>
     queryKey: ["message", id],
     queryFn: async () => unwrap(await api.GET("/messages/{id}", { params: { path: { id } } })),
   });
+
+/** Where each backlog sits (on demand: it counts every lane's queue). */
+export const hotspots = (name?: string, lanes = 20) =>
+  queryOptions({
+    queryKey: ["hotspots", name ?? "", lanes],
+    queryFn: async () => unwrap(await api.GET("/hotspots", { params: { query: { interface: name, lanes } } })),
+    refetchInterval: HEALTH_REFRESH_MS,
+  });
+
+export type ImpactSearch = { vendor?: string; application?: string; host?: string; resolve?: boolean };
+
+/** Which interfaces a vendor, application or host touches (exactly one of the three). */
+export const impact = (search: ImpactSearch) =>
+  queryOptions({
+    queryKey: ["impact", search],
+    queryFn: async () => unwrap(await api.GET("/impact", { params: { query: search } })),
+    enabled: Boolean(search.vendor || search.application || search.host),
+    staleTime: 60_000,
+  });
+
+export const owners = queryOptions({
+  queryKey: ["owners"],
+  queryFn: async () => unwrap(await api.GET("/owners")),
+});
+
+export const retention = queryOptions({
+  queryKey: ["retention"],
+  queryFn: async () => unwrap(await api.GET("/retention")),
+  // A change in progress counts down its rows.
+  refetchInterval: HEALTH_REFRESH_MS,
+});
+
+/** Draining is followed closely: it's what someone waits on during an upgrade. */
+export const drain = queryOptions({
+  queryKey: ["drain"],
+  queryFn: async () => unwrap(await api.GET("/drain")),
+  refetchInterval: (query) => (query.state.data?.state === "draining" ? 2_000 : HEALTH_REFRESH_MS),
+});
+
+export const tokens = queryOptions({
+  queryKey: ["tokens"],
+  queryFn: async () => unwrap(await api.GET("/tokens")),
+});
