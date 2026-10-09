@@ -484,22 +484,17 @@ impl Store {
     /// 1`, which Postgres can't turn into a join). As a join, Postgres priced looking a message up
     /// in ~100 partitions above scanning them, and hashed every message stored (it grows with
     /// the day's volume: one destination drained at 429/s instead of ~1,500/s).
+    ///
+    /// The deliveries come from `deliveries_queue` in message order (migration 0011), which stops
+    /// after `limit` rows however many are waiting or were delivered before them.
     pub async fn pending(&self, destination: DestinationId, partitions: &[i32], limit: i64) -> Result<Vec<Pending>> {
-        sqlx::query_as::<_, Pending>(
-            "SELECT d.message_id AS id, d.received_at, m.payload, d.attempts, m.origin_id AS origin
-             FROM (SELECT message_id, received_at, attempts FROM deliveries
-                   WHERE destination_id = $1 AND status = 0 AND partition_key = ANY($2)
-                   ORDER BY message_id LIMIT $3) d
-             CROSS JOIN LATERAL (SELECT payload, origin_id FROM messages m
-                                 WHERE m.id = d.message_id AND m.received_at = d.received_at LIMIT 1) m
-             ORDER BY d.message_id",
-        )
-        .bind(destination)
-        .bind(partitions)
-        .bind(limit)
-        .fetch_all(&self.pool)
-        .await
-        .context("reading pending messages")
+        sqlx::query_as::<_, Pending>(QUEUE_READ)
+            .bind(destination)
+            .bind(partitions)
+            .bind(limit)
+            .fetch_all(&self.pool)
+            .await
+            .context("reading pending messages")
     }
 
     /// Record what a destination did with messages (sent, filtered, quarantined), in one
@@ -765,6 +760,17 @@ fn is_serialization_failure(e: &anyhow::Error) -> bool {
         .and_then(|e| e.as_database_error())
         .is_some_and(|e| e.code().as_deref() == Some("40001"))
 }
+
+/// `Store::pending`: destination `$1`'s oldest `$3` pending deliveries in lanes `$2`, with their
+/// messages. Public so a test can check its plan.
+#[doc(hidden)]
+pub const QUEUE_READ: &str = "SELECT d.message_id AS id, d.received_at, m.payload, d.attempts, m.origin_id AS origin
+     FROM (SELECT message_id, received_at, attempts FROM deliveries
+           WHERE destination_id = $1 AND status = 0 AND partition_key = ANY($2)
+           ORDER BY message_id LIMIT $3) d
+     CROSS JOIN LATERAL (SELECT payload, origin_id FROM messages m
+                         WHERE m.id = d.message_id AND m.received_at = d.received_at LIMIT 1) m
+     ORDER BY d.message_id";
 
 /// Insert one message (`$6` its status, `$8` its tier) and a pending delivery for each
 /// destination in `$7` (none for a duplicate), in one statement.

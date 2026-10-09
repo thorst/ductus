@@ -45,7 +45,7 @@ One row per queued message and destination: each destination's work queue and it
 | `updated_at` | timestamptz | Last change. |
 | `tier` | smallint | Always its message's tier (a retention change moves both in one statement). |
 
-Indexes: primary key `(message_id, received_at, destination_id, tier)`; `deliveries_pending (destination_id, partition_key, message_id) WHERE status = 0`, which is each destination's queue in arrival order; `deliveries_quarantined (destination_id, message_id) WHERE status = 3` (quarantine counts without reading the table).
+Indexes: primary key `(message_id, received_at, destination_id, tier)`; `deliveries_queue (destination_id, message_id, partition_key) WHERE status = 0`, which is each destination's queue in arrival order (the lane is checked inside the index; migration 0011 replaced `deliveries_pending`, which had the lane second); `deliveries_quarantined (destination_id, message_id) WHERE status = 3` (quarantine counts without reading the table).
 
 ## `destinations`
 

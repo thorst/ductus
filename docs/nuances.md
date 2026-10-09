@@ -89,6 +89,14 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** at startup the engine matches stored deliveries to `interface.yaml`. A **new** destination also gets the messages still in flight (pending for any destination), not older ones. A **removed** destination's waiting messages are marked filtered ("destination `x` was removed from interface.yaml") and logged. A **rename** is both: the new name gets everything in flight, including what the old name had waiting, and may re-send some the old name had already sent.
 - **What to do:** rename only when the destination is caught up. Removing a destination by mistake can't be undone by putting it back: its waiting messages were already filtered.
 
+### Many destinations on one interface: when to split (level 3)
+- **What:** every destination adds a delivery row per message, written in the same statement as the message and updated when it's sent. So a message with 25 destinations costs the database about 25 small writes on the way in and 25 on the way out, and senders wait for the first part before their ACK.
+- **Measured** (dev laptop under WSL, strict durability, 16 sender connections, file destinations, steady-state partitions; `scripts/bench-fanout.sh`): 1 and 5 destinations ingest ~2,700–3,400 messages/s; 25 destinations ~1,150–1,300/s; 50 destinations ~500–700/s. Delivery tops out around 15,000–20,000 deliveries/s in total, whatever the fan-out: at 50 destinations, 6,000 messages took ~16 s to reach everyone (one run 27 s). For scale, 1M ADT messages a day averages ~12/s, with peaks of a few hundred.
+- **What to do:**
+  - Up to ~10 destinations per interface: nothing to plan, at any realistic volume.
+  - More than that: multiply your peak messages/s by the number of destinations and compare with the deliveries/s your server measures (~15,000 on a laptop; `ductus bench` will measure it, v0.6). Under a third of it is comfortable: that leaves room for a burst of 3x and for catching up after a receiver's outage. Over that, a burst builds a backlog that clears only as fast as the spare capacity allows.
+  - If it doesn't fit: split the feed. Route to a few internal interfaces (`destination: { interface: adt_out_a }`) that each fan out to a share of the receivers, or give low-priority receivers (archives, analytics) their own interface fed from a route. The sender's ACK then waits for a few delivery rows instead of dozens; in exchange, each hop stores one more copy of the message, so total writes grow a little.
+
 ### A runaway is blamed on the interface, not the destination (level 5)
 - **What:** when code runs away after an `await`, the engine knows which interface's code it was, not which function. Every call of that interface in flight on the thread is quarantined, so another destination's message can be quarantined with it. Each one counts towards stopping the interface.
 

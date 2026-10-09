@@ -327,6 +327,47 @@ async fn reconcile_matches_deliveries_to_the_configured_destinations() {
     assert_eq!(store.deliveries(m).await.unwrap()[0].status, Status::Sent);
 }
 
+/// The queue read walks the destination's queue in message order, so it stops after its rows
+/// however many deliveries came before them. Without `deliveries_queue`, Postgres walked each
+/// partition's primary key past every delivered row instead (~300 ms a read with 1M delivered
+/// messages ahead of a 10k backlog, migration 0011). Checks the plan Postgres would cache.
+#[tokio::test]
+async fn the_queue_read_uses_the_queue_index() {
+    let Some(store) = store().await else { return };
+    let t = Iface::single(&store, "queue-plan").await;
+    let delivered: Vec<String> = (0..3000).map(|n| format!("old{n}")).collect();
+    let items: Vec<_> = delivered.iter().map(|p| (p.as_str(), None)).collect();
+    store.insert_batch(&batch(&t, &items, None)).await.unwrap();
+    let done: Vec<_> = store.pending(t.dest(), &[0], 3000).await.unwrap().iter().map(|p| sent(p.reference())).collect();
+    store.finish(t.dest(), &done).await.unwrap();
+    store.insert_batch(&batch(&t, &[("new", None)], None)).await.unwrap();
+
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    sqlx::query("ANALYZE deliveries").execute(&pool).await.unwrap();
+    let mut connection = pool.acquire().await.unwrap();
+    sqlx::query("SET plan_cache_mode = force_generic_plan").execute(&mut *connection).await.unwrap();
+    sqlx::query(sqlx::AssertSqlSafe(format!("PREPARE queue_read(int, int[], bigint) AS {}", ductus_store::QUEUE_READ)))
+        .execute(&mut *connection)
+        .await
+        .unwrap();
+    let plan: Vec<String> = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "EXPLAIN (COSTS OFF) EXECUTE queue_read({}, '{{0,1}}', 50)",
+        t.dest()
+    )))
+    .fetch_all(&mut *connection)
+    .await
+    .unwrap();
+    let scans: Vec<&String> = plan.iter().filter(|l| l.contains("Scan") && l.contains(" on deliveries_")).collect();
+    assert!(!scans.is_empty(), "no scan of deliveries in:\n{}", plan.join("\n"));
+    assert!(
+        scans.iter().all(|l| l.contains("destination_id_message_id")),
+        "the queue read doesn't use deliveries_queue:\n{}",
+        plan.join("\n")
+    );
+    let read = store.pending(t.dest(), &[0], 50).await.unwrap();
+    assert_eq!(payloads(read), [b"new".to_vec()]);
+}
+
 fn batch<'a>(t: &'a Iface, items: &[(&'a str, Option<&'a str>)], state: Option<(&'a str, &'a str)>) -> Batch<'a> {
     Batch {
         interface: &t.name,
