@@ -51,6 +51,20 @@ export const messages = (name: string, status?: MessageStatus) =>
     getNextPageParam: (page) => page.next_before ?? null,
   });
 
+/** Quarantined deliveries across interfaces (or one interface or destination), newest first. */
+export const quarantine = (filter: { interface?: string; destination?: string }) =>
+  infiniteQueryOptions({
+    queryKey: ["quarantine", filter.interface ?? "", filter.destination ?? ""],
+    queryFn: async ({ pageParam }) =>
+      unwrap(
+        await api.GET("/quarantine", {
+          params: { query: { ...filter, before: pageParam ?? undefined, limit: PAGE } },
+        }),
+      ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.next_before ?? null,
+  });
+
 export const message = (id: number) =>
   queryOptions({
     queryKey: ["message", id],

@@ -99,11 +99,29 @@ test("a quarantined message: why, what each destination did, and its HL7 fields"
   await page.screenshot({ path: "test-results/message.png", fullPage: true });
   await page.getByRole("button", { name: "Raw" }).click();
   await expect(page.locator("pre")).toContainText("PID|1||100003^^^MRN");
+  // A viewer looks; acting is for operators.
+  await expect(page.getByRole("button", { name: "Edit and resend" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Resend/ })).toHaveCount(0);
+});
+
+test("the quarantine across interfaces", async ({ page }) => {
+  await signIn(page, "/quarantine");
+  const rows = page.getByRole("table", { name: "Quarantined deliveries" }).locator("tbody tr");
+  await expect(rows).toHaveCount(4);
+  await expect(rows.first()).toContainText("unknown patient 100003");
+  await expect(page.getByRole("link", { name: /Quarantine\s*4/ }).first()).toBeVisible();
+  // The filter offers the interfaces with something quarantined.
+  await page.getByLabel("Interface").selectOption("orders");
+  await expect(page).toHaveURL(/interface=orders/);
+  await expect(rows).toHaveCount(4);
+  await page.goto("/quarantine?interface=adt");
+  await expect(page.getByText("Nothing quarantined in adt.")).toBeVisible();
+  await expect(page.getByRole("button", { name: /Resend/ })).toHaveCount(0); // a viewer
 });
 
 test("no accessibility violations in any theme", async ({ page }) => {
   await signIn(page);
-  const pages = ["/", "/interfaces", "/interfaces/adt", "/interfaces/orders?tab=messages"];
+  const pages = ["/", "/interfaces", "/interfaces/adt", "/interfaces/orders?tab=messages", "/quarantine"];
   for (const t of ["light", "dark", "contrast"]) {
     await theme(page, t);
     for (const path of pages) {
@@ -121,7 +139,7 @@ test("no accessibility violations in any theme", async ({ page }) => {
 test("a phone-sized screen gets the navigation on top and no sideways page scroll", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await signIn(page);
-  for (const path of ["/", "/interfaces", "/interfaces/adt", "/interfaces/orders?tab=messages"]) {
+  for (const path of ["/", "/interfaces", "/interfaces/adt", "/interfaces/orders?tab=messages", "/quarantine"]) {
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
     await expect(

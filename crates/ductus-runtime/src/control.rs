@@ -57,6 +57,14 @@ pub struct Snapshot {
     pub queues: HashMap<DestinationId, QueueCount>,
     /// When the oldest waiting message was received, for destinations with any.
     pub oldest: HashMap<DestinationId, DateTime<Utc>>,
+    /// Every interface's state and then its destinations', in engine order (`Engine::states`):
+    /// live updates are sent when one changes, even if no count did (a destination turning
+    /// stalled, an interface going silent). Filled in by the monitor.
+    pub states: Vec<&'static str>,
+    /// Deliveries finished since the engine started, per destination (`Engine::finished`): an
+    /// update is sent when any finished, even if every count is back where it was (a resent
+    /// message quarantined again, a replay sent, between two counts). Filled in by the monitor.
+    pub finished: Vec<u64>,
 }
 
 impl Snapshot {
@@ -196,7 +204,30 @@ impl Engine {
         let waiting: Vec<DestinationId> = queues.values().filter(|q| q.pending > 0).map(|q| q.destination_id).collect();
         let oldest = self.store.oldest_pending(&waiting).await?;
         let oldest = oldest.into_iter().map(|o| (o.destination_id, o.received_at)).collect();
-        Ok(Snapshot { at: Utc::now(), queues, oldest })
+        Ok(Snapshot { at: Utc::now(), queues, oldest, states: Vec::new(), finished: Vec::new() })
+    }
+
+    /// Deliveries each destination finished since the engine started (sent, filtered or
+    /// quarantined), from the workers' counters: no query.
+    pub fn finished(&self) -> Vec<u64> {
+        use std::sync::atomic::Ordering::Relaxed;
+        self.interfaces
+            .iter()
+            .flat_map(|i| i.stats.destinations.iter())
+            .map(|d| d.sent.load(Relaxed) + d.filtered.load(Relaxed) + d.quarantined.load(Relaxed))
+            .collect()
+    }
+
+    /// The health state of every interface and destination (see `Snapshot::states`).
+    pub fn states(&self, snapshot: &Snapshot) -> Vec<&'static str> {
+        let now = Utc::now();
+        self.interfaces
+            .iter()
+            .flat_map(|i| {
+                let own = std::iter::once(self.interface_state(i, now).0.label());
+                own.chain((0..i.destinations.len()).map(move |n| self.diagnose(i, n, snapshot, now).state.label()))
+            })
+            .collect()
     }
 
     /// An interface's own state: what it should have received (`monitor:`), or stopped.
@@ -331,10 +362,14 @@ async fn monitor(engine: std::sync::Weak<Engine>) {
         let draining = matches!(e.drain_state(), DrainState::Draining { .. });
         if watched {
             match e.snapshot().await {
-                Ok(snapshot) => {
+                Ok(mut snapshot) => {
+                    snapshot.states = e.states(&snapshot);
+                    snapshot.finished = e.finished();
                     e.monitor.send_if_modified(|s| {
-                        // Same counts: keep the old snapshot, so watchers only hear of changes.
-                        let changed = s.queues != snapshot.queues;
+                        // Nothing changed: keep the old snapshot, so watchers only hear of changes.
+                        let changed = s.queues != snapshot.queues
+                            || s.states != snapshot.states
+                            || s.finished != snapshot.finished;
                         if changed {
                             *s = Arc::new(snapshot);
                         }

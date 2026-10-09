@@ -172,7 +172,7 @@
         "tags": [
           "engine"
         ],
-        "summary": "Live updates (Server-Sent Events): an `update` event with every interface's queues and the\ndrain state, sent at once and then whenever something changes (checked every 2 s).",
+        "summary": "Live updates (Server-Sent Events): an `update` event with every interface's queues, health and\nthe drain state, sent at once and then whenever a count or a health state changes or a delivery\nfinishes (checked every 2 s).",
         "operationId": "events",
         "responses": {
           "200": {
@@ -1328,6 +1328,13 @@
               "format": "int64"
             },
             "description": "Message ids (at most 500), from any interfaces."
+          },
+          "quarantined_only": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Only deliveries still quarantined, even with `destination` named (what the quarantine\nscreen sends: a delivery someone resolved meanwhile is skipped, not replayed). Default:\ntrue without `destination`, false with it."
           },
           "reason": {
             "type": [
@@ -2588,9 +2595,14 @@
           "name",
           "pending",
           "quarantined",
-          "paused"
+          "paused",
+          "health"
         ],
         "properties": {
+          "health": {
+            "$ref": "#/components/schemas/LiveHealth",
+            "description": "As in `GET /interfaces` (an update is sent when a state changes, not as a summary's\nminutes tick on)."
+          },
           "name": {
             "type": "string"
           },
@@ -2607,12 +2619,28 @@
           }
         }
       },
+      "LiveHealth": {
+        "type": "object",
+        "required": [
+          "state",
+          "summary"
+        ],
+        "properties": {
+          "state": {
+            "type": "string"
+          },
+          "summary": {
+            "type": "string"
+          }
+        }
+      },
       "LiveInterface": {
         "type": "object",
         "required": [
           "name",
           "state",
           "accepting",
+          "health",
           "destinations"
         ],
         "properties": {
@@ -2624,6 +2652,10 @@
             "items": {
               "$ref": "#/components/schemas/LiveDestination"
             }
+          },
+          "health": {
+            "$ref": "#/components/schemas/LiveHealth",
+            "description": "What it receives, as in `GET /interfaces`."
           },
           "name": {
             "type": "string"

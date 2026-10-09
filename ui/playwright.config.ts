@@ -15,5 +15,18 @@ export default defineConfig({
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } } }],
+  // The read-only tests first (they check the demo's counts), then the ones that act and change them.
+  projects: [
+    {
+      name: "read",
+      testMatch: "ui.spec.ts",
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
+    {
+      name: "act",
+      testMatch: "actions.spec.ts",
+      dependencies: ["read"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
+  ],
 });

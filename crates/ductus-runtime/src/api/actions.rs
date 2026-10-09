@@ -190,6 +190,11 @@ pub struct BulkResendRequest {
     /// delivery ended as (a replay). Without it: every destination that quarantined each message.
     #[serde(default)]
     destination: Option<String>,
+    /// Only deliveries still quarantined, even with `destination` named (what the quarantine
+    /// screen sends: a delivery someone resolved meanwhile is skipped, not replayed). Default:
+    /// true without `destination`, false with it.
+    #[serde(default)]
+    quarantined_only: Option<bool>,
     /// Why (kept with each action).
     #[serde(default)]
     reason: Option<String>,
@@ -236,7 +241,8 @@ async fn resend_many(
     let mut ids = request.ids.clone();
     ids.sort_unstable();
     ids.dedup();
-    let r = Resend { messages: &ids, destinations: &destinations, quarantined_only: named.is_none() };
+    let quarantined_only = request.quarantined_only.unwrap_or(named.is_none());
+    let r = Resend { messages: &ids, destinations: &destinations, quarantined_only };
     let resent = engine.store.resend(r, caller.actor(request.reason.as_deref())).await?;
     wake(&engine, &resent);
     let resent = by_message(resent);

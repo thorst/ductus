@@ -974,6 +974,20 @@ async fn messages_are_resent_and_corrected_through_the_api() {
     assert!(eventually(async || quarantined().await.len() == 2).await, "rejected again");
     assert_eq!(post("/messages/resend", &ops, serde_json::json!({"ids": []})).await.0, 400);
 
+    // Live updates carry each interface's and destination's health.
+    let mut events = http.get(format!("{base}/events")).bearer_auth(&viewer).send().await.unwrap();
+    let mut text = String::new();
+    while !text.contains("\n\n") {
+        text.push_str(&String::from_utf8_lossy(&events.chunk().await.unwrap().unwrap()));
+    }
+    let data = text.lines().find_map(|l| l.strip_prefix("data:")).unwrap();
+    let update: serde_json::Value = serde_json::from_str(data.trim()).unwrap();
+    let mine = update["interfaces"].as_array().unwrap().iter().find(|i| i["name"] == name.as_str()).unwrap();
+    assert!(mine["health"]["summary"].is_string(), "{mine}");
+    let lab = mine["destinations"].as_array().unwrap().iter().find(|d| d["name"] == "lab").unwrap();
+    assert_eq!((&lab["health"]["state"], &lab["quarantined"]), (&"error".into(), &2.into()), "{lab}");
+    drop(events);
+
     let spec: serde_json::Value = http.get(format!("{base}/openapi.json")).send().await.unwrap().json().await.unwrap();
     for path in ["/messages/{id}/resend", "/messages/resend", "/messages/{id}/edit", "/quarantine"] {
         assert!(spec["paths"][path].is_object(), "{path} missing from the OpenAPI document");

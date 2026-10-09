@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { isHl7, parseHl7, prettyJson } from "./hl7";
+import { fromEditable, isHl7, parseHl7, prettyJson, toEditable } from "./hl7";
 
 const ADT = "MSH|^~\\&|EPIC|HOSP|LAB|HOSP|20261009||ADT^A01|C1|P|2.5\rPID|1||MRN1^^^HOSP||DOE^JANE\r";
 
@@ -24,5 +24,15 @@ describe("hl7 display", () => {
     expect(prettyJson('{"a":[1,2]}')).toBe('{\n  "a": [\n    1,\n    2\n  ]\n}');
     expect(prettyJson("{nope")).toBeNull();
     expect(prettyJson("a,b,c")).toBeNull();
+  });
+});
+
+describe("editing a message", () => {
+  it("shows segments one per line and puts the separator back", () => {
+    const text = toEditable(ADT);
+    expect(text).toBe("MSH|^~\\&|EPIC|HOSP|LAB|HOSP|20261009||ADT^A01|C1|P|2.5\nPID|1||MRN1^^^HOSP||DOE^JANE\n");
+    expect(fromEditable(text, true)).toBe(ADT);
+    expect(fromEditable(text.replace("JANE", "JOAN") + "\n\n", true)).toBe(ADT.replace("JANE", "JOAN"));
+    expect(fromEditable("a,b\r\nc,d\n", false)).toBe("a,b\r\nc,d\n");
   });
 });

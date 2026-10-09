@@ -1,11 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
-import { getRouteApi, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, CirclePause } from "lucide-react";
+import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
+import { ArrowRight, CirclePause, CirclePlay, MessageSquareText } from "lucide-react";
+import { useState } from "react";
+import { pause, resume, useCanOperate, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
 import { iface } from "@/api/queries";
+import { ActionDialog } from "@/components/action-dialog";
 import { HealthBadge } from "@/components/health-badge";
 import { MessageList } from "@/components/message-list";
 import { Field, Loaded, PageHeader } from "@/components/page";
+import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { ago, count, duration, ms, perMinute } from "@/lib/format";
@@ -105,16 +109,17 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
       <h2 className="text-base font-semibold">Destinations</h2>
       <div className="grid items-start gap-4 xl:grid-cols-2">
         {i.destinations.map((d) => (
-          <DestinationCard key={d.name} d={d} />
+          <DestinationCard key={d.name} interfaceName={i.name} d={d} />
         ))}
       </div>
     </div>
   );
 }
 
-function DestinationCard({ d }: { d: Schemas["DestinationStatus"] }) {
+function DestinationCard({ interfaceName, d }: { interfaceName: string; d: Schemas["DestinationStatus"] }) {
   const h = d.health;
   const c = d.since_start;
+  const canOperate = useCanOperate();
   return (
     <Card aria-label={d.name}>
       <CardHeader>
@@ -124,6 +129,7 @@ function DestinationCard({ d }: { d: Schemas["DestinationStatus"] }) {
         </div>
         <HealthBadge state={h.state} />
       </CardHeader>
+      {canOperate && <PauseControls interfaceName={interfaceName} d={d} />}
       <CardBody className="space-y-4">
         {/* The engine's summary already says who paused it, when and why. */}
         <p className={cn("text-sm", d.paused && "flex gap-2 rounded-md border border-paused/40 bg-paused/10 p-3")}>
@@ -134,7 +140,17 @@ function DestinationCard({ d }: { d: Schemas["DestinationStatus"] }) {
           <Field label="Waiting">{count(d.pending)}</Field>
           <Field label="Oldest waiting">{duration(h.oldest_waiting_s)}</Field>
           <Field label="Quarantined">
-            <span className={cn(d.quarantined > 0 && "font-semibold text-bad")}>{count(d.quarantined)}</span>
+            {d.quarantined > 0 ? (
+              <Link
+                to="/quarantine"
+                search={{ interface: interfaceName, destination: d.name }}
+                className="font-semibold text-bad"
+              >
+                {count(d.quarantined)}
+              </Link>
+            ) : (
+              count(d.quarantined)
+            )}
           </Field>
           <Field label="Catching up in">{h.catch_up_s != null ? `~${duration(h.catch_up_s)}` : "–"}</Field>
           <Field label="Last sent">{ago(h.last_sent)}</Field>
@@ -177,5 +193,65 @@ function DestinationCard({ d }: { d: Schemas["DestinationStatus"] }) {
         </details>
       </CardBody>
     </Card>
+  );
+}
+
+/**
+ * Pause at once (a reason is optional and can come later: act first, explain after), add the
+ * reason, or resume (the backlog goes in order).
+ */
+function PauseControls({ interfaceName, d }: { interfaceName: string; d: Schemas["DestinationStatus"] }) {
+  const [dialog, setDialog] = useState<"pause" | "reason" | "resume" | null>(null);
+  const refresh = useRefresh();
+  const close = (open: boolean) => !open && setDialog(null);
+  return (
+    <div className="flex flex-wrap gap-2 border-b px-4 py-2">
+      {d.paused ? (
+        <>
+          <Button size="sm" variant="outline" onClick={() => setDialog("resume")}>
+            <CirclePlay aria-hidden />
+            Resume<span className="sr-only"> {d.name}</span>
+          </Button>
+          {!d.paused.reason && (
+            <Button size="sm" variant="ghost" onClick={() => setDialog("reason")}>
+              <MessageSquareText aria-hidden />
+              Add the reason
+            </Button>
+          )}
+        </>
+      ) : (
+        <Button size="sm" variant="outline" onClick={() => setDialog("pause")}>
+          <CirclePause aria-hidden />
+          Pause<span className="sr-only"> {d.name}</span>
+        </Button>
+      )}
+      <ActionDialog
+        open={dialog === "pause" || dialog === "reason"}
+        onOpenChange={close}
+        title={dialog === "reason" ? `Why is ${d.name} paused?` : `Pause ${d.name}`}
+        description={
+          dialog === "reason"
+            ? "Kept with the pause, so everyone sees it."
+            : "Nothing is sent or retried until it's resumed (a send under way finishes). Messages keep queueing in order. The pause holds across restarts; a drain doesn't wait for it."
+        }
+        confirm={dialog === "reason" ? "Save the reason" : "Pause"}
+        onConfirm={async (why) => {
+          await pause(interfaceName, d.name, why);
+          await refresh();
+        }}
+      />
+      <ActionDialog
+        open={dialog === "resume"}
+        onOpenChange={close}
+        reason={false}
+        title={`Resume ${d.name}`}
+        description={`It sends the ${count(d.pending)} waiting, in order, then carries on.`}
+        confirm="Resume"
+        onConfirm={async () => {
+          await resume(interfaceName, d.name);
+          await refresh();
+        }}
+      />
+    </div>
   );
 }

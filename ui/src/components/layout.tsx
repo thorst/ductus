@@ -1,18 +1,20 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate } from "@tanstack/react-router";
-import { Check, ChevronDown, LayoutDashboard, LogOut, Network, Radio } from "lucide-react";
+import { Check, ChevronDown, LayoutDashboard, LogOut, Network, Radio, ShieldAlert } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 import { useState } from "react";
 import { api } from "@/api/client";
 import { useLiveUpdates, type LiveState } from "@/api/live";
-import { engine, session } from "@/api/queries";
+import { engine, interfaces, session } from "@/api/queries";
 import { Logo } from "@/components/logo";
+import { count } from "@/lib/format";
 import { getTheme, setTheme, THEME_LABELS, THEMES, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
 const NAV = [
   { to: "/", label: "Overview", icon: LayoutDashboard, exact: true },
   { to: "/interfaces", label: "Interfaces", icon: Network, exact: false },
+  { to: "/quarantine", label: "Quarantine", icon: ShieldAlert, exact: false },
 ] as const;
 
 export function Layout() {
@@ -46,7 +48,7 @@ export function Layout() {
       </header>
       {/* Narrow screens: the same links across the top (only one of the two navs is ever shown). */}
       <nav aria-label="Main" className="border-b bg-panel px-2 py-1 md:hidden">
-        <NavLinks className="flex gap-1" />
+        <NavLinks className="flex flex-wrap gap-1" />
       </nav>
       <div className="flex flex-1">
         <nav aria-label="Main" className="hidden w-52 shrink-0 border-r bg-panel p-3 md:block">
@@ -61,6 +63,8 @@ export function Layout() {
 }
 
 function NavLinks({ className }: { className: string }) {
+  const { data: all } = useQuery(interfaces);
+  const quarantined = (all ?? []).flatMap((i) => i.destinations).reduce((n, d) => n + d.quarantined, 0);
   return (
     <ul className={className}>
       {NAV.map(({ to, label, icon: Icon, exact }) => (
@@ -72,6 +76,11 @@ function NavLinks({ className }: { className: string }) {
           >
             <Icon aria-hidden className="size-4" />
             {label}
+            {to === "/quarantine" && quarantined > 0 && (
+              <span className="ml-auto rounded-full border border-bad/40 bg-bad/10 px-1.5 text-xs text-bad tabular-nums">
+                {count(quarantined)}
+              </span>
+            )}
           </Link>
         </li>
       ))}

@@ -1,16 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
-import { getRouteApi, Link } from "@tanstack/react-router";
-import { Check, Copy } from "lucide-react";
+import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
+import { Check, Copy, Pencil, RotateCcw } from "lucide-react";
 import { useMemo, useState } from "react";
+import { editAndResend, resend, useCanOperate, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
 import { message } from "@/api/queries";
+import { ActionDialog } from "@/components/action-dialog";
 import { StatusBadge } from "@/components/health-badge";
 import { Field, Loaded, PageHeader } from "@/components/page";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, Td, Th } from "@/components/ui/table";
 import { bytes, timestamp } from "@/lib/format";
-import { isHl7, parseHl7, prettyJson, type Hl7Field } from "@/lib/hl7";
+import { fromEditable, isHl7, parseHl7, prettyJson, toEditable, type Hl7Field } from "@/lib/hl7";
 import { cn } from "@/lib/utils";
 
 const route = getRouteApi("/app/messages/$id");
@@ -18,6 +20,7 @@ const route = getRouteApi("/app/messages/$id");
 export function MessagePage() {
   const { id } = route.useParams();
   const query = useQuery(message(id));
+  const canOperate = useCanOperate();
   return (
     <Loaded query={query}>
       {(m) => (
@@ -29,6 +32,7 @@ export function MessagePage() {
                 <StatusBadge status={m.status} />
               </span>
             }
+            actions={canOperate && m.deliveries.length > 0 && <EditButton m={m} />}
           >
             <Link to="/interfaces/$name" params={{ name: m.interface }} search={{ tab: "messages" }}>
               {m.interface}
@@ -36,6 +40,15 @@ export function MessagePage() {
             {" · "}received {timestamp(m.received_at)}
           </PageHeader>
           <div className="space-y-6">
+            {m.copy_of != null && (
+              <p role="note" className="rounded-md border border-accent/40 bg-accent-soft p-3 text-sm">
+                An edited copy of{" "}
+                <Link to="/messages/$id" params={{ id: m.copy_of }} className="font-mono">
+                  message {m.copy_of}
+                </Link>
+                , queued by an operator. The original is kept as it was received.
+              </p>
+            )}
             <Card>
               <CardBody>
                 <dl className="grid grid-cols-2 gap-x-6 gap-y-4 md:grid-cols-4">
@@ -59,7 +72,8 @@ export function MessagePage() {
                 </dl>
               </CardBody>
             </Card>
-            <Deliveries deliveries={m.deliveries} />
+            <Deliveries m={m} canOperate={canOperate} />
+            <History actions={m.actions} />
             <Payload payload={m.payload} />
           </div>
         </>
@@ -68,11 +82,13 @@ export function MessagePage() {
   );
 }
 
-function Deliveries({ deliveries }: { deliveries: Schemas["DeliveryInfo"][] }) {
+function Deliveries({ m, canOperate }: { m: Schemas["MessageDetail"]; canOperate: boolean }) {
   const [open, setOpen] = useState<string | null>(null);
-  if (deliveries.length === 0) return null;
+  const [resending, setResending] = useState<Schemas["DeliveryInfo"] | null>(null);
+  const refresh = useRefresh();
+  if (m.deliveries.length === 0) return null;
   return (
-    <Card>
+    <Card aria-label="Destinations">
       <CardHeader>
         <CardTitle>Destinations</CardTitle>
       </CardHeader>
@@ -84,10 +100,11 @@ function Deliveries({ deliveries }: { deliveries: Schemas["DeliveryInfo"][] }) {
             <Th className="text-right">Attempts</Th>
             <Th>Error</Th>
             <Th>Sent</Th>
+            {canOperate && <Th>Action</Th>}
           </tr>
         </thead>
         <tbody>
-          {deliveries.map((d) => (
+          {m.deliveries.map((d) => (
             <tr key={d.destination}>
               <Td className="font-medium">{d.destination}</Td>
               <Td>
@@ -113,6 +130,174 @@ function Deliveries({ deliveries }: { deliveries: Schemas["DeliveryInfo"][] }) {
                   </span>
                 )}
               </Td>
+              {canOperate && (
+                <Td>
+                  {/* Pending: being sent or retried already. */}
+                  {d.status !== "pending" && (
+                    <Button size="sm" variant="outline" onClick={() => setResending(d)}>
+                      <RotateCcw aria-hidden />
+                      {d.status === "quarantined" ? "Resend" : "Replay"}
+                      <span className="sr-only"> to {d.destination}</span>
+                    </Button>
+                  )}
+                </Td>
+              )}
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+      {resending && (
+        <ActionDialog
+          open
+          onOpenChange={(o) => !o && setResending(null)}
+          title={`${resending.status === "quarantined" ? "Resend" : "Replay"} message ${m.id} to ${resending.destination}`}
+          description={
+            resending.status === "quarantined" ? (
+              <>
+                It goes back in {resending.destination}&rsquo;s queue in its place: sent next for its key, through
+                today&rsquo;s code.
+              </>
+            ) : (
+              <>
+                {resending.destination} already has it ({resending.status}). It&rsquo;s sent again as it is: the same
+                message and control id, so a receiver that drops repeats may ignore it. Newer messages for the same key
+                sent since arrive before it.
+              </>
+            )
+          }
+          confirm={resending.status === "quarantined" ? "Resend" : "Replay"}
+          onConfirm={async (why) => {
+            await resend(m.id, [resending.destination], why);
+            await refresh();
+          }}
+        />
+      )}
+    </Card>
+  );
+}
+
+/** Correct a message: a copy with the edits is queued; the original stays as received. */
+function EditButton({ m }: { m: Schemas["MessageDetail"] }) {
+  const [open, setOpen] = useState(false);
+  const hl7 = isHl7(m.payload);
+  const [text, setText] = useState(() => toEditable(m.payload));
+  const quarantined = m.deliveries.filter((d) => d.status === "quarantined").map((d) => d.destination);
+  const [chosen, setChosen] = useState<string[]>(quarantined);
+  const refresh = useRefresh();
+  const navigate = useNavigate();
+  return (
+    <>
+      <Button
+        variant="outline"
+        onClick={() => {
+          setText(toEditable(m.payload));
+          setChosen(quarantined);
+          setOpen(true);
+        }}
+      >
+        <Pencil aria-hidden />
+        Edit and resend
+      </Button>
+      <ActionDialog
+        open={open}
+        onOpenChange={setOpen}
+        wide
+        title={`Edit and resend message ${m.id}`}
+        description="A corrected copy is queued as a new message, at the back of its lane. The original stays as it was received; its quarantined deliveries to the destinations you pick are marked replaced."
+        confirm="Queue the copy"
+        onConfirm={async (why) => {
+          const copy = await editAndResend(m.id, fromEditable(text, hl7), chosen, why);
+          await refresh();
+          await navigate({ to: "/messages/$id", params: { id: copy.id } });
+        }}
+      >
+        <label className="block text-sm">
+          <span className="text-muted">{hl7 ? "Message (one segment per line)" : "Message"}</span>
+          <textarea
+            value={text}
+            onChange={(e) => setText(e.target.value)}
+            spellCheck={false}
+            rows={Math.min(20, Math.max(6, text.split("\n").length + 1))}
+            className="mt-1 w-full rounded-md border bg-bg p-3 font-mono text-xs focus-visible:border-accent"
+          />
+        </label>
+        <fieldset className="text-sm">
+          <legend className="text-muted">Send the copy to</legend>
+          <div className="mt-1 flex flex-wrap gap-4">
+            {m.deliveries.map((d) => (
+              <label key={d.destination} className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  // Pending: the original may be being sent right now; the engine refuses it.
+                  disabled={d.status === "pending"}
+                  checked={chosen.includes(d.destination)}
+                  onChange={(e) =>
+                    setChosen(e.target.checked ? [...chosen, d.destination] : chosen.filter((c) => c !== d.destination))
+                  }
+                />
+                {d.destination} <span className="text-muted">({d.status})</span>
+              </label>
+            ))}
+          </div>
+        </fieldset>
+      </ActionDialog>
+    </>
+  );
+}
+
+const BEFORE: Record<string, string> = { quarantined: "Resent", sent: "Replayed", filtered: "Replayed" };
+
+/** What people did to this message, oldest first. */
+function History({ actions }: { actions: Schemas["ActionInfo"][] }) {
+  if (actions.length === 0) return null;
+  return (
+    <Card aria-label="History">
+      <CardHeader>
+        <CardTitle>History</CardTitle>
+      </CardHeader>
+      <Table>
+        <thead>
+          <tr>
+            <Th>When</Th>
+            <Th>What</Th>
+            <Th>Destination</Th>
+            <Th>Before</Th>
+            <Th>By</Th>
+            <Th>Reason</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {actions.map((a, n) => (
+            <tr key={n}>
+              <Td className="tabular-nums">{timestamp(a.at)}</Td>
+              <Td>
+                {a.action === "edit" ? (
+                  <>
+                    Edited: copy{" "}
+                    <Link to="/messages/$id" params={{ id: a.copy! }} className="font-mono">
+                      {a.copy}
+                    </Link>
+                  </>
+                ) : (
+                  (BEFORE[a.previous_status ?? ""] ?? "Resent")
+                )}
+              </Td>
+              <Td>{a.destination}</Td>
+              <Td>
+                {a.previous_status ? (
+                  <span className="flex flex-wrap items-center gap-2">
+                    <StatusBadge status={a.previous_status} />
+                    <span className="text-xs text-muted">
+                      {a.previous_attempts} {a.previous_attempts === 1 ? "attempt" : "attempts"}
+                    </span>
+                  </span>
+                ) : (
+                  <span className="text-muted">none</span>
+                )}
+                {a.previous_error && <div className="mt-1 text-xs break-words text-muted">{a.previous_error}</div>}
+              </Td>
+              <Td>{a.by}</Td>
+              <Td className="text-xs">{a.reason ?? ""}</Td>
             </tr>
           ))}
         </tbody>

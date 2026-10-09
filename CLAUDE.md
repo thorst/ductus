@@ -58,6 +58,7 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - **Type checker API (`check.js`)**: to know whether a call is the SDK's `db`/`api`, resolve the callee with `checker.getSymbolAtLocation` + `getAliasedSymbol` and check its declaration sits in `declare module "@ductus/sdk"`; don't match names (a local `db` would count, an alias wouldn't). `analyze(..., false)` skips `getPreEmitDiagnostics`, which is the slow part.
 - **Timing durable commits**: a transaction that only takes an xid (`SELECT txid_current()`) writes no WAL of its own, so its commit doesn't wait for the flush (0.28 ms vs 3.06 ms measured on the same disk). `ductus doctor` uses `pg_logical_emit_message(true, ...)` (WAL, no table). The TLS verifier (`rustls_platform_verifier`) logs every failed verification at ERROR: doctor's log filter turns it off.
 - **REST API routes** go through `utoipa_axum::routes!` in each `api/*.rs` `routes()` (that's what puts them in the OpenAPI document); a handler's `#[utoipa::path]` path is relative to `/api/v1`. Two handlers with one path and different methods go in one `routes!(a, b)`. A plain helper with the same name as a handler breaks the macro (it picks the wrong item).
+- **A statement reads as of when it started, even after waiting for a lock.** A settle that read deliveries and then waited for a message row read them as they were before a resend made one pending again (it marked the message quarantined; reconcile would then undo the resend). So settle locks in one statement and reads in the next. Any new write that moves a delivery *backwards* (final → pending) must hold the message's lock, and readers that decide from deliveries must lock first.
 - **Statements that lock many rows lock them in id order** (`ORDER BY id FOR UPDATE` in a CTE, as `Store::settle` does), never in whatever order the plan visits them: the plan changes with the statistics, and two writers over overlapping sets then deadlock. The routing demo hit it once in 11 runs; no test could force the plan, so it's a rule, not a test. And **a flush may be retried after its commit** (a later statement failed): writes must be guarded (`WHERE status = 0 RETURNING`), or a route would store its messages twice (it did, before the guard).
 - **Store tests that make partitions often** (the stress test) also take `LONG_LOCKS`: while another test holds its long read on purpose, each partition DDL waits up to 2 s and the inserts queue behind it (seen as "too little traffic").
 - **Retention tiers (migration 0010):** `messages`/`deliveries` are LIST-partitioned by `tier`, then RANGE by `received_at` (`messages_t21_20261005`; tiers in days: 7 daily, 21 and 49 weekly). **Never hold two tier tables in one transaction for DDL**: queries lock every tier in creation order (7d first), so creating or dropping partitions of two tiers at once deadlocks (the stress test caught it, in a test cleanup too). One table and tier per statement or transaction.
@@ -83,13 +84,14 @@ crates/ductus-core     config, formats, environments, secrets, resources (databa
                        settings (ductus.yaml)
 crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
-crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations); retention.rs (tiers, changes, drops, held area); activity.rs (last activity, pauses)
+crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations); retention.rs (tiers, changes, drops, held area); activity.rs (last activity, pauses);
+                       actions.rs (resend, edited copies, message_actions, the quarantine list)
 crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for the API: health, queues, drain, pauses),
                        stats.rs (counts and timings in memory: histograms, Prometheus text format),
                        activity.rs (last activity and pauses, kept in the database across restarts),
                        gate.rs (drain gate), retention.rs (applies retention, runs changes, drops partitions),
-                       api/ (REST API: status, messages, reports, retention, tokens, metrics, hotspots,
+                       api/ (REST API: status, messages, actions (resend, edit, quarantine), reports, retention, tokens, metrics, hotspots,
                        session (browser sign-in), ui (serves the embedded web UI; build.rs embeds ui/dist)),
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,

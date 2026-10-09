@@ -652,6 +652,8 @@ pub struct LiveInterface {
     name: String,
     state: &'static str,
     accepting: bool,
+    /// What it receives, as in `GET /interfaces`.
+    health: LiveHealth,
     destinations: Vec<LiveDestination>,
 }
 
@@ -661,9 +663,19 @@ pub struct LiveDestination {
     pending: i64,
     quarantined: i64,
     paused: bool,
+    /// As in `GET /interfaces` (an update is sent when a state changes, not as a summary's
+    /// minutes tick on).
+    health: LiveHealth,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct LiveHealth {
+    state: &'static str,
+    summary: String,
 }
 
 fn live_update(engine: &Engine, snapshot: &Snapshot) -> LiveUpdate {
+    let now = Utc::now();
     LiveUpdate {
         at: snapshot.at,
         drain: drain_report(engine, snapshot),
@@ -674,16 +686,23 @@ fn live_update(engine: &Engine, snapshot: &Snapshot) -> LiveUpdate {
                 name: i.config.name.clone(),
                 state: if i.health.stopped().is_some() { "stopped" } else { "running" },
                 accepting: i.gate.is_open(),
+                health: {
+                    let (state, summary) = engine.interface_state(i, now);
+                    LiveHealth { state: state.label(), summary }
+                },
                 destinations: i
                     .destinations
                     .iter()
-                    .map(|(name, id)| {
+                    .enumerate()
+                    .map(|(n, (name, id))| {
                         let q = snapshot.queue(*id);
+                        let d = engine.diagnose(i, n, snapshot, now);
                         LiveDestination {
                             name: name.clone(),
                             pending: q.pending,
                             quarantined: q.quarantined,
                             paused: engine.paused(*id).is_some(),
+                            health: LiveHealth { state: d.state.label(), summary: d.summary },
                         }
                     })
                     .collect(),
@@ -692,8 +711,9 @@ fn live_update(engine: &Engine, snapshot: &Snapshot) -> LiveUpdate {
     }
 }
 
-/// Live updates (Server-Sent Events): an `update` event with every interface's queues and the
-/// drain state, sent at once and then whenever something changes (checked every 2 s).
+/// Live updates (Server-Sent Events): an `update` event with every interface's queues, health and
+/// the drain state, sent at once and then whenever a count or a health state changes or a delivery
+/// finishes (checked every 2 s).
 #[utoipa::path(
     get, path = "/events", tag = "engine",
     responses((status = 200, description = "`text/event-stream` of `update` events", body = LiveUpdate, content_type = "text/event-stream"))

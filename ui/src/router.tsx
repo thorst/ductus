@@ -8,6 +8,7 @@ import { InterfacesPage } from "@/pages/interfaces";
 import { MessagePage } from "@/pages/message";
 import { NotFound } from "@/pages/not-found";
 import { OverviewPage } from "@/pages/overview";
+import { QuarantinePage } from "@/pages/quarantine";
 import { SignInPage } from "@/pages/sign-in";
 
 const root = createRootRouteWithContext<{ queryClient: QueryClient }>()({
@@ -59,6 +60,21 @@ const iface = createRoute({
   component: InterfacePage,
 });
 
+export interface QuarantineSearch {
+  interface?: string;
+  destination?: string;
+}
+
+const quarantine = createRoute({
+  getParentRoute: () => app,
+  path: "/quarantine",
+  validateSearch: (search: Record<string, unknown>): QuarantineSearch => ({
+    interface: typeof search.interface === "string" && search.interface ? search.interface : undefined,
+    destination: typeof search.destination === "string" && search.destination ? search.destination : undefined,
+  }),
+  component: QuarantinePage,
+});
+
 const message = createRoute({
   getParentRoute: () => app,
   path: "/messages/$id",
@@ -69,7 +85,7 @@ const message = createRoute({
   component: MessagePage,
 });
 
-const tree = root.addChildren([signIn, app.addChildren([overview, interfaces, iface, message])]);
+const tree = root.addChildren([signIn, app.addChildren([overview, interfaces, iface, quarantine, message])]);
 
 export function makeRouter(queryClient: QueryClient) {
   return createRouter({ routeTree: tree, context: { queryClient }, defaultPreload: "intent", scrollRestoration: true });

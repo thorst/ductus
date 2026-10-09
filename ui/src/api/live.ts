@@ -1,6 +1,6 @@
-// Live updates: the engine's `/events` stream (Server-Sent Events) says when queues or the drain
-// state change; the screens' data is then fetched again. The browser sends the session cookie
-// with it (same origin) and reconnects by itself after a network blip.
+// Live updates: the engine's `/events` stream (Server-Sent Events) says when queues, a health
+// state or the drain state change; the screens' data is then fetched again. The browser sends
+// the session cookie with it (same origin) and reconnects by itself after a network blip.
 
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
@@ -18,6 +18,8 @@ export function useLiveUpdates(): LiveState {
       setState("live");
       void queryClient.invalidateQueries({ queryKey: ["interfaces"] });
       void queryClient.invalidateQueries({ queryKey: ["engine"] });
+      void queryClient.invalidateQueries({ queryKey: ["quarantine"] });
+      void queryClient.invalidateQueries({ queryKey: ["message"] }); // an open message's statuses
     });
     return () => events.close();
   }, [queryClient]);

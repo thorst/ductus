@@ -6,8 +6,10 @@
 #   orders  its code quarantines one patient's messages ("unknown patient 100003")
 #   billing its only destination is paused, with a reason
 # The browser signs in with a token (wrong one first), finds what needs attention, filters the
-# interfaces, reads a destination's state, opens a quarantined message and its HL7 fields, checks
-# accessibility (axe) in every theme, and signs out. Screenshots: ui/test-results/.
+# interfaces, reads a destination's state, opens a quarantined message and its HL7 fields, lists
+# the quarantine, checks accessibility (axe) in every theme, and signs out. Then, as an operator,
+# it corrects a quarantined message (an edited copy), resends from the quarantine screen, and
+# pauses and resumes a destination. Screenshots: ui/test-results/.
 #
 # Needs Node and the UI's packages (cd ui && npm ci), and Playwright's Chromium
 # (npx playwright install --with-deps chromium).
@@ -93,7 +95,7 @@ echo "   /interfaces/adt → index.html, gzip, CSP"
 
 echo "== the browser (Playwright)"
 cd "$UI"
-export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER
+export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN
 if npx playwright test --reporter=line; then
   echo PASS
 else

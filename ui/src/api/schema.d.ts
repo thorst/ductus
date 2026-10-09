@@ -73,8 +73,9 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Live updates (Server-Sent Events): an `update` event with every interface's queues and the
-         *     drain state, sent at once and then whenever something changes (checked every 2 s).
+         * Live updates (Server-Sent Events): an `update` event with every interface's queues, health and
+         *     the drain state, sent at once and then whenever a count or a health state changes or a delivery
+         *     finishes (checked every 2 s).
          */
         get: operations["events"];
         put?: never;
@@ -480,6 +481,12 @@ export interface components {
             destination?: string | null;
             /** @description Message ids (at most 500), from any interfaces. */
             ids: number[];
+            /**
+             * @description Only deliveries still quarantined, even with `destination` named (what the quarantine
+             *     screen sends: a delivery someone resolved meanwhile is skipped, not replayed). Default:
+             *     true without `destination`, false with it.
+             */
+            quarantined_only?: boolean | null;
             /** @description Why (kept with each action). */
             reason?: string | null;
         };
@@ -977,6 +984,11 @@ export interface components {
             error: string;
         };
         LiveDestination: {
+            /**
+             * @description As in `GET /interfaces` (an update is sent when a state changes, not as a summary's
+             *     minutes tick on).
+             */
+            health: components["schemas"]["LiveHealth"];
             name: string;
             paused: boolean;
             /** Format: int64 */
@@ -984,9 +996,15 @@ export interface components {
             /** Format: int64 */
             quarantined: number;
         };
+        LiveHealth: {
+            state: string;
+            summary: string;
+        };
         LiveInterface: {
             accepting: boolean;
             destinations: components["schemas"]["LiveDestination"][];
+            /** @description What it receives, as in `GET /interfaces`. */
+            health: components["schemas"]["LiveHealth"];
             name: string;
             state: string;
         };

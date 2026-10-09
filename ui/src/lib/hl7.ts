@@ -55,3 +55,18 @@ export function prettyJson(payload: string): string | null {
     return null;
   }
 }
+
+/** A message as text to edit: one segment (or line) per line, whatever the line endings. */
+export function toEditable(payload: string): string {
+  return payload.replace(/\r\n?/g, "\n");
+}
+
+/**
+ * Edited text back to a message. HL7 gets its segment separator back (`\r`, ending the last
+ * segment too, as senders do) and no blank segments; anything else keeps the line endings typed.
+ */
+export function fromEditable(text: string, hl7: boolean): string {
+  if (!hl7) return text;
+  const segments = text.split(/\r\n?|\n/).filter((s) => s.trim() !== "");
+  return segments.map((s) => `${s}\r`).join("");
+}
