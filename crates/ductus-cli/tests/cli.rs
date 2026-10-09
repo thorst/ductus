@@ -505,6 +505,39 @@ async fn the_api_shows_the_engine_and_drains_it() {
     assert_eq!(mine["source"], format!("mllp 127.0.0.1:{mllp}"));
     assert_eq!(mine["destinations"][0]["connector"], format!("mllp 127.0.0.1:{receiver}"));
     assert_eq!(mine["destinations"][0]["pending"], 3);
+    assert_eq!(mine["since_start"]["received"], 3, "{mine}");
+
+    // Prometheus metrics (a token too).
+    assert_eq!(http.get(format!("{base}/metrics")).send().await.unwrap().status(), 401);
+    let metrics = get("/metrics", &viewer).await.unwrap().text().await.unwrap();
+    let labels = format!("interface=\"{name}\",destination=\"lab\"");
+    for line in [
+        format!(
+            "ductus_messages_received_total{{interface=\"{name}\"}} 3
+"
+        ),
+        format!(
+            "ductus_queue_pending{{{labels}}} 3
+"
+        ),
+        format!(
+            "ductus_deliveries_total{{{labels},outcome=\"sent\"}} 0
+"
+        ),
+        format!(
+            "ductus_interface_stopped{{interface=\"{name}\"}} 0
+"
+        ),
+        "# TYPE ductus_delivery_latency_seconds histogram
+"
+        .to_string(),
+    ] {
+        assert!(
+            metrics.contains(&line),
+            "missing {line:?} in:
+{metrics}"
+        );
+    }
 
     // The message browser.
     let page = json(&format!("/interfaces/{name}/messages?limit=2"), &viewer).await;
@@ -525,9 +558,16 @@ async fn the_api_shows_the_engine_and_drains_it() {
     let owners = json("/owners", &viewer).await;
     assert!(owners.to_string().contains("Lab team"), "{owners}");
     let spec: serde_json::Value = http.get(format!("{base}/openapi.json")).send().await.unwrap().json().await.unwrap();
-    for path in
-        ["/interfaces", "/interfaces/{name}/messages", "/messages/{id}", "/drain", "/events", "/doctor", "/tokens"]
-    {
+    for path in [
+        "/interfaces",
+        "/interfaces/{name}/messages",
+        "/messages/{id}",
+        "/drain",
+        "/events",
+        "/doctor",
+        "/tokens",
+        "/metrics",
+    ] {
         assert!(spec["paths"][path].is_object(), "{path} missing from the OpenAPI document");
     }
 
@@ -554,6 +594,37 @@ async fn the_api_shows_the_engine_and_drains_it() {
         count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         async { bytes::Bytes::from_static(b"MSH|^~\\&|LAB|H|EPIC|H|20260101||ACK|1|P|2.5\rMSA|AA|1\r") }
     }));
+    let all_there = eventually(async || delivered.load(std::sync::atomic::Ordering::SeqCst) == 3);
+    assert!(all_there.await, "delivered once the receiver is up");
+    // Counted, with how long each took since it was received (the first waited for the receiver).
+    let counted = eventually(async || {
+        let interfaces = json("/interfaces", &viewer).await;
+        let mine = interfaces.as_array().unwrap().iter().find(|i| i["name"] == name.as_str()).unwrap().clone();
+        mine["destinations"][0]["since_start"]["sent"] == 3
+    });
+    assert!(counted.await, "three sent");
+    let interfaces = json("/interfaces", &viewer).await;
+    let lab = &interfaces.as_array().unwrap().iter().find(|i| i["name"] == name.as_str()).unwrap()["destinations"][0];
+    let counts = &lab["since_start"];
+    assert_eq!((&counts["latency"]["count"], &counts["send"]["count"]), (&3.into(), &3.into()), "{lab}");
+    assert!(counts["retries"].as_u64().unwrap() >= 1, "the receiver was down at first: {lab}");
+    assert!(counts["latency"]["p50_ms"].as_f64().unwrap() > 0.0, "{lab}");
+    let metrics = get("/metrics", &viewer).await.unwrap().text().await.unwrap();
+    assert!(
+        metrics.contains(&format!(
+            "ductus_deliveries_total{{{labels},outcome=\"sent\"}} 3
+"
+        )),
+        "{metrics}"
+    );
+    assert!(
+        metrics.contains(&format!(
+            "ductus_send_seconds_count{{{labels}}} 3
+"
+        )),
+        "{metrics}"
+    );
+
     let root = dir.path().to_path_buf();
     let (ok, out) = tokio::task::spawn_blocking(move || {
         ductus(&root, &["drain", "--wait", "--stop", "--api", &api_url, "--token", &admin])

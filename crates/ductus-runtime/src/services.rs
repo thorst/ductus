@@ -2,6 +2,7 @@
 //! variables, secrets.
 
 use crate::mssql;
+use crate::stats::ResourceCalls;
 use anyhow::{Result, anyhow, bail};
 use ductus_core::resources::{Api, Database, DbConnection};
 use ductus_core::{Environment, InterfaceConfig, Resources};
@@ -46,6 +47,8 @@ pub struct SharedServices {
     databases: HashMap<String, Pool>,
     apis: BTreeMap<String, Api>,
     http: reqwest::Client,
+    /// Each resource's calls: counted and timed.
+    calls: Arc<ResourceCalls>,
     /// Database and HTTP calls run on the engine's main (multi-threaded) runtime. A socket is served by
     /// the runtime that opened it; if a worker thread's runtime opened it, its replies would
     /// wait while that thread is busy running JavaScript.
@@ -65,7 +68,21 @@ impl SharedServices {
             databases,
             apis: resources.apis.clone(),
             http: http_client(),
+            calls: Arc::new(ResourceCalls::new(resources.databases.keys().cloned(), resources.apis.keys().cloned())),
             io: tokio::runtime::Handle::current(),
+        }
+    }
+
+    /// Each resource's call counts and timings (for the API and `/metrics`).
+    pub(crate) fn calls(&self) -> Arc<ResourceCalls> {
+        self.calls.clone()
+    }
+
+    /// Run a call, timed under `stats` when it's a known resource.
+    async fn timed<T>(stats: Option<&crate::stats::CallStats>, call: impl Future<Output = Result<T>>) -> Result<T> {
+        match stats {
+            Some(stats) => stats.time(call).await,
+            None => call.await,
         }
     }
 
@@ -288,10 +305,13 @@ impl Services for EngineServices {
         let (shared, own) = (self.shared.clone(), self.own.clone());
         let (resource, sql) = (resource.to_string(), sql.to_string());
         self.shared.spawn(async move {
-            match shared.pool(&own, &resource)? {
-                Pool::Postgres(p) => postgres_query(p, &sql, params).await,
-                Pool::Sqlserver(p) => p.query(&sql, params).await,
-            }
+            let call = async {
+                match shared.pool(&own, &resource)? {
+                    Pool::Postgres(p) => postgres_query(p, &sql, params).await,
+                    Pool::Sqlserver(p) => p.query(&sql, params).await,
+                }
+            };
+            SharedServices::timed(shared.calls.db(&resource), call).await
         })
     }
 
@@ -299,16 +319,24 @@ impl Services for EngineServices {
         let (shared, own) = (self.shared.clone(), self.own.clone());
         let (resource, sql) = (resource.to_string(), sql.to_string());
         self.shared.spawn(async move {
-            match shared.pool(&own, &resource)? {
-                Pool::Postgres(p) => postgres_execute(p, sql, params).await,
-                Pool::Sqlserver(p) => p.execute(&sql, params).await,
-            }
+            let call = async {
+                match shared.pool(&own, &resource)? {
+                    Pool::Postgres(p) => postgres_execute(p, sql, params).await,
+                    Pool::Sqlserver(p) => p.execute(&sql, params).await,
+                }
+            };
+            SharedServices::timed(shared.calls.db(&resource), call).await
         })
     }
 
     fn fetch(&self, request: FetchRequest) -> BoxFuture<FetchResponse> {
         let shared = self.shared.clone();
-        self.shared.spawn(async move { http_fetch(&shared.http, resolve_api(&shared.apis, request)?).await })
+        self.shared.spawn(async move {
+            let api = request.api.clone();
+            let stats = shared.calls.http(api.as_deref());
+            SharedServices::timed(stats, async { http_fetch(&shared.http, resolve_api(&shared.apis, request)?).await })
+                .await
+        })
     }
 
     fn variable(&self, name: &str) -> Option<String> {
@@ -408,6 +436,35 @@ mod tests {
         r.api = Some("nope".into());
         let err = resolve_api(&resources.apis, r).unwrap_err().to_string();
         assert_eq!(err, "no api named `nope` in resources.yaml (defined: echo)");
+    }
+
+    /// Calls are counted and timed per resource: a named API's under its name, plain URLs under
+    /// `fetch`; failures count as errors, a name resources.yaml doesn't have counts nowhere.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn calls_are_counted_per_resource() {
+        let base = server().await;
+        let resources: Resources =
+            serde_yaml_ng::from_str(&format!("apis:\n  echo: {{ url: '{base}/', timeout: 300ms }}\n")).unwrap();
+        let shared = Arc::new(SharedServices::new(Environment::with_variables("dev", &[]), &resources));
+        let services = EngineServices::new(shared.clone(), Default::default());
+        let via = |api: Option<&str>, url: &str| FetchRequest {
+            api: api.map(Into::into),
+            timeout_ms: None,
+            ..request(url, 0)
+        };
+
+        services.fetch(via(Some("echo"), "/echo")).await.unwrap();
+        services.fetch(via(Some("echo"), "/slow")).await.unwrap_err(); // times out
+        services.fetch(via(Some("nope"), "/echo")).await.unwrap_err();
+        services.fetch(request(&format!("{base}/echo"), 5000)).await.unwrap();
+
+        let calls = shared.calls();
+        let echo = calls.http(Some("echo")).unwrap();
+        assert_eq!((echo.calls.count(), crate::stats::get(&echo.errors)), (2, 1));
+        assert!(echo.calls.quantile(1.0).unwrap() >= Duration::from_millis(300), "the timeout was timed");
+        let fetch = calls.http(None).unwrap();
+        assert_eq!((fetch.calls.count(), crate::stats::get(&fetch.errors)), (1, 0));
+        assert!(calls.http(Some("nope")).is_none());
     }
 
     /// A local HTTP server: /echo answers with what it got, /slow takes 2 s, /big is 17 MB.

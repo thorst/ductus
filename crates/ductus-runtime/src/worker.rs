@@ -20,6 +20,7 @@ use crate::http::HttpCall;
 use crate::ingest::{Intake, Routed};
 use crate::limiter::{Decision, Limiter};
 use crate::services::EngineServices;
+use crate::stats::{self, DestinationStats, InterfaceStats};
 use anyhow::{Context, Result, anyhow};
 use ductus_core::InterfaceConfig;
 use ductus_core::config::Retry;
@@ -52,6 +53,8 @@ pub struct Job {
     pub health: Arc<Health>,
     /// What each destination needs beyond its config, in `config.destinations()` order.
     pub outlets: Vec<Outlet>,
+    /// The interface's counts (respond mode: its requests).
+    pub stats: Arc<InterfaceStats>,
 }
 
 /// One destination's shared parts.
@@ -67,6 +70,8 @@ pub struct Outlet {
     pub api: Option<ductus_core::resources::Api>,
     /// Routes to another interface: where its messages are stored.
     pub route: Option<Arc<Intake>>,
+    /// Its counts and timings, shared by its slots.
+    pub stats: Arc<DestinationStats>,
 }
 
 /// Readiness report for one job: its interface name and whether its code loaded.
@@ -131,7 +136,8 @@ pub fn spawn_thread(
                         })
                     };
                     if let Some(requests) = job.requests.take() {
-                        let worker = Responder { config: job.config, script: script(0), health: job.health };
+                        let worker =
+                            Responder { config: job.config, script: script(0), health: job.health, stats: job.stats };
                         tokio::task::spawn_local(worker.answer(requests));
                         continue;
                     }
@@ -218,6 +224,7 @@ struct Responder {
     config: Arc<InterfaceConfig>,
     script: Option<Script>,
     health: Arc<Health>,
+    stats: Arc<InterfaceStats>,
 }
 
 impl Responder {
@@ -231,9 +238,14 @@ impl Responder {
                 let _ = call.reply.send(Err(anyhow!("{} interface stopped: {reason}", ductus_script::TRANSIENT)));
                 continue;
             }
-            let (script, health, name) = (script.clone(), self.health.clone(), name.clone());
+            let (script, health, name, stats) = (script.clone(), self.health.clone(), name.clone(), self.stats.clone());
             tokio::task::spawn_local(async move {
+                let started = std::time::Instant::now();
                 let result = script.transform(&call.envelope, None).await;
+                stats.requests.observe(started.elapsed());
+                if result.is_err() {
+                    stats::add(&stats.request_errors);
+                }
                 match result.as_ref().err().and_then(|e| e.downcast_ref::<Runaway>()) {
                     Some(runaway) => ran_away(&name, &health, runaway),
                     None => health.ran(),
@@ -272,6 +284,7 @@ struct Worker {
     routed: Vec<Routed>,
     routed_since: Option<std::time::Instant>,
     health: Arc<Health>,
+    stats: Arc<DestinationStats>,
 }
 
 /// What the interface logic decided to do with a message.
@@ -317,6 +330,7 @@ impl Worker {
             routed: Vec::new(),
             routed_since: None,
             health: job.health.clone(),
+            stats: outlet.stats,
             config,
         }
     }
@@ -374,7 +388,7 @@ impl Worker {
         loop {
             let outcome = match &self.script {
                 None => Outcome::Deliver(input.to_string()),
-                Some(script) => match script.transform(&input, Some(&meta)).await {
+                Some(script) => match self.transformed(script, &input, &meta).await {
                     Ok(Some(output)) => match output.strip_prefix(ductus_script::KILL) {
                         Some(reason) => Outcome::Filter(Some(format!("killed: {reason}"))),
                         None => Outcome::Deliver(output),
@@ -409,7 +423,10 @@ impl Worker {
                     let error = format!("transform {runaway}");
                     self.finish(reference, Status::Quarantined, Some(&error)).await
                 }
-                Outcome::Filter(reason) => self.done(Done::with(reference, Status::Filtered, reason.as_deref())).await,
+                Outcome::Filter(reason) => {
+                    stats::add(&self.stats.filtered);
+                    self.done(Done::with(reference, Status::Filtered, reason.as_deref())).await
+                }
                 Outcome::Quarantine(error) => {
                     tracing::warn!(interface = %self.config.name, destination = %self.destination, id = reference.id, %error, "quarantined");
                     self.finish(reference, Status::Quarantined, Some(&error)).await
@@ -428,6 +445,21 @@ impl Worker {
         }
     }
 
+    /// Run the destination's function, timing it.
+    async fn transformed(&self, script: &Script, input: &str, meta: &str) -> Result<Option<String>> {
+        let started = std::time::Instant::now();
+        let result = script.transform(input, Some(meta)).await;
+        self.stats.transform.observe(started.elapsed());
+        result
+    }
+
+    /// Count a message delivered (or routed), and how long it took since it was received.
+    fn sent(&self, reference: MessageRef) {
+        stats::add(&self.stats.sent);
+        let waited = chrono::Utc::now() - reference.received_at;
+        self.stats.latency.observe(waited.to_std().unwrap_or_default());
+    }
+
     async fn deliver(&mut self, reference: MessageRef, mut attempts: i32, payload: Vec<u8>) {
         if let Some(limiter) = self.limiter.clone() {
             loop {
@@ -438,6 +470,7 @@ impl Worker {
                         tokio::time::sleep(delay).await;
                     }
                     Decision::Drop => {
+                        stats::add(&self.stats.filtered);
                         let dropped = Done::with(reference, Status::Filtered, Some("dropped: over rate limit"));
                         return self.done(dropped).await;
                     }
@@ -450,14 +483,18 @@ impl Worker {
             let output = self.save_output.then(|| payload.clone());
             self.routed.push(Routed { payload, origin: reference.id });
             self.routed_since.get_or_insert_with(std::time::Instant::now);
+            self.sent(reference);
             return self.done(Done::sent(reference, output)).await;
         }
         let retry = self.retry.clone();
         let mut backoff = Duration::from_millis(retry.initial_backoff_ms);
         loop {
             let sender = self.sender.as_mut().expect("not a route");
+            let started = std::time::Instant::now();
             match sender.send(reference.id, &payload).await {
                 Ok(()) => {
+                    self.stats.send.observe(started.elapsed());
+                    self.sent(reference);
                     let output = self.save_output.then_some(payload);
                     return self.done(Done::sent(reference, output)).await;
                 }
@@ -494,6 +531,7 @@ impl Worker {
     }
 
     async fn record_failure(&self, reference: MessageRef, error: &str) -> Option<i32> {
+        stats::add(&self.stats.retries);
         let (error, destination) = (error.to_string(), self.destination_id);
         match self.db(|store| async move { store.record_failure(reference, destination, &error).await }).await {
             Ok(attempts) => Some(attempts),
@@ -540,6 +578,9 @@ impl Worker {
     /// the database accepts it: if we gave up here, the message would be processed again after
     /// a restart.
     async fn finish(&self, reference: MessageRef, status: Status, error: Option<&str>) {
+        if status == Status::Quarantined {
+            stats::add(&self.stats.quarantined);
+        }
         let save = || {
             let (done, destination) = (Done::with(reference, status, error), self.destination_id);
             self.db(move |store| async move { store.finish(destination, &[done]).await })

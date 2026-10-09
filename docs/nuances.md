@@ -289,6 +289,25 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** the REST API listens on `127.0.0.1:7700` by default (`api.listen` in ductus.yaml, `--api-listen`, or `off`). Every call except `/health` and `/openapi.json` needs a token. Tokens are made on the server with `ductus token create` and are stored only as hashes: a lost token can't be shown again; revoke it and make a new one.
 - **What to do:** put a TLS reverse proxy in front before opening it to the network (the engine's own listeners have no TLS yet).
 
+## Monitoring
+
+### Counts and timings start at zero when the engine starts (level 3)
+- **What:** `GET /api/v1/metrics` (Prometheus) and `since_start` in `GET /api/v1/interfaces` count messages received, sent, filtered, quarantined and retried, and time transforms, sends, database/API calls and the whole journey from receipt to sent. They're kept in memory and start again at zero with the engine. Queue sizes (`pending`, `quarantined`) come from the database and are always current.
+- **Why:** counting in memory costs nothing per message; writing every count to the database would cost a write per message. Prometheus expects counters to reset and its `rate()` handles it.
+- **What to do:** graph rates (`rate(ductus_deliveries_total[5m])`), not raw totals. For "how many today", use the message browser or the database, which keep everything for the retention window.
+
+### Timings are estimates to a bucket, averages are exact (level 4)
+- **What:** p50/p95 (half / 95% of the messages were faster than this) are estimated from histogram buckets (1, 2.5 and 5 per decade from 0.5 ms to 10 s, then 1 min, 5 min, 1 h), so they're good to about a bucket's width: a p50 of "3.5 ms" means somewhere between 2.5 and 5 ms. `mean_ms` is exact (the total time divided by the count).
+- **What to do:** use p95 to spot slow outliers and changes over time, the mean to compare against a measurement.
+
+### Prometheus series grow with destinations (level 4)
+- **What:** each destination has 3 histograms (receipt to sent, send, transform) of 20 series each (18 buckets, a sum and a count), plus its counts and queue sizes: about 65 series per destination. 1,000 destinations ≈ 65,000 series, comfortable for Prometheus but a cost on hosted services that bill per series.
+- **What to do:** on a hosted service, drop what you don't graph with `metric_relabel_configs` (for example keep `ductus_delivery_latency_seconds` and drop `ductus_transform_seconds`).
+
+### In respond mode, calls run one after another unless you await them together (level 2)
+- **What:** each `await` waits for its call before the next starts. Measured in the v0.4 demo (a patient lookup API: 2 database queries and 1 EMPI call): 2.1–3.0 ms in the engine on average, of which ~1.5–2.1 ms is the three calls one after another (~0.5–0.7 ms each on a local database; a remote one takes longer) and ~0.6 ms the engine itself.
+- **What to do:** when calls don't depend on each other, start them together: `const [patient, empi] = await Promise.all([db("patient_db").one(...), fetch(...)])`. The response then takes about as long as the slowest call instead of the sum. `GET /api/v1/engine` (`resources`) shows each database's and API's call times, to see which one to work on.
+
 ### Anyone with a viewer token can read message payloads (level 4)
 - **What:** `GET /api/v1/messages/{id}` returns the payload, which holds patient data. Each read is logged with the token's name; there are no finer permissions or audit log yet (they come with users and roles in v0.5 step 8).
 - **What to do:** give tokens only to people and tools that may see patient data, and name them so the log says who looked.

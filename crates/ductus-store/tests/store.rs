@@ -357,11 +357,19 @@ async fn the_queue_read_uses_the_queue_index() {
     .fetch_all(&mut *connection)
     .await
     .unwrap();
-    let scans: Vec<&String> = plan.iter().filter(|l| l.contains("Scan") && l.contains(" on deliveries_")).collect();
-    assert!(!scans.is_empty(), "no scan of deliveries in:\n{}", plan.join("\n"));
+    // The partition holding the delivered rows and the backlog. (On nearly empty partitions of
+    // the shared test database either index is as cheap, and the planner picks either.)
+    let partition: String = sqlx::query_scalar(sqlx::AssertSqlSafe(format!(
+        "SELECT tableoid::regclass::text FROM deliveries WHERE destination_id = {} LIMIT 1",
+        t.dest()
+    )))
+    .fetch_one(&mut *connection)
+    .await
+    .unwrap();
+    let scan = plan.iter().find(|l| l.contains("Scan") && l.contains(&format!(" on {partition} ")));
     assert!(
-        scans.iter().all(|l| l.contains("destination_id_message_id")),
-        "the queue read doesn't use deliveries_queue:\n{}",
+        scan.is_some_and(|l| l.contains("destination_id_message_id")),
+        "the queue read doesn't use deliveries_queue on {partition}:\n{}",
         plan.join("\n")
     );
     let read = store.pending(t.dest(), &[0], 50).await.unwrap();

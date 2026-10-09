@@ -8,6 +8,7 @@
 //! connection checks, admin also manages tokens.
 
 mod messages;
+mod metrics;
 mod reports;
 mod retention;
 mod status;
@@ -64,6 +65,7 @@ pub fn router(engine: Shared) -> (Router, utoipa::openapi::OpenApi) {
     let (api, doc) = OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(status::routes())
         .merge(messages::routes())
+        .merge(metrics::routes())
         .merge(reports::routes())
         .merge(retention::routes())
         .merge(tokens::routes())

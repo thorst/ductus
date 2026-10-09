@@ -5,6 +5,7 @@ use crate::Wake;
 use crate::gate::{Closed, Gate};
 use crate::hl7_now;
 use crate::keys::{self, KeyPath};
+use crate::stats::{self, InterfaceStats};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use ductus_core::config::{Durability, Source};
@@ -38,6 +39,8 @@ pub struct Intake {
     ordering: Option<KeyPath>,
     dedupe: Vec<KeyPath>,
     control_id: Option<KeyPath>,
+    /// What it received (shared with the API and `/metrics`).
+    pub stats: Arc<InterfaceStats>,
 }
 
 impl Intake {
@@ -50,6 +53,7 @@ impl Intake {
         gate: Arc<Gate>,
         destinations: Vec<DestinationId>,
         tier: Arc<AtomicI16>,
+        stats: Arc<InterfaceStats>,
     ) -> Result<Self> {
         let compile = |path: &str| {
             keys::compile(&config.format, path).with_context(|| format!("interface `{}`: key `{path}`", config.name))
@@ -57,7 +61,7 @@ impl Intake {
         let ordering = config.ordering.key.as_deref().map(compile).transpose()?;
         let dedupe = config.dedupe.iter().flat_map(|d| d.keys.iter()).map(|k| compile(k)).collect::<Result<_>>()?;
         let control_id = (config.format == Format::Hl7).then(|| compile("MSH-10")).transpose()?;
-        Ok(Self { config, store, wake, gate, destinations, tier, ordering, dedupe, control_id })
+        Ok(Self { config, store, wake, gate, destinations, tier, ordering, dedupe, control_id, stats })
     }
 
     pub fn store(&self) -> &Store {
@@ -93,9 +97,29 @@ impl Intake {
         self.wake.lane(partition);
     }
 
+    /// Count what storing gave: `queued` new messages, `duplicates`, or a failure (not a closed
+    /// gate: that's a drain, not a problem).
+    fn count<T>(&self, result: &Result<T>, queued: impl Fn(&T) -> (u64, u64)) {
+        match result {
+            Ok(r) => {
+                let (queued, duplicates) = queued(r);
+                self.stats.received.fetch_add(queued, Relaxed);
+                self.stats.duplicates.fetch_add(duplicates, Relaxed);
+            }
+            Err(e) if e.is::<Closed>() => {}
+            Err(_) => stats::add(&self.stats.store_failures),
+        }
+    }
+
     /// Store a message (deduplicating if configured) and wake its worker. Fails with `Closed`
     /// while draining.
     pub async fn accept(&self, payload: &[u8]) -> Result<Accepted> {
+        let result = self.accept_one(payload).await;
+        self.count(&result, |a| if matches!(a, Accepted::Queued(_)) { (1, 0) } else { (0, 1) });
+        result
+    }
+
+    async fn accept_one(&self, payload: &[u8]) -> Result<Accepted> {
         let _pass = self.gate.enter()?;
         let keys = self.keys(payload);
         let new = NewMessage {
@@ -129,6 +153,12 @@ impl Intake {
     /// Store many messages and the source's progress in one transaction (see `Store::insert_batch`).
     /// Returns how many were queued (the rest were duplicates).
     pub async fn accept_batch(&self, payloads: &[Vec<u8>], state: Option<(&str, &str)>) -> Result<usize> {
+        let result = self.accept_many(payloads, state).await;
+        self.count(&result, |&queued| (queued as u64, (payloads.len() - queued) as u64));
+        result
+    }
+
+    async fn accept_many(&self, payloads: &[Vec<u8>], state: Option<(&str, &str)>) -> Result<usize> {
         let _pass = self.gate.enter()?;
         let keys: Vec<Keys> = payloads.iter().map(|p| self.keys(p)).collect();
         let batch = Batch {
@@ -195,8 +225,10 @@ impl Intake {
             destinations: &self.destinations,
             tier: self.tier(),
         };
-        let queued = self.store.finish_routed(destination, done, &batch).await?;
-        for (k, _) in keys.iter().zip(&queued).filter(|(_, queued)| **queued) {
+        let queued = self.store.finish_routed(destination, done, &batch).await;
+        // Not queued here: a duplicate, or already routed by an earlier try of this flush.
+        self.count(&queued, |q| (q.iter().filter(|q| **q).count() as u64, 0));
+        for (k, _) in keys.iter().zip(&queued?).filter(|(_, queued)| **queued) {
             self.wake(k.partition);
         }
         Ok(())
@@ -216,7 +248,9 @@ impl Intake {
             destinations: &self.destinations,
             tier: self.tier(),
         };
-        let queued = self.store.insert_scheduled(new, key, state, skipped_state).await?.is_some();
+        let queued = self.store.insert_scheduled(new, key, state, skipped_state).await.map(|q| q.is_some());
+        self.count(&queued, |&q| (u64::from(q), 0));
+        let queued = queued?;
         if queued {
             self.wake(0);
         }

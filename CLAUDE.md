@@ -82,8 +82,9 @@ crates/ductus-mllp     MLLP framing/listener/client
 crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations); retention.rs (tiers, changes, drops)
 crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for the API: health, queues, drain),
+                       stats.rs (counts and timings in memory: histograms, Prometheus text format),
                        gate.rs (drain gate), retention.rs (applies retention, runs changes, drops partitions),
-                       api/ (REST API: status, messages, reports, retention, tokens),
+                       api/ (REST API: status, messages, reports, retention, tokens, metrics),
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,

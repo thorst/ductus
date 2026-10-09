@@ -280,6 +280,20 @@ run_env() { # env, api port, database url, name suffix, glucose value
 import statistics, sys
 t = sorted(float(x) * 1000 for x in sys.argv[1].split())
 print(f'median {statistics.median(t):.1f} ms, p95 {t[int(len(t) * 0.95) - 1]:.1f} ms')" "$times")"
+  # Where that time goes, from the engine's own timings (REST API; estimates from histogram buckets).
+  local token
+  token=$("$BIN" token create "demo-v04-$env-$$" --role viewer 2>/dev/null)
+  api() { curl -s -H "Authorization: Bearer $token" "http://127.0.0.1:7700/api/v1$1"; }
+  echo "  inside the engine (averages): $(python3 -c "
+import json, sys
+engine, interfaces = json.loads(sys.argv[1]), {i['name']: i for i in json.loads(sys.argv[2])}
+calls = {(r['kind'], r['name']): r['calls'] for r in engine['resources']}
+request = interfaces['patient-api']['since_start']['requests']
+db, fetch = calls[('db', 'patient_db')], calls[('fetch', 'fetch')]
+empi = interfaces['empi']['since_start']['requests']
+print(f\"request {request['mean_ms']} ms = 2 queries x {db['mean_ms']} ms + EMPI call {fetch['mean_ms']} ms\"
+      f\" (the EMPI interface itself {empi['mean_ms']} ms) + the rest\")" "$(api /engine)" "$(api /interfaces)")"
+  "$BIN" token revoke "demo-v04-$env-$$" >/dev/null
 
   kill -INT $ENGINE; wait $ENGINE 2>/dev/null || true; ENGINE=
 }

@@ -30,6 +30,8 @@ pub struct Running {
     pub config: Arc<InterfaceConfig>,
     pub health: Arc<Health>,
     pub gate: Arc<Gate>,
+    /// What it received and delivered since the engine started.
+    pub stats: Arc<crate::stats::InterfaceStats>,
     /// Its destinations' names and store ids, in config order.
     pub destinations: Vec<(String, DestinationId)>,
 }
@@ -70,6 +72,8 @@ pub struct Engine {
     pub resources: Resources,
     pub interfaces: Vec<Running>,
     pub retention: Arc<crate::retention::Retention>,
+    /// Calls to each database and API in resources.yaml (`fetch` for URLs called directly).
+    pub calls: Arc<crate::stats::ResourceCalls>,
     drain: watch::Sender<DrainState>,
     monitor: watch::Sender<Arc<Snapshot>>,
     /// What each interface's code uses, worked out on first request (it needs the TypeScript
@@ -79,16 +83,21 @@ pub struct Engine {
     pub shutdown: CancellationToken,
 }
 
+/// What the engine is made of, from startup.
+pub struct Parts {
+    pub environment: String,
+    pub root: PathBuf,
+    pub database_url: String,
+    pub store: Store,
+    pub resources: Resources,
+    pub interfaces: Vec<Running>,
+    pub retention: Arc<crate::retention::Retention>,
+    pub calls: Arc<crate::stats::ResourceCalls>,
+}
+
 impl Engine {
-    pub fn new(
-        environment: String,
-        root: PathBuf,
-        database_url: String,
-        store: Store,
-        resources: Resources,
-        interfaces: Vec<Running>,
-        retention: Arc<crate::retention::Retention>,
-    ) -> Arc<Self> {
+    pub fn new(parts: Parts) -> Arc<Self> {
+        let Parts { environment, root, database_url, store, resources, interfaces, retention, calls } = parts;
         let engine = Arc::new(Self {
             started_at: Utc::now(),
             environment,
@@ -98,6 +107,7 @@ impl Engine {
             resources,
             interfaces,
             retention,
+            calls,
             drain: watch::Sender::new(DrainState::Accepting),
             monitor: watch::Sender::new(Arc::default()),
             code: OnceCell::new(),

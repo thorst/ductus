@@ -2,6 +2,7 @@
 
 use super::{ApiError, ApiResult, Caller, Eng, Shared};
 use crate::control::{DrainState, Engine, Running, Snapshot};
+use crate::stats::{self, DestinationStats, Histogram, InterfaceStats};
 use axum::Json;
 use axum::extract::Path;
 use axum::response::sse::{Event, KeepAlive, Sse};
@@ -91,6 +92,19 @@ pub struct EngineInfo {
     /// Interfaces stopped because their code ran away (their messages wait).
     stopped: usize,
     drain: DrainStatus,
+    /// Calls from interface code to each database and API in resources.yaml (`fetch`: URLs
+    /// called directly), since the engine started.
+    resources: Vec<ResourceCalls>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ResourceCalls {
+    /// `db`, `api` or `fetch`.
+    kind: String,
+    name: String,
+    calls: Timing,
+    /// Calls that failed (network, SQL, timeout; an HTTP error status is an answer, not a failure).
+    errors: u64,
 }
 
 /// The engine: version, environment, uptime, drain state.
@@ -106,6 +120,16 @@ async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
         interfaces: engine.interfaces.len(),
         stopped: engine.interfaces.iter().filter(|i| i.health.stopped().is_some()).count(),
         drain: drain_report(&engine, &snapshot),
+        resources: engine
+            .calls
+            .all()
+            .map(|(kind, name, s)| ResourceCalls {
+                kind: kind.into(),
+                name: name.into(),
+                calls: Timing::of(&s.calls),
+                errors: stats::get(&s.errors),
+            })
+            .collect(),
     }))
 }
 
@@ -129,7 +153,78 @@ pub struct InterfaceStatus {
     retention_days: Option<i16>,
     description: Option<String>,
     owner: Option<String>,
+    /// Counts since the engine started (they start at zero with it).
+    since_start: InterfaceCounts,
     destinations: Vec<DestinationStatus>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct InterfaceCounts {
+    /// Stored and queued.
+    received: u64,
+    /// Stored as duplicates, not queued.
+    duplicates: u64,
+    /// Couldn't be stored (the sender was told to retry).
+    store_failures: u64,
+    /// Respond mode: requests answered, how long they took in the engine, and how many failed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    requests: Option<Timing>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    request_errors: Option<u64>,
+}
+
+/// How long something took, over every time since the engine started (estimated from histogram
+/// buckets, like Prometheus does: good to a bucket's width).
+#[derive(Serialize, ToSchema)]
+pub struct Timing {
+    count: u64,
+    mean_ms: Option<f64>,
+    p50_ms: Option<f64>,
+    p95_ms: Option<f64>,
+}
+
+impl Timing {
+    fn of(h: &Histogram) -> Self {
+        let ms = |d: Option<std::time::Duration>| d.map(|d| (d.as_secs_f64() * 1e4).round() / 10.0);
+        Self { count: h.count(), mean_ms: ms(h.mean()), p50_ms: ms(h.quantile(0.5)), p95_ms: ms(h.quantile(0.95)) }
+    }
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DestinationCounts {
+    sent: u64,
+    filtered: u64,
+    quarantined: u64,
+    /// Temporary failures (each retry counts).
+    retries: u64,
+    /// From receipt to sent, waiting in the queue included.
+    latency: Timing,
+    /// Each successful send (the receiver's time).
+    send: Timing,
+    /// The destination's function.
+    transform: Timing,
+}
+
+fn interface_counts(s: &InterfaceStats, responds: bool) -> InterfaceCounts {
+    InterfaceCounts {
+        received: stats::get(&s.received),
+        duplicates: stats::get(&s.duplicates),
+        store_failures: stats::get(&s.store_failures),
+        requests: responds.then(|| Timing::of(&s.requests)),
+        request_errors: responds.then(|| stats::get(&s.request_errors)),
+    }
+}
+
+fn destination_counts(s: &DestinationStats) -> DestinationCounts {
+    DestinationCounts {
+        sent: stats::get(&s.sent),
+        filtered: stats::get(&s.filtered),
+        quarantined: stats::get(&s.quarantined),
+        retries: stats::get(&s.retries),
+        latency: Timing::of(&s.latency),
+        send: Timing::of(&s.send),
+        transform: Timing::of(&s.transform),
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -143,6 +238,8 @@ pub struct DestinationStatus {
     pending: i64,
     /// Needing a person.
     quarantined: i64,
+    /// Counts and timings since the engine started.
+    since_start: DestinationCounts,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -241,10 +338,12 @@ fn interface_status(engine: &Engine, i: &Running, snapshot: &Snapshot) -> Interf
         retention_days: engine.retention.get(&c.name).map(|m| m.configured),
         description: given(&c.about.description).map(Into::into),
         owner: owner.map(Into::into),
+        since_start: interface_counts(&i.stats, c.responds()),
         destinations: c
             .destinations()
             .zip(&i.destinations)
-            .map(|((name, d), (_, id))| {
+            .zip(&i.stats.destinations)
+            .map(|(((name, d), (_, id)), stats)| {
                 let queue = snapshot.queue(*id);
                 DestinationStatus {
                     name: name.into(),
@@ -254,6 +353,7 @@ fn interface_status(engine: &Engine, i: &Running, snapshot: &Snapshot) -> Interf
                         .map(Into::into),
                     pending: queue.pending,
                     quarantined: queue.quarantined,
+                    since_start: destination_counts(stats),
                 }
             })
             .collect(),

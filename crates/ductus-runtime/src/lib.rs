@@ -18,6 +18,7 @@ mod schedule;
 mod services;
 mod sftp;
 mod split;
+pub mod stats;
 mod worker;
 
 use anyhow::{Context, Result, bail};
@@ -144,6 +145,8 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         let wake = Arc::new(Wake::new(config.slots(), config.destinations().count()));
         let destination_ids: Vec<_> = ids.by_ref().take(config.destinations().count()).collect();
         let gate = Arc::new(gate::Gate::default());
+        let stats =
+            Arc::new(stats::InterfaceStats::new(&config.name, config.destinations().map(|(name, _)| name.to_string())));
         if !config.responds() {
             let intake = ingest::Intake::new(
                 config.clone(),
@@ -152,18 +155,21 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 gate.clone(),
                 destination_ids.clone(),
                 retention.tier(&config.name),
+                stats.clone(),
             )?;
             intakes.insert(config.name.clone(), Arc::new(intake));
         }
-        parts.push((config, wake, destination_ids, gate));
+        parts.push((config, wake, destination_ids, gate, stats));
     }
-    for (config, wake, destination_ids, gate) in parts {
+    for (config, wake, destination_ids, gate, stats) in parts {
         let health = Arc::new(health::Health::default());
         let outlets: Vec<worker::Outlet> = config
             .destinations()
             .zip(&destination_ids)
-            .map(|((_, d), &id)| worker::Outlet {
+            .zip(&stats.destinations)
+            .map(|(((_, d), &id), destination_stats)| worker::Outlet {
                 id,
+                stats: destination_stats.clone(),
                 limiter: config
                     .rate_limit_for(d)
                     .map(|r| Arc::new(limiter::Limiter::new(r.clone(), std::time::Instant::now()))),
@@ -204,6 +210,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 requests: requests.take(),
                 health: health.clone(),
                 outlets: outlets.clone(),
+                stats: stats.clone(),
             };
             match config.isolation {
                 Isolation::Shared => {
@@ -213,7 +220,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 Isolation::Dedicated => dedicated.push((format!("{}-w{slot}", config.name), job)),
             }
         }
-        interfaces.push((config, wake, destination_ids, health, gate));
+        interfaces.push((config, wake, destination_ids, health, gate, stats));
     }
 
     let services = Arc::new(services::SharedServices::new(env, &resources));
@@ -264,22 +271,24 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     http::serve(http_endpoints).await?;
     let running: Vec<control::Running> = interfaces
         .iter()
-        .map(|(config, _, ids, health, gate)| control::Running {
+        .map(|(config, _, ids, health, gate, stats)| control::Running {
             config: config.clone(),
             health: health.clone(),
             gate: gate.clone(),
+            stats: stats.clone(),
             destinations: config.destinations().map(|(name, _)| name.to_string()).zip(ids.iter().copied()).collect(),
         })
         .collect();
-    let engine = control::Engine::new(
-        options.env.clone(),
-        root.to_path_buf(),
-        database_url.to_string(),
-        store.clone(),
-        resources.clone(),
-        running,
+    let engine = control::Engine::new(control::Parts {
+        environment: options.env.clone(),
+        root: root.to_path_buf(),
+        database_url: database_url.to_string(),
+        store: store.clone(),
+        resources: resources.clone(),
+        interfaces: running,
         retention,
-    );
+        calls: services.calls(),
+    });
     if let Some((host, port)) = &api_address {
         api::serve(engine.clone(), host, *port).await?;
     }
