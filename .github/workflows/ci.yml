@@ -25,7 +25,9 @@ jobs:
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     services:
       postgres:
-        image: postgres:18
+        # The official image through AWS's public mirror: Docker Hub rate-limits anonymous pulls
+        # by IP, and shared runners hit it (every run failed on it for a while on 2026-10-09).
+        image: public.ecr.aws/docker/library/postgres:18
         env:
           POSTGRES_USER: ductus
           POSTGRES_PASSWORD: ductus
