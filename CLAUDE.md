@@ -19,6 +19,8 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - Postgres 18 in WSL: `postgres://todd:ductus@localhost/ductus_dev`.
 - From PowerShell, multi-line or `$`-heavy shell commands get mangled: write a script file and run `wsl -d Ubuntu -- bash /mnt/c/...script.sh`.
 - `/tmp` in WSL is tmpfs: don't benchmark disk there.
+- **WSL's disk lives on D:** (`D:\WSL\UbuntuTest\ext4.vhdx`, distro name `Ubuntu`, since 2026-10-10; C: was full). A synchronous 8 KB write takes ~5 ms there (NVMe C: was ~2.5 ms): benchmark numbers in architecture.md before 0.6.1 were measured on C:. Never `wsl --manage --move` it again: the moved 61 GB image did ~400 ms per synchronous write (commits took a second) while a fresh image on the same drive did 6 ms; export + import made a fresh one. Docker in WSL needs Ubuntu's `docker-buildx` and `docker-compose-v2` packages (installed).
+- Bash: `in` is a keyword (a helper function named `in` is a syntax error), and `tee /dev/stderr` fails in non-interactive WSL shells: write progress with `>&2`.
 
 ## Code conventions
 
@@ -102,7 +104,7 @@ crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for th
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
                        services.rs + mssql.rs (DB calls), limiter.rs, doctor.rs (connection checks)
-crates/ductus-cli      the `ductus` command (project.rs: test/validate/ports/impact/types/secret; new.rs: `new interface`;
+crates/ductus-cli      the `ductus` command (init.rs: `init`, a new project; project.rs: test/validate/ports/impact/types/secret; new.rs: `new interface`;
                        admin.rs: `token`, `drain`, `resume`, `pause`, `retention`, `hotspots`;
                        doctor.rs: runs `doctor` (what to check is runtime's `doctor::plan`); owners.rs: `owners` report and reassign;
                        tools.rs: gen/sink/status;
@@ -113,6 +115,8 @@ ui/                    web UI (React + Vite; README.md): src/api (typed client, 
 sdk/src                TypeScript SDK (embedded via include_str! in ductus-script/src/loader.rs: add new files there)
 sdk/tests              SDK tests (TypeScript)
 scripts/               demos (end-to-end, PASS/FAIL) and scripts/dev (check.sh, demos.sh)
+Dockerfile, packaging/ the image and the .deb/.rpm from one engine build (packaging/README.md: layout, upgrades);
+                       demo-docker.sh, demo-packages.sh (systemd in containers) run in CI's `packaging` job
 docs/                  architecture.md, nuances.md, schema.md (every table/column; a store test fails if one
                        isn't described), shared-pool.md
 examples/adt-relay     example project
