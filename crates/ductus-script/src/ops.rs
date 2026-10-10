@@ -124,3 +124,29 @@ deno_core::extension!(
     esm_entry_point = "ext:ductus_ops/ops.js",
     esm = [dir "src", "ops.js"],
 );
+
+/// The ops extension with its JavaScript inside the binary. deno_core records an `esm` file by
+/// its path on the build machine and reads it there at every isolate's start (the bytes are
+/// only embedded by a startup snapshot), so an installed binary, with no source folder, couldn't
+/// start one.
+pub fn extension() -> deno_core::Extension {
+    let mut extension = ductus_ops::init();
+    extension.esm_files = std::borrow::Cow::Owned(vec![deno_core::ExtensionFileSource::new(
+        "ext:ductus_ops/ops.js",
+        deno_core::ascii_str_include!("ops.js"),
+    )]);
+    extension
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_extension_reads_nothing_from_disk() {
+        let extension = super::extension();
+        let files = [&extension.js_files, &extension.esm_files, &extension.lazy_loaded_esm_files];
+        for file in files.iter().flat_map(|f| f.iter()) {
+            assert!(file.is_runtime_loadable(), "{} would be read from the build machine's disk", file.specifier);
+        }
+        assert_eq!(extension.esm_files.len(), 1);
+    }
+}

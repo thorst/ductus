@@ -1,0 +1,52 @@
+[Unit]
+Description=Ductus integration engine
+Documentation=https://getductus.com
+# Postgres may be on this server or elsewhere: wait for the network either way. A database that
+# isn't up yet makes the engine fail its start, and systemd tries again (Restart below).
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=exec
+User=ductus
+Group=ductus
+# DUCTUS_DATABASE_URL, DUCTUS_ENV, DUCTUS_SECRET_KEY, DUCTUS_PROJECT ...: see the file.
+EnvironmentFile=/etc/ductus/ductus.env
+WorkingDirectory=/var/lib/ductus
+ExecStart=/usr/bin/ductus run
+# The engine stops cleanly on SIGTERM: no new messages, the ones in hand finished and saved,
+# within DUCTUS_STOP_TIMEOUT (30 s). Give it longer than that before systemd kills it.
+KillSignal=SIGTERM
+KillMode=mixed
+TimeoutStopSec=45
+Restart=on-failure
+RestartSec=5
+# A drained engine asked to stop (`ductus drain --stop`) exits 0: it stays stopped.
+SuccessExitStatus=0
+# Many connections: one per sender and receiver, and the database pool.
+LimitNOFILE=65536
+
+# Hardening: the engine needs the network and its own folder, nothing else.
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/ductus
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictSUIDSGID=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+CapabilityBoundingSet=
+# Listening below port 1024 (an MLLP port of 104, say) needs this instead of root:
+# AmbientCapabilities=CAP_NET_BIND_SERVICE
+# CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+[Install]
+WantedBy=multi-user.target

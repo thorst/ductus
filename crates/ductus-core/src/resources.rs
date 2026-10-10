@@ -257,6 +257,9 @@ impl Resources {
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
         let mut value: serde_yaml_ng::Value =
             crate::env::parse_yaml(&text).with_context(|| format!("parsing {}", file.display()))?;
+        if value.is_null() {
+            return Ok(Self::default()); // only comments (as `ductus init` writes it)
+        }
         env.substitute(&mut value).with_context(|| format!("in {}", file.display()))?;
         let resources: Self = serde_yaml_ng::from_value(value).with_context(|| format!("in {}", file.display()))?;
         for (name, s) in &resources.sftp {
@@ -386,6 +389,14 @@ impl std::fmt::Display for Endpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_file_of_comments_defines_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("resources.yaml"), "# databases:\n#   patient_db: ...\n").unwrap();
+        let r = Resources::load(dir.path(), &Environment::with_variables("dev", &[])).unwrap();
+        assert!(r.databases.is_empty() && r.sftp.is_empty() && r.apis.is_empty());
+    }
 
     #[test]
     fn loads_databases_with_environment_values() {

@@ -102,6 +102,9 @@ jobs:
           grep -q "unique 3000 " demo.log
           grep -q "out of order 0 " demo.log
 
+      - name: Clean stop demo (SIGTERM mid-stream re-sends nothing; with the receiver down it stops at once)
+        run: BIN=target/release/ductus bash scripts/demo-stop.sh
+
       - name: Database lookup demo (async transform, resources, secrets, kill/quarantine)
         run: PGUSER_=ductus PGPASS_=ductus BIN=target/release/ductus bash scripts/demo-lookup.sh
 
@@ -151,3 +154,16 @@ jobs:
 
       - name: Scale demo (300 shared interfaces + 1 dedicated, hot MRN)
         run: SHARED=300 EPIC_SECONDS=10 SAMPLED=50 BIN=target/release/ductus bash scripts/demo-scale.sh
+
+  # The container image and the Linux packages, from the Dockerfile (one engine build, on Rocky
+  # Linux 9, for both), tested end to end. In parallel with `test`; nothing is published.
+  packaging:
+    runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Image (build; compose with Postgres; docker compose stop mid-stream re-sends nothing)
+        run: bash scripts/demo-docker.sh
+
+      - name: Linux packages (systemd in containers; install, upgrade under traffic, stop, remove; Ubuntu and Rocky)
+        run: bash scripts/demo-packages.sh

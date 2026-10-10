@@ -18,6 +18,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 
 const SAVE_EVERY: Duration = Duration::from_secs(5);
 /// How far back "recent" rates look: long enough to smooth a few slow sends, short enough to
@@ -172,6 +173,8 @@ pub struct Activity {
     pub pauses: HashMap<DestinationId, Arc<Pause>>,
     /// Every destination's recent rates and normal.
     pub trends: HashMap<DestinationId, Arc<Mutex<Trends>>>,
+    /// The task that saves them (see `saved`).
+    saver: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
 
 impl Activity {
@@ -186,8 +189,8 @@ impl Activity {
 
 impl Activity {
     /// Load what's stored into the counts' last-seen times and the pause switches, then save
-    /// changes every few seconds for as long as the engine runs.
-    pub async fn start(store: Store, watched: Vec<Watched>) -> Result<Self> {
+    /// changes every few seconds until `stop` (and once more then).
+    pub async fn start(store: Store, watched: Vec<Watched>, stop: CancellationToken) -> Result<Self> {
         let names: Vec<&str> = watched.iter().map(|w| w.stats.name.as_str()).collect();
         let ids: Vec<DestinationId> = watched.iter().flat_map(|w| w.destinations.iter().copied()).collect();
         let (interfaces, destinations) = store.activity(&names, &ids).await?;
@@ -225,14 +228,27 @@ impl Activity {
             }
             watched_since.insert(i.interface, i.watched_since);
         }
-        tokio::spawn(save(store, watched, trends.clone()));
-        Ok(Self { watched_since, pauses, trends })
+        let saver = tokio::spawn(save(store, watched, trends.clone(), stop));
+        Ok(Self { watched_since, pauses, trends, saver: Mutex::new(Some(saver)) })
+    }
+
+    /// After the engine's stop: wait for the last save.
+    pub async fn saved(&self) {
+        let saver = self.saver.lock().unwrap_or_else(|p| p.into_inner()).take();
+        if let Some(saver) = saver {
+            let _ = saver.await;
+        }
     }
 }
 
 /// Every few seconds, sample each destination's counts and save the last-seen times that
 /// changed; once an hour, save what was learned about it.
-async fn save(store: Store, watched: Vec<Watched>, trends: HashMap<DestinationId, Arc<Mutex<Trends>>>) {
+async fn save(
+    store: Store,
+    watched: Vec<Watched>,
+    trends: HashMap<DestinationId, Arc<Mutex<Trends>>>,
+    stop: CancellationToken,
+) {
     let mut unsaved: Vec<BaselineRow> = Vec::new();
     // What was saved last (or loaded): only changes are written.
     let mut received: HashMap<String, Option<DateTime<Utc>>> =
@@ -246,7 +262,11 @@ async fn save(store: Store, watched: Vec<Watched>, trends: HashMap<DestinationId
         }
     }
     loop {
-        tokio::time::sleep(SAVE_EVERY).await;
+        // Stopping: one last save, so a restart starts from now rather than a few seconds ago.
+        let last = tokio::select! {
+            _ = tokio::time::sleep(SAVE_EVERY) => false,
+            _ = stop.cancelled() => true,
+        };
         let now = Utc::now();
         for w in &watched {
             let arrived = crate::stats::get(&w.stats.received);
@@ -288,6 +308,9 @@ async fn save(store: Store, watched: Vec<Watched>, trends: HashMap<DestinationId
             }
         }
         if changed_received.is_empty() && changed_seen.is_empty() {
+            if last {
+                return;
+            }
             continue;
         }
         let names: Vec<(&str, DateTime<Utc>)> = changed_received.iter().map(|(n, t)| (n.as_str(), *t)).collect();
@@ -302,6 +325,9 @@ async fn save(store: Store, watched: Vec<Watched>, trends: HashMap<DestinationId
             }
             // Tried again next time: the times are still in memory.
             Err(e) => tracing::warn!(error = %format!("{e:#}"), "saving last activity failed"),
+        }
+        if last {
+            return;
         }
     }
 }

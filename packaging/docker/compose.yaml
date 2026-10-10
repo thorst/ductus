@@ -1,0 +1,43 @@
+# Ductus and its database, to try it out (development build: not for production before v1.0).
+#
+#   docker build -t ductus:dev .                                   # from the repository root
+#   PROJECT=$PWD/examples/adt-relay docker compose -f packaging/docker/compose.yaml up
+#
+# The project is mounted read-only: interfaces change through Git and a restart, never inside the
+# container. The web UI is at http://127.0.0.1:7700 (create a token first:
+# docker compose -f packaging/docker/compose.yaml exec engine ductus token create me --role admin).
+name: ductus
+
+services:
+  postgres:
+    image: postgres:18
+    environment:
+      POSTGRES_USER: ductus
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ductus}
+      POSTGRES_DB: ductus
+    volumes:
+      - pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "ductus"]
+      interval: 2s
+      retries: 30
+
+  engine:
+    image: ${IMAGE:-ductus:dev}
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      DUCTUS_DATABASE_URL: postgres://ductus:${POSTGRES_PASSWORD:-ductus}@postgres/ductus
+      DUCTUS_ENV: ${DUCTUS_ENV:-dev}
+      DUCTUS_SECRET_KEY: ${DUCTUS_SECRET_KEY:-}
+    volumes:
+      - ${PROJECT:?set PROJECT to your project folder}:/project:ro
+    ports:
+      - 127.0.0.1:7700:7700 # the API and web UI: this machine only
+      - 6661:6661 # each interface's listener (here the example's MLLP port)
+    # Longer than the engine's own stop limit (30 s), so a stop is never cut short.
+    stop_grace_period: 45s
+    restart: unless-stopped
+
+volumes:
+  pgdata:

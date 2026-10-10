@@ -134,7 +134,7 @@ impl Isolate {
     pub fn new(services: Option<Rc<dyn Services>>, heap_mb: usize) -> Self {
         let mut runtime = JsRuntime::new(RuntimeOptions {
             module_loader: Some(Rc::new(loader::Loader)),
-            extensions: vec![ops::ductus_ops::init()],
+            extensions: vec![ops::extension()],
             create_params: Some(v8::Isolate::create_params().heap_limits(0, heap_mb << 20)),
             ..Default::default()
         });

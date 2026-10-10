@@ -1,5 +1,6 @@
 mod admin;
 mod doctor;
+mod init;
 mod new;
 mod owners;
 mod project;
@@ -18,10 +19,16 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Start a new project: settings, environments, resources and a first interface, ready for
+    /// `ductus test`. The folder must be empty (a fresh Git clone is fine).
+    Init {
+        #[arg(default_value = ".")]
+        dir: PathBuf,
+    },
     /// Run every interface in a project.
     Run {
         /// Project folder containing `interfaces/`.
-        #[arg(long, default_value = ".")]
+        #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
         root: PathBuf,
         #[arg(long, env = "DUCTUS_DATABASE_URL", default_value = tools::DEFAULT_DB)]
         database_url: String,
@@ -38,6 +45,10 @@ enum Command {
         /// ductus.yaml (default 127.0.0.1:7700).
         #[arg(long, env = "DUCTUS_API_LISTEN")]
         api_listen: Option<String>,
+        /// On Ctrl-C or SIGTERM, how long to finish the messages in hand before exiting anyway
+        /// (they stay pending for the next start). Service managers should wait longer.
+        #[arg(long, env = "DUCTUS_STOP_TIMEOUT", default_value = "30s", value_parser = parse_duration)]
+        stop_timeout: std::time::Duration,
     },
     /// Run each interface's `*.test.ts` files.
     Test {
@@ -402,13 +413,14 @@ async fn run(cli: Cli) -> Result<()> {
         .init();
 
     match cli.command {
-        Command::Run { root, database_url, threads, db_connections, env, api_listen } => {
+        Command::Run { root, database_url, threads, db_connections, env, api_listen, stop_timeout } => {
             let defaults = ductus_runtime::EngineOptions::default();
             let options = ductus_runtime::EngineOptions {
                 pool_threads: threads.unwrap_or(defaults.pool_threads),
                 db_connections,
                 env,
                 api_listen,
+                stop_timeout,
             };
             ductus_runtime::run(&root, &database_url, options).await
         }
@@ -416,6 +428,7 @@ async fn run(cli: Cli) -> Result<()> {
             exit_on_failure(project::test(&root, &env, interface.as_deref()).await)
         }
         Command::Validate { root, env } => exit_on_failure(project::validate(&root, &env).await),
+        Command::Init { dir } => init::project(&dir).await,
         Command::New { what: NewCommand::Interface { name, source, format, port, server, root } } => {
             new::interface(new::NewInterface { root, name, source, format, port, server })
         }

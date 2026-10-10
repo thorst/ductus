@@ -1,0 +1,44 @@
+# The .deb and .rpm packages (nfpm). Built by the Dockerfile's `packages` target: see
+# packaging/README.md.
+# VERSION is semver (0.5.0-dev.20261009); nfpm writes a pre-release as 0.5.0~dev.20261009, which
+# sorts before 0.5.0, so the release upgrades over development builds.
+name: ductus
+arch: ${ARCH}
+platform: linux
+version: ${VERSION}
+section: net
+priority: optional
+maintainer: Todd Horst <admin@getductus.com>
+description: |
+  Ductus healthcare integration engine.
+  Code-first interfaces (HL7, CSV, XML, JSON over MLLP, HTTP, files and SFTP) in TypeScript,
+  stored in PostgreSQL. Runs as the ductus service; settings in /etc/ductus/ductus.env.
+vendor: Ductus
+homepage: https://getductus.com
+license: Apache-2.0
+
+contents:
+  - src: /ductus # where the Dockerfile puts the binary (nfpm doesn't expand variables here)
+    dst: /usr/bin/ductus
+    file_info: { mode: 0755 }
+  - src: packaging/linux/ductus.service
+    dst: /usr/lib/systemd/system/ductus.service
+    file_info: { mode: 0644 }
+  # Settings: never replaced by an upgrade (deb conffile, rpm %config(noreplace)).
+  - src: packaging/linux/ductus.env
+    dst: /etc/ductus/ductus.env
+    type: config|noreplace
+    file_info: { mode: 0640 }
+  - dst: /var/lib/ductus
+    type: dir
+    file_info: { mode: 0750 }
+
+scripts:
+  postinstall: packaging/linux/postinstall.sh
+  preremove: packaging/linux/preremove.sh
+  postremove: packaging/linux/postremove.sh
+
+# Nothing else to depend on: the binary needs only the C library (glibc 2.34 or later: RHEL 9,
+# Ubuntu 22.04, Debian 12 and later). Postgres is the DBA's, on this server or another.
+recommends:
+  - ca-certificates

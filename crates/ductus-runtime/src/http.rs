@@ -42,8 +42,9 @@ pub struct Endpoint {
 
 const RESPOND_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Start one server per (host, port) with every endpoint's route.
-pub async fn serve(endpoints: Vec<Endpoint>) -> Result<()> {
+/// Start one server per (host, port) with every endpoint's route. On `stop` each answers the
+/// requests in flight, then closes (respond-mode workers end once nothing can reach them).
+pub async fn serve(endpoints: Vec<Endpoint>, stop: tokio_util::sync::CancellationToken) -> Result<()> {
     let mut servers: BTreeMap<(String, u16), Vec<Endpoint>> = BTreeMap::new();
     for e in endpoints {
         servers.entry((e.host.clone(), e.port)).or_default().push(e);
@@ -79,8 +80,9 @@ pub async fn serve(endpoints: Vec<Endpoint>) -> Result<()> {
             .await
             .with_context(|| format!("binding HTTP {host}:{port}"))?;
         tracing::info!(%host, port, "listening (HTTP)");
+        let stop = stop.clone();
         tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, router).await {
+            if let Err(e) = axum::serve(listener, router).with_graceful_shutdown(stop.cancelled_owned()).await {
                 tracing::error!(error = %e, "HTTP server stopped");
             }
         });

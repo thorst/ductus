@@ -60,6 +60,8 @@ pub struct EngineOptions {
     pub env: String,
     /// Where the REST API listens (`host:port` or `off`), instead of `api.listen` in ductus.yaml.
     pub api_listen: Option<String>,
+    /// How long a stop may take before the engine exits anyway (see `stop`).
+    pub stop_timeout: Duration,
 }
 
 impl Default for EngineOptions {
@@ -69,12 +71,13 @@ impl Default for EngineOptions {
             db_connections: 32,
             env: "dev".into(),
             api_listen: None,
+            stop_timeout: STOP_TIMEOUT,
         }
     }
 }
 
-/// Start every interface under `root` and run until Ctrl-C (or until drained, when a drain
-/// asked to stop).
+/// Start every interface under `root` and run until Ctrl-C or SIGTERM (or until drained, when a
+/// drain asked to stop); then stop cleanly (`stop`).
 pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Result<()> {
     let env = Environment::load(root, &options.env)?;
     let configs = load_interfaces(root, &env)?;
@@ -172,7 +175,10 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         .filter(|(config, ..)| !config.responds())
         .map(|(_, _, ids, _, stats)| activity::Watched { stats: stats.clone(), destinations: ids.clone() })
         .collect();
-    let activity = activity::Activity::start(store.clone(), watched).await.context("loading last activity")?;
+    // The engine is stopping: workers finish what's in hand, save it and end (see `stop`).
+    let stopping = tokio_util::sync::CancellationToken::new();
+    let activity =
+        activity::Activity::start(store.clone(), watched, stopping.clone()).await.context("loading last activity")?;
     for (config, wake, destination_ids, gate, stats) in parts {
         let health = Arc::new(health::Health::default());
         let outlets: Vec<worker::Outlet> = config
@@ -239,10 +245,13 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     let services = Arc::new(services::SharedServices::new(env, &resources));
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let mut jobs = 0;
+    let mut threads = Vec::new();
     for (i, thread_jobs) in pool.into_iter().enumerate().filter(|(_, j)| !j.is_empty()) {
         jobs += thread_jobs.len();
         let engine = services::EngineServices::new(services.clone(), Default::default());
-        worker::spawn_thread(format!("pool-{i}"), thread_jobs, store.clone(), engine, heap_mb, ready_tx.clone())?;
+        let name = format!("pool-{i}");
+        let ready = ready_tx.clone();
+        threads.push(worker::spawn_thread(name, thread_jobs, store.clone(), engine, heap_mb, ready, stopping.clone())?);
     }
     // A dedicated interface's own pools are shared by all its worker threads.
     let mut own_pools = std::collections::HashMap::new();
@@ -251,15 +260,26 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         let own =
             own_pools.entry(job.config.name.clone()).or_insert_with(|| services.dedicated_pools(&job.config)).clone();
         let engine = services::EngineServices::new(services.clone(), own);
-        worker::spawn_thread(name, vec![job], store.clone(), engine, heap_mb, ready_tx.clone())?;
+        let ready = ready_tx.clone();
+        threads.push(worker::spawn_thread(name, vec![job], store.clone(), engine, heap_mb, ready, stopping.clone())?);
     }
     drop(ready_tx);
     // Fail fast if any interface's code doesn't load, before accepting any messages.
     let mut failed = Vec::new();
+    let mut reported = 0;
     for (name, result) in ready_rx.iter().take(jobs) {
+        reported += 1;
         if let Err(e) = result {
             failed.push(format!("interface `{name}`: {e:#}"));
         }
+    }
+    // A thread that died before loading its interfaces (a panic, logged above) reports nothing:
+    // the channel closes with fewer answers than jobs.
+    if reported < jobs {
+        failed.push(format!(
+            "{} of {jobs} interface workers didn't start (their threads stopped; see the errors above)",
+            jobs - reported
+        ));
     }
     if !failed.is_empty() {
         failed.dedup();
@@ -281,7 +301,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
             Source::Internal => {}    // other interfaces' workers store its messages (routes)
         }
     }
-    http::serve(http_endpoints).await?;
+    http::serve(http_endpoints, stopping.clone()).await?;
     let running: Vec<control::Running> = interfaces
         .iter()
         .map(|(config, _, ids, health, gate, stats)| control::Running {
@@ -331,19 +351,86 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         }
     });
 
+    let why = tokio::select! {
+        signal = stop_signal() => signal,
+        _ = engine.shutdown.cancelled() => "drained and asked to stop",
+    };
+    let limit = options.stop_timeout;
+    tracing::info!(why, limit = ?limit, "stopping: taking no new messages, finishing the ones in hand");
+    let started = std::time::Instant::now();
+    let stop = stop(&engine, &stopping, threads, api_server);
     tokio::select! {
-        signal = tokio::signal::ctrl_c() => signal?,
-        _ = engine.shutdown.cancelled() => {
-            tracing::info!("drained and asked to stop");
-            // Answer the requests in flight first (the drain's own, say). Live-update streams
-            // never end by themselves, hence the limit.
-            if let Some(server) = api_server {
-                let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+        finished = tokio::time::timeout(limit, stop) => match finished {
+            Ok(()) => tracing::info!(took = ?started.elapsed(), "stopped"),
+            Err(_) => tracing::warn!(
+                "still finishing after {limit:?}; stopping anyway: the messages in hand stay pending and are processed again at the next start (a destination may get one again)"
+            ),
+        },
+        signal = stop_signal() => tracing::warn!(signal, "asked again: stopping now; the messages in hand are processed again at the next start"),
+    }
+    Ok(())
+}
+
+/// How long a stop may take by default: a transform or send under way finishes first, and
+/// both have their own limits (a transform's `timeout`, 5 s by default).
+pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Stop in order, so nothing is left half done: close every interface's gate (listeners close,
+/// queued HTTP answers 503, file pickup and schedules wait) and wait for messages being stored,
+/// so each gets its ACK; then the workers finish the message in hand and save their statuses;
+/// then last activity is saved and the API answers what's in flight. What's still pending stays
+/// in the queue for the next start, as in a drain.
+async fn stop(
+    engine: &control::Engine,
+    stopping: &tokio_util::sync::CancellationToken,
+    threads: Vec<std::thread::JoinHandle<()>>,
+    api_server: Option<tokio::task::JoinHandle<()>>,
+) {
+    for i in &engine.interfaces {
+        i.gate.set_open(false);
+    }
+    while engine.interfaces.iter().any(|i| i.gate.in_flight() > 0) {
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    stopping.cancel();
+    engine.shutdown.cancel(); // the API takes no new requests
+    let _ = tokio::task::spawn_blocking(move || {
+        for thread in threads {
+            let _ = thread.join();
+        }
+    })
+    .await;
+    engine.activity.saved().await;
+    // Answer the requests in flight (a drain's own, say). Live-update streams never end by
+    // themselves, hence the limit.
+    if let Some(server) = api_server {
+        let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+    }
+}
+
+/// The operating system asking the engine to stop: Ctrl-C, or SIGTERM on Unix (systemd,
+/// Docker and Kubernetes stop services with it). Its name, for the log.
+pub async fn stop_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+        match signal(SignalKind::terminate()) {
+            Ok(mut terminate) => tokio::select! {
+                _ = tokio::signal::ctrl_c() => "Ctrl-C",
+                _ = terminate.recv() => "SIGTERM",
+            },
+            Err(e) => {
+                tracing::warn!(error = %e, "can't listen for SIGTERM: only Ctrl-C stops the engine cleanly");
+                let _ = tokio::signal::ctrl_c().await;
+                "Ctrl-C"
             }
         }
     }
-    tracing::info!("shutting down");
-    Ok(())
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "Ctrl-C"
+    }
 }
 
 /// Wake-up signals, one per (slot, destination). Ingest wakes every destination's worker in the

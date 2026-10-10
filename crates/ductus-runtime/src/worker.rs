@@ -32,6 +32,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::{Notify, mpsc, watch};
+use tokio_util::sync::CancellationToken;
 
 const BATCH: i64 = 200;
 /// Safety-net poll. Ingest wakes the owning slot directly (and the wake-up is never lost),
@@ -82,7 +83,7 @@ pub type Ready = (String, Result<()>);
 
 /// Start a worker thread for `jobs`, with one isolate of `heap_mb`. Each job reports on
 /// `ready` once its interface code has loaded (or failed to); then the thread processes
-/// messages forever.
+/// messages until `stop`, and ends once its workers have saved what they finished.
 pub fn spawn_thread(
     name: String,
     jobs: Vec<Job>,
@@ -90,7 +91,8 @@ pub fn spawn_thread(
     services: EngineServices,
     heap_mb: usize,
     ready: std::sync::mpsc::Sender<Ready>,
-) -> Result<()> {
+    stop: CancellationToken,
+) -> Result<std::thread::JoinHandle<()>> {
     let io = tokio::runtime::Handle::current(); // the main runtime (see `Worker::db`)
     std::thread::Builder::new()
         .name(name.clone())
@@ -127,6 +129,7 @@ pub fn spawn_thread(
                 let kick = Rc::new(Notify::new());
                 let interrupted = Rc::new(watch::Sender::new(None));
                 tokio::task::spawn_local(drive_event_loop(name, host.clone(), kick.clone(), interrupted.clone()));
+                let mut tasks = Vec::new();
                 for (mut job, script) in loaded {
                     // The script's functions, in `config.functions()` order: one per destination.
                     let script = |i: usize| {
@@ -141,19 +144,25 @@ pub fn spawn_thread(
                     if let Some(requests) = job.requests.take() {
                         let worker =
                             Responder { config: job.config, script: script(0), health: job.health, stats: job.stats };
-                        tokio::task::spawn_local(worker.answer(requests));
+                        // Ends once its HTTP server has stopped and answered what was in flight.
+                        tasks.push(tokio::task::spawn_local(worker.answer(requests)));
                         continue;
                     }
                     for (i, outlet) in job.outlets.iter().enumerate() {
-                        let worker = Worker::new(&job, i, outlet.clone(), script(i), store.clone(), io.clone());
-                        tokio::task::spawn_local(worker.run());
+                        let worker =
+                            Worker::new(&job, i, outlet.clone(), script(i), store.clone(), io.clone(), stop.clone());
+                        tasks.push(tokio::task::spawn_local(worker.run()));
                     }
                 }
-                std::future::pending::<()>().await;
+                // Until the engine stops, even if every worker here has ended (an interface the
+                // runaway guard stopped): the isolate stays.
+                stop.cancelled().await;
+                for task in tasks {
+                    let _ = task.await;
+                }
             });
         })
-        .context("spawning worker thread")?;
-    Ok(())
+        .context("spawning worker thread")
 }
 
 /// Runs the thread's JavaScript event loop whenever async transforms are waiting (on database
@@ -289,6 +298,9 @@ struct Worker {
     health: Arc<Health>,
     stats: Arc<DestinationStats>,
     pause: Arc<Pause>,
+    /// The engine is stopping: like a pause (a transform or send under way finishes, nothing new
+    /// starts), but the worker then saves what it finished and ends.
+    stop: CancellationToken,
 }
 
 /// What the interface logic decided to do with a message.
@@ -312,6 +324,7 @@ impl Worker {
         script: Option<Script>,
         store: Store,
         io: tokio::runtime::Handle,
+        stop: CancellationToken,
     ) -> Self {
         let config = job.config.clone();
         let (name, destination) = config.destinations().nth(index).expect("one outlet per destination");
@@ -336,6 +349,7 @@ impl Worker {
             health: job.health.clone(),
             stats: outlet.stats,
             pause: outlet.pause,
+            stop,
             config,
         }
     }
@@ -345,15 +359,14 @@ impl Worker {
             return; // more workers than lanes: nothing to own
         }
         // A stopped interface's messages stay pending until it's fixed and restarted.
-        while self.health.stopped().is_none() {
-            self.hold_while_paused().await;
+        while self.health.stopped().is_none() && self.hold_while_paused().await {
             let (destination, lanes) = (self.destination_id, self.lanes.clone());
             let read = |store: Store| async move { store.pending(destination, &lanes, BATCH).await };
             let batch = match self.db(read).await {
                 Ok(batch) => batch,
                 Err(e) => {
                     tracing::error!(interface = %self.config.name, destination = %self.destination, error = %e, "reading queue failed");
-                    tokio::time::sleep(DB_RETRY).await;
+                    self.wait(DB_RETRY).await;
                     continue;
                 }
             };
@@ -361,17 +374,28 @@ impl Worker {
                 tokio::select! {
                     _ = self.wake.get(self.slot, self.index).notified() => {}
                     _ = tokio::time::sleep(IDLE_POLL) => {}
+                    _ = self.stop.cancelled() => {}
                 }
                 continue;
             }
             for message in batch {
-                if self.health.stopped().is_some() || self.pause.is_paused() {
+                if self.health.stopped().is_some() || self.pause.is_paused() || self.stop.is_cancelled() {
                     break;
                 }
                 self.process(message).await;
             }
             // Must happen before the next read, or those messages would be read again as pending.
             self.flush().await;
+        }
+        self.flush().await;
+    }
+
+    /// Wait `delay` (a retry's back-off, a rate limit), unless the engine stops meanwhile: then
+    /// `false`, and the message in hand stays pending (taken again at the next start).
+    async fn wait(&self, delay: Duration) -> bool {
+        tokio::select! {
+            _ = tokio::time::sleep(delay) => !self.stop.is_cancelled(),
+            _ = self.stop.cancelled() => false,
         }
     }
 
@@ -443,8 +467,9 @@ impl Worker {
                     attempts = self.record_failure(reference, &error).await.unwrap_or(attempts + 1);
                     tracing::warn!(interface = %self.config.name, destination = %self.destination, id = reference.id, attempts, %error, "temporary failure; retrying in {backoff:?}");
                     self.flush().await;
-                    tokio::time::sleep(backoff).await;
-                    self.hold_while_paused().await;
+                    if !self.wait(backoff).await || !self.hold_while_paused().await {
+                        return;
+                    }
                     backoff = (backoff * 2).min(Duration::from_millis(self.retry.max_backoff_ms));
                     continue;
                 }
@@ -475,7 +500,9 @@ impl Worker {
                     Decision::Proceed => break,
                     Decision::Wait(delay) => {
                         self.flush().await;
-                        tokio::time::sleep(delay).await;
+                        if !self.wait(delay).await {
+                            return;
+                        }
                     }
                     Decision::Drop => {
                         stats::add(&self.stats.filtered);
@@ -486,7 +513,9 @@ impl Worker {
             }
         }
         if self.sender.is_none() {
-            self.hold_while_paused().await;
+            if !self.hold_while_paused().await {
+                return;
+            }
             // A route: stored in the target interface with the next flush, in the same
             // transaction as this status.
             let output = self.save_output.then(|| payload.clone());
@@ -498,8 +527,11 @@ impl Worker {
         let retry = self.retry.clone();
         let mut backoff = Duration::from_millis(retry.initial_backoff_ms);
         loop {
-            // Paused meanwhile (while its function ran, a rate-limit wait, a retry's back-off).
-            self.hold_while_paused().await;
+            // Paused or stopping meanwhile (while its function ran, a rate-limit wait, a retry's
+            // back-off).
+            if !self.hold_while_paused().await {
+                return;
+            }
             let sender = self.sender.as_mut().expect("not a route");
             let started = std::time::Instant::now();
             match sender.send(reference.id, &payload).await {
@@ -522,7 +554,9 @@ impl Worker {
                     }
                     tracing::warn!(interface = %self.config.name, destination = %self.destination, id = reference.id, attempts, %error, "delivery failed; retrying in {backoff:?}");
                     self.flush().await; // don't hold delivered statuses through a long outage
-                    tokio::time::sleep(backoff).await;
+                    if !self.wait(backoff).await {
+                        return;
+                    }
                     backoff = (backoff * 2).min(Duration::from_millis(retry.max_backoff_ms));
                 }
             }
@@ -530,14 +564,20 @@ impl Worker {
     }
 
     /// While the destination is paused: save what's done, then wait until it's resumed. A send
-    /// already under way finishes; nothing new starts, and nothing is retried.
-    async fn hold_while_paused(&mut self) {
-        if self.pause.is_paused() {
+    /// already under way finishes; nothing new starts, and nothing is retried. `false` once the
+    /// engine is stopping (paused or not): the message in hand stays pending.
+    async fn hold_while_paused(&mut self) -> bool {
+        if self.pause.is_paused() && !self.stop.is_cancelled() {
             self.flush().await;
             tracing::info!(interface = %self.config.name, destination = %self.destination, slot = self.slot, "paused: waiting to be resumed");
-            self.pause.until_resumed().await;
-            tracing::info!(interface = %self.config.name, destination = %self.destination, slot = self.slot, "resumed");
+            tokio::select! {
+                _ = self.pause.until_resumed() => {
+                    tracing::info!(interface = %self.config.name, destination = %self.destination, slot = self.slot, "resumed");
+                }
+                _ = self.stop.cancelled() => {}
+            }
         }
+        !self.stop.is_cancelled()
     }
 
     /// Run a store call on the main runtime. Connections are pooled and shared with intake,

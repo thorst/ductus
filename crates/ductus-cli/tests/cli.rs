@@ -21,6 +21,25 @@ fn ductus(dir: &Path, args: &[&str]) -> (bool, String) {
 }
 
 #[test]
+fn a_new_project_passes_test_and_validate_as_generated() {
+    let parent = tempfile::tempdir().unwrap();
+    let (ok, out) = ductus(parent.path(), &["init", "hospital"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("created interfaces/adt-in/ (MLLP on port 6661)"), "{out}");
+    assert!(out.contains("git init"), "says to make it a repository: {out}");
+    let dir = parent.path().join("hospital");
+    let (ok, out) = ductus(&dir, &["test"]);
+    assert!(ok && out.contains("passed"), "{out}");
+    let (ok, out) = ductus(&dir, &["validate"]);
+    assert!(ok, "every environment (dev and prod): {out}");
+    // A second interface takes the next port, from ductus.yaml's range.
+    let (ok, out) = ductus(&dir, &["new", "interface", "orders"]);
+    assert!(ok && out.contains("port 6662"), "{out}");
+    let (ok, out) = ductus(&dir, &["init"]);
+    assert!(!ok && out.contains("isn't empty"), "{out}");
+}
+
+#[test]
 fn generated_interfaces_pass_test_and_validate_as_generated() {
     let dir = project(&[
         // An existing interface whose port differs per environment: 7001 is taken in prod only.
