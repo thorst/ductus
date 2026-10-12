@@ -29,6 +29,8 @@ pub struct Options {
     pub reset: bool,
     /// Don't ask before `reset` deletes it.
     pub yes: bool,
+    /// Start only the Postgres, not the engine (for tools, or a service under test).
+    pub database_only: bool,
 }
 
 /// What is kept between runs in `<project>/.ductus/postgres/dev.json`.
@@ -118,7 +120,13 @@ pub async fn run(options: Options) -> Result<()> {
     println!("Postgres {} is running for this project:\n  {url}", VERSION.trim_start_matches('='));
     println!("  (data in {}; stops with the engine)", data_dir.display());
 
-    let result = ductus_runtime::run(&options.root, &url, options.engine).await;
+    let result = if options.database_only {
+        println!("(only the database: Ctrl-C stops it)");
+        ductus_runtime::stop_signal().await;
+        Ok(())
+    } else {
+        ductus_runtime::run(&options.root, &url, options.engine).await
+    };
 
     match postgres.stop().await {
         Ok(()) => println!("Postgres stopped"),

@@ -1,0 +1,104 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Windows installer: ductus.exe, the "Ductus" service and the folders it uses. Built by
+  build.ps1 (WiX v5). Layout and upgrade rules: packaging/README.md.
+
+  Rules that keep upgrades safe:
+  - The UpgradeCode is this product's identity for ever: never change it.
+  - ProductVersion is major.minor.patch (MSI ignores a fourth part), so development builds of one
+    version replace each other: AllowSameVersionUpgrades.
+  - Nothing secret is ever an installer property (they end up in the install log). Settings go in
+    C:\ProgramData\Ductus\ductus.env, which the installer creates once and never overwrites.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
+  <Package Name="Ductus" Manufacturer="Ductus" Version="$(Version)" UpgradeCode="19FF28DC-C511-4D30-8FA3-AFDD57C90468"
+           Scope="perMachine" InstallerVersion="500" Compressed="yes">
+    <MajorUpgrade AllowSameVersionUpgrades="yes"
+                  DowngradeErrorMessage="A newer version of Ductus is already installed. Uninstall it first to go back." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="Ductus" />
+    </StandardDirectory>
+    <StandardDirectory Id="CommonAppDataFolder">
+      <Directory Id="DATADIR" Name="Ductus">
+        <Directory Id="PROJECTDIR" Name="project" />
+        <Directory Id="LOGDIR" Name="logs" />
+      </Directory>
+    </StandardDirectory>
+
+    <!-- Is there a settings file already? (an upgrade of a configured install starts the service again) -->
+    <Property Id="ENVFILE">
+      <DirectorySearch Id="DataDirSearch" Path="[CommonAppDataFolder]Ductus" Depth="0">
+        <FileSearch Id="EnvFileSearch" Name="ductus.env" />
+      </DirectorySearch>
+    </Property>
+
+    <ComponentGroup Id="Engine" Directory="INSTALLFOLDER">
+      <Component Id="EngineExe" Bitness="always64">
+        <File Id="DuctusExe" Source="$(Binary)" KeyPath="yes" />
+        <!-- On the PATH, so `ductus doctor`, `ductus token` and the rest work in any terminal. -->
+        <Environment Id="Path" Name="PATH" Value="[INSTALLFOLDER]" Action="set" Part="last" System="yes" Permanent="no" />
+        <ServiceInstall Id="DuctusService" Name="Ductus" DisplayName="Ductus Integration Engine"
+                        Description="Healthcare integration engine (HL7, MLLP, HTTP, files). Settings: C:\ProgramData\Ductus\ductus.env"
+                        Type="ownProcess" Start="auto" ErrorControl="normal"
+                        Account="NT SERVICE\Ductus"
+                        Arguments="run --service --env-file &quot;[DATADIR]ductus.env&quot;" />
+        <!-- A stop is a clean stop (the messages in hand are finished): wait for it. -->
+        <ServiceControl Id="StopDuctus" Name="Ductus" Stop="both" Remove="uninstall" Wait="yes" />
+        <!-- If it dies, try again after a minute, twice; then leave it for a person. -->
+        <util:ServiceConfig ServiceName="Ductus" FirstFailureActionType="restart" SecondFailureActionType="restart"
+                            ThirdFailureActionType="none" RestartServiceDelayInSeconds="60" ResetPeriodInDays="1" />
+        <!-- When Windows shuts down, give the clean stop up to 90 s instead of the default 5 s. -->
+        <RegistryValue Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\Ductus" Name="PreshutdownTimeout"
+                       Type="integer" Value="90000" />
+      </Component>
+    </ComponentGroup>
+
+    <!-- Kept on uninstall and upgrade: the person's settings, project and logs. -->
+    <ComponentGroup Id="Data" Directory="DATADIR">
+      <Component Id="SettingsFile" Bitness="always64" Permanent="yes" NeverOverwrite="yes">
+        <File Id="DuctusEnv" Source="ductus.env" KeyPath="yes" />
+      </Component>
+      <Component Id="ProjectFolder" Guid="F1CB8380-31E0-4E32-AA26-5E23FA84A766" Bitness="always64" Permanent="yes" Directory="PROJECTDIR">
+        <CreateFolder />
+      </Component>
+      <Component Id="LogFolder" Guid="EEB4C84E-CA60-4783-9AC2-A73C0C2B07EF" Bitness="always64" Permanent="yes" Directory="LOGDIR">
+        <CreateFolder />
+      </Component>
+    </ComponentGroup>
+
+    <!--
+      Started again after an upgrade, when settings exist: the stop for the upgrade shouldn't leave a
+      configured engine down. A first install doesn't start it (nothing is configured: it would stop
+      at once for lack of a database).
+    -->
+    <ComponentGroup Id="RestartAfterUpgrade" Directory="INSTALLFOLDER">
+      <Component Id="StartConfigured" Bitness="always64" Condition="WIX_UPGRADE_DETECTED AND ENVFILE">
+        <RegistryValue Root="HKLM" Key="SOFTWARE\Ductus" Name="Upgraded" Type="integer" Value="1" KeyPath="yes" />
+        <ServiceControl Id="StartDuctus" Name="Ductus" Start="install" Wait="no" />
+      </Component>
+    </ComponentGroup>
+
+    <!--
+      Who may read the settings (a database password): administrators, SYSTEM and the service. The
+      service has no rights anywhere else on the disk. icacls runs after the service exists (its
+      virtual account is looked up by name) and before it is started. Inheritance does the rest: the
+      project and the settings inside are covered without touching them one by one.
+    -->
+    <CustomAction Id="LockDataFolder" Directory="SystemFolder" Execute="deferred" Impersonate="no" Return="check"
+                  ExeCommand="icacls.exe &quot;[DATADIR].&quot; /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F &quot;NT SERVICE\Ductus:(OI)(CI)RX&quot;" />
+    <CustomAction Id="LetServiceWriteLogs" Directory="SystemFolder" Execute="deferred" Impersonate="no" Return="check"
+                  ExeCommand="icacls.exe &quot;[LOGDIR].&quot; /grant &quot;NT SERVICE\Ductus:(OI)(CI)M&quot;" />
+    <InstallExecuteSequence>
+      <Custom Action="LockDataFolder" After="InstallServices" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="LetServiceWriteLogs" After="LockDataFolder" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+    </InstallExecuteSequence>
+
+    <Feature Id="Main" Title="Ductus" Level="1">
+      <ComponentGroupRef Id="Engine" />
+      <ComponentGroupRef Id="Data" />
+      <ComponentGroupRef Id="RestartAfterUpgrade" />
+    </Feature>
+  </Package>
+</Wix>

@@ -1,10 +1,13 @@
 mod admin;
 mod dev;
 mod doctor;
+mod envfile;
 mod init;
 mod new;
 mod owners;
 mod project;
+#[cfg(windows)]
+mod service;
 mod tools;
 
 use anyhow::Result;
@@ -16,6 +19,57 @@ use std::path::PathBuf;
 struct Cli {
     #[command(subcommand)]
     command: Command,
+    /// Read settings from this file (`NAME=value` lines, the names of the DUCTUS_* variables);
+    /// variables already set win. Read before anything else, in `main`.
+    #[arg(long, global = true, env = "DUCTUS_ENV_FILE", value_name = "FILE")]
+    #[allow(dead_code)]
+    env_file: Option<PathBuf>,
+}
+
+/// What `ductus run` takes (and the Windows service, which is `ductus run --service`).
+#[derive(clap::Args, Clone)]
+struct RunArgs {
+    /// Project folder containing `interfaces/`.
+    #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
+    root: PathBuf,
+    #[arg(long, env = "DUCTUS_DATABASE_URL")]
+    database_url: Option<String>,
+    /// Threads in the shared worker pool (default: one per CPU core).
+    #[arg(long, env = "DUCTUS_THREADS")]
+    threads: Option<usize>,
+    /// Maximum PostgreSQL connections.
+    #[arg(long, env = "DUCTUS_DB_CONNECTIONS", default_value_t = 32)]
+    db_connections: u32,
+    /// Environment: variables from environments/<env>.yaml, secrets from secrets/<env>.json.
+    #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+    env: String,
+    /// Where the REST API listens (`host:port`, or `off`), instead of `api.listen` in
+    /// ductus.yaml (default 127.0.0.1:7700).
+    #[arg(long, env = "DUCTUS_API_LISTEN")]
+    api_listen: Option<String>,
+    /// On Ctrl-C or SIGTERM, how long to finish the messages in hand before exiting anyway
+    /// (they stay pending for the next start). Service managers should wait longer.
+    #[arg(long, env = "DUCTUS_STOP_TIMEOUT", default_value = "30s", value_parser = parse_duration)]
+    stop_timeout: std::time::Duration,
+    /// Run as a Windows service, under the service manager (the installer sets this up).
+    #[arg(long)]
+    service: bool,
+}
+
+impl RunArgs {
+    /// Where the project is, which database, and the engine's settings.
+    fn parts(self) -> Result<(PathBuf, String, ductus_runtime::EngineOptions)> {
+        let defaults = ductus_runtime::EngineOptions::default();
+        let options = ductus_runtime::EngineOptions {
+            pool_threads: self.threads.unwrap_or(defaults.pool_threads),
+            db_connections: self.db_connections,
+            env: self.env,
+            api_listen: self.api_listen,
+            stop_timeout: self.stop_timeout,
+            ..defaults
+        };
+        Ok((self.root, tools::database_url(self.database_url)?, options))
+    }
 }
 
 #[derive(Subcommand)]
@@ -27,30 +81,7 @@ enum Command {
         dir: PathBuf,
     },
     /// Run every interface in a project.
-    Run {
-        /// Project folder containing `interfaces/`.
-        #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
-        root: PathBuf,
-        #[arg(long, env = "DUCTUS_DATABASE_URL")]
-        database_url: Option<String>,
-        /// Threads in the shared worker pool (default: one per CPU core).
-        #[arg(long, env = "DUCTUS_THREADS")]
-        threads: Option<usize>,
-        /// Maximum PostgreSQL connections.
-        #[arg(long, env = "DUCTUS_DB_CONNECTIONS", default_value_t = 32)]
-        db_connections: u32,
-        /// Environment: variables from environments/<env>.yaml, secrets from secrets/<env>.json.
-        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
-        env: String,
-        /// Where the REST API listens (`host:port`, or `off`), instead of `api.listen` in
-        /// ductus.yaml (default 127.0.0.1:7700).
-        #[arg(long, env = "DUCTUS_API_LISTEN")]
-        api_listen: Option<String>,
-        /// On Ctrl-C or SIGTERM, how long to finish the messages in hand before exiting anyway
-        /// (they stay pending for the next start). Service managers should wait longer.
-        #[arg(long, env = "DUCTUS_STOP_TIMEOUT", default_value = "30s", value_parser = parse_duration)]
-        stop_timeout: std::time::Duration,
-    },
+    Run(RunArgs),
     /// Run the project with a Postgres of its own, for local development: nothing to install.
     /// The first run downloads Postgres (once per user); its data lives in `.ductus/postgres`
     /// and it stops with the engine. Prints the connection URL.
@@ -78,6 +109,9 @@ enum Command {
         /// Don't ask before --reset deletes it.
         #[arg(long, requires = "reset")]
         yes: bool,
+        /// Start only the Postgres, without the engine, and print its URL.
+        #[arg(long)]
+        database_only: bool,
     },
     /// Run each interface's `*.test.ts` files.
     Test {
@@ -420,8 +454,19 @@ fn exit_on_failure(result: Result<bool>) -> Result<()> {
 }
 
 fn main() -> Result<()> {
+    if let Some(file) = envfile::requested() {
+        envfile::load(&file)?;
+    }
     let cli = Cli::parse();
-    if !matches!(cli.command, Command::Run { .. } | Command::Dev { .. } | Command::Gen { .. } | Command::Sink { .. }) {
+    if let Command::Run(args) = &cli.command
+        && args.service
+    {
+        #[cfg(windows)]
+        return service::run(args.clone());
+        #[cfg(not(windows))]
+        anyhow::bail!("--service is for the Windows service; systemd runs `ductus run` itself");
+    }
+    if !matches!(cli.command, Command::Run(_) | Command::Dev { .. } | Command::Gen { .. } | Command::Sink { .. }) {
         quiet_on_closed_pipe();
     }
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(cli))
@@ -442,18 +487,11 @@ async fn run(cli: Cli) -> Result<()> {
         .init();
 
     match cli.command {
-        Command::Run { root, database_url, threads, db_connections, env, api_listen, stop_timeout } => {
-            let defaults = ductus_runtime::EngineOptions::default();
-            let options = ductus_runtime::EngineOptions {
-                pool_threads: threads.unwrap_or(defaults.pool_threads),
-                db_connections,
-                env,
-                api_listen,
-                stop_timeout,
-            };
-            ductus_runtime::run(&root, &tools::database_url(database_url)?, options).await
+        Command::Run(args) => {
+            let (root, database_url, options) = args.parts()?;
+            ductus_runtime::run(&root, &database_url, options).await
         }
-        Command::Dev { root, threads, env, api_listen, stop_timeout, port, reset, yes } => {
+        Command::Dev { root, threads, env, api_listen, stop_timeout, port, reset, yes, database_only } => {
             let defaults = ductus_runtime::EngineOptions::default();
             let engine = ductus_runtime::EngineOptions {
                 pool_threads: threads.unwrap_or(defaults.pool_threads),
@@ -462,7 +500,7 @@ async fn run(cli: Cli) -> Result<()> {
                 stop_timeout,
                 ..defaults
             };
-            dev::run(dev::Options { root, engine, port, reset, yes }).await
+            dev::run(dev::Options { root, engine, port, reset, yes, database_only }).await
         }
         Command::Test { root, interface, env } => {
             exit_on_failure(project::test(&root, &env, interface.as_deref()).await)

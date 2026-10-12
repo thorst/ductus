@@ -392,3 +392,10 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** `ductus dev` starts a Postgres of its own for the project (data in `.ductus/postgres`, one engine at a time per project) and runs the engine against it. It ignores `DUCTUS_DATABASE_URL`, uses default Postgres settings, and nobody backs the data up. Postgres is downloaded once per user (about 30 MB).
 - **Why:** to try an interface without asking anyone for a database. Production needs the DBA's Postgres (backups, monitoring, failover), and a message the engine has acknowledged must survive what the DBA protects against.
 - **What to do:** use `ductus dev` on your own machine; everywhere else set `DUCTUS_DATABASE_URL` and use `ductus run`. Without a download possible, unpack the Postgres binaries yourself and set `DUCTUS_POSTGRES_DIR`. `ductus dev --reset` throws the dev data away.
+
+## Windows
+
+### The Windows service can only touch what you give it (level 2)
+- **What:** the service runs as the virtual account `NT SERVICE\Ductus`, which can read `C:\ProgramData\Ductus` (settings, project) and write its logs there, and nothing else. A file or SFTP interface that moves, deletes or writes files outside it (an inbox on `D:\Interfaces`, an archive folder, an output share) fails with "access denied" until you allow it. Settings (`ductus.env`) hold the database password, so only administrators, SYSTEM and the service can read that folder.
+- **Why:** a service that can write anywhere turns one bad interface into a problem for the whole server.
+- **What to do:** grant the service the folders interfaces use, as narrowly as you can: `icacls "D:\Interfaces" /grant "NT SERVICE\Ductus:(OI)(CI)M"`. For a network share, grant the computer account (`DOMAIN\SERVER$`), since a virtual account authenticates as the machine. `ductus doctor` in a terminal runs as you, not as the service, so it can pass where the service fails: the service's log (`C:\ProgramData\Ductus\logs`) shows the "access denied".

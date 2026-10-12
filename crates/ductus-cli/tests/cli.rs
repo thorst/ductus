@@ -46,6 +46,35 @@ fn there_is_no_default_database() {
 }
 
 #[test]
+fn an_env_file_supplies_settings_and_the_environment_wins() {
+    let parent = tempfile::tempdir().unwrap();
+    let (ok, out) = ductus(parent.path(), &["init", "p"]);
+    assert!(ok, "{out}");
+    let project = parent.path().join("p");
+    std::fs::write(
+        parent.path().join("ductus.env"),
+        "# the service's settings
+DUCTUS_ENV=\"prod\"
+",
+    )
+    .unwrap();
+    let file = parent.path().join("ductus.env");
+    let ports = |env: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ductus"));
+        command.args(["ports", "--env-file"]).arg(&file).current_dir(&project).env_remove("DUCTUS_ENV");
+        if let Some(env) = env {
+            command.env("DUCTUS_ENV", env);
+        }
+        String::from_utf8_lossy(&command.output().unwrap().stdout).into_owned()
+    };
+    assert!(ports(None).contains("environment: prod"), "the file's setting is used");
+    assert!(ports(Some("dev")).contains("environment: dev"), "a variable that is already set wins");
+    // A file that isn't there is an error, not a silent skip.
+    let (ok, out) = ductus(&project, &["ports", "--env-file", "missing.env"]);
+    assert!(!ok && out.contains("reading the env file"), "{out}");
+}
+
+#[test]
 fn a_new_project_passes_test_and_validate_as_generated() {
     let parent = tempfile::tempdir().unwrap();
     let (ok, out) = ductus(parent.path(), &["init", "hospital"]);

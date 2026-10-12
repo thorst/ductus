@@ -1,7 +1,7 @@
 # Packaging
 
-How Ductus is installed: a container image, Linux packages with a systemd service, and (coming)
-a Windows MSI with a Windows service. Every one is a development build until v1.0.
+How Ductus is installed: a container image, Linux packages with a systemd service, and a Windows
+MSI with a Windows service. Every one is a development build until v1.0.
 
 The engine is one binary (`ductus`, the web UI inside it) plus PostgreSQL, which is never
 bundled: it's the DBA's, on the same server or another, and so are its backups (pgBackRest or WAL
@@ -86,7 +86,48 @@ becomes `0.5.0~dev.20261009`, which sorts before `0.5.0`.
 - Test: `scripts/demo-packages.sh` (systemd in containers: install, configure, upgrade under
   traffic, stop, remove; Ubuntu and Rocky).
 
-## Windows (coming in 0.6.1)
+## Windows (MSI and service)
 
-An MSI (WiX) installing a Windows service: silent installs (`msiexec /i ductus.msi /qn`) for
-GPO, SCCM and Intune, upgrades in place.
+```powershell
+msiexec /i ductus-0.5.0-dev.20261012-x64.msi /qn      # silent: GPO, SCCM, Intune
+notepad C:\ProgramData\Ductus\ductus.env             # DUCTUS_DATABASE_URL at least
+Start-Service Ductus                                   # then Restart-Service after edits
+```
+
+Built by `packaging/windows/build.ps1` (WiX v5: `dotnet tool install --global wix --version 5.0.2`,
+then `wix extension add --global WixToolset.Util.wixext/5.0.2`) from a release `ductus.exe`
+(`cargo build --release -p ductus`, MSVC). Unsigned for now: SmartScreen warns on a downloaded
+installer; a code-signing certificate is a later decision.
+
+| Path | What |
+|---|---|
+| `C:\Program Files\Ductus\ductus.exe` | the engine and CLI; the folder is on the system PATH |
+| `C:\ProgramData\Ductus\ductus.env` | settings (the variables above; `NAME=value` lines): the installer writes a template once and never overwrites it |
+| `C:\ProgramData\Ductus\project\` | the project (a Git clone) |
+| `C:\ProgramData\Ductus\logs\` | `ductus.<date>.log`, daily, the last 14 kept |
+| service `Ductus` | "Ductus Integration Engine", `ductus.exe run --service --env-file C:\ProgramData\Ductus\ductus.env`, runs as the virtual account `NT SERVICE\Ductus` |
+
+- **Secrets are never installer properties** (they would end up in the install log): the database
+  password lives in `ductus.env`. `C:\ProgramData\Ductus` is readable by administrators, SYSTEM and
+  the service only; the service has no rights anywhere else. Give it access to what interfaces
+  use (a folder a file destination writes to, a share) with `icacls "D:\Out" /grant "NT SERVICE\Ductus:(OI)(CI)M"`.
+- **Install:** registers the service (automatic start) but doesn't start it: nothing is configured,
+  and without a database it would stop at once. After editing `ductus.env`, `Start-Service Ductus`
+  (or reboot).
+- **Stop:** the service manager's Stop, a Windows shutdown (the service takes preshutdown, 90 s)
+  and `ductus drain --stop` all stop cleanly, like SIGTERM on Linux. While starting and stopping
+  it reports progress, so a long migration or a stop finishing the messages in hand isn't taken
+  for a hang. If it fails it restarts after a minute, twice, then waits for a person.
+- **Upgrade:** `msiexec /i` of a newer MSI (or the same version: development builds replace each
+  other; the installer's version is major.minor.patch) stops the service cleanly, replaces the
+  program and, if `ductus.env` exists, starts it again. A service that was stopped on purpose
+  is started too: the installer can't tell. Settings, project and logs are never touched.
+- **Uninstall:** removes the service and the program; keeps `C:\ProgramData\Ductus`.
+- `ductus dev` works on Windows too (its own Postgres), from a normal, non-elevated prompt.
+- Test: `scripts/demo-windows.ps1` (elevated; CI's `windows` job runs it on `windows-latest`:
+  silent install, service account and settings, start, health, an MLLP round trip, clean stop,
+  upgrade over a running install, uninstall).
+- Building on Windows: Rust (MSVC) and the VS Build Tools' C++ workload are enough (V8 comes
+  prebuilt). rusty_v8's build script makes a symlink when the target folder and the cargo
+  registry are on different drives, which needs Developer Mode or an elevated shell: keep
+  `CARGO_HOME` and `CARGO_TARGET_DIR` on the same drive.

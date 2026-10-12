@@ -62,6 +62,10 @@ pub struct EngineOptions {
     pub api_listen: Option<String>,
     /// How long a stop may take before the engine exits anyway (see `stop`).
     pub stop_timeout: Duration,
+    /// Another way to ask for the stop a signal asks for: the Windows service manager's Stop.
+    pub stop_request: Option<std::sync::Arc<tokio::sync::Notify>>,
+    /// Called once when every interface and the API are up (the service reports Running then).
+    pub on_started: Option<Box<dyn FnOnce() + Send>>,
 }
 
 impl Default for EngineOptions {
@@ -72,13 +76,15 @@ impl Default for EngineOptions {
             env: "dev".into(),
             api_listen: None,
             stop_timeout: STOP_TIMEOUT,
+            stop_request: None,
+            on_started: None,
         }
     }
 }
 
 /// Start every interface under `root` and run until Ctrl-C or SIGTERM (or until drained, when a
 /// drain asked to stop); then stop cleanly (`stop`).
-pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Result<()> {
+pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) -> Result<()> {
     let env = Environment::load(root, &options.env)?;
     let configs = load_interfaces(root, &env)?;
     // Loaded now so a missing variable or secret stops startup; used by interface code (v0.4).
@@ -335,6 +341,9 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         dedicated_threads = jobs - shared_count,
         "started"
     );
+    if let Some(started) = options.on_started.take() {
+        started();
+    }
 
     let maintenance = store.clone();
     tokio::spawn(async move {
@@ -351,9 +360,16 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
         }
     });
 
+    let requested = async {
+        match &options.stop_request {
+            Some(request) => request.notified().await,
+            None => std::future::pending().await,
+        }
+    };
     let why = tokio::select! {
         signal = stop_signal() => signal,
         _ = engine.shutdown.cancelled() => "drained and asked to stop",
+        _ = requested => "asked by the service manager",
     };
     let limit = options.stop_timeout;
     tracing::info!(why, limit = ?limit, "stopping: taking no new messages, finishing the ones in hand");

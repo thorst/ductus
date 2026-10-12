@@ -22,6 +22,11 @@ serde_json = "1.0.151"
 tokio = { version = "1.53.2", features = ["full"] }
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
+[target.'cfg(windows)'.dependencies]
+tracing = "0.1.44"
+tracing-appender = "0.2.3"
+windows-service = "0.8.0"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2.190"
 

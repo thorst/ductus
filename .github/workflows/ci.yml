@@ -170,3 +170,58 @@ jobs:
 
       - name: Linux packages (systemd in containers; install, upgrade under traffic, stop, remove; Ubuntu and Rocky)
         run: bash scripts/demo-packages.sh
+
+  # The Windows build, installer and service, in parallel with the others.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+
+      - name: Web UI (the binary embeds it)
+        working-directory: ui
+        run: npm ci --no-audit --no-fund && npm run build
+
+      - name: Build
+        run: cargo build --release --locked -p ductus
+
+      - name: Installer (WiX)
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add --global WixToolset.Util.wixext/5.0.2
+          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version 0.5.0-ci -Out dist
+
+      - name: A Postgres for the service (ductus dev --database-only)
+        shell: pwsh
+        run: |
+          $project = Join-Path $env:RUNNER_TEMP "dbproject"
+          New-Item -ItemType Directory $project | Out-Null
+          $log = Join-Path $env:RUNNER_TEMP "database.log"
+          Start-Process target/release/ductus.exe -ArgumentList "dev --database-only --root `"$project`"" -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError "$log.err"
+          $url = $null
+          for ($i = 0; $i -lt 240 -and -not $url; $i++) {
+            Start-Sleep 1
+            $url = (Get-Content $log -ErrorAction SilentlyContinue | Where-Object { $_ -match '^\s+(postgresql://\S+)$' } | Select-Object -First 1)
+          }
+          if (-not $url) { Get-Content $log, "$log.err" -ErrorAction SilentlyContinue; throw "no database" }
+          "DEMO_DATABASE_URL=$($url.Trim())" >> $env:GITHUB_ENV
+
+      - name: Installer demo (silent install, service, MLLP round trip, upgrade over it, uninstall)
+        shell: pwsh
+        run: ./scripts/demo-windows.ps1 -Msi (Get-Item dist/*.msi).FullName -DatabaseUrl $env:DEMO_DATABASE_URL
+
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-installer
+          path: dist/*.msi
+          if-no-files-found: ignore
