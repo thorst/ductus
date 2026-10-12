@@ -180,6 +180,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: windows
+          # The build takes ~35 min cold: keep it when a later step fails.
+          cache-on-failure: true
       - uses: actions/setup-node@v7
         with:
           node-version: 24
@@ -217,11 +219,13 @@ jobs:
 
       - name: Installer demo (silent install, service, MLLP round trip, upgrade over it, uninstall)
         shell: pwsh
-        run: ./scripts/demo-windows.ps1 -Msi (Get-Item dist/*.msi).FullName -DatabaseUrl $env:DEMO_DATABASE_URL
+        run: ./scripts/demo-windows.ps1 -Msi (Get-Item dist/*.msi).FullName -DatabaseUrl $env:DEMO_DATABASE_URL -LogDir "$env:RUNNER_TEMP/demo-logs"
 
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: windows-installer
-          path: dist/*.msi
+          path: |
+            dist/*.msi
+            ${{ runner.temp }}/demo-logs
           if-no-files-found: ignore

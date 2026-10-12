@@ -5,14 +5,16 @@
 #   .\scripts\demo-windows.ps1 -Msi dist\ductus-0.5.0-dev-x64.msi -DatabaseUrl postgres://u:p@localhost/db
 param(
     [Parameter(Mandatory)] [string] $Msi,
-    [Parameter(Mandatory)] [string] $DatabaseUrl
+    [Parameter(Mandatory)] [string] $DatabaseUrl,
+    # Where the installer logs and the receiver's output go (CI uploads it).
+    [string] $LogDir = ""
 )
 $ErrorActionPreference = "Stop"
 $Msi = (Resolve-Path $Msi).Path
 $data = "C:\ProgramData\Ductus"
 $exe = "C:\Program Files\Ductus\ductus.exe"
-$work = Join-Path ([IO.Path]::GetTempPath()) ("ductus-win-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
-New-Item -ItemType Directory $work | Out-Null
+$work = if ($LogDir) { $LogDir } else { Join-Path ([IO.Path]::GetTempPath()) ("ductus-win-" + [guid]::NewGuid().ToString("N").Substring(0, 8)) }
+New-Item -ItemType Directory -Force $work | Out-Null
 $failures = @()
 $sink = $null
 
@@ -21,6 +23,7 @@ function Check([string] $name, [bool] $ok, [string] $detail = "") {
 }
 function Msi([string[]] $arguments, [string] $log) {
     $p = Start-Process msiexec.exe -ArgumentList ($arguments + @("/qn", "/l*v", "`"$work\$log.log`"")) -Wait -PassThru
+    Write-Host "   (msiexec $($arguments -join ' ') -> exit $($p.ExitCode); log $work\$log.log)"
     return $p.ExitCode
 }
 function Wait-Until([scriptblock] $condition, [int] $seconds = 60) {
@@ -79,10 +82,16 @@ try {
     Check "still takes messages" (Wait-Until { (Get-Content "$work\sink.log" -ErrorAction SilentlyContinue | Out-String) -match "unique 150 " } 30)
 
     Write-Host "== 6. uninstall"
+    # The receiver runs from the installed program: let go of it first, like an administrator would.
+    if ($sink -and -not $sink.HasExited) { Stop-Process -Id $sink.Id -Force; $sink.WaitForExit(5000) | Out-Null }
     Check "msiexec /x succeeds" ((Msi @("/x", "`"$Msi`"") "uninstall") -in 0, 3010)
     Check "service removed" ($null -eq (Get-Service Ductus -ErrorAction SilentlyContinue))
     Check "program removed" (-not (Test-Path $exe))
     Check "settings and project kept" ((Test-Path "$data\ductus.env") -and (Test-Path "$data\project"))
+}
+catch {
+    Write-Host "EXCEPTION: $($_ | Out-String)"
+    $failures += "exception"
 }
 finally {
     if ($sink -and -not $sink.HasExited) { Stop-Process -Id $sink.Id -Force }
