@@ -1,5 +1,7 @@
 # Ductus
 
+*Ductus* is Latin for a conduit, a channel that leads something from one place to another: here, messages between healthcare systems. Website: **[getductus.com](https://getductus.com)**.
+
 **A code-first integration engine for healthcare.** Write interfaces in TypeScript, run them on a fast Rust runtime with PostgreSQL as the store and queue, and operate them with monitoring, replay and data lifecycle tools built in.
 
 One binary plus PostgreSQL. No message broker, no JVM, no Node.js.
