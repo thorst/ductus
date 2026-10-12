@@ -6,7 +6,7 @@ We want to be clear about how this project is licensed and how we intend to make
 
 - **The core engine is open source under Apache-2.0, and it stays that way.**
 - A small set of **Enterprise features** for large organizations is sold under a commercial license.
-- The free edition is a complete, production-ready integration engine, not a trial or a demo.
+- The free edition is meant to be a complete, production-ready integration engine, not a trial or a demo. (Today it is an early development build: see the README.)
 
 ## What's open source (Apache-2.0)
 

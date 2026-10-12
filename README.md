@@ -4,7 +4,25 @@
 
 One binary plus PostgreSQL. No message broker, no JVM, no Node.js.
 
-> Early development (v0.4 released, v0.5 in progress). Not production-ready yet.
+> **Early development, not production-ready.** The engine's core (persist-before-ACK, ordering,
+> retries, retention) is built and tested end to end, and the web UI and operations tooling are in
+> progress, but there has been no external security audit and the installers are development
+> builds. **Don't send real patient data through it yet.** See [SECURITY.md](SECURITY.md).
+
+## Try it
+
+Needs Rust (stable). Nothing else: `ductus dev` brings its own PostgreSQL.
+
+```
+cargo build --release                      # for the web UI too: (cd ui && npm ci && npm run build) first
+export PATH="$PWD/target/release:$PATH"
+ductus init hospital && cd hospital
+ductus test                                # the sample interface's tests, in embedded V8
+ductus dev                                 # engine + its own Postgres (downloaded once); prints the URL
+ductus gen --count 100                     # in a second terminal: 100 synthetic ADT messages over MLLP
+```
+
+The web UI is at `http://127.0.0.1:7700` (sign in with a token: `ductus token create me --role admin --database-url <the URL dev printed>`).
 
 ## What an interface looks like
 
@@ -126,7 +144,9 @@ Past that, the limit is PostgreSQL, and mostly its disk: Ductus spends little CP
 
 | Command | What it does |
 |---|---|
-| `ductus run` | Run every interface in the project |
+| `ductus init [dir]` | A new project that passes `test` and `validate` as generated |
+| `ductus dev` | Run the project with a PostgreSQL of its own (nothing to install), for local development |
+| `ductus run` | Run every interface in the project against your PostgreSQL (`DUCTUS_DATABASE_URL`, no default) |
 | `ductus new interface <name>` | A working interface (config, code, test, sample) on a free port |
 | `ductus test` | Run each interface's `*.test.ts`, with mocks for databases and APIs |
 | `ductus validate` | Check configs, code loading and TypeScript types for an environment (exits 1 on problems) |
@@ -151,12 +171,14 @@ Every guarantee has an end-to-end demo in `scripts/` that kills the engine mid-s
 
 ## Building
 
-Requires Rust (stable) and PostgreSQL. TypeScript type checking uses an embedded copy of the TypeScript 6 compiler (`vendor/typescript`, Apache-2.0); no Node.js needed.
+Requires Rust (stable); the tests need a PostgreSQL. TypeScript type checking uses an embedded copy of the TypeScript 6 compiler (`vendor/typescript`, Apache-2.0); Node.js is needed only to build the web UI (`ui/`, embedded in the binary).
 
 ```
 cargo build --release
 DUCTUS_TEST_DATABASE_URL=postgres://user:pass@localhost/db cargo test
 ```
+
+Linux packages (.deb, .rpm), a container image and a Windows installer (MSI with a Windows service) are built from the same source: see [packaging/README.md](packaging/README.md). Nothing is published as a release before v1.0. On Windows (MSVC), keep `CARGO_HOME` and `CARGO_TARGET_DIR` on one drive.
 
 ## License
 

@@ -1,5 +1,5 @@
 //! Database-backed tests. Skipped unless DUCTUS_TEST_DATABASE_URL is set
-//! (CI sets it; locally: postgres://todd:ductus@localhost/ductus_dev).
+//! (CI sets it; locally: scripts/dev/db.sh prints the one the scripts use).
 
 use ductus_store::{
     Batch, BatchMessage, Browse, DedupeKey, DestinationId, Done, MessageRef, NewMessage, QueueCount, Reconciled, Role,

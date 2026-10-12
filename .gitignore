@@ -19,6 +19,7 @@ Thumbs.db
 .env
 .env.*
 *.local.yaml
+scripts/dev/db.local.sh
 
 # Generated editor typings (ductus types)
 .ductus/

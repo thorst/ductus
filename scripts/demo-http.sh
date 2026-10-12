@@ -10,7 +10,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
 DB=$DUCTUS_DATABASE_URL
-PGUSER_=${PGUSER_:-todd}
+PGUSER_=${PGUSER_:-ductus}
 PGPASS_=${PGPASS_:-ductus}
 P=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB

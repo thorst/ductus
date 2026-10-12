@@ -13,7 +13,7 @@ source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
 DB=$DUCTUS_DATABASE_URL
-PGUSER_=${PGUSER_:-todd}
+PGUSER_=${PGUSER_:-ductus}
 PGPASS_=${PGPASS_:-ductus}
 SSHD=${SSHD:-/usr/sbin/sshd}
 SFTP_PORT=${SFTP_PORT:-2222}
