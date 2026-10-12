@@ -2,6 +2,7 @@
 # v0.1 demo: stream synthetic ADT through Ductus, hard-kill the engine mid-stream,
 # restart it, and verify nothing was lost and per-patient order held.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}
 COUNT=${COUNT:-20000}
@@ -10,7 +11,7 @@ KILL_AFTER=${KILL_AFTER:-5}
 LOGS=$(mktemp -d)
 ROOT=$(cd "$(dirname "$0")/../examples/adt-relay" && pwd)
 
-psql -q "${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}" -c "TRUNCATE messages, deliveries, dedupe_keys" 2>/dev/null || true
+psql -q "$DUCTUS_DATABASE_URL" -c "TRUNCATE messages, deliveries, dedupe_keys" 2>/dev/null || true
 
 echo "== starting sink, engine, generator ($COUNT messages, $PATIENTS patients)"
 "$BIN" sink --port 6662 >"$LOGS/sink.log" 2>&1 &

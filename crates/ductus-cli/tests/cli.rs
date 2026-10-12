@@ -20,6 +20,31 @@ fn ductus(dir: &Path, args: &[&str]) -> (bool, String) {
     (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }
 
+/// `ductus <args>` with no database configured at all.
+fn without_a_database(dir: &Path, args: &[&str]) -> (bool, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(args)
+        .current_dir(dir)
+        .env_remove("DUCTUS_DATABASE_URL")
+        .output()
+        .unwrap();
+    (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+}
+
+#[test]
+fn there_is_no_default_database() {
+    let dir = tempfile::tempdir().unwrap();
+    for args in [&["run"][..], &["status"], &["token", "list"], &["doctor"]] {
+        let (ok, out) = without_a_database(dir.path(), args);
+        assert!(!ok, "{args:?} must not guess a database: {out}");
+        assert!(out.contains("no database: set DUCTUS_DATABASE_URL") && out.contains("ductus dev"), "{args:?}: {out}");
+    }
+    for args in [&["--help"][..], &["run", "--help"], &["status", "--help"], &["dev", "--help"]] {
+        let (_, out) = without_a_database(dir.path(), args);
+        assert!(!out.contains("todd") && !out.contains("ductus_dev"), "{args:?} shows a personal database: {out}");
+    }
+}
+
 #[test]
 fn a_new_project_passes_test_and_validate_as_generated() {
     let parent = tempfile::tempdir().unwrap();

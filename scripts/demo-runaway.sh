@@ -9,9 +9,10 @@
 #   hog     fills the heap on every message: 1 quarantined, interface stopped
 # steady must deliver everything, as fast as it would alone.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 COUNT=${COUNT:-200}
 P=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB

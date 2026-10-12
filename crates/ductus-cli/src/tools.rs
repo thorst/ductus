@@ -7,7 +7,16 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-pub const DEFAULT_DB: &str = "postgres://todd:ductus@localhost/ductus_dev";
+/// The engine's database, from `--database-url` or `DUCTUS_DATABASE_URL`. There is no default:
+/// a default would point at somebody's own server.
+pub fn database_url(given: Option<String>) -> Result<String> {
+    match given.map(|u| u.trim().to_string()) {
+        Some(url) if !url.is_empty() => Ok(url),
+        _ => anyhow::bail!(
+            "no database: set DUCTUS_DATABASE_URL (postgres://user:password@host/database) or pass              --database-url; for local development `ductus dev` starts its own Postgres"
+        ),
+    }
+}
 
 const LAST: &[&str] =
     &["SMITH", "JOHNSON", "WILLIAMS", "BROWN", "JONES", "GARCIA", "MILLER", "DAVIS", "LOPEZ", "WILSON"];

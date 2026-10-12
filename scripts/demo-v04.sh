@@ -9,9 +9,10 @@
 # Each environment has its own database, ports, SFTP folder, facility name and encrypted secrets.
 # The interfaces start from `ductus new interface`; their tests run against mocks (no database).
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 PGUSER_=${PGUSER_:-todd}
 PGPASS_=${PGPASS_:-ductus}
 SSHD=${SSHD:-/usr/sbin/sshd}

@@ -385,3 +385,10 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 ### Anyone with a viewer token can read message payloads (level 4)
 - **What:** `GET /api/v1/messages/{id}` (and the message page in the UI) returns the payload, which holds patient data. Each read is logged with the token's name; there are no finer permissions or audit log yet (they come with users and roles in v0.5 step 8).
 - **What to do:** give tokens only to people and tools that may see patient data, and name them so the log says who looked.
+
+## Local development
+
+### `ductus dev` is a development tool, not a way to run in production (level 1)
+- **What:** `ductus dev` starts a Postgres of its own for the project (data in `.ductus/postgres`, one engine at a time per project) and runs the engine against it. It ignores `DUCTUS_DATABASE_URL`, uses default Postgres settings, and nobody backs the data up. Postgres is downloaded once per user (about 30 MB).
+- **Why:** to try an interface without asking anyone for a database. Production needs the DBA's Postgres (backups, monitoring, failover), and a message the engine has acknowledged must survive what the DBA protects against.
+- **What to do:** use `ductus dev` on your own machine; everywhere else set `DUCTUS_DATABASE_URL` and use `ductus run`. Without a download possible, unpack the Postgres binaries yourself and set `DUCTUS_POSTGRES_DIR`. `ductus dev --reset` throws the dev data away.

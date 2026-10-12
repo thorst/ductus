@@ -7,9 +7,10 @@
 #   2. SIGTERM: nothing lost, nothing sent twice, exit 0;
 #   3. SIGTERM while the receiver is down (the worker in a retry back-off): stops at once.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 COUNT=${COUNT:-6000}
 # As fast as ACKs come back over 8 connections: ingest outruns delivery, so workers are mid-batch (finished
 # messages not saved yet) when the engine stops. That's when a hard kill re-sends.

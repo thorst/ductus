@@ -16,7 +16,8 @@ cd "$(dirname "$0")/../.."
 [ -f ~/.cargo/env ] && source ~/.cargo/env
 # Build outside /mnt (Windows drives are slow from WSL).
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$HOME/target}
-export DUCTUS_TEST_DATABASE_URL=${DUCTUS_TEST_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+source scripts/dev/db.sh
+export DUCTUS_TEST_DATABASE_URL=${DUCTUS_TEST_DATABASE_URL:-$DUCTUS_DATABASE_URL}
 if [ -z "${DUCTUS_TEST_SQLSERVER:-}" ]; then
   if { docker inspect ductus-mssql || sudo -n docker inspect ductus-mssql; } >/dev/null 2>&1; then
     DUCTUS_TEST_SQLSERVER=$(bash scripts/dev/sqlserver.sh)

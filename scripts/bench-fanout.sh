@@ -9,9 +9,10 @@
 # not a receiver's. Not a pass/fail demo: it prints a table (and fails only if something was
 # lost or sent twice).
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 COUNT=${COUNT:-6000}
 CONNECTIONS=${CONNECTIONS:-16}
 FANOUT=${FANOUT:-"1 5 25"}

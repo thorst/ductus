@@ -3,6 +3,7 @@
 # Needs: a built release binary (scripts/dev/check.sh), Postgres, psql.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
+source scripts/dev/db.sh
 export CARGO_TARGET_DIR=${CARGO_TARGET_DIR:-$HOME/target}
 export BIN=$CARGO_TARGET_DIR/release/ductus
 [ -x "$HOME/.local/node/bin/node" ] && export PATH="$HOME/.local/node/bin:$PATH"
@@ -21,4 +22,5 @@ echo "##### retention";       bash scripts/demo-retention.sh | tail -1
 echo "##### held area";       bash scripts/demo-held.sh | tail -1
 echo "##### hotspots";        bash scripts/demo-hotspots.sh | tail -1
 echo "##### web UI";          bash scripts/demo-ui.sh | tail -1
+echo "##### ductus dev";      bash scripts/demo-dev.sh | tail -1
 echo "##### scale";           SHARED=300 EPIC_SECONDS=10 SAMPLED=50 bash scripts/demo-scale.sh | tail -1

@@ -13,9 +13,10 @@
 # them in order per patient, and each audit record points back through billing to its ADT.
 # `ductus validate` refuses a loop; `ductus impact` follows the routes downstream.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 COUNT=2000   # 100 patients x 20 messages; MRNs 100000..100099, the 50 odd ones are billable
 BILLABLE=1000
 P=$(mktemp -d)

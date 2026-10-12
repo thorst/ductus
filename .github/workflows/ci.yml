@@ -137,6 +137,9 @@ jobs:
       - name: Hotspots demo (one patient's message blocks its worker, a receiver down, a hot patient)
         run: BIN=target/release/ductus bash scripts/demo-hotspots.sh
 
+      - name: Dev demo (ductus dev starts a Postgres of its own; same port and data on restart; a killed one is cleaned up)
+        run: BIN=target/release/ductus bash scripts/demo-dev.sh
+
       - name: Web UI demo (a real browser against the engine; sign-in, attention, messages, axe in every theme)
         run: |
           (cd ui && npx playwright install --with-deps chromium >/dev/null)

@@ -1,4 +1,5 @@
 mod admin;
+mod dev;
 mod doctor;
 mod init;
 mod new;
@@ -30,8 +31,8 @@ enum Command {
         /// Project folder containing `interfaces/`.
         #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
         root: PathBuf,
-        #[arg(long, env = "DUCTUS_DATABASE_URL", default_value = tools::DEFAULT_DB)]
-        database_url: String,
+        #[arg(long, env = "DUCTUS_DATABASE_URL")]
+        database_url: Option<String>,
         /// Threads in the shared worker pool (default: one per CPU core).
         #[arg(long, env = "DUCTUS_THREADS")]
         threads: Option<usize>,
@@ -49,6 +50,34 @@ enum Command {
         /// (they stay pending for the next start). Service managers should wait longer.
         #[arg(long, env = "DUCTUS_STOP_TIMEOUT", default_value = "30s", value_parser = parse_duration)]
         stop_timeout: std::time::Duration,
+    },
+    /// Run the project with a Postgres of its own, for local development: nothing to install.
+    /// The first run downloads Postgres (once per user); its data lives in `.ductus/postgres`
+    /// and it stops with the engine. Prints the connection URL.
+    Dev {
+        /// Project folder containing `interfaces/`.
+        #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
+        root: PathBuf,
+        /// Threads in the shared worker pool (default: one per CPU core).
+        #[arg(long, env = "DUCTUS_THREADS")]
+        threads: Option<usize>,
+        /// Environment: variables from environments/<env>.yaml, secrets from secrets/<env>.json.
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+        /// Where the REST API listens (`host:port`, or `off`).
+        #[arg(long, env = "DUCTUS_API_LISTEN")]
+        api_listen: Option<String>,
+        #[arg(long, env = "DUCTUS_STOP_TIMEOUT", default_value = "30s", value_parser = parse_duration)]
+        stop_timeout: std::time::Duration,
+        /// Postgres's port (default: the one kept from the last run, else a free one).
+        #[arg(long)]
+        port: Option<u16>,
+        /// Delete this project's dev database and start again.
+        #[arg(long)]
+        reset: bool,
+        /// Don't ask before --reset deletes it.
+        #[arg(long, requires = "reset")]
+        yes: bool,
     },
     /// Run each interface's `*.test.ts` files.
     Test {
@@ -120,8 +149,8 @@ enum Command {
         root: PathBuf,
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
-        #[arg(long, env = "DUCTUS_DATABASE_URL", default_value = tools::DEFAULT_DB)]
-        database_url: String,
+        #[arg(long, env = "DUCTUS_DATABASE_URL")]
+        database_url: Option<String>,
     },
     /// Who owns which interface and destination (`about.owner`, and `owner` on a destination
     /// someone else owns). `ductus owners reassign` moves ownership.
@@ -139,8 +168,8 @@ enum Command {
     Token {
         #[command(subcommand)]
         action: TokenAction,
-        #[arg(long, env = "DUCTUS_DATABASE_URL", default_value = tools::DEFAULT_DB, global = true)]
-        database_url: String,
+        #[arg(long, env = "DUCTUS_DATABASE_URL", global = true)]
+        database_url: Option<String>,
     },
     /// Stop taking new messages and deliver what's stored (for upgrades, server moves, config
     /// changes that need an empty queue): MLLP listeners close, queued HTTP answers 503, file
@@ -216,8 +245,8 @@ enum Command {
     /// down); with a token, also each interface's and destination's health from the running
     /// engine (silent, behind, stalled, paused, catching up...).
     Status {
-        #[arg(long, env = "DUCTUS_DATABASE_URL", default_value = tools::DEFAULT_DB)]
-        database_url: String,
+        #[arg(long, env = "DUCTUS_DATABASE_URL")]
+        database_url: Option<String>,
         #[command(flatten)]
         api: ApiArgs,
     },
@@ -392,7 +421,7 @@ fn exit_on_failure(result: Result<bool>) -> Result<()> {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
-    if !matches!(cli.command, Command::Run { .. } | Command::Gen { .. } | Command::Sink { .. }) {
+    if !matches!(cli.command, Command::Run { .. } | Command::Dev { .. } | Command::Gen { .. } | Command::Sink { .. }) {
         quiet_on_closed_pipe();
     }
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(cli))
@@ -422,7 +451,18 @@ async fn run(cli: Cli) -> Result<()> {
                 api_listen,
                 stop_timeout,
             };
-            ductus_runtime::run(&root, &database_url, options).await
+            ductus_runtime::run(&root, &tools::database_url(database_url)?, options).await
+        }
+        Command::Dev { root, threads, env, api_listen, stop_timeout, port, reset, yes } => {
+            let defaults = ductus_runtime::EngineOptions::default();
+            let engine = ductus_runtime::EngineOptions {
+                pool_threads: threads.unwrap_or(defaults.pool_threads),
+                env,
+                api_listen,
+                stop_timeout,
+                ..defaults
+            };
+            dev::run(dev::Options { root, engine, port, reset, yes }).await
         }
         Command::Test { root, interface, env } => {
             exit_on_failure(project::test(&root, &env, interface.as_deref()).await)
@@ -444,7 +484,14 @@ async fn run(cli: Cli) -> Result<()> {
             exit_on_failure(project::impact(&root, &env, query, resolve).await)
         }
         Command::Doctor { interface, timeout, report, root, env, database_url } => {
-            let options = doctor::Options { root, env, database_url, interfaces: interface, timeout, report };
+            let options = doctor::Options {
+                root,
+                env,
+                database_url: tools::database_url(database_url)?,
+                interfaces: interface,
+                timeout,
+                report,
+            };
             exit_on_failure(doctor::run(options).await)
         }
         Command::Owners { action: None, root, env } => exit_on_failure(owners::report(&root, &env)),
@@ -457,7 +504,7 @@ async fn run(cli: Cli) -> Result<()> {
                 TokenAction::List { revoked } => admin::TokenCommand::List { revoked },
                 TokenAction::Revoke { name } => admin::TokenCommand::Revoke { name },
             };
-            admin::token(&database_url, command).await
+            admin::token(&tools::database_url(database_url)?, command).await
         }
         Command::Drain { stop, wait, api } => admin::drain(admin::Remote::new(&api.api, api.token)?, stop, wait).await,
         Command::Resume { interface: None, api, .. } => admin::resume(admin::Remote::new(&api.api, api.token)?).await,
@@ -485,7 +532,7 @@ async fn run(cli: Cli) -> Result<()> {
             Ok(())
         }
         Command::Status { database_url, api } => {
-            tools::status(&database_url).await?;
+            tools::status(&tools::database_url(database_url)?).await?;
             if api.token.as_deref().is_some_and(|t| !t.trim().is_empty()) {
                 println!("\nhealth:");
                 match admin::health(&admin::Remote::new(&api.api, api.token)?).await {

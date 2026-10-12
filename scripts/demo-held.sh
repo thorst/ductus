@@ -16,9 +16,10 @@
 # 3. Next run: held months that are over and fully delivered are dropped whole; the month with
 #    adt's unresolved quarantined messages stays.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 HISTORY=${HISTORY:-500}   # adt messages per day of history
 P=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB DUCTUS_API_URL=http://127.0.0.1:7792 PGTZ=UTC  # dates as the engine sees them

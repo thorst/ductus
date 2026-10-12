@@ -10,9 +10,10 @@
 # it must get all 200, in order per patient, once each; billing and archive nothing twice.
 # `ductus impact` must find the interface by the billing vendor and the lab's host.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 COUNT=200 # 20 patients x 10 messages; MRNs 100000..100019, the 10 odd ones are billable
 P=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB

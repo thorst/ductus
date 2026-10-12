@@ -12,12 +12,21 @@ Settings come from environment variables, the same everywhere:
 
 | Variable | What |
 |---|---|
-| `DUCTUS_DATABASE_URL` | `postgres://user:password@host/database`; the engine creates its tables on first start |
+| `DUCTUS_DATABASE_URL` | `postgres://user:password@host/database`; the engine creates its tables on first start. There is no default: without it `ductus run` says so |
 | `DUCTUS_PROJECT` | the project folder (`interfaces/`, `ductus.yaml`, `environments/`), usually a Git clone |
 | `DUCTUS_ENV` | which environment's variables and secrets to use (`dev`, `prod`, ...) |
 | `DUCTUS_SECRET_KEY` | opens `secrets/<env>.json` |
 | `DUCTUS_API_LISTEN` | the REST API and web UI (`127.0.0.1:7700` by default) |
 | `DUCTUS_STOP_TIMEOUT` | how long a stop may take to finish the messages in hand (30 s) |
+
+## Local development without a database
+
+`ductus dev` runs a project with a Postgres of its own: nothing to install, nothing to configure.
+The first run downloads Postgres 18.6 once per user (about 30 MB, Maven Central); the cluster
+lives in `<project>/.ductus/postgres` (`ductus init` gitignores it), keeps its port between runs
+and prints its URL, so any SQL tool can look inside. It stops with the engine. Without internet
+access, point `DUCTUS_POSTGRES_DIR` at an unpacked copy of the binaries. `--reset` starts over.
+It is for development: production uses the DBA's Postgres through `DUCTUS_DATABASE_URL`.
 
 ## Stopping and upgrading
 

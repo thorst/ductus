@@ -14,9 +14,10 @@
 # 3. lab is lengthened to 7w: no confirmation, it starts at once and keeps everything; its
 #    quarantined messages are within 7 weeks again, so they move from the held area to the 7w tier.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 HISTORY=2000   # adt messages per day of history
 LIVE=2000      # adt messages sent while the change runs
 P=$(mktemp -d)

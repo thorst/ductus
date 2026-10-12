@@ -11,9 +11,10 @@
 #            one worker hold most of the backlog. Hotspots must name the lane and the key; once
 #            resumed, the archive drains and drops out of the report.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 COUNT=400
 P=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB

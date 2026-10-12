@@ -3,6 +3,7 @@
 # with a hot MRN, all in one engine. Measures startup, memory and threads, then verifies
 # that every message arrived exactly once and in per-patient order.
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}
 BIN=$(realpath "$BIN")
@@ -12,7 +13,7 @@ EPIC_SECONDS=${EPIC_SECONDS:-60}
 HOT=${HOT:-0.3}                 # share of Epic traffic for one MRN
 SAMPLED=${SAMPLED:-200}         # shared interfaces that also get traffic
 PER_SAMPLED=${PER_SAMPLED:-20}
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 WORK=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB
 

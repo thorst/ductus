@@ -6,9 +6,10 @@
 #                         POSTed to /inbox (an HTTP destination)
 #   POST /inbox           queue mode: CSV written to files
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 PGUSER_=${PGUSER_:-todd}
 PGPASS_=${PGPASS_:-ductus}
 P=$(mktemp -d)

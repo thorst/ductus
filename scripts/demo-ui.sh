@@ -19,10 +19,11 @@
 # Needs Node and the UI's packages (cd ui && npm ci), and Playwright's Chromium
 # (npx playwright install --with-deps chromium).
 set -euo pipefail
+source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
 UI=$(realpath "$(dirname "$0")/../ui")
-DB=${DUCTUS_DATABASE_URL:-postgres://todd:ductus@localhost/ductus_dev}
+DB=$DUCTUS_DATABASE_URL
 P=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB
 export DUCTUS_API_URL=http://127.0.0.1:7794
