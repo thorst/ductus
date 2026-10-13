@@ -632,11 +632,13 @@ async fn unpause(
 ) -> ApiResult<PauseStatus> {
     caller.require(Role::Operator)?;
     let (_, id) = engine.destination(&name, &destination).map_err(ApiError::not_found)?;
+    // Counted before the pause ends: a receiver that is up takes the backlog at once, and counting
+    // afterwards could report "0 waiting" for a backlog of thousands.
+    let pending = engine.snapshot().await?.queue(id).pending;
     let ended = engine.unpause(id).await?;
     if ended.is_some() {
         tracing::warn!(interface = %name, %destination, by = caller.name(), "destination resumed");
     }
-    let pending = engine.snapshot().await?.queue(id).pending;
     Ok(Json(PauseStatus { interface: name, destination, paused: ended.map(Into::into), pending }))
 }
 
