@@ -135,7 +135,7 @@ Fast startup is what makes upgrades and restarts uneventful: senders reconnect t
 
 Most interfaces never need to: one destination of an interface in the shared pool drained about 1,500 messages/s in the measurements above, against an average of 12/s for a 1M/day feed. When one does, in this order:
 
-1. **Set `ordering.key`** (e.g. `PID-3.1`). Without one, the interface is a single ordered lane and no number of workers can split it; with one, it has 64 lanes and only the same patient's messages wait on each other.
+1. **Set `ordering.key`** (e.g. `PID-3.1`). Without one, the interface is a single ordered lane and no number of workers can split it; with one, it has 64 lanes by default (`ordering: { key: PID-3.1, partitions: 128 }` sets another number; pick it before the interface carries traffic, since changing it with messages waiting needs care: see [docs/nuances.md](docs/nuances.md)) and only the same patient's messages wait on each other.
 2. **`isolation: dedicated`**: its own threads and V8 isolate, away from its neighbours, with 4 workers by default.
 3. **Raise `workers`**, up to about the number of CPU cores. Lanes are spread evenly over them.
 4. **`dedicated_pools`** if it does database lookups, so it has connections of its own.
