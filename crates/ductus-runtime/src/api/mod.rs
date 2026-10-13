@@ -4,14 +4,16 @@
 //! spec can't drift from the code.
 //!
 //! Every call but `health` and `openapi.json` needs a token (`Authorization: Bearer dux_...`,
-//! made with `ductus token create`) or a browser session made from one (`session.rs`). Roles:
-//! viewer reads, operator also drains, pauses, resends and corrects messages and runs connection
-//! checks, admin also manages tokens.
+//! made with `ductus token create`) or a browser session (`session.rs`: a user's, signed in with a
+//! password, or a token's). Roles: viewer reads, operator also drains, pauses, resends and
+//! corrects messages and runs connection checks, admin also manages users and tokens. Two
+//! permissions go beyond a role: `payloads` (read message payloads) and `audit`.
 //!
 //! The same listener serves the web UI (`ui.rs`) at every path outside `/api`.
 
 mod actions;
 mod hotspots;
+mod me;
 mod messages;
 mod metrics;
 mod reports;
@@ -20,6 +22,7 @@ mod session;
 mod status;
 mod tokens;
 mod ui;
+mod users;
 
 use crate::control::Engine;
 use axum::extract::{FromRequestParts, State};
@@ -28,7 +31,7 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use ductus_store::{Role, Token};
+use ductus_store::{Principal, Role};
 use serde::Serialize;
 use std::sync::Arc;
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
@@ -50,6 +53,8 @@ pub type Shared = Arc<Engine>;
     tags(
         (name = "engine", description = "The engine, its interfaces and live updates"),
         (name = "session", description = "Signing a browser in and out"),
+        (name = "me", description = "The signed-in user's own account: password, sessions, tokens, appearance"),
+        (name = "users", description = "People who sign in (admin)"),
         (name = "messages", description = "The message browser, the quarantine, and resending or correcting messages"),
         (name = "drain", description = "Stop taking messages and deliver what's stored"),
         (name = "reports", description = "Impact, owners and connection checks"),
@@ -75,6 +80,8 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
     OpenApiRouter::with_openapi(ApiDoc::openapi())
         .merge(status::routes())
         .merge(session::routes())
+        .merge(me::routes())
+        .merge(users::routes())
         .merge(hotspots::routes())
         .merge(messages::routes())
         .merge(actions::routes())
@@ -164,29 +171,55 @@ impl IntoResponse for ApiError {
 
 pub type ApiResult<T> = Result<Json<T>, ApiError>;
 
-/// Who is calling: the token that came with the request, directly or through a browser's
-/// session (`session` is then when it ends).
+/// Who is calling: a user (signed in with a password) or a token, directly or through a
+/// browser's session (`session` is then when it ends, and `cookie` its secret).
 pub struct Caller {
-    pub token: Token,
+    pub who: Principal,
     pub session: Option<DateTime<Utc>>,
+    pub cookie: Option<String>,
 }
 
 impl Caller {
-    /// Refuse unless the token's role is at least `role`.
+    /// Refuse unless the caller's role is at least `role`.
     pub fn require(&self, role: Role) -> Result<(), ApiError> {
-        if self.token.role >= role {
+        if self.who.role >= role {
             return Ok(());
         }
         Err(ApiError::new(
             StatusCode::FORBIDDEN,
-            format!("token `{}` is a {}; this needs {}", self.token.name, self.token.role.label(), role.label()),
+            format!("`{}` is a {}; this needs {}", self.who.name, self.who.role.label(), role.label()),
+        ))
+    }
+
+    /// Refuse unless the caller was given `permission` (admins have them all).
+    pub fn require_permission(&self, permission: &str) -> Result<(), ApiError> {
+        if self.who.can(permission) {
+            return Ok(());
+        }
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            format!("`{}` doesn't have the `{permission}` permission: ask an admin for it", self.who.name),
         ))
     }
 
     pub fn name(&self) -> &str {
-        &self.token.name
+        &self.who.name
+    }
+
+    /// The signed-in person, for what only a person has (a password, sessions, settings).
+    pub fn user_id(&self) -> Result<i32, ApiError> {
+        self.who.user_id.filter(|_| self.who.token_id.is_none()).ok_or_else(|| {
+            ApiError::new(
+                StatusCode::FORBIDDEN,
+                "this is for people signed in with a username and password, not tokens",
+            )
+        })
     }
 }
+
+/// A caller whose password an admin chose and who hasn't changed it yet: only changing it (and
+/// saying who they are, or signing out) works. Every other call answers 403 `password_change_required`.
+pub struct MustChange(pub Caller);
 
 /// A signed-in browser's requests that change something must carry this header. Other sites
 /// can't send it without the engine agreeing first (CORS, which it never does), so a page
@@ -199,32 +232,51 @@ fn bearer(parts: &Parts) -> Option<&str> {
     value.strip_prefix("Bearer ").or_else(|| value.strip_prefix("bearer ")).map(str::trim)
 }
 
+async fn identify(parts: &Parts, engine: &Shared) -> Result<Caller, ApiError> {
+    let unauthorized = |message: &str| {
+        ApiError::new(StatusCode::UNAUTHORIZED, format!("{message} (create a token with `ductus token create`)"))
+    };
+    if let Some(secret) = bearer(parts) {
+        return match engine.store.authenticate(secret).await? {
+            Some(who) => Ok(Caller { who, session: None, cookie: None }),
+            None => Err(unauthorized("unknown or revoked token")),
+        };
+    }
+    let Some(secret) = session::cookie(parts) else {
+        return Err(unauthorized("missing `Authorization: Bearer <token>`"));
+    };
+    if !parts.method.is_safe() && !parts.headers.contains_key(BROWSER_HEADER) {
+        return Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "a change made with a session cookie needs the `X-Ductus: 1` header",
+        ));
+    }
+    match engine.store.authenticate_session(secret, session::limits(engine)).await? {
+        Some((who, ends)) => Ok(Caller { who, session: Some(ends), cookie: Some(secret.to_string()) }),
+        None => Err(ApiError::new(StatusCode::UNAUTHORIZED, "the session has ended: sign in again")),
+    }
+}
+
 impl FromRequestParts<Shared> for Caller {
     type Rejection = ApiError;
 
     async fn from_request_parts(parts: &mut Parts, engine: &Shared) -> Result<Self, ApiError> {
-        let unauthorized = |message: &str| {
-            ApiError::new(StatusCode::UNAUTHORIZED, format!("{message} (create a token with `ductus token create`)"))
-        };
-        if let Some(secret) = bearer(parts) {
-            return match engine.store.authenticate(secret).await? {
-                Some(token) => Ok(Caller { token, session: None }),
-                None => Err(unauthorized("unknown or revoked token")),
-            };
-        }
-        let Some(secret) = session::cookie(parts) else {
-            return Err(unauthorized("missing `Authorization: Bearer <token>`"));
-        };
-        if !parts.method.is_safe() && !parts.headers.contains_key(BROWSER_HEADER) {
+        let caller = identify(parts, engine).await?;
+        if caller.who.must_change_password {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
-                "a change made with a session cookie needs the `X-Ductus: 1` header",
+                "password_change_required: choose a new password first (POST /me/password)",
             ));
         }
-        match engine.store.authenticate_session(secret).await? {
-            Some((token, ends)) => Ok(Caller { token, session: Some(ends) }),
-            None => Err(ApiError::new(StatusCode::UNAUTHORIZED, "the session has ended: sign in again")),
-        }
+        Ok(caller)
+    }
+}
+
+impl FromRequestParts<Shared> for MustChange {
+    type Rejection = ApiError;
+
+    async fn from_request_parts(parts: &mut Parts, engine: &Shared) -> Result<Self, ApiError> {
+        identify(parts, engine).await.map(MustChange)
     }
 }
 
@@ -251,6 +303,85 @@ mod tests {
             }
         }
         assert!(checked > 10, "only {checked} parameters found: did the document's shape change?");
+    }
+
+    /// Who may call what, in one place. Every operation in the API document has a row (and the
+    /// other way round), so an endpoint can't ship without someone deciding its access:
+    /// `public` needs nothing, `signed` any signed-in caller (user or token), `user` a person
+    /// signed in with a password, `operator` and `admin` that role at least. Behaviour is covered
+    /// by the tests that call the engine (`cargo test -p ductus --test cli`, `demo-ui.sh`).
+    const ACCESS: &[(&str, &str, &str)] = &[
+        ("GET", "/health", "public"),
+        ("POST", "/session", "public"),
+        ("DELETE", "/session", "public"),
+        ("GET", "/session", "signed"),
+        ("GET", "/engine", "signed"),
+        ("GET", "/events", "signed"),
+        ("GET", "/metrics", "signed"),
+        ("GET", "/interfaces", "signed"),
+        ("GET", "/interfaces/{name}", "signed"),
+        ("GET", "/interfaces/{name}/messages", "signed"),
+        ("GET", "/messages/{id}", "signed"),
+        ("GET", "/quarantine", "signed"),
+        ("GET", "/hotspots", "signed"),
+        ("GET", "/impact", "signed"),
+        ("GET", "/owners", "signed"),
+        ("POST", "/owners/reassign/preview", "signed"),
+        ("GET", "/docs", "signed"),
+        ("GET", "/retention", "signed"),
+        ("GET", "/drain", "signed"),
+        ("POST", "/drain", "operator"),
+        ("DELETE", "/drain", "operator"),
+        ("POST", "/doctor", "operator"),
+        ("POST", "/interfaces/{name}/destinations/{destination}/pause", "operator"),
+        ("DELETE", "/interfaces/{name}/destinations/{destination}/pause", "operator"),
+        ("POST", "/messages/{id}/resend", "operator"),
+        ("POST", "/messages/resend", "operator"),
+        ("POST", "/messages/{id}/edit", "operator"),
+        ("POST", "/retention/{name}/confirm", "operator"),
+        ("GET", "/me", "user"),
+        ("PATCH", "/me", "user"),
+        ("POST", "/me/password", "user"),
+        ("GET", "/me/sessions", "user"),
+        ("DELETE", "/me/sessions", "user"),
+        ("DELETE", "/me/sessions/{id}", "user"),
+        ("GET", "/me/settings", "user"),
+        ("PUT", "/me/settings", "user"),
+        ("GET", "/me/tokens", "user"),
+        ("POST", "/me/tokens", "user"),
+        ("DELETE", "/me/tokens/{name}", "user"),
+        ("GET", "/tokens", "admin"),
+        ("POST", "/tokens", "admin"),
+        ("DELETE", "/tokens/{name}", "admin"),
+        ("GET", "/users", "admin"),
+        ("POST", "/users", "admin"),
+        ("PATCH", "/users/{id}", "admin"),
+        ("POST", "/users/{id}/password", "admin"),
+        ("POST", "/users/{id}/unlock", "admin"),
+    ];
+
+    #[test]
+    fn every_operation_has_a_decided_access() {
+        let doc = serde_json::to_value(super::openapi()).unwrap();
+        let mut in_doc = std::collections::BTreeSet::new();
+        for (path, item) in doc["paths"].as_object().unwrap() {
+            for (method, op) in item.as_object().unwrap() {
+                let public = op["security"] == serde_json::json!([{}]);
+                in_doc.insert((method.to_uppercase(), path.clone(), public));
+            }
+        }
+        let in_table: std::collections::BTreeSet<_> =
+            ACCESS.iter().map(|(m, p, a)| (m.to_string(), p.to_string(), *a == "public")).collect();
+        let missing: Vec<_> = in_doc.difference(&in_table).collect();
+        let stale: Vec<_> = in_table.difference(&in_doc).collect();
+        assert!(
+            missing.is_empty() && stale.is_empty(),
+            "add a row to ACCESS (in api/mod.rs tests) for {missing:?}, and drop rows for {stale:?} \
+             (a public row must be the operations the document marks `security: []`)"
+        );
+        for (method, path, access) in ACCESS {
+            assert!(["public", "signed", "user", "operator", "admin"].contains(access), "{method} {path}: {access}");
+        }
     }
 
     /// utoipa names an operation after its handler, and two modules' `list` once shared one

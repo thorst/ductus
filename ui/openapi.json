@@ -616,6 +616,399 @@
         }
       }
     },
+    "/me": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "The signed-in user's account.",
+        "operationId": "get_me",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserInfo"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Change your own name and email.",
+        "operationId": "update_me",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ProfileUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserInfo"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/password": {
+      "post": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Change your own password. Your other sessions end. Works while a change is required.",
+        "operationId": "change_password",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordChange"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/sessions": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Your signed-in browsers.",
+        "operationId": "my_sessions",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/SessionInfo"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Sign out everywhere else: every session of yours but this one ends.",
+        "operationId": "end_other_sessions",
+        "responses": {
+          "204": {},
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/sessions/{id}": {
+      "delete": {
+        "tags": [
+          "me"
+        ],
+        "summary": "End one of your sessions.",
+        "operationId": "end_my_session",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Session id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/settings": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Your saved appearance (theme and custom colors), which follows you to any browser.",
+        "operationId": "get_my_settings",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Appearance"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "put": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Save your appearance.",
+        "operationId": "save_my_settings",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/Appearance"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Appearance"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/tokens": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Your own tokens (live ones).",
+        "operationId": "my_tokens",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/TokenInfo"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Make a token of your own, for scripts. It acts as you at most: never above your role or\npermissions, and it stops working if you are disabled. Its secret is in this answer only.",
+        "operationId": "make_my_token",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewMyToken"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CreatedToken"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/me/tokens/{name}": {
+      "delete": {
+        "tags": [
+          "me"
+        ],
+        "summary": "Revoke one of your tokens (the name as listed).",
+        "operationId": "revoke_my_token",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Token name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/messages/resend": {
       "post": {
         "tags": [
@@ -1097,7 +1490,7 @@
         "tags": [
           "session"
         ],
-        "summary": "Who is calling: the token (directly or through a session) and its role.",
+        "summary": "Who is calling, and as what. Works while a password change is still required.",
         "operationId": "whoami",
         "responses": {
           "200": {
@@ -1124,7 +1517,7 @@
         "tags": [
           "session"
         ],
-        "summary": "Sign a browser in with a token: answers with a session cookie (`ductus_session`), which then\nstands in for the token. Needs the `X-Ductus: 1` header.",
+        "summary": "Sign a browser in with a username and password, or a token: answers with a session cookie\n(`ductus_session`), which then stands in for them. Needs the `X-Ductus: 1` header. After too\nmany wrong passwords for one username the account refuses sign-in for a while (429).",
         "operationId": "sign_in",
         "requestBody": {
           "content": {
@@ -1163,6 +1556,15 @@
                 }
               }
             }
+          },
+          "429": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
           }
         },
         "security": [
@@ -1188,7 +1590,7 @@
         "tags": [
           "tokens"
         ],
-        "summary": "Live tokens (never their secrets). Admin.",
+        "summary": "Live tokens, everyone's (never their secrets). Admin.",
         "operationId": "list_tokens",
         "responses": {
           "200": {
@@ -1218,7 +1620,7 @@
         "tags": [
           "tokens"
         ],
-        "summary": "Create a token. Its secret is in this answer only. Admin.",
+        "summary": "Create a service token (it belongs to nobody). Its secret is in this answer only. Admin.",
         "operationId": "create_token",
         "requestBody": {
           "content": {
@@ -1303,6 +1705,256 @@
           }
         }
       }
+    },
+    "/users": {
+      "get": {
+        "tags": [
+          "users"
+        ],
+        "summary": "All users. Admin.",
+        "operationId": "list_users",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/UserInfo"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Make an account with a temporary password (the person changes it at their first sign-in). Admin.",
+        "operationId": "create_user",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/NewUserRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/{id}": {
+      "patch": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Change a user's details, role, permissions, or disable them. Refused when it would leave no\nadmin who can sign in. Admin.",
+        "operationId": "update_user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UserUpdate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UserInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/{id}/password": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Give a user a new temporary password (their sessions end; they must change it when they sign\nin). Admin.",
+        "operationId": "reset_password",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordReset"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "204": {},
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/{id}/unlock": {
+      "post": {
+        "tags": [
+          "users"
+        ],
+        "summary": "Let a user who was locked out after wrong passwords try again. Admin.",
+        "operationId": "unlock_user",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "User id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "204": {},
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -1326,7 +1978,7 @@
           },
           "by": {
             "type": "string",
-            "description": "The token that did it."
+            "description": "The user or token that did it."
           },
           "copy": {
             "type": [
@@ -1364,6 +2016,29 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "Appearance": {
+        "type": "object",
+        "required": [
+          "theme"
+        ],
+        "properties": {
+          "colors": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "The custom colors, as the UI saves them (a JSON object)."
+          },
+          "saved": {
+            "type": "boolean",
+            "description": "Whether this was saved before: false means the UI may offer the browser's own choice."
+          },
+          "theme": {
+            "type": "string",
+            "description": "`system`, `light`, `dark`, `contrast` or `custom`."
           }
         }
       },
@@ -2875,7 +3550,7 @@
           {
             "type": "object",
             "required": [
-              "payload",
+              "payload_hidden",
               "deliveries",
               "actions"
             ],
@@ -2902,8 +3577,15 @@
                 }
               },
               "payload": {
-                "type": "string",
-                "description": "The message as received (bytes that aren't UTF-8 are replaced)."
+                "type": [
+                  "string",
+                  "null"
+                ],
+                "description": "The message as received (bytes that aren't UTF-8 are replaced). Absent when the caller\ndoesn't have the `payloads` permission (`payload_hidden` is then true), and so are the\ndeliveries' `output`s."
+              },
+              "payload_hidden": {
+                "type": "boolean",
+                "description": "The payload (and saved outputs) were left out: the caller may not read them."
               }
             }
           }
@@ -2997,6 +3679,35 @@
           }
         }
       },
+      "NewMyToken": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string",
+            "description": "What it is for, e.g. `deploy-script`; it is listed as `<you>/<name>`."
+          },
+          "permissions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Defaults to none; never more than you have."
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Defaults to your own role; never above it."
+          }
+        }
+      },
       "NewToken": {
         "type": "object",
         "required": [
@@ -3007,12 +3718,67 @@
             "type": "string",
             "description": "Who or what uses it, e.g. `ci` or `monitoring`."
           },
+          "permissions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "`payloads` and/or `audit`. None by default: a token can't read message payloads unless\nit is given the permission."
+          },
           "role": {
             "type": [
               "string",
               "null"
             ],
             "description": "`viewer` (default), `operator` or `admin`."
+          }
+        }
+      },
+      "NewUserRequest": {
+        "type": "object",
+        "required": [
+          "username",
+          "password"
+        ],
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "type": "string",
+            "description": "A temporary password: the person must change it at their first sign-in."
+          },
+          "permissions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "`payloads` and/or `audit`."
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`viewer` (default), `operator` or `admin`."
+          },
+          "username": {
+            "type": "string"
           }
         }
       },
@@ -3060,6 +3826,34 @@
             "items": {
               "$ref": "#/components/schemas/Owned"
             }
+          }
+        }
+      },
+      "PasswordChange": {
+        "type": "object",
+        "required": [
+          "current",
+          "new"
+        ],
+        "properties": {
+          "current": {
+            "type": "string",
+            "description": "The password you have now."
+          },
+          "new": {
+            "type": "string"
+          }
+        }
+      },
+      "PasswordReset": {
+        "type": "object",
+        "required": [
+          "password"
+        ],
+        "properties": {
+          "password": {
+            "type": "string",
+            "description": "The temporary password; the person must change it at their next sign-in."
           }
         }
       },
@@ -3141,6 +3935,23 @@
             "type": "integer",
             "format": "int64",
             "description": "Messages waiting for it."
+          }
+        }
+      },
+      "ProfileUpdate": {
+        "type": "object",
+        "properties": {
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -3565,8 +4376,11 @@
       "Session": {
         "type": "object",
         "required": [
+          "kind",
           "name",
-          "role"
+          "role",
+          "permissions",
+          "must_change_password"
         ],
         "properties": {
           "ends_at": {
@@ -3575,11 +4389,26 @@
               "null"
             ],
             "format": "date-time",
-            "description": "When the session ends at the latest (it also ends after 12 hours unused). None when the\ncall came with a token instead of a session."
+            "description": "When the session ends at the latest (it also ends when unused for too long). None when\nthe call came with a token instead of a session."
+          },
+          "kind": {
+            "type": "string",
+            "description": "`user` (signed in with a password) or `token`."
+          },
+          "must_change_password": {
+            "type": "boolean",
+            "description": "An admin chose this password: nothing else works until it is changed (`POST /me/password`)."
           },
           "name": {
             "type": "string",
-            "description": "The token's name."
+            "description": "The username, or the token's name."
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the role doesn't say: `payloads`, `audit`. Admins have both."
           },
           "role": {
             "type": "string",
@@ -3587,15 +4416,60 @@
           }
         }
       },
-      "SignIn": {
+      "SessionInfo": {
         "type": "object",
         "required": [
-          "token"
+          "id",
+          "created_at",
+          "last_seen_at",
+          "expires_at",
+          "current"
         ],
         "properties": {
-          "token": {
+          "created_at": {
             "type": "string",
-            "description": "An API token (`dux_...`)."
+            "format": "date-time"
+          },
+          "current": {
+            "type": "boolean",
+            "description": "The one making this request."
+          },
+          "expires_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "last_seen_at": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "SignIn": {
+        "type": "object",
+        "properties": {
+          "password": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "token": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "...or an API token (`dux_...`), unless `auth.token_sign_in` is off."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "A user's name (with `password`)..."
           }
         }
       },
@@ -3676,6 +4550,7 @@
         "required": [
           "name",
           "role",
+          "permissions",
           "created_at"
         ],
         "properties": {
@@ -3694,9 +4569,133 @@
           "name": {
             "type": "string"
           },
+          "owner": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The user it belongs to; none for a service token made by an admin."
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`payloads`, `audit` (admins' tokens have all)."
+          },
           "role": {
             "type": "string",
             "description": "`viewer`, `operator` or `admin`."
+          }
+        }
+      },
+      "UserInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "username",
+          "display_name",
+          "email",
+          "role",
+          "permissions",
+          "source",
+          "must_change_password",
+          "disabled",
+          "created_at"
+        ],
+        "properties": {
+          "created_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "disabled": {
+            "type": "boolean"
+          },
+          "display_name": {
+            "type": "string"
+          },
+          "email": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "last_sign_in_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "locked_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Refused after too many wrong passwords, until then."
+          },
+          "must_change_password": {
+            "type": "boolean",
+            "description": "An admin chose the password; the next sign-in can only change it."
+          },
+          "permissions": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`payloads`, `audit` (admins have both whatever is listed)."
+          },
+          "role": {
+            "type": "string",
+            "description": "`viewer`, `operator` or `admin`."
+          },
+          "source": {
+            "type": "string",
+            "description": "Where the password is checked: `local`, or a directory."
+          },
+          "username": {
+            "type": "string"
+          }
+        }
+      },
+      "UserUpdate": {
+        "type": "object",
+        "properties": {
+          "disabled": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "Disabled users can't sign in, and their sessions and tokens stop at once."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "permissions": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            }
+          },
+          "role": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -3762,6 +4761,14 @@
     {
       "name": "session",
       "description": "Signing a browser in and out"
+    },
+    {
+      "name": "me",
+      "description": "The signed-in user's own account: password, sessions, tokens, appearance"
+    },
+    {
+      "name": "users",
+      "description": "People who sign in (admin)"
     },
     {
       "name": "messages",

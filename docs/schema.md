@@ -99,23 +99,61 @@ REST API tokens (`ductus token create`, or `POST /api/v1/tokens`). Only a hash o
 | `created_at` | timestamptz | When it was made. |
 | `last_used_at` | timestamptz | Last use, to the minute (written at most once a minute per token). |
 | `revoked_at` | timestamptz | When it was revoked; it stops working at once. |
+| `user_id` | integer | The user it belongs to (`users.id`); none for a service token made by an admin. A user's token stops working when the user is disabled and never goes above the user's role or permissions. |
+| `permissions` | text[] | Extra permissions (`payloads`, `audit`); admins have all. |
 
-Indexes: primary key `id`; unique `hash`; `api_tokens_live_name (name) WHERE revoked_at IS NULL` (unique).
+Indexes: primary key `id`; unique `hash`; `api_tokens_live_name (name) WHERE revoked_at IS NULL` (unique); `api_tokens_user (user_id)`.
+
+## `users`
+
+People who sign in (`ductus user create`, or `POST /api/v1/users`). Passwords are argon2id hashes; no password is ever stored or logged. Accounts are disabled, never deleted: the audit trail names them.
+
+| column | type | |
+|---|---|---|
+| `id` | integer | Identity. |
+| `username` | text | Sign-in name; not case sensitive (unique on `lower(username)`). |
+| `display_name` | text | For people reading the UI. |
+| `email` | text | Where alerts for this person go. |
+| `role` | smallint | `0` viewer, `1` operator, `2` admin (as tokens). |
+| `permissions` | text[] | `payloads` (may read message payloads), `audit` (may read the audit log). Admins have both. |
+| `source` | text | Where the password is checked: `local`, or `ldap` (a directory; no hash kept). |
+| `password_hash` | text | argon2id, a self-describing string; null when the password lives elsewhere. |
+| `must_change_password` | boolean | Set when an admin made or reset the password: the next sign-in can do nothing but change it. |
+| `disabled_at` | timestamptz | When it was disabled: sessions and tokens stop at once. |
+| `failed_logins` | integer | Wrong passwords counted within the lockout window. |
+| `last_failed_at` | timestamptz | The latest wrong password (starts a new window when the last one is over). |
+| `locked_until` | timestamptz | Past the limit, the account is refused until then. |
+| `created_at` | timestamptz | |
+| `last_sign_in_at` | timestamptz | |
+
+Indexes: primary key `id`; unique `users_username (lower(username))`.
+
+## `user_settings`
+
+A user's own choices, so they follow them to any machine. Today: the theme and the custom colors.
+
+| column | type | |
+|---|---|---|
+| `user_id` | integer | `users.id`. Primary key. |
+| `theme` | text | `system`, `light`, `dark`, `contrast` or `custom`. |
+| `colors` | jsonb | The five custom colors and the values worked out from them, as the UI saves them. |
+| `updated_at` | timestamptz | |
 
 ## `api_sessions`
 
-Web UI sessions: a browser signs in with a token (`POST /api/v1/session`) and gets a cookie instead of keeping the token. A session acts with its token's role and ends when the token is revoked, when it's been idle for 12 hours, or 7 days after sign-in. Expired sessions are deleted when the next one is made.
+Web UI sessions: a browser signs in with a username and password, or a token (`POST /api/v1/session`), and gets a cookie instead of keeping either. A session acts with its user's or token's role and ends when the user is disabled or the token revoked, when it's been idle too long (12 hours unless `auth.session` says otherwise), or at most 7 days after sign-in. Expired sessions are deleted when the next one is made.
 
 | column | type | |
 |---|---|---|
 | `id` | integer | Identity. |
 | `hash` | bytea | SHA-256 of the cookie's value (32 random bytes). |
-| `token_id` | integer | The token it signed in with (`api_tokens.id`). |
+| `token_id` | integer | The token it signed in with (`api_tokens.id`); none for a user's session. |
+| `user_id` | integer | The user it signed in as (`users.id`); none for a token's session. Exactly one of the two is set. |
 | `created_at` | timestamptz | Sign-in. |
 | `last_seen_at` | timestamptz | Last use, to the minute (written at most once a minute). |
-| `expires_at` | timestamptz | 7 days after sign-in, whatever its use. |
+| `expires_at` | timestamptz | When it ends at the latest, whatever its use. |
 
-Indexes: primary key `id`; unique `hash`; `api_sessions_expires (expires_at)`.
+Indexes: primary key `id`; unique `hash`; `api_sessions_expires (expires_at)`; `api_sessions_user (user_id)`.
 
 ## `message_actions`
 
@@ -127,7 +165,8 @@ What people did to messages through the API (`POST /api/v1/messages/{id}/resend`
 | `at` | timestamptz | When. |
 | `action` | text | `resend` or `edit`. |
 | `token_id` | integer | The API token used (`api_tokens.id`). |
-| `actor` | text | The token's name at the time (names can be reused once a token is revoked). |
+| `user_id` | integer | The person who acted (`users.id`), when it was one (their token's owner counts). |
+| `actor` | text | The user's or token's name at the time (names can be reused). |
 | `reason` | text | Why, if given. |
 | `message_id` | bigint | The message acted on (for an edit: the original). |
 | `received_at` | timestamptz | Its `received_at` (with `message_id`, finds it in its partition while it's kept). |

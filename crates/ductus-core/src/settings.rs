@@ -11,6 +11,12 @@
 //!   listen: 127.0.0.1:7700  # the REST API (`/api/v1`); `off` to run without it
 //! retention: 7w       # how long messages are kept when an interface doesn't say (1w, 3w, 7w)
 //! quarantined: keep   # quarantined messages past it: keep until resolved, or purge
+//! auth:               # sign-in for people (all optional; see `AuthSettings`)
+//!   session: { idle: 12h, max: 7d }
+//!   password: { min_length: 12 }
+//!   lockout: { attempts: 5, window: 15m, for: 15m }
+//!   token_sign_in: true
+//!   user_tokens: true
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -39,6 +45,115 @@ pub struct Settings {
     /// interfaces whose interface.yaml doesn't say.
     #[serde(default)]
     pub quarantined: crate::Quarantined,
+    /// How people sign in to the API and the web UI.
+    #[serde(default)]
+    pub auth: AuthSettings,
+}
+
+/// Sign-in for people (`auth:` in ductus.yaml).
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuthSettings {
+    #[serde(default)]
+    pub session: SessionSettings,
+    #[serde(default)]
+    pub password: PasswordSettings,
+    #[serde(default)]
+    pub lockout: LockoutSettings,
+    /// The sign-in page also accepts an API token. Turn it off once everyone has an account
+    /// (`ductus user` on the server always works).
+    #[serde(default = "yes")]
+    pub token_sign_in: bool,
+    /// Users may make API tokens of their own (never above their own role).
+    #[serde(default = "yes")]
+    pub user_tokens: bool,
+}
+
+impl Default for AuthSettings {
+    fn default() -> Self {
+        Self {
+            session: SessionSettings::default(),
+            password: PasswordSettings::default(),
+            lockout: LockoutSettings::default(),
+            token_sign_in: true,
+            user_tokens: true,
+        }
+    }
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// How long a browser session lasts.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionSettings {
+    /// Ends after this long unused (a shift, with room to spare).
+    #[serde(default = "default_idle", deserialize_with = "crate::config::duration")]
+    pub idle: std::time::Duration,
+    /// Ends this long after sign-in, however it is used.
+    #[serde(default = "default_max", deserialize_with = "crate::config::duration")]
+    pub max: std::time::Duration,
+}
+
+impl Default for SessionSettings {
+    fn default() -> Self {
+        Self { idle: default_idle(), max: default_max() }
+    }
+}
+
+fn default_idle() -> std::time::Duration {
+    std::time::Duration::from_secs(12 * 3600)
+}
+
+fn default_max() -> std::time::Duration {
+    std::time::Duration::from_secs(7 * 86_400)
+}
+
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PasswordSettings {
+    /// The shortest password accepted (never below 8).
+    #[serde(default = "default_min_length")]
+    pub min_length: usize,
+}
+
+impl Default for PasswordSettings {
+    fn default() -> Self {
+        Self { min_length: default_min_length() }
+    }
+}
+
+fn default_min_length() -> usize {
+    12
+}
+
+/// Wrong passwords for one username: after `attempts` within `window`, sign-in as that user is
+/// refused for `for`.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LockoutSettings {
+    #[serde(default = "default_attempts")]
+    pub attempts: u32,
+    #[serde(default = "default_window", deserialize_with = "crate::config::duration")]
+    pub window: std::time::Duration,
+    #[serde(rename = "for", default = "default_window", deserialize_with = "crate::config::duration")]
+    pub lock_for: std::time::Duration,
+}
+
+impl Default for LockoutSettings {
+    fn default() -> Self {
+        Self { attempts: default_attempts(), window: default_window(), lock_for: default_window() }
+    }
+}
+
+fn default_attempts() -> u32 {
+    5
+}
+
+fn default_window() -> std::time::Duration {
+    std::time::Duration::from_secs(15 * 60)
 }
 
 /// The REST API the engine serves (`/api/v1`).
@@ -156,7 +271,23 @@ impl Settings {
         if settings.isolates.heap_mb < 64 {
             bail!("in {}: isolates.heap_mb must be at least 64 (the SDK alone needs a few MB)", file.display());
         }
+        settings.auth.check().with_context(|| format!("in {}", file.display()))?;
         Ok(settings)
+    }
+}
+
+impl AuthSettings {
+    fn check(&self) -> Result<()> {
+        if self.session.idle.is_zero() || self.session.max < self.session.idle {
+            bail!("auth.session: `idle` must be above zero and no longer than `max`");
+        }
+        if self.password.min_length < crate::password::MIN_LENGTH_FLOOR {
+            bail!("auth.password.min_length must be at least {}", crate::password::MIN_LENGTH_FLOOR);
+        }
+        if self.lockout.attempts == 0 {
+            bail!("auth.lockout.attempts must be at least 1");
+        }
+        Ok(())
     }
 }
 
@@ -243,6 +374,28 @@ mod tests {
         .unwrap();
         let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
         assert!(err.contains("write it like 127.0.0.1:7700"), "{err}");
+    }
+
+    #[test]
+    fn auth_has_safe_defaults_and_checks_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Settings::load(dir.path()).unwrap().auth;
+        assert_eq!((a.session.idle.as_secs(), a.session.max.as_secs()), (12 * 3600, 7 * 86_400));
+        assert_eq!((a.password.min_length, a.lockout.attempts, a.lockout.lock_for.as_secs()), (12, 5, 900));
+        assert!(a.token_sign_in && a.user_tokens);
+        std::fs::write(
+            dir.path().join(FILE),
+            "auth: { session: { idle: 1h, max: 2d }, lockout: { attempts: 3, for: 1m }, token_sign_in: false }
+",
+        )
+        .unwrap();
+        let a = Settings::load(dir.path()).unwrap().auth;
+        assert_eq!((a.session.idle.as_secs(), a.lockout.attempts, a.lockout.lock_for.as_secs()), (3600, 3, 60));
+        assert!(!a.token_sign_in);
+        for bad in ["auth: { session: { idle: 2d, max: 1d } }", "auth: { password: { min_length: 4 } }"] {
+            std::fs::write(dir.path().join(FILE), bad).unwrap();
+            assert!(Settings::load(dir.path()).is_err(), "{bad}");
+        }
     }
 
     #[test]

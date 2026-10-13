@@ -12,10 +12,16 @@ export function useCanOperate(): boolean {
   return data?.role === "operator" || data?.role === "admin";
 }
 
-/** Admins manage tokens. */
+/** Admins manage users and tokens. */
 export function useIsAdmin(): boolean {
   const { data } = useQuery(session);
   return data?.role === "admin";
+}
+
+/** Can the signed-in caller read message payloads (patient data)? Admins can; others need the permission. */
+export function useCanReadPayloads(): boolean {
+  const { data } = useQuery(session);
+  return data?.role === "admin" || !!data?.permissions.includes("payloads");
 }
 
 /** Fetch again everything an action can change. */
@@ -23,9 +29,19 @@ export function useRefresh() {
   const queryClient = useQueryClient();
   return () =>
     Promise.all(
-      ["message", "messages", "quarantine", "interfaces", "hotspots", "retention", "drain", "engine", "tokens"].map(
-        (key) => queryClient.invalidateQueries({ queryKey: [key] }),
-      ),
+      [
+        "message",
+        "messages",
+        "quarantine",
+        "interfaces",
+        "hotspots",
+        "retention",
+        "drain",
+        "engine",
+        "tokens",
+        "users",
+        "me",
+      ].map((key) => queryClient.invalidateQueries({ queryKey: [key] })),
     );
 }
 
@@ -122,8 +138,57 @@ export async function runDoctor(interfaces: string[], timeoutMs: number) {
   return unwrap(await api.POST("/doctor", { body: { interfaces, timeout_ms: timeoutMs } }));
 }
 
-export async function createToken(name: string, role: string) {
-  return unwrap(await api.POST("/tokens", { body: { name, role } }));
+export async function createToken(name: string, role: string, permissions: string[]) {
+  return unwrap(await api.POST("/tokens", { body: { name, role, permissions } }));
+}
+
+export async function createUser(user: Schemas["NewUserRequest"]) {
+  return unwrap(await api.POST("/users", { body: user }));
+}
+
+export async function updateUser(id: number, change: Schemas["UserUpdate"]) {
+  return unwrap(await api.PATCH("/users/{id}", { params: { path: { id } }, body: change }));
+}
+
+export async function resetPassword(id: number, password: string) {
+  const { response, error } = await api.POST("/users/{id}/password", {
+    params: { path: { id } },
+    body: { password },
+  });
+  if (!response.ok) unwrap({ response, error });
+}
+
+export async function unlockUser(id: number) {
+  const { response, error } = await api.POST("/users/{id}/unlock", { params: { path: { id } } });
+  if (!response.ok) unwrap({ response, error });
+}
+
+export async function changePassword(current: string, next: string) {
+  const { response, error } = await api.POST("/me/password", { body: { current, new: next } });
+  if (!response.ok) unwrap({ response, error });
+}
+
+export async function updateProfile(change: Schemas["ProfileUpdate"]) {
+  return unwrap(await api.PATCH("/me", { body: change }));
+}
+
+export async function endOtherSessions() {
+  const { response, error } = await api.DELETE("/me/sessions");
+  if (!response.ok) unwrap({ response, error });
+}
+
+export async function endSession(id: number) {
+  const { response, error } = await api.DELETE("/me/sessions/{id}", { params: { path: { id } } });
+  if (!response.ok) unwrap({ response, error });
+}
+
+export async function makeMyToken(name: string, role: string, permissions: string[]) {
+  return unwrap(await api.POST("/me/tokens", { body: { name, role, permissions } }));
+}
+
+export async function revokeMyToken(name: string) {
+  const { response, error } = await api.DELETE("/me/tokens/{name}", { params: { path: { name } } });
+  if (!response.ok) unwrap({ response, error });
 }
 
 export async function revokeToken(name: string) {

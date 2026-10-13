@@ -526,7 +526,8 @@ async fn the_api_shows_the_engine_and_drains_it() {
         (out.status.success(), text)
     };
     let token = |role: &str| {
-        let (ok, out) = run(&["token", "create", &format!("{name}-{role}"), "--role", role]);
+        let (ok, out) =
+            run(&["token", "create", &format!("{name}-{role}"), "--role", role, "--permission", "payloads"]);
         assert!(ok, "{out}");
         out.lines().next().unwrap().to_string()
     };
@@ -923,7 +924,8 @@ async fn messages_are_resent_and_corrected_through_the_api() {
         )
     };
     let token = |role: &str| {
-        let (ok, out) = run(&["token", "create", &format!("{name}-{role}"), "--role", role]);
+        let (ok, out) =
+            run(&["token", "create", &format!("{name}-{role}"), "--role", role, "--permission", "payloads"]);
         assert!(ok, "{out}");
         out.lines().next().unwrap().to_string()
     };
@@ -1201,6 +1203,247 @@ async fn the_ui_is_served_and_a_browser_signs_in_with_a_session() {
     let ended = http.get(format!("{base}/session")).header("cookie", &cookie).send().await.unwrap();
     assert_eq!(ended.status(), 401);
     assert!(ended.text().await.unwrap().contains("sign in again"));
+}
+
+/// People sign in with a username and password: wrong ones are refused the same way whoever
+/// they name, too many lock the account until an admin unlocks it, a password an admin chose has
+/// to be changed before anything else works, users make tokens that never go above them,
+/// appearance is kept per user, and disabling a user ends their sessions.
+#[tokio::test(flavor = "multi_thread")]
+async fn people_sign_in_with_passwords_and_are_kept_in_check() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let api = free_port();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let admin = format!("test-user-cli-{nanos}");
+    let dir = project(&[(
+        "interfaces/people/interface.yaml",
+        format!("name: people\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestination: {{ file: {{ dir: out }} }}\n", free_port()).as_str(),
+    )]);
+    let root = dir.path().to_string_lossy().to_string();
+    let run = |args: &[&str], stdin: Option<&str>| {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(args)
+            .env("DUCTUS_DATABASE_URL", &db)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin.unwrap_or("").as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), text.trim().to_string())
+    };
+
+    // The first admin is made on the server, with a password the policy accepts.
+    let (ok, out) =
+        run(&["user", "create", &admin, "--role", "admin", "--password-stdin", "--root", &root], Some("short\n"));
+    assert!(!ok && out.contains("at least 12"), "{out}");
+    let (ok, out) = run(
+        &["user", "create", &admin, "--role", "admin", "--email", "a@example.org", "--password-stdin", "--root", &root],
+        Some("tulip river lantern\n"),
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = run(
+        &["user", "create", &admin.to_uppercase(), "--password-stdin", "--root", &root],
+        Some("tulip river lantern\n"),
+    );
+    assert!(!ok && out.contains("already a user"), "names ignore case: {out}");
+    let (ok, out) = run(&["user", "list"], None);
+    assert!(ok && out.contains(&admin) && out.contains("admin"), "{out}");
+
+    let _engine = Child(
+        Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["run", "--root", &root, "--threads", "1"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let base = format!("http://127.0.0.1:{api}/api/v1");
+    let http = reqwest::Client::new();
+    let mut up = false;
+    for _ in 0..100 {
+        if http.get(format!("{base}/health")).send().await.is_ok_and(|r| r.status().is_success()) {
+            up = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(up, "the API never came up");
+
+    let sign_in =
+        |body: serde_json::Value| http.post(format!("{base}/session")).header("X-Ductus", "1").json(&body).send();
+    let password = |user: &str, password: &str| sign_in(serde_json::json!({ "username": user, "password": password }));
+    let cookie_of =
+        |r: &reqwest::Response| r.headers()["set-cookie"].to_str().unwrap().split(';').next().unwrap().to_string();
+    let call = |method: reqwest::Method, cookie: &str, path: &str, body: Option<serde_json::Value>| {
+        let mut r = http.request(method, format!("{base}{path}")).header("cookie", cookie).header("X-Ductus", "1");
+        if let Some(b) = body {
+            r = r.json(&b);
+        }
+        r.send()
+    };
+    use reqwest::Method as M;
+
+    // Wrong passwords: the same answer for a real name and one nobody has.
+    let wrong = password(&admin, "not the password").await.unwrap();
+    assert_eq!(wrong.status(), 401);
+    let wrong = wrong.text().await.unwrap();
+    let nobody = password("nobody-has-this-name", "not the password").await.unwrap();
+    assert_eq!(nobody.status(), 401);
+    assert_eq!(nobody.text().await.unwrap(), wrong, "no hint which names exist");
+    assert_eq!(sign_in(serde_json::json!({})).await.unwrap().status(), 400);
+
+    let ok = password(&admin.to_uppercase(), "tulip river lantern").await.unwrap();
+    assert_eq!(ok.status(), 200, "usernames ignore case");
+    let cookie = cookie_of(&ok);
+    let me: serde_json::Value = ok.json().await.unwrap();
+    assert_eq!(
+        (&me["kind"], &me["name"], &me["role"]),
+        (&"user".into(), &admin.clone().into(), &"admin".into()),
+        "{me}"
+    );
+    assert_eq!(me["permissions"], serde_json::json!(["payloads", "audit"]), "admins have both");
+    assert_eq!(me["must_change_password"], false);
+
+    // An admin makes a viewer with a temporary password; the viewer can do nothing until they change it.
+    let viewer = format!("test-user-cli-v-{nanos}");
+    let bad = call(M::POST, &cookie, "/users", Some(serde_json::json!({"username": viewer, "password": "weak"})))
+        .await
+        .unwrap();
+    assert_eq!(bad.status(), 400);
+    let made: serde_json::Value = call(
+        M::POST,
+        &cookie,
+        "/users",
+        Some(serde_json::json!({"username": viewer, "display_name": "Vi Ewer", "email": "v@example.org", "password": "temporary pass phrase"})),
+    )
+    .await
+    .unwrap()
+    .json()
+    .await
+    .unwrap();
+    assert_eq!((&made["role"], &made["must_change_password"]), (&"viewer".into(), &true.into()), "{made}");
+    let viewer_id = made["id"].as_i64().unwrap();
+
+    let signed = password(&viewer, "temporary pass phrase").await.unwrap();
+    assert_eq!(signed.status(), 200);
+    let vcookie = cookie_of(&signed);
+    assert_eq!(signed.json::<serde_json::Value>().await.unwrap()["must_change_password"], true);
+    let blocked = call(M::GET, &vcookie, "/interfaces", None).await.unwrap();
+    assert_eq!(blocked.status(), 403);
+    assert!(blocked.text().await.unwrap().contains("password_change_required"));
+    assert_eq!(call(M::GET, &vcookie, "/session", None).await.unwrap().status(), 200, "who am I still works");
+    let change = |current: &str, new: &str| {
+        call(M::POST, &vcookie, "/me/password", Some(serde_json::json!({"current": current, "new": new})))
+    };
+    assert_eq!(change("wrong current", "a brand new phrase").await.unwrap().status(), 400);
+    let weak = change("temporary pass phrase", "short").await.unwrap();
+    assert_eq!(weak.status(), 400);
+    assert!(weak.text().await.unwrap().contains("at least 12"));
+    assert_eq!(change("temporary pass phrase", "a brand new phrase").await.unwrap().status(), 204);
+    assert_eq!(call(M::GET, &vcookie, "/interfaces", None).await.unwrap().status(), 200, "now it works");
+
+    // What a viewer may not do.
+    assert_eq!(call(M::GET, &vcookie, "/users", None).await.unwrap().status(), 403);
+    assert_eq!(
+        call(M::POST, &vcookie, "/interfaces/people/destinations/default/pause", None).await.unwrap().status(),
+        403
+    );
+
+    // Their own tokens never go above them.
+    let too_high = call(M::POST, &vcookie, "/me/tokens", Some(serde_json::json!({"name": "ci", "role": "operator"})))
+        .await
+        .unwrap();
+    assert_eq!(too_high.status(), 400);
+    let no_perm =
+        call(M::POST, &vcookie, "/me/tokens", Some(serde_json::json!({"name": "ci", "permissions": ["payloads"]})))
+            .await
+            .unwrap();
+    assert_eq!(no_perm.status(), 400, "a viewer without payloads can't hand it to a token");
+    let token: serde_json::Value = call(M::POST, &vcookie, "/me/tokens", Some(serde_json::json!({"name": "ci"})))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(token["token"]["name"], format!("{viewer}/ci"), "{token}");
+    assert_eq!(token["token"]["owner"], viewer.as_str());
+    let secret = token["secret"].as_str().unwrap().to_string();
+    let with_token = http.get(format!("{base}/interfaces")).bearer_auth(&secret).send().await.unwrap();
+    assert_eq!(with_token.status(), 200);
+
+    // Appearance follows the user.
+    let fresh: serde_json::Value = call(M::GET, &vcookie, "/me/settings", None).await.unwrap().json().await.unwrap();
+    assert_eq!((&fresh["theme"], &fresh["saved"]), (&"system".into(), &false.into()), "{fresh}");
+    let colors = serde_json::json!({"colors": {"accent": "#112233"}, "scheme": "dark"});
+    let saved = call(M::PUT, &vcookie, "/me/settings", Some(serde_json::json!({"theme": "custom", "colors": colors})))
+        .await
+        .unwrap();
+    assert_eq!(saved.status(), 200);
+    assert_eq!(
+        call(M::PUT, &vcookie, "/me/settings", Some(serde_json::json!({"theme": "neon"}))).await.unwrap().status(),
+        400
+    );
+    let again: serde_json::Value =
+        call(M::GET, &cookie_of(&password(&viewer, "a brand new phrase").await.unwrap()), "/me/settings", None)
+            .await
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+    assert_eq!(
+        (&again["theme"], &again["colors"], &again["saved"]),
+        (&"custom".into(), &colors, &true.into()),
+        "{again}"
+    );
+    // Tokens have no account to keep settings on.
+    let tokens_me = http.get(format!("{base}/me/settings")).bearer_auth(&secret).send().await.unwrap();
+    assert_eq!(tokens_me.status(), 403);
+
+    // Too many wrong passwords lock the account, and an admin unlocks it.
+    for _ in 0..5 {
+        password(&viewer, "guess guess guess").await.unwrap();
+    }
+    let locked = password(&viewer, "a brand new phrase").await.unwrap();
+    assert_eq!(locked.status(), 429, "even the right password waits");
+    assert!(locked.text().await.unwrap().contains("try again in"));
+    let listed: serde_json::Value = call(M::GET, &cookie, "/users", None).await.unwrap().json().await.unwrap();
+    let row = listed.as_array().unwrap().iter().find(|u| u["username"] == viewer.as_str()).unwrap();
+    assert!(row["locked_until"].is_string(), "{row}");
+    assert_eq!(call(M::POST, &cookie, &format!("/users/{viewer_id}/unlock"), None).await.unwrap().status(), 204);
+    let back = password(&viewer, "a brand new phrase").await.unwrap();
+    assert_eq!(back.status(), 200);
+    let vcookie = cookie_of(&back);
+
+    // Disabling ends sessions and stops their tokens; they can't sign in; enabling brings them back.
+    let off = call(M::PATCH, &cookie, &format!("/users/{viewer_id}"), Some(serde_json::json!({"disabled": true})))
+        .await
+        .unwrap();
+    assert_eq!(off.status(), 200);
+    assert_eq!(call(M::GET, &vcookie, "/interfaces", None).await.unwrap().status(), 401);
+    assert_eq!(http.get(format!("{base}/interfaces")).bearer_auth(&secret).send().await.unwrap().status(), 401);
+    assert_eq!(password(&viewer, "a brand new phrase").await.unwrap().status(), 401);
+    call(M::PATCH, &cookie, &format!("/users/{viewer_id}"), Some(serde_json::json!({"disabled": false})))
+        .await
+        .unwrap();
+    assert_eq!(password(&viewer, "a brand new phrase").await.unwrap().status(), 200);
+
+    // Sessions: list, and sign out everywhere else.
+    let second = cookie_of(&password(&admin, "tulip river lantern").await.unwrap());
+    let sessions: serde_json::Value = call(M::GET, &cookie, "/me/sessions", None).await.unwrap().json().await.unwrap();
+    assert!(sessions.as_array().unwrap().len() >= 2, "{sessions}");
+    assert_eq!(sessions.as_array().unwrap().iter().filter(|s| s["current"] == true).count(), 1);
+    assert_eq!(call(M::DELETE, &cookie, "/me/sessions", None).await.unwrap().status(), 204);
+    assert_eq!(call(M::GET, &second, "/interfaces", None).await.unwrap().status(), 401, "the other one ended");
+    assert_eq!(call(M::GET, &cookie, "/interfaces", None).await.unwrap().status(), 200, "this one stays");
+
+    // A token can't be an account, and `auth.token_sign_in` isn't touched here.
+    let bearer_me = http.get(format!("{base}/me")).bearer_auth(&secret).send().await.unwrap();
+    assert!(bearer_me.status().is_client_error());
 }
 
 const DOCS_SCHEMA: &str = r#"

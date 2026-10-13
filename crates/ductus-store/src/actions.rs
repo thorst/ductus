@@ -10,8 +10,10 @@ use chrono::{DateTime, Utc};
 /// Who acted, and why.
 #[derive(Debug, Clone, Copy)]
 pub struct Actor<'a> {
-    /// Their API token (`api_tokens.id`).
+    /// Their API token (`api_tokens.id`), when they came with one.
     pub token_id: Option<i32>,
+    /// The person (`users.id`): who signed in, or whose token it is.
+    pub user_id: Option<i32>,
     pub name: &'a str,
     pub reason: Option<&'a str>,
 }
@@ -151,9 +153,9 @@ impl Store {
                  ), recorded AS (
                      INSERT INTO message_actions (action, token_id, actor, reason, message_id, received_at, interface,
                                                   destination_id, previous_status, previous_attempts, previous_error,
-                                                  previous_output)
+                                                  previous_output, user_id)
                      SELECT 'resend', $7, $8, $9, old.message_id, old.received_at, t.interface, old.destination_id,
-                            old.status, old.attempts, old.last_error, old.output
+                            old.status, old.attempts, old.last_error, old.output, $10
                      FROM old JOIN destinations t ON t.id = old.destination_id
                  )
                  SELECT old.message_id, t.interface, old.destination_id, t.name AS destination, old.partition_key,
@@ -171,6 +173,7 @@ impl Store {
             .bind(by.token_id)
             .bind(by.name)
             .bind(by.reason)
+            .bind(by.user_id)
             .fetch_all(&mut *tx)
             .await
             .context("resetting deliveries")?;
@@ -259,8 +262,8 @@ impl Store {
                  ), recorded AS (
                      INSERT INTO message_actions (action, token_id, actor, reason, message_id, received_at, interface,
                                                   destination_id, previous_status, previous_attempts, previous_error,
-                                                  previous_output, copy_id)
-                     SELECT 'edit', $5, $6, $7, $1, $2, $8, c.id, old.status, old.attempts, old.last_error, old.output, $9
+                                                  previous_output, copy_id, user_id)
+                     SELECT 'edit', $5, $6, $7, $1, $2, $8, c.id, old.status, old.attempts, old.last_error, old.output, $9, $10
                      FROM unnest($3::int[]) AS c(id) LEFT JOIN old ON old.destination_id = c.id
                  )
                  SELECT destination_id FROM replaced ORDER BY 1",
@@ -274,6 +277,7 @@ impl Store {
             .bind(by.reason)
             .bind(c.interface)
             .bind(id)
+            .bind(by.user_id)
             .fetch_all(&mut *tx)
             .await
             .context("replacing the original's deliveries")?;

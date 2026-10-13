@@ -10,6 +10,7 @@ const token = process.env.DUCTUS_VIEWER_TOKEN ?? "";
 async function signIn(page: Page, path = "/") {
   await page.goto(path);
   await expect(page).toHaveURL(/\/sign-in/);
+  await page.getByRole("button", { name: "Use an API token instead" }).click();
   await page.getByLabel("Token").fill(token);
   await page.getByRole("button", { name: "Sign in" }).click();
   // Signed in only once it's left this page: navigating sooner can cancel the sign-in request
@@ -40,6 +41,8 @@ const AXE_PAGES = [
   "/drain",
   "/connections",
   "/tokens",
+  "/users",
+  "/account",
   "/api-reference",
   "/appearance",
 ];
@@ -66,6 +69,7 @@ test("a wrong token is refused; the right one signs in and comes back to the pag
 }) => {
   await page.goto("/interfaces/adt");
   await expect(page).toHaveURL(/\/sign-in\?redirect=/);
+  await page.getByRole("button", { name: "Use an API token instead" }).click();
   await page.getByLabel("Token").fill("dux_wrong");
   await page.getByRole("button", { name: "Sign in" }).click();
   await expect(page.getByRole("alert")).toContainText("unknown or revoked token");

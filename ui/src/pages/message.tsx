@@ -32,7 +32,7 @@ export function MessagePage() {
                 <StatusBadge status={m.status} />
               </span>
             }
-            actions={canOperate && m.deliveries.length > 0 && <EditButton m={m} />}
+            actions={canOperate && m.deliveries.length > 0 && m.payload != null && <EditButton m={m} />}
           >
             <Link to="/interfaces/$name" params={{ name: m.interface }} search={{ tab: "messages" }}>
               {m.interface}
@@ -74,7 +74,21 @@ export function MessagePage() {
             </Card>
             <Deliveries m={m} canOperate={canOperate} />
             <History actions={m.actions} />
-            <Payload payload={m.payload} />
+            {m.payload != null ? (
+              <Payload payload={m.payload} />
+            ) : (
+              <Card aria-label="Payload">
+                <CardHeader>
+                  <CardTitle>Payload</CardTitle>
+                </CardHeader>
+                <CardBody>
+                  <p className="text-sm text-muted">
+                    You don&rsquo;t have permission to read payloads (they hold patient data). Ask an admin for the{" "}
+                    <strong className="text-text">payloads</strong> permission.
+                  </p>
+                </CardBody>
+              </Card>
+            )}
           </div>
         </>
       )}
@@ -126,7 +140,7 @@ function Deliveries({ m, canOperate }: { m: Schemas["MessageDetail"]; canOperate
                   </>
                 ) : (
                   <span className="text-xs text-muted" title="Saved only for destinations with save_output: true">
-                    not saved
+                    {m.payload_hidden ? "hidden" : "not saved"}
                   </span>
                 )}
               </Td>
@@ -179,8 +193,9 @@ function Deliveries({ m, canOperate }: { m: Schemas["MessageDetail"]; canOperate
 /** Correct a message: a copy with the edits is queued; the original stays as received. */
 function EditButton({ m }: { m: Schemas["MessageDetail"] }) {
   const [open, setOpen] = useState(false);
-  const hl7 = isHl7(m.payload);
-  const [text, setText] = useState(() => toEditable(m.payload));
+  const payload = m.payload ?? "";
+  const hl7 = isHl7(payload);
+  const [text, setText] = useState(() => toEditable(payload));
   const quarantined = m.deliveries.filter((d) => d.status === "quarantined").map((d) => d.destination);
   const [chosen, setChosen] = useState<string[]>(quarantined);
   const refresh = useRefresh();
@@ -190,7 +205,7 @@ function EditButton({ m }: { m: Schemas["MessageDetail"] }) {
       <Button
         variant="outline"
         onClick={() => {
-          setText(toEditable(m.payload));
+          setText(toEditable(payload));
           setChosen(quarantined);
           setOpen(true);
         }}

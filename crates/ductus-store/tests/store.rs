@@ -3,7 +3,7 @@
 
 use ductus_store::{
     Batch, BatchMessage, Browse, DedupeKey, DestinationId, Done, MessageRef, NewMessage, QueueCount, Reconciled, Role,
-    Status, Store,
+    SessionFor, SessionLimits, Status, Store,
 };
 
 /// The retention tier test messages go to.
@@ -398,8 +398,12 @@ async fn destinations_finishing_at_once_never_leave_a_message_pending() {
     assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), 300);
 }
 
-const OPERATOR: ductus_store::Actor<'static> =
-    ductus_store::Actor { token_id: None, name: "test-operator", reason: Some("vendor fixed their side") };
+const OPERATOR: ductus_store::Actor<'static> = ductus_store::Actor {
+    token_id: None,
+    user_id: None,
+    name: "test-operator",
+    reason: Some("vendor fixed their side"),
+};
 
 async fn status_by_id(store: &Store, id: i64) -> Status {
     store.message(id).await.unwrap().expect("the message exists").0.status
@@ -1471,26 +1475,26 @@ async fn partition_maintenance_is_idempotent() {
 async fn tokens_are_stored_hashed_and_can_be_revoked() {
     let Some(store) = store().await else { return };
     let name = format!("test-token-{}", std::process::id());
-    let (token, secret) = store.create_token(&name, Role::Operator).await.unwrap();
+    let (token, secret) = store.create_token(&name, Role::Operator, &[], None).await.unwrap();
     assert!(secret.starts_with(ductus_store::TOKEN_PREFIX) && secret.len() == 68, "{secret}");
     assert_eq!((token.name.as_str(), token.role), (name.as_str(), Role::Operator));
-    let err = store.create_token(&name, Role::Viewer).await.unwrap_err().to_string();
+    let err = store.create_token(&name, Role::Viewer, &[], None).await.unwrap_err().to_string();
     assert!(err.contains("already exists"), "{err}");
 
     let found = store.authenticate(&secret).await.unwrap().expect("the token works");
-    assert_eq!(found.id, token.id);
-    assert!(store.tokens(false).await.unwrap().iter().any(|t| t.id == token.id && t.last_used_at.is_some()));
+    assert_eq!(found.token_id, Some(token.id));
+    assert!(store.tokens(false, None).await.unwrap().iter().any(|t| t.id == token.id && t.last_used_at.is_some()));
     assert!(store.authenticate("dux_0000").await.unwrap().is_none());
     assert!(store.authenticate("not a token").await.unwrap().is_none());
 
-    assert!(store.revoke_token(&name).await.unwrap());
-    assert!(!store.revoke_token(&name).await.unwrap(), "nothing left to revoke");
+    assert!(store.revoke_token(&name, None).await.unwrap());
+    assert!(!store.revoke_token(&name, None).await.unwrap(), "nothing left to revoke");
     assert!(store.authenticate(&secret).await.unwrap().is_none(), "revoked tokens stop working");
-    assert!(!store.tokens(false).await.unwrap().iter().any(|t| t.id == token.id));
-    assert!(store.tokens(true).await.unwrap().iter().any(|t| t.id == token.id && t.revoked_at.is_some()));
+    assert!(!store.tokens(false, None).await.unwrap().iter().any(|t| t.id == token.id));
+    assert!(store.tokens(true, None).await.unwrap().iter().any(|t| t.id == token.id && t.revoked_at.is_some()));
     // The name is free again.
-    let (again, _) = store.create_token(&name, Role::Viewer).await.unwrap();
-    store.revoke_token(&name).await.unwrap();
+    let (again, _) = store.create_token(&name, Role::Viewer, &[], None).await.unwrap();
+    store.revoke_token(&name, None).await.unwrap();
     assert_ne!(again.id, token.id);
 }
 
@@ -1502,25 +1506,26 @@ async fn sessions_act_as_their_token_until_they_end() {
     let store = Store::connect(&url, 4).await.unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let name = format!("test-session-{}", std::process::id());
-    let (token, token_secret) = store.create_token(&name, Role::Operator).await.unwrap();
+    let (token, token_secret) = store.create_token(&name, Role::Operator, &[], None).await.unwrap();
+    let limits = SessionLimits::default();
 
-    let (secret, expires_at) = store.create_session(&token).await.unwrap();
+    let (secret, expires_at) = store.create_session(SessionFor::Token(token.id), limits).await.unwrap();
     assert!(secret.starts_with(ductus_store::SESSION_PREFIX) && secret.len() == 68, "{secret}");
     let days = (expires_at - chrono::Utc::now()).num_hours();
     assert!((167..=168).contains(&days), "a week from now: {expires_at}");
-    let (found, _) = store.authenticate_session(&secret).await.unwrap().expect("the session works");
-    assert_eq!((found.id, found.role), (token.id, Role::Operator));
+    let (found, _) = store.authenticate_session(&secret, limits).await.unwrap().expect("the session works");
+    assert_eq!((found.token_id, found.role), (Some(token.id), Role::Operator));
     assert!(store.authenticate(&secret).await.unwrap().is_none(), "a session isn't a token");
-    assert!(store.authenticate_session(&token_secret).await.unwrap().is_none(), "nor a token a session");
+    assert!(store.authenticate_session(&token_secret, limits).await.unwrap().is_none(), "nor a token a session");
 
     // Sign-out.
     assert!(store.end_session(&secret).await.unwrap());
-    assert!(store.authenticate_session(&secret).await.unwrap().is_none());
+    assert!(store.authenticate_session(&secret, limits).await.unwrap().is_none());
 
     // Idle too long, or past its end.
-    let (idle, _) = store.create_session(&token).await.unwrap();
-    let (old, _) = store.create_session(&token).await.unwrap();
-    let (live, _) = store.create_session(&token).await.unwrap();
+    let (idle, _) = store.create_session(SessionFor::Token(token.id), limits).await.unwrap();
+    let (old, _) = store.create_session(SessionFor::Token(token.id), limits).await.unwrap();
+    let (live, _) = store.create_session(SessionFor::Token(token.id), limits).await.unwrap();
     for (set, secret) in
         [("last_seen_at = now() - interval '13 hours'", &idle), ("expires_at = now() - interval '1 second'", &old)]
     {
@@ -1528,13 +1533,210 @@ async fn sessions_act_as_their_token_until_they_end() {
         let changed = sqlx::query(sqlx::AssertSqlSafe(sql)).bind(secret).execute(&pool).await.unwrap();
         assert_eq!(changed.rows_affected(), 1);
     }
-    assert!(store.authenticate_session(&idle).await.unwrap().is_none(), "idle 13 hours");
-    assert!(store.authenticate_session(&old).await.unwrap().is_none(), "past its end");
-    assert!(store.authenticate_session(&live).await.unwrap().is_some());
+    assert!(store.authenticate_session(&idle, limits).await.unwrap().is_none(), "idle 13 hours");
+    assert!(store.authenticate_session(&old, limits).await.unwrap().is_none(), "past its end");
+    assert!(store.authenticate_session(&live, limits).await.unwrap().is_some());
 
     // Revoking the token ends its sessions.
-    store.revoke_token(&name).await.unwrap();
-    assert!(store.authenticate_session(&live).await.unwrap().is_none());
+    store.revoke_token(&name, None).await.unwrap();
+    assert!(store.authenticate_session(&live, limits).await.unwrap().is_none());
+}
+
+/// Tests that make admins take turns: the "last admin" guard counts every admin in the database.
+static ADMINS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+fn unique(prefix: &str) -> String {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    format!("{prefix}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed))
+}
+
+async fn make_user(store: &Store, role: Role, permissions: &[&str]) -> ductus_store::User {
+    let permissions: Vec<String> = permissions.iter().map(|p| p.to_string()).collect();
+    store
+        .create_user(&ductus_store::NewUser {
+            username: &unique("test-user"),
+            display_name: "",
+            email: "",
+            role,
+            permissions: &permissions,
+            password_hash: Some("$argon2id$not-checked-here"),
+            must_change_password: false,
+            source: "local",
+        })
+        .await
+        .unwrap()
+}
+
+/// Accounts: names ignore case, wrong passwords lock an account for a while and a good sign-in
+/// clears the count, and a disabled user's sessions and tokens stop at once.
+#[tokio::test]
+async fn users_lock_after_wrong_passwords_and_stop_when_disabled() {
+    let Some(store) = store().await else { return };
+    let limits = SessionLimits::default();
+    let user = make_user(&store, Role::Operator, &["payloads"]).await;
+    let err = store
+        .create_user(&ductus_store::NewUser {
+            username: &user.username.to_uppercase(),
+            display_name: "",
+            email: "",
+            role: Role::Viewer,
+            permissions: &[],
+            password_hash: None,
+            must_change_password: false,
+            source: "local",
+        })
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("already a user"), "{err}");
+    assert!(store.user_by_name(&user.username.to_uppercase()).await.unwrap().is_some(), "names ignore case");
+    let unknown = ductus_store::clean_permissions(&["root".to_string()]).unwrap_err().to_string();
+    assert!(unknown.contains("unknown permission"), "{unknown}");
+
+    // Three wrong passwords within the window lock it; a right one (after an unlock) clears the count.
+    let lockout = ductus_store::Lockout {
+        attempts: 3,
+        window: std::time::Duration::from_secs(900),
+        lock_for: std::time::Duration::from_secs(600),
+    };
+    assert!(store.record_failed_login(user.id, lockout).await.unwrap().is_none());
+    assert!(store.record_failed_login(user.id, lockout).await.unwrap().is_none());
+    let until = store.record_failed_login(user.id, lockout).await.unwrap().expect("locked at the third");
+    assert!((9..=10).contains(&(until - chrono::Utc::now()).num_minutes()), "{until}");
+    let candidate = store.candidate(&user.username).await.unwrap().unwrap();
+    assert_eq!(candidate.locked_until, Some(until));
+    store.unlock_user(user.id).await.unwrap();
+    assert!(store.candidate(&user.username).await.unwrap().unwrap().locked_until.is_none());
+    store.record_failed_login(user.id, lockout).await.unwrap();
+    store.record_sign_in(user.id).await.unwrap();
+    assert!(store.record_failed_login(user.id, lockout).await.unwrap().is_none(), "the count started over");
+
+    // A session acts as the user; their token never goes above them.
+    let (secret, _) = store.create_session(SessionFor::User(user.id), limits).await.unwrap();
+    let (who, _) = store.authenticate_session(&secret, limits).await.unwrap().expect("the session works");
+    assert_eq!((who.user_id, who.token_id, who.role), (Some(user.id), None, Role::Operator));
+    assert!(who.can("payloads") && !who.can("audit"));
+    let tname = unique("test-user-token");
+    let permissions = ["payloads".to_string(), "audit".to_string()];
+    let (token, token_secret) = store.create_token(&tname, Role::Admin, &permissions, Some(user.id)).await.unwrap();
+    assert_eq!(token.owner.as_deref(), Some(user.username.as_str()));
+    let acting = store.authenticate(&token_secret).await.unwrap().expect("the token works");
+    assert_eq!(acting.role, Role::Operator, "capped at its owner's role");
+    assert_eq!(acting.permissions, ["payloads"], "and at the owner's permissions");
+    assert_eq!(store.tokens(false, Some(user.id)).await.unwrap().len(), 1);
+    assert!(!store.revoke_token(&tname, Some(user.id + 1_000_000)).await.unwrap(), "only the owner's own");
+
+    // Disabling ends the sessions and stops the tokens.
+    store.update_user(user.id, &ductus_store::UserChange { disabled: Some(true), ..Default::default() }).await.unwrap();
+    assert!(store.authenticate_session(&secret, limits).await.unwrap().is_none());
+    assert!(store.authenticate(&token_secret).await.unwrap().is_none(), "a disabled user's token stops");
+    store
+        .update_user(user.id, &ductus_store::UserChange { disabled: Some(false), ..Default::default() })
+        .await
+        .unwrap();
+    assert!(store.authenticate(&token_secret).await.unwrap().is_some(), "and works again when they are back");
+    store.revoke_token(&tname, None).await.unwrap();
+}
+
+/// Changing a password ends the user's other sessions but not the one changing it; people can end
+/// their own sessions and nobody else's; and an admin-chosen password has to be changed.
+#[tokio::test]
+async fn password_changes_end_other_sessions() {
+    let Some(store) = store().await else { return };
+    let limits = SessionLimits::default();
+    let user = make_user(&store, Role::Viewer, &[]).await;
+    let other = make_user(&store, Role::Viewer, &[]).await;
+    let (mine, _) = store.create_session(SessionFor::User(user.id), limits).await.unwrap();
+    let (elsewhere, _) = store.create_session(SessionFor::User(user.id), limits).await.unwrap();
+    let (theirs, _) = store.create_session(SessionFor::User(other.id), limits).await.unwrap();
+
+    let listed = store.user_sessions(user.id, Some(&mine), limits.idle).await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed.iter().filter(|s| s.current).count(), 1);
+    let not_mine = store.user_sessions(other.id, None, limits.idle).await.unwrap()[0].id;
+    assert!(!store.end_user_session(user.id, not_mine).await.unwrap(), "someone else's session");
+
+    store.set_password(user.id, "$argon2id$new", false, Some(&mine)).await.unwrap();
+    assert!(store.authenticate_session(&mine, limits).await.unwrap().is_some(), "the one changing it stays");
+    assert!(store.authenticate_session(&elsewhere, limits).await.unwrap().is_none(), "the others end");
+    assert!(store.authenticate_session(&theirs, limits).await.unwrap().is_some(), "other people's are untouched");
+    assert_eq!(store.password_hash(user.id).await.unwrap().as_deref(), Some("$argon2id$new"));
+
+    store.set_password(user.id, "$argon2id$temporary", true, None).await.unwrap();
+    assert!(store.authenticate_session(&mine, limits).await.unwrap().is_none(), "a reset ends every session");
+    let (again, _) = store.create_session(SessionFor::User(user.id), limits).await.unwrap();
+    let (who, _) = store.authenticate_session(&again, limits).await.unwrap().unwrap();
+    assert!(who.must_change_password, "an admin-chosen password has to be changed");
+    store.set_password(user.id, "$argon2id$mine", false, Some(&again)).await.unwrap();
+    let (who, _) = store.authenticate_session(&again, limits).await.unwrap().unwrap();
+    assert!(!who.must_change_password);
+}
+
+/// Appearance is saved per user and replaced as a whole.
+#[tokio::test]
+async fn appearance_is_kept_per_user() {
+    let Some(store) = store().await else { return };
+    let a = make_user(&store, Role::Viewer, &[]).await;
+    let b = make_user(&store, Role::Viewer, &[]).await;
+    assert!(store.user_settings(a.id).await.unwrap().is_none());
+    store.save_user_settings(a.id, "custom", Some(r##"{"colors":{"accent":"#112233"}}"##)).await.unwrap();
+    store.save_user_settings(b.id, "dark", None).await.unwrap();
+    let saved = store.user_settings(a.id).await.unwrap().unwrap();
+    assert_eq!(saved.theme, "custom");
+    assert!(saved.colors.unwrap().contains("#112233"));
+    store.save_user_settings(a.id, "light", None).await.unwrap();
+    let saved = store.user_settings(a.id).await.unwrap().unwrap();
+    assert_eq!((saved.theme.as_str(), saved.colors), ("light", None));
+    assert_eq!(store.user_settings(b.id).await.unwrap().unwrap().theme, "dark");
+}
+
+/// The last admin who can sign in can't be disabled or demoted (it would lock everyone out of
+/// user management). Counts every admin in the database, so when the test database has others
+/// already, the guard isn't reached and the test checks that the change goes through.
+#[tokio::test]
+async fn the_last_admin_stays() {
+    let Some(store) = store().await else { return };
+    let _serial = ADMINS.lock().await;
+    // Admins this test made on an earlier run would hide the guard.
+    let url = std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    forget_test_admins(&pool).await;
+    let others =
+        store.users().await.unwrap().iter().filter(|u| u.role == Role::Admin && u.disabled_at.is_none()).count();
+    let admin = make_user(&store, Role::Admin, &[]).await;
+    let demote = ductus_store::UserChange { role: Some(Role::Viewer), ..Default::default() };
+    let disable = ductus_store::UserChange { disabled: Some(true), ..Default::default() };
+    if others == 0 {
+        for change in [&demote, &disable] {
+            let err = store.update_user(admin.id, change).await.unwrap_err().to_string();
+            assert!(err.contains("no admin who can sign in"), "{err}");
+        }
+        let second = make_user(&store, Role::Admin, &[]).await;
+        store.update_user(admin.id, &demote).await.expect("another admin remains");
+        let err = store.update_user(second.id, &disable).await.unwrap_err().to_string();
+        assert!(err.contains("no admin who can sign in"), "{err}");
+    } else {
+        store.update_user(admin.id, &demote).await.expect("other admins remain");
+    }
+    forget_test_admins(&pool).await;
+}
+
+/// Delete the admins tests made (here and by the CLI tests, which name theirs `test-user-cli-...`)
+/// with what hangs off them.
+async fn forget_test_admins(pool: &sqlx::PgPool) {
+    for sql in [
+        "DELETE FROM api_sessions WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'test-user-%' AND role = 2)
+            OR token_id IN (SELECT t.id FROM api_tokens t JOIN users u ON u.id = t.user_id
+                            WHERE u.username LIKE 'test-user-%' AND u.role = 2)",
+        "UPDATE message_actions SET user_id = NULL
+            WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'test-user-%' AND role = 2)",
+        "DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'test-user-%' AND role = 2)",
+        "DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'test-user-%' AND role = 2)",
+        "DELETE FROM users WHERE username LIKE 'test-user-%' AND role = 2",
+    ] {
+        sqlx::query(sql).execute(pool).await.unwrap();
+    }
 }
 
 #[tokio::test]

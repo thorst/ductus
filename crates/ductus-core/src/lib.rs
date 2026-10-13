@@ -9,6 +9,7 @@ pub mod hotspots;
 pub mod impact;
 pub mod monitor;
 pub mod owners;
+pub mod password;
 pub mod ports;
 pub mod resources;
 pub mod retention;

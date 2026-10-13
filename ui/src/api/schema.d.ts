@@ -237,6 +237,132 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/me": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The signed-in user's account. */
+        get: operations["get_me"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /** Change your own name and email. */
+        patch: operations["update_me"];
+        trace?: never;
+    };
+    "/me/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Change your own password. Your other sessions end. Works while a change is required. */
+        post: operations["change_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/sessions": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Your signed-in browsers. */
+        get: operations["my_sessions"];
+        put?: never;
+        post?: never;
+        /** Sign out everywhere else: every session of yours but this one ends. */
+        delete: operations["end_other_sessions"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/sessions/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** End one of your sessions. */
+        delete: operations["end_my_session"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/settings": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Your saved appearance (theme and custom colors), which follows you to any browser. */
+        get: operations["get_my_settings"];
+        /** Save your appearance. */
+        put: operations["save_my_settings"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Your own tokens (live ones). */
+        get: operations["my_tokens"];
+        put?: never;
+        /**
+         * Make a token of your own, for scripts. It acts as you at most: never above your role or
+         *     permissions, and it stops working if you are disabled. Its secret is in this answer only.
+         */
+        post: operations["make_my_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/me/tokens/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /** Revoke one of your tokens (the name as listed). */
+        delete: operations["revoke_my_token"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/messages/resend": {
         parameters: {
             query?: never;
@@ -441,12 +567,13 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Who is calling: the token (directly or through a session) and its role. */
+        /** Who is calling, and as what. Works while a password change is still required. */
         get: operations["whoami"];
         put?: never;
         /**
-         * Sign a browser in with a token: answers with a session cookie (`ductus_session`), which then
-         *     stands in for the token. Needs the `X-Ductus: 1` header.
+         * Sign a browser in with a username and password, or a token: answers with a session cookie
+         *     (`ductus_session`), which then stands in for them. Needs the `X-Ductus: 1` header. After too
+         *     many wrong passwords for one username the account refuses sign-in for a while (429).
          */
         post: operations["sign_in"];
         /** Sign out: the session ends at once and the cookie is cleared. */
@@ -463,10 +590,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Live tokens (never their secrets). Admin. */
+        /** Live tokens, everyone's (never their secrets). Admin. */
         get: operations["list_tokens"];
         put?: never;
-        /** Create a token. Its secret is in this answer only. Admin. */
+        /** Create a service token (it belongs to nobody). Its secret is in this answer only. Admin. */
         post: operations["create_token"];
         delete?: never;
         options?: never;
@@ -491,6 +618,81 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/users": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** All users. Admin. */
+        get: operations["list_users"];
+        put?: never;
+        /** Make an account with a temporary password (the person changes it at their first sign-in). Admin. */
+        post: operations["create_user"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        /**
+         * Change a user's details, role, permissions, or disable them. Refused when it would leave no
+         *     admin who can sign in. Admin.
+         */
+        patch: operations["update_user"];
+        trace?: never;
+    };
+    "/users/{id}/password": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Give a user a new temporary password (their sessions end; they must change it when they sign
+         *     in). Admin.
+         */
+        post: operations["reset_password"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/users/{id}/unlock": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Let a user who was locked out after wrong passwords try again. Admin. */
+        post: operations["unlock_user"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
 }
 export type webhooks = Record<string, never>;
 export interface components {
@@ -500,7 +702,7 @@ export interface components {
             action: string;
             /** Format: date-time */
             at: string;
-            /** @description The token that did it. */
+            /** @description The user or token that did it. */
             by: string;
             /**
              * Format: int64
@@ -514,6 +716,14 @@ export interface components {
             /** @description The delivery before: `sent`, `filtered` or `quarantined` (none: there was none). */
             previous_status?: string | null;
             reason?: string | null;
+        };
+        Appearance: {
+            /** @description The custom colors, as the UI saves them (a JSON object). */
+            colors?: Record<string, never> | null;
+            /** @description Whether this was saved before: false means the UI may offer the browser's own choice. */
+            saved?: boolean;
+            /** @description `system`, `light`, `dark`, `contrast` or `custom`. */
+            theme: string;
         };
         BulkResendRequest: {
             /**
@@ -1101,8 +1311,14 @@ export interface components {
              */
             copy_of?: number | null;
             deliveries: components["schemas"]["DeliveryInfo"][];
-            /** @description The message as received (bytes that aren't UTF-8 are replaced). */
-            payload: string;
+            /**
+             * @description The message as received (bytes that aren't UTF-8 are replaced). Absent when the caller
+             *     doesn't have the `payloads` permission (`payload_hidden` is then true), and so are the
+             *     deliveries' `output`s.
+             */
+            payload?: string | null;
+            /** @description The payload (and saved outputs) were left out: the caller may not read them. */
+            payload_hidden: boolean;
         };
         MessagePage: {
             /** @description Newest first. */
@@ -1142,11 +1358,35 @@ export interface components {
             /** Format: date-time */
             updated_at: string;
         };
+        NewMyToken: {
+            /** @description What it is for, e.g. `deploy-script`; it is listed as `<you>/<name>`. */
+            name: string;
+            /** @description Defaults to none; never more than you have. */
+            permissions?: string[] | null;
+            /** @description Defaults to your own role; never above it. */
+            role?: string | null;
+        };
         NewToken: {
             /** @description Who or what uses it, e.g. `ci` or `monitoring`. */
             name: string;
+            /**
+             * @description `payloads` and/or `audit`. None by default: a token can't read message payloads unless
+             *     it is given the permission.
+             */
+            permissions?: string[] | null;
             /** @description `viewer` (default), `operator` or `admin`. */
             role?: string | null;
+        };
+        NewUserRequest: {
+            display_name?: string | null;
+            email?: string | null;
+            /** @description A temporary password: the person must change it at their first sign-in. */
+            password: string;
+            /** @description `payloads` and/or `audit`. */
+            permissions?: string[] | null;
+            /** @description `viewer` (default), `operator` or `admin`. */
+            role?: string | null;
+            username: string;
         };
         /** @enum {string} */
         Outcome: "ok" | "warn" | "fail";
@@ -1159,6 +1399,15 @@ export interface components {
             /** @description Absent for what nobody owns (listed last). */
             owner?: string | null;
             owns: components["schemas"]["Owned"][];
+        };
+        PasswordChange: {
+            /** @description The password you have now. */
+            current: string;
+            new: string;
+        };
+        PasswordReset: {
+            /** @description The temporary password; the person must change it at their next sign-in. */
+            password: string;
         };
         PauseInfo: {
             /** Format: date-time */
@@ -1184,6 +1433,10 @@ export interface components {
              * @description Messages waiting for it.
              */
             pending: number;
+        };
+        ProfileUpdate: {
+            display_name?: string | null;
+            email?: string | null;
         };
         QuarantinePage: {
             /** @description Newest message first; a message quarantined by two destinations is listed twice. */
@@ -1338,18 +1591,39 @@ export interface components {
         Session: {
             /**
              * Format: date-time
-             * @description When the session ends at the latest (it also ends after 12 hours unused). None when the
-             *     call came with a token instead of a session.
+             * @description When the session ends at the latest (it also ends when unused for too long). None when
+             *     the call came with a token instead of a session.
              */
             ends_at?: string | null;
-            /** @description The token's name. */
+            /** @description `user` (signed in with a password) or `token`. */
+            kind: string;
+            /** @description An admin chose this password: nothing else works until it is changed (`POST /me/password`). */
+            must_change_password: boolean;
+            /** @description The username, or the token's name. */
             name: string;
+            /** @description What the role doesn't say: `payloads`, `audit`. Admins have both. */
+            permissions: string[];
             /** @description `viewer`, `operator` or `admin`. */
             role: string;
         };
+        SessionInfo: {
+            /** Format: date-time */
+            created_at: string;
+            /** @description The one making this request. */
+            current: boolean;
+            /** Format: date-time */
+            expires_at: string;
+            /** Format: int32 */
+            id: number;
+            /** Format: date-time */
+            last_seen_at: string;
+        };
         SignIn: {
-            /** @description An API token (`dux_...`). */
-            token: string;
+            password?: string | null;
+            /** @description ...or an API token (`dux_...`), unless `auth.token_sign_in` is off. */
+            token?: string | null;
+            /** @description A user's name (with `password`)... */
+            username?: string | null;
         };
         /** @description One step of a check: `DNS`, `connect`, `TLS`, `login`, `HTTP`, `commits`, `folder`, `port`. */
         Step: {
@@ -1384,8 +1658,45 @@ export interface components {
              */
             last_used_at?: string | null;
             name: string;
+            /** @description The user it belongs to; none for a service token made by an admin. */
+            owner?: string | null;
+            /** @description `payloads`, `audit` (admins' tokens have all). */
+            permissions: string[];
             /** @description `viewer`, `operator` or `admin`. */
             role: string;
+        };
+        UserInfo: {
+            /** Format: date-time */
+            created_at: string;
+            disabled: boolean;
+            display_name: string;
+            email: string;
+            /** Format: int32 */
+            id: number;
+            /** Format: date-time */
+            last_sign_in_at?: string | null;
+            /**
+             * Format: date-time
+             * @description Refused after too many wrong passwords, until then.
+             */
+            locked_until?: string | null;
+            /** @description An admin chose the password; the next sign-in can only change it. */
+            must_change_password: boolean;
+            /** @description `payloads`, `audit` (admins have both whatever is listed). */
+            permissions: string[];
+            /** @description `viewer`, `operator` or `admin`. */
+            role: string;
+            /** @description Where the password is checked: `local`, or a directory. */
+            source: string;
+            username: string;
+        };
+        UserUpdate: {
+            /** @description Disabled users can't sign in, and their sessions and tokens stop at once. */
+            disabled?: boolean | null;
+            display_name?: string | null;
+            email?: string | null;
+            permissions?: string[] | null;
+            role?: string | null;
         };
         WorkerInfo: {
             /**
@@ -1850,6 +2161,357 @@ export interface operations {
             };
         };
     };
+    get_me: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserInfo"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    update_me: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ProfileUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserInfo"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    change_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordChange"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    my_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionInfo"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    end_other_sessions: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    end_my_session: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Session id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_my_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Appearance"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    save_my_settings: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["Appearance"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Appearance"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    my_tokens: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TokenInfo"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    make_my_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewMyToken"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CreatedToken"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    revoke_my_token: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Token name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     resend_many: {
         parameters: {
             query?: never;
@@ -2275,6 +2937,14 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
+            429: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
         };
     };
     sign_out: {
@@ -2373,6 +3043,206 @@ export interface operations {
         requestBody?: never;
         responses: {
             /** @description Revoked */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_users: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserInfo"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    create_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["NewUserRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserInfo"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    update_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["UserUpdate"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UserInfo"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    reset_password: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PasswordReset"];
+            };
+        };
+        responses: {
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    unlock_user: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description User id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
             204: {
                 headers: {
                     [name: string]: unknown;

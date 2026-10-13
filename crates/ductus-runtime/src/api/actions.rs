@@ -36,7 +36,12 @@ const MAX_PAGE: i64 = 500;
 
 impl Caller {
     fn actor<'a>(&'a self, reason: Option<&'a str>) -> Actor<'a> {
-        Actor { token_id: Some(self.token.id), name: self.name(), reason: reason.filter(|r| !r.trim().is_empty()) }
+        Actor {
+            token_id: self.who.token_id,
+            user_id: self.who.user_id,
+            name: self.name(),
+            reason: reason.filter(|r| !r.trim().is_empty()),
+        }
     }
 }
 
@@ -304,6 +309,8 @@ async fn edit(
     Json(request): Json<EditRequest>,
 ) -> Result<(StatusCode, Json<EditResult>), ApiError> {
     caller.require(Role::Operator)?;
+    // Correcting a message means reading it.
+    caller.require_permission("payloads")?;
     if request.payload.trim().is_empty() {
         return Err(ApiError::bad_request("the edited message is empty"));
     }

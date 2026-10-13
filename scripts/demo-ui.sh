@@ -109,9 +109,15 @@ ENGINE=$!
 trap 'kill -INT $ENGINE 2>/dev/null || true' EXIT
 until grep "started interfaces=" "$P/run.log" >/dev/null; do kill -0 $ENGINE || { cat "$P/run.log"; exit 1; }; sleep 0.2; done
 echo "engine log: $P/run.log"
-export DUCTUS_API_TOKEN=$("$BIN" token create "ui-demo-operator-$$" --role operator 2>/dev/null)
-VIEWER=$("$BIN" token create "ui-demo-viewer-$$" --role viewer 2>/dev/null)
+export DUCTUS_API_TOKEN=$("$BIN" token create "ui-demo-operator-$$" --role operator --permission payloads 2>/dev/null)
+VIEWER=$("$BIN" token create "ui-demo-viewer-$$" --role viewer --permission payloads 2>/dev/null)
 ADMIN=$("$BIN" token create "ui-demo-admin-$$" --role admin 2>/dev/null)
+# People with passwords (named test-user-*: the store tests clean such admins up). The operator may
+# read payloads; the viewer may not.
+PASSWORD="correct horse staple"
+"$BIN" user create "test-user-ui-admin-$$" --role admin --password-stdin <<<"$PASSWORD" >/dev/null
+"$BIN" user create "test-user-ui-operator-$$" --role operator --permission payloads --password-stdin <<<"$PASSWORD" >/dev/null
+"$BIN" user create "test-user-ui-viewer-$$" --role viewer --password-stdin <<<"$PASSWORD" >/dev/null
 
 echo "== traffic"
 "$BIN" pause billing --reason "invoice system upgrade tonight" | sed 's/^/   /'
@@ -136,7 +142,8 @@ echo "   /interfaces/adt → index.html, gzip, CSP"
 echo "== the browser (Playwright)"
 cd "$UI"
 export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN \
-  DUCTUS_ADMIN_TOKEN=$ADMIN
+  DUCTUS_ADMIN_TOKEN=$ADMIN DUCTUS_PERSON_ADMIN="test-user-ui-admin-$$:$PASSWORD" \
+  DUCTUS_PERSON_OPERATOR="test-user-ui-operator-$$:$PASSWORD" DUCTUS_PERSON_VIEWER="test-user-ui-viewer-$$:$PASSWORD"
 if npx playwright test --reporter=line; then
   echo PASS
 else

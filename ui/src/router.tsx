@@ -4,9 +4,11 @@ import {
   createRoute,
   createRouter,
   lazyRouteComponent,
+  isRedirect,
   Outlet,
   redirect,
 } from "@tanstack/react-router";
+import { syncAppearance } from "@/api/appearance";
 import { ApiError } from "@/api/client";
 import { session, STATUSES, type ImpactSearch, type MessageStatus } from "@/api/queries";
 import { Layout } from "@/components/layout";
@@ -24,6 +26,7 @@ import { QuarantinePage } from "@/pages/quarantine";
 import { RetentionPage } from "@/pages/retention";
 import { SignInPage } from "@/pages/sign-in";
 import { TokensPage } from "@/pages/tokens";
+import { UsersPage } from "@/pages/users";
 
 const root = createRootRouteWithContext<{ queryClient: QueryClient }>()({
   component: Outlet,
@@ -45,8 +48,12 @@ const app = createRoute({
   id: "app",
   beforeLoad: async ({ context, location }) => {
     try {
-      await context.queryClient.ensureQueryData(session);
+      const me = await context.queryClient.ensureQueryData(session);
+      // A password an admin chose has to be changed before anything else works.
+      if (me.must_change_password && location.pathname !== "/account") throw redirect({ to: "/account" });
+      await syncAppearance(me);
     } catch (e) {
+      if (isRedirect(e)) throw e;
       if (e instanceof ApiError && e.status === 401)
         throw redirect({ to: "/sign-in", search: { redirect: location.href } });
       throw e;
@@ -138,6 +145,14 @@ const retention = createRoute({ getParentRoute: () => app, path: "/retention", c
 const drain = createRoute({ getParentRoute: () => app, path: "/drain", component: DrainPage });
 const doctor = createRoute({ getParentRoute: () => app, path: "/connections", component: DoctorPage });
 const tokens = createRoute({ getParentRoute: () => app, path: "/tokens", component: TokensPage });
+const users = createRoute({ getParentRoute: () => app, path: "/users", component: UsersPage });
+
+/** Its own chunk: opened from the user menu, rarely. */
+const accountPage = createRoute({
+  getParentRoute: () => app,
+  path: "/account",
+  component: lazyRouteComponent(() => import("@/pages/account"), "AccountPage"),
+});
 
 /** Its own chunk, fetched when opened: not part of a first visit's size (scripts/budget.mjs). */
 const apiReference = createRoute({
@@ -186,6 +201,8 @@ const tree = root.addChildren([
     drain,
     doctor,
     tokens,
+    users,
+    accountPage,
     apiReference,
     appearance,
     message,

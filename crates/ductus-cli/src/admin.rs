@@ -8,7 +8,7 @@ use serde_json::Value;
 use std::time::Duration;
 
 pub enum TokenCommand {
-    Create { name: String, role: String },
+    Create { name: String, role: String, permissions: Vec<String> },
     List { revoked: bool },
     Revoke { name: String },
 }
@@ -16,10 +16,10 @@ pub enum TokenCommand {
 pub async fn token(database_url: &str, command: TokenCommand) -> Result<()> {
     let store = Store::connect(database_url, 2).await?;
     match command {
-        TokenCommand::Create { name, role } => {
+        TokenCommand::Create { name, role, permissions } => {
             let role =
                 Role::parse(&role).with_context(|| format!("unknown role `{role}` (viewer, operator or admin)"))?;
-            let (token, secret) = store.create_token(&name, role).await?;
+            let (token, secret) = store.create_token(&name, role, &permissions, None).await?;
             println!("{secret}");
             eprintln!(
                 "token `{}` ({}) created. This is the only time it's shown: keep it in a secret store.\n\
@@ -29,7 +29,7 @@ pub async fn token(database_url: &str, command: TokenCommand) -> Result<()> {
             );
         }
         TokenCommand::List { revoked } => {
-            let tokens = store.tokens(revoked).await?;
+            let tokens = store.tokens(revoked, None).await?;
             if tokens.is_empty() {
                 println!("no tokens yet: create one with `ductus token create <name> --role admin`");
             }
@@ -38,8 +38,11 @@ pub async fn token(database_url: &str, command: TokenCommand) -> Result<()> {
             };
             for t in tokens {
                 let revoked = t.revoked_at.map(|r| format!("  revoked {}", when(Some(r)))).unwrap_or_default();
+                let extra =
+                    if t.permissions.is_empty() { String::new() } else { format!("  [{}]", t.permissions.join(", ")) };
+                let owner = t.owner.map(|o| format!("  of {o}")).unwrap_or_default();
                 println!(
-                    "{:<24} {:<9} created {}  last used {}{revoked}",
+                    "{:<24} {:<9} created {}  last used {}{extra}{owner}{revoked}",
                     t.name,
                     t.role.label(),
                     when(Some(t.created_at)),
@@ -48,10 +51,148 @@ pub async fn token(database_url: &str, command: TokenCommand) -> Result<()> {
             }
         }
         TokenCommand::Revoke { name } => {
-            if !store.revoke_token(&name).await? {
+            if !store.revoke_token(&name, None).await? {
                 bail!("no live token named `{name}` (see `ductus token list`)");
             }
             println!("token `{name}` revoked: it stops working at once");
+        }
+    }
+    Ok(())
+}
+
+pub enum UserCommand {
+    Create {
+        username: String,
+        role: String,
+        display_name: Option<String>,
+        email: Option<String>,
+        permissions: Vec<String>,
+        password_stdin: bool,
+        must_change: bool,
+    },
+    List,
+    Set {
+        username: String,
+        role: Option<String>,
+        permissions: Vec<String>,
+    },
+    Password {
+        username: String,
+        password_stdin: bool,
+    },
+    Disable {
+        username: String,
+        disabled: bool,
+    },
+    Unlock {
+        username: String,
+    },
+}
+
+/// A password from stdin (one line), or asked for twice without showing it.
+fn read_password(from_stdin: bool, username: &str, min_length: usize) -> Result<String> {
+    use std::io::BufRead;
+    let password = if from_stdin {
+        let mut line = String::new();
+        std::io::stdin().lock().read_line(&mut line).context("reading the password from stdin")?;
+        line.trim_end_matches(['\r', '\n']).to_string()
+    } else {
+        let first = rpassword::prompt_password("Password: ").context("reading the password")?;
+        let again = rpassword::prompt_password("Again: ").context("reading the password")?;
+        if first != again {
+            bail!("the two passwords differ");
+        }
+        first
+    };
+    ductus_core::password::check_policy(username, &password, min_length).map_err(|why| anyhow::anyhow!(why))?;
+    Ok(password)
+}
+
+/// `ductus user ...`: accounts, straight in the engine's database.
+pub async fn user(database_url: &str, root: &std::path::Path, command: UserCommand) -> Result<()> {
+    let settings = ductus_core::settings::Settings::load(root)?;
+    let min_length = settings.auth.password.min_length;
+    let store = Store::connect(database_url, 2).await?;
+    let find = |name: String| {
+        let store = store.clone();
+        async move {
+            store.user_by_name(&name).await?.with_context(|| format!("no user named `{name}` (see `ductus user list`)"))
+        }
+    };
+    match command {
+        UserCommand::Create { username, role, display_name, email, permissions, password_stdin, must_change } => {
+            let role =
+                Role::parse(&role).with_context(|| format!("unknown role `{role}` (viewer, operator or admin)"))?;
+            let password = read_password(password_stdin, &username, min_length)?;
+            let hash = ductus_core::password::hash(&password)?;
+            let user = store
+                .create_user(&ductus_store::NewUser {
+                    username: &username,
+                    display_name: display_name.as_deref().unwrap_or(""),
+                    email: email.as_deref().unwrap_or(""),
+                    role,
+                    permissions: &permissions,
+                    password_hash: Some(&hash),
+                    must_change_password: must_change,
+                    source: "local",
+                })
+                .await?;
+            println!("user `{}` ({}) created", user.username, user.role.label());
+        }
+        UserCommand::List => {
+            let users = store.users().await?;
+            if users.is_empty() {
+                println!("no users yet: create one with `ductus user create <name> --role admin`");
+            }
+            for u in users {
+                let state = if u.disabled_at.is_some() {
+                    "  disabled"
+                } else if u.locked_until.is_some_and(|t| t > chrono::Utc::now()) {
+                    "  locked"
+                } else if u.must_change_password {
+                    "  must change password"
+                } else {
+                    ""
+                };
+                let extra =
+                    if u.permissions.is_empty() { String::new() } else { format!("  [{}]", u.permissions.join(", ")) };
+                println!("{:<24} {:<9} {}{extra}{state}", u.username, u.role.label(), u.email);
+            }
+        }
+        UserCommand::Set { username, role, permissions } => {
+            let user = find(username).await?;
+            let role = role
+                .map(|r| Role::parse(&r).with_context(|| format!("unknown role `{r}` (viewer, operator or admin)")))
+                .transpose()?;
+            let change = ductus_store::UserChange {
+                role,
+                permissions: (!permissions.is_empty()).then_some(permissions),
+                ..Default::default()
+            };
+            let user = store.update_user(user.id, &change).await?;
+            println!("user `{}` is now {} [{}]", user.username, user.role.label(), user.permissions.join(", "));
+        }
+        UserCommand::Password { username, password_stdin } => {
+            let user = find(username).await?;
+            let password = read_password(password_stdin, &user.username, min_length)?;
+            let hash = ductus_core::password::hash(&password)?;
+            store.set_password(user.id, &hash, true, None).await?;
+            println!("`{}` has a new temporary password; they must change it at their next sign-in", user.username);
+        }
+        UserCommand::Disable { username, disabled } => {
+            let user = find(username).await?;
+            let change = ductus_store::UserChange { disabled: Some(disabled), ..Default::default() };
+            let user = store.update_user(user.id, &change).await?;
+            println!(
+                "user `{}` {}",
+                user.username,
+                if disabled { "disabled: signed out, tokens stopped" } else { "enabled" }
+            );
+        }
+        UserCommand::Unlock { username } => {
+            let user = find(username).await?;
+            store.unlock_user(user.id).await?;
+            println!("user `{}` can try again", user.username);
         }
     }
     Ok(())

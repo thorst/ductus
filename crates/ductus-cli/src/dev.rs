@@ -125,6 +125,9 @@ pub async fn run(options: Options) -> Result<()> {
         ductus_runtime::stop_signal().await;
         Ok(())
     } else {
+        if let Err(e) = first_user(&options.root, &url).await {
+            eprintln!("couldn't make a dev login ({e:#}): create one with `ductus user create` against the URL above");
+        }
         ductus_runtime::run(&options.root, &url, options.engine).await
     };
 
@@ -134,6 +137,35 @@ pub async fn run(options: Options) -> Result<()> {
     }
     drop(lock);
     result
+}
+
+/// A dev database starts with no users, and nobody wants to run a command before seeing the UI:
+/// make a `dev` admin with a random password, kept in `.ductus/dev-login` (the database is local
+/// and holds only test data) so every start can say how to sign in.
+async fn first_user(root: &Path, url: &str) -> Result<()> {
+    let store = ductus_store::Store::connect(url, 2).await?;
+    let file = root.join(".ductus").join("dev-login");
+    if store.user_count().await? == 0 {
+        let password = ductus_core::password::generate();
+        let hash = ductus_core::password::hash(&password)?;
+        store
+            .create_user(&ductus_store::NewUser {
+                username: "dev",
+                display_name: "Dev",
+                email: "",
+                role: ductus_store::Role::Admin,
+                permissions: &[],
+                password_hash: Some(&hash),
+                must_change_password: false,
+                source: "local",
+            })
+            .await?;
+        std::fs::write(&file, &password).with_context(|| format!("writing {}", file.display()))?;
+    }
+    if let Ok(password) = std::fs::read_to_string(&file) {
+        println!("Web UI login: user `dev`, password `{}` (kept in {})", password.trim(), file.display());
+    }
+    Ok(())
 }
 
 impl Kept {

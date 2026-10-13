@@ -1,5 +1,7 @@
 import { CircleAlert, CircleCheck, Undo2, WandSparkles } from "lucide-react";
+import { useQuery } from "@tanstack/react-query";
 import { useMemo, useState, type CSSProperties } from "react";
+import { session } from "@/api/queries";
 import { PageHeader } from "@/components/page";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
@@ -29,6 +31,7 @@ const LABEL = Object.fromEntries(PALETTE_KEYS.map(({ key, label }) => [key, labe
  * accent just far enough; it never stops anyone using what they chose, since it's their screen.
  */
 export function AppearancePage() {
+  const { data: me } = useQuery(session);
   const saved = getSavedColors();
   const [palette, setPalette] = useState<Palette>(saved?.colors ?? PRESETS.Light!);
   // What is in each hex box while typing (a half-typed color isn't a color yet).
@@ -68,7 +71,9 @@ export function AppearancePage() {
     <>
       <PageHeader title="Appearance">
         Choose five colors; the rest is worked out from them. The check below tells you where text may be hard to read.
-        Colors are kept in this browser.
+        {me?.kind === "user"
+          ? "They are saved to your account, so they follow you to any browser."
+          : "They are kept in this browser only: a token has no account to save them in."}
       </PageHeader>
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,22rem)]">
         <div className="min-w-0 space-y-6">

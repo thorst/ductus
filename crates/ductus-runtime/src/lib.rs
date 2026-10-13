@@ -343,6 +343,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         retention,
         calls: services.calls(),
         activity,
+        auth: settings.auth.clone(),
     });
     let mut api_server = None;
     if let Some((host, port)) = &api_address {

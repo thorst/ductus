@@ -24,7 +24,7 @@ ductus dev                                 # engine + its own Postgres (download
 ductus gen --count 100                     # in a second terminal: 100 synthetic ADT messages over MLLP
 ```
 
-The web UI is at `http://127.0.0.1:7700` (sign in with a token: `ductus token create me --role admin --database-url <the URL dev printed>`).
+The web UI is at `http://127.0.0.1:7700` (`ductus dev` prints a `dev` login; on a real install make the first admin with `ductus user create me --role admin`, and sign in with that).
 
 ## What an interface looks like
 

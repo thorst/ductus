@@ -81,6 +81,7 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - **Windows (0.6.1):** `cargo build --release -p ductus` works natively (MSVC; VS 2019 Build Tools are enough; Rust 1.99). **Keep `CARGO_HOME` and `CARGO_TARGET_DIR` on one drive** (here both on D:): rusty_v8's build.rs makes a directory symlink otherwise, which needs Developer Mode or an elevated shell ("Failed to create symlink"). From PowerShell: `$env:CARGO_HOME="D:\cargo-home"; $env:CARGO_TARGET_DIR="D:	arget-win"`; the binary and the MSI (`packaging/windows/build.ps1`, WiX 5 via `dotnet tool`) are in `D:	arget-win`. `cargo` isn't on the Git Bash PATH. Installing the MSI needs an elevated shell (UAC): `scripts/demo-windows.ps1`, started with `Start-Process powershell -Verb RunAs`, needs a database: `ductus dev --database-only` prints one. The service code is `ductus-cli/src/service.rs` (`windows-service`); the engine takes `EngineOptions.stop_request` (the service manager's Stop) and `on_started` (Running is reported then). `--env-file` (`envfile.rs`) is read before clap, so `env = ...` options see it. `pg_ctl start -w` from a PowerShell tool call hangs the call (the server keeps its stdout): redirect or use `ductus dev`.
 - **WSL's VM gets killed under memory pressure** (commit charge, not RAM): this machine has a 2-4 GB fixed pagefile, Edge holds ~18 GB, and a long `check.sh` died mid-run three times ("wsl.exe" exit -1073741571 / 253, `/tmp` emptied, Application Error events for wsl.exe, "low virtual memory condition" naming vmmemWSL in the System log). Work around it: `wsl --shutdown` first, `CARGO_BUILD_JOBS=4`, run the test stage per crate (`cargo test --release -p <crate>`); detached `nohup` jobs die with the VM (only an attached `wsl` command counts as activity). The kill can leave a truncated test binary (`Exec format error` in the CLI tests): delete `~/target/release/deps/ductus-*` and rebuild. A real fix is Todd's call (system-managed pagefile, or `memory=` in `.wslconfig`).
 - **`[skip ci]` in the HEAD commit of a push skips CI for every commit in that push**, including an earlier code commit: a docs-only commit on top of a code commit must not carry it. Start a run by hand with `gh workflow run ci.yml --ref main`. The `windows` job's cold build takes ~35 min (the rust cache is kept on failure); a "Data limit exceeded" pull error in "Initialize containers" is the registry, not the code (`gh run rerun <id> --failed`).
+- **People (0.5.8.1):** `ductus user create|list|set|password|disable|enable|unlock` works on the database directly (`--password-stdin` for scripts; a terminal asks twice, no echo). Tests and demos that read a payload through the API need a token with `--permission payloads` (admins have every permission). Test users are named `test-user-...` (the store's last-admin test deletes such admins first, so a demo that makes an admin must name it that way). A new API operation needs a row in `ACCESS` (`api/mod.rs` tests). The store test for the last admin only checks the guard when the test database has no other admin.
 - **Web UI (`ui/`):** Node 24 in WSL is a per-user install in `~/.local/node` (check.sh and demos.sh put it on the PATH; non-interactive WSL shells don't read `.bashrc`). TypeScript is pinned to 6.0 (typescript-eslint doesn't support 7, the Go one); openapi-typescript's `typescript ^5` peer is overridden in package.json (`overrides`), not `--force`d. TS 6 deprecates `baseUrl`: `paths` alone. A new API field or route = run check.sh, which regenerates `ui/openapi.json` and `ui/src/api/schema.d.ts` and asks for a second run. A `<section>` is a landmark (`region`) only with a name: label cards that tests or screen readers look for (`aria-label`). axe runs in every theme in `demo-ui.sh` (AAA in high contrast): new colors must pass it. Under `set -o pipefail`, `curl` to a closed port fails the whole pipeline: capture its output first.
 - **utoipa names each operation after its handler function**: two modules' `list` once shared the operationId `list`, and the UI's generated types gave `GET /tokens` the message browser's answer. A handler named like another gets `operation_id = "..."` in `#[utoipa::path]` (`every_operation_has_its_own_id` guards it).
 - **Playwright sign-in waits until the URL has left `/sign-in`**: clicking "Sign in" and navigating at once can cancel the request (CI ran a test signed out), and the sign-in page has an h1 too, so "an h1 is visible" proves nothing.
@@ -89,7 +90,7 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 ## Where things are
 
 ```
-crates/ductus-core     config, formats, environments, secrets, resources (databases, sftp, apis), retention, docs (company-defined
+crates/ductus-core     config, formats, environments, secrets, password (argon2id, policy), resources (databases, sftp, apis), retention, docs (company-defined
                        documentation fields: docs-schema.yaml, `custom:` values, checks, the snapshot), monitor
                        (`monitor:` expectations and their time rules), hotspots (backlog by lane and worker), about (systems,
                        host/subnet matching), impact, owners (report + in-place reassign), schedule timing, ports,
@@ -97,21 +98,22 @@ crates/ductus-core     config, formats, environments, secrets, resources (databa
 crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
 crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations); retention.rs (tiers, changes, drops, held area); activity.rs (last activity, pauses);
-                       actions.rs (resend, edited copies, message_actions, the quarantine list)
+                       actions.rs (resend, edited copies, message_actions, the quarantine list); users.rs (accounts,
+                       sign-in bookkeeping, sessions, appearance); api.rs (tokens, sessions, `Principal`, the message browser)
 crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for the API: health, queues, drain, pauses),
                        stats.rs (counts and timings in memory: histograms, Prometheus text format),
                        activity.rs (last activity and pauses, kept in the database across restarts),
                        gate.rs (drain gate), retention.rs (applies retention, runs changes, drops partitions),
                        api/ (REST API: status, messages, actions (resend, edit, quarantine), reports (impact, owners + reassign
-                       preview, doctor), retention, tokens, metrics, hotspots,
+                       preview, doctor), retention, tokens, users, me (own account), metrics, hotspots,
                        session (browser sign-in), ui (serves the embedded web UI; build.rs embeds ui/dist)),
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
                        services.rs + mssql.rs (DB calls), limiter.rs, doctor.rs (connection checks)
 crates/ductus-cli      the `ductus` command (init.rs: `init`, a new project; dev.rs: `dev`, the engine with an embedded Postgres; dev.rs: `dev`, the engine with an embedded Postgres; project.rs: test/validate/ports/impact/types/secret; new.rs: `new interface`;
-                       admin.rs: `token`, `drain`, `resume`, `pause`, `retention`, `hotspots`;
+                       admin.rs: `user`, `token`, `drain`, `resume`, `pause`, `retention`, `hotspots`;
                        doctor.rs: runs `doctor` (what to check is runtime's `doctor::plan`); owners.rs: `owners` report and reassign;
                        tools.rs: gen/sink/status;
                        tests/cli.rs runs the binary on temp projects)

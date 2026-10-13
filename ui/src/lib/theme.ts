@@ -1,5 +1,7 @@
-// The theme: kept in this browser until users exist (step 8), then per user on the server.
-// public/theme.js applies it before the first paint; this changes it while the app runs.
+// The theme. A signed-in user's choice lives on the server (src/api/appearance.ts keeps it
+// there); this browser keeps a copy too, because public/theme.js applies it before the first
+// paint (no flash of the wrong theme) and because a session made with a token has no account to
+// save it in. This file reads and writes that copy and tells the listener (the sync) about changes.
 //
 // `custom` is the user's own five colors (src/lib/colors.ts works out the rest). What is saved
 // is the finished CSS values, so this file and theme.js need none of the color math: they only
@@ -26,6 +28,9 @@ export type SavedColors = {
   scheme: "light" | "dark";
 };
 
+/** Everything a person chooses about how the UI looks. */
+export type Appearance = { theme: Theme; colors: SavedColors | null };
+
 /** Every variable a custom theme sets, so leaving it can take them off again. */
 const CUSTOM_VARS = [
   "--header",
@@ -45,11 +50,25 @@ const CUSTOM_VARS = [
   "--accent-soft",
 ];
 
+/** Told after a person changes the appearance (not when one is applied from the server). */
+let listener: ((appearance: Appearance) => void) | null = null;
+
+export function onAppearanceChange(fn: ((appearance: Appearance) => void) | null) {
+  listener = fn;
+}
+
+function notify() {
+  listener?.(currentAppearance());
+}
+
+export function isSavedColors(saved: unknown): saved is SavedColors {
+  return !!saved && typeof saved === "object" && "vars" in saved && "colors" in saved && "scheme" in saved;
+}
+
 export function getSavedColors(): SavedColors | null {
   try {
     const saved: unknown = JSON.parse(localStorage.getItem(COLORS_KEY) ?? "null");
-    const ok = saved && typeof saved === "object" && "vars" in saved && "colors" in saved && "scheme" in saved;
-    return ok ? (saved as SavedColors) : null;
+    return isSavedColors(saved) ? saved : null;
   } catch {
     return null;
   }
@@ -66,6 +85,10 @@ export function getTheme(): Theme {
   }
 }
 
+export function currentAppearance(): Appearance {
+  return { theme: getTheme(), colors: getSavedColors() };
+}
+
 function applyColors(saved: SavedColors | null) {
   const style = document.documentElement.style;
   for (const name of CUSTOM_VARS) style.removeProperty(name);
@@ -75,36 +98,59 @@ function applyColors(saved: SavedColors | null) {
   style.setProperty("color-scheme", saved.scheme);
 }
 
-export function setTheme(theme: Theme) {
+function remember(key: string, value: string | null) {
+  try {
+    if (value === null) localStorage.removeItem(key);
+    else localStorage.setItem(key, value);
+  } catch {
+    // Storage blocked: it applies until the page is reloaded.
+  }
+}
+
+/** Shows `theme` (and `colors` for a custom one) and keeps them in this browser. Tells nobody. */
+function show(theme: Theme, colors: SavedColors | null) {
   const root = document.documentElement;
   if (theme === "system") delete root.dataset.theme;
   else root.dataset.theme = theme;
-  applyColors(theme === "custom" ? getSavedColors() : null);
-  try {
-    localStorage.setItem(KEY, theme);
-  } catch {
-    // Storage blocked: it still applies until the page is reloaded.
-  }
+  applyColors(theme === "custom" ? colors : null);
+  remember(KEY, theme);
+}
+
+export function setTheme(theme: Theme) {
+  show(theme, getSavedColors());
+  notify();
 }
 
 /** Keeps a custom scheme and switches to it. */
 export function saveCustomColors(saved: SavedColors) {
-  try {
-    localStorage.setItem(COLORS_KEY, JSON.stringify(saved));
-  } catch {
-    // Storage blocked: it applies until the page is reloaded.
-  }
-  // Applying reads what was just saved; with storage blocked, apply it directly.
-  setTheme("custom");
-  applyColors(saved);
+  remember(COLORS_KEY, JSON.stringify(saved));
+  // Applied directly: with storage blocked, reading back what was just saved would find nothing.
+  show("custom", saved);
+  notify();
 }
 
 /** Forgets the custom scheme; a custom theme falls back to following the system. */
 export function forgetCustomColors() {
-  try {
-    localStorage.removeItem(COLORS_KEY);
-  } catch {
-    // Nothing kept to forget.
-  }
-  if (document.documentElement.dataset.theme === "custom") setTheme("system");
+  remember(COLORS_KEY, null);
+  if (document.documentElement.dataset.theme === "custom") show("system", null);
+  notify();
+}
+
+/** Applies what the server has saved for this person (and keeps it here for the first paint). */
+export function applyAppearance(appearance: Appearance) {
+  remember(COLORS_KEY, appearance.colors ? JSON.stringify(appearance.colors) : null);
+  const theme = appearance.theme === "custom" && !appearance.colors ? "system" : appearance.theme;
+  show(theme, appearance.colors);
+}
+
+/** After a person signs out their choices stay on the server: this browser goes back to the default. */
+export function forgetAppearanceHere() {
+  remember(COLORS_KEY, null);
+  show("system", null);
+}
+
+/** Has this browser anything of its own to offer a new account? */
+export function hasLocalChoice(): boolean {
+  const { theme, colors } = currentAppearance();
+  return theme !== "system" || colors !== null;
 }

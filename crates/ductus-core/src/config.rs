@@ -606,7 +606,7 @@ pub fn parse_duration(text: &str) -> Result<Duration> {
     Ok(Duration::from_secs(seconds))
 }
 
-fn duration<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Duration, D::Error> {
+pub(crate) fn duration<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Duration, D::Error> {
     let text = String::deserialize(d)?;
     parse_duration(&text).map_err(serde::de::Error::custom)
 }

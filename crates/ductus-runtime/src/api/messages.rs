@@ -116,8 +116,12 @@ pub struct DeliveryInfo {
 pub struct MessageDetail {
     #[serde(flatten)]
     message: MessageSummary,
-    /// The message as received (bytes that aren't UTF-8 are replaced).
-    payload: String,
+    /// The message as received (bytes that aren't UTF-8 are replaced). Absent when the caller
+    /// doesn't have the `payloads` permission (`payload_hidden` is then true), and so are the
+    /// deliveries' `output`s.
+    payload: Option<String>,
+    /// The payload (and saved outputs) were left out: the caller may not read them.
+    payload_hidden: bool,
     deliveries: Vec<DeliveryInfo>,
     /// What people did to it (resends, edits), oldest first.
     actions: Vec<ActionInfo>,
@@ -130,7 +134,7 @@ pub struct ActionInfo {
     at: DateTime<Utc>,
     /// `resend` (the delivery went back to pending) or `edit` (a corrected copy was queued).
     action: String,
-    /// The token that did it.
+    /// The user or token that did it.
     by: String,
     reason: Option<String>,
     destination: String,
@@ -151,8 +155,12 @@ pub struct ActionInfo {
 async fn message(engine: Eng, caller: Caller, Path(id): Path<i64>) -> ApiResult<MessageDetail> {
     let (row, payload) =
         engine.store.message(id).await?.ok_or_else(|| ApiError::not_found(format!("no message {id}")))?;
-    // Payloads hold patient data: who looked is logged (the audit log comes with users, step 8).
-    tracing::info!(token = caller.name(), id, interface = %row.interface, "message payload viewed");
+    // Payloads hold patient data: only callers with the `payloads` permission get them, and who
+    // looked is logged (the audit log builds on this).
+    let may_read = caller.who.can("payloads");
+    if may_read {
+        tracing::info!(who = caller.name(), id, interface = %row.interface, "message payload viewed");
+    }
     let deliveries = engine
         .store
         .deliveries(MessageRef { id: row.id, received_at: row.received_at })
@@ -163,7 +171,7 @@ async fn message(engine: Eng, caller: Caller, Path(id): Path<i64>) -> ApiResult<
             status: d.status.label(),
             attempts: d.attempts,
             last_error: d.last_error,
-            output: d.output.map(|o| String::from_utf8_lossy(&o).into_owned()),
+            output: d.output.filter(|_| may_read).map(|o| String::from_utf8_lossy(&o).into_owned()),
         })
         .collect();
     let (made_by, done_to): (Vec<_>, Vec<_>) =
@@ -183,6 +191,6 @@ async fn message(engine: Eng, caller: Caller, Path(id): Path<i64>) -> ApiResult<
         })
         .collect();
     let copy_of = made_by.first().map(|a| a.message_id);
-    let payload = String::from_utf8_lossy(&payload).into_owned();
-    Ok(Json(MessageDetail { message: row.into(), payload, deliveries, actions, copy_of }))
+    let payload = may_read.then(|| String::from_utf8_lossy(&payload).into_owned());
+    Ok(Json(MessageDetail { message: row.into(), payload, payload_hidden: !may_read, deliveries, actions, copy_of }))
 }

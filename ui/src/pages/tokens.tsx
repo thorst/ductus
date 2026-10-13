@@ -1,37 +1,32 @@
 import { useQuery } from "@tanstack/react-query";
-import { KeyRound, Plus, Trash2 } from "lucide-react";
+import { Plus, Trash2 } from "lucide-react";
 import { useState } from "react";
 import { createToken, revokeToken, useIsAdmin, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
 import { session, tokens } from "@/api/queries";
 import { ActionDialog } from "@/components/action-dialog";
-import { CopyButton } from "@/components/copy-button";
 import { Loaded, PageHeader } from "@/components/page";
+import { PermissionPicker, RolePicker, type Role } from "@/components/permissions";
+import { TokenSecret } from "@/components/token-secret";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Table, Td, Th } from "@/components/ui/table";
 import { ago, timestamp } from "@/lib/format";
 
-const ROLES = {
-  viewer: "reads everything, payloads included",
-  operator: "also resends, pauses, drains, confirms retention, runs connection checks",
-  admin: "also manages tokens",
-} as const;
-
-type Role = keyof typeof ROLES;
-
 /**
- * API tokens, for scripts, monitoring and signing in here. A token's secret is shown once, when
- * it's made; the engine keeps only its hash. Revoking one ends it (and its sessions) at once.
+ * API tokens, for scripts and monitoring (and signing in here when `auth.token_sign_in` allows).
+ * These are everyone's: service tokens an admin made, and the ones users made for themselves
+ * (those belong to their owner and stop when the owner is disabled). A token's secret is shown
+ * once, when it's made; the engine keeps only its hash. Revoking one ends it (and its sessions)
+ * at once.
  */
 export function TokensPage() {
   const isAdmin = useIsAdmin();
   return (
     <>
       <PageHeader title="Tokens">
-        For scripts, monitoring and signing in here. The engine keeps only a token's hash: its secret is shown once.
+        For scripts and monitoring. The engine keeps only a token&rsquo;s hash: its secret is shown once.
       </PageHeader>
       {isAdmin ? <Tokens /> : <p className="text-sm text-muted">Managing tokens needs an admin token.</p>}
     </>
@@ -45,6 +40,7 @@ function Tokens() {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("");
   const [role, setRole] = useState<Role>("viewer");
+  const [permissions, setPermissions] = useState<string[]>([]);
   const [created, setCreated] = useState<Schemas["CreatedToken"] | null>(null);
   const [revoking, setRevoking] = useState<Schemas["TokenInfo"] | null>(null);
   return (
@@ -63,6 +59,7 @@ function Tokens() {
                 <tr>
                   <Th>Name</Th>
                   <Th>Role</Th>
+                  <Th>Belongs to</Th>
                   <Th>Created</Th>
                   <Th>Last used</Th>
                   <Th className="w-0" />
@@ -75,7 +72,13 @@ function Tokens() {
                       {t.name}
                       {t.name === me.data?.name && <span className="ml-2 text-xs text-muted">(you)</span>}
                     </Td>
-                    <Td>{t.role}</Td>
+                    <Td>
+                      {t.role}
+                      {t.permissions.length > 0 && t.role !== "admin" && (
+                        <div className="text-xs text-muted">+ {t.permissions.join(", ")}</div>
+                      )}
+                    </Td>
+                    <Td>{t.owner ?? <span className="text-muted">nobody (service)</span>}</Td>
                     <Td className="tabular-nums">{timestamp(t.created_at)}</Td>
                     <Td>{t.last_used_at ? ago(t.last_used_at) : "never"}</Td>
                     <Td>
@@ -96,13 +99,14 @@ function Tokens() {
         onOpenChange={setCreating}
         reason={false}
         title="New token"
-        description="Name it after who or what uses it: one token per script or service, so each can be revoked alone."
+        description="A service token, owned by nobody. Name it after what uses it: one token per script, so each can be revoked alone. People make their own under Account."
         confirm="Create"
         disabled={!name.trim()}
         onConfirm={async () => {
-          const result = await createToken(name.trim(), role);
+          const result = await createToken(name.trim(), role, permissions);
           setName("");
           setRole("viewer");
+          setPermissions([]);
           setCreated(result);
           await refresh();
         }}
@@ -111,21 +115,10 @@ function Tokens() {
           <span className="text-muted">Name</span>
           <Input className="mt-1" value={name} placeholder="monitoring" onChange={(e) => setName(e.target.value)} />
         </label>
-        <fieldset className="text-sm">
-          <legend className="text-muted">Role</legend>
-          <div className="mt-1 space-y-1">
-            {(Object.keys(ROLES) as Role[]).map((r) => (
-              <label key={r} className="flex items-start gap-2">
-                <input type="radio" name="role" className="mt-1" checked={role === r} onChange={() => setRole(r)} />
-                <span>
-                  <strong>{r}</strong> <span className="text-muted">{ROLES[r]}</span>
-                </span>
-              </label>
-            ))}
-          </div>
-        </fieldset>
+        <RolePicker value={role} onChange={setRole} />
+        <PermissionPicker value={permissions} onChange={setPermissions} isAdmin={role === "admin"} />
       </ActionDialog>
-      {created && <Secret created={created} onClose={() => setCreated(null)} />}
+      {created && <TokenSecret created={created} onClose={() => setCreated(null)} />}
       {revoking && (
         <ActionDialog
           open
@@ -145,36 +138,5 @@ function Tokens() {
         />
       )}
     </>
-  );
-}
-
-/** The secret, once: it can't be shown again (only its hash is stored). */
-function Secret({ created, onClose }: { created: Schemas["CreatedToken"]; onClose: () => void }) {
-  return (
-    <Dialog
-      open
-      onOpenChange={(open) => !open && onClose()}
-      title={`${created.token.name} (${created.token.role})`}
-      description="Copy it now and keep it somewhere safe (a secret store, the script's secrets): it's shown only this once."
-    >
-      <div className="space-y-4">
-        <label className="block text-sm">
-          <span className="flex items-center gap-1.5 text-muted">
-            <KeyRound aria-hidden className="size-4" />
-            Token
-          </span>
-          <Input
-            readOnly
-            className="mt-1 font-mono text-xs"
-            value={created.secret}
-            onFocus={(e) => e.target.select()}
-          />
-        </label>
-        <div className="flex flex-wrap justify-end gap-2">
-          <CopyButton text={created.secret} what="the token" />
-          <Button onClick={onClose}>Done</Button>
-        </div>
-      </div>
-    </Dialog>
   );
 }

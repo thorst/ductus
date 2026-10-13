@@ -114,6 +114,27 @@ export const tokens = queryOptions({
   queryFn: async () => unwrap(await api.GET("/tokens")),
 });
 
+export const users = queryOptions({
+  queryKey: ["users"],
+  queryFn: async () => unwrap(await api.GET("/users")),
+});
+
+/** The signed-in person's own account (people only: a token has none). */
+export const account = queryOptions({
+  queryKey: ["me", "account"],
+  queryFn: async () => unwrap(await api.GET("/me")),
+});
+
+export const mySessions = queryOptions({
+  queryKey: ["me", "sessions"],
+  queryFn: async () => unwrap(await api.GET("/me/sessions")),
+});
+
+export const myTokens = queryOptions({
+  queryKey: ["me", "tokens"],
+  queryFn: async () => unwrap(await api.GET("/me/tokens")),
+});
+
 /** The company-defined documentation fields and every entry's values (the project's files, so rarely changing). */
 export const docs = queryOptions({
   queryKey: ["docs"],

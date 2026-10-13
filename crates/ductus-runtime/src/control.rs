@@ -104,6 +104,8 @@ pub struct Engine {
     code: OnceCell<CodeUses>,
     /// Cancelled when the engine should stop (drained with `stop`).
     pub shutdown: CancellationToken,
+    /// How people sign in (`auth:` in ductus.yaml).
+    pub auth: ductus_core::settings::AuthSettings,
 }
 
 /// What the engine is made of, from startup.
@@ -118,12 +120,24 @@ pub struct Parts {
     pub retention: Arc<crate::retention::Retention>,
     pub calls: Arc<crate::stats::ResourceCalls>,
     pub activity: Activity,
+    pub auth: ductus_core::settings::AuthSettings,
 }
 
 impl Engine {
     pub fn new(parts: Parts) -> Arc<Self> {
-        let Parts { environment, root, database_url, store, resources, docs, interfaces, retention, calls, activity } =
-            parts;
+        let Parts {
+            environment,
+            root,
+            database_url,
+            store,
+            resources,
+            docs,
+            interfaces,
+            retention,
+            calls,
+            activity,
+            auth,
+        } = parts;
         let engine = Arc::new(Self {
             started_at: Utc::now(),
             environment,
@@ -140,6 +154,7 @@ impl Engine {
             monitor: watch::Sender::new(Arc::default()),
             code: OnceCell::new(),
             shutdown: CancellationToken::new(),
+            auth,
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

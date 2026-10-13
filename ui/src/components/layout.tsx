@@ -14,6 +14,7 @@ import {
   LogOut,
   Palette,
   Network,
+  UserRound,
   Radio,
   ShieldAlert,
   Stethoscope,
@@ -25,10 +26,19 @@ import { useState } from "react";
 import { useIsAdmin } from "@/api/actions";
 import { api } from "@/api/client";
 import { useLiveUpdates, type LiveState } from "@/api/live";
+import { forgetSync } from "@/api/appearance";
 import { engine, interfaces, session } from "@/api/queries";
 import { Logo } from "@/components/logo";
 import { count } from "@/lib/format";
-import { getSavedColors, getTheme, setTheme, THEME_LABELS, THEMES, type Theme } from "@/lib/theme";
+import {
+  forgetAppearanceHere,
+  getSavedColors,
+  getTheme,
+  setTheme,
+  THEME_LABELS,
+  THEMES,
+  type Theme,
+} from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
 type NavLink = { to: LinkProps["to"] & string; label: string; icon: LucideIcon; exact?: boolean; admin?: boolean };
@@ -57,6 +67,7 @@ const NAV: { heading?: string; links: NavLink[] }[] = [
       { to: "/retention", label: "Retention", icon: Archive },
       { to: "/drain", label: "Drain", icon: CirclePause },
       { to: "/connections", label: "Connections", icon: Stethoscope },
+      { to: "/users", label: "Users", icon: Users, admin: true },
       { to: "/tokens", label: "Tokens", icon: KeyRound, admin: true },
       { to: "/api-reference", label: "API reference", icon: BookOpen },
     ],
@@ -172,6 +183,9 @@ function UserMenu() {
   const navigate = useNavigate();
   const signOut = async () => {
     await api.DELETE("/session");
+    // A person's choices are on the server: the next person here starts from the default.
+    if (me?.kind === "user") forgetAppearanceHere();
+    forgetSync();
     queryClient.clear();
     await navigate({ to: "/sign-in", search: {} });
   };
@@ -189,6 +203,14 @@ function UserMenu() {
           sideOffset={6}
           className="z-50 min-w-52 rounded-md border bg-panel p-1 text-sm text-text shadow-lg"
         >
+          <DropdownMenu.Item
+            onSelect={() => void navigate({ to: "/account" })}
+            className="flex cursor-default items-center gap-2 rounded px-2 py-1.5 outline-none data-highlighted:bg-hover"
+          >
+            <UserRound aria-hidden className="size-4" />
+            Account
+          </DropdownMenu.Item>
+          <DropdownMenu.Separator className="my-1 h-px bg-border" />
           <DropdownMenu.Label className="px-2 py-1.5 text-xs text-muted">Theme</DropdownMenu.Label>
           <DropdownMenu.RadioGroup
             value={theme}

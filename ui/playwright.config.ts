@@ -28,5 +28,12 @@ export default defineConfig({
       dependencies: ["read"],
       use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
     },
+    {
+      // People with passwords; makes users, so it goes last.
+      name: "people",
+      testMatch: "people.spec.ts",
+      dependencies: ["act"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
   ],
 });

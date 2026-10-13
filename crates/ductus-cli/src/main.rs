@@ -210,8 +210,22 @@ enum Command {
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
+    /// Manage the people who sign in (in the engine's database; that is how the first admin is
+    /// made). Roles: viewer reads, operator also drains, resends and runs connection checks, admin
+    /// also manages users and tokens. Permissions beyond a role: `payloads` (read message
+    /// payloads), `audit`.
+    User {
+        #[command(subcommand)]
+        action: UserAction,
+        #[arg(long, env = "DUCTUS_DATABASE_URL", global = true)]
+        database_url: Option<String>,
+        /// The project folder (its ductus.yaml sets the password rules).
+        #[arg(long, default_value = ".", global = true)]
+        root: PathBuf,
+    },
     /// Manage REST API tokens (in the engine's database). Roles: viewer reads, operator also
-    /// drains and runs connection checks, admin also manages tokens.
+    /// drains and runs connection checks, admin also manages users and tokens. A token can't read
+    /// message payloads unless it is given `--permission payloads`.
     Token {
         #[command(subcommand)]
         action: TokenAction,
@@ -401,6 +415,9 @@ enum TokenAction {
         /// viewer, operator or admin.
         #[arg(long, default_value = "viewer")]
         role: String,
+        /// Beyond the role: `payloads` (read message payloads), `audit`. Repeat for both.
+        #[arg(long = "permission")]
+        permissions: Vec<String>,
     },
     /// List tokens (never their secrets).
     List {
@@ -410,6 +427,53 @@ enum TokenAction {
     },
     /// Revoke a token: it stops working at once.
     Revoke { name: String },
+}
+
+#[derive(Subcommand)]
+enum UserAction {
+    /// Make an account. The password is asked for twice (or read from stdin with --password-stdin).
+    Create {
+        username: String,
+        /// viewer, operator or admin.
+        #[arg(long, default_value = "viewer")]
+        role: String,
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
+        email: Option<String>,
+        /// Beyond the role: `payloads`, `audit`. Repeat for both.
+        #[arg(long = "permission")]
+        permissions: Vec<String>,
+        /// Read the password from stdin (one line) instead of asking.
+        #[arg(long)]
+        password_stdin: bool,
+        /// The person must choose their own password at their first sign-in.
+        #[arg(long)]
+        must_change: bool,
+    },
+    /// List users.
+    List,
+    /// Change a user's role and permissions (all of them are set to what is given).
+    Set {
+        username: String,
+        #[arg(long)]
+        role: Option<String>,
+        /// The permissions the user has afterwards (none given: leave them as they are).
+        #[arg(long = "permission")]
+        permissions: Vec<String>,
+    },
+    /// Give a user a new temporary password (they must change it at their next sign-in).
+    Password {
+        username: String,
+        #[arg(long)]
+        password_stdin: bool,
+    },
+    /// Stop a user signing in; their sessions and tokens stop at once.
+    Disable { username: String },
+    /// Let a disabled user sign in again.
+    Enable { username: String },
+    /// Let a user locked out by wrong passwords try again.
+    Unlock { username: String },
 }
 
 #[derive(Subcommand)]
@@ -550,9 +614,43 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Owners {
             action: Some(OwnersAction::Reassign { from, to, interface, dry_run, root, env }), ..
         } => exit_on_failure(owners::reassign(&root, &env, &from, &to, &interface, dry_run)),
+        Command::User { action, database_url, root } => {
+            let command = match action {
+                UserAction::Create {
+                    username,
+                    role,
+                    display_name,
+                    email,
+                    permissions,
+                    password_stdin,
+                    must_change,
+                } => admin::UserCommand::Create {
+                    username,
+                    role,
+                    display_name,
+                    email,
+                    permissions,
+                    password_stdin,
+                    must_change,
+                },
+                UserAction::List => admin::UserCommand::List,
+                UserAction::Set { username, role, permissions } => {
+                    admin::UserCommand::Set { username, role, permissions }
+                }
+                UserAction::Password { username, password_stdin } => {
+                    admin::UserCommand::Password { username, password_stdin }
+                }
+                UserAction::Disable { username } => admin::UserCommand::Disable { username, disabled: true },
+                UserAction::Enable { username } => admin::UserCommand::Disable { username, disabled: false },
+                UserAction::Unlock { username } => admin::UserCommand::Unlock { username },
+            };
+            admin::user(&tools::database_url(database_url)?, &root, command).await
+        }
         Command::Token { action, database_url } => {
             let command = match action {
-                TokenAction::Create { name, role } => admin::TokenCommand::Create { name, role },
+                TokenAction::Create { name, role, permissions } => {
+                    admin::TokenCommand::Create { name, role, permissions }
+                }
                 TokenAction::List { revoked } => admin::TokenCommand::List { revoked },
                 TokenAction::Revoke { name } => admin::TokenCommand::Revoke { name },
             };

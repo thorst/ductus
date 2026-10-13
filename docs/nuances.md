@@ -395,9 +395,22 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **Why:** a backlog in an ordered queue sits behind one message per worker. The count alone says *that* it's stuck, not *which* patient to look at.
 - **What to do:** for a blocked message, check its last error and the message (`GET /api/v1/messages/{id}`); fix the data or the receiver, or set `retry.max_attempts` so it's quarantined and the others go on (resending a single message comes with step 7). For a receiver that's down, call the vendor; `ductus pause` stops the retries meanwhile. A hot key under a few hundred messages clears by itself; one that stays hot every day is a feed to discuss with the sender (a batch load sent as one patient's updates?). Lanes with fewer than 100 waiting are never called hot: a flowing queue always has some.
 
-### Anyone with a viewer token can read message payloads (level 4)
-- **What:** `GET /api/v1/messages/{id}` (and the message page in the UI) returns the payload, which holds patient data. Each read is logged with the token's name; there are no finer permissions or audit log yet (they come with users and roles in v0.5 step 8).
-- **What to do:** give tokens only to people and tools that may see patient data, and name them so the log says who looked.
+## People and access
+
+### Reading payloads is a permission, not part of a role (level 4)
+- **What:** `GET /api/v1/messages/{id}` (and the message page) returns the payload, and the saved output of each destination, only to admins and to users and tokens that were given the `payloads` permission. Without it the message page still shows its status, destinations and errors, and says the payload is hidden. Editing a message needs the permission too (correcting a message means reading it). Each read is logged with the name of the user or token (the audit log, with the permission to read it, comes in the next part of step 8). Existing tokens were revoked when users came in (migration 0018); a new token has no permissions unless it is given them.
+- **What it doesn't hide:** the ordering key (often an MRN), the control id, error texts (a quarantine's error can quote a field value) and sizes are still shown to anyone who can read the interface. The permission protects the message content, not every identifier the engine has seen. Write error messages in interface code the way you would write a log line that a support person may read.
+- **What to do:** give `payloads` to the people who fix data problems and to nobody else; a monitoring token needs none. `ductus user create ... --permission payloads`, `ductus token create ... --permission payloads`.
+
+### Passwords, lockout and what a disabled account loses (level 2)
+- **What:** people sign in with a username (not case sensitive) and a password of at least 12 characters (`auth.password.min_length`; never below 8) that isn't the username, one character repeated, or one of a short list of common ones. Passwords are stored as argon2id hashes. Five wrong passwords for one username within 15 minutes lock that account for 15 minutes (`auth.lockout`); the right password doesn't help meanwhile, and an admin can unlock at once. A wrong username and a wrong password give the same answer in about the same time.
+- **Why lock by username:** per username, not per address, because sign-ins arrive through a proxy. The price is that someone who knows a username can keep that person locked out; an admin unlocks, and locking was the safer side of that choice for patient data.
+- **Disabling** a user ends their sessions at once and stops every token of theirs (their scripts get 401). A password an admin chose (a new account, a reset) is temporary: the person's first sign-in can do nothing but change it. There is always at least one admin who can sign in: the last one can't be disabled or demoted.
+- **What to do:** make accounts for people, tokens for scripts; let people make their own tokens under Account (they stop with their owner). Turn `auth.token_sign_in` off once everyone has an account, so a leaked token can't also open the UI. If you lock yourself out, `ductus user` on the server (it works on the database directly) makes or unlocks an admin.
+
+### Theme and colors follow the account (level 1)
+- **What:** a signed-in user's theme and custom colors are saved on the server and applied in any browser they sign in to. A copy stays in the browser so the right theme shows before the page has loaded; signing out clears it, so the next person starts from the default. A session made with a token has no account: its choice stays in that browser.
+- **What to do:** nothing; a person who had picked colors before accounts existed has them sent to their account the first time they sign in.
 
 ## Local development
 
