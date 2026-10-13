@@ -2,8 +2,10 @@ import type { ComponentProps } from "react";
 import { cn } from "@/lib/utils";
 
 export function Table({ className, ...props }: ComponentProps<"table">) {
+  // `relative`: an sr-only span inside a wide table is absolutely placed, and escapes the scroll box
+  // (widening the page) unless this is its containing block.
   return (
-    <div className="overflow-x-auto">
+    <div className="relative overflow-x-auto">
       <table className={cn("w-full border-collapse text-sm", className)} {...props} />
     </div>
   );

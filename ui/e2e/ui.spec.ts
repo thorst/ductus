@@ -22,6 +22,41 @@ async function theme(page: Page, name: string) {
   await page.reload();
 }
 
+/** The screens axe visits in every theme. */
+const AXE_PAGES = [
+  "/",
+  "/interfaces",
+  "/interfaces/adt",
+  "/interfaces/orders?tab=messages",
+  "/quarantine",
+  "/hotspots",
+  "/hotspots?interface=adt&destination=lab",
+  "/impact?vendor=Epic%20Systems",
+  "/owners",
+  "/retention",
+  "/drain",
+  "/connections",
+  "/tokens",
+  "/api-reference",
+  "/appearance",
+];
+
+const AA_TAGS = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa"];
+
+async function axeClean(page: Page, label: string, tags: string[]) {
+  for (const path of AXE_PAGES) {
+    await page.goto(path);
+    await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
+    // The Appearance page's preview and samples draw the user's own colors, not the theme's, so
+    // AAA (a promise of the High contrast theme) can't apply to them; they stay in the AA runs.
+    const axe = new AxeBuilder({ page }).withTags(tags);
+    if (tags.includes("wcag2aaa")) axe.exclude("[data-user-colors]");
+    const { violations } = await axe.analyze();
+    const found = violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`);
+    expect(found, `${label}, ${path}`).toEqual([]);
+  }
+}
+
 test("a wrong token is refused; the right one signs in and comes back to the page asked for", async ({
   page,
   context,
@@ -243,36 +278,106 @@ test("the API reference is in the binary and loads only when opened", async ({ p
 });
 
 test("no accessibility violations in any theme", async ({ page }) => {
-  test.setTimeout(180_000);
+  test.setTimeout(240_000);
   await signIn(page);
-  const pages = [
-    "/",
-    "/interfaces",
-    "/interfaces/adt",
-    "/interfaces/orders?tab=messages",
-    "/quarantine",
-    "/hotspots",
-    "/hotspots?interface=adt&destination=lab",
-    "/impact?vendor=Epic%20Systems",
-    "/owners",
-    "/retention",
-    "/drain",
-    "/connections",
-    "/tokens",
-    "/api-reference",
-  ];
   for (const t of ["light", "dark", "contrast"]) {
     await theme(page, t);
-    for (const path of pages) {
-      await page.goto(path);
-      await expect(page.getByRole("heading", { level: 1 })).toBeVisible();
-      // High contrast promises AAA (7:1); the others AA.
-      const tags = ["wcag2a", "wcag2aa", "wcag21a", "wcag21aa", ...(t === "contrast" ? ["wcag2aaa"] : [])];
-      const { violations } = await new AxeBuilder({ page }).withTags(tags).analyze();
-      const found = violations.map((v) => `${v.id}: ${v.nodes.map((n) => n.target.join(" ")).join(", ")}`);
-      expect(found, `${t} theme, ${path}`).toEqual([]);
-    }
+    // High contrast promises AAA (7:1); the others AA.
+    await axeClean(page, `${t} theme`, [...AA_TAGS, ...(t === "contrast" ? ["wcag2aaa"] : [])]);
   }
+});
+
+/** The five colors on the Appearance page, by their hex boxes. */
+async function setColors(page: Page, colors: Record<string, string>) {
+  for (const [label, hex] of Object.entries(colors)) await page.getByLabel(`${label} as hex`).fill(hex);
+}
+
+const hardToRead = (page: Page) =>
+  page.getByRole("table", { name: "Contrast of each pair of colors" }).getByText("Hard to read");
+
+test("custom colors: a preset is worn everywhere, survives a reload, and passes axe", async ({ page }) => {
+  test.setTimeout(300_000);
+  await signIn(page, "/appearance");
+  await expect(page.getByRole("status").first()).toContainText("Every pair reaches WCAG AA");
+  for (const name of ["Sepia", "Ocean"]) {
+    await page.getByLabel("Start from").selectOption(name);
+    await expect(hardToRead(page)).toHaveCount(0);
+    await page.getByRole("button", { name: "Use these colors" }).click();
+    await expect(page.getByText("These colors are in use.")).toBeVisible();
+    // The page itself wears them: its background is the preset's.
+    const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
+    expect(bg).toBe(name === "Sepia" ? "rgb(244, 236, 216)" : "rgb(10, 31, 43)");
+    await page.reload();
+    expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBe("custom");
+    await axeClean(page, `custom ${name}`, AA_TAGS);
+    await page.screenshot({ path: `test-results/appearance-${name.toLowerCase()}.png`, fullPage: true });
+  }
+  // Another theme takes the custom values off again; Custom brings them back.
+  await theme(page, "light");
+  expect(await page.evaluate(() => document.documentElement.style.getPropertyValue("--bg"))).toBe("");
+  await page.getByRole("button", { name: /viewer/ }).click();
+  await page.getByRole("menuitemradio", { name: "Custom" }).click();
+  expect(await page.evaluate(() => document.documentElement.style.getPropertyValue("--bg"))).toBe("#0a1f2b");
+});
+
+test("custom colors: unreadable choices are flagged, not blocked, and Fix it makes them pass axe", async ({ page }) => {
+  test.setTimeout(300_000);
+  await signIn(page, "/appearance");
+  // Pale grey text and a yellow accent on white.
+  await setColors(page, {
+    Header: "#ffffff",
+    Accent: "#ffeb3b",
+    "Page background": "#ffffff",
+    Panel: "#ffffff",
+    Text: "#cccccc",
+  });
+  await expect(page.getByRole("status").first()).toContainText("may be hard to read. You can still use these colors");
+  await expect(hardToRead(page).first()).toBeVisible();
+  const pairs = page.getByRole("table", { name: "Contrast of each pair of colors" });
+  await expect(pairs.getByRole("row", { name: /Text on a panel/ })).toContainText("1.6:1");
+  await page.screenshot({ path: "test-results/appearance-unreadable.png", fullPage: true });
+
+  // Not blocked: they can be used as they are, and axe sees what the check said.
+  await page.getByRole("button", { name: "Use these colors" }).click();
+  await page.goto("/");
+  const unfixed = await new AxeBuilder({ page }).withTags(AA_TAGS).analyze();
+  expect(unfixed.violations.map((v) => v.id)).toContain("color-contrast");
+
+  // Fix it, one row at a time: the text first. Undo puts it back.
+  await page.goto("/appearance");
+  await page.getByRole("button", { name: "Fix it: Text on a panel" }).click();
+  await expect(page.getByText(/^Fixed Text on a panel: Text #cccccc → #/)).toBeVisible();
+  await expect(pairs.getByRole("row", { name: /Text on a panel/ })).toContainText("Readable");
+  await expect(hardToRead(page).first()).toBeVisible(); // the accent still is
+  await page.getByRole("button", { name: "Undo" }).click();
+  await expect(page.getByLabel("Text as hex")).toHaveValue("#cccccc");
+
+  await page.getByRole("button", { name: "Fix all" }).click();
+  await expect(page.getByText(/^Fixed: /)).toBeVisible();
+  await expect(page.getByRole("status").first()).toContainText("Every pair reaches WCAG AA");
+  await expect(hardToRead(page)).toHaveCount(0);
+  // The page background and the panel are the user's look: not touched.
+  await expect(page.getByLabel("Page background as hex")).toHaveValue("#ffffff");
+  await page.getByRole("button", { name: "Use these colors" }).click();
+  await axeClean(page, "fixed custom colors", AA_TAGS);
+  await page.screenshot({ path: "test-results/appearance-fixed.png", fullPage: true });
+
+  // Reset forgets them and follows the system again.
+  await page.goto("/appearance");
+  await page.getByRole("button", { name: "Reset" }).click();
+  await expect(page.getByText("Your colors are forgotten")).toBeVisible();
+  expect(await page.evaluate(() => document.documentElement.dataset.theme)).toBeUndefined();
+  expect(await page.evaluate(() => localStorage.getItem("ductus.colors"))).toBeNull();
+});
+
+test("a half-typed color is flagged and not applied", async ({ page }) => {
+  await signIn(page, "/appearance");
+  const hex = page.getByLabel("Accent as hex");
+  await hex.fill("#2f5");
+  await expect(hex).toHaveAttribute("aria-invalid", "false"); // #rgb is a color
+  await hex.fill("#2f5b");
+  await expect(hex).toHaveAttribute("aria-invalid", "true");
+  await expect(page.getByText("Use a color like #2f5bd3.")).toBeVisible();
 });
 
 test("a phone-sized screen gets the navigation on top and no sideways page scroll", async ({ page }) => {
@@ -290,6 +395,7 @@ test("a phone-sized screen gets the navigation on top and no sideways page scrol
     "/retention",
     "/drain",
     "/api-reference",
+    "/appearance",
   ]) {
     await page.goto(path);
     await expect(page.getByRole("heading", { level: 1 })).toBeVisible();

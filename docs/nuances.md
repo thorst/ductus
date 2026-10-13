@@ -340,6 +340,11 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** a browser session acts with the role of the token it signed in with, and logs show that token's name. It ends after 12 hours unused, 7 days after sign-in, on sign-out, or when the token is revoked. Changes made with the session cookie (pausing, draining) must carry the `X-Ductus: 1` header, which the UI sends and other websites can't, so a page elsewhere can't act through someone's session. Scripts use the token itself and don't need the header.
 - **What to do:** until users and logins arrive (v0.5 step 8), give each person their own token (`ductus token create jane --role operator`) so the log says who looked at which message or paused what; revoke it when they leave. The theme is kept per browser until then.
 
+### Your own colors can be unreadable on purpose (level 1)
+- **What:** Appearance (user menu → Customize colors…) takes five colors (header, accent, page background, panel, text) and works the rest out from them. It checks every pair the screens draw against WCAG AA (4.5:1 for text, 3:1 for the focus ring) and marks the ones below it "Hard to read". It warns and does not stop you: **Use these colors** works either way, and the pages are then as hard to read as the check said. The built-in High contrast theme is the one that promises AAA (7:1).
+- **Why:** it is your screen and your eyes; a rule that refuses a color nobody else sees would be in the way. But people spend all day in this, so the check is always shown.
+- **What to do:** press **Fix it** on a row (or **Fix all**): it moves only the text or the accent, in lightness and just far enough, and shows the old and new values with Undo. It leaves the header, page background and panel alone, unless no text color could be read on them at all (a black page with a white panel): then it pulls the panel toward the page background and says so. The colors are kept in this browser, not on the server, until logins arrive (v0.5 step 8): another browser or machine starts from the system theme.
+
 ## Monitoring
 
 ### Counts and timings start at zero when the engine starts (level 3)

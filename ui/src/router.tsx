@@ -131,6 +131,13 @@ const apiReference = createRoute({
   component: lazyRouteComponent(() => import("@/pages/api-reference"), "ApiReferencePage"),
 });
 
+/** Also on demand: it carries the color math (src/lib/colors.ts). */
+const appearance = createRoute({
+  getParentRoute: () => app,
+  path: "/appearance",
+  component: lazyRouteComponent(() => import("@/pages/appearance"), "AppearancePage"),
+});
+
 const message = createRoute({
   getParentRoute: () => app,
   path: "/messages/$id",
@@ -156,6 +163,7 @@ const tree = root.addChildren([
     doctor,
     tokens,
     apiReference,
+    appearance,
     message,
   ]),
 ]);

@@ -11,6 +11,7 @@ import {
   KeyRound,
   LayoutDashboard,
   LogOut,
+  Palette,
   Network,
   Radio,
   ShieldAlert,
@@ -26,7 +27,7 @@ import { useLiveUpdates, type LiveState } from "@/api/live";
 import { engine, interfaces, session } from "@/api/queries";
 import { Logo } from "@/components/logo";
 import { count } from "@/lib/format";
-import { getTheme, setTheme, THEME_LABELS, THEMES, type Theme } from "@/lib/theme";
+import { getSavedColors, getTheme, setTheme, THEME_LABELS, THEMES, type Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
 type NavLink = { to: LinkProps["to"] & string; label: string; icon: LucideIcon; exact?: boolean; admin?: boolean };
@@ -173,7 +174,8 @@ function UserMenu() {
     await navigate({ to: "/sign-in", search: {} });
   };
   return (
-    <DropdownMenu.Root>
+    // Colors may have been saved on the Appearance page since the menu was last open.
+    <DropdownMenu.Root onOpenChange={(open) => open && setCurrent(getTheme())}>
       <DropdownMenu.Trigger className="flex items-center gap-1 rounded-md px-2 py-1 text-sm hover:bg-white/10">
         <span>{me?.name}</span>
         <span className="hidden opacity-70 sm:inline">({me?.role})</span>
@@ -189,6 +191,8 @@ function UserMenu() {
           <DropdownMenu.RadioGroup
             value={theme}
             onValueChange={(value) => {
+              // Custom with no colors chosen yet starts at choosing them.
+              if (value === "custom" && !getSavedColors()) return void navigate({ to: "/appearance" });
               setTheme(value as Theme);
               setCurrent(value as Theme);
             }}
@@ -208,6 +212,13 @@ function UserMenu() {
               </DropdownMenu.RadioItem>
             ))}
           </DropdownMenu.RadioGroup>
+          <DropdownMenu.Item
+            onSelect={() => void navigate({ to: "/appearance" })}
+            className="flex cursor-default items-center gap-2 rounded px-2 py-1.5 outline-none data-highlighted:bg-hover"
+          >
+            <Palette aria-hidden className="size-4" />
+            Customize colors…
+          </DropdownMenu.Item>
           <DropdownMenu.Separator className="my-1 h-px bg-border" />
           <DropdownMenu.Item
             onSelect={signOut}
