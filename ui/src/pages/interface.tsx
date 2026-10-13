@@ -4,14 +4,16 @@ import { ArrowRight, CirclePause, CirclePlay, Flame, MessageSquareText } from "l
 import { useState } from "react";
 import { pause, resume, useCanOperate, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
-import { iface } from "@/api/queries";
+import { docs, iface } from "@/api/queries";
 import { ActionDialog } from "@/components/action-dialog";
+import { DocFields } from "@/components/docs-values";
 import { HealthBadge } from "@/components/health-badge";
 import { MessageList } from "@/components/message-list";
 import { Field, Loaded, PageHeader } from "@/components/page";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { entryNamed, fieldsFor } from "@/lib/docs";
 import { ago, count, duration, ms, perMinute } from "@/lib/format";
 import { worst } from "@/lib/health";
 import { cn } from "@/lib/utils";
@@ -106,6 +108,7 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
           </dl>
         </CardBody>
       </Card>
+      <DocumentationCard name={i.name} />
       <h2 className="text-base font-semibold">Destinations</h2>
       <div className="grid items-start gap-4 xl:grid-cols-2">
         {i.destinations.map((d) => (
@@ -167,6 +170,7 @@ function DestinationCard({ interfaceName, d }: { interfaceName: string; d: Schem
             </Field>
           )}
         </dl>
+        <DestinationDocs interfaceName={interfaceName} name={d.name} />
         {h.last_error && (
           <div className="rounded-md border bg-bg p-3 text-sm">
             <div className="text-xs text-muted">Last error, {ago(h.last_error.at)}</div>
@@ -264,4 +268,34 @@ function PauseControls({ interfaceName, d }: { interfaceName: string; d: Schemas
       />
     </div>
   );
+}
+
+/** The company's documentation fields for this interface (nothing when none are defined). */
+function DocumentationCard({ name }: { name: string }) {
+  const { data: report } = useQuery(docs);
+  const entry = report && entryNamed(report, "interface", name);
+  const fields = report ? fieldsFor(report, "interface") : [];
+  if (!report || !entry || fields.length === 0) return null;
+  return (
+    <Card aria-label="Documentation">
+      <CardHeader>
+        <CardTitle>Documentation</CardTitle>
+        <Link to="/documentation" className="text-sm">
+          All interfaces
+        </Link>
+      </CardHeader>
+      <CardBody>
+        <DocFields fields={fields} entry={entry} />
+      </CardBody>
+    </Card>
+  );
+}
+
+/** A destination's own documentation fields, if the company defined any for destinations. */
+function DestinationDocs({ interfaceName, name }: { interfaceName: string; name: string }) {
+  const { data: report } = useQuery(docs);
+  const entry = report && entryNamed(report, "destination", `${interfaceName}.${name}`);
+  const fields = report ? fieldsFor(report, "destination") : [];
+  if (!report || !entry || fields.length === 0) return null;
+  return <DocFields fields={fields} entry={entry} className="md:grid-cols-2" />;
 }

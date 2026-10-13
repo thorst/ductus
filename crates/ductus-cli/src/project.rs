@@ -250,6 +250,21 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
         );
     }
 
+    // The company's own documentation fields (docs-schema.yaml) against their values.
+    match ductus_core::docs::Schema::load(root) {
+        Err(e) => {
+            problems += 1;
+            println!("✗ {}: {e:#}", ductus_core::docs::FILE);
+        }
+        Ok(schema) => {
+            let none = Default::default();
+            for line in ductus_core::docs::check_project(&schema, configs(), resources.as_ref().unwrap_or(&none)) {
+                problems += 1;
+                println!("✗ {line}");
+            }
+        }
+    }
+
     let diagnostics = &analysis.diagnostics;
     for d in diagnostics {
         if d.is_error() {
@@ -366,6 +381,69 @@ pub async fn impact(root: &Path, env: &str, query: ductus_core::impact::Query, r
         println!(
             "\nnote: {unnamed} interface(s) don't name every system they connect (see `ductus validate`); they may be missing here"
         );
+    }
+    Ok(complete)
+}
+
+/// `ductus docs`: the company-defined documentation fields (docs-schema.yaml) and their values
+/// for every interface, destination and resources.yaml entry. Returns false when `missing`
+/// finds required values that aren't there (or something doesn't load).
+pub fn docs(root: &Path, env: &str, only_missing: bool, json: bool) -> Result<bool> {
+    use ductus_core::docs;
+    let environment = Environment::load(root, env)?;
+    let interfaces = interface_dirs(root, &environment)?;
+    let resources = ductus_core::Resources::load(root, &environment)?;
+    let schema = docs::Schema::load(root)?;
+    let configs: Vec<&InterfaceConfig> = interfaces.iter().filter_map(|i| i.config.as_ref().ok()).collect();
+    let mut complete = interfaces.iter().all(|i| i.config.is_ok());
+    let rows: Vec<(docs::Entry, Vec<String>)> = docs::entries(configs.iter().copied(), &resources)
+        .into_iter()
+        .map(|e| {
+            let missing = schema.missing(e.level, &e.custom);
+            (e, missing)
+        })
+        .filter(|(_, missing)| !only_missing || !missing.is_empty())
+        .collect();
+    complete &= rows.iter().all(|(_, missing)| missing.is_empty());
+    if json {
+        let out: Vec<_> = rows
+            .iter()
+            .map(|(e, missing)| serde_json::json!({"level": e.level, "name": e.name, "custom": e.custom, "missing": missing}))
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(complete);
+    }
+    println!("environment: {env}");
+    if schema.fields.is_empty() {
+        println!("no fields are declared (docs-schema.yaml)");
+        return Ok(complete);
+    }
+    for (entry, missing) in &rows {
+        let fields: Vec<_> = schema.for_level(entry.level).collect();
+        if fields.is_empty() {
+            continue;
+        }
+        println!("\n{} ({})", entry.name, entry.level.label());
+        let width = fields.iter().map(|d| d.title().chars().count()).max().unwrap_or(0);
+        for d in fields {
+            let shown = match entry.custom.get(&d.key) {
+                Some(v) if !docs::is_blank(v) => match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Array(a) => {
+                        a.iter().map(|i| i.as_str().unwrap_or("?")).collect::<Vec<_>>().join(", ")
+                    }
+                    other => other.to_string(),
+                },
+                _ if missing.contains(&d.key) => "⚠ missing".into(),
+                _ => "–".into(),
+            };
+            if !only_missing || missing.contains(&d.key) {
+                println!("  {:<width$}  {shown}", d.title());
+            }
+        }
+    }
+    if only_missing && rows.is_empty() {
+        println!("every required field has a value");
     }
     Ok(complete)
 }

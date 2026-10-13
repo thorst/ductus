@@ -117,6 +117,19 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     }
     let sftp_server = |name: &str| resources.sftp.get(name).cloned();
     let store = Store::connect(database_url, options.db_connections).await?;
+    // The company's documentation fields: a broken docs-schema.yaml is for `ductus validate` to report,
+    // not a reason to stop the engine. The snapshot is for SQL reports, so it never blocks startup either.
+    let docs = ductus_core::docs::Schema::load(root).unwrap_or_else(|e| {
+        tracing::warn!(error = format!("{e:#}"), "ignoring the documentation fields: run `ductus validate`");
+        Default::default()
+    });
+    let snapshot: Vec<_> = ductus_core::docs::snapshot(&configs, &resources)
+        .into_iter()
+        .map(|(kind, name, docs)| ductus_store::DocsRow { kind, name, docs: docs.to_string() })
+        .collect();
+    if let Err(e) = store.save_docs_snapshot(&snapshot).await {
+        tracing::warn!(error = format!("{e:#}"), "could not save the documentation snapshot");
+    }
     // Before any worker starts: stored deliveries must match the destinations configured now.
     let destinations: Vec<(String, String)> =
         configs.iter().flat_map(|c| c.destinations().map(|(name, _)| (c.name.clone(), name.to_string()))).collect();
@@ -325,6 +338,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         database_url: database_url.to_string(),
         store: store.clone(),
         resources: resources.clone(),
+        docs,
         interfaces: running,
         retention,
         calls: services.calls(),

@@ -57,7 +57,22 @@ const app = createRoute({
 
 const overview = createRoute({ getParentRoute: () => app, path: "/", component: OverviewPage });
 
-const interfaces = createRoute({ getParentRoute: () => app, path: "/interfaces", component: InterfacesPage });
+export interface DocsSearch {
+  field?: string;
+  value?: string;
+}
+
+const docsSearch = (search: Record<string, unknown>): DocsSearch => {
+  const field = typeof search.field === "string" && search.field ? search.field : undefined;
+  return { field, value: field && typeof search.value === "string" && search.value ? search.value : undefined };
+};
+
+const interfaces = createRoute({
+  getParentRoute: () => app,
+  path: "/interfaces",
+  validateSearch: docsSearch,
+  component: InterfacesPage,
+});
 
 export interface InterfaceSearch {
   tab?: "messages";
@@ -131,6 +146,14 @@ const apiReference = createRoute({
   component: lazyRouteComponent(() => import("@/pages/api-reference"), "ApiReferencePage"),
 });
 
+/** Its own chunk too: the company's documentation fields, read when someone asks for them. */
+const documentation = createRoute({
+  getParentRoute: () => app,
+  path: "/documentation",
+  validateSearch: docsSearch,
+  component: lazyRouteComponent(() => import("@/pages/documentation"), "DocumentationPage"),
+});
+
 /** Also on demand: it carries the color math (src/lib/colors.ts). */
 const appearance = createRoute({
   getParentRoute: () => app,
@@ -158,6 +181,7 @@ const tree = root.addChildren([
     hotspots,
     impact,
     owners,
+    documentation,
     retention,
     drain,
     doctor,

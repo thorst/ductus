@@ -1873,3 +1873,51 @@ async fn expired_unfinished_messages_move_to_the_held_area() {
     assert!(store.drop_finished_held().await.unwrap().contains(&month), "nothing unfinished in it now");
     assert!(!exists(&pool, &month).await && !exists(&pool, &month.replace("messages", "deliveries")).await);
 }
+
+/// The documentation snapshot matches the project exactly: changed rows are rewritten, unchanged
+/// ones keep their time, entries that left the project are removed.
+#[tokio::test]
+async fn the_docs_snapshot_follows_the_project() {
+    let Some(url) = std::env::var("DUCTUS_TEST_DATABASE_URL").ok() else { return };
+    let store = store().await.unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let row = |kind, name: &str, docs: &str| ductus_store::DocsRow { kind, name: name.into(), docs: docs.into() };
+    let read = || async {
+        sqlx::query_as::<_, (String, String, String, chrono::DateTime<chrono::Utc>)>(
+            "SELECT kind, name, docs::text, updated_at FROM docs_snapshot ORDER BY kind, name",
+        )
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    store
+        .save_docs_snapshot(&[
+            row("interface", "adt", r#"{"custom": {"baa_signed": "no"}}"#),
+            row("resource", "api empi", r#"{"custom": {}}"#),
+            row("interface", "lab", r#"{"custom": {"baa_signed": "yes"}}"#),
+        ])
+        .await
+        .unwrap();
+    let first = read().await;
+    assert_eq!(first.len(), 3);
+    assert_eq!(first[0].2, r#"{"custom": {"baa_signed": "no"}}"#, "stored as jsonb: {first:?}");
+
+    // adt changes, lab stays, the api is gone, a new interface appears.
+    store
+        .save_docs_snapshot(&[
+            row("interface", "adt", r#"{"custom": {"baa_signed": "yes"}}"#),
+            row("interface", "lab", r#"{"custom":   {"baa_signed": "yes"}}"#),
+            row("interface", "orders", r#"{"custom": {}}"#),
+        ])
+        .await
+        .unwrap();
+    let second = read().await;
+    let names: Vec<_> = second.iter().map(|r| r.1.as_str()).collect();
+    assert_eq!(names, ["adt", "lab", "orders"], "{second:?}");
+    assert_eq!(second[0].2, r#"{"custom": {"baa_signed": "yes"}}"#);
+    assert!(second[0].3 > first[0].3, "a changed row gets a new time");
+    assert_eq!(second[1].3, first[2].3, "an unchanged row is left alone (same jsonb, spacing aside)");
+    // An empty project empties the table.
+    store.save_docs_snapshot(&[]).await.unwrap();
+    assert!(read().await.is_empty());
+}

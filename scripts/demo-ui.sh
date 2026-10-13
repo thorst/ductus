@@ -32,6 +32,20 @@ psql -q "$DB" -c "TRUNCATE messages, deliveries, dedupe_keys"
 code=$(curl -s -o /dev/null -w '%{http_code}' "$DUCTUS_API_URL/api/v1/health" || true)
 [ "$code" = 000 ] || { echo "FAIL: something already listens on $DUCTUS_API_URL"; exit 1; }
 
+# The company's own documentation fields (0.5.7.5): orders is missing a required one on purpose.
+cat >"$P/docs-schema.yaml" <<'EOF'
+fields:
+  data_classification: { type: enum, values: [PHI, Internal, Public], required: true, label: Data classification }
+  baa_signed: { type: enum, values: ["yes", "no", n/a], required: true, applies_to: [interface, resource], label: BAA signed }
+  go_live: { type: date, label: Go-live }
+  downstream: { type: list, label: Downstream systems }
+  runbook: { type: url, applies_to: [interface, destination], label: Runbook }
+EOF
+cat >"$P/resources.yaml" <<'EOF'
+apis:
+  empi: { url: "http://127.0.0.1:7794/api/v1", application: EMPI, custom: { baa_signed: "yes" } }
+EOF
+
 mkdir -p "$P/interfaces/adt" "$P/interfaces/orders" "$P/interfaces/billing"
 printf 'api: { listen: 127.0.0.1:7794 }\n' >"$P/ductus.yaml"
 cat >"$P/interfaces/adt/interface.yaml" <<'EOF'
@@ -44,8 +58,14 @@ about:
   owner: ADT team
   from: { application: Epic, vendor: Epic Systems }
   to: { application: Sunquest Lab, vendor: Sunquest }
+custom:
+  data_classification: PHI
+  baa_signed: "yes"
+  go_live: 2026-03-02
+  downstream: [Sunquest Lab, Archive]
+  runbook: https://wiki.example.org/adt
 destinations:
-  lab: { mllp: { host: 127.0.0.1, port: 6799, timeout_ms: 300 } }
+  lab: { mllp: { host: 127.0.0.1, port: 6799, timeout_ms: 300 }, custom: { runbook: "https://wiki.example.org/adt-lab" } }
   archive: { file: { dir: out/archive } }
 EOF
 cat >"$P/interfaces/orders/interface.yaml" <<'EOF'
@@ -53,6 +73,7 @@ name: orders
 source: { mllp: { port: 6722 } }
 script: transform.ts
 about: { description: Orders checked against the order system, owner: Orders team }
+custom: { data_classification: Internal }
 destination: { file: { dir: out/orders } }
 EOF
 cat >"$P/interfaces/orders/transform.ts" <<'EOF'
@@ -67,6 +88,7 @@ name: billing
 source: { mllp: { port: 6723 } }
 retention: 1w
 about: { owner: Finance }
+custom: { data_classification: PHI, baa_signed: "no" }
 destination: { file: { dir: out/billing } }
 EOF
 # As if billing had kept 7 weeks until now: its shorter 1w waits for someone to confirm it.
@@ -74,7 +96,14 @@ psql -q "$DB" -c "DELETE FROM retention WHERE interface IN ('adt', 'orders', 'bi
   -c "INSERT INTO retention (interface, days) VALUES ('billing', 49)"
 
 cd "$P"
-"$BIN" validate >/dev/null || { "$BIN" validate; echo "FAIL: validation"; exit 1; }
+# Validation fails on purpose, for one reason only (orders lacks a required documentation field);
+# the engine runs anyway.
+validation=$("$BIN" validate || true)
+[ "$(grep '^✗' <<<"$validation")" = "✗ orders: custom.baa_signed is required (one of: yes, no, n/a)" ] || {
+  echo "$validation"
+  echo "FAIL: validation"
+  exit 1
+}
 "$BIN" run >"$P/run.log" 2>&1 &
 ENGINE=$!
 trap 'kill -INT $ENGINE 2>/dev/null || true' EXIT

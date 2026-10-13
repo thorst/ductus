@@ -82,6 +82,9 @@ pub struct InterfaceConfig {
     /// not behind. Nothing by default (see `monitor.rs`).
     #[serde(default)]
     pub monitor: crate::monitor::Monitor,
+    /// Company-defined documentation fields, declared in `docs-schema.yaml`.
+    #[serde(default)]
+    pub custom: crate::docs::Custom,
 
     /// Folder the config was loaded from.
     #[serde(skip)]
@@ -348,6 +351,8 @@ pub struct DestinationConfig {
     pub owner: Option<String>,
     /// Its own `behind` limit, instead of the interface's `monitor.behind`.
     pub monitor: crate::monitor::DestinationMonitor,
+    /// Company-defined documentation fields (`docs-schema.yaml`).
+    pub custom: crate::docs::Custom,
 }
 
 impl DestinationConfig {
@@ -412,6 +417,8 @@ struct RawDestination {
     owner: Option<String>,
     #[serde(default)]
     monitor: crate::monitor::DestinationMonitor,
+    #[serde(default)]
+    custom: crate::docs::Custom,
 }
 
 impl TryFrom<RawDestination> for DestinationConfig {
@@ -444,6 +451,7 @@ impl TryFrom<RawDestination> for DestinationConfig {
             vendor: raw.vendor,
             owner: raw.owner,
             monitor: raw.monitor,
+            custom: raw.custom,
         })
     }
 }

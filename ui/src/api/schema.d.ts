@@ -4,6 +4,26 @@
  */
 
 export interface paths {
+    "/docs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The company-defined documentation fields and every interface's, destination's and resource's
+         *     values. Read-only: the project's files are the source of truth.
+         */
+        get: operations["docs_report"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/doctor": {
         parameters: {
             query?: never;
@@ -665,6 +685,42 @@ export interface components {
             quarantined: number;
             /** @description Counts and timings since the engine started. */
             since_start: components["schemas"]["DestinationCounts"];
+        };
+        /** @description One documented thing and the values it has. */
+        DocsEntry: {
+            /** @description Values by field key, as written in `custom:`. */
+            custom: {
+                [key: string]: unknown;
+            };
+            /** @description The interface it belongs to; none for a resource. */
+            interface?: string | null;
+            /** @description `interface`, `destination` or `resource`. */
+            level: string;
+            /** @description Required fields that have no value here. */
+            missing: string[];
+            /** @description `adt-lab`, `adt-lab.default`, `api empi`. */
+            name: string;
+        };
+        /** @description A field the company declared in `docs-schema.yaml`. */
+        DocsField: {
+            /** @description `interface`, `destination`, `resource`. */
+            applies_to: string[];
+            help?: string | null;
+            key: string;
+            required: boolean;
+            /** @description The label, else the key. */
+            title: string;
+            /** @description `text`, `enum`, `date`, `url`, `person` or `list`. */
+            type: string;
+            /** @description What an enum (or each item of a list) may be. */
+            values: string[];
+        };
+        DocsReport: {
+            entries: components["schemas"]["DocsEntry"][];
+            /** @description In the order the file lists them. */
+            fields: components["schemas"]["DocsField"][];
+            /** @description What `ductus validate` would reject (wrong or undeclared values, missing required ones). */
+            problems: string[];
         };
         DoctorRequest: {
             /** @description Only what these interfaces use (the engine's database is always checked). */
@@ -1352,6 +1408,25 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    docs_report: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DocsReport"];
+                };
+            };
+        };
+    };
     doctor_report: {
         parameters: {
             query?: never;

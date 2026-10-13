@@ -9,11 +9,13 @@
 mod actions;
 mod activity;
 mod api;
+mod docs;
 mod retention;
 
 pub use actions::{Action, Actor, Copy, Edited, Quarantined, Resend, Resent};
 pub use activity::{BaselineRow, DestinationActivity, InterfaceActivity, Oldest, PauseRow, Received, Seen};
 pub use api::{Browse, LaneRow, MessageRow, QueueCount, Role, SESSION_PREFIX, TOKEN_PREFIX, Token};
+pub use docs::DocsRow;
 pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};
 
 use anyhow::{Context, Result};

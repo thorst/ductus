@@ -89,7 +89,8 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 ## Where things are
 
 ```
-crates/ductus-core     config, formats, environments, secrets, resources (databases, sftp, apis), retention, monitor
+crates/ductus-core     config, formats, environments, secrets, resources (databases, sftp, apis), retention, docs (company-defined
+                       documentation fields: docs-schema.yaml, `custom:` values, checks, the snapshot), monitor
                        (`monitor:` expectations and their time rules), hotspots (backlog by lane and worker), about (systems,
                        host/subnet matching), impact, owners (report + in-place reassign), schedule timing, ports,
                        settings (ductus.yaml)

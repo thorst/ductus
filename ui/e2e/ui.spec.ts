@@ -33,6 +33,9 @@ const AXE_PAGES = [
   "/hotspots?interface=adt&destination=lab",
   "/impact?vendor=Epic%20Systems",
   "/owners",
+  "/documentation",
+  "/documentation?field=baa_signed&value=__no_value__",
+  "/interfaces/orders",
   "/retention",
   "/drain",
   "/connections",
@@ -392,6 +395,8 @@ test("a phone-sized screen gets the navigation on top and no sideways page scrol
     "/hotspots",
     "/impact?vendor=Epic%20Systems",
     "/owners",
+    "/documentation",
+    "/interfaces/orders",
     "/retention",
     "/drain",
     "/api-reference",
@@ -415,4 +420,62 @@ test("signing out ends the session", async ({ page }) => {
   await expect(page).toHaveURL(/\/sign-in/);
   await page.goto("/interfaces");
   await expect(page).toHaveURL(/\/sign-in/);
+});
+
+test("company-defined documentation: on the interface, missing flagged, filtered by value, listed with gaps", async ({
+  page,
+}) => {
+  await signIn(page, "/interfaces/adt");
+  const card = page.getByRole("region", { name: "Documentation" });
+  await expect(card).toContainText("Data classification");
+  await expect(card.getByText("PHI", { exact: true })).toBeVisible();
+  await expect(card.getByText("BAA signed")).toBeVisible();
+  await expect(card.getByText("Mar 2, 2026")).toBeVisible();
+  await expect(card.getByText("Sunquest Lab", { exact: true })).toBeVisible();
+  await expect(card.getByRole("link", { name: /wiki\.example\.org\/adt/ })).toHaveAttribute(
+    "href",
+    "https://wiki.example.org/adt",
+  );
+  // A destination's own fields.
+  await expect(page.getByRole("region", { name: "lab" }).getByRole("link", { name: /adt-lab/ })).toBeVisible();
+  // Read-only: the files are the source of truth, and a viewer has nothing to edit here.
+  await expect(card.getByRole("button")).toHaveCount(0);
+
+  // Orders lacks a required value: said in words, not just color.
+  await page.goto("/interfaces/orders");
+  await expect(page.getByRole("region", { name: "Documentation" }).getByText("Missing")).toBeVisible();
+
+  // The interface list filters by a field and a value, in the URL.
+  await page.goto("/interfaces");
+  const rows = page.locator("tbody tr");
+  await expect(rows).toHaveCount(3);
+  await page.getByLabel("Documentation field").selectOption({ label: "BAA signed" });
+  await page.getByLabel("Documentation value").selectOption("No value");
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText("orders");
+  await expect(page).toHaveURL(/field=baa_signed&value=__no_value__/);
+  await page.getByLabel("Documentation value").selectOption("no");
+  await expect(rows).toHaveCount(1);
+  await expect(rows.first()).toContainText("billing");
+  await page.reload();
+  await expect(rows).toHaveCount(1);
+
+  // The page of everything: gaps per required field, a click narrows to them.
+  await page.goto("/documentation");
+  await expect(page.getByRole("heading", { level: 1, name: "Documentation" })).toBeVisible();
+  const required = page.getByRole("list", { name: "Required fields" });
+  await expect(required).toContainText("Data classification (required)");
+  await expect(required).toContainText("All 3 have it");
+  await required.getByRole("button", { name: "1 of 4 missing" }).click();
+  await expect(page).toHaveURL(/field=baa_signed/);
+  const interfaces = page.getByRole("region", { name: "Interfaces" });
+  await expect(interfaces.locator("tbody tr")).toHaveCount(1);
+  await expect(interfaces).toContainText("orders");
+  await expect(interfaces.getByText("Missing")).toBeVisible();
+  await expect(page.getByRole("region", { name: "Resources" })).toContainText("None match");
+  // Every entry, unfiltered: the resource shows its value too.
+  await page.getByLabel("Documentation field").selectOption("Any");
+  await expect(page.getByRole("region", { name: "Resources" })).toContainText("api empi");
+  await expect(page.getByRole("region", { name: "Destinations" })).toContainText("adt.lab");
+  await page.screenshot({ path: "test-results/documentation.png" });
 });

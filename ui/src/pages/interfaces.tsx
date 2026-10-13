@@ -1,21 +1,28 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link, useNavigate } from "@tanstack/react-router";
+import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { Schemas } from "@/api/client";
-import { interfaces } from "@/api/queries";
+import { docs, interfaces } from "@/api/queries";
+import { DocsFilter } from "@/components/docs-values";
 import { HealthBadge } from "@/components/health-badge";
 import { Loaded, PageHeader } from "@/components/page";
 import { Input } from "@/components/ui/input";
 import { Table, Td, Th } from "@/components/ui/table";
+import { entryNamed, matches } from "@/lib/docs";
 import { ago, count } from "@/lib/format";
 import { describe, worst } from "@/lib/health";
 import { cn } from "@/lib/utils";
 
 type Row = Schemas["InterfaceStatus"] & { worst: string; waiting: number; quarantined: number };
 
+const route = getRouteApi("/app/interfaces");
+
 export function InterfacesPage() {
   const query = useQuery(interfaces);
+  const { data: report } = useQuery(docs);
+  const { field, value } = route.useSearch();
+  const navigate = useNavigate({ from: "/interfaces" });
   const [text, setText] = useState("");
   const [onlyProblems, setOnlyProblems] = useState(false);
   const rows = useMemo(() => {
@@ -29,13 +36,18 @@ export function InterfacesPage() {
       }))
       .filter((i) => !onlyProblems || describe(i.worst).rank >= 2)
       .filter((i) => {
+        const chosen = report?.fields.find((f) => f.key === field);
+        const entry = report && entryNamed(report, "interface", i.name);
+        return !chosen || !value || (entry !== undefined && matches(entry, chosen, value));
+      })
+      .filter((i) => {
         const haystack = [i.name, i.description, i.owner, i.source, ...i.destinations.map((d) => d.connector)]
           .join(" ")
           .toLowerCase();
         return words.every((w) => haystack.includes(w));
       })
       .sort((a, b) => describe(b.worst).rank - describe(a.worst).rank || a.name.localeCompare(b.name));
-  }, [query.data, text, onlyProblems]);
+  }, [query.data, text, onlyProblems, report, field, value]);
 
   return (
     <>
@@ -61,6 +73,14 @@ export function InterfacesPage() {
           />
           Only those needing attention
         </label>
+        {report && report.fields.some((f) => f.applies_to.includes("interface")) && (
+          <DocsFilter
+            report={{ ...report, fields: report.fields.filter((f) => f.applies_to.includes("interface")) }}
+            field={field}
+            value={value}
+            onChange={(f, v) => void navigate({ search: { field: f, value: v } })}
+          />
+        )}
       </div>
       <Loaded query={query}>{() => <InterfaceTable rows={rows} />}</Loaded>
     </>

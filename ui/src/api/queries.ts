@@ -113,3 +113,10 @@ export const tokens = queryOptions({
   queryKey: ["tokens"],
   queryFn: async () => unwrap(await api.GET("/tokens")),
 });
+
+/** The company-defined documentation fields and every entry's values (the project's files, so rarely changing). */
+export const docs = queryOptions({
+  queryKey: ["docs"],
+  queryFn: async () => unwrap(await api.GET("/docs")),
+  staleTime: 60_000,
+});

@@ -89,6 +89,8 @@ pub struct Engine {
     pub database_url: String,
     pub store: Store,
     pub resources: Resources,
+    /// The company-defined documentation fields (docs-schema.yaml; none if it is missing or broken).
+    pub docs: ductus_core::docs::Schema,
     pub interfaces: Vec<Running>,
     pub retention: Arc<crate::retention::Retention>,
     /// Calls to each database and API in resources.yaml (`fetch` for URLs called directly).
@@ -111,6 +113,7 @@ pub struct Parts {
     pub database_url: String,
     pub store: Store,
     pub resources: Resources,
+    pub docs: ductus_core::docs::Schema,
     pub interfaces: Vec<Running>,
     pub retention: Arc<crate::retention::Retention>,
     pub calls: Arc<crate::stats::ResourceCalls>,
@@ -119,7 +122,8 @@ pub struct Parts {
 
 impl Engine {
     pub fn new(parts: Parts) -> Arc<Self> {
-        let Parts { environment, root, database_url, store, resources, interfaces, retention, calls, activity } = parts;
+        let Parts { environment, root, database_url, store, resources, docs, interfaces, retention, calls, activity } =
+            parts;
         let engine = Arc::new(Self {
             started_at: Utc::now(),
             environment,
@@ -127,6 +131,7 @@ impl Engine {
             database_url,
             store,
             resources,
+            docs,
             interfaces,
             retention,
             calls,

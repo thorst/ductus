@@ -2,6 +2,7 @@
 
 pub mod about;
 pub mod config;
+pub mod docs;
 pub mod env;
 pub mod format;
 pub mod hotspots;

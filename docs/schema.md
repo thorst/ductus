@@ -193,6 +193,19 @@ Each destination's last send and failure (written like `interface_activity`), an
 
 Index: primary key `destination_id`.
 
+## `docs_snapshot`
+
+The project's documentation as the company wrote it, for SQL reports and BI tools ("which interfaces have no signed BAA": `SELECT name FROM docs_snapshot WHERE kind = 'interface' AND docs->'custom'->>'baa_signed' = 'no'`). One row per interface and per resources.yaml entry. The YAML in Git is the source of truth: every engine start makes the table match the project (changed rows are rewritten, entries the project no longer has are removed), so it is as current as the last start. Versioned history comes with versioned releases (v0.6).
+
+| column | type | |
+|---|---|---|
+| `kind` | text | `interface` or `resource`. |
+| `name` | text | The interface's name, or the resource as `api empi`, `database patient_db`, `sftp server lab`. |
+| `docs` | jsonb | An interface: `{"description", "owner", "custom": {...}, "destinations": {"<name>": {"custom": {...}}}}`; a resource: `{"custom": {...}}`. `custom` uses the company's field names from `docs-schema.yaml`; absent values are absent. |
+| `updated_at` | timestamptz | When the row last changed. |
+
+Indexes: primary key `(kind, name)`; `docs_snapshot_docs` (GIN on `docs`).
+
 ## Functions
 
 - `ductus_tiers()`: the tiers in days, `{7,21,49}`. `ductus_tier_unit(tier)`: the period one partition of a tier covers (`day` for 7, else `week`).

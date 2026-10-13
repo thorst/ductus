@@ -95,6 +95,9 @@ pub struct Api {
     pub application: Option<String>,
     #[serde(default)]
     pub vendor: Option<String>,
+    /// Company-defined documentation fields (`docs-schema.yaml`).
+    #[serde(default)]
+    pub custom: crate::docs::Custom,
 }
 
 impl Api {
@@ -148,6 +151,9 @@ pub struct SftpServer {
     pub application: Option<String>,
     #[serde(default)]
     pub vendor: Option<String>,
+    /// Company-defined documentation fields (`docs-schema.yaml`).
+    #[serde(default)]
+    pub custom: crate::docs::Custom,
 }
 
 // Hand-written so passwords and keys never end up in logs.
@@ -190,6 +196,9 @@ pub struct DbConnection {
     pub application: Option<String>,
     #[serde(default)]
     pub vendor: Option<String>,
+    /// Company-defined documentation fields (`docs-schema.yaml`).
+    #[serde(default)]
+    pub custom: crate::docs::Custom,
 }
 
 /// SQL Server, with SQL Server authentication (user and password).
@@ -217,6 +226,9 @@ pub struct SqlServerConnection {
     pub application: Option<String>,
     #[serde(default)]
     pub vendor: Option<String>,
+    /// Company-defined documentation fields (`docs-schema.yaml`).
+    #[serde(default)]
+    pub custom: crate::docs::Custom,
 }
 
 fn default_max_connections() -> u32 {
@@ -297,6 +309,21 @@ impl Resources {
         let known = self.names(kind);
         let known = if known.is_empty() { "none".to_string() } else { known.join(", ") };
         Some(format!("no {} named `{name}` in resources.yaml (defined: {known})", kind.label()))
+    }
+
+    /// Every entry's documentation fields, in kind and name order.
+    pub fn customs(&self) -> Vec<(Kind, &str, &crate::docs::Custom)> {
+        let mut all = Vec::new();
+        for (name, d) in &self.databases {
+            let custom = match d {
+                Database::Postgres(c) => &c.custom,
+                Database::Sqlserver(c) => &c.custom,
+            };
+            all.push((Kind::Database, name.as_str(), custom));
+        }
+        all.extend(self.apis.iter().map(|(n, a)| (Kind::Api, n.as_str(), &a.custom)));
+        all.extend(self.sftp.iter().map(|(n, s)| (Kind::Sftp, n.as_str(), &s.custom)));
+        all
     }
 
     /// The application and vendor an entry belongs to (unknown if it isn't defined).

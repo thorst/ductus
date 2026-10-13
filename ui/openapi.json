@@ -15,6 +15,26 @@
     }
   ],
   "paths": {
+    "/docs": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "The company-defined documentation fields and every interface's, destination's and resource's\nvalues. Read-only: the project's files are the source of truth.",
+        "operationId": "docs_report",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DocsReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/doctor": {
       "post": {
         "tags": [
@@ -1790,6 +1810,126 @@
           "since_start": {
             "$ref": "#/components/schemas/DestinationCounts",
             "description": "Counts and timings since the engine started."
+          }
+        }
+      },
+      "DocsEntry": {
+        "type": "object",
+        "description": "One documented thing and the values it has.",
+        "required": [
+          "level",
+          "name",
+          "custom",
+          "missing"
+        ],
+        "properties": {
+          "custom": {
+            "type": "object",
+            "description": "Values by field key, as written in `custom:`.",
+            "additionalProperties": {},
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "interface": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The interface it belongs to; none for a resource."
+          },
+          "level": {
+            "type": "string",
+            "description": "`interface`, `destination` or `resource`."
+          },
+          "missing": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Required fields that have no value here."
+          },
+          "name": {
+            "type": "string",
+            "description": "`adt-lab`, `adt-lab.default`, `api empi`."
+          }
+        }
+      },
+      "DocsField": {
+        "type": "object",
+        "description": "A field the company declared in `docs-schema.yaml`.",
+        "required": [
+          "key",
+          "title",
+          "type",
+          "values",
+          "required",
+          "applies_to"
+        ],
+        "properties": {
+          "applies_to": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "`interface`, `destination`, `resource`."
+          },
+          "help": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "key": {
+            "type": "string"
+          },
+          "required": {
+            "type": "boolean"
+          },
+          "title": {
+            "type": "string",
+            "description": "The label, else the key."
+          },
+          "type": {
+            "type": "string",
+            "description": "`text`, `enum`, `date`, `url`, `person` or `list`."
+          },
+          "values": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What an enum (or each item of a list) may be."
+          }
+        }
+      },
+      "DocsReport": {
+        "type": "object",
+        "required": [
+          "fields",
+          "entries",
+          "problems"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocsEntry"
+            }
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DocsField"
+            },
+            "description": "In the order the file lists them."
+          },
+          "problems": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What `ductus validate` would reject (wrong or undeclared values, missing required ones)."
           }
         }
       },

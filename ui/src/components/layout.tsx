@@ -7,6 +7,7 @@ import {
   ChevronDown,
   CirclePause,
   Crosshair,
+  FileText,
   Flame,
   KeyRound,
   LayoutDashboard,
@@ -47,6 +48,7 @@ const NAV: { heading?: string; links: NavLink[] }[] = [
     links: [
       { to: "/impact", label: "Impact", icon: Crosshair },
       { to: "/owners", label: "Owners", icon: Users },
+      { to: "/documentation", label: "Documentation", icon: FileText },
     ],
   },
   {

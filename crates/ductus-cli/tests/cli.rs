@@ -1202,3 +1202,125 @@ async fn the_ui_is_served_and_a_browser_signs_in_with_a_session() {
     assert_eq!(ended.status(), 401);
     assert!(ended.text().await.unwrap().contains("sign in again"));
 }
+
+const DOCS_SCHEMA: &str = r#"
+fields:
+  data_classification: { type: enum, values: [PHI, Internal, Public], required: true, label: Data classification }
+  baa_signed: { type: enum, values: ["yes", "no", n/a], required: true, applies_to: [interface, resource] }
+  go_live: { type: date }
+  runbook: { type: url, applies_to: [interface, destination] }
+"#;
+
+fn edit(path: &std::path::Path, from: &str, to: &str) {
+    let text = std::fs::read_to_string(path).unwrap();
+    assert!(text.contains(from), "{from} not in {}", path.display());
+    std::fs::write(path, text.replacen(from, to, 1)).unwrap();
+}
+
+#[test]
+fn validate_checks_company_defined_fields_and_docs_lists_them() {
+    let dir = hospital();
+    let root = dir.path();
+    let (ok, out) = ductus(root, &["validate"]);
+    assert!(ok, "no schema, no values: nothing to say: {out}");
+    let (ok, out) = ductus(root, &["docs"]);
+    assert!(ok && out.contains("no fields are declared"), "{out}");
+
+    // A value with no schema is undeclared.
+    edit(&root.join("interfaces/adt-in/interface.yaml"), "source:", "custom: { go_live: 2026-10-13 }\nsource:");
+    let (ok, out) = ductus(root, &["validate"]);
+    assert!(!ok && out.contains("✗ adt-in: custom.go_live isn't declared in docs-schema.yaml"), "{out}");
+
+    // With the schema: required fields are missing everywhere they apply.
+    std::fs::write(root.join("docs-schema.yaml"), DOCS_SCHEMA).unwrap();
+    let (ok, out) = ductus(root, &["validate"]);
+    assert!(!ok, "{out}");
+    for line in [
+        "✗ adt-in: custom.data_classification is required (one of: PHI, Internal, Public)",
+        "✗ adt-in: custom.baa_signed is required (one of: yes, no, n/a)",
+        "✗ results: custom.baa_signed is required (one of: yes, no, n/a)",
+        "✗ resources.yaml api empi: custom.baa_signed is required (one of: yes, no, n/a)",
+        "✗ resources.yaml sftp server quest: custom.baa_signed is required",
+    ] {
+        assert!(out.contains(line), "{line}\n{out}");
+    }
+    assert!(!out.contains("adt-in.default: custom.baa"), "a destination isn't asked for interface fields: {out}");
+
+    // Wrong values say what's allowed; typos get a hint; fields stay where they apply.
+    let adt = root.join("interfaces/adt-in/interface.yaml");
+    edit(
+        &adt,
+        "custom: { go_live: 2026-10-13 }",
+        "custom: { data_classification: phi, baa_signed: \"yes\", go_live: 13/10/2026, runbok: \"https://w/x\" }",
+    );
+    edit(
+        &adt,
+        "destination: { mllp: { host: 10.50.0.7, port: 6662 } }",
+        "destination: { mllp: { host: 10.50.0.7, port: 6662 }, custom: { go_live: 2026-10-13, runbook: wiki } }",
+    );
+    let (ok, out) = ductus(root, &["validate"]);
+    assert!(!ok, "{out}");
+    for line in [
+        "✗ adt-in: custom.data_classification is `phi`; allowed: PHI, Internal, Public (case matters: write `PHI`)",
+        "✗ adt-in: custom.go_live `13/10/2026` isn't a date; write it as 2026-10-13",
+        "✗ adt-in: custom.runbok isn't declared in docs-schema.yaml (did you mean `runbook`?)",
+        "✗ adt-in.default: custom.go_live doesn't apply to a destination (it applies to: interface)",
+        "✗ adt-in.default: custom.runbook `wiki` isn't an http(s) address",
+    ] {
+        assert!(out.contains(line), "{line}\n{out}");
+    }
+
+    // Fix everything: validate passes, `docs` shows the values, --missing is quiet.
+    edit(
+        &adt,
+        "custom: { data_classification: phi, baa_signed: \"yes\", go_live: 13/10/2026, runbok: \"https://w/x\" }",
+        "custom: { data_classification: PHI, baa_signed: \"yes\", go_live: 2026-10-13, runbook: \"https://w/x\" }",
+    );
+    edit(&adt, "custom: { go_live: 2026-10-13, runbook: wiki }", "custom: { runbook: \"https://w/mllp\" }");
+    edit(
+        &root.join("interfaces/results/interface.yaml"),
+        "source:",
+        "custom: { data_classification: Internal, baa_signed: n/a }\nsource:",
+    );
+    let resources = root.join("resources.yaml");
+    edit(
+        &resources,
+        "application: EMPI, vendor: Rhapsody }",
+        "application: EMPI, vendor: Rhapsody, custom: { baa_signed: \"yes\" } }",
+    );
+    edit(&resources, "vendor: Experian }", "vendor: Experian, custom: { baa_signed: \"no\" } }");
+    edit(&resources, "vendor: Quest }", "vendor: Quest, custom: { baa_signed: \"yes\" } }");
+    edit(&resources, "vendor: Epic Systems } }", "vendor: Epic Systems, custom: { baa_signed: \"yes\" } } }");
+    let (ok, out) = ductus(root, &["validate"]);
+    assert!(ok && !out.contains("custom."), "{out}");
+
+    let (ok, out) = ductus(root, &["docs"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("adt-in (interface)") && out.contains("Data classification  PHI"), "{out}");
+    assert!(
+        out.contains("go_live                2026-10-13") || out.contains("go_live              2026-10-13"),
+        "{out}"
+    );
+    assert!(out.contains("results (interface)") && out.contains("go_live") && out.contains("–"), "{out}");
+    let (ok, out) = ductus(root, &["docs", "--missing"]);
+    assert!(ok && out.contains("every required field has a value"), "{out}");
+
+    // --missing lists what's not there and exits 1; --json is for scripts.
+    edit(&root.join("interfaces/results/interface.yaml"), "baa_signed: n/a", "baa_signed: ' '");
+    let (ok, out) = ductus(root, &["docs", "--missing"]);
+    assert!(
+        !ok && out.contains("results (interface)") && out.contains("⚠ missing") && !out.contains("adt-in"),
+        "{out}"
+    );
+    let (ok, out) = ductus(root, &["docs", "--json"]);
+    assert!(!ok);
+    let rows: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let results = rows.as_array().unwrap().iter().find(|r| r["name"] == "results").unwrap();
+    assert_eq!(results["missing"], serde_json::json!(["baa_signed"]));
+    assert_eq!(results["custom"]["data_classification"], "Internal");
+
+    // A broken schema is reported by name.
+    std::fs::write(root.join("docs-schema.yaml"), "fields: { owner: { type: text } }").unwrap();
+    let (ok, out) = ductus(root, &["validate"]);
+    assert!(!ok && out.contains("✗ docs-schema.yaml:") && out.contains("ductus already uses that name"), "{out}");
+}

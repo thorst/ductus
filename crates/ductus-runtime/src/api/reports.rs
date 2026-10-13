@@ -21,6 +21,7 @@ pub fn routes() -> OpenApiRouter<Shared> {
         .routes(routes!(owners))
         .routes(routes!(reassign_preview))
         .routes(routes!(doctor_report))
+        .routes(routes!(docs_report))
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -335,4 +336,82 @@ async fn doctor_report(engine: Eng, caller: Caller, body: Option<Json<DoctorRequ
         seconds: started.elapsed().as_secs_f64(),
         checks,
     }))
+}
+
+/// A field the company declared in `docs-schema.yaml`.
+#[derive(Serialize, ToSchema)]
+pub struct DocsField {
+    key: String,
+    /// The label, else the key.
+    title: String,
+    /// `text`, `enum`, `date`, `url`, `person` or `list`.
+    #[serde(rename = "type")]
+    kind: String,
+    /// What an enum (or each item of a list) may be.
+    values: Vec<String>,
+    required: bool,
+    /// `interface`, `destination`, `resource`.
+    applies_to: Vec<String>,
+    help: Option<String>,
+}
+
+/// One documented thing and the values it has.
+#[derive(Serialize, ToSchema)]
+pub struct DocsEntry {
+    /// `interface`, `destination` or `resource`.
+    level: String,
+    /// `adt-lab`, `adt-lab.default`, `api empi`.
+    name: String,
+    /// The interface it belongs to; none for a resource.
+    interface: Option<String>,
+    /// Values by field key, as written in `custom:`.
+    #[schema(value_type = std::collections::BTreeMap<String, serde_json::Value>)]
+    custom: ductus_core::docs::Custom,
+    /// Required fields that have no value here.
+    missing: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DocsReport {
+    /// In the order the file lists them.
+    fields: Vec<DocsField>,
+    entries: Vec<DocsEntry>,
+    /// What `ductus validate` would reject (wrong or undeclared values, missing required ones).
+    problems: Vec<String>,
+}
+
+/// The company-defined documentation fields and every interface's, destination's and resource's
+/// values. Read-only: the project's files are the source of truth.
+#[utoipa::path(get, path = "/docs", tag = "reports", responses((status = 200, body = DocsReport)))]
+async fn docs_report(engine: Eng, _caller: Caller) -> ApiResult<DocsReport> {
+    use ductus_core::docs;
+    let schema = &engine.docs;
+    let configs = || engine.interfaces.iter().map(|i| &*i.config);
+    let entries = docs::entries(configs(), &engine.resources)
+        .into_iter()
+        .map(|e| DocsEntry {
+            missing: schema.missing(e.level, &e.custom),
+            level: e.level.label().into(),
+            name: e.name,
+            interface: e.interface,
+            custom: e.custom,
+        })
+        .collect();
+    let fields = schema
+        .fields
+        .iter()
+        .map(|d| DocsField {
+            key: d.key.clone(),
+            title: d.title().into(),
+            kind: serde_json::to_value(d.field.kind)
+                .ok()
+                .and_then(|v| v.as_str().map(String::from))
+                .unwrap_or_default(),
+            values: d.field.values.clone(),
+            required: d.field.required,
+            applies_to: d.field.applies_to.iter().map(|l| l.label().into()).collect(),
+            help: d.field.help.clone(),
+        })
+        .collect();
+    Ok(Json(DocsReport { fields, entries, problems: docs::check_project(schema, configs(), &engine.resources) }))
 }

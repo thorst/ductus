@@ -186,6 +186,19 @@ enum Command {
         #[arg(long, env = "DUCTUS_DATABASE_URL")]
         database_url: Option<String>,
     },
+    /// The company-defined documentation fields (`docs-schema.yaml`) and their values (`custom:`)
+    /// for every interface, destination and resource. Exits 1 if a required value is missing.
+    Docs {
+        /// Only what's missing.
+        #[arg(long)]
+        missing: bool,
+        #[arg(long)]
+        json: bool,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+    },
     /// Who owns which interface and destination (`about.owner`, and `owner` on a destination
     /// someone else owns). `ductus owners reassign` moves ownership.
     #[command(args_conflicts_with_subcommands = true)]
@@ -532,6 +545,7 @@ async fn run(cli: Cli) -> Result<()> {
             };
             exit_on_failure(doctor::run(options).await)
         }
+        Command::Docs { missing, json, root, env } => exit_on_failure(project::docs(&root, &env, missing, json)),
         Command::Owners { action: None, root, env } => exit_on_failure(owners::report(&root, &env)),
         Command::Owners {
             action: Some(OwnersAction::Reassign { from, to, interface, dry_run, root, env }), ..
