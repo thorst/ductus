@@ -84,6 +84,7 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 
 - **People (0.5.8.1):** `ductus user create|list|set|password|disable|enable|unlock` works on the database directly (`--password-stdin` for scripts; a terminal asks twice, no echo). Tests and demos that read a payload through the API need a token with `--permission payloads` (admins have every permission). Test users are named `test-user-...` (the store's last-admin test deletes such admins first, so a demo that makes an admin must name it that way). A new API operation needs a row in `ACCESS` (`api/mod.rs` tests). The store test for the last admin only checks the guard when the test database has no other admin.
 - **Audit (0.5.8.2):** a change that has a transaction takes an `&Audit` (`ductus_store::{Audit, By}`) and writes its row in it (`audit::insert`); one without writes the row first with `record_first` (API) or `Store::record`. New audit actions go in `docs/schema.md` (`audit_log.action`) and in the UI's `ACTIONS` map (`ui/src/components/audit-table.tsx`). Store tests that aren't about the log pass `quiet()`. Test users are `test-user-*`; the CLI tests and `demo-ui.sh` read `/audit` as a token or person with the `audit` permission. `ductus audit export` reads the database directly. The hourly trim deletes anything older than 6 years: a test that needs old rows backdates its own and trims with its own `keep`.
+- **Alerts (0.5.8.3):** ductus.yaml is parsed through `env::parse_yaml` (so `${...}` can't break it) and only `alerts:` is substituted, per environment (`Settings::alerts(&env)`); everything else in it is read as written. **lettre's pooled SMTP transport must be built inside a Tokio runtime** (`Alerts::new` spawns; a plain `#[test]` aborts with "no reactor running": use `#[tokio::test]`). `chrono` has the `serde` feature only through the runtime's dependency tree: `cargo check -p ductus-runtime` compiled a `json!` with a `DateTime` in `ductus-store` that `cargo test -p ductus-store` alone refused; put times in JSON as `to_rfc3339()`. Store tests that make alerts delete them (`forget_alert`): an open test alert would show in a demo engine's counts (the API lists only the engine's own interfaces' alerts anyway). Demos that need mail or a webhook use `ductus sink --smtp`/`--http` (`--dir` keeps each one as a file).
 - **Web UI (`ui/`):** Node 24 in WSL is a per-user install in `~/.local/node` (check.sh and demos.sh put it on the PATH; non-interactive WSL shells don't read `.bashrc`). TypeScript is pinned to 6.0 (typescript-eslint doesn't support 7, the Go one); openapi-typescript's `typescript ^5` peer is overridden in package.json (`overrides`), not `--force`d. TS 6 deprecates `baseUrl`: `paths` alone. A new API field or route = run check.sh, which regenerates `ui/openapi.json` and `ui/src/api/schema.d.ts` and asks for a second run. A `<section>` is a landmark (`region`) only with a name: label cards that tests or screen readers look for (`aria-label`). axe runs in every theme in `demo-ui.sh` (AAA in high contrast): new colors must pass it. Under `set -o pipefail`, `curl` to a closed port fails the whole pipeline: capture its output first.
 - **utoipa names each operation after its handler function**: two modules' `list` once shared the operationId `list`, and the UI's generated types gave `GET /tokens` the message browser's answer. A handler named like another gets `operation_id = "..."` in `#[utoipa::path]` (`every_operation_has_its_own_id` guards it).
 - **Playwright sign-in waits until the URL has left `/sign-in`**: clicking "Sign in" and navigating at once can cancel the request (CI ran a test signed out), and the sign-in page has an h1 too, so "an h1 is visible" proves nothing.
@@ -92,7 +93,7 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 ## Where things are
 
 ```
-crates/ductus-core     config, formats, environments, secrets, password (argon2id, policy), resources (databases, sftp, apis), retention, docs (company-defined
+crates/ductus-core     config, alerts (`alerts:` settings, rules, owners as recipients, the alert state machine, notification text), formats, environments, secrets, password (argon2id, policy), resources (databases, sftp, apis), retention, docs (company-defined
                        documentation fields: docs-schema.yaml, `custom:` values, checks, the snapshot), monitor
                        (`monitor:` expectations and their time rules), hotspots (backlog by lane and worker), about (systems,
                        host/subnet matching), impact, owners (report + in-place reassign), schedule timing, ports,
@@ -102,13 +103,14 @@ crates/ductus-mllp     MLLP framing/listener/client
 crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations); retention.rs (tiers, changes, drops, held area); activity.rs (last activity, pauses);
                        actions.rs (resend, edited copies, message_actions, the quarantine list); users.rs (accounts,
                        sign-in bookkeeping, sessions, appearance); api.rs (tokens, sessions, `Principal`, the message browser);
-                       audit.rs (the audit log: `Audit`, `By`, reads, trimming)
+                       audit.rs (the audit log: `Audit`, `By`, reads, trimming); alerts.rs (alert state, events, the outbox)
 crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for the API: health, queues, drain, pauses),
                        stats.rs (counts and timings in memory: histograms, Prometheus text format),
                        activity.rs (last activity and pauses, kept in the database across restarts),
                        gate.rs (drain gate), retention.rs (applies retention, runs changes, drops partitions),
-                       api/ (REST API: status, messages, actions (resend, edit, quarantine), reports (impact, owners + reassign
+                       alerts.rs (judging every 15 s, the outbox sender, SMTP and webhooks, the heartbeat),
+                       api/ (REST API: status, messages, actions (resend, edit, quarantine), alerts, reports (impact, owners + reassign
                        preview, doctor), retention, tokens, users, me (own account), metrics, hotspots,
                        session (browser sign-in), ui (serves the embedded web UI; build.rs embeds ui/dist)),
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
@@ -118,7 +120,7 @@ crates/ductus-runtime  engine: lib.rs (startup), control.rs (engine state for th
 crates/ductus-cli      the `ductus` command (init.rs: `init`, a new project; dev.rs: `dev`, the engine with an embedded Postgres; dev.rs: `dev`, the engine with an embedded Postgres; project.rs: test/validate/ports/impact/types/secret; new.rs: `new interface`;
                        admin.rs: `user`, `token`, `drain`, `resume`, `pause`, `retention`, `hotspots`;
                        doctor.rs: runs `doctor` (what to check is runtime's `doctor::plan`); owners.rs: `owners` report and reassign;
-                       tools.rs: gen/sink/status;
+                       tools.rs: gen/sink/status; sinks.rs: `sink --smtp`/`--http`;
                        tests/cli.rs runs the binary on temp projects)
 ui/                    web UI (React + Vite; README.md): src/api (typed client, queries, live updates), src/pages,
                        src/components, src/lib (format, hl7, health, theme, openapi: the API reference's reading of the

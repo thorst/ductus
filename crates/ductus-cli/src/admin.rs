@@ -584,6 +584,60 @@ pub async fn hotspots(remote: Remote, interface: Option<&str>, lanes: Option<usi
     Ok(())
 }
 
+/// `ductus alerts`: open alerts, worst first, and what is silenced.
+pub async fn alerts(remote: Remote) -> Result<()> {
+    let report = remote.call(reqwest::Method::GET, "/alerts", None).await?;
+    if report["configured"].as_bool() != Some(true) {
+        println!("alerts aren't set up: add `alerts:` to ductus.yaml (channels and rules)");
+        return Ok(());
+    }
+    let all = report["alerts"].as_array().cloned().unwrap_or_default();
+    let name = |a: &Value| match a["destination"].as_str() {
+        Some(d) if d != ductus_core::config::DEFAULT_DESTINATION => {
+            format!("{} → {d}", a["interface"].as_str().unwrap_or("?"))
+        }
+        _ => a["interface"].as_str().unwrap_or("?").to_string(),
+    };
+    let open: Vec<&Value> = all.iter().filter(|a| a["state"] != "ok").collect();
+    if open.is_empty() {
+        println!("no open alerts ({} interfaces and destinations watched)", all.len());
+    }
+    for a in &open {
+        let since = a["since"].as_str().map(|_| format!(" since {}", local_time(&a["since"]))).unwrap_or_default();
+        let mut notes = Vec::new();
+        if let Some(by) = a["acknowledged_by"].as_str() {
+            notes.push(format!("acknowledged by {by}"));
+        }
+        if a["recovering_since"].is_string() {
+            notes.push("recovering".into());
+        }
+        if a["muted"].as_bool() == Some(true) {
+            notes.push("muted".into());
+        }
+        let notes = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join(", ")) };
+        println!(
+            "{:<9} {}: {}{since}{notes}  [alert {}]",
+            a["severity"].as_str().unwrap_or("?").to_uppercase(),
+            name(a),
+            a["state"].as_str().unwrap_or("?"),
+            a["id"]
+        );
+        if let Some(summary) = a["summary"].as_str() {
+            println!("          {summary}");
+        }
+    }
+    for a in all.iter().filter(|a| a["silenced_until"].is_string()) {
+        let reason = a["silence_reason"].as_str().map(|r| format!(": {r}")).unwrap_or_default();
+        println!(
+            "silenced: {} until {} by {}{reason}",
+            name(a),
+            local_time(&a["silenced_until"]),
+            a["silenced_by"].as_str().unwrap_or("?")
+        );
+    }
+    Ok(())
+}
+
 /// Bytes as people read them: `512 KB`, `3.2 GB`.
 fn size(bytes: i64) -> String {
     let mut value = bytes as f64;

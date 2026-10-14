@@ -31,6 +31,10 @@ export const ACTIONS: Record<string, string> = {
   "retention.confirm": "Confirmed a shorter retention",
   "doctor.run": "Ran connection checks",
   "audit.export": "Exported the audit log",
+  "alert.ack": "Acknowledged an alert",
+  "alert.silence": "Silenced an alert",
+  "alert.unsilence": "Ended an alert's silence",
+  "alert.test": "Sent a test notification",
   "engine.start": "Engine started",
   "engine.stop": "Engine stopped",
   "interface.stopped": "Interface stopped",
@@ -52,6 +56,8 @@ function summary(e: Entry): string {
     if (d.previous === "unclean") parts.push("the previous run did not stop cleanly");
   }
   if (e.action === "engine.stop") parts.push(d.forced ? "forced" : "clean");
+  if (e.action === "alert.silence" && typeof d.until === "string") parts.push(`until ${timestamp(d.until)}`);
+  if (e.action === "alert.ack" && typeof d.state === "string") parts.push(d.state);
   if (e.action === "interface.stopped" && typeof d.reason === "string") parts.push(d.reason);
   if (e.action === "session.failed") {
     if (typeof d.reason === "string") parts.push(d.reason);

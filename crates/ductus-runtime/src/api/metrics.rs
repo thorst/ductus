@@ -43,6 +43,23 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
         u8::from(draining),
     );
 
+    if let Some(a) = &engine.alerts {
+        let rows: Vec<_> =
+            engine.store.alerts().await?.into_iter().filter(|r| super::alerts::ours(&engine, r)).collect();
+        out.family("ductus_alerts_open", "gauge", "Open alerts, by severity.");
+        for severity in ["warning", "critical"] {
+            let open = rows.iter().filter(|r| r.is_open() && r.severity.as_deref() == Some(severity)).count();
+            out.sample("ductus_alerts_open", &format!("severity=\"{severity}\""), open);
+        }
+        out.family(
+            "ductus_alert_send_failures_total",
+            "counter",
+            "Alert notifications that couldn't be sent (each try counts), by channel (`owner`: owners' addresses).",
+        );
+        for (channel, failed) in a.failures() {
+            out.sample("ductus_alert_send_failures_total", &format!("channel=\"{}\"", label(&channel)), failed);
+        }
+    }
     out.family("ductus_interface_stopped", "gauge", "1 if the interface was stopped because its code ran away.");
     for i in &engine.interfaces {
         out.sample("ductus_interface_stopped", &iface(&i.config.name), u8::from(i.health.stopped().is_some()));

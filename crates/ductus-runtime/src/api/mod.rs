@@ -12,6 +12,7 @@
 //! The same listener serves the web UI (`ui.rs`) at every path outside `/api`.
 
 mod actions;
+mod alerts;
 mod audit;
 mod hotspots;
 mod me;
@@ -62,6 +63,7 @@ pub type Shared = Arc<Engine>;
         (name = "messages", description = "The message browser, the quarantine, and resending or correcting messages"),
         (name = "drain", description = "Stop taking messages and deliver what's stored"),
         (name = "reports", description = "Impact, owners and connection checks"),
+        (name = "alerts", description = "Alerts: what is wrong, acknowledging and silencing, and where notifications go"),
         (name = "audit", description = "Who did what: the audit log (the `audit` permission) and your own activity"),
         (name = "retention", description = "How long messages are kept, and changes to it"),
         (name = "tokens", description = "API tokens (admin)")
@@ -90,6 +92,7 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
         .merge(hotspots::routes())
         .merge(messages::routes())
         .merge(actions::routes())
+        .merge(alerts::routes())
         .merge(audit::routes())
         .merge(metrics::routes())
         .merge(reports::routes())
@@ -387,6 +390,13 @@ mod tests {
         ("POST", "/messages/{id}/edit", "operator"),
         ("POST", "/messages/{id}/dismiss", "operator"),
         ("POST", "/messages/dismiss", "operator"),
+        ("GET", "/alerts", "signed"),
+        ("GET", "/alerts/{id}", "signed"),
+        ("POST", "/alerts/{id}/ack", "operator"),
+        ("POST", "/alerts/{id}/silence", "operator"),
+        ("DELETE", "/alerts/{id}/silence", "operator"),
+        ("GET", "/alerts/channels", "operator"),
+        ("POST", "/alerts/channels/{name}/test", "operator"),
         ("GET", "/audit", "audit"),
         ("GET", "/me/activity", "user"),
         ("POST", "/retention/{name}/confirm", "operator"),

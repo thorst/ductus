@@ -554,6 +554,190 @@ async fn an_edited_copy_replaces_the_quarantined_delivery() {
     assert_eq!(status_by_id(&store, original.id).await, Status::Sent);
 }
 
+/// A test alert (unique per test and run): its row as made.
+async fn test_alert(store: &Store, test: &str) -> ductus_store::AlertRow {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let interface = format!("test-{test}-{}-{nanos}", std::process::id());
+    let key = format!("dest:{interface}/lab");
+    // Left by a run that failed before cleaning up (an open test alert would show in engines'
+    // alert counts).
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    sqlx::query("DELETE FROM alert_state WHERE key LIKE 'dest:test-%' AND updated_at < now() - interval '10 minutes'")
+        .execute(&pool)
+        .await
+        .unwrap();
+    let keys = [(key.clone(), interface.clone(), Some("lab".to_string()))];
+    store.ensure_alerts(&keys).await.unwrap();
+    store.ensure_alerts(&keys).await.unwrap(); // again: nothing changes
+    store.alerts().await.unwrap().into_iter().find(|a| a.key == key).expect("made")
+}
+
+/// An alert that fires, as the engine records it.
+fn fired<'a>(deliveries: Vec<(String, chrono::DateTime<chrono::Utc>)>) -> ductus_store::AlertChange<'a> {
+    let now = chrono::Utc::now();
+    ductus_store::AlertChange {
+        state: "stalled",
+        severity: Some("critical"),
+        since: Some(now),
+        ok_since: None,
+        last_notified_at: Some(now),
+        summary: Some("stalled: nothing sent for 2 min"),
+        fresh: true,
+        unacknowledge: false,
+        cancel_waiting: false,
+        event: Some(ductus_store::NewEvent {
+            kind: "fired",
+            state: "stalled",
+            severity: Some("critical"),
+            since: Some(now),
+            deliveries,
+        }),
+    }
+}
+
+/// A change is stored once (compare-and-set on `rev`, as two engines would race), with its event and
+/// its notifications; two senders claiming at once send each notification once; failures retry or
+/// give up; and a recovery cancels what still waits for quiet hours to end.
+#[tokio::test]
+async fn alert_notifications_are_stored_first_and_sent_once() {
+    let Some(store) = store().await else { return };
+    let row = test_alert(&store, "outbox").await;
+    assert_eq!((row.state.as_str(), row.rev, row.notify_count), ("ok", 0, 0));
+    let now = chrono::Utc::now();
+    let later = now + chrono::Duration::hours(8);
+    let deliveries = vec![("oncall".to_string(), now), ("chat".to_string(), now), ("quiet".to_string(), later)];
+    assert!(store.change_alert(row.id, row.rev, &fired(deliveries.clone())).await.unwrap());
+    assert!(!store.change_alert(row.id, row.rev, &fired(deliveries)).await.unwrap(), "stale: the other engine's");
+    let row = store.alert(row.id).await.unwrap().unwrap();
+    assert_eq!((row.state.as_str(), row.severity.as_deref(), row.rev), ("stalled", Some("critical"), 1));
+    let events = store.alert_events(Some(row.id), 10).await.unwrap();
+    assert_eq!(events.len(), 1, "one event, though two engines tried");
+    assert_eq!((events[0].kind.as_str(), events[0].waiting), ("fired", 3));
+    assert!(store.alert_was_told(row.id).await.unwrap(), "due now and not sent yet still counts");
+
+    // Two senders at once: each due notification is claimed by exactly one.
+    let lease = std::time::Duration::from_secs(60);
+    let (a, b) = tokio::join!(store.claim_alert_deliveries(50, lease), store.claim_alert_deliveries(50, lease));
+    let mine: Vec<_> = a.unwrap().into_iter().chain(b.unwrap()).filter(|i| i.alert_id == row.id).collect();
+    let mut channels: Vec<&str> = mine.iter().map(|i| i.channel.as_str()).collect();
+    channels.sort();
+    assert_eq!(channels, ["chat", "oncall"], "the quiet-hours one isn't due");
+    assert!(mine.iter().all(|i| i.attempts == 1 && i.kind == "fired" && i.key == row.key));
+    let again = store.claim_alert_deliveries(50, lease).await.unwrap();
+    assert!(again.iter().all(|i| i.alert_id != row.id), "claimed ones wait for their lease");
+
+    let oncall = mine.iter().find(|i| i.channel == "oncall").unwrap();
+    let chat = mine.iter().find(|i| i.channel == "chat").unwrap();
+    store.alert_delivery_sent(oncall.id).await.unwrap();
+    store.alert_delivery_sent(oncall.id).await.unwrap(); // a retried mark counts once
+    store.alert_delivery_failed(chat.id, "connection refused", Some(chrono::Utc::now())).await.unwrap();
+    let retry = store.claim_alert_deliveries(50, lease).await.unwrap();
+    let retry: Vec<_> = retry.into_iter().filter(|i| i.alert_id == row.id).collect();
+    assert_eq!((retry.len(), retry[0].attempts), (1, 2), "retried");
+    store.alert_delivery_failed(retry[0].id, "still refused", None).await.unwrap();
+    assert_eq!(store.alert(row.id).await.unwrap().unwrap().notify_count, 1);
+    let e = &store.alert_events(Some(row.id), 10).await.unwrap()[0];
+    assert_eq!((e.sent, e.waiting, e.failed), (1, 1, 1));
+    let counts = store.outbox_counts(1).await.unwrap();
+    let chat = counts.iter().find(|c| c.channel == "chat").unwrap();
+    assert!(chat.failed >= 1 && chat.last_error.is_some());
+
+    // Recovered: what still waits for the morning is no longer news.
+    let row = store.alert(row.id).await.unwrap().unwrap();
+    let recovered = ductus_store::AlertChange {
+        state: "ok",
+        severity: None,
+        since: None,
+        ok_since: None,
+        last_notified_at: None,
+        summary: None,
+        fresh: true,
+        unacknowledge: false,
+        cancel_waiting: true,
+        event: Some(ductus_store::NewEvent {
+            kind: "recovered",
+            state: "stalled",
+            severity: Some("critical"),
+            since: row.since,
+            deliveries: vec![("oncall".to_string(), now)],
+        }),
+    };
+    assert!(store.change_alert(row.id, row.rev, &recovered).await.unwrap());
+    let row = store.alert(row.id).await.unwrap().unwrap();
+    assert_eq!((row.state.as_str(), row.notify_count, row.since), ("ok", 0, None));
+    let events = store.alert_events(Some(row.id), 10).await.unwrap();
+    assert_eq!((events[0].kind.as_str(), events[0].state.as_deref()), ("recovered", Some("stalled")));
+    assert_eq!((events[1].sent, events[1].waiting, events[1].failed), (1, 0, 1), "the morning one was cancelled");
+
+    // An engine that dies holding a claim: whoever claims after the lease sends it (at least once).
+    let short = std::time::Duration::from_millis(500);
+    let held: Vec<_> =
+        store.claim_alert_deliveries(50, short).await.unwrap().into_iter().filter(|i| i.alert_id == row.id).collect();
+    assert_eq!((held.len(), held[0].kind.as_str()), (1, "recovered"));
+    tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+    let taken: Vec<_> =
+        store.claim_alert_deliveries(50, lease).await.unwrap().into_iter().filter(|i| i.alert_id == row.id).collect();
+    assert_eq!((taken.len(), taken[0].id, taken[0].attempts), (1, held[0].id, 2));
+
+    // History past `alerts.keep` goes, with its notifications.
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    sqlx::query("UPDATE alert_events SET at = now() - interval '400 days' WHERE alert_id = $1")
+        .bind(row.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(store.trim_alerts(std::time::Duration::from_secs(365 * 86_400), 1000, 10).await.unwrap() >= 2);
+    assert!(store.alert_events(Some(row.id), 10).await.unwrap().is_empty());
+    forget_alert(&pool, row.id).await;
+}
+
+/// Remove a test alert and its history.
+async fn forget_alert(pool: &sqlx::PgPool, id: i32) {
+    sqlx::query("DELETE FROM alert_events WHERE alert_id = $1").bind(id).execute(pool).await.unwrap();
+    sqlx::query("DELETE FROM alert_state WHERE id = $1").bind(id).execute(pool).await.unwrap();
+}
+
+/// Acknowledging needs an open alert; silencing works on any. Both are events of the alert and
+/// rows of the audit log, written together.
+#[tokio::test]
+async fn acknowledging_and_silencing_are_logged_with_the_change() {
+    let Some(store) = store().await else { return };
+    let row = test_alert(&store, "ack").await;
+    let by = ductus_store::By::cli("test-user-anna");
+    let audit = |action| ductus_store::Audit::new(by, action);
+    assert!(store.acknowledge_alert(row.id, "anna", &audit("alert.ack")).await.unwrap().is_none(), "nothing open");
+
+    let until = chrono::Utc::now() + chrono::Duration::hours(2);
+    let silenced =
+        store.silence_alert(row.id, Some(until), "anna", Some("planned work"), &audit("alert.silence")).await.unwrap();
+    let silenced = silenced.unwrap();
+    assert!(silenced.is_silenced(chrono::Utc::now()));
+    assert_eq!(
+        (silenced.silenced_by.as_deref(), silenced.silence_reason.as_deref()),
+        (Some("anna"), Some("planned work"))
+    );
+
+    assert!(store.change_alert(row.id, silenced.rev, &fired(Vec::new())).await.unwrap());
+    let acked = store.acknowledge_alert(row.id, "anna", &audit("alert.ack")).await.unwrap().unwrap();
+    assert_eq!(acked.ack_by.as_deref(), Some("anna"));
+    let ended = store.silence_alert(row.id, None, "anna", None, &audit("alert.unsilence")).await.unwrap().unwrap();
+    assert!(!ended.is_silenced(chrono::Utc::now()) && ended.silenced_by.is_none());
+
+    let kinds: Vec<String> =
+        store.alert_events(Some(row.id), 10).await.unwrap().into_iter().rev().map(|e| e.kind).collect();
+    assert_eq!(kinds, ["silenced", "fired", "acknowledged", "unsilenced"]);
+    let logged: Vec<String> = audit_of(&store, &row.interface).await.into_iter().map(|(a, ..)| a).collect();
+    assert_eq!(logged, ["alert.silence", "alert.ack", "alert.unsilence"]);
+    assert_eq!(audit_of(&store, &row.interface).await[0].2["reason"], "planned work");
+
+    // A new episode ends the acknowledgement.
+    let row = store.alert(row.id).await.unwrap().unwrap();
+    assert!(store.change_alert(row.id, row.rev, &fired(Vec::new())).await.unwrap());
+    assert!(store.alert(row.id).await.unwrap().unwrap().ack_by.is_none());
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    forget_alert(&pool, row.id).await;
+}
+
 /// The audit rows of one interface, oldest first, as (action, message id, detail).
 async fn audit_of(store: &Store, interface: &str) -> Vec<(String, Option<i64>, serde_json::Value)> {
     let filter =

@@ -14,7 +14,9 @@
 # an operator, it corrects a quarantined message (an edited copy), resends from the quarantine
 # screen, pauses and resumes a destination, confirms the shorter retention, runs the connection
 # checks, and drains and resumes the engine; as an admin, it creates a token (its secret works),
-# then revokes it (it doesn't). Screenshots: ui/test-results/.
+# then revokes it (it doesn't). Alerts: the open ones (orders' quarantine, the lab's stall) are
+# acknowledged and silenced, a channel is tested (one works, one can't be reached), and a viewer
+# only looks. Screenshots: ui/test-results/.
 #
 # Needs Node and the UI's packages (cd ui && npm ci), and Playwright's Chromium
 # (npx playwright install --with-deps chromium).
@@ -47,7 +49,17 @@ apis:
 EOF
 
 mkdir -p "$P/interfaces/adt" "$P/interfaces/orders" "$P/interfaces/billing"
-printf 'api: { listen: 127.0.0.1:7794 }\n' >"$P/ductus.yaml"
+# Alerts (0.5.8.3): `chat` reaches a sink; `pager` reaches nothing, so its failures show.
+cat >"$P/ductus.yaml" <<'EOF'
+api: { listen: 127.0.0.1:7794 }
+alerts:
+  channels:
+    chat: { webhook: { url: "http://127.0.0.1:8098/chat" } }
+    pager: { webhook: { url: "http://127.0.0.1:9/page", format: teams } }
+  rules:
+    - { when: [error, stalled, stopped], severity: critical, to: [chat, pager] }
+    - { when: [behind, silent, missed], severity: warning, to: [chat] }
+EOF
 cat >"$P/interfaces/adt/interface.yaml" <<'EOF'
 name: adt
 source: { mllp: { port: 6721 } }
@@ -104,9 +116,14 @@ validation=$("$BIN" validate || true)
   echo "FAIL: validation"
   exit 1
 }
+"$BIN" sink --http 8098 >"$P/hook.log" 2>&1 &
+HOOK=$!
 "$BIN" run >"$P/run.log" 2>&1 &
 ENGINE=$!
-trap 'kill -INT $ENGINE 2>/dev/null || true' EXIT
+trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true' EXIT
+# Alerts of earlier runs of this demo: start clean.
+psql -q "$DB" -c "DELETE FROM alert_events WHERE key IN ('dest:adt/lab', 'dest:adt/archive', 'dest:orders/default', 'dest:billing/default', 'iface:adt', 'iface:orders', 'iface:billing')" \
+  -c "UPDATE alert_state SET state = 'ok', severity = NULL, since = NULL, ok_since = NULL, ack_by = NULL, ack_at = NULL, silenced_until = NULL, rev = rev + 1 WHERE interface IN ('adt', 'orders', 'billing')"
 until grep "started interfaces=" "$P/run.log" >/dev/null; do kill -0 $ENGINE || { cat "$P/run.log"; exit 1; }; sleep 0.2; done
 echo "engine log: $P/run.log"
 export DUCTUS_API_TOKEN=$("$BIN" token create "ui-demo-operator-$$" --role operator --permission payloads 2>/dev/null)

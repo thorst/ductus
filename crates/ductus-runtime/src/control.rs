@@ -111,6 +111,8 @@ pub struct Engine {
     /// Names this run in the audit log (`engine.start` and `engine.stop` carry it), so a start
     /// with no stop shows up as a crash.
     pub instance: String,
+    /// Alerts (`alerts:` in ductus.yaml), if configured.
+    pub alerts: Option<Arc<crate::alerts::Alerts>>,
 }
 
 /// What the engine is made of, from startup.
@@ -128,6 +130,7 @@ pub struct Parts {
     pub auth: ductus_core::settings::AuthSettings,
     pub audit: ductus_core::settings::AuditSettings,
     pub instance: String,
+    pub alerts: Option<Arc<crate::alerts::Alerts>>,
 }
 
 impl Engine {
@@ -146,6 +149,7 @@ impl Engine {
             auth,
             audit,
             instance,
+            alerts,
         } = parts;
         let engine = Arc::new(Self {
             started_at: Utc::now(),
@@ -166,6 +170,7 @@ impl Engine {
             auth,
             audit,
             instance,
+            alerts,
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

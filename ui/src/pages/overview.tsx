@@ -3,6 +3,7 @@ import { Link } from "@tanstack/react-router";
 import { CircleCheck } from "lucide-react";
 import type { Schemas } from "@/api/client";
 import { engine, interfaces } from "@/api/queries";
+import { AlertItem, useOpenAlerts } from "@/components/alerts";
 import { HealthBadge } from "@/components/health-badge";
 import { Loaded, PageHeader } from "@/components/page";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
@@ -27,6 +28,7 @@ export function OverviewPage() {
         {(all) => (
           <div className="space-y-6">
             {info.data && <DrainBanner drain={info.data.drain} />}
+            <OpenAlerts />
             <Totals all={all} />
             <Attention all={all} />
             {info.data && <Resources resources={info.data.resources.filter((r) => r.calls.count + r.errors > 0)} />}
@@ -50,6 +52,28 @@ function DrainBanner({ drain }: { drain: Schemas["DrainStatus"] }) {
           "."}
       {drain.stop_when_drained && " The engine stops once drained."}
     </p>
+  );
+}
+
+/** Open alerts, worst first (only when alerts are set up and something is open). */
+function OpenAlerts() {
+  const { open } = useOpenAlerts();
+  if (open.length === 0) return null;
+  return (
+    <Card aria-label="Open alerts">
+      <CardHeader>
+        <CardTitle>Open alerts</CardTitle>
+        <Link to="/alerts" className="text-sm">
+          All alerts
+        </Link>
+      </CardHeader>
+      <ul className="divide-y">
+        {open.slice(0, 5).map((a) => (
+          <AlertItem key={a.id} alert={a} />
+        ))}
+      </ul>
+      {open.length > 5 && <CardBody className="text-sm text-muted">and {count(open.length - 5)} more</CardBody>}
+    </Card>
   );
 }
 

@@ -179,3 +179,17 @@ export const docs = queryOptions({
   queryFn: async () => unwrap(await api.GET("/docs")),
   staleTime: 60_000,
 });
+
+/** Alerts: every interface's and destination's, open ones first, and what happened lately. */
+export const alerts = queryOptions({
+  queryKey: ["alerts"],
+  queryFn: async () => unwrap(await api.GET("/alerts")),
+  refetchInterval: HEALTH_REFRESH_MS,
+});
+
+/** Where alerts go and how sending went lately (operators: it shows addresses). */
+export const alertChannels = queryOptions({
+  queryKey: ["alerts", "channels"],
+  queryFn: async () => unwrap(await api.GET("/alerts/channels")),
+  refetchInterval: HEALTH_REFRESH_MS,
+});

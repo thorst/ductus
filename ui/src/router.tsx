@@ -176,6 +176,13 @@ const auditPage = createRoute({
   component: lazyRouteComponent(() => import("@/pages/audit"), "AuditPage"),
 });
 
+/** Its own chunk: opened when something is wrong (the header and the overview show what's open). */
+const alertsPage = createRoute({
+  getParentRoute: () => app,
+  path: "/alerts",
+  component: lazyRouteComponent(() => import("@/pages/alerts"), "AlertsPage"),
+});
+
 /** Its own chunk: opened from the user menu, rarely. */
 const accountPage = createRoute({
   getParentRoute: () => app,
@@ -222,6 +229,7 @@ const tree = root.addChildren([
     interfaces,
     iface,
     quarantine,
+    alertsPage,
     hotspots,
     impact,
     owners,

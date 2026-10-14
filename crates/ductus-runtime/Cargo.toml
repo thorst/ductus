@@ -17,6 +17,7 @@ ductus-mllp = { version = "0.5.0-dev", path = "../ductus-mllp" }
 ductus-script = { version = "0.5.0-dev", path = "../ductus-script" }
 ductus-store = { version = "0.5.0-dev", path = "../ductus-store" }
 futures-util = "0.3"
+lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "pool", "builder", "hostname", "tokio1", "tokio1-rustls", "rustls-platform-verifier", "aws-lc-rs"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rustls-platform-verifier = "0.7.1"

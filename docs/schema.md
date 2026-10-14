@@ -195,7 +195,7 @@ Who did what, to what, from where, and how it ended. Written in the transaction 
 | `actor_name` | text | The user's or token's name at the time (a snapshot). |
 | `via` | text | `session` (the web UI), `token`, `cli`, `engine`; none for rows made from `message_actions` when this table was added. |
 | `ip` | inet | The address the connection came from (a proxy's address behind one). |
-| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create`, `user.update`, `user.disable`, `user.unlock`, `token.create`, `token.revoke`, `message.payload.read`, `message.release` (resend of quarantined), `message.replay`, `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `engine.start`, `engine.stop`, `interface.stopped`. |
+| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create`, `user.update`, `user.disable`, `user.unlock`, `token.create`, `token.revoke`, `message.payload.read`, `message.release` (resend of quarantined), `message.replay`, `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `interface.stopped`. |
 | `subject` | text | What it was done to: a username, a token name, `interface/destination`. |
 | `interface` | text | The interface it concerns. |
 | `message_id` | bigint | The message, when the request was about exactly one. |
@@ -268,6 +268,70 @@ The project's documentation as the company wrote it, for SQL reports and BI tool
 | `updated_at` | timestamptz | When the row last changed. |
 
 Indexes: primary key `(kind, name)`; `docs_snapshot_docs` (GIN on `docs`).
+
+## `alert_state`
+
+One row per thing that can alert: each interface (`iface:<interface>`) and each destination (`dest:<interface>/<destination>`), made when an engine with `alerts:` in ductus.yaml first runs it (so it can be silenced before anything fires). Changed by compare-and-set on `rev`: two engines on one database judge the same state and only one records each change.
+
+| column | type | |
+|---|---|---|
+| `id` | integer | Identity; the API's `/alerts/{id}`. |
+| `key` | text | `iface:<interface>` or `dest:<interface>/<destination>` (unique). |
+| `interface` | text | The interface. |
+| `destination` | text | The destination; none for the interface's own alert. |
+| `state` | text | `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`, `missed` (an interface). |
+| `severity` | text | `warning` or `critical` (from the first rule naming the state), while open. |
+| `since` | timestamptz | Bad since (when it fired). |
+| `ok_since` | timestamptz | Fine again since then, not yet for `alerts.settle`: bad again before that reopens the same alert. |
+| `last_notified_at` | timestamptz | When people were last told, or will be once quiet hours end; reminders count from it. |
+| `notify_count` | integer | Notifications sent since it fired. |
+| `summary` | text | The health view's words, as of the last check. |
+| `ack_by` | text | Who acknowledged it (no reminders until it escalates or recovers). |
+| `ack_at` | timestamptz | When. |
+| `silenced_until` | timestamptz | Nothing is sent about it until then. |
+| `silenced_by` | text | Who silenced it. |
+| `silence_reason` | text | Why. |
+| `rev` | bigint | Each change adds one (compare-and-set). |
+| `updated_at` | timestamptz | Last change. |
+
+Indexes: primary key `id`; unique `key`.
+
+## `alert_events`
+
+What happened to each alert: `fired`, `escalated`, `reminded`, `recovered` (the engine) and `acknowledged`, `silenced`, `unsilenced` (people, also in `audit_log`). Rows older than `alerts.keep` (default a year) are deleted hourly with their notifications.
+
+| column | type | |
+|---|---|---|
+| `id` | bigint | Identity. |
+| `at` | timestamptz | When. |
+| `alert_id` | integer | `alert_state.id` (no foreign key). |
+| `key` | text | The alert's key. |
+| `kind` | text | See above. |
+| `state` | text | The state then; for `recovered`, what it recovered from. |
+| `severity` | text | The severity then. |
+| `since` | timestamptz | When the alert turned bad, for the words of a notification sent later. |
+| `summary` | text | The health view's words then. |
+| `by_name` | text | Who acknowledged or silenced it. |
+| `detail` | jsonb | For a silence: `until` and `reason`. |
+
+Indexes: primary key `id`; `alert_events_alert (alert_id, id)`; `alert_events_at (at)`.
+
+## `alert_deliveries`
+
+The outbox: one row per notification (an event to a channel), stored with the event before anything is sent. Senders claim due rows with `FOR UPDATE SKIP LOCKED` and a two-minute lease, so two engines send each once; a crash between sending and marking it sent sends it again after the lease (at least once).
+
+| column | type | |
+|---|---|---|
+| `id` | bigint | Identity. |
+| `event_id` | bigint | `alert_events.id` (deleted with it). |
+| `channel` | text | A channel's name; `<name>/email` and `<name>/webhook` for a channel with both; `email:<address>` for an owner. |
+| `status` | text | `pending`, `sent`, `failed` (given up after 10 tries, about six hours), `cancelled` (it recovered before quiet hours ended). |
+| `attempts` | integer | Tries so far. |
+| `last_error` | text | Why the last try failed. |
+| `next_try_at` | timestamptz | Due then (after quiet hours, or a back-off of 30 s doubling to an hour); while claimed, the end of the lease. |
+| `sent_at` | timestamptz | When it went out. |
+
+Indexes: primary key `id`; `alert_deliveries_due (next_try_at) WHERE status = 'pending'`; `alert_deliveries_event (event_id)`.
 
 ## Functions
 

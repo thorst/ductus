@@ -265,6 +265,40 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
         }
     }
 
+    // Alerts (`alerts:` in ductus.yaml), with this environment's variables and secrets.
+    match ductus_core::settings::Settings::load(root) {
+        Err(e) => {
+            problems += 1;
+            println!("✗ {e:#}");
+        }
+        Ok(settings) => match settings.alerts(&env) {
+            Err(e) => {
+                problems += 1;
+                println!("✗ {e:#}");
+            }
+            Ok(None) => {
+                for config in configs().filter(|c| !c.alert.to.is_empty()) {
+                    println!("⚠ {}: alert.to is set, but ductus.yaml has no `alerts:`", config.name);
+                }
+            }
+            Ok(Some(alerts)) => {
+                println!("✓ alerts: {} channel(s), {} rule(s)", alerts.channels.len(), alerts.rules.len());
+                for warning in alerts.warnings() {
+                    println!("⚠ {warning}");
+                }
+                for problem in configs().flat_map(|c| alerts.check_interface(&c.name, &c.alert)) {
+                    problems += 1;
+                    println!("✗ {problem}");
+                }
+                for owner in unreachable_owners(&alerts, &settings.owners, configs()) {
+                    println!(
+                        "⚠ owner `{owner}`: not in `owners:` in ductus.yaml and not an email address: its alerts reach someone only if a user has that name and an email (the engine checks at start)"
+                    );
+                }
+            }
+        },
+    }
+
     let diagnostics = &analysis.diagnostics;
     for d in diagnostics {
         if d.is_error() {
@@ -284,6 +318,39 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
 
     println!("\n{}", if problems == 0 { "valid".to_string() } else { format!("{problems} problem(s)") });
     Ok(problems == 0)
+}
+
+/// Owners that alerts sent to `owner` can't reach from what's in the project (users live in the
+/// database, so a user's name may still reach someone).
+fn unreachable_owners<'a>(
+    alerts: &ductus_core::alerts::AlertSettings,
+    directory: &BTreeMap<String, ductus_core::alerts::OwnerContact>,
+    configs: impl Iterator<Item = &'a InterfaceConfig> + Clone,
+) -> Vec<String> {
+    use ductus_core::alerts::OWNER;
+    let to_owner = alerts.rules.iter().any(|r| r.to.iter().any(|t| t == OWNER))
+        || configs.clone().any(|c| c.alert.to.iter().any(|t| t == OWNER));
+    if !to_owner {
+        return Vec::new();
+    }
+    ductus_core::owners::by_owner(ductus_core::owners::owned(configs))
+        .into_iter()
+        .map(|(owner, _)| owner)
+        .filter(|o| !o.is_empty() && ductus_core::alerts::owner_addresses(o, &[], directory).is_none())
+        .collect()
+}
+
+/// `ductus alerts test <channel>`: a test notification from ductus.yaml, without an engine.
+pub async fn test_alert(root: &Path, env: &str, channel: &str) -> Result<()> {
+    let environment = Environment::load(root, env)?;
+    let settings = ductus_core::settings::Settings::load(root)?;
+    let Some(alerts) = settings.alerts(&environment)? else {
+        anyhow::bail!("ductus.yaml has no `alerts:`");
+    };
+    let alerts = ductus_runtime::alerts::Alerts::new(alerts, settings.owners, env)?;
+    alerts.test(channel).await?;
+    println!("sent a test notification to `{channel}`");
+    Ok(())
 }
 
 /// Every .ts file of the project into `files`; returns the shared modules (see

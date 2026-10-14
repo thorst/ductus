@@ -4,8 +4,9 @@ import { ArrowRight, CirclePause, CirclePlay, Flame, MessageSquareText } from "l
 import { useState } from "react";
 import { pause, resume, useCanOperate, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
-import { docs, iface } from "@/api/queries";
+import { alerts, docs, iface } from "@/api/queries";
 import { ActionDialog } from "@/components/action-dialog";
+import { AlertItem } from "@/components/alerts";
 import { DocFields } from "@/components/docs-values";
 import { HealthBadge } from "@/components/health-badge";
 import { MessageList } from "@/components/message-list";
@@ -108,6 +109,7 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
           </dl>
         </CardBody>
       </Card>
+      <AlertsCard name={i.name} />
       <DocumentationCard name={i.name} />
       <h2 className="text-base font-semibold">Destinations</h2>
       <div className="grid items-start gap-4 xl:grid-cols-2">
@@ -116,6 +118,30 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * Its alerts (its own and its destinations'), when alerts are set up: open ones with what's wrong,
+ * and silencing for planned work before anything fires.
+ */
+function AlertsCard({ name }: { name: string }) {
+  const { data } = useQuery(alerts);
+  if (!data?.configured) return null;
+  const mine = data.alerts.filter((a) => a.interface === name);
+  const open = mine.filter((a) => a.state !== "ok").length;
+  return (
+    <Card aria-label="Alerts">
+      <CardHeader>
+        <CardTitle>Alerts</CardTitle>
+        <span className="text-xs text-muted">{open ? `${count(open)} open` : "nothing open"}</span>
+      </CardHeader>
+      <ul className="divide-y">
+        {mine.map((a) => (
+          <AlertItem key={a.id} alert={a} link={false} />
+        ))}
+      </ul>
+    </Card>
   );
 }
 

@@ -15,6 +15,330 @@
     }
   ],
   "paths": {
+    "/alerts": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Alerts: open ones first, and what happened lately.",
+        "operationId": "list_alerts",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertsOverview"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/alerts/channels": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Where alerts go, and how sending has gone lately. Secrets are never shown. Operator.",
+        "operationId": "alert_channels",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ChannelsOverview"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/alerts/channels/{name}/test": {
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Send a test notification to a channel now (it says it is a test). Answers 502 with the reason\nwhen it can't be sent. Operator; logged.",
+        "operationId": "test_channel",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Channel name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TestResult"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/alerts/{id}": {
+      "get": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "One alert and its history.",
+        "operationId": "get_alert",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Alert id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertDetail"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/alerts/{id}/ack": {
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Acknowledge an open alert: someone is on it. No reminders until it gets worse or recovers.\nOperator.",
+        "operationId": "acknowledge",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Alert id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertInfo"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/alerts/{id}/silence": {
+      "post": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "Silence an alert: nothing is sent about it (fired, worse, reminders, recovery) until the time\nis up. It still shows. Works before anything fires (planned work). A silence is not a pause:\nmessages still wait. Operator.",
+        "operationId": "silence",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Alert id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/SilenceRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertInfo"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "alerts"
+        ],
+        "summary": "End a silence early. Operator.",
+        "operationId": "unsilence",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Alert id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AlertInfo"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/audit": {
       "get": {
         "tags": [
@@ -2333,6 +2657,240 @@
           }
         }
       },
+      "AlertDetail": {
+        "type": "object",
+        "required": [
+          "alert",
+          "events"
+        ],
+        "properties": {
+          "alert": {
+            "$ref": "#/components/schemas/AlertInfo"
+          },
+          "events": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertEvent"
+            },
+            "description": "Newest first (the last 100)."
+          }
+        }
+      },
+      "AlertEvent": {
+        "type": "object",
+        "required": [
+          "id",
+          "at",
+          "alert",
+          "key",
+          "kind",
+          "sent",
+          "waiting",
+          "failed"
+        ],
+        "properties": {
+          "alert": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "by": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who acknowledged or silenced it."
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "key": {
+            "type": "string"
+          },
+          "kind": {
+            "type": "string",
+            "description": "`fired`, `escalated`, `reminded`, `recovered`, `acknowledged`, `silenced`, `unsilenced`."
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its notifications: sent, still to send (waiting for quiet hours to end, or being retried),\nand given up on."
+          },
+          "severity": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "state": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The state then (for `recovered`: what it recovered from)."
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "AlertInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "key",
+          "interface",
+          "state",
+          "notifications",
+          "muted"
+        ],
+        "properties": {
+          "acknowledged_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "acknowledged_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "destination": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "interface": {
+            "type": "string"
+          },
+          "key": {
+            "type": "string",
+            "description": "`iface:<interface>` or `dest:<interface>/<destination>`."
+          },
+          "last_notified_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When people were last told (or will be, once quiet hours end)."
+          },
+          "muted": {
+            "type": "boolean",
+            "description": "Its interface says `alert: { mute: true }`: nothing is ever sent about it."
+          },
+          "notifications": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Notifications sent since it fired."
+          },
+          "recovering_since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Fine again since then, but not for `alerts.settle` yet (it may still reopen)."
+          },
+          "severity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`warning` or `critical` while open."
+          },
+          "silence_reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "silenced_by": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "silenced_until": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Set while silenced: nothing is sent until then."
+          },
+          "since": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "Bad since."
+          },
+          "state": {
+            "type": "string",
+            "description": "`ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`,\n`missed` (an interface)."
+          },
+          "summary": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The health view's words, as of the last check."
+          }
+        }
+      },
+      "AlertsOverview": {
+        "type": "object",
+        "required": [
+          "configured",
+          "alerts",
+          "recent"
+        ],
+        "properties": {
+          "alerts": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertInfo"
+            },
+            "description": "Every interface and destination, open alerts first (critical, then oldest)."
+          },
+          "configured": {
+            "type": "boolean",
+            "description": "`alerts:` is in ductus.yaml. Without it nothing is judged or sent."
+          },
+          "recent": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertEvent"
+            },
+            "description": "The latest events, newest first."
+          }
+        }
+      },
       "Appearance": {
         "type": "object",
         "required": [
@@ -2573,6 +3131,163 @@
           "to": {
             "type": "integer",
             "format": "int32"
+          }
+        }
+      },
+      "ChannelCounts": {
+        "type": "object",
+        "required": [
+          "sent",
+          "waiting",
+          "failed"
+        ],
+        "properties": {
+          "failed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "ChannelInfo": {
+        "type": "object",
+        "required": [
+          "name",
+          "email",
+          "sent",
+          "waiting",
+          "failed"
+        ],
+        "properties": {
+          "email": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "last_error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "last_sent": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "name": {
+            "type": "string"
+          },
+          "sent": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Notifications in the last 7 days: sent, still to send, given up on."
+          },
+          "waiting": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "webhook": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Scheme and host only: the rest of a webhook URL is often its secret."
+          },
+          "webhook_format": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`json`, `slack` or `teams`."
+          }
+        }
+      },
+      "ChannelsOverview": {
+        "type": "object",
+        "required": [
+          "configured",
+          "channels",
+          "owners"
+        ],
+        "properties": {
+          "channels": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ChannelInfo"
+            }
+          },
+          "configured": {
+            "type": "boolean"
+          },
+          "heartbeat": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The heartbeat URL (scheme and host) and how often."
+          },
+          "owner_notifications": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ChannelCounts",
+                "description": "Sent to owners in the last 7 days (each owner address is a channel of its own)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "owners": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnerReach"
+            },
+            "description": "Owners named in interface.yaml, when a rule sends to `owner`."
+          },
+          "quiet": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`\"22:00-06:00\"` and which severities wait, if set."
+          },
+          "repeat": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Reminders: `4h`, or none."
+          },
+          "smtp": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SmtpInfo"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       },
@@ -4318,6 +5033,25 @@
           }
         }
       },
+      "OwnerReach": {
+        "type": "object",
+        "required": [
+          "owner",
+          "addresses"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Where alerts for this owner go; empty: nowhere (no user with that name and an email, not\nin `owners:`, not an address)."
+          },
+          "owner": {
+            "type": "string"
+          }
+        }
+      },
       "PasswordChange": {
         "type": "object",
         "required": [
@@ -4962,6 +5696,57 @@
           }
         }
       },
+      "SilenceRequest": {
+        "type": "object",
+        "required": [
+          "for"
+        ],
+        "properties": {
+          "for": {
+            "type": "string",
+            "description": "How long: `30m`, `4h`, `2d` (at most 30 days)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why (planned work, a known outage): shown to everyone who sees the alert."
+          }
+        }
+      },
+      "SmtpInfo": {
+        "type": "object",
+        "required": [
+          "host",
+          "port",
+          "tls",
+          "from"
+        ],
+        "properties": {
+          "from": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "tls": {
+            "type": "string",
+            "description": "`starttls`, `tls` or `none`."
+          },
+          "username": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
       "Step": {
         "type": "object",
         "description": "One step of a check: `DNS`, `connect`, `TLS`, `login`, `HTTP`, `commits`, `folder`, `port`.",
@@ -4996,6 +5781,21 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "TestResult": {
+        "type": "object",
+        "required": [
+          "channel",
+          "sent"
+        ],
+        "properties": {
+          "channel": {
+            "type": "string"
+          },
+          "sent": {
+            "type": "boolean"
           }
         }
       },
@@ -5270,6 +6070,10 @@
     {
       "name": "reports",
       "description": "Impact, owners and connection checks"
+    },
+    {
+      "name": "alerts",
+      "description": "Alerts: what is wrong, acknowledging and silencing, and where notifications go"
     },
     {
       "name": "audit",

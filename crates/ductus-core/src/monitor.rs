@@ -136,6 +136,24 @@ impl Hours {
         if self.start < self.end { self.start <= t && t < self.end } else { t >= self.start || t < self.end }
     }
 
+    /// Whether `t` is inside the hours (local time).
+    pub fn includes(&self, t: DateTime<Utc>) -> bool {
+        self.contains(t.with_timezone(&Local).time())
+    }
+
+    /// When the current stretch of hours ends, if `now` is inside them.
+    pub fn ends(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let local = now.with_timezone(&Local);
+        if !self.contains(local.time()) {
+            return None;
+        }
+        let mut day = local.date_naive();
+        if local.time() >= self.end {
+            day = day.succ_opt()?; // overnight hours, before midnight: they end tomorrow
+        }
+        Some(Local.from_local_datetime(&day.and_time(self.end)).earliest()?.with_timezone(&Utc))
+    }
+
     /// When the current stretch of hours started, if `now` is inside them.
     fn started(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let local = now.with_timezone(&Local);

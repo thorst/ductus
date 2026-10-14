@@ -1,6 +1,7 @@
 //! Runs interfaces: receive → persist → ACK, then workers transform and deliver.
 
 pub mod activity;
+pub mod alerts;
 pub mod api;
 pub mod audit;
 pub mod control;
@@ -91,6 +92,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     // Loaded now so a missing variable or secret stops startup; used by interface code (v0.4).
     let resources = ductus_core::Resources::load(root, &env)?;
     let settings = ductus_core::settings::Settings::load(root)?;
+    let alert_settings = settings.alerts(&env)?;
     let heap_mb = settings.isolates.heap_mb;
     let api_address = settings.api.address(options.api_listen.as_deref())?;
     if configs.is_empty() {
@@ -116,6 +118,19 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     if !missing.is_empty() {
         bail!("{}", missing.join("\n"));
     }
+    let alerts = match alert_settings {
+        Some(a) => {
+            let wrong: Vec<String> = configs.iter().flat_map(|c| a.check_interface(&c.name, &c.alert)).collect();
+            if !wrong.is_empty() {
+                bail!("{}", wrong.join("\n"));
+            }
+            for warning in a.warnings() {
+                tracing::warn!("{warning}");
+            }
+            Some(Arc::new(alerts::Alerts::new(a, settings.owners.clone(), &options.env)?))
+        }
+        None => None,
+    };
     let sftp_server = |name: &str| resources.sftp.get(name).cloned();
     let store = Store::connect(database_url, options.db_connections).await?;
     // The company's documentation fields: a broken docs-schema.yaml is for `ductus validate` to report,
@@ -351,11 +366,13 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         auth: settings.auth.clone(),
         audit: settings.audit,
         instance: instance.clone(),
+        alerts,
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse
     // to start (the engine may be all that is left to move messages), but it is an error.
     audit::start(&engine, stopped_rx, retention_days).await;
+    alerts::start(&engine).await;
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
         api_server = Some(api::serve(engine.clone(), host, *port).await?);

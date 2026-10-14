@@ -1588,6 +1588,70 @@ fields:
   runbook: { type: url, applies_to: [interface, destination] }
 "#;
 
+/// `ductus validate` reads `alerts:` with each environment's values and says what is wrong or
+/// won't reach anyone; `ductus alerts test` sends a test notification without an engine (here to
+/// `ductus sink --http`).
+#[test]
+fn validate_checks_alerts_and_a_channel_can_be_tested() {
+    let dir = hospital();
+    let root = dir.path();
+    let port = free_port();
+    std::fs::create_dir_all(root.join("environments")).unwrap();
+    std::fs::write(root.join("environments/dev.yaml"), "variables: {}\n").unwrap();
+    std::fs::write(root.join("environments/prod.yaml"), format!("variables:\n  HOOK: http://127.0.0.1:{port}/chat\n"))
+        .unwrap();
+    let settings = |smtp: &str| {
+        format!(
+            "alerts:\n{smtp}  channels:\n    chat: {{ webhook: {{ url: \"${{HOOK}}\", format: teams }} }}\n  rules:\n    - {{ when: [error, stalled], severity: critical, to: [chat, owner] }}\nowners:\n  Lab team: {{ email: lab@hospital.example }}\n"
+        )
+    };
+    std::fs::write(root.join("ductus.yaml"), settings("")).unwrap();
+    let (ok, out) = ductus(root, &["validate", "--env", "prod"]);
+    assert!(!ok && out.contains("✗ in ductus.yaml: alerts: email channels and `owner` need `smtp:`"), "{out}");
+
+    std::fs::write(
+        root.join("ductus.yaml"),
+        settings("  smtp: { host: smtp.hospital.example, from: ductus@hospital.example }\n"),
+    )
+    .unwrap();
+    let (ok, out) = ductus(root, &["validate", "--env", "dev"]);
+    assert!(!ok && out.contains("missing in environment `dev`: HOOK"), "{out}");
+    let (ok, out) = ductus(root, &["validate", "--env", "prod"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("✓ alerts: 1 channel(s), 1 rule(s)"), "{out}");
+    assert!(out.contains("⚠ alerts: no rule names behind, stopped, silent, missed"), "{out}");
+    assert!(out.contains("⚠ owner `Integration team`: not in `owners:`"), "{out}");
+    assert!(!out.contains("owner `Lab team`"), "it is in `owners:`: {out}");
+
+    edit(&root.join("interfaces/results/interface.yaml"), "source:", "alert: { to: [pager] }\nsource:");
+    let (ok, out) = ductus(root, &["validate", "--env", "prod"]);
+    assert!(!ok && out.contains("✗ results: alert.to names `pager`, but alerts.channels has no such channel"), "{out}");
+
+    // A test notification, straight from ductus.yaml.
+    let requests = root.join("requests");
+    let sink = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["sink", "--http", &port.to_string(), "--dir"])
+        .arg(&requests)
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let _sink = Child(sink);
+    let (ok, out) = ductus(root, &["alerts", "test", "nope", "--env", "prod"]);
+    assert!(!ok && out.contains("no channel named `nope` (defined: chat)"), "{out}");
+    let mut sent = (false, String::new());
+    for _ in 0..50 {
+        sent = ductus(root, &["alerts", "test", "chat", "--env", "prod"]);
+        if sent.0 {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100)); // the sink is starting
+    }
+    assert!(sent.0 && sent.1.contains("sent a test notification to `chat`"), "{}", sent.1);
+    let request = std::fs::read_to_string(requests.join("request-1.txt")).unwrap();
+    assert!(request.starts_with("POST /chat"), "{request}");
+    assert!(request.contains("AdaptiveCard") && request.contains("[Ductus prod] test notification"), "{request}");
+}
+
 fn edit(path: &std::path::Path, from: &str, to: &str) {
     let text = std::fs::read_to_string(path).unwrap();
     assert!(text.contains(from), "{from} not in {}", path.display());

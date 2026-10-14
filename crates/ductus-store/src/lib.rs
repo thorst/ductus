@@ -8,6 +8,7 @@
 
 mod actions;
 mod activity;
+mod alerts;
 mod api;
 mod audit;
 mod docs;
@@ -16,6 +17,7 @@ mod users;
 
 pub use actions::{Action, Actor, Copy, Dismissed, Edited, Quarantined, Resend, Resent};
 pub use activity::{BaselineRow, DestinationActivity, InterfaceActivity, Oldest, PauseRow, Received, Seen};
+pub use alerts::{AlertChange, AlertEventRow, AlertRow, NewEvent, OutboxCount, OutboxItem};
 pub use api::{
     Browse, LaneRow, MessageRow, PERMISSIONS, Principal, QueueCount, Role, SESSION_PREFIX, SessionFor, SessionLimits,
     TOKEN_PREFIX, Token, clean_permissions,

@@ -48,6 +48,7 @@ export function useRefresh() {
         "users",
         "me",
         "audit",
+        "alerts",
       ].map((key) => queryClient.invalidateQueries({ queryKey: [key] })),
     );
 }
@@ -233,4 +234,25 @@ export async function revokeMyToken(name: string) {
 export async function revokeToken(name: string) {
   const { response, error } = await api.DELETE("/tokens/{name}", { params: { path: { name } } });
   if (!response.ok) unwrap({ response, error });
+}
+
+/** Someone is on it: no reminders until it gets worse or recovers. */
+export async function acknowledgeAlert(id: number) {
+  return unwrap(await api.POST("/alerts/{id}/ack", { params: { path: { id } } }));
+}
+
+/** Send nothing about an alert for `duration` (`4h`): planned work, a known outage. */
+export async function silenceAlert(id: number, duration: string, why: string) {
+  return unwrap(
+    await api.POST("/alerts/{id}/silence", { params: { path: { id } }, body: { for: duration, reason: reason(why) } }),
+  );
+}
+
+export async function unsilenceAlert(id: number) {
+  return unwrap(await api.DELETE("/alerts/{id}/silence", { params: { path: { id } } }));
+}
+
+/** A test notification to a channel, now. */
+export async function testChannel(name: string) {
+  return unwrap(await api.POST("/alerts/channels/{name}/test", { params: { path: { name } } }));
 }

@@ -43,5 +43,12 @@ export default defineConfig({
       dependencies: ["people"],
       use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
     },
+    {
+      // Alerts: acknowledges and silences, so it goes after the tests that read health and counts.
+      name: "alerts",
+      testMatch: "alerts.spec.ts",
+      dependencies: ["audit"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
   ],
 });

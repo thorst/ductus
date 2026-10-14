@@ -2,6 +2,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Outlet, useNavigate, type LinkProps } from "@tanstack/react-router";
 import {
   Archive,
+  Bell,
   BookOpen,
   Check,
   ChevronDown,
@@ -29,6 +30,7 @@ import { api } from "@/api/client";
 import { useLiveUpdates, type LiveState } from "@/api/live";
 import { forgetSync } from "@/api/appearance";
 import { engine, interfaces, session } from "@/api/queries";
+import { useOpenAlerts } from "@/components/alerts";
 import { Logo } from "@/components/logo";
 import { count } from "@/lib/format";
 import {
@@ -59,6 +61,7 @@ const NAV: { heading?: string; links: NavLink[] }[] = [
       { to: "/", label: "Overview", icon: LayoutDashboard, exact: true },
       { to: "/interfaces", label: "Interfaces", icon: Network },
       { to: "/quarantine", label: "Quarantine", icon: ShieldAlert },
+      { to: "/alerts", label: "Alerts", icon: Bell },
       { to: "/hotspots", label: "Hotspots", icon: Flame },
     ],
   },
@@ -109,6 +112,7 @@ export function Layout() {
               {info.drain.state === "drained" ? "Drained" : "Draining"}
             </span>
           )}
+          <AlertsBadge />
           <LiveDot state={live} />
           <UserMenu />
         </div>
@@ -135,6 +139,7 @@ function NavLinks({ wide }: { wide?: boolean }) {
   const isAdmin = useIsAdmin();
   const canAudit = useCanAudit();
   const quarantined = (all ?? []).flatMap((i) => i.destinations).reduce((n, d) => n + d.quarantined, 0);
+  const { open } = useOpenAlerts();
   const item = ({ to, label, icon: Icon, exact }: NavLink) => (
     <li key={to}>
       <Link
@@ -150,6 +155,11 @@ function NavLinks({ wide }: { wide?: boolean }) {
         {to === "/quarantine" && quarantined > 0 && (
           <span className="ml-auto rounded-full border border-bad/40 bg-bad/10 px-1.5 text-xs text-bad tabular-nums">
             {count(quarantined)}
+          </span>
+        )}
+        {to === "/alerts" && open.length > 0 && (
+          <span className="ml-auto rounded-full border border-bad/40 bg-bad/10 px-1.5 text-xs text-bad tabular-nums">
+            {count(open.length)}
           </span>
         )}
       </Link>
@@ -171,6 +181,26 @@ function NavLinks({ wide }: { wide?: boolean }) {
         </div>
       ))}
     </div>
+  );
+}
+
+/** Open alerts, in the header on every page: the count and how many are critical, as words. */
+function AlertsBadge() {
+  const { open, critical } = useOpenAlerts();
+  if (open.length === 0) return null;
+  const label = `${count(open.length)} open alert${open.length === 1 ? "" : "s"}`;
+  return (
+    <Link
+      to="/alerts"
+      className={cn(
+        "flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-semibold text-panel no-underline hover:no-underline",
+        critical > 0 ? "bg-bad" : "bg-warn",
+      )}
+    >
+      <Bell aria-hidden className="size-3.5" />
+      {label}
+      {critical > 0 && <span className="hidden sm:inline">({count(critical)} critical)</span>}
+    </Link>
   );
 }
 

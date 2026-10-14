@@ -21,6 +21,9 @@
 //!   keep: 6y          # at least 1y
 //!   payload_reads: true
 //!   payload_read_window: 10m
+//! alerts: ...         # where alerts go and when (see `crate::alerts`); may use ${secret:...}
+//! owners:             # owners that aren't users
+//!   "Lab Systems": { email: lab-systems@hospital.org }
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -55,6 +58,13 @@ pub struct Settings {
     /// The audit log: how long it is kept, and whether reading a payload is logged.
     #[serde(default)]
     pub audit: AuditSettings,
+    /// Alerts (`crate::alerts`), as written: they may reference the environment's variables and
+    /// secrets, so they are read per environment (`Settings::alerts`).
+    #[serde(default)]
+    alerts: Option<serde_yaml_ng::Value>,
+    /// Owners that aren't users, and where alerts for them go (a team's mailing list).
+    #[serde(default)]
+    pub owners: std::collections::BTreeMap<String, crate::alerts::OwnerContact>,
 }
 
 /// The audit log (`audit:` in ductus.yaml).
@@ -91,7 +101,9 @@ fn default_read_window() -> std::time::Duration {
 }
 
 /// `6y` (365 days each), or any duration (`2190d`).
-fn keep_duration<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<std::time::Duration, D::Error> {
+pub(crate) fn keep_duration<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<std::time::Duration, D::Error> {
     let text = String::deserialize(d)?;
     let text = text.trim();
     if let Some(years) = text.strip_suffix('y') {
@@ -318,7 +330,12 @@ impl Settings {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-        let settings: Self = serde_yaml_ng::from_str(&text).with_context(|| format!("in {}", file.display()))?;
+        // `${...}` references (alerts only) must not break the YAML: parsed protected.
+        let value = crate::env::parse_yaml(&text).with_context(|| format!("parsing {}", file.display()))?;
+        if value.is_null() {
+            return Ok(Self::default());
+        }
+        let settings: Self = serde_yaml_ng::from_value(value).with_context(|| format!("in {}", file.display()))?;
         settings.api.address(None).with_context(|| format!("in {}", file.display()))?;
         if settings.isolates.heap_mb < 64 {
             bail!("in {}: isolates.heap_mb must be at least 64 (the SDK alone needs a few MB)", file.display());
@@ -331,6 +348,18 @@ impl Settings {
             );
         }
         Ok(settings)
+    }
+
+    /// The alerts, with the environment's variables and secrets filled in and checked; `None`
+    /// when ductus.yaml has no `alerts:`.
+    pub fn alerts(&self, env: &crate::Environment) -> Result<Option<crate::alerts::AlertSettings>> {
+        let Some(raw) = &self.alerts else { return Ok(None) };
+        let mut value = raw.clone();
+        env.substitute(&mut value).with_context(|| format!("in {FILE}: alerts"))?;
+        let alerts: crate::alerts::AlertSettings =
+            serde_yaml_ng::from_value(value).with_context(|| format!("in {FILE}: alerts"))?;
+        alerts.check().with_context(|| format!("in {FILE}"))?;
+        Ok(Some(alerts))
     }
 }
 
@@ -471,6 +500,31 @@ mod tests {
             std::fs::write(dir.path().join(FILE), bad).unwrap();
             assert!(Settings::load(dir.path()).is_err(), "{bad}");
         }
+    }
+
+    #[test]
+    fn alerts_are_read_per_environment() {
+        let dir = tempfile::tempdir().unwrap();
+        let env = crate::Environment::with_variables("prod", &[("HOOK", "https://hooks.example.org/x"), ("HB", "300")]);
+        assert!(Settings::load(dir.path()).unwrap().alerts(&env).unwrap().is_none());
+        std::fs::write(
+            dir.path().join(FILE),
+            "alerts:\n  channels: { chat: { webhook: { url: ${HOOK}, format: teams } } }\n  rules: [{ when: [error], severity: critical, to: [chat] }]\nowners:\n  Lab: { email: lab@example.org }\n",
+        )
+        .unwrap();
+        let s = Settings::load(dir.path()).unwrap();
+        assert_eq!(s.owners["Lab"].email, ["lab@example.org"]);
+        let a = s.alerts(&env).unwrap().unwrap();
+        assert_eq!(a.channels["chat"].webhook.as_ref().unwrap().url, "https://hooks.example.org/x");
+        let err = format!("{:#}", s.alerts(&crate::Environment::with_variables("dev", &[])).unwrap_err());
+        assert!(err.contains("missing in environment `dev`: HOOK"), "{err}");
+        std::fs::write(
+            dir.path().join(FILE),
+            "alerts:\n  rules: [{ when: [error], severity: critical, to: [nope] }]\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", Settings::load(dir.path()).unwrap().alerts(&env).unwrap_err());
+        assert!(err.contains("no channel named `nope`"), "{err}");
     }
 
     #[test]

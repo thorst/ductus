@@ -4,6 +4,119 @@
  */
 
 export interface paths {
+    "/alerts": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Alerts: open ones first, and what happened lately. */
+        get: operations["list_alerts"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/channels": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Where alerts go, and how sending has gone lately. Secrets are never shown. Operator. */
+        get: operations["alert_channels"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/channels/{name}/test": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Send a test notification to a channel now (it says it is a test). Answers 502 with the reason
+         *     when it can't be sent. Operator; logged.
+         */
+        post: operations["test_channel"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One alert and its history. */
+        get: operations["get_alert"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/{id}/ack": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Acknowledge an open alert: someone is on it. No reminders until it gets worse or recovers.
+         *     Operator.
+         */
+        post: operations["acknowledge"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/alerts/{id}/silence": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Silence an alert: nothing is sent about it (fired, worse, reminders, recovery) until the time
+         *     is up. It still shows. Works before anything fires (planned work). A silence is not a pause:
+         *     messages still wait. Operator.
+         */
+        post: operations["silence"];
+        /** End a silence early. Operator. */
+        delete: operations["unsilence"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/audit": {
         parameters: {
             query?: never;
@@ -799,6 +912,95 @@ export interface components {
             previous_status?: string | null;
             reason?: string | null;
         };
+        AlertDetail: {
+            alert: components["schemas"]["AlertInfo"];
+            /** @description Newest first (the last 100). */
+            events: components["schemas"]["AlertEvent"][];
+        };
+        AlertEvent: {
+            /** Format: int32 */
+            alert: number;
+            /** Format: date-time */
+            at: string;
+            /** @description Who acknowledged or silenced it. */
+            by?: string | null;
+            /** Format: int64 */
+            failed: number;
+            /** Format: int64 */
+            id: number;
+            key: string;
+            /** @description `fired`, `escalated`, `reminded`, `recovered`, `acknowledged`, `silenced`, `unsilenced`. */
+            kind: string;
+            /**
+             * Format: int64
+             * @description Its notifications: sent, still to send (waiting for quiet hours to end, or being retried),
+             *     and given up on.
+             */
+            sent: number;
+            severity?: string | null;
+            /** @description The state then (for `recovered`: what it recovered from). */
+            state?: string | null;
+            summary?: string | null;
+            /** Format: int64 */
+            waiting: number;
+        };
+        AlertInfo: {
+            /** Format: date-time */
+            acknowledged_at?: string | null;
+            acknowledged_by?: string | null;
+            destination?: string | null;
+            /** Format: int32 */
+            id: number;
+            interface: string;
+            /** @description `iface:<interface>` or `dest:<interface>/<destination>`. */
+            key: string;
+            /**
+             * Format: date-time
+             * @description When people were last told (or will be, once quiet hours end).
+             */
+            last_notified_at?: string | null;
+            /** @description Its interface says `alert: { mute: true }`: nothing is ever sent about it. */
+            muted: boolean;
+            /**
+             * Format: int32
+             * @description Notifications sent since it fired.
+             */
+            notifications: number;
+            /**
+             * Format: date-time
+             * @description Fine again since then, but not for `alerts.settle` yet (it may still reopen).
+             */
+            recovering_since?: string | null;
+            /** @description `warning` or `critical` while open. */
+            severity?: string | null;
+            silence_reason?: string | null;
+            silenced_by?: string | null;
+            /**
+             * Format: date-time
+             * @description Set while silenced: nothing is sent until then.
+             */
+            silenced_until?: string | null;
+            /**
+             * Format: date-time
+             * @description Bad since.
+             */
+            since?: string | null;
+            /**
+             * @description `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`,
+             *     `missed` (an interface).
+             */
+            state: string;
+            /** @description The health view's words, as of the last check. */
+            summary?: string | null;
+        };
+        AlertsOverview: {
+            /** @description Every interface and destination, open alerts first (critical, then oldest). */
+            alerts: components["schemas"]["AlertInfo"][];
+            /** @description `alerts:` is in ductus.yaml. Without it nothing is judged or sent. */
+            configured: boolean;
+            /** @description The latest events, newest first. */
+            recent: components["schemas"]["AlertEvent"][];
+        };
         Appearance: {
             /** @description The custom colors, as the UI saves them (a JSON object). */
             colors?: Record<string, never> | null;
@@ -893,6 +1095,49 @@ export interface components {
             started_at: string;
             /** Format: int32 */
             to: number;
+        };
+        ChannelCounts: {
+            /** Format: int64 */
+            failed: number;
+            last_error?: string | null;
+            /** Format: int64 */
+            sent: number;
+            /** Format: int64 */
+            waiting: number;
+        };
+        ChannelInfo: {
+            email: string[];
+            /** Format: int64 */
+            failed: number;
+            last_error?: string | null;
+            /** Format: date-time */
+            last_sent?: string | null;
+            name: string;
+            /**
+             * Format: int64
+             * @description Notifications in the last 7 days: sent, still to send, given up on.
+             */
+            sent: number;
+            /** Format: int64 */
+            waiting: number;
+            /** @description Scheme and host only: the rest of a webhook URL is often its secret. */
+            webhook?: string | null;
+            /** @description `json`, `slack` or `teams`. */
+            webhook_format?: string | null;
+        };
+        ChannelsOverview: {
+            channels: components["schemas"]["ChannelInfo"][];
+            configured: boolean;
+            /** @description The heartbeat URL (scheme and host) and how often. */
+            heartbeat?: string | null;
+            owner_notifications?: components["schemas"]["ChannelCounts"] | null;
+            /** @description Owners named in interface.yaml, when a rule sends to `owner`. */
+            owners: components["schemas"]["OwnerReach"][];
+            /** @description `"22:00-06:00"` and which severities wait, if set. */
+            quiet?: string | null;
+            /** @description Reminders: `4h`, or none. */
+            repeat?: string | null;
+            smtp?: components["schemas"]["SmtpInfo"] | null;
         };
         /** @description The result for one thing the project connects to. */
         Check: {
@@ -1548,6 +1793,14 @@ export interface components {
             owner?: string | null;
             owns: components["schemas"]["Owned"][];
         };
+        OwnerReach: {
+            /**
+             * @description Where alerts for this owner go; empty: nowhere (no user with that name and an email, not
+             *     in `owners:`, not an address).
+             */
+            addresses: string[];
+            owner: string;
+        };
         PasswordChange: {
             /** @description The password you have now. */
             current: string;
@@ -1773,6 +2026,21 @@ export interface components {
             /** @description A user's name (with `password`)... */
             username?: string | null;
         };
+        SilenceRequest: {
+            /** @description How long: `30m`, `4h`, `2d` (at most 30 days). */
+            for: string;
+            /** @description Why (planned work, a known outage): shown to everyone who sees the alert. */
+            reason?: string | null;
+        };
+        SmtpInfo: {
+            from: string;
+            host: string;
+            /** Format: int32 */
+            port: number;
+            /** @description `starttls`, `tls` or `none`. */
+            tls: string;
+            username?: string | null;
+        };
         /** @description One step of a check: `DNS`, `connect`, `TLS`, `login`, `HTTP`, `commits`, `folder`, `port`. */
         Step: {
             detail: string;
@@ -1782,6 +2050,10 @@ export interface components {
         SystemInfo: {
             application?: string | null;
             vendor?: string | null;
+        };
+        TestResult: {
+            channel: string;
+            sent: boolean;
         };
         /**
          * @description How long something took, over every time since the engine started (estimated from histogram
@@ -1867,6 +2139,262 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_alerts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertsOverview"];
+                };
+            };
+        };
+    };
+    alert_channels: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ChannelsOverview"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    test_channel: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Channel name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["TestResult"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_alert: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Alert id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertDetail"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    acknowledge: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Alert id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertInfo"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    silence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Alert id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["SilenceRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertInfo"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    unsilence: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Alert id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AlertInfo"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     list_audit: {
         parameters: {
             query?: {

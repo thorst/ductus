@@ -82,6 +82,9 @@ pub struct InterfaceConfig {
     /// not behind. Nothing by default (see `monitor.rs`).
     #[serde(default)]
     pub monitor: crate::monitor::Monitor,
+    /// Its alerts: more recipients than the rules', or none at all (`mute`, for a test interface).
+    #[serde(default)]
+    pub alert: crate::alerts::AlertOptions,
     /// Company-defined documentation fields, declared in `docs-schema.yaml`.
     #[serde(default)]
     pub custom: crate::docs::Custom,

@@ -8,6 +8,7 @@ mod owners;
 mod project;
 #[cfg(windows)]
 mod service;
+mod sinks;
 mod tools;
 
 use anyhow::Result;
@@ -296,6 +297,15 @@ enum Command {
         #[command(flatten)]
         api: ApiArgs,
     },
+    /// Alerts (`alerts:` in ductus.yaml): what is open, from the running engine's REST API (viewer
+    /// token); or `ductus alerts test <channel>`, which sends a test notification straight from
+    /// ductus.yaml (no engine needed: check the mail server or webhook before going live).
+    Alerts {
+        #[command(subcommand)]
+        action: Option<AlertsAction>,
+        #[command(flatten)]
+        api: ApiArgs,
+    },
     /// Manage encrypted secrets (secrets/<env>.json; key in DUCTUS_SECRET_KEY).
     Secret {
         #[command(subcommand)]
@@ -341,10 +351,33 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         offset: u64,
     },
-    /// Receive messages over MLLP, ACK them, and verify per-patient ordering.
+    /// Receive messages over MLLP, ACK them, and verify per-patient ordering. With --smtp or
+    /// --http, a mail server or web server that accepts everything and prints it instead (to see
+    /// what alerts send without a real one).
     Sink {
         #[arg(long, default_value_t = 6662)]
         port: u16,
+        /// Be an SMTP server on this port: print each mail (and keep it in --dir).
+        #[arg(long, conflicts_with = "http")]
+        smtp: Option<u16>,
+        /// Be an HTTP server on this port: print each request's body (and keep it in --dir).
+        #[arg(long)]
+        http: Option<u16>,
+        /// Also write each mail or request to a file of its own here.
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AlertsAction {
+    /// Send a test notification to a channel now, from ductus.yaml in this environment.
+    Test {
+        channel: String,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
     },
 }
 
@@ -714,6 +747,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Hotspots { interface, lanes, api } => {
             admin::hotspots(admin::Remote::new(&api.api, api.token)?, interface.as_deref(), lanes).await
         }
+        Command::Alerts { action: None, api } => admin::alerts(admin::Remote::new(&api.api, api.token)?).await,
+        Command::Alerts { action: Some(AlertsAction::Test { channel, root, env }), .. } => {
+            project::test_alert(&root, &env, &channel).await
+        }
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Types { root } => project::types(&root).await,
         Command::ApiSpec => {
@@ -734,6 +771,8 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Gen { to, count, patients, rate, connections, hot, offset } => {
             tools::generate(tools::GenOptions { to, count, patients, rate, connections, hot, offset }).await
         }
-        Command::Sink { port } => tools::sink(port).await,
+        Command::Sink { smtp: Some(port), dir, .. } => sinks::smtp(port, dir).await,
+        Command::Sink { http: Some(port), dir, .. } => sinks::http(port, dir).await,
+        Command::Sink { port, .. } => tools::sink(port).await,
     }
 }
