@@ -135,6 +135,44 @@ export const myTokens = queryOptions({
   queryFn: async () => unwrap(await api.GET("/me/tokens")),
 });
 
+/** `from` and `to` are times (ISO 8601): the page turns the days typed in the filter into them. */
+export interface AuditSearch {
+  actor?: string;
+  action?: string;
+  interface?: string;
+  message?: number;
+  from?: string;
+  to?: string;
+}
+
+/** The audit log, newest first, a page at a time (needs the `audit` permission). */
+export const audit = (filter: AuditSearch) =>
+  infiniteQueryOptions({
+    queryKey: ["audit", filter],
+    queryFn: async ({ pageParam }) =>
+      unwrap(
+        await api.GET("/audit", { params: { query: { ...filter, before: pageParam ?? undefined, limit: PAGE } } }),
+      ),
+    initialPageParam: null as number | null,
+    getNextPageParam: (page) => page.next_before ?? null,
+  });
+
+/** Who looked at a message's payload (for those who may read the audit log). */
+export const messageReaders = (id: number) =>
+  queryOptions({
+    queryKey: ["audit", "readers", id],
+    queryFn: async () =>
+      unwrap(
+        await api.GET("/audit", { params: { query: { message: id, action: "message.payload.read", limit: 50 } } }),
+      ),
+  });
+
+/** What the signed-in person did themselves. */
+export const myActivity = queryOptions({
+  queryKey: ["me", "activity"],
+  queryFn: async () => unwrap(await api.GET("/me/activity", { params: { query: { limit: 25 } } })),
+});
+
 /** The company-defined documentation fields and every entry's values (the project's files, so rarely changing). */
 export const docs = queryOptions({
   queryKey: ["docs"],

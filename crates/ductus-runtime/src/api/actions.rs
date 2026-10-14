@@ -27,6 +27,8 @@ pub fn routes() -> OpenApiRouter<Shared> {
         .routes(routes!(resend))
         .routes(routes!(resend_many))
         .routes(routes!(edit))
+        .routes(routes!(dismiss))
+        .routes(routes!(dismiss_many))
         .routes(routes!(quarantine))
 }
 
@@ -36,12 +38,7 @@ const MAX_PAGE: i64 = 500;
 
 impl Caller {
     fn actor<'a>(&'a self, reason: Option<&'a str>) -> Actor<'a> {
-        Actor {
-            token_id: self.who.token_id,
-            user_id: self.who.user_id,
-            name: self.name(),
-            reason: reason.filter(|r| !r.trim().is_empty()),
-        }
+        Actor { by: self.by(), reason: reason.filter(|r| !r.trim().is_empty()) }
     }
 }
 
@@ -361,6 +358,124 @@ async fn edit(
             Ok((StatusCode::CREATED, Json(result)))
         }
     }
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct DismissRequest {
+    /// Dismiss only these destinations' quarantined deliveries. Without it: all of the message's.
+    #[serde(default)]
+    destinations: Option<Vec<String>>,
+    /// Why nobody will fix or resend these. Required: it is kept in the audit log.
+    reason: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DismissResult {
+    /// The messages with a delivery dismissed (`previous_status` is `quarantined`; `previous_error`
+    /// is why it was).
+    dismissed: Vec<ResentMessage>,
+    /// Ids with nothing to dismiss: not found, not run by this engine, or no delivery still
+    /// quarantined (someone resolved it meanwhile).
+    skipped: Vec<i64>,
+}
+
+fn require_reason(reason: &str) -> Result<&str, ApiError> {
+    let reason = reason.trim();
+    if reason.is_empty() {
+        return Err(ApiError::bad_request(
+            "say why these are being dismissed (`reason`): a dismissal is kept in the audit log",
+        ));
+    }
+    Ok(reason)
+}
+
+/// Dismiss a message's quarantined deliveries: nobody will fix or resend them, so they leave the
+/// quarantine (the delivery becomes `filtered`, "dismissed by NAME: reason"). Nothing is deleted:
+/// the message and what happened to it stay, and the dismissal is in the audit log with the reason.
+/// Works the same in the held area. Operator.
+#[utoipa::path(
+    post, path = "/messages/{id}/dismiss", tag = "messages",
+    params(("id" = i64, Path, description = "Message id")),
+    request_body(content = DismissRequest, content_type = "application/json"),
+    responses(
+        (status = 200, body = DismissResult), (status = 400, body = super::ErrorBody), (status = 403, body = super::ErrorBody),
+        (status = 404, body = super::ErrorBody), (status = 409, description = "Nothing quarantined to dismiss", body = super::ErrorBody)
+    )
+)]
+async fn dismiss(
+    engine: Eng,
+    caller: Caller,
+    Path(id): Path<i64>,
+    Json(request): Json<DismissRequest>,
+) -> ApiResult<DismissResult> {
+    caller.require(Role::Operator)?;
+    let reason = require_reason(&request.reason)?;
+    let i = owner(&engine, id).await?;
+    let destinations = match &request.destinations {
+        Some(names) if !names.is_empty() => destination_ids(&engine, i, names)?,
+        _ => i.destinations.iter().map(|(_, id)| *id).collect(),
+    };
+    let r = Resend { messages: &[id], destinations: &destinations, quarantined_only: true };
+    let done = engine.store.dismiss(r, caller.actor(Some(reason))).await?;
+    if done.is_empty() {
+        return Err(conflict(format!("nothing to dismiss for message {id}: it has no quarantined delivery")));
+    }
+    tracing::warn!(id, interface = %i.config.name, by = caller.name(), reason, "quarantined message dismissed");
+    Ok(Json(DismissResult { dismissed: by_message(done), skipped: vec![] }))
+}
+
+#[derive(Deserialize, ToSchema)]
+pub struct BulkDismissRequest {
+    /// Message ids (at most 500), from any interfaces.
+    ids: Vec<i64>,
+    /// Only the destination with this name in each message's interface. Without it: all quarantined
+    /// deliveries of each message.
+    #[serde(default)]
+    destination: Option<String>,
+    /// Why. Required; kept with every dismissal and in the audit log.
+    reason: String,
+}
+
+/// Dismiss many messages' quarantined deliveries at once (the quarantine screen's "dismiss
+/// selected"), in one transaction, with one reason. Operator.
+#[utoipa::path(
+    post, path = "/messages/dismiss", tag = "messages",
+    request_body(content = BulkDismissRequest, content_type = "application/json"),
+    responses((status = 200, body = DismissResult), (status = 400, body = super::ErrorBody), (status = 403, body = super::ErrorBody))
+)]
+async fn dismiss_many(
+    engine: Eng,
+    caller: Caller,
+    Json(request): Json<BulkDismissRequest>,
+) -> ApiResult<DismissResult> {
+    caller.require(Role::Operator)?;
+    let reason = require_reason(&request.reason)?;
+    if request.ids.is_empty() || request.ids.len() > MAX_BULK {
+        return Err(ApiError::bad_request(format!("give 1 to {MAX_BULK} message ids (got {})", request.ids.len())));
+    }
+    let named = request.destination.as_deref().filter(|d| !d.is_empty());
+    let destinations: Vec<DestinationId> = engine
+        .interfaces
+        .iter()
+        .flat_map(|i| i.destinations.iter())
+        .filter(|(name, _)| named.is_none_or(|n| n == name))
+        .map(|(_, id)| *id)
+        .collect();
+    if let Some(name) = named
+        && destinations.is_empty()
+    {
+        return Err(ApiError::bad_request(format!("no interface has a destination named `{name}`")));
+    }
+    let mut ids = request.ids.clone();
+    ids.sort_unstable();
+    ids.dedup();
+    let r = Resend { messages: &ids, destinations: &destinations, quarantined_only: true };
+    let done = engine.store.dismiss(r, caller.actor(Some(reason))).await?;
+    let dismissed = by_message(done);
+    let finished: HashSet<i64> = dismissed.iter().map(|m| m.id).collect();
+    let skipped = ids.into_iter().filter(|id| !finished.contains(id)).collect();
+    tracing::warn!(messages = dismissed.len(), by = caller.name(), reason, "quarantined messages dismissed");
+    Ok(Json(DismissResult { dismissed, skipped }))
 }
 
 #[derive(Deserialize, IntoParams)]

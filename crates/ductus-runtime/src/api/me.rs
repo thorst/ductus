@@ -48,7 +48,11 @@ pub struct ProfileUpdate {
 async fn update_profile(engine: Eng, caller: Caller, Json(change): Json<ProfileUpdate>) -> ApiResult<UserInfo> {
     let id = caller.user_id()?;
     let change = UserChange { display_name: change.display_name, email: change.email, ..UserChange::default() };
-    let user = engine.store.update_user(id, &change).await.map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
+    let user = engine
+        .store
+        .update_user(id, &change, &caller.audit("user.update"))
+        .await
+        .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
     Ok(Json(user.into()))
 }
 
@@ -81,7 +85,7 @@ async fn change_password(
     let hash = hash_password(change.new).await?;
     engine
         .store
-        .set_password(id, &hash, false, caller.cookie.as_deref())
+        .set_password(id, &hash, false, caller.cookie.as_deref(), &caller.audit("password.change"))
         .await
         .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
     tracing::info!(user = caller.name(), "password changed");
@@ -240,7 +244,7 @@ async fn make_token(engine: Eng, caller: Caller, Json(new): Json<NewMyToken>) ->
     let name = format!("{}/{}", caller.name(), new.name.trim());
     let (token, secret) = engine
         .store
-        .create_token(&name, role, &permissions, Some(id))
+        .create_token(&name, role, &permissions, Some(id), &caller.audit("token.create"))
         .await
         .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
     tracing::warn!(by = caller.name(), token = %token.name, role = role.label(), "API token created");
@@ -255,7 +259,7 @@ async fn make_token(engine: Eng, caller: Caller, Json(new): Json<NewMyToken>) ->
 )]
 async fn revoke_token(engine: Eng, caller: Caller, Path(name): Path<String>) -> Result<StatusCode, ApiError> {
     let id = caller.user_id()?;
-    if !engine.store.revoke_token(&name, Some(id)).await? {
+    if !engine.store.revoke_token(&name, Some(id), &caller.audit("token.revoke")).await? {
         return Err(ApiError::not_found(format!("you have no live token named `{name}`")));
     }
     tracing::warn!(by = caller.name(), token = %name, "API token revoked");

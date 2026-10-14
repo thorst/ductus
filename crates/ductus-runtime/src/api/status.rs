@@ -559,6 +559,8 @@ pub struct DrainRequest {
 async fn drain(engine: Eng, caller: Caller, body: Option<Json<DrainRequest>>) -> ApiResult<DrainStatus> {
     caller.require(Role::Operator)?;
     let request = body.map(|Json(b)| b).unwrap_or_default();
+    super::record_first(&engine, caller.audit("engine.drain").detail(serde_json::json!({ "stop": request.stop })))
+        .await?;
     tracing::warn!(token = caller.name(), stop = request.stop, "drain requested through the API");
     engine.drain(request.stop);
     let snapshot = engine.snapshot().await?;
@@ -572,6 +574,7 @@ async fn drain(engine: Eng, caller: Caller, body: Option<Json<DrainRequest>>) ->
 )]
 async fn resume(engine: Eng, caller: Caller) -> ApiResult<DrainStatus> {
     caller.require(Role::Operator)?;
+    super::record_first(&engine, caller.audit("engine.resume")).await?;
     tracing::info!(token = caller.name(), "resume requested through the API");
     engine.resume();
     let snapshot = engine.snapshot().await?;
@@ -613,6 +616,16 @@ async fn pause(
     caller.require(Role::Operator)?;
     let (_, id) = engine.destination(&name, &destination).map_err(ApiError::not_found)?;
     let reason = body.and_then(|Json(b)| b.reason).filter(|r| !r.trim().is_empty());
+    let subject = format!("{name}/{destination}");
+    super::record_first(
+        &engine,
+        caller
+            .audit("destination.pause")
+            .subject(&subject)
+            .interface(&name)
+            .detail(serde_json::json!({ "reason": reason })),
+    )
+    .await?;
     let paused = engine.pause(id, caller.name(), reason.as_deref()).await?;
     tracing::warn!(interface = %name, %destination, by = caller.name(), reason = reason.as_deref().unwrap_or("none yet"), "destination paused");
     let pending = engine.snapshot().await?.queue(id).pending;
@@ -635,6 +648,8 @@ async fn unpause(
     // Counted before the pause ends: a receiver that is up takes the backlog at once, and counting
     // afterwards could report "0 waiting" for a backlog of thousands.
     let pending = engine.snapshot().await?.queue(id).pending;
+    let subject = format!("{name}/{destination}");
+    super::record_first(&engine, caller.audit("destination.resume").subject(&subject).interface(&name)).await?;
     let ended = engine.unpause(id).await?;
     if ended.is_some() {
         tracing::warn!(interface = %name, %destination, by = caller.name(), "destination resumed");

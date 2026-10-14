@@ -1,8 +1,8 @@
 import { useInfiniteQuery, useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
-import { RotateCcw } from "lucide-react";
+import { CircleX, RotateCcw } from "lucide-react";
 import { useState } from "react";
-import { resendQuarantined, useCanOperate, useRefresh, type Picked } from "@/api/actions";
+import { dismissQuarantined, resendQuarantined, useCanOperate, useRefresh, type Picked } from "@/api/actions";
 import { interfaces, quarantine } from "@/api/queries";
 import { ActionDialog } from "@/components/action-dialog";
 import { Loaded, PageHeader } from "@/components/page";
@@ -28,6 +28,7 @@ export function QuarantinePage() {
   const refresh = useRefresh();
   const [picked, setPicked] = useState<Map<string, Picked>>(new Map());
   const [confirming, setConfirming] = useState(false);
+  const [dismissing, setDismissing] = useState(false);
   const [done, setDone] = useState<string | null>(null);
 
   // What's picked and still listed (a row resolved elsewhere drops out by itself).
@@ -93,12 +94,18 @@ export function QuarantinePage() {
               ))}
             </select>
           </label>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex flex-wrap items-center gap-2">
             {canOperate && (
-              <Button disabled={chosen.length === 0} onClick={() => setConfirming(true)}>
-                <RotateCcw aria-hidden />
-                Resend {chosen.length > 0 ? count(chosen.length) : ""} selected
-              </Button>
+              <>
+                <Button disabled={chosen.length === 0} onClick={() => setConfirming(true)}>
+                  <RotateCcw aria-hidden />
+                  Resend {chosen.length > 0 ? count(chosen.length) : ""} selected
+                </Button>
+                <Button variant="outline" disabled={chosen.length === 0} onClick={() => setDismissing(true)}>
+                  <CircleX aria-hidden />
+                  Dismiss {chosen.length > 0 ? count(chosen.length) : ""} selected
+                </Button>
+              </>
             )}
             <Button variant="ghost" onClick={() => void query.refetch()}>
               Refresh
@@ -204,6 +211,34 @@ export function QuarantinePage() {
           const resent = result.resent.reduce((n, m) => n + m.destinations.length, 0);
           setDone(
             `Resent ${count(resent)} ${resent === 1 ? "delivery" : "deliveries"}` +
+              (result.skipped.length ? `; ${count(result.skipped.length)} skipped (no longer quarantined).` : "."),
+          );
+          setPicked(new Map());
+          await refresh();
+        }}
+      />
+      <ActionDialog
+        open={dismissing}
+        onOpenChange={setDismissing}
+        title={`Dismiss ${count(chosen.length)} quarantined ${chosen.length === 1 ? "delivery" : "deliveries"}`}
+        description={
+          <>
+            Dismiss {count(chosen.length)} {chosen.length === 1 ? "delivery" : "deliveries"} of{" "}
+            {count(new Set(chosen.map((p) => p.id)).size)}{" "}
+            {new Set(chosen.map((p) => p.id)).size === 1 ? "message" : "messages"} for{" "}
+            {count(new Set(chosen.map((p) => p.destination)).size)}{" "}
+            {new Set(chosen.map((p) => p.destination)).size === 1 ? "destination" : "destinations"}? They stay in the
+            message history and in the audit log, with your name and the reason; they leave the quarantine, and nothing
+            is sent. Nothing is deleted: a message can still be replayed from its page.
+          </>
+        }
+        confirm="Dismiss"
+        reasonRequired
+        onConfirm={async (why) => {
+          const result = await dismissQuarantined(chosen, why);
+          const dismissed = result.dismissed.reduce((n, m) => n + m.destinations.length, 0);
+          setDone(
+            `Dismissed ${count(dismissed)} ${dismissed === 1 ? "delivery" : "deliveries"}` +
               (result.skipped.length ? `; ${count(result.skipped.length)} skipped (no longer quarantined).` : "."),
           );
           setPicked(new Map());

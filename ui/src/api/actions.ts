@@ -24,6 +24,12 @@ export function useCanReadPayloads(): boolean {
   return data?.role === "admin" || !!data?.permissions.includes("payloads");
 }
 
+/** Can the signed-in caller read the audit log? Admins can; others need the permission. */
+export function useCanAudit(): boolean {
+  const { data } = useQuery(session);
+  return data?.role === "admin" || !!data?.permissions.includes("audit");
+}
+
 /** Fetch again everything an action can change. */
 export function useRefresh() {
   const queryClient = useQueryClient();
@@ -41,6 +47,7 @@ export function useRefresh() {
         "tokens",
         "users",
         "me",
+        "audit",
       ].map((key) => queryClient.invalidateQueries({ queryKey: [key] })),
     );
 }
@@ -84,6 +91,38 @@ export async function resendQuarantined(picked: Picked[], why: string) {
     }
   }
   return result;
+}
+
+/**
+ * Dismiss quarantined deliveries (nobody will fix or resend them): they become filtered, with who
+ * and why, and leave the quarantine. Grouped by destination name like `resendQuarantined`; the
+ * reason is required and goes in the audit log.
+ */
+export async function dismissQuarantined(picked: Picked[], why: string) {
+  const byDestination = new Map<string, Picked[]>();
+  for (const p of picked) byDestination.set(p.destination, [...(byDestination.get(p.destination) ?? []), p]);
+  const result: Schemas["DismissResult"] = { dismissed: [], skipped: [] };
+  for (const [destination, items] of byDestination) {
+    const ids = items.map((p) => p.id);
+    for (let i = 0; i < ids.length; i += 500) {
+      const answer = unwrap(
+        await api.POST("/messages/dismiss", { body: { ids: ids.slice(i, i + 500), destination, reason: why } }),
+      );
+      result.dismissed.push(...answer.dismissed);
+      result.skipped.push(...answer.skipped);
+    }
+  }
+  return result;
+}
+
+/** Dismiss one message's quarantined delivery to `destination`. */
+export async function dismissDelivery(id: number, destination: string, why: string) {
+  return unwrap(
+    await api.POST("/messages/{id}/dismiss", {
+      params: { path: { id } },
+      body: { destinations: [destination], reason: why },
+    }),
+  );
 }
 
 /** Queue a corrected copy of a message for `destinations`. */

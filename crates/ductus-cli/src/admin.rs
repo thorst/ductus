@@ -3,7 +3,7 @@
 //! pause`, `ductus retention`, `ductus hotspots`.
 
 use anyhow::{Context, Result, bail};
-use ductus_store::{Role, Store};
+use ductus_store::{Audit, AuditFilter, By, Role, Store};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -13,13 +13,22 @@ pub enum TokenCommand {
     Revoke { name: String },
 }
 
+/// Who is at the keyboard, for the audit log (what the operating system says; commands run on the
+/// server's own database, so whoever may do that is trusted, but the log says who it was).
+fn os_user() -> String {
+    std::env::var("USER").or_else(|_| std::env::var("USERNAME")).unwrap_or_else(|_| "unknown".into())
+}
+
 pub async fn token(database_url: &str, command: TokenCommand) -> Result<()> {
     let store = Store::connect(database_url, 2).await?;
+    let who = os_user();
+    let by = By::cli(&who);
     match command {
         TokenCommand::Create { name, role, permissions } => {
             let role =
                 Role::parse(&role).with_context(|| format!("unknown role `{role}` (viewer, operator or admin)"))?;
-            let (token, secret) = store.create_token(&name, role, &permissions, None).await?;
+            let (token, secret) =
+                store.create_token(&name, role, &permissions, None, &Audit::new(by, "token.create")).await?;
             println!("{secret}");
             eprintln!(
                 "token `{}` ({}) created. This is the only time it's shown: keep it in a secret store.\n\
@@ -51,7 +60,7 @@ pub async fn token(database_url: &str, command: TokenCommand) -> Result<()> {
             }
         }
         TokenCommand::Revoke { name } => {
-            if !store.revoke_token(&name, None).await? {
+            if !store.revoke_token(&name, None, &Audit::new(by, "token.revoke")).await? {
                 bail!("no live token named `{name}` (see `ductus token list`)");
             }
             println!("token `{name}` revoked: it stops working at once");
@@ -113,6 +122,8 @@ pub async fn user(database_url: &str, root: &std::path::Path, command: UserComma
     let settings = ductus_core::settings::Settings::load(root)?;
     let min_length = settings.auth.password.min_length;
     let store = Store::connect(database_url, 2).await?;
+    let who = os_user();
+    let by = By::cli(&who);
     let find = |name: String| {
         let store = store.clone();
         async move {
@@ -126,16 +137,19 @@ pub async fn user(database_url: &str, root: &std::path::Path, command: UserComma
             let password = read_password(password_stdin, &username, min_length)?;
             let hash = ductus_core::password::hash(&password)?;
             let user = store
-                .create_user(&ductus_store::NewUser {
-                    username: &username,
-                    display_name: display_name.as_deref().unwrap_or(""),
-                    email: email.as_deref().unwrap_or(""),
-                    role,
-                    permissions: &permissions,
-                    password_hash: Some(&hash),
-                    must_change_password: must_change,
-                    source: "local",
-                })
+                .create_user(
+                    &ductus_store::NewUser {
+                        username: &username,
+                        display_name: display_name.as_deref().unwrap_or(""),
+                        email: email.as_deref().unwrap_or(""),
+                        role,
+                        permissions: &permissions,
+                        password_hash: Some(&hash),
+                        must_change_password: must_change,
+                        source: "local",
+                    },
+                    &Audit::new(by, "user.create"),
+                )
                 .await?;
             println!("user `{}` ({}) created", user.username, user.role.label());
         }
@@ -169,20 +183,21 @@ pub async fn user(database_url: &str, root: &std::path::Path, command: UserComma
                 permissions: (!permissions.is_empty()).then_some(permissions),
                 ..Default::default()
             };
-            let user = store.update_user(user.id, &change).await?;
+            let user = store.update_user(user.id, &change, &Audit::new(by, "user.update")).await?;
             println!("user `{}` is now {} [{}]", user.username, user.role.label(), user.permissions.join(", "));
         }
         UserCommand::Password { username, password_stdin } => {
             let user = find(username).await?;
             let password = read_password(password_stdin, &user.username, min_length)?;
             let hash = ductus_core::password::hash(&password)?;
-            store.set_password(user.id, &hash, true, None).await?;
+            store.set_password(user.id, &hash, true, None, &Audit::new(by, "password.reset")).await?;
             println!("`{}` has a new temporary password; they must change it at their next sign-in", user.username);
         }
         UserCommand::Disable { username, disabled } => {
             let user = find(username).await?;
             let change = ductus_store::UserChange { disabled: Some(disabled), ..Default::default() };
-            let user = store.update_user(user.id, &change).await?;
+            let action = if disabled { "user.disable" } else { "user.update" };
+            let user = store.update_user(user.id, &change, &Audit::new(by, action)).await?;
             println!(
                 "user `{}` {}",
                 user.username,
@@ -191,10 +206,66 @@ pub async fn user(database_url: &str, root: &std::path::Path, command: UserComma
         }
         UserCommand::Unlock { username } => {
             let user = find(username).await?;
-            store.unlock_user(user.id).await?;
+            store.unlock_user(user.id, &Audit::new(by, "user.unlock")).await?;
             println!("user `{}` can try again", user.username);
         }
     }
+    Ok(())
+}
+
+/// What `ductus audit export` selects (all optional).
+#[derive(Default)]
+pub struct AuditExport {
+    pub since: Option<String>,
+    pub until: Option<String>,
+    pub actor: Option<String>,
+    pub action: Option<String>,
+    pub interface: Option<String>,
+    pub message: Option<i64>,
+}
+
+/// A day (`2026-01-31`, UTC midnight) or a full RFC 3339 time.
+fn parse_time(text: &str) -> Result<chrono::DateTime<chrono::Utc>> {
+    let text = text.trim();
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Ok(t.with_timezone(&chrono::Utc));
+    }
+    let day = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .with_context(|| format!("`{text}` is not a time: write 2026-01-31 or 2026-01-31T08:00:00Z"))?;
+    Ok(day.and_hms_opt(0, 0, 0).expect("midnight exists").and_utc())
+}
+
+/// `ductus audit export`: the audit log as one JSON object per line, oldest first, straight from
+/// the database (for a SIEM or an auditor). The export is itself logged.
+pub async fn audit_export(database_url: &str, e: AuditExport) -> Result<()> {
+    use std::io::Write;
+    let store = Store::connect(database_url, 2).await?;
+    let (from, to) = (e.since.as_deref().map(parse_time).transpose()?, e.until.as_deref().map(parse_time).transpose()?);
+    let mut out = std::io::stdout().lock();
+    let (mut after, mut total) = (0i64, 0u64);
+    loop {
+        let filter = AuditFilter {
+            actor: e.actor.as_deref(),
+            action: e.action.as_deref(),
+            interface: e.interface.as_deref(),
+            message_id: e.message,
+            from,
+            to,
+            after: Some(after),
+            limit: 5_000,
+            ..AuditFilter::default()
+        };
+        let rows = store.audit_log(&filter).await?;
+        let Some(last) = rows.last() else { break };
+        after = last.id;
+        for row in rows {
+            writeln!(out, "{}", serde_json::to_string(&ductus_runtime::api::AuditEntry::from(row))?)?;
+            total += 1;
+        }
+    }
+    let who = os_user();
+    store.record(&Audit::new(By::cli(&who), "audit.export").detail(serde_json::json!({ "rows": total }))).await?;
+    eprintln!("{total} entries");
     Ok(())
 }
 

@@ -12,8 +12,9 @@ import {
   useRefresh,
 } from "@/api/actions";
 import { ApiError, type Schemas } from "@/api/client";
-import { account, myTokens, mySessions, session } from "@/api/queries";
+import { account, myActivity, myTokens, mySessions, session } from "@/api/queries";
 import { ActionDialog } from "@/components/action-dialog";
+import { AuditTable } from "@/components/audit-table";
 import { Loaded, PageHeader } from "@/components/page";
 import { PERMISSION_HELP, PermissionPicker, RolePicker, ROLES, type Role } from "@/components/permissions";
 import { TokenSecret } from "@/components/token-secret";
@@ -61,11 +62,40 @@ export function AccountPage() {
             <PermissionsCard me={me} />
             <SessionsCard />
             <TokensCard me={me} />
+            <ActivityCard />
             <AppearanceCard />
           </>
         )}
       </div>
     </>
+  );
+}
+
+/** What you did yourself (and what your tokens did), from the audit log: anyone may read their own. */
+function ActivityCard() {
+  const query = useQuery(myActivity);
+  return (
+    <Card aria-label="My activity">
+      <CardHeader>
+        <CardTitle>My activity</CardTitle>
+      </CardHeader>
+      <Loaded query={query}>
+        {(page) =>
+          page.entries.length === 0 ? (
+            <CardBody>
+              <p className="text-sm text-muted">Nothing yet.</p>
+            </CardBody>
+          ) : (
+            <>
+              <AuditTable entries={page.entries} whose={false} label="My activity" />
+              <p className="p-3 text-xs text-muted">
+                The latest {page.entries.length}. Admins and people with the audit permission can read the whole log.
+              </p>
+            </>
+          )
+        }
+      </Loaded>
+    </Card>
   );
 }
 

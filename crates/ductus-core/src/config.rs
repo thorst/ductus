@@ -589,7 +589,7 @@ fn check_rate_limit(r: &RateLimit) -> Result<()> {
     Ok(())
 }
 
-/// Parse durations like "500ms", "90s", "15m", "24h", "7d".
+/// Parse durations like "500ms", "90s", "15m", "24h", "7d". (`audit.keep` also takes years.)
 pub fn parse_duration(text: &str) -> Result<Duration> {
     let text = text.trim();
     let split = text.find(|c: char| !c.is_ascii_digit()).unwrap_or(text.len());

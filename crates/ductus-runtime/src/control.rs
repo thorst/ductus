@@ -106,6 +106,11 @@ pub struct Engine {
     pub shutdown: CancellationToken,
     /// How people sign in (`auth:` in ductus.yaml).
     pub auth: ductus_core::settings::AuthSettings,
+    /// The audit log's settings (`audit:` in ductus.yaml).
+    pub audit: ductus_core::settings::AuditSettings,
+    /// Names this run in the audit log (`engine.start` and `engine.stop` carry it), so a start
+    /// with no stop shows up as a crash.
+    pub instance: String,
 }
 
 /// What the engine is made of, from startup.
@@ -121,6 +126,8 @@ pub struct Parts {
     pub calls: Arc<crate::stats::ResourceCalls>,
     pub activity: Activity,
     pub auth: ductus_core::settings::AuthSettings,
+    pub audit: ductus_core::settings::AuditSettings,
+    pub instance: String,
 }
 
 impl Engine {
@@ -137,6 +144,8 @@ impl Engine {
             calls,
             activity,
             auth,
+            audit,
+            instance,
         } = parts;
         let engine = Arc::new(Self {
             started_at: Utc::now(),
@@ -155,6 +164,8 @@ impl Engine {
             code: OnceCell::new(),
             shutdown: CancellationToken::new(),
             auth,
+            audit,
+            instance,
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

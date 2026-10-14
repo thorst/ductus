@@ -12,8 +12,9 @@ use axum::http::request::Parts;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{AppendHeaders, IntoResponse};
 use chrono::{DateTime, Utc};
-use ductus_store::{Lockout, Principal, SessionFor, SessionLimits};
+use ductus_store::{Audit, By, Lockout, Principal, SessionFor, SessionLimits};
 use serde::{Deserialize, Serialize};
+use std::net::IpAddr;
 use std::sync::OnceLock;
 use tokio::sync::Semaphore;
 use utoipa::ToSchema;
@@ -135,11 +136,17 @@ const WRONG: &str = "wrong username or password";
     post, path = "/session", tag = "session", security(()), request_body = SignIn,
     responses((status = 200, body = Session), (status = 401, body = super::ErrorBody), (status = 403, body = super::ErrorBody), (status = 429, body = super::ErrorBody))
 )]
-async fn sign_in(engine: Eng, headers: HeaderMap, Json(body): Json<SignIn>) -> Result<impl IntoResponse, ApiError> {
+async fn sign_in(
+    engine: Eng,
+    parts: Parts,
+    headers: HeaderMap,
+    Json(body): Json<SignIn>,
+) -> Result<impl IntoResponse, ApiError> {
     if !headers.contains_key(BROWSER_HEADER) {
         return Err(ApiError::new(StatusCode::FORBIDDEN, "signing in needs the `X-Ductus: 1` header"));
     }
-    let (who, owner) = if let Some(token) = body.token.as_deref().filter(|t| !t.trim().is_empty()) {
+    let ip = super::peer(&parts);
+    let (who, owner, audit_for) = if let Some(token) = body.token.as_deref().filter(|t| !t.trim().is_empty()) {
         if !engine.auth.token_sign_in {
             return Err(ApiError::new(
                 StatusCode::FORBIDDEN,
@@ -147,17 +154,18 @@ async fn sign_in(engine: Eng, headers: HeaderMap, Json(body): Json<SignIn>) -> R
             ));
         }
         let Some(who) = engine.store.authenticate(token.trim()).await? else {
+            refuse(&engine, ip, serde_json::json!({ "with": "token", "reason": "unknown or revoked token" })).await?;
             return Err(ApiError::new(StatusCode::UNAUTHORIZED, "unknown or revoked token"));
         };
         let id = who.token_id.expect("a token's caller has a token id");
-        (who, SessionFor::Token(id))
+        (who, SessionFor::Token(id), "token")
     } else {
         let username = body.username.as_deref().unwrap_or("").trim().to_string();
         let password = body.password.unwrap_or_default();
         if username.is_empty() || password.is_empty() {
             return Err(ApiError::bad_request("give a username and password, or a token"));
         }
-        let user = user_sign_in(&engine, &username, password).await?;
+        let user = user_sign_in(&engine, &username, password, ip).await?;
         let who = Principal {
             user_id: Some(user.id),
             token_id: None,
@@ -166,25 +174,52 @@ async fn sign_in(engine: Eng, headers: HeaderMap, Json(body): Json<SignIn>) -> R
             permissions: user.permissions,
             must_change_password: user.must_change_password,
         };
-        (who, SessionFor::User(user.id))
+        (who, SessionFor::User(user.id), "password")
     };
-    let (secret, ends_at) = engine.store.create_session(owner, limits(&engine)).await?;
+    let by = match owner {
+        SessionFor::Token(id) => By::token(id, who.user_id, &who.name, "session", ip),
+        SessionFor::User(id) => By::user(id, &who.name, "session", ip),
+    };
+    let audit = Audit::new(by, "session.sign_in").detail(serde_json::json!({ "with": audit_for }));
+    let (secret, ends_at) = engine.store.create_session(owner, limits(&engine), &audit).await?;
     tracing::info!(who = %who.name, kind = if who.token_id.is_some() { "token" } else { "user" }, "signed in to the web UI");
     let max_age = (ends_at - Utc::now()).num_seconds();
     Ok((AppendHeaders([(SET_COOKIE, set_cookie(&secret, max_age))]), Json(describe(&who, Some(ends_at)))))
 }
 
+/// A sign-in that failed for someone nobody knows (what they typed isn't kept: it may be a
+/// password in the wrong box).
+async fn refuse(engine: &Shared, ip: Option<IpAddr>, detail: serde_json::Value) -> Result<(), ApiError> {
+    let audit = Audit::new(By::anonymous(ip), "session.failed").failed().detail(detail);
+    engine.store.record(&audit).await?;
+    Ok(())
+}
+
 /// Check a username and password; the account on success. Every refusal but a lockout says the
-/// same thing, and takes about as long, so nobody learns which usernames exist.
-async fn user_sign_in(engine: &Shared, username: &str, password: String) -> Result<ductus_store::User, ApiError> {
+/// same thing, and takes about as long, so nobody learns which usernames exist. (The audit log
+/// does know which: its rows are for admins.)
+async fn user_sign_in(
+    engine: &Shared,
+    username: &str,
+    password: String,
+    ip: Option<IpAddr>,
+) -> Result<ductus_store::User, ApiError> {
     let wrong = || ApiError::new(StatusCode::UNAUTHORIZED, WRONG);
+    let failed = |id: i32, reason: &'static str| {
+        let audit = Audit::new(By::user(id, username, "session", ip), "session.failed")
+            .failed()
+            .detail(serde_json::json!({ "reason": reason }));
+        async move { engine.store.record(&audit).await }
+    };
     let Some(candidate) = engine.store.candidate(username).await? else {
         waste_time(password).await;
+        refuse(engine, ip, serde_json::json!({ "with": "password", "reason": "unknown username" })).await?;
         return Err(wrong());
     };
     if let Some(until) = candidate.locked_until.filter(|u| *u > Utc::now()) {
         let minutes = ((until - Utc::now()).num_seconds() + 59) / 60;
         tracing::warn!(user = username, "sign-in refused: the account is locked after wrong passwords");
+        failed(candidate.id, "account locked").await?;
         return Err(ApiError::new(
             StatusCode::TOO_MANY_REQUESTS,
             format!(
@@ -195,13 +230,18 @@ async fn user_sign_in(engine: &Shared, username: &str, password: String) -> Resu
     let stored = candidate.password_hash.clone().filter(|_| candidate.source == "local");
     let Some(stored) = stored else {
         waste_time(password).await;
+        failed(candidate.id, "no password kept here").await?;
         return Err(wrong());
     };
     let ok = check_password(password, stored).await;
     if !ok || candidate.disabled_at.is_some() {
         if !ok && candidate.disabled_at.is_none() {
-            let locked = engine.store.record_failed_login(candidate.id, lockout(engine)).await?;
+            // Counted and logged in one transaction.
+            let audit = Audit::new(By::user(candidate.id, username, "session", ip), "session.failed").failed();
+            let locked = engine.store.record_failed_login(candidate.id, lockout(engine), &audit).await?;
             tracing::warn!(user = username, locked = locked.is_some(), "sign-in failed: wrong password");
+        } else if ok {
+            failed(candidate.id, "account disabled").await?;
         }
         return Err(wrong());
     }
@@ -217,9 +257,9 @@ async fn whoami(MustChange(caller): MustChange) -> ApiResult<Session> {
 
 /// Sign out: the session ends at once and the cookie is cleared.
 #[utoipa::path(delete, path = "/session", tag = "session", security(()), responses((status = 204)))]
-async fn sign_out(engine: Eng, headers: HeaderMap) -> Result<impl IntoResponse, ApiError> {
+async fn sign_out(engine: Eng, parts: Parts, headers: HeaderMap) -> Result<impl IntoResponse, ApiError> {
     if let Some(secret) = from_headers(&headers) {
-        engine.store.end_session(secret).await?;
+        engine.store.end_session(secret, super::peer(&parts)).await?;
     }
     Ok((StatusCode::NO_CONTENT, AppendHeaders([(SET_COOKIE, set_cookie("", 0))])))
 }

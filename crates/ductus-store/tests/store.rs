@@ -399,11 +399,14 @@ async fn destinations_finishing_at_once_never_leave_a_message_pending() {
 }
 
 const OPERATOR: ductus_store::Actor<'static> = ductus_store::Actor {
-    token_id: None,
-    user_id: None,
-    name: "test-operator",
+    by: ductus_store::By { kind: "system", id: None, user_id: None, name: "test-operator", via: "cli", ip: None },
     reason: Some("vendor fixed their side"),
 };
+
+/// An audit entry for tests that aren't about the log.
+fn quiet() -> ductus_store::Audit<'static> {
+    ductus_store::Audit::new(ductus_store::By::cli("test"), "test")
+}
 
 async fn status_by_id(store: &Store, id: i64) -> Status {
     store.message(id).await.unwrap().expect("the message exists").0.status
@@ -551,6 +554,286 @@ async fn an_edited_copy_replaces_the_quarantined_delivery() {
     assert_eq!(status_by_id(&store, original.id).await, Status::Sent);
 }
 
+/// The audit rows of one interface, oldest first, as (action, message id, detail).
+async fn audit_of(store: &Store, interface: &str) -> Vec<(String, Option<i64>, serde_json::Value)> {
+    let filter =
+        ductus_store::AuditFilter { interface: Some(interface), after: Some(0), limit: 100, ..Default::default() };
+    store
+        .audit_log(&filter)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| (r.action, r.message_id, r.detail.map(|d| serde_json::from_str(&d).unwrap()).unwrap_or_default()))
+        .collect()
+}
+
+/// Dismissing ends a quarantine without sending: the delivery is filtered with who and why, the
+/// message is settled again (also when other destinations sent it), a reason is required, and
+/// only quarantined deliveries are touched. The request leaves one audit row.
+#[tokio::test]
+async fn a_dismissed_quarantine_is_filtered_settled_and_logged() {
+    use ductus_store::Resend;
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "dismiss", &["billing", "lab"]).await;
+    let (lab, billing) = (t.id("lab"), t.id("billing"));
+    let a = store.insert(t.msg(1, b"a")).await.unwrap();
+    let b = store.insert(t.msg(1, b"b")).await.unwrap();
+    let c = store.insert(t.msg(1, b"c")).await.unwrap();
+    store.finish(lab, &[Done::with(a, Status::Quarantined, Some("AR: unknown patient"))]).await.unwrap();
+    store.finish(billing, &[sent(a)]).await.unwrap();
+    store.finish(lab, &[Done::with(b, Status::Quarantined, Some("AR: bad segment"))]).await.unwrap();
+    store.finish(billing, &[Done::with(b, Status::Quarantined, Some("HTTP 400"))]).await.unwrap();
+    assert_eq!(status_by_id(&store, b.id).await, Status::Quarantined);
+
+    let all = Resend { messages: &[a.id, b.id, c.id], destinations: &t.ids, quarantined_only: true };
+    let without_reason = ductus_store::Actor { reason: None, ..OPERATOR };
+    let err = store.dismiss(all, without_reason).await.unwrap_err().to_string();
+    assert!(err.contains("say why"), "{err}");
+    assert!(audit_of(&store, &t.name).await.is_empty(), "a refused dismissal leaves nothing");
+
+    let done = store.dismiss(all, OPERATOR).await.unwrap();
+    let dismissed: Vec<_> = done.iter().map(|d| (d.message_id, d.destination.as_str(), d.previous_status)).collect();
+    assert_eq!(
+        dismissed,
+        [
+            (a.id, "lab", Status::Quarantined),
+            (b.id, "billing", Status::Quarantined),
+            (b.id, "lab", Status::Quarantined)
+        ],
+        "c is pending: left alone"
+    );
+    let deliveries = store.deliveries(a).await.unwrap();
+    let lab_delivery = deliveries.iter().find(|d| d.destination == "lab").unwrap();
+    assert_eq!(lab_delivery.status, Status::Filtered);
+    assert_eq!(lab_delivery.last_error.as_deref(), Some("dismissed by test-operator: vendor fixed their side"));
+    assert_eq!(status_by_id(&store, a.id).await, Status::Sent, "billing sent it");
+    assert_eq!(status_by_id(&store, b.id).await, Status::Filtered, "nothing sent it, nothing left to fix");
+    assert_eq!(status_by_id(&store, c.id).await, Status::Pending);
+    assert!(store.dismiss(all, OPERATOR).await.unwrap().is_empty(), "nothing is quarantined any more");
+
+    let rows = audit_of(&store, &t.name).await;
+    assert_eq!(rows.len(), 1, "one row for the request, none for the empty one: {rows:?}");
+    let (action, message, detail) = &rows[0];
+    assert_eq!((action.as_str(), *message), ("message.dismiss", None), "two messages: no single id");
+    assert_eq!(detail["messages"], serde_json::json!([a.id, b.id]));
+    assert_eq!(detail["reason"], "vendor fixed their side");
+    assert_eq!(detail["deliveries"], 3);
+    let actions: Vec<_> = store.actions(a.id).await.unwrap().into_iter().map(|x| (x.action, x.destination)).collect();
+    assert_eq!(actions, [("dismiss".to_string(), "lab".to_string())]);
+
+    // One message: its id is on the row.
+    let d = store.insert(t.msg(1, b"d")).await.unwrap();
+    store.finish(lab, &[Done::with(d, Status::Quarantined, Some("AR"))]).await.unwrap();
+    let one = Resend { messages: &[d.id], destinations: &[lab], quarantined_only: true };
+    assert_eq!(store.dismiss(one, OPERATOR).await.unwrap().len(), 1);
+    assert_eq!(audit_of(&store, &t.name).await.last().unwrap().1, Some(d.id));
+}
+
+/// Resends (a release of a quarantine, a replay) and edits each leave one audit row, written with
+/// the change; a resend that finds nothing to do leaves none.
+#[tokio::test]
+async fn resend_and_edit_write_their_audit_row_with_the_change() {
+    use ductus_store::{Copy, Edited, Resend};
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "audit-actions", &["billing", "lab"]).await;
+    let (lab, billing) = (t.id("lab"), t.id("billing"));
+    let a = store.insert(t.msg(2, b"a")).await.unwrap();
+    store.finish(lab, &[Done::with(a, Status::Quarantined, Some("AR"))]).await.unwrap();
+    store.finish(billing, &[sent(a)]).await.unwrap();
+
+    let nothing = Resend { messages: &[a.id], destinations: &[billing], quarantined_only: true };
+    assert!(store.resend(nothing, OPERATOR).await.unwrap().is_empty());
+    assert!(audit_of(&store, &t.name).await.is_empty(), "nothing resent, nothing recorded");
+
+    let release = Resend { messages: &[a.id], destinations: &t.ids, quarantined_only: true };
+    assert_eq!(store.resend(release, OPERATOR).await.unwrap().len(), 1);
+    store.finish(lab, &[sent(a)]).await.unwrap();
+    let replay = Resend { messages: &[a.id], destinations: &[billing], quarantined_only: false };
+    assert_eq!(store.resend(replay, OPERATOR).await.unwrap().len(), 1);
+    store.finish(billing, &[Done::with(a, Status::Quarantined, Some("again"))]).await.unwrap();
+
+    let copy = Copy {
+        original: a.id,
+        interface: &t.name,
+        partition_key: 2,
+        ordering_key: None,
+        control_id: None,
+        payload: b"fixed",
+        tier: TIER,
+        destinations: &[billing],
+    };
+    let Edited::Copied { copy: made, .. } = store.copy_edited(copy, OPERATOR).await.unwrap() else { panic!("a copy") };
+
+    let rows = audit_of(&store, &t.name).await;
+    let kinds: Vec<_> = rows.iter().map(|(a, m, _)| (a.as_str(), *m)).collect();
+    assert_eq!(kinds, [("message.release", Some(a.id)), ("message.replay", Some(a.id)), ("message.edit", Some(a.id))]);
+    assert_eq!(rows[0].2["destinations"], serde_json::json!([format!("{}/lab", t.name)]));
+    assert_eq!(rows[2].2["copy"], made.id);
+    assert_eq!(rows[2].2["reason"], "vendor fixed their side");
+}
+
+/// Reads of one payload by the same person within the window are one row; another person, another
+/// message or an expired window are rows of their own.
+#[tokio::test]
+async fn payload_reads_within_the_window_are_one_row() {
+    use ductus_store::{Audit, By};
+    let Some(store) = store().await else { return };
+    let t = Iface::single(&store, "payload-reads").await;
+    let m = store.insert(t.msg(0, b"x")).await.unwrap();
+    let other = store.insert(t.msg(0, b"y")).await.unwrap();
+    let window = std::time::Duration::from_secs(600);
+    let (anna, ben) = (
+        make_user(&store, Role::Operator, &["payloads"]).await,
+        make_user(&store, Role::Operator, &["payloads"]).await,
+    );
+    fn read<'a>(who: &'a ductus_store::User, interface: &'a str, id: i64) -> Audit<'a> {
+        Audit::new(By::user(who.id, &who.username, "session", None), "message.payload.read")
+            .interface(interface)
+            .message(id)
+    }
+    assert!(store.record_payload_read(&read(&anna, &t.name, m.id), window).await.unwrap());
+    assert!(!store.record_payload_read(&read(&anna, &t.name, m.id), window).await.unwrap(), "the same read again");
+    assert!(store.record_payload_read(&read(&ben, &t.name, m.id), window).await.unwrap(), "another person");
+    assert!(store.record_payload_read(&read(&anna, &t.name, other.id), window).await.unwrap(), "another message");
+    assert!(
+        store.record_payload_read(&read(&anna, &t.name, m.id), std::time::Duration::ZERO).await.unwrap(),
+        "no window: every read"
+    );
+    let rows = audit_of(&store, &t.name).await;
+    assert_eq!(rows.len(), 4);
+    assert!(rows.iter().all(|(a, _, _)| a == "message.payload.read"));
+}
+
+/// Copies of payloads kept with message actions go when the messages' own retention ends (the row
+/// stays); audit rows and actions go after `audit.keep`.
+#[tokio::test]
+async fn payload_copies_and_old_audit_rows_are_cleared_on_schedule() {
+    use ductus_store::Resend;
+    let Some(url) = std::env::var("DUCTUS_TEST_DATABASE_URL").ok() else { return };
+    let store = Store::connect(&url, 4).await.unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let t = Iface::single(&store, "trim").await;
+    let m = store.insert(t.msg(0, b"x")).await.unwrap();
+    store.finish(t.dest(), &[Done::sent(m, Some(b"what was sent".to_vec()))]).await.unwrap();
+    let replay = Resend { messages: &[m.id], destinations: &t.ids, quarantined_only: false };
+    store.resend(replay, OPERATOR).await.unwrap();
+    store.finish(t.dest(), &[Done::sent(m, Some(b"and again".to_vec()))]).await.unwrap();
+    let copies = || async {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM message_actions WHERE interface = $1 AND previous_output IS NOT NULL",
+        )
+        .bind(&t.name)
+        .fetch_one(&pool)
+        .await
+        .unwrap()
+    };
+    assert_eq!(copies().await, 1);
+
+    // 30 days old: inside a 49-day window, kept; 60 days old: cleared, the row stays.
+    let age = |days: i32| {
+        let sql = "UPDATE message_actions SET at = now() - make_interval(days => $2) WHERE interface = $1";
+        sqlx::query(sql).bind(&t.name).bind(days).execute(&pool)
+    };
+    age(30).await.unwrap();
+    let windows = [(t.name.clone(), 49)];
+    store.clear_action_outputs(&windows, 49, 1000, 10).await.unwrap();
+    assert_eq!(copies().await, 1, "inside its window");
+    age(60).await.unwrap();
+    assert!(store.clear_action_outputs(&windows, 49, 1000, 10).await.unwrap() >= 1);
+    assert_eq!(copies().await, 0, "outside it");
+    assert_eq!(store.actions(m.id).await.unwrap().len(), 1, "who did what stays");
+    // An interface this engine no longer runs gets the longest window.
+    age(30).await.unwrap();
+    sqlx::query("UPDATE message_actions SET previous_output = 'x' WHERE interface = $1")
+        .bind(&t.name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    store.clear_action_outputs(&[], 49, 1000, 10).await.unwrap();
+    assert_eq!(copies().await, 1);
+
+    // Past audit.keep: the action and its audit row go; recent rows stay.
+    let six_years = std::time::Duration::from_secs(6 * 365 * 86_400);
+    sqlx::query("UPDATE message_actions SET at = now() - interval '7 years' WHERE interface = $1")
+        .bind(&t.name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE audit_log SET at = now() - interval '7 years' WHERE interface = $1")
+        .bind(&t.name)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let recent = store
+        .record(&ductus_store::Audit::new(ductus_store::By::engine(), "test.recent").interface(&t.name))
+        .await
+        .unwrap();
+    let (actions, rows) = store.trim_audit(six_years, 1000, 10).await.unwrap();
+    assert!(actions >= 1 && rows >= 1, "{actions} actions, {rows} rows");
+    assert!(store.actions(m.id).await.unwrap().is_empty());
+    let left = audit_of(&store, &t.name).await;
+    assert_eq!(left.iter().map(|(a, _, _)| a.as_str()).collect::<Vec<_>>(), ["test.recent"], "id {recent}");
+}
+
+/// A start with no stop of its instance is how a crash shows.
+#[tokio::test]
+async fn a_start_without_a_stop_is_a_crash() {
+    use ductus_store::{Audit, By, PreviousRun};
+    let Some(store) = store().await else { return };
+    let host = unique("test-host");
+    assert_eq!(store.previous_run(&host).await.unwrap(), PreviousRun::First);
+    let started = |instance: &str| {
+        Audit::new(By::engine(), "engine.start").detail(serde_json::json!({ "host": host, "instance": instance }))
+    };
+    store.record(&started("one")).await.unwrap();
+    assert!(matches!(store.previous_run(&host).await.unwrap(), PreviousRun::Unclean(_)));
+    let stopped = Audit::new(By::engine(), "engine.stop").detail(serde_json::json!({ "instance": "one" }));
+    store.record(&stopped).await.unwrap();
+    assert!(matches!(store.previous_run(&host).await.unwrap(), PreviousRun::Stopped(_)));
+    store.record(&started("two")).await.unwrap();
+    assert!(matches!(store.previous_run(&host).await.unwrap(), PreviousRun::Unclean(_)), "the newest start counts");
+}
+
+/// Changes to accounts and tokens write their audit row in their own transaction: a refused change
+/// leaves none, a made one leaves one that names who did it and what was done to.
+#[tokio::test]
+async fn account_changes_are_logged_with_the_change() {
+    use ductus_store::{Audit, AuditFilter, By};
+    let Some(store) = store().await else { return };
+    let admin = make_user(&store, Role::Viewer, &[]).await;
+    let by = By::user(admin.id, &admin.username, "session", Some("192.0.2.7".parse().unwrap()));
+    let name = unique("test-user");
+    let permissions = ["payloads".to_string()];
+    let new = ductus_store::NewUser {
+        username: &name,
+        display_name: "",
+        email: "",
+        role: Role::Operator,
+        permissions: &permissions,
+        password_hash: Some("$argon2id$x"),
+        must_change_password: true,
+        source: "local",
+    };
+    store.create_user(&new, &Audit::new(by, "user.create")).await.unwrap();
+    assert!(store.create_user(&new, &Audit::new(by, "user.create")).await.is_err(), "a duplicate name");
+    let filter = AuditFilter { actor: Some(&admin.username), action: Some("user"), limit: 10, ..Default::default() };
+    let rows = store.audit_log(&filter).await.unwrap();
+    assert_eq!(rows.len(), 1, "the refused one left nothing: {rows:?}");
+    let r = &rows[0];
+    assert_eq!(
+        (r.action.as_str(), r.subject.as_deref(), r.outcome.as_str()),
+        ("user.create", Some(name.as_str()), "ok")
+    );
+    assert_eq!(
+        (r.actor_kind.as_str(), r.via.as_deref(), r.ip.as_deref()),
+        ("user", Some("session"), Some("192.0.2.7"))
+    );
+    assert!(r.detail.as_deref().unwrap().contains("payloads"));
+    // Their own activity, by person.
+    let mine = AuditFilter { user_id: Some(admin.id), limit: 10, ..Default::default() };
+    assert_eq!(store.audit_log(&mine).await.unwrap().len(), 1);
+}
+
 /// A resend puts a finished delivery back to pending while another destination may be settling
 /// the same message. Settling must read the deliveries after it holds the message's lock, or it
 /// settles from the delivery as it was before the resend: quarantined with a delivery pending,
@@ -592,6 +875,46 @@ async fn a_resend_while_another_destination_settles_leaves_the_message_pending()
     let done: Vec<Done> = refs.iter().map(|m| sent(*m)).collect();
     store.finish(a, &done).await.unwrap();
     assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), 300);
+}
+
+/// A dismissal while the other destination is still settling the same messages: whichever lands
+/// last, every message ends up settled from both deliveries (sent: `b` sent it), none pending with
+/// nothing to wait for, none quarantined with nothing quarantined.
+#[tokio::test]
+async fn a_dismissal_while_another_destination_settles_leaves_the_message_settled() {
+    use ductus_store::Resend;
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "dismiss-race", &["a", "b"]).await;
+    let (a, b) = (t.id("a"), t.id("b"));
+    let mut refs = Vec::new();
+    for i in 0..300 {
+        refs.push(store.insert(t.msg(0, format!("m{i}").as_bytes())).await.unwrap());
+    }
+    let quarantined: Vec<Done> = refs.iter().map(|m| Done::with(*m, Status::Quarantined, Some("rejected"))).collect();
+    store.finish(a, &quarantined).await.unwrap();
+    let settle_b = {
+        let (store, refs) = (store.clone(), refs.clone());
+        tokio::spawn(async move {
+            for m in refs {
+                store.finish(b, &[sent(m)]).await.unwrap();
+            }
+        })
+    };
+    let dismiss_a = {
+        let (store, refs) = (store.clone(), refs.clone());
+        tokio::spawn(async move {
+            for m in refs {
+                let r = Resend { messages: &[m.id], destinations: &[a], quarantined_only: true };
+                assert_eq!(store.dismiss(r, OPERATOR).await.unwrap().len(), 1);
+            }
+        })
+    };
+    let (x, y) = tokio::join!(settle_b, dismiss_a);
+    x.unwrap();
+    y.unwrap();
+    assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap().len(), 300);
+    assert!(store.payloads(&t.name, Status::Pending).await.unwrap().is_empty());
+    assert!(store.payloads(&t.name, Status::Quarantined).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1475,10 +1798,10 @@ async fn partition_maintenance_is_idempotent() {
 async fn tokens_are_stored_hashed_and_can_be_revoked() {
     let Some(store) = store().await else { return };
     let name = format!("test-token-{}", std::process::id());
-    let (token, secret) = store.create_token(&name, Role::Operator, &[], None).await.unwrap();
+    let (token, secret) = store.create_token(&name, Role::Operator, &[], None, &quiet()).await.unwrap();
     assert!(secret.starts_with(ductus_store::TOKEN_PREFIX) && secret.len() == 68, "{secret}");
     assert_eq!((token.name.as_str(), token.role), (name.as_str(), Role::Operator));
-    let err = store.create_token(&name, Role::Viewer, &[], None).await.unwrap_err().to_string();
+    let err = store.create_token(&name, Role::Viewer, &[], None, &quiet()).await.unwrap_err().to_string();
     assert!(err.contains("already exists"), "{err}");
 
     let found = store.authenticate(&secret).await.unwrap().expect("the token works");
@@ -1487,14 +1810,14 @@ async fn tokens_are_stored_hashed_and_can_be_revoked() {
     assert!(store.authenticate("dux_0000").await.unwrap().is_none());
     assert!(store.authenticate("not a token").await.unwrap().is_none());
 
-    assert!(store.revoke_token(&name, None).await.unwrap());
-    assert!(!store.revoke_token(&name, None).await.unwrap(), "nothing left to revoke");
+    assert!(store.revoke_token(&name, None, &quiet()).await.unwrap());
+    assert!(!store.revoke_token(&name, None, &quiet()).await.unwrap(), "nothing left to revoke");
     assert!(store.authenticate(&secret).await.unwrap().is_none(), "revoked tokens stop working");
     assert!(!store.tokens(false, None).await.unwrap().iter().any(|t| t.id == token.id));
     assert!(store.tokens(true, None).await.unwrap().iter().any(|t| t.id == token.id && t.revoked_at.is_some()));
     // The name is free again.
-    let (again, _) = store.create_token(&name, Role::Viewer, &[], None).await.unwrap();
-    store.revoke_token(&name, None).await.unwrap();
+    let (again, _) = store.create_token(&name, Role::Viewer, &[], None, &quiet()).await.unwrap();
+    store.revoke_token(&name, None, &quiet()).await.unwrap();
     assert_ne!(again.id, token.id);
 }
 
@@ -1506,10 +1829,10 @@ async fn sessions_act_as_their_token_until_they_end() {
     let store = Store::connect(&url, 4).await.unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let name = format!("test-session-{}", std::process::id());
-    let (token, token_secret) = store.create_token(&name, Role::Operator, &[], None).await.unwrap();
+    let (token, token_secret) = store.create_token(&name, Role::Operator, &[], None, &quiet()).await.unwrap();
     let limits = SessionLimits::default();
 
-    let (secret, expires_at) = store.create_session(SessionFor::Token(token.id), limits).await.unwrap();
+    let (secret, expires_at) = store.create_session(SessionFor::Token(token.id), limits, &quiet()).await.unwrap();
     assert!(secret.starts_with(ductus_store::SESSION_PREFIX) && secret.len() == 68, "{secret}");
     let days = (expires_at - chrono::Utc::now()).num_hours();
     assert!((167..=168).contains(&days), "a week from now: {expires_at}");
@@ -1519,13 +1842,13 @@ async fn sessions_act_as_their_token_until_they_end() {
     assert!(store.authenticate_session(&token_secret, limits).await.unwrap().is_none(), "nor a token a session");
 
     // Sign-out.
-    assert!(store.end_session(&secret).await.unwrap());
+    assert!(store.end_session(&secret, None).await.unwrap());
     assert!(store.authenticate_session(&secret, limits).await.unwrap().is_none());
 
     // Idle too long, or past its end.
-    let (idle, _) = store.create_session(SessionFor::Token(token.id), limits).await.unwrap();
-    let (old, _) = store.create_session(SessionFor::Token(token.id), limits).await.unwrap();
-    let (live, _) = store.create_session(SessionFor::Token(token.id), limits).await.unwrap();
+    let (idle, _) = store.create_session(SessionFor::Token(token.id), limits, &quiet()).await.unwrap();
+    let (old, _) = store.create_session(SessionFor::Token(token.id), limits, &quiet()).await.unwrap();
+    let (live, _) = store.create_session(SessionFor::Token(token.id), limits, &quiet()).await.unwrap();
     for (set, secret) in
         [("last_seen_at = now() - interval '13 hours'", &idle), ("expires_at = now() - interval '1 second'", &old)]
     {
@@ -1538,7 +1861,7 @@ async fn sessions_act_as_their_token_until_they_end() {
     assert!(store.authenticate_session(&live, limits).await.unwrap().is_some());
 
     // Revoking the token ends its sessions.
-    store.revoke_token(&name, None).await.unwrap();
+    store.revoke_token(&name, None, &quiet()).await.unwrap();
     assert!(store.authenticate_session(&live, limits).await.unwrap().is_none());
 }
 
@@ -1554,16 +1877,19 @@ fn unique(prefix: &str) -> String {
 async fn make_user(store: &Store, role: Role, permissions: &[&str]) -> ductus_store::User {
     let permissions: Vec<String> = permissions.iter().map(|p| p.to_string()).collect();
     store
-        .create_user(&ductus_store::NewUser {
-            username: &unique("test-user"),
-            display_name: "",
-            email: "",
-            role,
-            permissions: &permissions,
-            password_hash: Some("$argon2id$not-checked-here"),
-            must_change_password: false,
-            source: "local",
-        })
+        .create_user(
+            &ductus_store::NewUser {
+                username: &unique("test-user"),
+                display_name: "",
+                email: "",
+                role,
+                permissions: &permissions,
+                password_hash: Some("$argon2id$not-checked-here"),
+                must_change_password: false,
+                source: "local",
+            },
+            &quiet(),
+        )
         .await
         .unwrap()
 }
@@ -1576,16 +1902,19 @@ async fn users_lock_after_wrong_passwords_and_stop_when_disabled() {
     let limits = SessionLimits::default();
     let user = make_user(&store, Role::Operator, &["payloads"]).await;
     let err = store
-        .create_user(&ductus_store::NewUser {
-            username: &user.username.to_uppercase(),
-            display_name: "",
-            email: "",
-            role: Role::Viewer,
-            permissions: &[],
-            password_hash: None,
-            must_change_password: false,
-            source: "local",
-        })
+        .create_user(
+            &ductus_store::NewUser {
+                username: &user.username.to_uppercase(),
+                display_name: "",
+                email: "",
+                role: Role::Viewer,
+                permissions: &[],
+                password_hash: None,
+                must_change_password: false,
+                source: "local",
+            },
+            &quiet(),
+        )
         .await
         .unwrap_err()
         .to_string();
@@ -1600,43 +1929,47 @@ async fn users_lock_after_wrong_passwords_and_stop_when_disabled() {
         window: std::time::Duration::from_secs(900),
         lock_for: std::time::Duration::from_secs(600),
     };
-    assert!(store.record_failed_login(user.id, lockout).await.unwrap().is_none());
-    assert!(store.record_failed_login(user.id, lockout).await.unwrap().is_none());
-    let until = store.record_failed_login(user.id, lockout).await.unwrap().expect("locked at the third");
+    assert!(store.record_failed_login(user.id, lockout, &quiet()).await.unwrap().is_none());
+    assert!(store.record_failed_login(user.id, lockout, &quiet()).await.unwrap().is_none());
+    let until = store.record_failed_login(user.id, lockout, &quiet()).await.unwrap().expect("locked at the third");
     assert!((9..=10).contains(&(until - chrono::Utc::now()).num_minutes()), "{until}");
     let candidate = store.candidate(&user.username).await.unwrap().unwrap();
     assert_eq!(candidate.locked_until, Some(until));
-    store.unlock_user(user.id).await.unwrap();
+    store.unlock_user(user.id, &quiet()).await.unwrap();
     assert!(store.candidate(&user.username).await.unwrap().unwrap().locked_until.is_none());
-    store.record_failed_login(user.id, lockout).await.unwrap();
+    store.record_failed_login(user.id, lockout, &quiet()).await.unwrap();
     store.record_sign_in(user.id).await.unwrap();
-    assert!(store.record_failed_login(user.id, lockout).await.unwrap().is_none(), "the count started over");
+    assert!(store.record_failed_login(user.id, lockout, &quiet()).await.unwrap().is_none(), "the count started over");
 
     // A session acts as the user; their token never goes above them.
-    let (secret, _) = store.create_session(SessionFor::User(user.id), limits).await.unwrap();
+    let (secret, _) = store.create_session(SessionFor::User(user.id), limits, &quiet()).await.unwrap();
     let (who, _) = store.authenticate_session(&secret, limits).await.unwrap().expect("the session works");
     assert_eq!((who.user_id, who.token_id, who.role), (Some(user.id), None, Role::Operator));
     assert!(who.can("payloads") && !who.can("audit"));
     let tname = unique("test-user-token");
     let permissions = ["payloads".to_string(), "audit".to_string()];
-    let (token, token_secret) = store.create_token(&tname, Role::Admin, &permissions, Some(user.id)).await.unwrap();
+    let (token, token_secret) =
+        store.create_token(&tname, Role::Admin, &permissions, Some(user.id), &quiet()).await.unwrap();
     assert_eq!(token.owner.as_deref(), Some(user.username.as_str()));
     let acting = store.authenticate(&token_secret).await.unwrap().expect("the token works");
     assert_eq!(acting.role, Role::Operator, "capped at its owner's role");
     assert_eq!(acting.permissions, ["payloads"], "and at the owner's permissions");
     assert_eq!(store.tokens(false, Some(user.id)).await.unwrap().len(), 1);
-    assert!(!store.revoke_token(&tname, Some(user.id + 1_000_000)).await.unwrap(), "only the owner's own");
+    assert!(!store.revoke_token(&tname, Some(user.id + 1_000_000), &quiet()).await.unwrap(), "only the owner's own");
 
     // Disabling ends the sessions and stops the tokens.
-    store.update_user(user.id, &ductus_store::UserChange { disabled: Some(true), ..Default::default() }).await.unwrap();
+    store
+        .update_user(user.id, &ductus_store::UserChange { disabled: Some(true), ..Default::default() }, &quiet())
+        .await
+        .unwrap();
     assert!(store.authenticate_session(&secret, limits).await.unwrap().is_none());
     assert!(store.authenticate(&token_secret).await.unwrap().is_none(), "a disabled user's token stops");
     store
-        .update_user(user.id, &ductus_store::UserChange { disabled: Some(false), ..Default::default() })
+        .update_user(user.id, &ductus_store::UserChange { disabled: Some(false), ..Default::default() }, &quiet())
         .await
         .unwrap();
     assert!(store.authenticate(&token_secret).await.unwrap().is_some(), "and works again when they are back");
-    store.revoke_token(&tname, None).await.unwrap();
+    store.revoke_token(&tname, None, &quiet()).await.unwrap();
 }
 
 /// Changing a password ends the user's other sessions but not the one changing it; people can end
@@ -1647,9 +1980,9 @@ async fn password_changes_end_other_sessions() {
     let limits = SessionLimits::default();
     let user = make_user(&store, Role::Viewer, &[]).await;
     let other = make_user(&store, Role::Viewer, &[]).await;
-    let (mine, _) = store.create_session(SessionFor::User(user.id), limits).await.unwrap();
-    let (elsewhere, _) = store.create_session(SessionFor::User(user.id), limits).await.unwrap();
-    let (theirs, _) = store.create_session(SessionFor::User(other.id), limits).await.unwrap();
+    let (mine, _) = store.create_session(SessionFor::User(user.id), limits, &quiet()).await.unwrap();
+    let (elsewhere, _) = store.create_session(SessionFor::User(user.id), limits, &quiet()).await.unwrap();
+    let (theirs, _) = store.create_session(SessionFor::User(other.id), limits, &quiet()).await.unwrap();
 
     let listed = store.user_sessions(user.id, Some(&mine), limits.idle).await.unwrap();
     assert_eq!(listed.len(), 2);
@@ -1657,18 +1990,18 @@ async fn password_changes_end_other_sessions() {
     let not_mine = store.user_sessions(other.id, None, limits.idle).await.unwrap()[0].id;
     assert!(!store.end_user_session(user.id, not_mine).await.unwrap(), "someone else's session");
 
-    store.set_password(user.id, "$argon2id$new", false, Some(&mine)).await.unwrap();
+    store.set_password(user.id, "$argon2id$new", false, Some(&mine), &quiet()).await.unwrap();
     assert!(store.authenticate_session(&mine, limits).await.unwrap().is_some(), "the one changing it stays");
     assert!(store.authenticate_session(&elsewhere, limits).await.unwrap().is_none(), "the others end");
     assert!(store.authenticate_session(&theirs, limits).await.unwrap().is_some(), "other people's are untouched");
     assert_eq!(store.password_hash(user.id).await.unwrap().as_deref(), Some("$argon2id$new"));
 
-    store.set_password(user.id, "$argon2id$temporary", true, None).await.unwrap();
+    store.set_password(user.id, "$argon2id$temporary", true, None, &quiet()).await.unwrap();
     assert!(store.authenticate_session(&mine, limits).await.unwrap().is_none(), "a reset ends every session");
-    let (again, _) = store.create_session(SessionFor::User(user.id), limits).await.unwrap();
+    let (again, _) = store.create_session(SessionFor::User(user.id), limits, &quiet()).await.unwrap();
     let (who, _) = store.authenticate_session(&again, limits).await.unwrap().unwrap();
     assert!(who.must_change_password, "an admin-chosen password has to be changed");
-    store.set_password(user.id, "$argon2id$mine", false, Some(&again)).await.unwrap();
+    store.set_password(user.id, "$argon2id$mine", false, Some(&again), &quiet()).await.unwrap();
     let (who, _) = store.authenticate_session(&again, limits).await.unwrap().unwrap();
     assert!(!who.must_change_password);
 }
@@ -1709,15 +2042,15 @@ async fn the_last_admin_stays() {
     let disable = ductus_store::UserChange { disabled: Some(true), ..Default::default() };
     if others == 0 {
         for change in [&demote, &disable] {
-            let err = store.update_user(admin.id, change).await.unwrap_err().to_string();
+            let err = store.update_user(admin.id, change, &quiet()).await.unwrap_err().to_string();
             assert!(err.contains("no admin who can sign in"), "{err}");
         }
         let second = make_user(&store, Role::Admin, &[]).await;
-        store.update_user(admin.id, &demote).await.expect("another admin remains");
-        let err = store.update_user(second.id, &disable).await.unwrap_err().to_string();
+        store.update_user(admin.id, &demote, &quiet()).await.expect("another admin remains");
+        let err = store.update_user(second.id, &disable, &quiet()).await.unwrap_err().to_string();
         assert!(err.contains("no admin who can sign in"), "{err}");
     } else {
-        store.update_user(admin.id, &demote).await.expect("other admins remain");
+        store.update_user(admin.id, &demote, &quiet()).await.expect("other admins remain");
     }
     forget_test_admins(&pool).await;
 }
@@ -2062,6 +2395,17 @@ async fn expired_unfinished_messages_move_to_the_held_area() {
     // The month stays while c is unresolved; once it is, the month goes whole.
     assert!(!store.drop_finished_held().await.unwrap().contains(&month));
     assert!(exists(&pool, &month).await);
+    // Dismissing c, in the held area, is how its quarantine ends (a resend or an edit would too).
+    let c: i64 = sqlx::query_scalar("SELECT id FROM messages WHERE interface = $1 AND payload = 'c quarantined'")
+        .bind(&keep.name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    let dismissal = ductus_store::Resend { messages: &[c], destinations: &keep.ids, quarantined_only: true };
+    assert!(!store.dismiss(dismissal, OPERATOR).await.unwrap().is_empty(), "c's quarantined deliveries");
+    assert_eq!(status_by_id(&store, c).await, Status::Filtered);
+    let tiers = tiers_of(&pool, &keep.name).await;
+    assert_eq!(tiers.last().unwrap(), &("c quarantined".to_string(), ductus_store::HELD), "still held");
     // Resolved (with anything a failed run left in past months: only tests put rows there).
     for table in ["deliveries", "messages"] {
         sqlx::query(sqlx::AssertSqlSafe(format!(

@@ -12,6 +12,7 @@
 //! The same listener serves the web UI (`ui.rs`) at every path outside `/api`.
 
 mod actions;
+mod audit;
 mod hotspots;
 mod me;
 mod messages;
@@ -25,18 +26,21 @@ mod ui;
 mod users;
 
 use crate::control::Engine;
-use axum::extract::{FromRequestParts, State};
+use axum::extract::{ConnectInfo, FromRequestParts, State};
 use axum::http::request::Parts;
 use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::{Json, Router};
 use chrono::{DateTime, Utc};
-use ductus_store::{Principal, Role};
+use ductus_store::{Audit, By, Principal, Role};
 use serde::Serialize;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 use utoipa::openapi::security::{ApiKey, ApiKeyValue, HttpAuthScheme, HttpBuilder, SecurityScheme};
 use utoipa::{Modify, OpenApi, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
+
+pub use audit::AuditEntry;
 
 pub type Shared = Arc<Engine>;
 
@@ -58,6 +62,7 @@ pub type Shared = Arc<Engine>;
         (name = "messages", description = "The message browser, the quarantine, and resending or correcting messages"),
         (name = "drain", description = "Stop taking messages and deliver what's stored"),
         (name = "reports", description = "Impact, owners and connection checks"),
+        (name = "audit", description = "Who did what: the audit log (the `audit` permission) and your own activity"),
         (name = "retention", description = "How long messages are kept, and changes to it"),
         (name = "tokens", description = "API tokens (admin)")
     )
@@ -85,6 +90,7 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
         .merge(hotspots::routes())
         .merge(messages::routes())
         .merge(actions::routes())
+        .merge(audit::routes())
         .merge(metrics::routes())
         .merge(reports::routes())
         .merge(retention::routes())
@@ -120,7 +126,8 @@ pub async fn serve(engine: Shared, host: &str, port: u16) -> anyhow::Result<toki
     let shutdown = engine.shutdown.clone();
     let (router, _) = router(engine);
     Ok(tokio::spawn(async move {
-        if let Err(e) = axum::serve(listener, router).with_graceful_shutdown(shutdown.cancelled_owned()).await {
+        let app = router.into_make_service_with_connect_info::<SocketAddr>();
+        if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned()).await {
             tracing::error!(error = %e, "REST API stopped");
         }
     }))
@@ -177,9 +184,27 @@ pub struct Caller {
     pub who: Principal,
     pub session: Option<DateTime<Utc>>,
     pub cookie: Option<String>,
+    /// How they came (`session`: the web UI; `token`: a bearer token), for the audit log.
+    pub via: &'static str,
+    /// The address the connection came from (a proxy's, when there is one).
+    pub ip: Option<IpAddr>,
 }
 
 impl Caller {
+    /// Who this is, for the audit log.
+    pub fn by(&self) -> By<'_> {
+        match (self.who.token_id, self.who.user_id) {
+            (Some(token), owner) => By::token(token, owner, &self.who.name, self.via, self.ip),
+            (None, Some(user)) => By::user(user, &self.who.name, self.via, self.ip),
+            (None, None) => By::anonymous(self.ip),
+        }
+    }
+
+    /// A row for the audit log about something this caller did.
+    pub fn audit<'a>(&'a self, action: &'a str) -> Audit<'a> {
+        Audit::new(self.by(), action)
+    }
+
     /// Refuse unless the caller's role is at least `role`.
     pub fn require(&self, role: Role) -> Result<(), ApiError> {
         if self.who.role >= role {
@@ -217,6 +242,19 @@ impl Caller {
     }
 }
 
+/// Write an audit row before doing what it says (for actions that have no database transaction of
+/// their own: a pause, a drain). If the log can't be written the action is refused: nothing
+/// happens that the log doesn't know about.
+pub async fn record_first(engine: &Shared, audit: Audit<'_>) -> Result<(), ApiError> {
+    engine.store.record(&audit).await.map(|_| ()).map_err(|e| {
+        tracing::error!(action = audit.action, error = %format!("{e:#}"), "audit log write failed: refusing the action");
+        ApiError::new(
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the audit log can't be written, so this was not done: check the database, then try again",
+        )
+    })
+}
+
 /// A caller whose password an admin chose and who hasn't changed it yet: only changing it (and
 /// saying who they are, or signing out) works. Every other call answers 403 `password_change_required`.
 pub struct MustChange(pub Caller);
@@ -225,6 +263,11 @@ pub struct MustChange(pub Caller);
 /// can't send it without the engine agreeing first (CORS, which it never does), so a page
 /// elsewhere can't use the session cookie to act. Scripts using a token don't need it.
 pub const BROWSER_HEADER: &str = "x-ductus";
+
+/// The address the connection came from.
+fn peer(parts: &Parts) -> Option<IpAddr> {
+    parts.extensions.get::<ConnectInfo<SocketAddr>>().map(|c| c.0.ip())
+}
 
 /// `Authorization: Bearer ...`, if given.
 fn bearer(parts: &Parts) -> Option<&str> {
@@ -236,9 +279,10 @@ async fn identify(parts: &Parts, engine: &Shared) -> Result<Caller, ApiError> {
     let unauthorized = |message: &str| {
         ApiError::new(StatusCode::UNAUTHORIZED, format!("{message} (create a token with `ductus token create`)"))
     };
+    let ip = peer(parts);
     if let Some(secret) = bearer(parts) {
         return match engine.store.authenticate(secret).await? {
-            Some(who) => Ok(Caller { who, session: None, cookie: None }),
+            Some(who) => Ok(Caller { who, session: None, cookie: None, via: "token", ip }),
             None => Err(unauthorized("unknown or revoked token")),
         };
     }
@@ -252,7 +296,9 @@ async fn identify(parts: &Parts, engine: &Shared) -> Result<Caller, ApiError> {
         ));
     }
     match engine.store.authenticate_session(secret, session::limits(engine)).await? {
-        Some((who, ends)) => Ok(Caller { who, session: Some(ends), cookie: Some(secret.to_string()) }),
+        Some((who, ends)) => {
+            Ok(Caller { who, session: Some(ends), cookie: Some(secret.to_string()), via: "session", ip })
+        }
         None => Err(ApiError::new(StatusCode::UNAUTHORIZED, "the session has ended: sign in again")),
     }
 }
@@ -308,7 +354,8 @@ mod tests {
     /// Who may call what, in one place. Every operation in the API document has a row (and the
     /// other way round), so an endpoint can't ship without someone deciding its access:
     /// `public` needs nothing, `signed` any signed-in caller (user or token), `user` a person
-    /// signed in with a password, `operator` and `admin` that role at least. Behaviour is covered
+    /// signed in with a password, `operator` and `admin` that role at least, `audit` the `audit`
+    /// permission (admins have it). Behaviour is covered
     /// by the tests that call the engine (`cargo test -p ductus --test cli`, `demo-ui.sh`).
     const ACCESS: &[(&str, &str, &str)] = &[
         ("GET", "/health", "public"),
@@ -338,6 +385,10 @@ mod tests {
         ("POST", "/messages/{id}/resend", "operator"),
         ("POST", "/messages/resend", "operator"),
         ("POST", "/messages/{id}/edit", "operator"),
+        ("POST", "/messages/{id}/dismiss", "operator"),
+        ("POST", "/messages/dismiss", "operator"),
+        ("GET", "/audit", "audit"),
+        ("GET", "/me/activity", "user"),
         ("POST", "/retention/{name}/confirm", "operator"),
         ("GET", "/me", "user"),
         ("PATCH", "/me", "user"),
@@ -380,7 +431,10 @@ mod tests {
              (a public row must be the operations the document marks `security: []`)"
         );
         for (method, path, access) in ACCESS {
-            assert!(["public", "signed", "user", "operator", "admin"].contains(access), "{method} {path}: {access}");
+            assert!(
+                ["public", "signed", "user", "operator", "admin", "audit"].contains(access),
+                "{method} {path}: {access}"
+            );
         }
     }
 

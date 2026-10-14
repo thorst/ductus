@@ -4,6 +4,7 @@
 
 use crate::Store;
 use crate::api::{Role, clean_permissions};
+use crate::audit::{self, Audit};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use std::time::Duration;
@@ -103,9 +104,10 @@ fn clean_username(name: &str) -> Result<String> {
 
 impl Store {
     /// Make an account. Refuses a name taken (in any case).
-    pub async fn create_user(&self, new: &NewUser<'_>) -> Result<User> {
+    pub async fn create_user(&self, new: &NewUser<'_>, audit: &Audit<'_>) -> Result<User> {
         let username = clean_username(new.username)?;
         let permissions = clean_permissions(new.permissions)?;
+        let mut tx = self.pool.begin().await.context("creating user")?;
         let sql = format!(
             "INSERT INTO users (username, display_name, email, role, permissions, password_hash, must_change_password, source)
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING {USER_COLUMNS}"
@@ -119,10 +121,16 @@ impl Store {
             .bind(new.password_hash)
             .bind(new.must_change_password)
             .bind(new.source)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await;
         match made {
-            Ok(user) => Ok(user),
+            Ok(user) => {
+                let detail = serde_json::json!({ "role": user.role.label(), "permissions": user.permissions, "source": user.source });
+                audit::insert(&mut tx, &Audit { subject: Some(&user.username), detail: Some(detail), ..audit.clone() })
+                    .await?;
+                tx.commit().await.context("creating user")?;
+                Ok(user)
+            }
             Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
                 bail!("there is already a user named `{username}` (names ignore case)")
             }
@@ -156,7 +164,7 @@ impl Store {
 
     /// Change an account. Refuses a change that would leave no admin who can sign in. A user
     /// who is disabled loses their sessions at once (their tokens stop by themselves).
-    pub async fn update_user(&self, id: i32, change: &UserChange) -> Result<User> {
+    pub async fn update_user(&self, id: i32, change: &UserChange, audit: &Audit<'_>) -> Result<User> {
         let permissions = change.permissions.as_deref().map(clean_permissions).transpose()?;
         let mut tx = self.pool.begin().await.context("updating user")?;
         // Lock the admins in id order, so two changes at once can't both think another admin remains.
@@ -200,6 +208,11 @@ impl Store {
                 .await
                 .context("ending the user's sessions")?;
         }
+        let detail = serde_json::json!({
+            "role": change.role.map(|r| r.label()), "permissions": change.permissions,
+            "disabled": change.disabled, "display_name": change.display_name.is_some(), "email": change.email.is_some(),
+        });
+        audit::insert(&mut tx, &Audit { subject: Some(&user.username), detail: Some(detail), ..audit.clone() }).await?;
         tx.commit().await.context("updating user")?;
         Ok(user)
     }
@@ -217,7 +230,13 @@ impl Store {
 
     /// A wrong password: counted within the window, and past the limit the account is locked for
     /// a while. Returns when it is locked until, if it now is.
-    pub async fn record_failed_login(&self, id: i32, lockout: Lockout) -> Result<Option<DateTime<Utc>>> {
+    pub async fn record_failed_login(
+        &self,
+        id: i32,
+        lockout: Lockout,
+        audit: &Audit<'_>,
+    ) -> Result<Option<DateTime<Utc>>> {
+        let mut tx = self.pool.begin().await.context("noting the wrong password")?;
         let locked: Option<DateTime<Utc>> = sqlx::query_scalar(
             "UPDATE users SET
                  failed_logins = CASE WHEN last_failed_at IS NULL OR last_failed_at < now() - make_interval(secs => $2)
@@ -232,11 +251,15 @@ impl Store {
         .bind(lockout.window.as_secs_f64())
         .bind(lockout.attempts as i32)
         .bind(lockout.lock_for.as_secs_f64())
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *tx)
         .await
         .context("noting the wrong password")?
         .flatten();
-        Ok(locked.filter(|until| *until > Utc::now()))
+        let locked = locked.filter(|until| *until > Utc::now());
+        let detail = serde_json::json!({ "reason": "wrong password", "locked": locked.is_some() });
+        audit::insert(&mut tx, &Audit { detail: Some(detail), ..audit.clone() }).await?;
+        tx.commit().await.context("noting the wrong password")?;
+        Ok(locked)
     }
 
     /// A successful sign-in: the count of wrong passwords starts over.
@@ -253,12 +276,18 @@ impl Store {
     }
 
     /// Let a locked account try again.
-    pub async fn unlock_user(&self, id: i32) -> Result<()> {
-        sqlx::query("UPDATE users SET failed_logins = 0, last_failed_at = NULL, locked_until = NULL WHERE id = $1")
-            .bind(id)
-            .execute(&self.pool)
-            .await
-            .context("unlocking the account")?;
+    pub async fn unlock_user(&self, id: i32, audit: &Audit<'_>) -> Result<()> {
+        let mut tx = self.pool.begin().await.context("unlocking the account")?;
+        let name: Option<String> = sqlx::query_scalar(
+            "UPDATE users SET failed_logins = 0, last_failed_at = NULL, locked_until = NULL WHERE id = $1
+             RETURNING username",
+        )
+        .bind(id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("unlocking the account")?;
+        audit::insert(&mut tx, &Audit { subject: name.as_deref(), ..audit.clone() }).await?;
+        tx.commit().await.context("unlocking the account")?;
         Ok(())
     }
 
@@ -270,22 +299,24 @@ impl Store {
         password_hash: &str,
         must_change: bool,
         keep: Option<&str>,
+        audit: &Audit<'_>,
     ) -> Result<()> {
         let mut tx = self.pool.begin().await.context("changing the password")?;
-        let found = sqlx::query(
+        let name: Option<String> = sqlx::query_scalar(
             "UPDATE users SET password_hash = $2, must_change_password = $3, failed_logins = 0,
                     last_failed_at = NULL, locked_until = NULL
-             WHERE id = $1 AND source = 'local'",
+             WHERE id = $1 AND source = 'local' RETURNING username",
         )
         .bind(id)
         .bind(password_hash)
         .bind(must_change)
-        .execute(&mut *tx)
+        .fetch_optional(&mut *tx)
         .await
         .context("changing the password")?;
-        if found.rows_affected() == 0 {
+        let Some(name) = name else {
             bail!("this account's password isn't kept here (its directory decides it)");
-        }
+        };
+        audit::insert(&mut tx, &Audit { subject: Some(&name), ..audit.clone() }).await?;
         sqlx::query("DELETE FROM api_sessions WHERE user_id = $1 AND ($2::bytea IS NULL OR hash <> $2)")
             .bind(id)
             .bind(keep.map(crate::api::hash_secret))

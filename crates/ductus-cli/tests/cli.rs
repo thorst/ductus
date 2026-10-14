@@ -1087,11 +1087,108 @@ async fn messages_are_resent_and_corrected_through_the_api() {
     assert_eq!((&lab["health"]["state"], &lab["quarantined"]), (&"error".into(), &2.into()), "{lab}");
     drop(events);
 
+    // Dismissing: viewers can't, a reason is required, and the quarantine empties (the archive had
+    // sent both, so the messages count as sent). Each request is one row in the audit log.
+    let (c4, c5) = (ids[0], ids[1]);
+    assert_eq!(post(&format!("/messages/{c4}/dismiss"), &viewer, serde_json::json!({"reason": "x"})).await.0, 403);
+    let (status, body) = post(&format!("/messages/{c4}/dismiss"), &ops, serde_json::json!({"reason": "  "})).await;
+    assert_eq!(status, 400, "{body}");
+    assert!(body["error"].as_str().unwrap().contains("say why"), "{body}");
+    assert_eq!(quarantined().await.len(), 2, "nothing was dismissed without a reason");
+    let (status, body) =
+        post(&format!("/messages/{c4}/dismiss"), &ops, serde_json::json!({"reason": "lab retired the unit"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!(body["dismissed"][0]["destinations"][0]["destination"], "lab");
+    let (status, body) =
+        post("/messages/dismiss", &ops, serde_json::json!({"ids": [c5, c1], "reason": "same unit"})).await;
+    assert_eq!(status, 200, "{body}");
+    assert_eq!((body["dismissed"].as_array().unwrap().len(), &body["skipped"]), (1, &serde_json::json!([c1])));
+    assert!(eventually(async || quarantined().await.is_empty()).await, "dismissed deliveries leave the quarantine");
+    let dismissed = get(&format!("/messages/{c4}")).await;
+    assert_eq!(dismissed["status"], "sent", "{dismissed}");
+    let lab = dismissed["deliveries"].as_array().unwrap().iter().find(|d| d["destination"] == "lab").unwrap();
+    assert_eq!(
+        (&lab["status"], &lab["last_error"]),
+        (&"filtered".into(), &format!("dismissed by {name}-operator: lab retired the unit").into())
+    );
+    let action = dismissed["actions"].as_array().unwrap().iter().find(|a| a["action"] == "dismiss").unwrap();
+    assert_eq!(
+        (&action["previous_status"], &action["reason"]),
+        (&"quarantined".into(), &"lab retired the unit".into())
+    );
+    let (status, body) = post(&format!("/messages/{c4}/dismiss"), &ops, serde_json::json!({"reason": "again"})).await;
+    assert_eq!(status, 409, "nothing is quarantined any more: {body}");
+
+    // The audit log: only with the `audit` permission; it says who, how and from where.
+    let auditor = {
+        let (ok, out) =
+            run(&["token", "create", &format!("{name}-auditor"), "--role", "viewer", "--permission", "audit"]);
+        assert!(ok, "{out}");
+        out.lines().next().unwrap().to_string()
+    };
+    let get_as = async |token: &str, path: &str| -> (u16, serde_json::Value) {
+        let r = http.get(format!("{base}{path}")).bearer_auth(token).send().await.unwrap();
+        (r.status().as_u16(), r.json().await.unwrap_or_default())
+    };
+    assert_eq!(get_as(&viewer, "/audit").await.0, 403, "payloads isn't audit");
+    assert_eq!(get_as(&ops, "/audit").await.0, 403, "nor is a role below admin");
+    let (status, page) = get_as(&auditor, &format!("/audit?interface={name}&action=message.dismiss")).await;
+    assert_eq!(status, 200, "{page}");
+    let entries = page["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 2, "one row per request, newest first: {page}");
+    let (bulk, single) = (&entries[0], &entries[1]);
+    assert_eq!(
+        (&bulk["actor"], &bulk["actor_kind"], &bulk["via"], &bulk["ip"], &bulk["message"]),
+        (&format!("{name}-operator").into(), &"token".into(), &"token".into(), &"127.0.0.1".into(), &c5.into())
+    );
+    assert_eq!(
+        (&bulk["detail"]["reason"], &bulk["detail"]["messages"]),
+        (&"same unit".into(), &serde_json::json!([c5]))
+    );
+    assert_eq!((&single["message"], &single["detail"]["reason"]), (&c4.into(), &"lab retired the unit".into()));
+    assert_eq!(single["detail"]["destinations"], serde_json::json!([format!("{name}/lab")]));
+
+    // Reads of a payload are rows too, one per reader and message within the window (the viewer
+    // looked at C2 many times above).
+    let (_, reads) =
+        get_as(&auditor, &format!("/audit?interface={name}&action=message.payload.read&message={c2}")).await;
+    let reads = reads["entries"].as_array().unwrap();
+    assert_eq!(reads.len(), 1, "{reads:?}");
+    assert_eq!(reads[0]["actor"], format!("{name}-viewer"));
+    // The engine's own start is in it, with the version.
+    let (_, started) = get_as(&auditor, "/audit?action=engine.start&limit=1").await;
+    let start = &started["entries"][0];
+    assert_eq!((&start["actor_kind"], &start["via"]), (&"system".into(), &"engine".into()), "{started}");
+    assert!(start["detail"]["instance"].is_string() && start["detail"]["version"].is_string(), "{start}");
+    assert!(["first", "stopped", "unclean"].contains(&start["detail"]["previous"].as_str().unwrap()), "{start}");
+    // An export is oldest first, one JSON object per line, and logged.
+    let export = http.get(format!("{base}/audit?format=ndjson&interface={name}")).bearer_auth(&auditor);
+    let export = export.send().await.unwrap();
+    assert_eq!(export.headers()["content-type"], "application/x-ndjson");
+    let lines: Vec<serde_json::Value> =
+        export.text().await.unwrap().lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(lines.len() >= 5 && lines.windows(2).all(|w| w[0]["id"].as_i64() < w[1]["id"].as_i64()), "{lines:?}");
+    let (_, exports) = get_as(&auditor, "/audit?action=audit.export&limit=1").await;
+    assert_eq!(exports["entries"][0]["actor"], format!("{name}-auditor"));
+    // The same from the server's command line, without a token.
+    let (ok, out) = run(&["audit", "export", "--interface", &name, "--action", "message.dismiss"]);
+    assert!(ok, "{out}");
+    assert_eq!(out.lines().filter(|l| l.starts_with('{')).count(), 2, "{out}");
+    let (_, cli) = get_as(&auditor, "/audit?action=audit.export&limit=1").await;
+    assert_eq!((&cli["entries"][0]["via"], &cli["entries"][0]["actor_kind"]), (&"cli".into(), &"system".into()));
+
     let spec: serde_json::Value = http.get(format!("{base}/openapi.json")).send().await.unwrap().json().await.unwrap();
-    for path in ["/messages/{id}/resend", "/messages/resend", "/messages/{id}/edit", "/quarantine"] {
+    for path in [
+        "/messages/{id}/resend",
+        "/messages/resend",
+        "/messages/{id}/edit",
+        "/messages/{id}/dismiss",
+        "/audit",
+        "/quarantine",
+    ] {
         assert!(spec["paths"][path].is_object(), "{path} missing from the OpenAPI document");
     }
-    for role in ["operator", "viewer"] {
+    for role in ["operator", "viewer", "auditor"] {
         run(&["token", "revoke", &format!("{name}-{role}")]);
     }
 }
@@ -1440,6 +1537,43 @@ async fn people_sign_in_with_passwords_and_are_kept_in_check() {
     assert_eq!(call(M::DELETE, &cookie, "/me/sessions", None).await.unwrap().status(), 204);
     assert_eq!(call(M::GET, &second, "/interfaces", None).await.unwrap().status(), 401, "the other one ended");
     assert_eq!(call(M::GET, &cookie, "/interfaces", None).await.unwrap().status(), 200, "this one stays");
+
+    // The audit log: admins read it (viewers don't), and it has all of the above.
+    let audit = async |cookie: &str, query: &str| -> serde_json::Value {
+        let r = call(M::GET, cookie, &format!("/audit?{query}&limit=100"), None).await.unwrap();
+        assert_eq!(r.status(), 200, "{query}");
+        r.json::<serde_json::Value>().await.unwrap()["entries"].clone()
+    };
+    let rows = |entries: &serde_json::Value| entries.as_array().unwrap().clone();
+    let vcookie = cookie_of(&password(&viewer, "a brand new phrase").await.unwrap());
+    assert_eq!(call(M::GET, &vcookie, "/audit", None).await.unwrap().status(), 403, "a viewer can't read the log");
+    let failed = rows(&audit(&cookie, &format!("action=session.failed&actor={viewer}")).await);
+    assert!(failed.len() >= 5, "{failed:?}");
+    assert!(failed.iter().any(|e| e["detail"]["locked"] == true), "the fifth wrong password locked it");
+    assert!(failed.iter().all(|e| e["outcome"] == "failed" && e["via"] == "session" && e["ip"] == "127.0.0.1"));
+    let everything = audit(&cookie, "action=session").await;
+    let anonymous: Vec<_> = rows(&everything).into_iter().filter(|e| e["actor_kind"] == "anonymous").collect();
+    assert!(!anonymous.is_empty() && anonymous.iter().all(|e| e["actor"] == "(unknown username)"));
+    assert!(!everything.to_string().contains("nobody-has-this-name"), "what a stranger typed isn't kept");
+    let made = rows(&audit(&cookie, "action=user.create").await);
+    let first = made.iter().find(|e| e["subject"] == admin.as_str()).expect("the first admin");
+    assert_eq!((&first["via"], &first["actor_kind"]), (&"cli".into(), &"system".into()), "made at the command line");
+    let viewer_made = made.iter().find(|e| e["subject"] == viewer.as_str()).expect("the viewer");
+    assert_eq!((&viewer_made["actor"], &viewer_made["via"]), (&admin.clone().into(), &"session".into()));
+    for action in ["user.disable", "user.unlock", "user.update"] {
+        let found = rows(&audit(&cookie, &format!("action={action}")).await);
+        assert!(found.iter().any(|e| e["subject"] == viewer.as_str() && e["actor"] == admin.as_str()), "{action}");
+    }
+    let tokens = rows(&audit(&cookie, "action=token.create").await);
+    assert!(tokens.iter().any(|e| e["subject"] == format!("{viewer}/ci") && e["actor"] == viewer.as_str()));
+    let passwords = rows(&audit(&cookie, &format!("actor={viewer}&action=password")).await);
+    assert!(passwords.iter().any(|e| e["action"] == "password.change"), "{passwords:?}");
+    // Everyone sees their own activity, and only that.
+    let mine: serde_json::Value = call(M::GET, &vcookie, "/me/activity", None).await.unwrap().json().await.unwrap();
+    let mine = rows(&mine["entries"]);
+    assert!(mine.iter().any(|e| e["action"] == "password.change"));
+    assert!(mine.iter().all(|e| e["actor"] == viewer.as_str() || e["actor"].as_str().unwrap().starts_with(&viewer)));
+    assert!(mine.iter().any(|e| e["action"] == "token.create"), "their token's creation is theirs");
 
     // A token can't be an account, and `auth.token_sign_in` isn't touched here.
     let bearer_me = http.get(format!("{base}/me")).bearer_auth(&secret).send().await.unwrap();

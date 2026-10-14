@@ -1,5 +1,6 @@
 //! What the REST API reads and keeps: its tokens and sessions, the message browser, and queue counts.
 
+use crate::audit::{self, Audit, By};
 use crate::{DestinationId, Status, Store};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -280,6 +281,7 @@ impl Store {
         role: Role,
         permissions: &[String],
         user_id: Option<i32>,
+        audit: &Audit<'_>,
     ) -> Result<(Token, String)> {
         let name = name.trim();
         if name.is_empty() {
@@ -287,6 +289,7 @@ impl Store {
         }
         let permissions = clean_permissions(permissions)?;
         let secret = random_secret(TOKEN_PREFIX);
+        let mut tx = self.pool.begin().await.context("creating token")?;
         let sql = format!(
             "WITH t AS (
                  INSERT INTO api_tokens (name, role, hash, permissions, user_id) VALUES ($1, $2, $3, $4, $5)
@@ -300,10 +303,17 @@ impl Store {
             .bind(hash(&secret))
             .bind(&permissions)
             .bind(user_id)
-            .fetch_one(&self.pool)
+            .fetch_one(&mut *tx)
             .await;
         match token {
-            Ok(token) => Ok((token, secret)),
+            Ok(token) => {
+                let role = role.label();
+                let detail = serde_json::json!({ "role": role, "permissions": permissions });
+                audit::insert(&mut tx, &Audit { subject: Some(&token.name), detail: Some(detail), ..audit.clone() })
+                    .await?;
+                tx.commit().await.context("creating token")?;
+                Ok((token, secret))
+            }
             Err(sqlx::Error::Database(e)) if e.is_unique_violation() => {
                 bail!("a token named `{name}` already exists (revoke it first, or pick another name)")
             }
@@ -327,17 +337,23 @@ impl Store {
 
     /// Revoke the live token named `name` (only if it is `user_id`'s, when given). False if
     /// there's none.
-    pub async fn revoke_token(&self, name: &str, user_id: Option<i32>) -> Result<bool> {
+    pub async fn revoke_token(&self, name: &str, user_id: Option<i32>, audit: &Audit<'_>) -> Result<bool> {
+        let mut tx = self.pool.begin().await.context("revoking token")?;
         let result = sqlx::query(
             "UPDATE api_tokens SET revoked_at = now()
              WHERE name = $1 AND revoked_at IS NULL AND ($2::int IS NULL OR user_id = $2)",
         )
         .bind(name.trim())
         .bind(user_id)
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("revoking token")?;
-        Ok(result.rows_affected() > 0)
+        if result.rows_affected() == 0 {
+            return Ok(false);
+        }
+        audit::insert(&mut tx, &Audit { subject: Some(name.trim()), ..audit.clone() }).await?;
+        tx.commit().await.context("revoking token")?;
+        Ok(true)
     }
 
     /// Who the live token with this secret is, if anyone. Notes when it was used, at most once a
@@ -370,13 +386,19 @@ impl Store {
 
     /// Sign a browser in: a new session for `owner` (already authenticated). Returns the secret
     /// for the cookie, which is never stored. Expired sessions are cleared on the way.
-    pub async fn create_session(&self, owner: SessionFor, limits: SessionLimits) -> Result<(String, DateTime<Utc>)> {
+    pub async fn create_session(
+        &self,
+        owner: SessionFor,
+        limits: SessionLimits,
+        audit: &Audit<'_>,
+    ) -> Result<(String, DateTime<Utc>)> {
+        let mut tx = self.pool.begin().await.context("creating session")?;
         sqlx::query(
             "DELETE FROM api_sessions
              WHERE expires_at < now() OR last_seen_at < now() - make_interval(secs => $1)",
         )
         .bind(limits.idle.as_secs_f64())
-        .execute(&self.pool)
+        .execute(&mut *tx)
         .await
         .context("clearing expired sessions")?;
         let secret = random_secret(SESSION_PREFIX);
@@ -393,9 +415,11 @@ impl Store {
         .bind(token_id)
         .bind(user_id)
         .bind(limits.max.as_secs_f64())
-        .fetch_one(&self.pool)
+        .fetch_one(&mut *tx)
         .await
         .context("creating session")?;
+        audit::insert(&mut tx, audit).await?;
+        tx.commit().await.context("creating session")?;
         Ok((secret, expires_at))
     }
 
@@ -435,13 +459,29 @@ impl Store {
     }
 
     /// Sign out: the session stops working at once. False if there was none.
-    pub async fn end_session(&self, secret: &str) -> Result<bool> {
-        let result = sqlx::query("DELETE FROM api_sessions WHERE hash = $1")
-            .bind(hash(secret))
-            .execute(&self.pool)
-            .await
-            .context("ending session")?;
-        Ok(result.rows_affected() > 0)
+    pub async fn end_session(&self, secret: &str, ip: Option<std::net::IpAddr>) -> Result<bool> {
+        let mut tx = self.pool.begin().await.context("ending session")?;
+        // Who it was, for the audit log (a session belongs to a user or a token).
+        type Ended = (Option<i32>, Option<String>, Option<i32>, Option<String>, Option<i32>);
+        let who: Option<Ended> = sqlx::query_as(
+            "DELETE FROM api_sessions s WHERE s.hash = $1
+             RETURNING s.user_id, (SELECT username FROM users WHERE id = s.user_id), s.token_id,
+                       (SELECT name FROM api_tokens WHERE id = s.token_id),
+                       (SELECT user_id FROM api_tokens WHERE id = s.token_id)",
+        )
+        .bind(hash(secret))
+        .fetch_optional(&mut *tx)
+        .await
+        .context("ending session")?;
+        let Some((user, username, token, token_name, owner)) = who else { return Ok(false) };
+        let by = match (user, token) {
+            (Some(id), _) => By::user(id, username.as_deref().unwrap_or(""), "session", ip),
+            (None, Some(id)) => By::token(id, owner, token_name.as_deref().unwrap_or(""), "session", ip),
+            (None, None) => return Ok(true),
+        };
+        audit::insert(&mut tx, &Audit::new(by, "session.sign_out")).await?;
+        tx.commit().await.context("ending session")?;
+        Ok(true)
     }
 
     /// A page of an interface's messages, newest first.

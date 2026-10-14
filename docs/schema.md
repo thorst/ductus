@@ -163,7 +163,7 @@ What people did to messages through the API (`POST /api/v1/messages/{id}/resend`
 |---|---|---|
 | `id` | bigint | Identity. |
 | `at` | timestamptz | When. |
-| `action` | text | `resend` or `edit`. |
+| `action` | text | `resend`, `edit` or `dismiss` (a quarantined delivery closed without sending: it became `filtered`, "dismissed by NAME: reason"). |
 | `token_id` | integer | The API token used (`api_tokens.id`). |
 | `user_id` | integer | The person who acted (`users.id`), when it was one (their token's owner counts). |
 | `actor` | text | The user's or token's name at the time (names can be reused). |
@@ -175,10 +175,34 @@ What people did to messages through the API (`POST /api/v1/messages/{id}/resend`
 | `previous_status` | smallint | The delivery's status before (as `deliveries.status`); none if the message had no delivery for that destination. |
 | `previous_attempts` | integer | Its attempts before (a resend starts them over). |
 | `previous_error` | text | Its `last_error` before. |
-| `previous_output` | bytea | What was sent before, for destinations with `save_output: true` (sending again replaces it). |
+| `previous_output` | bytea | What was sent before, for destinations with `save_output: true` (sending again replaces it). A copy of a payload, so it is set to NULL once the action is older than the interface's message retention (the row stays). |
 | `copy_id` | bigint | `edit`: the copy's message id. |
+| `audit_id` | bigint | The `audit_log` row of the request that made this action (one request, e.g. a bulk resend, makes one audit row and one action per delivery). No foreign key: both are trimmed after `audit.keep`. |
 
-Indexes: primary key `id`; `message_actions_message (message_id)`; `message_actions_copy (copy_id) WHERE copy_id IS NOT NULL`.
+Indexes: primary key `id`; `message_actions_message (message_id)`; `message_actions_copy (copy_id) WHERE copy_id IS NOT NULL`; `message_actions_audit (audit_id) WHERE audit_id IS NOT NULL`; `message_actions_outputs (at) WHERE previous_output IS NOT NULL` (finds the copies to clear). Rows older than `audit.keep` (default 6 years) are deleted hourly in batches of 5,000.
+
+## `audit_log`
+
+Who did what, to what, from where, and how it ended. Written in the transaction of the change itself where there is one (a resend, a dismissal, an account change), and before the action where there isn't (a pause, a drain; the action is refused if the row can't be written). Payload reads are written before the payload is returned. Not tied to users or tokens by a foreign key: it must say who acted long after the account is gone. Rows older than `audit.keep` are deleted hourly in batches of 5,000.
+
+| column | type | |
+|---|---|---|
+| `id` | bigint | Identity. |
+| `at` | timestamptz | When. |
+| `actor_kind` | text | `user`, `token`, `system` (the engine, or someone at the server's command line) or `anonymous` (a sign-in as a name nobody has; what they typed isn't kept, it may be a password). |
+| `actor_id` | integer | `users.id` or `api_tokens.id`, by `actor_kind`. |
+| `user_id` | integer | The person behind it: the user, or the owner of a user's token. What `GET /me/activity` reads. |
+| `actor_name` | text | The user's or token's name at the time (a snapshot). |
+| `via` | text | `session` (the web UI), `token`, `cli`, `engine`; none for rows made from `message_actions` when this table was added. |
+| `ip` | inet | The address the connection came from (a proxy's address behind one). |
+| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create`, `user.update`, `user.disable`, `user.unlock`, `token.create`, `token.revoke`, `message.payload.read`, `message.release` (resend of quarantined), `message.replay`, `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `engine.start`, `engine.stop`, `interface.stopped`. |
+| `subject` | text | What it was done to: a username, a token name, `interface/destination`. |
+| `interface` | text | The interface it concerns. |
+| `message_id` | bigint | The message, when the request was about exactly one. |
+| `outcome` | text | `ok`, `denied` or `failed`. |
+| `detail` | jsonb | More, by action: the reason, the messages and destinations of a bulk request, the version and previous run for `engine.start`. Never a password, token or payload. |
+
+Indexes: primary key `id`; `audit_log_at (at)`; `audit_log_actor (actor_kind, actor_id, at)`; `audit_log_user (user_id, at)`; `audit_log_action (action, at)`; `audit_log_interface (interface, at)`; `audit_log_message (message_id)`.
 
 ## `retention`
 

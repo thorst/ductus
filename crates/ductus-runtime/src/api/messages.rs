@@ -132,7 +132,8 @@ pub struct MessageDetail {
 #[derive(Serialize, ToSchema)]
 pub struct ActionInfo {
     at: DateTime<Utc>,
-    /// `resend` (the delivery went back to pending) or `edit` (a corrected copy was queued).
+    /// `resend` (the delivery went back to pending), `edit` (a corrected copy was queued) or
+    /// `dismiss` (a quarantined delivery was closed without sending).
     action: String,
     /// The user or token that did it.
     by: String,
@@ -155,11 +156,19 @@ pub struct ActionInfo {
 async fn message(engine: Eng, caller: Caller, Path(id): Path<i64>) -> ApiResult<MessageDetail> {
     let (row, payload) =
         engine.store.message(id).await?.ok_or_else(|| ApiError::not_found(format!("no message {id}")))?;
-    // Payloads hold patient data: only callers with the `payloads` permission get them, and who
-    // looked is logged (the audit log builds on this).
+    // Payloads hold patient data: only callers with the `payloads` permission get them, and the
+    // read is in the audit log before they are returned: if it can't be written, nothing is
+    // returned (an unlogged read of patient data is worse than a refused one).
     let may_read = caller.who.can("payloads");
-    if may_read {
-        tracing::info!(who = caller.name(), id, interface = %row.interface, "message payload viewed");
+    if may_read && engine.audit.payload_reads {
+        let audit = caller.audit("message.payload.read").interface(&row.interface).message(id);
+        engine.store.record_payload_read(&audit, engine.audit.payload_read_window).await.map_err(|e| {
+            tracing::error!(id, error = %format!("{e:#}"), "audit log write failed: refusing to return a payload");
+            ApiError::new(
+                axum::http::StatusCode::SERVICE_UNAVAILABLE,
+                "the audit log can't be written, so the payload is not shown: check the database, then try again",
+            )
+        })?;
     }
     let deliveries = engine
         .store

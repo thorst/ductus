@@ -137,6 +137,9 @@ jobs:
       - name: Hotspots demo (one patient's message blocks its worker, a receiver down, a hot patient)
         run: BIN=target/release/ductus bash scripts/demo-hotspots.sh
 
+      - name: Audit demo (a dismissal with its reason, no payload without a log row, a killed engine shows, export)
+        run: BIN=target/release/ductus bash scripts/demo-audit.sh
+
       - name: Dev demo (ductus dev starts a Postgres of its own; same port and data on restart; a killed one is cleaned up)
         run: BIN=target/release/ductus bash scripts/demo-dev.sh
 

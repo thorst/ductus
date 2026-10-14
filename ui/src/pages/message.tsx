@@ -1,10 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
-import { Check, Copy, Pencil, RotateCcw } from "lucide-react";
+import { Check, CircleX, Copy, Pencil, RotateCcw } from "lucide-react";
 import { useMemo, useState } from "react";
-import { editAndResend, resend, useCanOperate, useRefresh } from "@/api/actions";
+import { dismissDelivery, editAndResend, resend, useCanAudit, useCanOperate, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
-import { message } from "@/api/queries";
+import { message, messageReaders } from "@/api/queries";
 import { ActionDialog } from "@/components/action-dialog";
 import { StatusBadge } from "@/components/health-badge";
 import { Field, Loaded, PageHeader } from "@/components/page";
@@ -21,6 +21,7 @@ export function MessagePage() {
   const { id } = route.useParams();
   const query = useQuery(message(id));
   const canOperate = useCanOperate();
+  const canAudit = useCanAudit();
   return (
     <Loaded query={query}>
       {(m) => (
@@ -74,6 +75,7 @@ export function MessagePage() {
             </Card>
             <Deliveries m={m} canOperate={canOperate} />
             <History actions={m.actions} />
+            {canAudit && <Readers id={m.id} />}
             {m.payload != null ? (
               <Payload payload={m.payload} />
             ) : (
@@ -99,6 +101,7 @@ export function MessagePage() {
 function Deliveries({ m, canOperate }: { m: Schemas["MessageDetail"]; canOperate: boolean }) {
   const [open, setOpen] = useState<string | null>(null);
   const [resending, setResending] = useState<Schemas["DeliveryInfo"] | null>(null);
+  const [dismissing, setDismissing] = useState<Schemas["DeliveryInfo"] | null>(null);
   const refresh = useRefresh();
   if (m.deliveries.length === 0) return null;
   return (
@@ -148,11 +151,20 @@ function Deliveries({ m, canOperate }: { m: Schemas["MessageDetail"]; canOperate
                 <Td>
                   {/* Pending: being sent or retried already. */}
                   {d.status !== "pending" && (
-                    <Button size="sm" variant="outline" onClick={() => setResending(d)}>
-                      <RotateCcw aria-hidden />
-                      {d.status === "quarantined" ? "Resend" : "Replay"}
-                      <span className="sr-only"> to {d.destination}</span>
-                    </Button>
+                    <span className="flex flex-wrap gap-2">
+                      <Button size="sm" variant="outline" onClick={() => setResending(d)}>
+                        <RotateCcw aria-hidden />
+                        {d.status === "quarantined" ? "Resend" : "Replay"}
+                        <span className="sr-only"> to {d.destination}</span>
+                      </Button>
+                      {d.status === "quarantined" && (
+                        <Button size="sm" variant="outline" onClick={() => setDismissing(d)}>
+                          <CircleX aria-hidden />
+                          Dismiss
+                          <span className="sr-only"> for {d.destination}</span>
+                        </Button>
+                      )}
+                    </span>
                   )}
                 </Td>
               )}
@@ -160,6 +172,26 @@ function Deliveries({ m, canOperate }: { m: Schemas["MessageDetail"]; canOperate
           ))}
         </tbody>
       </Table>
+      {dismissing && (
+        <ActionDialog
+          open
+          onOpenChange={(o) => !o && setDismissing(null)}
+          title={`Dismiss message ${m.id} for ${dismissing.destination}`}
+          description={
+            <>
+              Nobody will fix or resend it for {dismissing.destination}: the delivery becomes filtered (&ldquo;dismissed
+              by you: reason&rdquo;), leaves the quarantine, and nothing is sent. It stays in this history and in the
+              audit log, and can still be replayed later.
+            </>
+          }
+          confirm="Dismiss"
+          reasonRequired
+          onConfirm={async (why) => {
+            await dismissDelivery(m.id, dismissing.destination, why);
+            await refresh();
+          }}
+        />
+      )}
       {resending && (
         <ActionDialog
           open
@@ -262,6 +294,42 @@ function EditButton({ m }: { m: Schemas["MessageDetail"] }) {
 
 const BEFORE: Record<string, string> = { quarantined: "Resent", sent: "Replayed", filtered: "Replayed" };
 
+/** Who looked at the payload (the audit log), for those allowed to read it. */
+function Readers({ id }: { id: number }) {
+  const { data } = useQuery(messageReaders(id));
+  if (!data || data.entries.length === 0) return null;
+  return (
+    <Card aria-label="Who viewed the payload">
+      <CardHeader>
+        <CardTitle>Who viewed the payload</CardTitle>
+      </CardHeader>
+      <Table>
+        <thead>
+          <tr>
+            <Th>When</Th>
+            <Th>Who</Th>
+            <Th>How</Th>
+            <Th>From</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {data.entries.map((e) => (
+            <tr key={e.id}>
+              <Td className="tabular-nums">{timestamp(e.at)}</Td>
+              <Td>{e.actor}</Td>
+              <Td>{e.via === "session" ? "web UI" : (e.via ?? "")}</Td>
+              <Td className="font-mono text-xs">{e.ip ?? ""}</Td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+      <p className="p-3 text-xs text-muted">
+        Reading the same message again within a few minutes is one entry (<code>audit.payload_read_window</code>).
+      </p>
+    </Card>
+  );
+}
+
 /** What people did to this message, oldest first. */
 function History({ actions }: { actions: Schemas["ActionInfo"][] }) {
   if (actions.length === 0) return null;
@@ -293,6 +361,8 @@ function History({ actions }: { actions: Schemas["ActionInfo"][] }) {
                       {a.copy}
                     </Link>
                   </>
+                ) : a.action === "dismiss" ? (
+                  "Dismissed"
                 ) : (
                   (BEFORE[a.previous_status ?? ""] ?? "Resent")
                 )}

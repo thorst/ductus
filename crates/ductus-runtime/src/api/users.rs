@@ -103,16 +103,19 @@ async fn create(engine: Eng, caller: Caller, Json(new): Json<NewUserRequest>) ->
     let permissions = new.permissions.unwrap_or_default();
     let user = engine
         .store
-        .create_user(&NewUser {
-            username: &new.username,
-            display_name: new.display_name.as_deref().unwrap_or(""),
-            email: new.email.as_deref().unwrap_or(""),
-            role,
-            permissions: &permissions,
-            password_hash: Some(&password_hash),
-            must_change_password: true,
-            source: "local",
-        })
+        .create_user(
+            &NewUser {
+                username: &new.username,
+                display_name: new.display_name.as_deref().unwrap_or(""),
+                email: new.email.as_deref().unwrap_or(""),
+                role,
+                permissions: &permissions,
+                password_hash: Some(&password_hash),
+                must_change_password: true,
+                source: "local",
+            },
+            &caller.audit("user.create"),
+        )
         .await
         .map_err(bad)?;
     tracing::warn!(by = caller.name(), user = %user.username, role = role.label(), "user created");
@@ -158,6 +161,7 @@ async fn update(
                 permissions: change.permissions,
                 disabled: change.disabled,
             },
+            &caller.audit(if change.disabled == Some(true) { "user.disable" } else { "user.update" }),
         )
         .await
         .map_err(bad)?;
@@ -189,7 +193,7 @@ async fn reset_password(
     ductus_core::password::check_policy(&user.username, &reset.password, engine.auth.password.min_length)
         .map_err(ApiError::bad_request)?;
     let hash = hash_password(reset.password).await?;
-    engine.store.set_password(id, &hash, true, None).await.map_err(bad)?;
+    engine.store.set_password(id, &hash, true, None, &caller.audit("password.reset")).await.map_err(bad)?;
     tracing::warn!(by = caller.name(), user = %user.username, "password reset");
     Ok(StatusCode::NO_CONTENT)
 }
@@ -203,7 +207,7 @@ async fn reset_password(
 async fn unlock(engine: Eng, caller: Caller, Path(id): Path<i32>) -> Result<StatusCode, ApiError> {
     caller.require(Role::Admin)?;
     let user = engine.store.user(id).await?.ok_or_else(|| ApiError::not_found(format!("no user {id}")))?;
-    engine.store.unlock_user(id).await?;
+    engine.store.unlock_user(id, &caller.audit("user.unlock")).await?;
     tracing::warn!(by = caller.name(), user = %user.username, "user unlocked");
     Ok(StatusCode::NO_CONTENT)
 }

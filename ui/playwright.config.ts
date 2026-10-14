@@ -35,5 +35,13 @@ export default defineConfig({
       dependencies: ["act"],
       use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
     },
+    {
+      // The audit log and dismissing quarantined messages: dismisses a delivery, so it goes after
+      // the tests that count quarantines.
+      name: "audit",
+      testMatch: "audit.spec.ts",
+      dependencies: ["people"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
   ],
 });

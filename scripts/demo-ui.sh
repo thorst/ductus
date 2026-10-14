@@ -118,6 +118,8 @@ PASSWORD="correct horse staple"
 "$BIN" user create "test-user-ui-admin-$$" --role admin --password-stdin <<<"$PASSWORD" >/dev/null
 "$BIN" user create "test-user-ui-operator-$$" --role operator --permission payloads --password-stdin <<<"$PASSWORD" >/dev/null
 "$BIN" user create "test-user-ui-viewer-$$" --role viewer --password-stdin <<<"$PASSWORD" >/dev/null
+# May read the audit log, and nothing else beyond a viewer (no payloads).
+"$BIN" user create "test-user-ui-auditor-$$" --role viewer --permission audit --password-stdin <<<"$PASSWORD" >/dev/null
 
 echo "== traffic"
 "$BIN" pause billing --reason "invoice system upgrade tonight" | sed 's/^/   /'
@@ -143,7 +145,8 @@ echo "== the browser (Playwright)"
 cd "$UI"
 export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN \
   DUCTUS_ADMIN_TOKEN=$ADMIN DUCTUS_PERSON_ADMIN="test-user-ui-admin-$$:$PASSWORD" \
-  DUCTUS_PERSON_OPERATOR="test-user-ui-operator-$$:$PASSWORD" DUCTUS_PERSON_VIEWER="test-user-ui-viewer-$$:$PASSWORD"
+  DUCTUS_PERSON_OPERATOR="test-user-ui-operator-$$:$PASSWORD" DUCTUS_PERSON_VIEWER="test-user-ui-viewer-$$:$PASSWORD" \
+  DUCTUS_PERSON_AUDITOR="test-user-ui-auditor-$$:$PASSWORD"
 if npx playwright test --reporter=line; then
   echo PASS
 else

@@ -194,6 +194,8 @@ async fn confirm(engine: Eng, caller: Caller, Path(name): Path<String>) -> ApiRe
     if r.get(&name).is_none() {
         return Err(ApiError::not_found(format!("no interface named `{name}` stores messages here")));
     }
+    // Confirming a shorter retention approves deleting messages: recorded before it is done.
+    super::record_first(&engine, caller.audit("retention.confirm").interface(&name)).await?;
     match r.confirm(&name, caller.name()).await? {
         Some(state) => Ok(Json(describe(r, state).await?)),
         None => Err(ApiError::new(

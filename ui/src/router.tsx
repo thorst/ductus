@@ -113,6 +113,16 @@ const quarantine = createRoute({
 
 const str = (v: unknown) => (typeof v === "string" && v ? v : undefined);
 
+/** The audit log's filters; dates are days (`2026-10-13`) in the viewer's time zone. */
+export interface AuditPageSearch {
+  actor?: string;
+  action?: string;
+  interface?: string;
+  message?: number;
+  from?: string;
+  to?: string;
+}
+
 export interface HotspotsSearch {
   interface?: string;
   destination?: string;
@@ -146,6 +156,25 @@ const drain = createRoute({ getParentRoute: () => app, path: "/drain", component
 const doctor = createRoute({ getParentRoute: () => app, path: "/connections", component: DoctorPage });
 const tokens = createRoute({ getParentRoute: () => app, path: "/tokens", component: TokensPage });
 const users = createRoute({ getParentRoute: () => app, path: "/users", component: UsersPage });
+
+/** Its own chunk: the audit log is read by a few people, now and then. */
+const auditPage = createRoute({
+  getParentRoute: () => app,
+  path: "/audit",
+  validateSearch: (search: Record<string, unknown>): AuditPageSearch => {
+    const message = Number(search.message);
+    const day = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) ? v : undefined);
+    return {
+      actor: str(search.actor),
+      action: str(search.action),
+      interface: str(search.interface),
+      message: Number.isInteger(message) && message > 0 ? message : undefined,
+      from: day(search.from),
+      to: day(search.to),
+    };
+  },
+  component: lazyRouteComponent(() => import("@/pages/audit"), "AuditPage"),
+});
 
 /** Its own chunk: opened from the user menu, rarely. */
 const accountPage = createRoute({
@@ -202,6 +231,7 @@ const tree = root.addChildren([
     doctor,
     tokens,
     users,
+    auditPage,
     accountPage,
     apiReference,
     appearance,

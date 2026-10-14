@@ -104,7 +104,8 @@
     text-decoration: underline;
   }
   /* A link inside a sentence is told apart by more than its color (WCAG 1.4.1). */
-  p a {
+  p a,
+  .page-sub a {
     text-decoration: underline;
     text-underline-offset: 0.15em;
   }

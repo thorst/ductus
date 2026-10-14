@@ -232,6 +232,13 @@ enum Command {
         #[arg(long, env = "DUCTUS_DATABASE_URL", global = true)]
         database_url: Option<String>,
     },
+    /// The audit log (who did what), straight from the engine's database.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+        #[arg(long, env = "DUCTUS_DATABASE_URL", global = true)]
+        database_url: Option<String>,
+    },
     /// Stop taking new messages and deliver what's stored (for upgrades, server moves, config
     /// changes that need an empty queue): MLLP listeners close, queued HTTP answers 503, file
     /// pickup and schedules pause. Through the running engine's REST API.
@@ -404,6 +411,31 @@ struct ApiArgs {
 enum RetentionAction {
     /// Apply an interface's shorter retention: it deletes the messages past it (operator token).
     Confirm { interface: String },
+}
+
+#[derive(Subcommand)]
+enum AuditAction {
+    /// Print the log as one JSON object per line, oldest first (for a SIEM or an auditor). The
+    /// export is itself logged.
+    Export {
+        /// From this day (`2026-01-31`, UTC) or time (`2026-01-31T08:00:00Z`).
+        #[arg(long)]
+        since: Option<String>,
+        /// Until this day or time (exclusive).
+        #[arg(long)]
+        until: Option<String>,
+        /// A user's or token's name.
+        #[arg(long)]
+        actor: Option<String>,
+        /// An action (`message.dismiss`) or a group (`message`, `user`, `session`).
+        #[arg(long)]
+        action: Option<String>,
+        #[arg(long)]
+        interface: Option<String>,
+        /// A message id.
+        #[arg(long)]
+        message: Option<i64>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -655,6 +687,13 @@ async fn run(cli: Cli) -> Result<()> {
                 TokenAction::Revoke { name } => admin::TokenCommand::Revoke { name },
             };
             admin::token(&tools::database_url(database_url)?, command).await
+        }
+        Command::Audit {
+            action: AuditAction::Export { since, until, actor, action, interface, message },
+            database_url,
+        } => {
+            let export = admin::AuditExport { since, until, actor, action, interface, message };
+            admin::audit_export(&tools::database_url(database_url)?, export).await
         }
         Command::Drain { stop, wait, api } => admin::drain(admin::Remote::new(&api.api, api.token)?, stop, wait).await,
         Command::Resume { interface: None, api, .. } => admin::resume(admin::Remote::new(&api.api, api.token)?).await,

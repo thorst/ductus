@@ -17,6 +17,10 @@
 //!   lockout: { attempts: 5, window: 15m, for: 15m }
 //!   token_sign_in: true
 //!   user_tokens: true
+//! audit:              # the audit log
+//!   keep: 6y          # at least 1y
+//!   payload_reads: true
+//!   payload_read_window: 10m
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -48,6 +52,54 @@ pub struct Settings {
     /// How people sign in to the API and the web UI.
     #[serde(default)]
     pub auth: AuthSettings,
+    /// The audit log: how long it is kept, and whether reading a payload is logged.
+    #[serde(default)]
+    pub audit: AuditSettings,
+}
+
+/// The audit log (`audit:` in ductus.yaml).
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AuditSettings {
+    /// How long audit rows (and the record of message actions) are kept, at least a year: `6y`
+    /// (the usual HIPAA documentation period; ask your compliance office for yours), or `2190d`.
+    #[serde(default = "default_keep", deserialize_with = "keep_duration")]
+    pub keep: std::time::Duration,
+    /// Log who reads a message payload. Reading is allowed only to those with the `payloads`
+    /// permission whatever this says.
+    #[serde(default = "yes")]
+    pub payload_reads: bool,
+    /// One person reading the same message again within this long is one row (a screen that
+    /// reloads itself would write a row each time). `0s`: every read is a row.
+    #[serde(default = "default_read_window", deserialize_with = "crate::config::duration")]
+    pub payload_read_window: std::time::Duration,
+}
+
+impl Default for AuditSettings {
+    fn default() -> Self {
+        Self { keep: default_keep(), payload_reads: true, payload_read_window: default_read_window() }
+    }
+}
+
+/// Six years.
+fn default_keep() -> std::time::Duration {
+    std::time::Duration::from_secs(6 * 365 * 86_400)
+}
+
+fn default_read_window() -> std::time::Duration {
+    std::time::Duration::from_secs(10 * 60)
+}
+
+/// `6y` (365 days each), or any duration (`2190d`).
+fn keep_duration<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<std::time::Duration, D::Error> {
+    let text = String::deserialize(d)?;
+    let text = text.trim();
+    if let Some(years) = text.strip_suffix('y') {
+        let years: u64 =
+            years.trim().parse().map_err(|_| serde::de::Error::custom(format!("invalid duration `{text}`")))?;
+        return Ok(std::time::Duration::from_secs(years * 365 * 86_400));
+    }
+    crate::config::parse_duration(text).map_err(serde::de::Error::custom)
 }
 
 /// Sign-in for people (`auth:` in ductus.yaml).
@@ -272,6 +324,12 @@ impl Settings {
             bail!("in {}: isolates.heap_mb must be at least 64 (the SDK alone needs a few MB)", file.display());
         }
         settings.auth.check().with_context(|| format!("in {}", file.display()))?;
+        if settings.audit.keep < std::time::Duration::from_secs(365 * 86_400) {
+            bail!(
+                "in {}: audit.keep must be at least a year (`1y`): the log is the record of who did what",
+                file.display()
+            );
+        }
         Ok(settings)
     }
 }
@@ -393,6 +451,23 @@ mod tests {
         assert_eq!((a.session.idle.as_secs(), a.lockout.attempts, a.lockout.lock_for.as_secs()), (3600, 3, 60));
         assert!(!a.token_sign_in);
         for bad in ["auth: { session: { idle: 2d, max: 1d } }", "auth: { password: { min_length: 4 } }"] {
+            std::fs::write(dir.path().join(FILE), bad).unwrap();
+            assert!(Settings::load(dir.path()).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn the_audit_log_is_kept_six_years_unless_told_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Settings::load(dir.path()).unwrap().audit;
+        assert_eq!((a.keep.as_secs() / 86_400, a.payload_reads, a.payload_read_window.as_secs()), (2190, true, 600));
+        std::fs::write(dir.path().join(FILE), "audit: { keep: 7y, payload_reads: false, payload_read_window: 0s }")
+            .unwrap();
+        let a = Settings::load(dir.path()).unwrap().audit;
+        assert_eq!((a.keep.as_secs() / 86_400, a.payload_reads, a.payload_read_window.as_secs()), (2555, false, 0));
+        std::fs::write(dir.path().join(FILE), "audit: { keep: 400d }").unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().audit.keep.as_secs() / 86_400, 400);
+        for bad in ["audit: { keep: 90d }", "audit: { keep: 6months }", "audit: { keep: y }"] {
             std::fs::write(dir.path().join(FILE), bad).unwrap();
             assert!(Settings::load(dir.path()).is_err(), "{bad}");
         }

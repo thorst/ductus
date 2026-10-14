@@ -15,6 +15,142 @@
     }
   ],
   "paths": {
+    "/audit": {
+      "get": {
+        "tags": [
+          "audit"
+        ],
+        "summary": "The audit log, filtered. Needs the `audit` permission.",
+        "operationId": "list_audit",
+        "parameters": [
+          {
+            "name": "actor",
+            "in": "query",
+            "description": "A user's or token's name (a user's tokens count as theirs).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "action",
+            "in": "query",
+            "description": "An action (`message.dismiss`) or a group of them (`message`, `user`, `session`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "interface",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "message",
+            "in": "query",
+            "description": "A message id.",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "from",
+            "in": "query",
+            "description": "From this time (inclusive).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "to",
+            "in": "query",
+            "description": "Until this time (exclusive).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Entries older than this id (the previous page's `next_before`).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "description": "Entries newer than this id, oldest first (what an export follows).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "format",
+            "in": "query",
+            "description": "`json` (default: a page, newest first) or `ndjson` (one entry per line, oldest first, up to\n`limit`, default 10,000, at most 100,000: continue with `after` the last id). An export is\nitself logged.",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, at most 500 (default 100).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "With `format=ndjson`: `application/x-ndjson`, one entry (as in `entries`) per line",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/docs": {
       "get": {
         "tags": [
@@ -682,6 +818,57 @@
         }
       }
     },
+    "/me/activity": {
+      "get": {
+        "tags": [
+          "me"
+        ],
+        "summary": "What you did yourself (and what your tokens did): the same entries, only yours. Anyone signed\nin with a username and password.",
+        "operationId": "my_activity",
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Entries older than this id",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "At most 500 (default 50)",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AuditPage"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/me/password": {
       "post": {
         "tags": [
@@ -1009,6 +1196,54 @@
         }
       }
     },
+    "/messages/dismiss": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Dismiss many messages' quarantined deliveries at once (the quarantine screen's \"dismiss\nselected\"), in one transaction, with one reason. Operator.",
+        "operationId": "dismiss_many",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BulkDismissRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DismissResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/messages/resend": {
       "post": {
         "tags": [
@@ -1087,6 +1322,85 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/messages/{id}/dismiss": {
+      "post": {
+        "tags": [
+          "messages"
+        ],
+        "summary": "Dismiss a message's quarantined deliveries: nobody will fix or resend them, so they leave the\nquarantine (the delivery becomes `filtered`, \"dismissed by NAME: reason\"). Nothing is deleted:\nthe message and what happened to it stay, and the dismissal is in the audit log with the reason.\nWorks the same in the held area. Operator.",
+        "operationId": "dismiss",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "Message id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DismissRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DismissResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Nothing quarantined to dismiss",
             "content": {
               "application/json": {
                 "schema": {
@@ -1970,7 +2284,7 @@
         "properties": {
           "action": {
             "type": "string",
-            "description": "`resend` (the delivery went back to pending) or `edit` (a corrected copy was queued)."
+            "description": "`resend` (the delivery went back to pending), `edit` (a corrected copy was queued) or\n`dismiss` (a quarantined delivery was closed without sending)."
           },
           "at": {
             "type": "string",
@@ -2039,6 +2353,135 @@
           "theme": {
             "type": "string",
             "description": "`system`, `light`, `dark`, `contrast` or `custom`."
+          }
+        }
+      },
+      "AuditEntry": {
+        "type": "object",
+        "required": [
+          "id",
+          "at",
+          "actor_kind",
+          "actor",
+          "action",
+          "outcome"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`message.payload.read`, `message.dismiss`, `user.create`, ..."
+          },
+          "actor": {
+            "type": "string",
+            "description": "The user's or token's name when it happened."
+          },
+          "actor_kind": {
+            "type": "string",
+            "description": "`user`, `token`, `system` (the engine, or someone at the server's command line) or\n`anonymous` (a sign-in as a name nobody has)."
+          },
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "detail": {
+            "type": [
+              "object",
+              "null"
+            ],
+            "description": "More about it, by action (never a password, token or payload)."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "interface": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ip": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The address the request came from (a proxy's, if there is one)."
+          },
+          "message": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`ok`, `denied` or `failed`."
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What it was done to: a username, a token, `interface/destination`."
+          },
+          "via": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`session` (the web UI), `token`, `cli` or `engine`; none for entries from before the log."
+          }
+        }
+      },
+      "AuditPage": {
+        "type": "object",
+        "required": [
+          "entries"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AuditEntry"
+            },
+            "description": "Newest first."
+          },
+          "next_before": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Pass as `before` for the next (older) page; absent on the last page."
+          }
+        }
+      },
+      "BulkDismissRequest": {
+        "type": "object",
+        "required": [
+          "ids",
+          "reason"
+        ],
+        "properties": {
+          "destination": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Only the destination with this name in each message's interface. Without it: all quarantined\ndeliveries of each message."
+          },
+          "ids": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Message ids (at most 500), from any interfaces."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why. Required; kept with every dismissal and in the audit log."
           }
         }
       },
@@ -2485,6 +2928,52 @@
           "since_start": {
             "$ref": "#/components/schemas/DestinationCounts",
             "description": "Counts and timings since the engine started."
+          }
+        }
+      },
+      "DismissRequest": {
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "destinations": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Dismiss only these destinations' quarantined deliveries. Without it: all of the message's."
+          },
+          "reason": {
+            "type": "string",
+            "description": "Why nobody will fix or resend these. Required: it is kept in the audit log."
+          }
+        }
+      },
+      "DismissResult": {
+        "type": "object",
+        "required": [
+          "dismissed",
+          "skipped"
+        ],
+        "properties": {
+          "dismissed": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ResentMessage"
+            },
+            "description": "The messages with a delivery dismissed (`previous_status` is `quarantined`; `previous_error`\nis why it was)."
+          },
+          "skipped": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int64"
+            },
+            "description": "Ids with nothing to dismiss: not found, not run by this engine, or no delivery still\nquarantined (someone resolved it meanwhile)."
           }
         }
       },
@@ -4781,6 +5270,10 @@
     {
       "name": "reports",
       "description": "Impact, owners and connection checks"
+    },
+    {
+      "name": "audit",
+      "description": "Who did what: the audit log (the `audit` permission) and your own activity"
     },
     {
       "name": "retention",

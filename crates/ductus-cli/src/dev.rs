@@ -149,16 +149,19 @@ async fn first_user(root: &Path, url: &str) -> Result<()> {
         let password = ductus_core::password::generate();
         let hash = ductus_core::password::hash(&password)?;
         store
-            .create_user(&ductus_store::NewUser {
-                username: "dev",
-                display_name: "Dev",
-                email: "",
-                role: ductus_store::Role::Admin,
-                permissions: &[],
-                password_hash: Some(&hash),
-                must_change_password: false,
-                source: "local",
-            })
+            .create_user(
+                &ductus_store::NewUser {
+                    username: "dev",
+                    display_name: "Dev",
+                    email: "",
+                    role: ductus_store::Role::Admin,
+                    permissions: &[],
+                    password_hash: Some(&hash),
+                    must_change_password: false,
+                    source: "local",
+                },
+                &ductus_store::Audit::new(ductus_store::By::cli("ductus dev"), "user.create"),
+            )
             .await?;
         std::fs::write(&file, &password).with_context(|| format!("writing {}", file.display()))?;
     }

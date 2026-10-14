@@ -61,6 +61,17 @@ impl Retention {
         for c in &configured {
             let state = store.apply_retention(&c.name, c.days).await?;
             report(&state, c.days);
+            // A change that just began is a decision about patient data worth keeping a record of.
+            if state.changing_from.is_some() && Utc::now() - state.changed_at < chrono::TimeDelta::minutes(1) {
+                let detail =
+                    serde_json::json!({ "from": state.changing_from, "to": state.days, "waiting": state.waiting });
+                let audit = ductus_store::Audit::new(ductus_store::By::engine(), "retention.change")
+                    .interface(&c.name)
+                    .detail(detail);
+                if let Err(e) = store.record(&audit).await {
+                    tracing::error!(error = %format!("{e:#}"), interface = %c.name, "could not write the audit log (retention change)");
+                }
+            }
             interfaces.push(Managed {
                 name: c.name.clone(),
                 configured: c.days,

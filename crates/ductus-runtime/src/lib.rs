@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod api;
+pub mod audit;
 pub mod control;
 mod destination;
 pub mod doctor;
@@ -142,7 +143,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         tracing::warn!(%interface, %destination, count, "destination is no longer in interface.yaml: its pending deliveries were marked filtered");
     }
     // Each interface's retention, before anything is stored: intake needs the tier.
-    let configured = configs
+    let configured: Vec<retention::Configured> = configs
         .iter()
         .filter(|c| !c.responds())
         .map(|c| retention::Configured {
@@ -151,7 +152,11 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
             purge_quarantined: c.quarantined.unwrap_or(settings.quarantined) == ductus_core::Quarantined::Purge,
         })
         .collect();
+    // What the audit log's hourly job needs: how long each interface keeps its messages.
+    let retention_days: Vec<(String, i32)> = configured.iter().map(|c| (c.name.clone(), i32::from(c.days))).collect();
     let retention = retention::Retention::start(store.clone(), configured).await.context("applying retention")?;
+    let (stopped_tx, stopped_rx) = tokio::sync::mpsc::unbounded_channel();
+    let instance = audit::new_instance();
     // Keep dedupe keys a little longer than the longest window that uses them.
     let dedupe_retention = configs.iter().filter_map(|c| c.dedupe.as_ref()).map(|d| d.window).max().unwrap_or_default()
         + Duration::from_secs(3600);
@@ -199,7 +204,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     let activity =
         activity::Activity::start(store.clone(), watched, stopping.clone()).await.context("loading last activity")?;
     for (config, wake, destination_ids, gate, stats) in parts {
-        let health = Arc::new(health::Health::default());
+        let health = Arc::new(health::Health::reporting(&config.name, stopped_tx.clone()));
         let outlets: Vec<worker::Outlet> = config
             .destinations()
             .zip(&destination_ids)
@@ -344,7 +349,13 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         calls: services.calls(),
         activity,
         auth: settings.auth.clone(),
+        audit: settings.audit,
+        instance: instance.clone(),
     });
+    // The audit log: this start (and how the last run on this host ended), interfaces the runaway
+    // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse
+    // to start (the engine may be all that is left to move messages), but it is an error.
+    audit::start(&engine, stopped_rx, retention_days).await;
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
         api_server = Some(api::serve(engine.clone(), host, *port).await?);
@@ -390,15 +401,23 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     tracing::info!(why, limit = ?limit, "stopping: taking no new messages, finishing the ones in hand");
     let started = std::time::Instant::now();
     let stop = stop(&engine, &stopping, threads, api_server);
+    let mut forced = false;
     tokio::select! {
         finished = tokio::time::timeout(limit, stop) => match finished {
             Ok(()) => tracing::info!(took = ?started.elapsed(), "stopped"),
-            Err(_) => tracing::warn!(
-                "still finishing after {limit:?}; stopping anyway: the messages in hand stay pending and are processed again at the next start (a destination may get one again)"
-            ),
+            Err(_) => {
+                forced = true;
+                tracing::warn!(
+                    "still finishing after {limit:?}; stopping anyway: the messages in hand stay pending and are processed again at the next start (a destination may get one again)"
+                )
+            }
         },
-        signal = stop_signal() => tracing::warn!(signal, "asked again: stopping now; the messages in hand are processed again at the next start"),
+        signal = stop_signal() => {
+            forced = true;
+            tracing::warn!(signal, "asked again: stopping now; the messages in hand are processed again at the next start")
+        }
     }
+    audit::stopped(&engine, why, forced).await;
     Ok(())
 }
 

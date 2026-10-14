@@ -9,16 +9,18 @@
 mod actions;
 mod activity;
 mod api;
+mod audit;
 mod docs;
 mod retention;
 mod users;
 
-pub use actions::{Action, Actor, Copy, Edited, Quarantined, Resend, Resent};
+pub use actions::{Action, Actor, Copy, Dismissed, Edited, Quarantined, Resend, Resent};
 pub use activity::{BaselineRow, DestinationActivity, InterfaceActivity, Oldest, PauseRow, Received, Seen};
 pub use api::{
     Browse, LaneRow, MessageRow, PERMISSIONS, Principal, QueueCount, Role, SESSION_PREFIX, SessionFor, SessionLimits,
     TOKEN_PREFIX, Token, clean_permissions,
 };
+pub use audit::{Audit, AuditFilter, AuditRow, By, PreviousRun};
 pub use docs::DocsRow;
 pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};
 pub use users::{Candidate, Lockout, NewUser, SessionRow, User, UserChange, UserSettings};

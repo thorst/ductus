@@ -16,6 +16,7 @@ export function ActionDialog({
   confirm,
   onConfirm,
   reason = true,
+  reasonRequired,
   disabled,
   wide,
   children,
@@ -29,6 +30,8 @@ export function ActionDialog({
   onConfirm: (reason: string) => Promise<unknown>;
   /** Ask for a reason (optional to give). */
   reason?: boolean;
+  /** The reason can't be left empty (e.g. a dismissal, which the audit log keeps with why). */
+  reasonRequired?: boolean;
   /** Not yet confirmable (e.g. a name still to be typed). */
   disabled?: boolean;
   wide?: boolean;
@@ -66,8 +69,10 @@ export function ActionDialog({
         {children}
         {reason && (
           <label className="block text-sm">
-            <span className="text-muted">Reason (optional, kept with the action)</span>
-            <Input className="mt-1" value={why} onChange={(e) => setWhy(e.target.value)} />
+            <span className="text-muted">
+              {reasonRequired ? "Reason (required, kept in the audit log)" : "Reason (optional, kept with the action)"}
+            </span>
+            <Input className="mt-1" value={why} required={reasonRequired} onChange={(e) => setWhy(e.target.value)} />
           </label>
         )}
         {error && (
@@ -79,7 +84,7 @@ export function ActionDialog({
           <Button type="button" variant="outline" onClick={() => onOpenChange(false)}>
             Cancel
           </Button>
-          <Button type="submit" disabled={busy || disabled}>
+          <Button type="submit" disabled={busy || disabled || (reasonRequired && !why.trim())}>
             {busy ? "Working…" : confirm}
           </Button>
         </div>

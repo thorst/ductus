@@ -16,6 +16,7 @@ import {
   Network,
   UserRound,
   Radio,
+  ScrollText,
   ShieldAlert,
   Stethoscope,
   Users,
@@ -23,7 +24,7 @@ import {
 } from "lucide-react";
 import { DropdownMenu } from "radix-ui";
 import { useState } from "react";
-import { useIsAdmin } from "@/api/actions";
+import { useCanAudit, useIsAdmin } from "@/api/actions";
 import { api } from "@/api/client";
 import { useLiveUpdates, type LiveState } from "@/api/live";
 import { forgetSync } from "@/api/appearance";
@@ -41,7 +42,15 @@ import {
 } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
-type NavLink = { to: LinkProps["to"] & string; label: string; icon: LucideIcon; exact?: boolean; admin?: boolean };
+type NavLink = {
+  to: LinkProps["to"] & string;
+  label: string;
+  icon: LucideIcon;
+  exact?: boolean;
+  admin?: boolean;
+  /** Only for those who may read the audit log. */
+  audit?: boolean;
+};
 
 /** Day to day first; then reports; then running the engine itself. */
 const NAV: { heading?: string; links: NavLink[] }[] = [
@@ -69,6 +78,7 @@ const NAV: { heading?: string; links: NavLink[] }[] = [
       { to: "/connections", label: "Connections", icon: Stethoscope },
       { to: "/users", label: "Users", icon: Users, admin: true },
       { to: "/tokens", label: "Tokens", icon: KeyRound, admin: true },
+      { to: "/audit", label: "Audit", icon: ScrollText, audit: true },
       { to: "/api-reference", label: "API reference", icon: BookOpen },
     ],
   },
@@ -123,6 +133,7 @@ export function Layout() {
 function NavLinks({ wide }: { wide?: boolean }) {
   const { data: all } = useQuery(interfaces);
   const isAdmin = useIsAdmin();
+  const canAudit = useCanAudit();
   const quarantined = (all ?? []).flatMap((i) => i.destinations).reduce((n, d) => n + d.quarantined, 0);
   const item = ({ to, label, icon: Icon, exact }: NavLink) => (
     <li key={to}>
@@ -144,7 +155,10 @@ function NavLinks({ wide }: { wide?: boolean }) {
       </Link>
     </li>
   );
-  const sections = NAV.map((s) => ({ ...s, links: s.links.filter((l) => !l.admin || isAdmin) }));
+  const sections = NAV.map((s) => ({
+    ...s,
+    links: s.links.filter((l) => (!l.admin || isAdmin) && (!l.audit || canAudit)),
+  }));
   if (!wide) return <ul className="flex flex-wrap gap-1">{sections.flatMap((s) => s.links).map(item)}</ul>;
   return (
     <div className="space-y-4">

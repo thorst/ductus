@@ -9,13 +9,23 @@ use std::sync::atomic::{AtomicU32, Ordering};
 /// (quarantined, and the rest flow); three in a row is broken code.
 const RUNAWAYS_TO_STOP: u32 = 3;
 
+/// An interface that was stopped (its name and why), as the audit log is told.
+pub type StoppedTx = tokio::sync::mpsc::UnboundedSender<(String, String)>;
+
 #[derive(Debug, Default)]
 pub struct Health {
     stopped: OnceLock<String>,
     runaways_in_a_row: AtomicU32,
+    /// Where to report the stop (the audit log), with the interface's name.
+    report: Option<(String, StoppedTx)>,
 }
 
 impl Health {
+    /// Health that tells `tx` when the interface stops.
+    pub fn reporting(interface: &str, tx: StoppedTx) -> Self {
+        Self { report: Some((interface.to_string(), tx)), ..Self::default() }
+    }
+
     /// Why the interface was stopped, if it was. Its messages wait (pending) until the code is
     /// fixed and the engine restarted.
     pub fn stopped(&self) -> Option<&str> {
@@ -34,7 +44,10 @@ impl Health {
             }
             Cause::Timeout(_) => return None,
         };
-        self.stopped.set(reason).ok()?;
+        self.stopped.set(reason.clone()).ok()?;
+        if let Some((interface, tx)) = &self.report {
+            let _ = tx.send((interface.clone(), reason));
+        }
         self.stopped()
     }
 

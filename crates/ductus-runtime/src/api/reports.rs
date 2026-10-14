@@ -325,6 +325,8 @@ async fn doctor_report(engine: Eng, caller: Caller, body: Option<Json<DoctorRequ
         .into_iter()
         .filter(|p| !matches!(p.target, Target::Listener { .. }))
         .collect();
+    let detail = serde_json::json!({ "checks": probes.len(), "interfaces": request.interfaces });
+    super::record_first(&engine, caller.audit("doctor.run").detail(detail)).await?;
     tracing::info!(token = caller.name(), checks = probes.len(), "connection checks requested through the API");
     let started = Instant::now();
     let checks = doctor::check(probes, timeout).await;

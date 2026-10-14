@@ -4,6 +4,23 @@
  */
 
 export interface paths {
+    "/audit": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The audit log, filtered. Needs the `audit` permission. */
+        get: operations["list_audit"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/docs": {
         parameters: {
             query?: never;
@@ -255,6 +272,26 @@ export interface paths {
         patch: operations["update_me"];
         trace?: never;
     };
+    "/me/activity": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What you did yourself (and what your tokens did): the same entries, only yours. Anyone signed
+         *     in with a username and password.
+         */
+        get: operations["my_activity"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/me/password": {
         parameters: {
             query?: never;
@@ -363,6 +400,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/messages/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dismiss many messages' quarantined deliveries at once (the quarantine screen's "dismiss
+         *     selected"), in one transaction, with one reason. Operator.
+         */
+        post: operations["dismiss_many"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/messages/resend": {
         parameters: {
             query?: never;
@@ -394,6 +451,28 @@ export interface paths {
         get: operations["message"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/messages/{id}/dismiss": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Dismiss a message's quarantined deliveries: nobody will fix or resend them, so they leave the
+         *     quarantine (the delivery becomes `filtered`, "dismissed by NAME: reason"). Nothing is deleted:
+         *     the message and what happened to it stay, and the dismissal is in the audit log with the reason.
+         *     Works the same in the held area. Operator.
+         */
+        post: operations["dismiss"];
         delete?: never;
         options?: never;
         head?: never;
@@ -698,7 +777,10 @@ export type webhooks = Record<string, never>;
 export interface components {
     schemas: {
         ActionInfo: {
-            /** @description `resend` (the delivery went back to pending) or `edit` (a corrected copy was queued). */
+            /**
+             * @description `resend` (the delivery went back to pending), `edit` (a corrected copy was queued) or
+             *     `dismiss` (a quarantined delivery was closed without sending).
+             */
             action: string;
             /** Format: date-time */
             at: string;
@@ -724,6 +806,54 @@ export interface components {
             saved?: boolean;
             /** @description `system`, `light`, `dark`, `contrast` or `custom`. */
             theme: string;
+        };
+        AuditEntry: {
+            /** @description `message.payload.read`, `message.dismiss`, `user.create`, ... */
+            action: string;
+            /** @description The user's or token's name when it happened. */
+            actor: string;
+            /**
+             * @description `user`, `token`, `system` (the engine, or someone at the server's command line) or
+             *     `anonymous` (a sign-in as a name nobody has).
+             */
+            actor_kind: string;
+            /** Format: date-time */
+            at: string;
+            /** @description More about it, by action (never a password, token or payload). */
+            detail?: Record<string, never> | null;
+            /** Format: int64 */
+            id: number;
+            interface?: string | null;
+            /** @description The address the request came from (a proxy's, if there is one). */
+            ip?: string | null;
+            /** Format: int64 */
+            message?: number | null;
+            /** @description `ok`, `denied` or `failed`. */
+            outcome: string;
+            /** @description What it was done to: a username, a token, `interface/destination`. */
+            subject?: string | null;
+            /** @description `session` (the web UI), `token`, `cli` or `engine`; none for entries from before the log. */
+            via?: string | null;
+        };
+        AuditPage: {
+            /** @description Newest first. */
+            entries: components["schemas"]["AuditEntry"][];
+            /**
+             * Format: int64
+             * @description Pass as `before` for the next (older) page; absent on the last page.
+             */
+            next_before?: number | null;
+        };
+        BulkDismissRequest: {
+            /**
+             * @description Only the destination with this name in each message's interface. Without it: all quarantined
+             *     deliveries of each message.
+             */
+            destination?: string | null;
+            /** @description Message ids (at most 500), from any interfaces. */
+            ids: number[];
+            /** @description Why. Required; kept with every dismissal and in the audit log. */
+            reason: string;
         };
         BulkResendRequest: {
             /**
@@ -895,6 +1025,24 @@ export interface components {
             quarantined: number;
             /** @description Counts and timings since the engine started. */
             since_start: components["schemas"]["DestinationCounts"];
+        };
+        DismissRequest: {
+            /** @description Dismiss only these destinations' quarantined deliveries. Without it: all of the message's. */
+            destinations?: string[] | null;
+            /** @description Why nobody will fix or resend these. Required: it is kept in the audit log. */
+            reason: string;
+        };
+        DismissResult: {
+            /**
+             * @description The messages with a delivery dismissed (`previous_status` is `quarantined`; `previous_error`
+             *     is why it was).
+             */
+            dismissed: components["schemas"]["ResentMessage"][];
+            /**
+             * @description Ids with nothing to dismiss: not found, not run by this engine, or no delivery still
+             *     quarantined (someone resolved it meanwhile).
+             */
+            skipped: number[];
         };
         /** @description One documented thing and the values it has. */
         DocsEntry: {
@@ -1719,6 +1867,66 @@ export interface components {
 }
 export type $defs = Record<string, never>;
 export interface operations {
+    list_audit: {
+        parameters: {
+            query?: {
+                /** @description A user's or token's name (a user's tokens count as theirs). */
+                actor?: string;
+                /** @description An action (`message.dismiss`) or a group of them (`message`, `user`, `session`). */
+                action?: string;
+                interface?: string;
+                /** @description A message id. */
+                message?: number;
+                /** @description From this time (inclusive). */
+                from?: string;
+                /** @description Until this time (exclusive). */
+                to?: string;
+                /** @description Entries older than this id (the previous page's `next_before`). */
+                before?: number;
+                /** @description Entries newer than this id, oldest first (what an export follows). */
+                after?: number;
+                /**
+                 * @description `json` (default: a page, newest first) or `ndjson` (one entry per line, oldest first, up to
+                 *     `limit`, default 10,000, at most 100,000: continue with `after` the last id). An export is
+                 *     itself logged.
+                 */
+                format?: string;
+                /** @description Page size, at most 500 (default 100). */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description With `format=ndjson`: `application/x-ndjson`, one entry (as in `entries`) per line */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditPage"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     docs_report: {
         parameters: {
             query?: never;
@@ -2219,6 +2427,38 @@ export interface operations {
             };
         };
     };
+    my_activity: {
+        parameters: {
+            query?: {
+                /** @description Entries older than this id */
+                before?: number;
+                /** @description At most 500 (default 50) */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AuditPage"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     change_password: {
         parameters: {
             query?: never;
@@ -2512,6 +2752,45 @@ export interface operations {
             };
         };
     };
+    dismiss_many: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["BulkDismissRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DismissResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
     resend_many: {
         parameters: {
             query?: never;
@@ -2572,6 +2851,65 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    dismiss: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description Message id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DismissRequest"];
+            };
+        };
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DismissResult"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Nothing quarantined to dismiss */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

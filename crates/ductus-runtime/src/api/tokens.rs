@@ -88,7 +88,7 @@ async fn create(engine: Eng, caller: Caller, Json(new): Json<NewToken>) -> ApiRe
     let permissions = new.permissions.unwrap_or_default();
     let (token, secret) = engine
         .store
-        .create_token(&new.name, role, &permissions, None)
+        .create_token(&new.name, role, &permissions, None, &caller.audit("token.create"))
         .await
         .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
     tracing::warn!(by = caller.name(), token = %token.name, role = role.label(), "API token created");
@@ -103,7 +103,7 @@ async fn create(engine: Eng, caller: Caller, Json(new): Json<NewToken>) -> ApiRe
 )]
 async fn revoke(engine: Eng, caller: Caller, Path(name): Path<String>) -> Result<StatusCode, ApiError> {
     caller.require(Role::Admin)?;
-    if !engine.store.revoke_token(&name, None).await? {
+    if !engine.store.revoke_token(&name, None, &caller.audit("token.revoke")).await? {
         return Err(ApiError::not_found(format!("no live token named `{name}`")));
     }
     tracing::warn!(by = caller.name(), token = %name, "API token revoked");
