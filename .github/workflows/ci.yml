@@ -1,9 +1,13 @@
 name: CI
 
 on:
+  # Commits that only change prose don't run CI. The exception is docs/schema.md: a store test
+  # checks it against the migrations. (Later patterns win, so it is added back after the *.md rule.)
   push:
     branches: [main]
+    paths: ["**", "!**/*.md", "docs/schema.md"]
   pull_request:
+    paths: ["**", "!**/*.md", "docs/schema.md"]
   # Manual runs can pick the runner image, e.g. to try a new Ubuntu before `ubuntu-latest` moves:
   #   gh workflow run ci.yml -f runner=ubuntu-26.04
   workflow_dispatch:
@@ -11,6 +15,12 @@ on:
       runner:
         description: Runner image
         default: ubuntu-latest
+
+# A newer push to the same branch cancels the run for the commit before it (a quick follow-up fix
+# then costs one run, not two). Manual runs are never cancelled and don't cancel others.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
 
 env:
   CARGO_TERM_COLOR: always
