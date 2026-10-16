@@ -153,6 +153,9 @@ jobs:
       - name: Alerts demo (a stall mailed to on-call and the owner and posted to chat once, acknowledged and silenced in the audit log, the recovery, the heartbeat)
         run: BIN=target/release/ductus bash scripts/demo-alerts.sh
 
+      - name: Certificates demo (the engine's own check reads a certificate; 20, 10, 3 days and expired are mailed once each; renewed is a recovery)
+        run: BIN=target/release/ductus bash scripts/demo-certs.sh
+
       - name: Dev demo (ductus dev starts a Postgres of its own; same port and data on restart; a killed one is cleaned up)
         run: BIN=target/release/ductus bash scripts/demo-dev.sh
 

@@ -6,7 +6,7 @@ import { pause, resume, useCanOperate, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
 import { alerts, docs, iface } from "@/api/queries";
 import { ActionDialog } from "@/components/action-dialog";
-import { AlertItem } from "@/components/alerts";
+import { AlertItem, isCertificate } from "@/components/alerts";
 import { DocFields } from "@/components/docs-values";
 import { HealthBadge } from "@/components/health-badge";
 import { MessageList } from "@/components/message-list";
@@ -128,7 +128,7 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
 function AlertsCard({ name }: { name: string }) {
   const { data } = useQuery(alerts);
   if (!data?.configured) return null;
-  const mine = data.alerts.filter((a) => a.interface === name);
+  const mine = data.alerts.filter((a) => a.interface === name && !isCertificate(a));
   const open = mine.filter((a) => a.state !== "ok").length;
   return (
     <Card aria-label="Alerts">

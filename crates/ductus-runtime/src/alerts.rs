@@ -2,9 +2,10 @@
 //!
 //! Three tasks, all running whether or not anyone watches the UI:
 //! - **evaluate** (every 15 s): each interface's and destination's health, as the API shows it,
-//!   against its stored alert; a change (fired, escalated, reminded, recovered) is stored with its
-//!   notifications in one transaction (`Store::change_alert`, compare-and-set, so two engines on
-//!   one database record it once).
+//!   and each certificate's countdown (from its last check, `certificates.rs`), against its stored
+//!   alert; a change (fired, escalated, reminded, recovered) is stored with its notifications in
+//!   one transaction (`Store::change_alert`, compare-and-set, so two engines on one database
+//!   record it once).
 //! - **send**: claims due notifications from the outbox and sends each on its own (a mail server
 //!   that hangs never holds up a webhook), retrying with back-off.
 //! - **heartbeat**: calls a URL every so often, so an engine that is down is noticed by someone else.
@@ -12,7 +13,10 @@
 use crate::control::Engine;
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
-use ductus_core::alerts::{self, AlertSettings, Condition, Notice, Now, OWNER, OwnerContact, Person, Severity, Step};
+use ductus_core::alerts::{
+    self, AlertOptions, AlertSettings, CertificateNow, Condition, Notice, Now, OWNER, OwnerContact, Person, Severity,
+    Step,
+};
 use ductus_store::{AlertChange, AlertRow, NewEvent, OutboxItem};
 use lettre::message::{Mailbox, header::ContentType};
 use lettre::transport::smtp::authentication::Credentials;
@@ -235,6 +239,12 @@ pub async fn start(engine: &Arc<Engine>) {
                     .map(move |(d, _)| (alerts::destination_key(&name, d), name.clone(), Some(d.clone()))),
             )
         })
+        .chain(
+            engine
+                .certificates
+                .iter()
+                .map(|t| (t.key.clone(), t.resource.clone(), Some(format!("{}:{}", t.host, t.port)))),
+        )
         .collect();
     if let Err(e) = engine.store.ensure_alerts(&keys).await {
         tracing::error!(error = %format!("{e:#}"), "could not set up alerts: none will be sent");
@@ -349,10 +359,31 @@ fn people(users: &[ductus_store::User]) -> Vec<Person<'_>> {
 /// One thing that can alert, as it is now.
 struct Judged {
     key: String,
-    now: Now,
+    now: Judgement,
     summary: String,
     owner: String,
-    options: Arc<ductus_core::InterfaceConfig>,
+    /// Its interface's `alert:` options (none for a certificate of a resource).
+    options: AlertOptions,
+}
+
+/// What is true now: a health state, or a certificate's countdown.
+#[derive(Debug, Clone, Copy)]
+enum Judgement {
+    Health(Now),
+    Certificate(CertificateNow),
+}
+
+impl Judgement {
+    /// The bad state, its severity and (a certificate's) step.
+    fn bad(self) -> (Option<Condition>, Option<Severity>, Option<i32>) {
+        match self {
+            Judgement::Health(Now::Bad(c, s)) => (Some(c), Some(s), None),
+            Judgement::Certificate(CertificateNow::At { stage, severity }) => {
+                (Some(Condition::Certificate), Some(severity), Some(stage))
+            }
+            _ => (None, None, None),
+        }
+    }
 }
 
 /// Judge every interface and destination once.
@@ -373,10 +404,10 @@ pub async fn evaluate(engine: &Engine) -> Result<()> {
         let (state, summary) = engine.interface_state(i, now);
         judged.push(Judged {
             key: alerts::interface_key(&i.config.name),
-            now: judge(Condition::of_interface(state)),
+            now: Judgement::Health(judge(Condition::of_interface(state))),
             summary,
             owner: owner.clone(),
-            options: i.config.clone(),
+            options: i.config.alert.clone(),
         });
         for (n, ((name, _), (_, d))) in i.destinations.iter().zip(i.config.destinations()).enumerate() {
             let diagnosis = engine.diagnose(i, n, &snapshot, now);
@@ -387,20 +418,26 @@ pub async fn evaluate(engine: &Engine) -> Result<()> {
             let owner = ductus_core::about::given(&d.owner).map_or_else(|| owner.clone(), str::to_string);
             judged.push(Judged {
                 key: alerts::destination_key(&i.config.name, name),
-                now,
+                now: Judgement::Health(now),
                 summary: diagnosis.summary,
                 owner,
-                options: i.config.clone(),
+                options: i.config.alert.clone(),
             });
         }
     }
+    judged.extend(judge_certificates(engine, a, now).await?);
     let rows: HashMap<String, AlertRow> =
         engine.store.alerts().await?.into_iter().map(|r| (r.key.clone(), r)).collect();
     let mut users = None;
     for j in judged {
         let Some(row) = rows.get(&j.key) else { continue }; // made at start; a new one at the next start
         let stored = stored(row);
-        let step = alerts::step(&stored, j.now, now, a.settings.repeat, a.settings.settle);
+        let step = match j.now {
+            Judgement::Health(n) => alerts::step(&stored, n, now, a.settings.repeat, a.settings.settle),
+            Judgement::Certificate(n) => {
+                alerts::certificate_step(&stored, row.stage, n, now, a.settings.repeat, a.settings.settle)
+            }
+        };
         if matches!(step, Step::Nothing) {
             // Keep the words current for the UI (counts and ages change), quietly.
             if row.is_open() && row.summary.as_deref() != Some(&j.summary) {
@@ -425,6 +462,60 @@ pub async fn evaluate(engine: &Engine) -> Result<()> {
     Ok(())
 }
 
+/// Each certificate the engine connects to, from its last check: its step, and the words.
+async fn judge_certificates(engine: &Engine, a: &Alerts, now: DateTime<Utc>) -> Result<Vec<Judged>> {
+    if engine.certificates.is_empty() {
+        return Ok(Vec::new());
+    }
+    let seen = engine.store.certificates().await?;
+    let rule = a.settings.rule_for(Condition::Certificate).map(|r| r.severity);
+    let mut out = Vec::new();
+    for t in &engine.certificates {
+        let row = seen.iter().find(|c| c.resource == t.resource && c.host == t.host && c.port == i32::from(t.port));
+        let options = t
+            .interface
+            .as_deref()
+            .and_then(|i| engine.interface(i))
+            .map(|i| i.config.alert.clone())
+            .unwrap_or_default();
+        let (judgement, summary) = match row.and_then(|r| Some((r, r.chain_min_not_after?))) {
+            // Never read (not checked yet, or never reachable): nothing to count down from.
+            None => {
+                let why = row.and_then(|r| r.error.as_deref()).unwrap_or("not checked yet");
+                (CertificateNow::Hold, format!("Certificate of {}:{} ({}): {why}.", t.host, t.port, t.resource))
+            }
+            Some((r, not_after)) => {
+                let facts = alerts::CertificateFacts {
+                    resource: &t.resource,
+                    host: &t.host,
+                    port: t.port,
+                    not_after,
+                    earliest: r.chain_min_subject.as_deref(),
+                    // The dates are older than the last check only when it couldn't read them.
+                    error: r.error.as_deref().filter(|_| r.read_at.is_none_or(|read| read < r.checked_at)),
+                };
+                let summary = alerts::certificate_summary(&facts, now);
+                let judgement = match rule {
+                    Some(severity) => CertificateNow::of(
+                        alerts::certificate_stage(not_after, now, &a.settings.certificates.warn_days),
+                        severity,
+                    ),
+                    None => CertificateNow::Fine, // no rule names `certificate`
+                };
+                (judgement, summary)
+            }
+        };
+        out.push(Judged {
+            key: t.key.clone(),
+            now: Judgement::Certificate(judgement),
+            summary,
+            owner: t.owner.clone(),
+            options,
+        });
+    }
+    Ok(out)
+}
+
 fn stored(row: &AlertRow) -> alerts::Stored {
     alerts::Stored {
         condition: Condition::parse(&row.state),
@@ -445,6 +536,7 @@ fn keep<'a>(row: &'a AlertRow, summary: Option<&'a str>) -> AlertChange<'a> {
         ok_since: row.ok_since,
         last_notified_at: row.last_notified_at,
         summary,
+        stage: row.stage,
         fresh: false,
         unacknowledge: false,
         cancel_waiting: false,
@@ -462,17 +554,14 @@ async fn change<'a>(
     people: &[Person<'_>],
 ) -> Result<AlertChange<'a>> {
     let mut c = keep(row, Some(&j.summary));
-    let (condition, severity) = match j.now {
-        Now::Bad(c, s) => (Some(c), Some(s)),
-        _ => (None, None),
-    };
+    let (condition, severity, stage) = j.now.bad();
     // Who hears, and when: nobody while muted or silenced; warnings after quiet hours.
     let deliveries = |severity: Severity, condition: Condition| -> Vec<(String, DateTime<Utc>)> {
-        if j.options.alert.mute || row.is_silenced(now) {
+        if j.options.mute || row.is_silenced(now) {
             return Vec::new();
         }
         let Some(rule) = a.settings.rule_for(condition) else { return Vec::new() };
-        let recipients = alerts::recipients(rule, &j.options.alert);
+        let recipients = alerts::recipients(rule, &j.options);
         let due = a.settings.quiet_until(severity, now).unwrap_or(now);
         a.channels(&recipients, &j.owner, people).into_iter().map(|ch| (ch, due)).collect()
     };
@@ -487,6 +576,7 @@ async fn change<'a>(
             c.state = label(Some(cond));
             c.severity = Some(sev.label());
             c.ok_since = None;
+            c.stage = stage.or(row.stage);
             if step == Step::Fire {
                 c.since = Some(now);
                 c.fresh = true;
@@ -504,6 +594,7 @@ async fn change<'a>(
             c.state = label(condition);
             c.severity = severity.map(Severity::label);
             c.ok_since = None;
+            c.stage = stage;
         }
         Step::Recovering => c.ok_since = Some(now),
         Step::Recover => {
@@ -515,6 +606,7 @@ async fn change<'a>(
             };
             c.state = "ok";
             c.severity = None;
+            c.stage = None;
             c.ok_since = None;
             c.last_notified_at = None;
             c.fresh = true;

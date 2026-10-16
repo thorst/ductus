@@ -7,9 +7,16 @@
 //! Server pool, SFTP client and HTTP client), so what passes here connects the same way in
 //! the engine. Nothing is ever sent to a destination: MLLP and HTTP destinations are only
 //! connected to.
+//!
+//! Every TLS handshake also reports the server's certificate (`Check::certificate`), read even
+//! when this server doesn't trust it: the engine keeps these (`certificate_status`) and alerts
+//! before they expire. `Mode::Certificates` checks only what has a certificate, and logs in to
+//! nothing (what the engine runs on its own every few hours).
 
 use crate::{mssql, services, sftp};
+use chrono::{DateTime, Utc};
 use ductus_core::InterfaceConfig;
+use ductus_core::alerts::{AlertSettings, SmtpTls};
 use ductus_core::config::{Destination, Source};
 use ductus_core::resources::{Api, Database, Kind, Resources, SftpServer, SqlServerConnection};
 use ductus_script::TRANSIENT;
@@ -21,7 +28,10 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt};
 use tokio::net::TcpStream;
+
+pub use ductus_core::settings::DoctorMode as Mode;
 
 /// Commits timed against the engine's database: enough for a stable median, quick to run.
 const COMMITS: usize = 20;
@@ -67,6 +77,33 @@ pub struct Check {
     pub steps: Vec<Step>,
     /// What a failure or warning most likely means, and what to do about it.
     pub advice: Vec<String>,
+    /// For a server that speaks TLS: the certificate it presented (or, if none could be read, why).
+    pub certificate: Option<SeenCertificate>,
+}
+
+/// A server's certificate as a check saw it.
+#[derive(Debug, Clone, Serialize, utoipa::ToSchema)]
+pub struct SeenCertificate {
+    /// What it belongs to: `empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>`,
+    /// `alerts.heartbeat`, `<interface>/<destination>`.
+    pub resource: String,
+    pub host: String,
+    pub port: u16,
+    /// The server certificate's common name (or organisation); none if none was read.
+    pub subject: Option<String>,
+    pub issuer: Option<String>,
+    /// SHA-256 of the server certificate (DER), hex.
+    pub fingerprint: Option<String>,
+    pub not_before: Option<DateTime<Utc>>,
+    pub not_after: Option<DateTime<Utc>>,
+    /// The earliest expiry in the chain the server presented.
+    pub chain_not_after: Option<DateTime<Utc>>,
+    /// Whose that is, when it isn't the server certificate's (an intermediate).
+    pub chain_earliest: Option<String>,
+    /// This server trusts it (the system's trusted certificates).
+    pub trusted: bool,
+    /// Why the check failed: couldn't connect, not trusted, expired.
+    pub error: Option<String>,
 }
 
 /// Something to check.
@@ -84,6 +121,12 @@ pub enum Target {
     Http {
         url: String,
     },
+    /// The alerts' mail server: connected to (and, with TLS, its certificate read); never logged in to.
+    Smtp {
+        host: String,
+        port: u16,
+        tls: SmtpTls,
+    },
     /// A local folder a file source reads or a file destination writes. Destinations create
     /// missing folders; sources need them to exist.
     Folder {
@@ -97,11 +140,37 @@ pub enum Target {
     },
 }
 
+impl Target {
+    /// Whether the connection has a certificate to read (TLS).
+    pub fn has_certificate(&self) -> bool {
+        let https = |url: &str| url.trim().to_ascii_lowercase().starts_with("https://");
+        match self {
+            Target::Api(_, api) => https(&api.url),
+            Target::Http { url } => https(url),
+            Target::Smtp { tls, .. } => *tls != SmtpTls::None,
+            _ => false,
+        }
+    }
+
+    /// Where its certificate is: the host and port.
+    pub fn address(&self) -> Option<(String, u16)> {
+        match self {
+            Target::Api(_, Api { url, .. }) | Target::Http { url } => {
+                ductus_core::resources::Endpoint::from_url(url).map(|e| (e.host, e.port))
+            }
+            Target::Smtp { host, port, .. } => Some((host.clone(), *port)),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Probe {
     pub what: String,
     pub target: Target,
     pub used_by: Vec<String>,
+    /// The name its certificate is kept under (see `SeenCertificate::resource`).
+    pub resource: Option<String>,
 }
 
 /// The whole report: what `ductus doctor` prints and `--report` saves.
@@ -155,17 +224,28 @@ impl Report {
 /// Check everything at once (so firewalls that drop traffic don't add up their timeouts) and
 /// return the results in the order given. `timeout` bounds each step.
 pub async fn check(probes: Vec<Probe>, timeout: Duration) -> Vec<Check> {
+    check_with(probes, timeout, Mode::Full).await
+}
+
+/// `check`, in a mode: `Certificates` checks only what has a certificate (see `certificates_only`)
+/// and stops after the TLS handshake (an API's GET is left out too).
+pub async fn check_with(probes: Vec<Probe>, timeout: Duration, mode: Mode) -> Vec<Check> {
     let mut tasks = tokio::task::JoinSet::new();
     for (n, probe) in probes.into_iter().enumerate() {
-        tasks.spawn(async move { (n, run(probe, timeout).await) });
+        tasks.spawn(async move { (n, run(probe, timeout, mode).await) });
     }
     let mut checks: Vec<(usize, Check)> = tasks.join_all().await;
     checks.sort_by_key(|(n, _)| *n);
     checks.into_iter().map(|(_, c)| c).collect()
 }
 
-async fn run(probe: Probe, timeout: Duration) -> Check {
-    let mut r = Run { steps: Vec::new(), advice: Vec::new(), timeout, from: None };
+/// The probes a certificates-only run checks: the connections with a certificate.
+pub fn certificates_only(probes: Vec<Probe>) -> Vec<Probe> {
+    probes.into_iter().filter(|p| p.target.has_certificate()).collect()
+}
+
+async fn run(probe: Probe, timeout: Duration, mode: Mode) -> Check {
+    let mut r = Run { steps: Vec::new(), advice: Vec::new(), timeout, from: None, seen: None };
     let endpoint = match &probe.target {
         Target::Store(url) => r.store(url).await,
         Target::Database(_, Database::Postgres(c)) => {
@@ -182,8 +262,24 @@ async fn run(probe: Probe, timeout: Duration) -> Check {
             }
             format!("{}:{} SFTP", s.host, s.port)
         }
-        Target::Api(_, api) => r.http(&api.url, Some(api)).await,
+        Target::Api(_, api) => r.http(&api.url, (mode == Mode::Full).then_some(api)).await,
         Target::Http { url } => r.http(url, None).await,
+        Target::Smtp { host, port, tls } => {
+            if let Some(address) = r.connectable(host, *port).await {
+                match tls {
+                    SmtpTls::Tls => {
+                        r.tls(host, address).await;
+                    }
+                    SmtpTls::Starttls => {
+                        if let Some(stream) = r.starttls(address).await {
+                            r.tls_on(host, stream).await;
+                        }
+                    }
+                    SmtpTls::None => r.smtp_greeting(address).await,
+                }
+            }
+            format!("{host}:{port} SMTP")
+        }
         Target::Mllp { host, port } => {
             r.reach(host, *port).await;
             format!("{host}:{port} MLLP")
@@ -198,7 +294,35 @@ async fn run(probe: Probe, timeout: Duration) -> Check {
         }
     };
     let outcome = r.steps.iter().map(|s| s.outcome).max().unwrap_or(Outcome::Ok);
-    Check { what: probe.what, endpoint, used_by: probe.used_by, outcome, steps: r.steps, advice: r.advice }
+    let certificate = probe.target.address().filter(|_| probe.target.has_certificate()).map(|(host, port)| {
+        let failed = r.steps.iter().find(|s| s.outcome == Outcome::Fail).map(|s| s.detail.clone());
+        let seen = r.seen.take().unwrap_or_default();
+        SeenCertificate {
+            resource: probe.resource.clone().unwrap_or_else(|| probe.what.clone()),
+            host,
+            port,
+            subject: seen.leaf.as_ref().map(|c| c.subject.clone()),
+            issuer: seen.leaf.as_ref().map(|c| c.issuer.clone()),
+            fingerprint: seen.leaf.as_ref().map(|c| c.fingerprint.clone()),
+            not_before: seen.leaf.as_ref().map(|c| c.not_before),
+            not_after: seen.leaf.as_ref().map(|c| c.not_after),
+            chain_not_after: seen.chain_not_after,
+            chain_earliest: seen.chain_earliest,
+            trusted: seen.trusted,
+            error: seen.error.or(failed),
+        }
+    });
+    Check { what: probe.what, endpoint, used_by: probe.used_by, outcome, steps: r.steps, advice: r.advice, certificate }
+}
+
+/// What a TLS handshake showed.
+#[derive(Default)]
+struct Seen {
+    leaf: Option<Certificate>,
+    chain_not_after: Option<DateTime<Utc>>,
+    chain_earliest: Option<String>,
+    trusted: bool,
+    error: Option<String>,
 }
 
 /// The steps of one check as they happen.
@@ -208,6 +332,8 @@ struct Run {
     timeout: Duration,
     /// This server's address towards the target (for firewall requests and pg_hba advice).
     from: Option<IpAddr>,
+    /// The certificate a TLS handshake showed.
+    seen: Option<Seen>,
 }
 
 impl Run {
@@ -525,11 +651,26 @@ impl Run {
     /// A TLS handshake, verified the way the engine's HTTP client verifies (the system's
     /// trusted certificates), reporting the server's certificate either way.
     async fn tls(&mut self, host: &str, address: SocketAddr) -> bool {
+        match tokio::time::timeout(self.timeout, TcpStream::connect(address)).await {
+            Ok(Ok(tcp)) => self.tls_on(host, tcp).await,
+            Ok(Err(e)) => {
+                self.step("TLS", Outcome::Fail, format!("handshake failed: {e}"));
+                false
+            }
+            Err(_) => {
+                self.step("TLS", Outcome::Fail, format!("no TLS answer in {}", self.waited()));
+                false
+            }
+        }
+    }
+
+    /// The TLS handshake on a connection that is ready for it (fresh, or after STARTTLS).
+    async fn tls_on<S: AsyncRead + AsyncWrite + Unpin>(&mut self, host: &str, stream: S) -> bool {
         use rustls::pki_types::ServerName;
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let seen = Arc::new(Mutex::new(Vec::new()));
+        let presented = Arc::new(Mutex::new(Vec::new()));
         let verifier = match rustls_platform_verifier::Verifier::new(provider.clone()) {
-            Ok(v) => Recording { inner: v, seen: seen.clone() },
+            Ok(v) => Recording { inner: v, seen: presented.clone() },
             Err(e) => {
                 self.step("TLS", Outcome::Fail, format!("can't load this server's trusted certificates: {e}"));
                 return false;
@@ -545,23 +686,28 @@ impl Run {
             self.step("TLS", Outcome::Fail, format!("`{host}` isn't a valid name for TLS"));
             return false;
         };
-        let handshake = async {
-            let tcp = TcpStream::connect(address).await?;
-            tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, tcp).await
-        };
+        let handshake = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, stream);
         let result = tokio::time::timeout(self.timeout, handshake).await;
-        let leaf = seen.lock().expect("certificate lock").first().map(|c| Certificate::read(c));
-        let leaf = leaf.flatten();
+        // The verifier records the chain before it judges it: read even when it isn't trusted.
+        let chain: Vec<Certificate> =
+            presented.lock().expect("certificate lock").iter().filter_map(|c| Certificate::read(c)).collect();
+        let mut seen = Seen::default();
+        if let Some((n, earliest)) = chain.iter().enumerate().min_by_key(|(_, c)| c.not_after) {
+            seen.chain_not_after = Some(earliest.not_after);
+            seen.chain_earliest = (n > 0 && earliest.not_after < chain[0].not_after).then(|| earliest.subject.clone());
+        }
+        let leaf = chain.into_iter().next();
         let about = leaf.as_ref().map(Certificate::describe).unwrap_or_default();
-        match result {
+        let trusted = match result {
             Ok(Ok(stream)) => {
                 let version = stream.get_ref().1.protocol_version().map(|v| format!("{v:?}")).unwrap_or_default();
                 let version = version.replace("TLSv1_", "TLS 1.");
-                let days = leaf.as_ref().map(|c| c.days_left()).unwrap_or(i64::MAX);
+                let days = seen.chain_not_after.map(|t| (t - Utc::now()).num_days()).unwrap_or(i64::MAX);
                 if days < EXPIRY_WARNING_DAYS {
                     self.step("TLS", Outcome::Warn, format!("{version}, trusted; {about}"));
+                    let whose = seen.chain_earliest.as_ref().map(|s| format!(" (its chain's {s})")).unwrap_or_default();
                     self.advise(format!(
-                        "The certificate expires in {days} day(s): ask the server's owner to renew it before then."
+                        "The certificate{whose} expires in {days} day(s): ask the server's owner to renew it before then."
                     ));
                 } else {
                     self.step("TLS", Outcome::Ok, format!("{version}, trusted; {about}"));
@@ -571,6 +717,7 @@ impl Run {
             Ok(Err(e)) => {
                 let tls = e.get_ref().and_then(|i| i.downcast_ref::<rustls::Error>()).cloned();
                 let (detail, advice) = tls_failure(host, tls.as_ref(), &e, leaf.as_ref());
+                seen.error = Some(detail.clone());
                 self.step("TLS", Outcome::Fail, if about.is_empty() { detail } else { format!("{detail}; {about}") });
                 self.advise(advice);
                 false
@@ -580,6 +727,71 @@ impl Run {
                 self.advise("The port accepts connections but doesn't speak TLS (in time): is it plain http, or the wrong port?");
                 false
             }
+        };
+        seen.trusted = trusted;
+        seen.leaf = leaf;
+        self.seen = Some(seen);
+        trusted
+    }
+
+    /// SMTP up to STARTTLS (greeting, EHLO, STARTTLS): the connection, ready for the handshake.
+    /// Never logs in and never sends mail.
+    async fn starttls(&mut self, address: SocketAddr) -> Option<TcpStream> {
+        let dialogue = async {
+            let mut smtp = tokio::io::BufReader::new(TcpStream::connect(address).await?);
+            let greeting = smtp_reply(&mut smtp).await?;
+            if !greeting.starts_with("220") {
+                return Ok(Err(format!("the server greeted with `{}`", first(&greeting))));
+            }
+            smtp.get_mut().write_all(b"EHLO ductus-doctor\r\n").await?;
+            let ehlo = smtp_reply(&mut smtp).await?;
+            if !ehlo.starts_with("250") {
+                return Ok(Err(format!("EHLO was answered `{}`", first(&ehlo))));
+            }
+            if !ehlo.to_ascii_uppercase().contains("STARTTLS") {
+                return Ok(Err("the server doesn't offer STARTTLS".to_string()));
+            }
+            smtp.get_mut().write_all(b"STARTTLS\r\n").await?;
+            let ready = smtp_reply(&mut smtp).await?;
+            if !ready.starts_with("220") {
+                return Ok(Err(format!("STARTTLS was answered `{}`", first(&ready))));
+            }
+            Ok::<_, std::io::Error>(Ok((smtp.into_inner(), first(&greeting))))
+        };
+        match tokio::time::timeout(self.timeout, dialogue).await {
+            Ok(Ok(Ok((stream, greeting)))) => {
+                self.step("SMTP", Outcome::Ok, format!("{greeting}; STARTTLS offered and accepted"));
+                Some(stream)
+            }
+            Ok(Ok(Err(why))) => {
+                self.step("SMTP", Outcome::Fail, why);
+                self.advise("Alert mail is sent with STARTTLS (`tls: starttls`): use the port that offers it (usually 587), or `tls: tls` for a server that speaks TLS from the start (465).");
+                None
+            }
+            Ok(Err(e)) => {
+                self.step("SMTP", Outcome::Fail, e.to_string());
+                None
+            }
+            Err(_) => {
+                self.step("SMTP", Outcome::Fail, format!("no SMTP answer in {}", self.waited()));
+                None
+            }
+        }
+    }
+
+    /// A plain SMTP server's greeting (`tls: none`).
+    async fn smtp_greeting(&mut self, address: SocketAddr) {
+        let greeting = async {
+            let mut smtp = tokio::io::BufReader::new(TcpStream::connect(address).await?);
+            let reply = smtp_reply(&mut smtp).await?;
+            let _ = smtp.get_mut().write_all(b"QUIT\r\n").await;
+            Ok::<_, std::io::Error>(reply)
+        };
+        match tokio::time::timeout(self.timeout, greeting).await {
+            Ok(Ok(reply)) if reply.starts_with("220") => self.step("SMTP", Outcome::Ok, first(&reply)),
+            Ok(Ok(reply)) => self.step("SMTP", Outcome::Fail, format!("the server greeted with `{}`", first(&reply))),
+            Ok(Err(e)) => self.step("SMTP", Outcome::Fail, e.to_string()),
+            Err(_) => self.step("SMTP", Outcome::Fail, format!("no SMTP answer in {}", self.waited())),
         }
     }
 
@@ -736,6 +948,27 @@ fn took(d: Duration) -> String {
     }
 }
 
+/// One SMTP reply, all its lines (`250-...` continues, `250 ...` ends it).
+async fn smtp_reply<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> std::io::Result<String> {
+    let mut reply = String::new();
+    loop {
+        let mut line = String::new();
+        if r.read_line(&mut line).await? == 0 {
+            return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "the server closed the connection"));
+        }
+        let last = line.as_bytes().get(3) != Some(&b'-');
+        reply.push_str(&line);
+        if last || reply.len() > 16_384 {
+            return Ok(reply);
+        }
+    }
+}
+
+/// The first line of a reply, trimmed.
+fn first(reply: &str) -> String {
+    reply.lines().next().unwrap_or("").trim().to_string()
+}
+
 /// 2 significant figures: measured numbers aren't more precise than that.
 fn round(x: f64) -> String {
     if x <= 0.0 || !x.is_finite() {
@@ -801,7 +1034,10 @@ struct Certificate {
     subject: String,
     issuer: String,
     names: Vec<String>,
-    not_after: chrono::DateTime<chrono::Utc>,
+    not_before: DateTime<Utc>,
+    not_after: DateTime<Utc>,
+    /// SHA-256 of the DER, hex.
+    fingerprint: String,
 }
 
 impl Certificate {
@@ -830,11 +1066,15 @@ impl Certificate {
                 }
             }
         }
+        use sha2::Digest;
+        let fingerprint = sha2::Sha256::digest(der).iter().map(|b| format!("{b:02x}")).collect();
         Some(Self {
             subject: name(cert.subject()),
             issuer: name(cert.issuer()),
             names,
-            not_after: chrono::DateTime::from_timestamp(cert.validity().not_after.timestamp(), 0)?,
+            not_before: DateTime::from_timestamp(cert.validity().not_before.timestamp(), 0)?,
+            not_after: DateTime::from_timestamp(cert.validity().not_after.timestamp(), 0)?,
+            fingerprint,
         })
     }
 
@@ -911,18 +1151,31 @@ struct Entry {
     target: Target,
     used_by: Vec<String>,
     interfaces: BTreeSet<String>,
+    /// What its certificate is kept under: the resource's name, or the first destination's.
+    resource: String,
 }
 
 /// Users shown for a resource nothing uses.
 const UNUSED: &str = "nothing yet (defined in resources.yaml)";
 
 impl Plan {
-    fn add(&mut self, section: u8, key: String, what: &str, target: Target, user: String, interface: Option<&str>) {
+    #[allow(clippy::too_many_arguments)]
+    fn add(
+        &mut self,
+        section: u8,
+        key: String,
+        what: &str,
+        target: Target,
+        user: String,
+        interface: Option<&str>,
+        resource: &str,
+    ) {
         let e = self.entries.entry((section, key)).or_insert_with(|| Entry {
             what: what.into(),
             target,
             used_by: Vec::new(),
             interfaces: BTreeSet::new(),
+            resource: resource.into(),
         });
         if !e.used_by.contains(&user) {
             e.used_by.push(user);
@@ -946,7 +1199,7 @@ impl Plan {
                 None => return,
             },
         };
-        self.add(section, name.into(), &format!("{} {name}", kind.label()), target, user, interface);
+        self.add(section, name.into(), &format!("{} {name}", kind.label()), target, user, interface, name);
     }
 }
 
@@ -966,12 +1219,12 @@ pub fn plan(
             Source::Mllp { host, port } | Source::Http { host, port, .. } => {
                 let protocol = if matches!(c.source, Source::Mllp { .. }) { "MLLP" } else { "HTTP" };
                 let target = Target::Listener { host: host.clone(), port: *port, protocol };
-                plan.add(6, format!("{port:05} {host}"), "listening port", target, c.name.clone(), me);
+                plan.add(6, format!("{port:05} {host}"), "listening port", target, c.name.clone(), me, &c.name);
             }
             Source::File(f) => {
                 let path = c.dir.join(&f.dir);
                 let target = Target::Folder { path: path.clone(), created_if_missing: false };
-                plan.add(5, path.display().to_string(), "source folder", target, c.name.clone(), me);
+                plan.add(5, path.display().to_string(), "source folder", target, c.name.clone(), me, &c.name);
             }
             Source::Sftp(f) => {
                 let server = f.server.as_deref().unwrap_or_default();
@@ -981,14 +1234,15 @@ pub fn plan(
         }
         for (name, d) in c.destinations() {
             let label = if c.destination.is_some() { c.name.clone() } else { format!("{} → {name}", c.name) };
+            let resource = format!("{}/{name}", c.name);
             match &d.connector {
                 Destination::Mllp { host, port, .. } => {
                     let target = Target::Mllp { host: host.clone(), port: *port };
-                    plan.add(4, format!("{host}:{port}"), "MLLP destination", target, label, me);
+                    plan.add(4, format!("{host}:{port}"), "MLLP destination", target, label, me, &resource);
                 }
                 Destination::Http { url: Some(url), .. } => {
                     let target = Target::Http { url: url.clone() };
-                    plan.add(4, url.clone(), "HTTP destination", target, label, me);
+                    plan.add(4, url.clone(), "HTTP destination", target, label, me, &resource);
                 }
                 Destination::Http { api: Some(api), .. } => plan.resource(resources, Kind::Api, api, label, me),
                 Destination::Http { .. } | Destination::Interface(_) => {}
@@ -996,7 +1250,7 @@ pub fn plan(
                 Destination::File { dir } => {
                     let path = c.dir.join(dir);
                     let target = Target::Folder { path: path.clone(), created_if_missing: true };
-                    plan.add(5, path.display().to_string(), "destination folder", target, label, me);
+                    plan.add(5, path.display().to_string(), "destination folder", target, label, me, &resource);
                 }
             }
         }
@@ -1022,15 +1276,50 @@ pub fn plan(
         what: "engine database".into(),
         target: Target::Store(database_url.into()),
         used_by: vec!["the engine (DUCTUS_DATABASE_URL)".into()],
+        resource: None,
     };
     let wanted = |e: &Entry| only.is_empty() || only.iter().any(|i| e.interfaces.contains(i));
     let rest = plan.entries.into_values().filter(wanted).map(|mut e| {
         if e.used_by.len() > 1 {
             e.used_by.retain(|u| u != UNUSED);
         }
-        Probe { what: e.what, target: e.target, used_by: e.used_by }
+        Probe { what: e.what, target: e.target, used_by: e.used_by, resource: Some(e.resource) }
     });
     std::iter::once(store).chain(rest).collect()
+}
+
+/// What alerts connect to (`alerts:` in ductus.yaml): the mail server, each webhook, the
+/// heartbeat. Checked like the rest; a webhook's URL is never shown (it is its secret), only its
+/// server.
+pub fn alert_probes(a: &AlertSettings) -> Vec<Probe> {
+    let mut probes = Vec::new();
+    if let Some(smtp) = &a.smtp {
+        probes.push(Probe {
+            what: "mail server (alerts)".into(),
+            target: Target::Smtp { host: smtp.host.clone(), port: smtp.port(), tls: smtp.tls },
+            used_by: vec!["alerts".into()],
+            resource: Some("alerts.smtp".into()),
+        });
+    }
+    for (name, channel) in &a.channels {
+        if let Some(hook) = &channel.webhook {
+            probes.push(Probe {
+                what: format!("webhook {name} (alerts)"),
+                target: Target::Http { url: hook.url.clone() },
+                used_by: vec![format!("alerts → {name}")],
+                resource: Some(format!("alerts.{name}")),
+            });
+        }
+    }
+    if let Some(heartbeat) = &a.heartbeat {
+        probes.push(Probe {
+            what: "heartbeat (alerts)".into(),
+            target: Target::Http { url: heartbeat.url.clone() },
+            used_by: vec!["alerts".into()],
+            resource: Some("alerts.heartbeat".into()),
+        });
+    }
+    probes
 }
 
 /// This server's name, for the report header.
@@ -1049,7 +1338,7 @@ mod tests {
     use super::*;
 
     fn probe(target: Target) -> Probe {
-        Probe { what: "test".into(), target, used_by: vec!["x".into()] }
+        Probe { what: "test".into(), target, used_by: vec!["x".into()], resource: Some("test".into()) }
     }
 
     async fn one(target: Target) -> Check {
@@ -1191,6 +1480,188 @@ mod tests {
         assert_eq!(step(&check, "login").outcome, Outcome::Fail, "{check:#?}");
         assert!(!step(&check, "login").detail.contains(TRANSIENT), "{check:#?}");
         assert!(check.advice.iter().any(|a| a.contains("was refused")), "{check:#?}");
+    }
+
+    /// A certificate for `localhost` ending `days` whole days from today (UTC midnight; negative:
+    /// already ended), signed by `issuer` (or by itself).
+    fn certificate(
+        name: &str,
+        days: i64,
+        ca: bool,
+        issuer: Option<&rcgen::Issuer<'_, rcgen::KeyPair>>,
+    ) -> (rcgen::Certificate, rcgen::CertificateParams, rcgen::KeyPair) {
+        use chrono::Datelike;
+        let date = |d: i64| {
+            let day = (Utc::now() + chrono::Duration::days(d)).date_naive();
+            rcgen::date_time_ymd(day.year(), day.month() as u8, day.day() as u8)
+        };
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        params.distinguished_name.push(rcgen::DnType::CommonName, name);
+        params.not_before = date(-400);
+        params.not_after = date(days);
+        if ca {
+            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        }
+        let cert = match issuer {
+            Some(issuer) => params.signed_by(&key, issuer).unwrap(),
+            None => params.self_signed(&key).unwrap(),
+        };
+        (cert, params, key)
+    }
+
+    fn tls_config(chain: &[&rcgen::Certificate], key: &rcgen::KeyPair) -> Arc<rustls::ServerConfig> {
+        let key = rustls::pki_types::PrivateKeyDer::try_from(key.serialize_der()).unwrap();
+        let config =
+            rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+                .with_safe_default_protocol_versions()
+                .unwrap()
+                .with_no_client_auth()
+                .with_single_cert(chain.iter().map(|c| c.der().clone()).collect(), key)
+                .unwrap();
+        Arc::new(config)
+    }
+
+    /// A TLS server on localhost presenting `config`'s chain; its port.
+    async fn tls_server(config: Arc<rustls::ServerConfig>) -> u16 {
+        let acceptor = tokio_rustls::TlsAcceptor::from(config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move { drop(acceptor.accept(tcp).await) });
+            }
+        });
+        port
+    }
+
+    async fn certificate_of(target: Target) -> (Check, SeenCertificate) {
+        let c = check_with(vec![probe(target)], Duration::from_secs(2), Mode::Certificates).await.remove(0);
+        let seen = c.certificate.clone().unwrap_or_else(|| panic!("no certificate: {c:#?}"));
+        (c, seen)
+    }
+
+    #[tokio::test]
+    async fn reads_certificates_with_40_20_10_3_days_left_and_an_expired_one() {
+        let warn = [30, 14, 7];
+        for (days, stage) in [(40, None), (20, Some(30)), (10, Some(14)), (3, Some(7)), (-2, Some(0))] {
+            let (cert, _, key) = certificate("Test Server", days, false, None);
+            let port = tls_server(tls_config(&[&cert], &key)).await;
+            let (c, seen) = certificate_of(Target::Http { url: format!("https://localhost:{port}/orders") }).await;
+            let ends = seen.chain_not_after.expect("read though not trusted");
+            assert_eq!(ductus_core::alerts::days_left(ends, Utc::now()), days, "{seen:#?}");
+            assert_eq!(ductus_core::alerts::certificate_stage(ends, Utc::now(), &warn), stage, "{days} days");
+            assert_eq!((seen.host.as_str(), seen.port, seen.resource.as_str()), ("localhost", port, "test"));
+            assert_eq!((seen.subject.as_deref(), seen.chain_earliest.as_deref()), (Some("Test Server"), None));
+            assert_eq!(seen.not_after, seen.chain_not_after, "a chain of one");
+            assert_eq!(seen.fingerprint.as_ref().map(String::len), Some(64), "SHA-256, hex");
+            assert!(!seen.trusted, "self-signed: this server doesn't trust it");
+            assert!(
+                seen.error.as_deref().is_some_and(|e| e.contains("not trusted") || e.contains("expired")),
+                "{c:#?}"
+            );
+            assert_eq!(step(&c, "TLS").outcome, Outcome::Fail);
+        }
+    }
+
+    #[tokio::test]
+    async fn the_earliest_expiry_in_the_chain_counts() {
+        let (_, ca_params, ca_key) = certificate("Test Root", 3650, true, None);
+        let root = rcgen::Issuer::new(ca_params, ca_key);
+        let (intermediate, int_params, int_key) = certificate("Test Intermediate", 5, true, Some(&root));
+        let intermediate_issuer = rcgen::Issuer::new(int_params, int_key);
+        let (leaf, _, leaf_key) = certificate("Test Server", 60, false, Some(&intermediate_issuer));
+        let port = tls_server(tls_config(&[&leaf, &intermediate], &leaf_key)).await;
+        let (_, seen) = certificate_of(Target::Http { url: format!("https://localhost:{port}/") }).await;
+        let days = |t: Option<DateTime<Utc>>| ductus_core::alerts::days_left(t.unwrap(), Utc::now());
+        assert_eq!((days(seen.not_after), days(seen.chain_not_after)), (60, 5), "{seen:#?}");
+        assert_eq!(seen.chain_earliest.as_deref(), Some("Test Intermediate"));
+        assert_eq!(seen.issuer.as_deref(), Some("Test Intermediate"));
+    }
+
+    /// A pretend mail server: greets, answers EHLO (offering STARTTLS if `offer`), then TLS.
+    async fn smtp_server(config: Arc<rustls::ServerConfig>, offer: bool) -> u16 {
+        let acceptor = tokio_rustls::TlsAcceptor::from(config);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    let mut smtp = tokio::io::BufReader::new(tcp);
+                    let mut line = String::new();
+                    smtp.get_mut().write_all(b"220 mail.test ESMTP\r\n").await?;
+                    smtp.read_line(&mut line).await?;
+                    let caps: &[u8] = if offer { b"250-mail.test\r\n250 STARTTLS\r\n" } else { b"250 mail.test\r\n" };
+                    smtp.get_mut().write_all(caps).await?;
+                    line.clear();
+                    smtp.read_line(&mut line).await?;
+                    if line.starts_with("STARTTLS") {
+                        smtp.get_mut().write_all(b"220 go ahead\r\n").await?;
+                        drop(acceptor.accept(smtp.into_inner()).await);
+                    }
+                    Ok::<_, std::io::Error>(())
+                });
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn reads_the_mail_server_s_certificate_after_starttls() {
+        let (cert, _, key) = certificate("Test Mail", 10, false, None);
+        let config = tls_config(&[&cert], &key);
+        let port = smtp_server(config.clone(), true).await;
+        let target = Target::Smtp { host: "localhost".into(), port, tls: SmtpTls::Starttls };
+        let (c, seen) = certificate_of(target).await;
+        assert_eq!(step(&c, "SMTP").outcome, Outcome::Ok, "{c:#?}");
+        assert!(step(&c, "SMTP").detail.contains("STARTTLS offered and accepted"), "{c:#?}");
+        assert_eq!(seen.subject.as_deref(), Some("Test Mail"));
+        assert_eq!(c.endpoint, format!("localhost:{port} SMTP"));
+
+        let port = smtp_server(config.clone(), false).await;
+        let (c, seen) = certificate_of(Target::Smtp { host: "localhost".into(), port, tls: SmtpTls::Starttls }).await;
+        assert_eq!(step(&c, "SMTP").detail, "the server doesn't offer STARTTLS");
+        assert!(c.advice.iter().any(|a| a.contains("usually 587")), "{c:#?}");
+        assert_eq!((seen.fingerprint, seen.error.as_deref()), (None, Some("the server doesn't offer STARTTLS")));
+
+        // TLS from the first byte (port 465).
+        let port = tls_server(config).await;
+        let (_, seen) = certificate_of(Target::Smtp { host: "localhost".into(), port, tls: SmtpTls::Tls }).await;
+        assert_eq!(seen.subject.as_deref(), Some("Test Mail"));
+    }
+
+    #[tokio::test]
+    async fn a_server_that_can_t_be_reached_has_an_error_and_no_certificate() {
+        let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let (_, seen) = certificate_of(Target::Http { url: format!("https://127.0.0.1:{free}/") }).await;
+        assert_eq!((seen.fingerprint.as_deref(), seen.chain_not_after), (None, None));
+        assert!(seen.error.as_deref().is_some_and(|e| e.ends_with("refused")), "{seen:#?}");
+    }
+
+    #[test]
+    fn only_what_has_a_certificate_is_checked_in_certificates_mode() {
+        let alerts: AlertSettings = serde_yaml_ng::from_str(
+            "smtp: { host: mail.example.org, from: d@example.org }
+channels:
+  chat: { webhook: { url: 'https://hooks.example.org/T0/secret', format: slack } }
+  plain: { webhook: { url: 'http://10.1.1.1/hook' } }
+heartbeat: { url: 'https://hb.example.org/ping/abc' }",
+        )
+        .unwrap();
+        let mut probes = alert_probes(&alerts);
+        probes.push(probe(Target::Mllp { host: "lab".into(), port: 6661 }));
+        let kept: Vec<(String, Option<(String, u16)>)> =
+            certificates_only(probes).into_iter().map(|p| (p.resource.unwrap(), p.target.address())).collect();
+        assert_eq!(
+            kept,
+            [
+                ("alerts.smtp".into(), Some(("mail.example.org".into(), 587))),
+                ("alerts.chat".into(), Some(("hooks.example.org".into(), 443))),
+                ("alerts.heartbeat".into(), Some(("hb.example.org".into(), 443))),
+            ]
+        );
     }
 
     #[test]

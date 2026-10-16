@@ -2,7 +2,7 @@
 //! this engine runs.
 
 use super::{ApiError, ApiResult, Caller, Eng, Shared};
-use crate::doctor::{self, Report, Target};
+use crate::doctor::{Mode, Report};
 use axum::Json;
 use axum::extract::Query;
 use ductus_core::InterfaceConfig;
@@ -10,7 +10,7 @@ use ductus_core::about::HostQuery;
 use ductus_core::impact::{self, Query as ImpactQuery};
 use ductus_store::Role;
 use serde::{Deserialize, Serialize};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -300,12 +300,25 @@ pub struct DoctorRequest {
     interfaces: Vec<String>,
     /// Longest wait per step, in milliseconds (default 5000, at most 60000).
     timeout_ms: Option<u64>,
+    /// `full` (the default: logins included) or `certificates` (DNS, TCP and the TLS handshake of
+    /// what has a certificate; nothing logs in).
+    #[serde(default)]
+    mode: DoctorRunMode,
+}
+
+#[derive(Deserialize, ToSchema, Default, Clone, Copy)]
+#[serde(rename_all = "lowercase")]
+pub enum DoctorRunMode {
+    #[default]
+    Full,
+    Certificates,
 }
 
 /// Check every connection the engine needs, from its server: DNS, TCP (with the address a
-/// firewall request needs), TLS (certificate, expiry), then each system's own login. Never
-/// sends anything to a destination. Listening ports aren't checked (the engine holds them).
-/// Operator.
+/// firewall request needs), TLS (certificate, expiry), then each system's own login; also the
+/// alerts' mail server, webhooks and heartbeat. Never sends anything to a destination. Listening
+/// ports aren't checked (the engine holds them). The run is kept (`/doctor/runs`), and the
+/// certificates it saw (`/certificates`). Operator.
 #[utoipa::path(
     post, path = "/doctor", tag = "reports", request_body(content = DoctorRequest, content_type = "application/json"),
     responses((status = 200, body = Report), (status = 400, body = super::ErrorBody), (status = 403, body = super::ErrorBody))
@@ -319,25 +332,15 @@ async fn doctor_report(engine: Eng, caller: Caller, body: Option<Json<DoctorRequ
         return Err(ApiError::bad_request(format!("no interface named {}", unknown.join(", "))));
     }
     let timeout = Duration::from_millis(request.timeout_ms.unwrap_or(5000).clamp(100, 60_000));
-    let configs: Vec<&InterfaceConfig> = engine.interfaces.iter().map(|i| &*i.config).collect();
-    let code = engine.code_uses().await?;
-    let probes: Vec<_> = doctor::plan(&configs, &engine.resources, code, &engine.database_url, &request.interfaces)
-        .into_iter()
-        .filter(|p| !matches!(p.target, Target::Listener { .. }))
-        .collect();
-    let detail = serde_json::json!({ "checks": probes.len(), "interfaces": request.interfaces });
+    let mode = match request.mode {
+        DoctorRunMode::Full => Mode::Full,
+        DoctorRunMode::Certificates => Mode::Certificates,
+    };
+    let detail = serde_json::json!({ "mode": mode.label(), "interfaces": request.interfaces });
     super::record_first(&engine, caller.audit("doctor.run").detail(detail)).await?;
-    tracing::info!(token = caller.name(), checks = probes.len(), "connection checks requested through the API");
-    let started = Instant::now();
-    let checks = doctor::check(probes, timeout).await;
-    Ok(Json(Report {
-        generated_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string(),
-        environment: engine.environment.clone(),
-        host: doctor::hostname(),
-        version: env!("CARGO_PKG_VERSION").to_string(),
-        seconds: started.elapsed().as_secs_f64(),
-        checks,
-    }))
+    tracing::info!(by = caller.name(), mode = mode.label(), "connection checks requested through the API");
+    let report = crate::certificates::run(&engine, mode, caller.name(), &request.interfaces, timeout).await?;
+    Ok(Json(report))
 }
 
 /// A field the company declared in `docs-schema.yaml`.

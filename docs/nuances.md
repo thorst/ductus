@@ -292,7 +292,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 
 ### A pass means "can connect and log in", not "will accept your messages" (level 2)
 - **What:** doctor never sends anything to a destination: MLLP and HTTP destinations are only connected to (and TLS checked). For an API it sends one `GET` to the API's base URL with its headers and reports the status: a 404 there is normal, a 401/403 means the token was refused. Databases get a login and a version query; SFTP a host key check, login and SFTP start. Code that writes to a table it has no rights to still fails at run time.
-- **What to do:** use doctor for "can we reach it"; use the interface's tests and a test message for "does it accept what we send".
+- **What to do:** use doctor for "can we reach it"; use the interface's tests and a test message for "does it accept what we send". The engine runs the certificate part of these checks by itself every few hours (see Certificates).
 
 ### One working address is enough to pass, with a warning (level 3)
 - **What:** a name can resolve to several addresses (IPv4 and IPv6, or a cluster). Doctor tries each. If some fail and one works, the check warns: the engine (like any client) may try a failing address first and be slow, or fail now and then.
@@ -398,7 +398,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 ## Alerts
 
 ### Alerts tell you once, then remind; they don't repeat every check (level 2)
-- **What:** with `alerts:` in ductus.yaml, every interface and destination is judged every 15 s, whether or not anyone has the UI open. A state a rule names (`error`, `stalled`, `behind`, `stopped`, `silent`, `missed`) **fires** once, to the rule's channels. It **escalates** (people are told again) only when the severity rises, warning to critical. Getting better without being fine (stalled to behind) changes the alert quietly. While it stays open and nobody acknowledges it, a **reminder** goes every `repeat` (4 h by default; `0` = never). Once it has been fine for `settle` (2 min) it **recovers**, and the people who were told hear that too. Going bad again within `settle` reopens the same alert instead of firing a new one (a flapping receiver is one alert). More quarantined messages on a destination already in *error* are not a new alert.
+- **What:** with `alerts:` in ductus.yaml, every interface and destination is judged every 15 s, whether or not anyone has the UI open. A state a rule names (`error`, `stalled`, `behind`, `stopped`, `silent`, `missed`; `certificate` has steps of its own, see Certificates) **fires** once, to the rule's channels. It **escalates** (people are told again) only when the severity rises, warning to critical. Getting better without being fine (stalled to behind) changes the alert quietly. While it stays open and nobody acknowledges it, a **reminder** goes every `repeat` (4 h by default; `0` = never). Once it has been fine for `settle` (2 min) it **recovers**, and the people who were told hear that too. Going bad again within `settle` reopens the same alert instead of firing a new one (a flapping receiver is one alert). More quarantined messages on a destination already in *error* are not a new alert.
 - **Why:** an alert on every check is noise people learn to ignore. One per problem, a reminder while nobody owns it, and a word when it's over is what an on-call person can act on.
 - **What to do:** acknowledge what you're working on (the Alerts page, or `POST /api/v1/alerts/{id}/ack`): reminders stop until it gets worse or recovers. Keep `repeat` unless the channel pages someone. Clear quarantines (resend, correct or dismiss): *error* stays open until the destination has none.
 
@@ -437,6 +437,37 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 ### Judging alerts costs little, and runs all the time (level 4)
 - **What:** every 15 s the engine counts its queues (as live updates do) and compares each state with its stored alert, writing only what changed. Measured with 1,001 interfaces (2,002 alerts, WSL): 35 ms a round, about 0.1% of one core in all, and 7 MB of memory.
 - **What to do:** nothing at that size. Each round's time is in the log at debug level (`RUST_LOG=ductus_runtime::alerts=debug`, "alerts judged").
+## Certificates
+
+### The engine checks certificates by itself, and logs in to nothing (level 2)
+- **What:** every `doctor.schedule` (6 h by default; the first a minute or two after start), the engine runs the connection checks in `certificates` mode: DNS, TCP and the TLS handshake of every connection with a certificate, nothing else. It keeps what it saw (the Connections page, `GET /api/v1/certificates`) and the run itself (the last 30). `mode: full` runs everything `ductus doctor` does, every database and SFTP login included, every few hours.
+- **Why:** a full run logs in to every system four times a day. Hospital security teams notice service accounts that do that, and a password that changed locks the account out after a few runs.
+- **What to do:** keep `certificates` unless someone asked for scheduled login checks; run full checks when you want them (the Connections page, `POST /api/v1/doctor`, `ductus doctor`). `doctor: { schedule: off }` turns the scheduled checks off (and with them the countdown's freshness: dates then come from the last check someone ran).
+
+### What has a certificate the engine watches (level 3)
+- **What:** HTTPS APIs (resources.yaml) and HTTPS destinations, and what alerts connect to: the mail server (`tls: starttls` or `tls`), HTTPS webhooks and the heartbeat. Not watched: Postgres resources (the engine connects to them without TLS), SFTP (host keys, not certificates), MLLP (plain TCP), and **SQL Server** (its TLS is inside the TDS protocol; it joins with the certificate manager in v0.6). Our own listeners have no TLS yet (v0.6).
+- **What to do:** a SQL Server with `trust_server_certificate: false` stops accepting the engine's connections when its certificate expires: track that certificate where you track the server's others until v0.6.
+
+### The earliest expiry in the chain counts, in whole days (level 2)
+- **What:** a server presents its certificate and usually one or more intermediates. Clients refuse the connection when any of them has expired, so the countdown runs to the earliest of them (the Connections page names an intermediate that ends first). Days are whole days in UTC dates: a certificate ending tomorrow at 00:30 UTC has 1 day left all of today, wherever the server is.
+- **What to do:** when the intermediate is the one ending, the fix is the server's certificate bundle (the CA has a newer intermediate), not a new certificate.
+
+### A certificate alert is told at 30, 14 and 7 days, and when it expires (level 2)
+- **What:** with a rule naming `certificate` (`{ when: [certificate], severity: warning, to: [oncall] }`), a certificate alerts when it is 30 days from expiry, again at 14 and at 7 (escalated, even if someone acknowledged it), and as **critical** once expired, whatever the rule's severity. Each step is told once: no reminders before it expires (the steps are the reminders), the usual `repeat` after. Renewed past 30 days, it recovers (after `settle`); renewed with a certificate that is itself short, it moves to that step quietly. `alerts.certificates.warn_days` changes the steps. Without a rule naming `certificate`, nothing is sent (`ductus validate` says so) and the Connections page still shows them.
+- **What to do:** send `certificate` to the people who renew certificates, not the on-call pager; warnings respect quiet hours, an expired one doesn't. `to: [owner]` reaches a destination's owner for a destination with its own URL; resources.yaml entries have no owner, so their certificates go only to the rule's channels.
+
+### A check that can't connect keeps the last dates (level 2)
+- **What:** a certificate is read even when this server doesn't trust it (a private CA, self-signed): the Connections page says "not trusted by this server", and the dates count all the same. When a check can't connect at all, the row shows the error and keeps the dates the last successful check read ("dates from ..."); the countdown and alerts go on from those. A server never reached shows "Not read yet" and can't alert.
+- **What to do:** a certificate stuck on "Not read yet", or with an old "dates from", needs the connection fixed first (the same row's error says why).
+
+### Behind a load balancer, you see the balancer's certificate (level 3)
+- **What:** the check reads whatever certificate answers at the configured name and port: a load balancer or proxy that ends TLS presents its own, not the servers' behind it. If the balancer's backends present different certificates, each check may see another one; the alert follows what it sees (renewed, then not, is one alert held open by `settle`, but a backend left on an old certificate shows again at the next check).
+- **What to do:** renew every backend, and ask the balancer's owner which certificate clients actually get.
+
+### A refused certificate is said once, not logged as an error each time (level 4)
+- **What:** the TLS verifier the engine uses logs every certificate it refuses at ERROR. The engine turns that log off by default (`rustls_platform_verifier=off`): the refusal is already in the check's result and in a failed delivery's error, and scheduled checks of a private-CA server would otherwise log an error every few hours.
+- **What to do:** to see the verifier's own lines, set `RUST_LOG=info,sqlx=warn,rustls_platform_verifier=debug`.
+
 ## People and access
 
 ### Reading payloads is a permission, not part of a role (level 4)

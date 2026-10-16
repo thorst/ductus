@@ -21,6 +21,7 @@
 //!   quiet: { between: "22:00-06:00", severities: [warning] }   # wait until morning
 //!   heartbeat: { url: "${secret:HEARTBEAT_URL}", every: 5m }   # a dead-man's switch
 //!   keep: 1y            # alert history
+//!   certificates: { warn_days: [30, 14, 7] }   # a `certificate` alert's steps (and expired)
 //! owners:               # owners that aren't users (a team's mailing list)
 //!   "Lab Systems": { email: lab-systems@hospital.org }
 //! ```
@@ -72,6 +73,28 @@ pub struct AlertSettings {
     /// How long alert history is kept.
     #[serde(default = "default_keep", deserialize_with = "crate::settings::keep_duration")]
     pub keep: Duration,
+    /// When a certificate the engine connects to alerts (`certificate` in a rule).
+    #[serde(default)]
+    pub certificates: CertificateSettings,
+}
+
+/// `alerts.certificates`: the days before expiry at which a `certificate` alert fires (the first)
+/// and escalates (each later one); an expired certificate is always critical.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateSettings {
+    #[serde(default = "default_warn_days")]
+    pub warn_days: Vec<u32>,
+}
+
+impl Default for CertificateSettings {
+    fn default() -> Self {
+        Self { warn_days: default_warn_days() }
+    }
+}
+
+fn default_warn_days() -> Vec<u32> {
+    vec![30, 14, 7]
 }
 
 fn default_repeat() -> Duration {
@@ -217,8 +240,9 @@ pub struct Rule {
     pub to: Vec<String>,
 }
 
-/// A bad health state an alert is about: a destination's (`error`, `stalled`, `behind`) or an
-/// interface's (`stopped`, `silent`, `missed`). A pause is on purpose, so it never alerts.
+/// A bad health state an alert is about: a destination's (`error`, `stalled`, `behind`), an
+/// interface's (`stopped`, `silent`, `missed`), or a certificate's that is close to expiring or
+/// has expired (`certificate`). A pause is on purpose, so it never alerts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Condition {
@@ -228,16 +252,18 @@ pub enum Condition {
     Stopped,
     Silent,
     Missed,
+    Certificate,
 }
 
 impl Condition {
-    pub const ALL: [Condition; 6] = [
+    pub const ALL: [Condition; 7] = [
         Condition::Error,
         Condition::Stalled,
         Condition::Behind,
         Condition::Stopped,
         Condition::Silent,
         Condition::Missed,
+        Condition::Certificate,
     ];
 
     pub fn label(self) -> &'static str {
@@ -248,6 +274,7 @@ impl Condition {
             Condition::Stopped => "stopped",
             Condition::Silent => "silent",
             Condition::Missed => "missed",
+            Condition::Certificate => "certificate",
         }
     }
 
@@ -274,10 +301,11 @@ impl Condition {
         }
     }
 
-    /// Known as soon as it is true (quarantined messages, a stopped interface), rather than
-    /// after watching for a while: these alert even right after the engine starts.
+    /// Known as soon as it is true (quarantined messages, a stopped interface, a certificate's
+    /// date), rather than after watching for a while: these alert even right after the engine
+    /// starts.
     pub fn is_immediate(self) -> bool {
-        matches!(self, Condition::Error | Condition::Stopped)
+        matches!(self, Condition::Error | Condition::Stopped | Condition::Certificate)
     }
 }
 
@@ -408,6 +436,12 @@ impl AlertSettings {
         if self.keep < Duration::from_secs(30 * 86_400) {
             problems.push("keep must be at least 30d".into());
         }
+        let days = &self.certificates.warn_days;
+        if days.is_empty() || days.iter().any(|d| !(1..=365).contains(d)) || days.windows(2).any(|w| w[0] <= w[1]) {
+            problems.push(
+                "certificates.warn_days must list 1 to 365 days, longest first, each once (e.g. [30, 14, 7])".into(),
+            );
+        }
         if !problems.is_empty() {
             bail!("alerts: {}", problems.join("; "));
         }
@@ -528,6 +562,125 @@ pub fn interface_key(interface: &str) -> String {
 /// The key of a destination's alert.
 pub fn destination_key(interface: &str, destination: &str) -> String {
     format!("dest:{interface}/{destination}")
+}
+
+/// The key of a certificate's alert: the resource it belongs to (`empi`, `alerts.smtp`,
+/// `adt/lab`) and the server's address.
+pub fn certificate_key(resource: &str, host: &str, port: u16) -> String {
+    format!("cert:{resource}:{host}:{port}")
+}
+
+/// Where a certificate is in its countdown, as a `certificate` alert's step: the smallest of
+/// `warn_days` it is within (whole days, UTC dates), `0` once it has expired, `None` while it is
+/// further out than the first.
+pub fn certificate_stage(not_after: DateTime<Utc>, now: DateTime<Utc>, warn_days: &[u32]) -> Option<i32> {
+    if not_after <= now {
+        return Some(0);
+    }
+    let days = days_left(not_after, now);
+    warn_days.iter().rev().find(|d| days <= i64::from(**d)).map(|d| *d as i32)
+}
+
+/// Whole days until `not_after`, counted in UTC dates: a certificate that ends tomorrow at 00:30
+/// UTC has 1 day left all of today. Negative once past.
+pub fn days_left(not_after: DateTime<Utc>, now: DateTime<Utc>) -> i64 {
+    (not_after.date_naive() - now.date_naive()).num_days()
+}
+
+/// What a certificate alert's words are made of.
+#[derive(Debug, Clone)]
+pub struct CertificateFacts<'a> {
+    pub resource: &'a str,
+    pub host: &'a str,
+    pub port: u16,
+    /// The earliest expiry in the chain the server presents.
+    pub not_after: DateTime<Utc>,
+    /// The certificate that expires first, when it isn't the server's own (an intermediate).
+    pub earliest: Option<&'a str>,
+    /// The last check's failure, if it failed (the dates are then from the check before).
+    pub error: Option<&'a str>,
+}
+
+/// "Certificate of empi.example.org:443 (empi) expires in 14 days, on 2026-10-29." and what else
+/// matters; dates in UTC. The first sentence is a notification's title.
+pub fn certificate_summary(f: &CertificateFacts, now: DateTime<Utc>) -> String {
+    let date = f.not_after.format("%Y-%m-%d");
+    let days = days_left(f.not_after, now);
+    let plural = |n: i64| if n == 1 { "day" } else { "days" };
+    let what = format!("Certificate of {}:{} ({})", f.host, f.port, f.resource);
+    let mut text = if f.not_after <= now {
+        match -days {
+            0 => format!("{what} expired today ({} UTC).", f.not_after.format("%Y-%m-%d %H:%M")),
+            n => format!("{what} expired on {date} ({n} {} ago).", plural(n)),
+        }
+    } else {
+        match days {
+            0 => format!("{what} expires today ({} UTC).", f.not_after.format("%Y-%m-%d %H:%M")),
+            n => format!("{what} expires in {n} {}, on {date}.", plural(n)),
+        }
+    };
+    if let Some(subject) = f.earliest {
+        text.push_str(&format!(
+            " The earliest expiry in its chain is {subject}'s (an intermediate), not the server's own certificate."
+        ));
+    }
+    if let Some(error) = f.error {
+        let error: String = error.chars().take(200).collect();
+        text.push_str(&format!(" The last check failed ({error}): these dates are from the check before."));
+    }
+    text
+}
+
+/// What is true now for a certificate: its step and severity (the rule's, critical once expired),
+/// fine (renewed, or further out than the first step), or not known yet (never checked).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CertificateNow {
+    Fine,
+    At { stage: i32, severity: Severity },
+    Hold,
+}
+
+impl CertificateNow {
+    pub fn of(stage: Option<i32>, rule: Severity) -> Self {
+        match stage {
+            None => CertificateNow::Fine,
+            Some(0) => CertificateNow::At { stage: 0, severity: Severity::Critical },
+            Some(stage) => CertificateNow::At { stage, severity: rule },
+        }
+    }
+}
+
+/// The next step for a certificate's alert. It fires at the first step and escalates at each
+/// closer one (whatever the severity: 14 days is news after 30); each step is told once. It
+/// doesn't remind before it has expired (the steps are the reminders: `repeat` would mail every
+/// few hours for a month); an expired one reminds like any alert. A renewal that still lands
+/// within a step moves it quietly; past the first step it recovers after `settle`.
+pub fn certificate_step(
+    stored: &Stored,
+    stored_stage: Option<i32>,
+    now: CertificateNow,
+    at: DateTime<Utc>,
+    repeat: Duration,
+    settle: Duration,
+) -> Step {
+    match now {
+        CertificateNow::Hold => Step::Nothing,
+        CertificateNow::Fine => step(stored, Now::Fine, at, repeat, settle),
+        CertificateNow::At { stage, severity } => {
+            let Some(old) = stored.condition.and(stored_stage) else { return Step::Fire };
+            if stage < old {
+                Step::Escalate
+            } else if stored.ok_since.is_some() {
+                Step::Reopen
+            } else if stage > old {
+                Step::Change
+            } else if stage == 0 {
+                step(stored, Now::Bad(Condition::Certificate, severity), at, repeat, settle)
+            } else {
+                Step::Nothing
+            }
+        }
+    }
 }
 
 /// An alert as stored.
@@ -657,6 +810,15 @@ impl Notice<'_> {
         let state = self.condition.map_or("", Condition::label);
         let severity = self.severity.map_or("", |s| s.label()).to_uppercase();
         let env = format!("[Ductus {}]", self.environment);
+        if self.condition == Some(Condition::Certificate) {
+            // The summary's first sentence says it all: "Certificate of x:443 (empi) expires in 14 days (…)".
+            let what = self.summary.split(". ").next().unwrap_or(self.summary).trim_end_matches('.');
+            return match self.kind {
+                "recovered" => format!("{env} RECOVERED {what}"),
+                "reminded" => format!("{env} {severity} still: {what}"),
+                _ => format!("{env} {severity} {what}"),
+            };
+        }
         match self.kind {
             "recovered" => format!("{env} RECOVERED {}: no longer {state} (after {})", self.subject(), self.lasted()),
             "reminded" => format!("{env} {severity} still {state}: {} (for {})", self.subject(), self.lasted()),
@@ -673,6 +835,19 @@ impl Notice<'_> {
                 "This is a test from Ductus ({} environment), sent at {}. If you can read it, this channel works.\n",
                 self.environment,
                 local(self.at)
+            );
+        }
+        if self.condition == Some(Condition::Certificate) {
+            let todo = if self.kind == "recovered" {
+                "It was renewed: nothing more to do."
+            } else if self.summary.contains(" expired") {
+                "Connections that check it fail until the server's owner renews it."
+            } else {
+                "Ask the server's owner to renew it before then; the engine's connections to it fail once it expires."
+            };
+            return format!(
+                "{}\n\n{todo}\n\nAlert {} ({}), {} environment. The Connections page of the Ductus web UI lists every certificate; acknowledge or silence this alert on its Alerts page.\n",
+                self.summary, self.id, self.key, self.environment
             );
         }
         let since = self.since.map(|t| format!(" since {}", local(t))).unwrap_or_default();
@@ -746,6 +921,7 @@ channels:
 rules:
   - { when: [error, stalled, stopped], severity: critical, to: [oncall, chat, owner] }
   - { when: [behind, silent, missed], severity: warning, to: [chat, owner] }
+  - { when: [certificate], severity: warning, to: [oncall] }
 ";
 
     #[test]
@@ -768,8 +944,9 @@ rules:
         assert!(s.repeat.is_zero() && s.settle.is_zero());
         assert_eq!(
             s.warnings(),
-            ["alerts: no rule names stalled, behind, stopped, silent, missed: those states won't alert"]
+            ["alerts: no rule names stalled, behind, stopped, silent, missed, certificate: those states won't alert"]
         );
+        assert_eq!(s.certificates.warn_days, [30, 14, 7]);
     }
 
     #[test]
@@ -787,6 +964,9 @@ rules:
             ("repeat: 10s", "repeat must be at least 1m"),
             ("heartbeat: { url: 'http://x.org', every: 5s }", "at least 30s"),
             ("smtp: { host: h, from: me }", "isn't an email address"),
+            ("certificates: { warn_days: [7, 14] }", "longest first"),
+            ("certificates: { warn_days: [] }", "certificates.warn_days"),
+            ("certificates: { warn_days: [400] }", "1 to 365 days"),
         ] {
             let s: AlertSettings = serde_yaml_ng::from_str(yaml).unwrap();
             let err = s.check().unwrap_err().to_string();
@@ -970,5 +1150,152 @@ rules:
         let teams = n.webhook_body(WebhookFormat::Teams);
         assert_eq!(teams["attachments"][0]["content"]["type"], "AdaptiveCard");
         assert_eq!(teams["attachments"][0]["content"]["body"][0]["text"], n.title());
+    }
+
+    const WARN: [u32; 3] = [30, 14, 7];
+
+    /// `days` whole days from `now`, at 09:00 UTC that day.
+    fn ends_in(days: i64, now: DateTime<Utc>) -> DateTime<Utc> {
+        let day = (now + chrono::Duration::days(days)).date_naive();
+        day.and_hms_opt(9, 0, 0).unwrap().and_utc()
+    }
+
+    #[test]
+    fn a_certificate_s_stage_is_the_closest_step_it_is_within() {
+        let now = t(0); // 12:00 UTC
+        let stage = |days: i64| certificate_stage(ends_in(days, now), now, &WARN);
+        assert_eq!(
+            [31, 30, 15, 14, 8, 7, 1].map(stage),
+            [None, Some(30), Some(30), Some(14), Some(14), Some(7), Some(7)]
+        );
+        // Later today (whole days in UTC dates: 0 left, not expired yet), and past.
+        let tonight = now + chrono::Duration::hours(6);
+        assert_eq!(days_left(tonight, now), 0);
+        assert_eq!(certificate_stage(tonight, now, &WARN), Some(7));
+        assert_eq!(certificate_stage(now - chrono::Duration::seconds(1), now, &WARN), Some(0));
+        assert_eq!(certificate_stage(now, now, &WARN), Some(0), "expired at its last second");
+        assert_eq!(certificate_stage(ends_in(10, now), now, &[60]), Some(60), "one step of its own");
+    }
+
+    /// Apply a certificate step the way the engine stores it.
+    fn apply_cert(s: &mut (Stored, Option<i32>), now: CertificateNow, at: DateTime<Utc>) -> Step {
+        let step = certificate_step(&s.0, s.1, now, at, REPEAT, SETTLE);
+        let stored = &mut s.0;
+        match (step, now) {
+            (Step::Fire, CertificateNow::At { stage, severity }) => {
+                *s = (
+                    Stored {
+                        condition: Some(Condition::Certificate),
+                        severity: Some(severity),
+                        since: Some(at),
+                        last_notified_at: Some(at),
+                        ..Default::default()
+                    },
+                    Some(stage),
+                )
+            }
+            (Step::Escalate, CertificateNow::At { stage, severity }) => {
+                (stored.severity, stored.ok_since, stored.acknowledged, stored.last_notified_at) =
+                    (Some(severity), None, false, Some(at));
+                s.1 = Some(stage);
+            }
+            (Step::Change | Step::Reopen, CertificateNow::At { stage, severity }) => {
+                (stored.severity, stored.ok_since) = (Some(severity), None);
+                s.1 = Some(stage);
+            }
+            (Step::Recovering, _) => stored.ok_since = Some(at),
+            (Step::Recover, _) => *s = (Stored::default(), None),
+            (Step::Remind, _) => stored.last_notified_at = Some(at),
+            _ => {}
+        }
+        step
+    }
+
+    #[test]
+    fn a_certificate_alert_steps_31_30_14_7_expired_renewed() {
+        let mut s = (Stored::default(), None);
+        let at = |stage: Option<i32>| CertificateNow::of(stage, Severity::Warning);
+        assert_eq!(apply_cert(&mut s, at(None), t(0)), Step::Nothing, "31 days: nothing yet");
+        assert_eq!(apply_cert(&mut s, at(Some(30)), t(1)), Step::Fire);
+        assert_eq!(apply_cert(&mut s, at(Some(30)), t(2)), Step::Nothing, "the same step: told once");
+        assert_eq!(apply_cert(&mut s, at(Some(30)), t(600)), Step::Nothing, "no reminders before it expires");
+        assert_eq!(apply_cert(&mut s, at(Some(14)), t(601)), Step::Escalate, "14 days: news, the same severity");
+        assert_eq!(apply_cert(&mut s, at(Some(14)), t(602)), Step::Nothing);
+        s.0.acknowledged = true;
+        assert_eq!(apply_cert(&mut s, at(Some(7)), t(603)), Step::Escalate, "7 days: news even when acknowledged");
+        assert!(!s.0.acknowledged, "a step ends the acknowledgement");
+        assert_eq!(apply_cert(&mut s, at(Some(0)), t(604)), Step::Escalate, "expired");
+        assert_eq!(s.0.severity, Some(Severity::Critical), "expired is critical whatever the rule says");
+        assert_eq!(apply_cert(&mut s, at(Some(0)), t(605)), Step::Nothing);
+        assert_eq!(apply_cert(&mut s, at(Some(0)), t(604 + 240)), Step::Remind, "an expired one reminds");
+        assert_eq!(apply_cert(&mut s, at(None), t(900)), Step::Recovering, "renewed");
+        assert_eq!(apply_cert(&mut s, at(None), t(902)), Step::Recover);
+        assert_eq!(s, (Stored::default(), None));
+        assert_eq!(apply_cert(&mut s, CertificateNow::Hold, t(903)), Step::Nothing, "never checked");
+    }
+
+    #[test]
+    fn a_renewal_still_within_a_step_moves_it_quietly() {
+        let mut s = (Stored::default(), None);
+        let at = |stage: Option<i32>| CertificateNow::of(stage, Severity::Warning);
+        apply_cert(&mut s, at(Some(30)), t(0));
+        apply_cert(&mut s, at(Some(7)), t(1));
+        assert_eq!(apply_cert(&mut s, at(Some(30)), t(2)), Step::Change, "a short renewal: nobody is told");
+        assert_eq!(s.1, Some(30));
+        assert_eq!(apply_cert(&mut s, at(Some(14)), t(3)), Step::Escalate, "and its own steps follow");
+        // Fine for a moment (the check reached another server behind a balancer), then back.
+        assert_eq!(apply_cert(&mut s, at(None), t(4)), Step::Recovering);
+        assert_eq!(apply_cert(&mut s, at(Some(14)), t(5)), Step::Reopen);
+        assert_eq!(apply_cert(&mut s, at(None), t(6)), Step::Recovering);
+        assert_eq!(apply_cert(&mut s, at(Some(7)), t(7)), Step::Escalate, "closer while recovering: news");
+    }
+
+    #[test]
+    fn certificate_notifications_say_how_long_is_left() {
+        let now = t(0);
+        let facts = CertificateFacts {
+            resource: "empi",
+            host: "empi.example.org",
+            port: 443,
+            not_after: ends_in(14, now),
+            earliest: None,
+            error: None,
+        };
+        let summary = certificate_summary(&facts, now);
+        assert_eq!(summary, "Certificate of empi.example.org:443 (empi) expires in 14 days, on 2026-10-28.");
+        let one = certificate_summary(&CertificateFacts { not_after: ends_in(1, now), ..facts.clone() }, now);
+        assert!(one.contains("expires in 1 day, on"), "{one}");
+        let expired = certificate_summary(&CertificateFacts { not_after: ends_in(-3, now), ..facts.clone() }, now);
+        assert_eq!(expired, "Certificate of empi.example.org:443 (empi) expired on 2026-10-11 (3 days ago).");
+        let chain = CertificateFacts { earliest: Some("Example Intermediate"), error: Some("refused"), ..facts };
+        let chain = certificate_summary(&chain, now);
+        assert!(chain.contains("Example Intermediate's (an intermediate)"), "{chain}");
+        assert!(chain.contains("The last check failed (refused)"), "{chain}");
+
+        let n = Notice {
+            kind: "escalated",
+            id: 9,
+            key: "cert:empi:empi.example.org:443",
+            interface: "empi",
+            destination: Some("empi.example.org:443"),
+            condition: Some(Condition::Certificate),
+            severity: Some(Severity::Warning),
+            since: Some(now),
+            at: now,
+            summary: &chain,
+            environment: "prod",
+        };
+        assert_eq!(
+            n.title(),
+            "[Ductus prod] WARNING Certificate of empi.example.org:443 (empi) expires in 14 days, on 2026-10-28"
+        );
+        assert!(n.body().starts_with(&chain), "{}", n.body());
+        assert!(n.body().contains("renew it before then"), "{}", n.body());
+        let gone = Notice { summary: &expired, severity: Some(Severity::Critical), ..n.clone() };
+        assert!(gone.title().starts_with("[Ductus prod] CRITICAL Certificate of"), "{}", gone.title());
+        assert!(gone.body().contains("fail until the server's owner renews it"), "{}", gone.body());
+        let renewed = Notice { kind: "recovered", summary: &summary, ..n };
+        assert!(renewed.title().starts_with("[Ductus prod] RECOVERED Certificate of"), "{}", renewed.title());
+        assert!(renewed.body().contains("It was renewed"));
     }
 }

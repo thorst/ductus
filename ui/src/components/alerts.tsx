@@ -23,9 +23,28 @@ export function useOpenAlerts() {
   };
 }
 
-/** `adt-relay → lab`, or `adt-relay` (its own alert, or its only destination). */
-export function alertName(a: { interface: string; destination?: string | null }) {
+/** A certificate's alert (`cert:<resource>:<host>:<port>`): `interface` is its resource, `destination` the server. */
+export function isCertificate(a: { key: string }) {
+  return a.key.startsWith("cert:");
+}
+
+/** `adt-relay → lab`, `adt-relay` (its own alert, or its only destination), or `certificate of host:443 (empi)`. */
+export function alertName(a: { key: string; interface: string; destination?: string | null }) {
+  if (isCertificate(a)) return `certificate of ${a.destination ?? "?"} (${a.interface})`;
   return a.destination && a.destination !== "default" ? `${a.interface} → ${a.destination}` : a.interface;
+}
+
+/** The alert's name, linking to where it's about: the interface, or the Connections page for a certificate. */
+export function AlertLink({ alert, className }: { alert: Alert; className?: string }) {
+  return isCertificate(alert) ? (
+    <Link to="/connections" className={className}>
+      {alertName(alert)}
+    </Link>
+  ) : (
+    <Link to="/interfaces/$name" params={{ name: alert.interface }} className={className}>
+      {alertName(alert)}
+    </Link>
+  );
 }
 
 const SEVERITY = {
@@ -154,13 +173,7 @@ export function AlertItem({ alert, link = true }: { alert: Alert; link?: boolean
       <div className="min-w-0 space-y-1">
         <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
           <SeverityBadge severity={alert.state === "ok" ? null : alert.severity} />
-          {link ? (
-            <Link to="/interfaces/$name" params={{ name: alert.interface }} className="font-medium">
-              {name}
-            </Link>
-          ) : (
-            <span className="font-medium">{name}</span>
-          )}
+          {link ? <AlertLink alert={alert} className="font-medium" /> : <span className="font-medium">{name}</span>}
           <span className="text-sm">
             {alert.state === "ok" ? "fine" : alert.state}
             {alert.since && <span className="text-muted"> since {timestamp(alert.since)}</span>}

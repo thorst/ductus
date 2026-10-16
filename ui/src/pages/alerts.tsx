@@ -1,11 +1,10 @@
 import { useQuery } from "@tanstack/react-query";
-import { Link } from "@tanstack/react-router";
 import { CircleCheck, Send } from "lucide-react";
 import { useState } from "react";
 import { testChannel, useCanOperate, useRefresh } from "@/api/actions";
 import { ApiError, type Schemas } from "@/api/client";
 import { alertChannels, alerts } from "@/api/queries";
-import { AlertItem, alertName, SeverityBadge } from "@/components/alerts";
+import { AlertItem, AlertLink, SeverityBadge } from "@/components/alerts";
 import { Loaded, PageHeader } from "@/components/page";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
@@ -146,15 +145,7 @@ function History({ events, all }: { events: Schemas["AlertEvent"][]; all: Schema
                 <tr key={e.id} className="hover:bg-hover">
                   <Td className="tabular-nums">{timestamp(e.at)}</Td>
                   <Td>{KINDS[e.kind] ?? e.kind}</Td>
-                  <Td className="break-words">
-                    {a ? (
-                      <Link to="/interfaces/$name" params={{ name: a.interface }}>
-                        {alertName(a)}
-                      </Link>
-                    ) : (
-                      e.key
-                    )}
-                  </Td>
+                  <Td className="break-words">{a ? <AlertLink alert={a} /> : e.key}</Td>
                   <Td>
                     <span className="flex flex-wrap items-center gap-2">
                       {e.severity && <SeverityBadge severity={e.severity} />}

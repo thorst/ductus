@@ -16,7 +16,9 @@
 # checks, and drains and resumes the engine; as an admin, it creates a token (its secret works),
 # then revokes it (it doesn't). Alerts: the open ones (orders' quarantine, the lab's stall) are
 # acknowledged and silenced, a channel is tested (one works, one can't be reached), and a viewer
-# only looks. Screenshots: ui/test-results/.
+# only looks. Certificates (`cert-server`, an example): five TLS servers whose certificates end in
+# 40, 20, 10 and 3 days and two days ago, and one that can't be reached, in the Connections table
+# and the Overview card. Screenshots: ui/test-results/.
 #
 # Needs Node and the UI's packages (cd ui && npm ci), and Playwright's Chromium
 # (npx playwright install --with-deps chromium).
@@ -25,6 +27,10 @@ source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
 UI=$(realpath "$(dirname "$0")/../ui")
+CERTS=${CERT_SERVER:-$(dirname "$BIN")/examples/cert-server}
+if [ ! -x "$CERTS" ]; then
+  (cd "$(dirname "${BASH_SOURCE[0]}")/.." && cargo build --release -q -p ductus-runtime --example cert-server)
+fi
 DB=$DUCTUS_DATABASE_URL
 P=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB
@@ -43,9 +49,16 @@ fields:
   downstream: { type: list, label: Downstream systems }
   runbook: { type: url, applies_to: [interface, destination], label: Runbook }
 EOF
+# Certificates: five servers (cert-server below) and one nobody listens on.
 cat >"$P/resources.yaml" <<'EOF'
 apis:
   empi: { url: "http://127.0.0.1:7794/api/v1", application: EMPI, custom: { baa_signed: "yes" } }
+  pharmacy: { url: "https://localhost:7461/", custom: { baa_signed: n/a } }
+  radiology: { url: "https://localhost:7462/", custom: { baa_signed: n/a } }
+  payer: { url: "https://localhost:7463/", custom: { baa_signed: n/a } }
+  hie: { url: "https://localhost:7464/", custom: { baa_signed: n/a } }
+  legacy-portal: { url: "https://localhost:7465/", custom: { baa_signed: n/a } }
+  fax-gateway: { url: "https://localhost:7469/", custom: { baa_signed: n/a } }
 EOF
 
 mkdir -p "$P/interfaces/adt" "$P/interfaces/orders" "$P/interfaces/billing"
@@ -118,9 +131,13 @@ validation=$("$BIN" validate || true)
 }
 "$BIN" sink --http 8098 >"$P/hook.log" 2>&1 &
 HOOK=$!
+"$CERTS" 7461=40 7462=20 7463=10 7464=3 7465=-2 >"$P/certs.log" 2>&1 &
+TLS=$!
+psql -q "$DB" -c "DELETE FROM certificate_status WHERE resource IN ('pharmacy', 'radiology', 'payer', 'hie', 'legacy-portal', 'fax-gateway')"
 "$BIN" run >"$P/run.log" 2>&1 &
 ENGINE=$!
-trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true' EXIT
+# cert-server has no SIGINT handler (a background job of a script ignores SIGINT): TERM.
+trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true' EXIT
 # Alerts of earlier runs of this demo: start clean.
 psql -q "$DB" -c "DELETE FROM alert_events WHERE key IN ('dest:adt/lab', 'dest:adt/archive', 'dest:orders/default', 'dest:billing/default', 'iface:adt', 'iface:orders', 'iface:billing')" \
   -c "UPDATE alert_state SET state = 'ok', severity = NULL, since = NULL, ok_since = NULL, ack_by = NULL, ack_at = NULL, silenced_until = NULL, rev = rev + 1 WHERE interface IN ('adt', 'orders', 'billing')"
@@ -150,6 +167,10 @@ for _ in $(seq 1 100); do
   grep '"last_error":{' <<<"$status" >/dev/null && grep '"quarantined":4' <<<"$status" >/dev/null && break
   sleep 0.2
 done
+
+echo "== certificates (the engine's own check would run a minute or two after start: asked for now)"
+checks=$(curl -s -X POST -H "Authorization: Bearer $DUCTUS_API_TOKEN" -H 'Content-Type: application/json'   -d '{"mode": "certificates", "timeout_ms": 2000}' "$DUCTUS_API_URL/api/v1/doctor")
+python3 -c "import json, sys; d = json.loads(sys.argv[1]); print('   %d checked, %d certificates read' % (len(d['checks']), sum(1 for c in d['checks'] if c['certificate']['fingerprint'])))" "$checks"
 
 echo "== the UI is in the binary"
 head=$(curl -s -D - -o /dev/null -H 'Accept-Encoding: gzip' "$DUCTUS_API_URL/interfaces/adt")

@@ -4,6 +4,7 @@ pub mod activity;
 pub mod alerts;
 pub mod api;
 pub mod audit;
+pub mod certificates;
 pub mod control;
 mod destination;
 pub mod doctor;
@@ -367,12 +368,14 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         audit: settings.audit,
         instance: instance.clone(),
         alerts,
+        doctor: settings.doctor,
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse
     // to start (the engine may be all that is left to move messages), but it is an error.
     audit::start(&engine, stopped_rx, retention_days).await;
     alerts::start(&engine).await;
+    certificates::start(&engine);
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
         api_server = Some(api::serve(engine.clone(), host, *port).await?);

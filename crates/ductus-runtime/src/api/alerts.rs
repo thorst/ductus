@@ -30,12 +30,14 @@ const MAX_SILENCE: std::time::Duration = std::time::Duration::from_secs(30 * 86_
 #[derive(Serialize, ToSchema)]
 pub struct AlertInfo {
     pub id: i32,
-    /// `iface:<interface>` or `dest:<interface>/<destination>`.
+    /// `iface:<interface>`, `dest:<interface>/<destination>` or `cert:<resource>:<host>:<port>`.
     pub key: String,
+    /// The interface; for a certificate, its resource.
     pub interface: String,
+    /// The destination; for a certificate, `host:port`.
     pub destination: Option<String>,
     /// `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`,
-    /// `missed` (an interface).
+    /// `missed` (an interface), `certificate` (expiring or expired).
     pub state: String,
     /// `warning` or `critical` while open.
     pub severity: Option<String>,
@@ -134,9 +136,12 @@ pub struct AlertsOverview {
     pub recent: Vec<AlertEvent>,
 }
 
-/// An alert of this engine's interfaces (the database may hold others': another engine's, or
-/// interfaces no longer configured).
+/// An alert of this engine's interfaces and certificates (the database may hold others': another
+/// engine's, or ones no longer configured).
 pub(super) fn ours(engine: &Shared, row: &AlertRow) -> bool {
+    if row.key.starts_with("cert:") {
+        return engine.certificates.iter().any(|t| t.key == row.key);
+    }
     engine.interface(&row.interface).is_some_and(|i| match &row.destination {
         Some(d) => i.destinations.iter().any(|(name, _)| name == d),
         None => true,

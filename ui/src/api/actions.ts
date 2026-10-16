@@ -49,6 +49,8 @@ export function useRefresh() {
         "me",
         "audit",
         "alerts",
+        "certificates",
+        "doctor",
       ].map((key) => queryClient.invalidateQueries({ queryKey: [key] })),
     );
 }
@@ -173,9 +175,12 @@ export async function endDrain() {
   return unwrap(await api.DELETE("/drain"));
 }
 
-/** Check every connection (or only what `interfaces` use) from the engine's server. */
-export async function runDoctor(interfaces: string[], timeoutMs: number) {
-  return unwrap(await api.POST("/doctor", { body: { interfaces, timeout_ms: timeoutMs } }));
+/**
+ * Check every connection (or only what `interfaces` use) from the engine's server: everything, logins
+ * included, or only the certificates (DNS, TCP, the TLS handshake). The engine keeps the run.
+ */
+export async function runDoctor(interfaces: string[], timeoutMs: number, mode: "full" | "certificates" = "full") {
+  return unwrap(await api.POST("/doctor", { body: { interfaces, timeout_ms: timeoutMs, mode } }));
 }
 
 export async function createToken(name: string, role: string, permissions: string[]) {

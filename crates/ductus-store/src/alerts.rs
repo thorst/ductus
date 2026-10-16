@@ -11,7 +11,7 @@ use chrono::{DateTime, Utc};
 use std::time::Duration;
 
 const ALERT_COLUMNS: &str = "id, key, interface, destination, state, severity, since, ok_since, last_notified_at,
-    notify_count, summary, ack_by, ack_at, silenced_until, silenced_by, silence_reason, rev, updated_at";
+    notify_count, summary, ack_by, ack_at, silenced_until, silenced_by, silence_reason, rev, updated_at, stage";
 
 /// An alert as stored (`state` is `ok` when there's nothing wrong).
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
@@ -34,6 +34,8 @@ pub struct AlertRow {
     pub silence_reason: Option<String>,
     pub rev: i64,
     pub updated_at: DateTime<Utc>,
+    /// A certificate alert's step (the warn day it was last told about; 0: expired).
+    pub stage: Option<i32>,
 }
 
 impl AlertRow {
@@ -74,6 +76,8 @@ pub struct AlertChange<'a> {
     pub ok_since: Option<DateTime<Utc>>,
     pub last_notified_at: Option<DateTime<Utc>>,
     pub summary: Option<&'a str>,
+    /// A certificate alert's step (`None` for the others).
+    pub stage: Option<i32>,
     /// It fired or recovered: start counting notifications again, end the acknowledgement.
     pub fresh: bool,
     /// It escalated: the acknowledgement ends.
@@ -185,7 +189,7 @@ impl Store {
         let mut tx = self.pool.begin().await.context("changing an alert")?;
         let changed: Option<String> = sqlx::query_scalar(
             "UPDATE alert_state SET state = $3, severity = $4, since = $5, ok_since = $6, last_notified_at = $7,
-                    summary = COALESCE($8, summary),
+                    summary = COALESCE($8, summary), stage = $11,
                     notify_count = CASE WHEN $9 THEN 0 ELSE notify_count END,
                     ack_by = CASE WHEN $9 OR $10 THEN NULL ELSE ack_by END,
                     ack_at = CASE WHEN $9 OR $10 THEN NULL ELSE ack_at END,
@@ -202,6 +206,7 @@ impl Store {
         .bind(c.summary)
         .bind(c.fresh)
         .bind(c.unacknowledge)
+        .bind(c.stage)
         .fetch_optional(&mut *tx)
         .await
         .context("changing an alert")?;

@@ -124,10 +124,10 @@ test("running the connection checks and saving the report", async ({ page }) => 
   await page.getByRole("button", { name: "Run the checks" }).click();
   const report = page.getByRole("region", { name: "Report" });
   await expect(report.getByRole("status")).toContainText(/\d+ ok, \d+ warnings?, [1-9]\d* failed/, { timeout: 20_000 });
-  // Nobody listens for adt's lab: its check fails first, with what to do.
-  const first = report.getByRole("table", { name: "Checks" }).locator("tbody tr").first();
-  await expect(first).toContainText("Failed");
-  await expect(first).toContainText("127.0.0.1:6799");
+  // Nobody listens for adt's lab: its check fails, with what to do (failures are listed first).
+  const lab = report.getByRole("table", { name: "Checks" }).locator("tbody tr").filter({ hasText: "127.0.0.1:6799" });
+  await expect(lab).toContainText("Failed");
+  await expect(report.getByRole("table", { name: "Checks" }).locator("tbody tr").first()).toContainText("Failed");
   await page.screenshot({ path: "test-results/connections.png", fullPage: true });
   const [download] = await Promise.all([
     page.waitForEvent("download"),

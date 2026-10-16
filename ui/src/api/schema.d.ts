@@ -134,6 +134,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/certificates": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Every certificate the engine connects to, as its last check saw it, and when the engine
+         *     checks next by itself. Read even when this server doesn't trust them.
+         */
+        get: operations["list_certificates"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/docs": {
         parameters: {
             query?: never;
@@ -165,11 +185,46 @@ export interface paths {
         put?: never;
         /**
          * Check every connection the engine needs, from its server: DNS, TCP (with the address a
-         *     firewall request needs), TLS (certificate, expiry), then each system's own login. Never
-         *     sends anything to a destination. Listening ports aren't checked (the engine holds them).
-         *     Operator.
+         *     firewall request needs), TLS (certificate, expiry), then each system's own login; also the
+         *     alerts' mail server, webhooks and heartbeat. Never sends anything to a destination. Listening
+         *     ports aren't checked (the engine holds them). The run is kept (`/doctor/runs`), and the
+         *     certificates it saw (`/certificates`). Operator.
          */
         post: operations["doctor_report"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/doctor/runs": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The connection checks kept (the last 30), newest first. Operator. */
+        get: operations["list_doctor_runs"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/doctor/runs/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One kept connection check's report, as `POST /doctor` returned it. Operator. */
+        get: operations["get_doctor_run"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -948,11 +1003,13 @@ export interface components {
             /** Format: date-time */
             acknowledged_at?: string | null;
             acknowledged_by?: string | null;
+            /** @description The destination; for a certificate, `host:port`. */
             destination?: string | null;
             /** Format: int32 */
             id: number;
+            /** @description The interface; for a certificate, its resource. */
             interface: string;
-            /** @description `iface:<interface>` or `dest:<interface>/<destination>`. */
+            /** @description `iface:<interface>`, `dest:<interface>/<destination>` or `cert:<resource>:<host>:<port>`. */
             key: string;
             /**
              * Format: date-time
@@ -987,7 +1044,7 @@ export interface components {
             since?: string | null;
             /**
              * @description `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`,
-             *     `missed` (an interface).
+             *     `missed` (an interface), `certificate` (expiring or expired).
              */
             state: string;
             /** @description The health view's words, as of the last check. */
@@ -1083,6 +1140,86 @@ export interface components {
              */
             skipped: number[];
         };
+        CertificateInfo: {
+            /**
+             * Format: int32
+             * @description Its alert (`/alerts/{id}`), when alerts are set up.
+             */
+            alert?: number | null;
+            /** @description Whose that is, when it isn't the server certificate's (an intermediate). */
+            chain_earliest?: string | null;
+            /**
+             * Format: date-time
+             * @description The earliest expiry in its chain (what counts).
+             */
+            chain_not_after?: string | null;
+            /**
+             * Format: date-time
+             * @description The last check.
+             */
+            checked_at?: string | null;
+            /**
+             * Format: int64
+             * @description Whole days left (UTC dates), counted to the earliest expiry in the chain; negative once
+             *     expired.
+             */
+            days_left?: number | null;
+            /** @description Why the last check failed, if it did. */
+            error?: string | null;
+            /** @description SHA-256 of the server certificate, hex. */
+            fingerprint?: string | null;
+            host: string;
+            issuer?: string | null;
+            /**
+             * Format: date-time
+             * @description The server certificate's own expiry.
+             */
+            not_after?: string | null;
+            /** Format: date-time */
+            not_before?: string | null;
+            /** Format: int32 */
+            port: number;
+            /**
+             * Format: date-time
+             * @description When the certificate shown was read (older than `checked_at` when the last check couldn't).
+             */
+            read_at?: string | null;
+            /**
+             * @description `empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>`, `alerts.heartbeat`, or
+             *     `<interface>/<destination>`.
+             */
+            resource: string;
+            /**
+             * Format: int32
+             * @description The step of the countdown it is within (a warn day; 0 once expired).
+             */
+            stage?: number | null;
+            /**
+             * @description `ok`, `expiring` (within the first of `alerts.certificates.warn_days`), `expired`, or
+             *     `unknown` (never read: not checked yet, or never reachable).
+             */
+            state: string;
+            subject?: string | null;
+            /** @description This server trusts it. */
+            trusted?: boolean | null;
+        };
+        CertificatesOverview: {
+            /** @description A rule names `certificate` (alerts are sent about them). */
+            alerting: boolean;
+            /** @description Earliest expiry first; never read ones last. */
+            certificates: components["schemas"]["CertificateInfo"][];
+            last_run?: components["schemas"]["DoctorRun"] | null;
+            last_scheduled?: components["schemas"]["DoctorRun"] | null;
+            /** @description What those checks cover: `certificates` or `full`. */
+            mode: string;
+            /**
+             * Format: int64
+             * @description How often the engine checks by itself, in seconds; none when `doctor.schedule: off`.
+             */
+            schedule_seconds?: number | null;
+            /** @description The steps of the countdown (`alerts.certificates.warn_days`). */
+            warn_days: number[];
+        };
         Change: {
             /** Format: int32 */
             from: number;
@@ -1143,6 +1280,7 @@ export interface components {
         Check: {
             /** @description What a failure or warning most likely means, and what to do about it. */
             advice: string[];
+            certificate?: components["schemas"]["SeenCertificate"] | null;
             /** @description `epic.local:5000 MLLP`, a folder, `0.0.0.0:6661 MLLP`. */
             endpoint: string;
             /** @description The worst step. */
@@ -1329,11 +1467,34 @@ export interface components {
             /** @description Only what these interfaces use (the engine's database is always checked). */
             interfaces?: string[];
             /**
+             * @description `full` (the default: logins included) or `certificates` (DNS, TCP and the TLS handshake of
+             *     what has a certificate; nothing logs in).
+             */
+            mode?: components["schemas"]["DoctorRunMode"];
+            /**
              * Format: int64
              * @description Longest wait per step, in milliseconds (default 5000, at most 60000).
              */
             timeout_ms?: number | null;
         };
+        DoctorRun: {
+            /** Format: date-time */
+            at: string;
+            /** Format: int32 */
+            checks: number;
+            /** Format: int32 */
+            failed: number;
+            /** Format: int64 */
+            id: number;
+            /** @description `certificates` or `full`. */
+            mode: string;
+            /** Format: double */
+            seconds: number;
+            /** @description `schedule`, or who asked. */
+            started_by: string;
+        };
+        /** @enum {string} */
+        DoctorRunMode: "full" | "certificates";
         DrainRequest: {
             /** @description Exit the engine once drained (for an upgrade or a server move). */
             stop?: boolean;
@@ -1989,6 +2150,37 @@ export interface components {
              */
             last_drop_at?: string | null;
         };
+        /** @description A server's certificate as a check saw it. */
+        SeenCertificate: {
+            /** @description Whose that is, when it isn't the server certificate's (an intermediate). */
+            chain_earliest?: string | null;
+            /**
+             * Format: date-time
+             * @description The earliest expiry in the chain the server presented.
+             */
+            chain_not_after?: string | null;
+            /** @description Why the check failed: couldn't connect, not trusted, expired. */
+            error?: string | null;
+            /** @description SHA-256 of the server certificate (DER), hex. */
+            fingerprint?: string | null;
+            host: string;
+            issuer?: string | null;
+            /** Format: date-time */
+            not_after?: string | null;
+            /** Format: date-time */
+            not_before?: string | null;
+            /** Format: int32 */
+            port: number;
+            /**
+             * @description What it belongs to: `empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>`,
+             *     `alerts.heartbeat`, `<interface>/<destination>`.
+             */
+            resource: string;
+            /** @description The server certificate's common name (or organisation); none if none was read. */
+            subject?: string | null;
+            /** @description This server trusts it (the system's trusted certificates). */
+            trusted: boolean;
+        };
         Session: {
             /**
              * Format: date-time
@@ -2455,6 +2647,25 @@ export interface operations {
             };
         };
     };
+    list_certificates: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CertificatesOverview"];
+                };
+            };
+        };
+    };
     docs_report: {
         parameters: {
             query?: never;
@@ -2504,6 +2715,71 @@ export interface operations {
                 };
             };
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_doctor_runs: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DoctorRun"][];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_doctor_run: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The run's id */
+                id: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Report"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

@@ -14,6 +14,7 @@
 mod actions;
 mod alerts;
 mod audit;
+mod certificates;
 mod hotspots;
 mod me;
 mod messages;
@@ -94,6 +95,7 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
         .merge(actions::routes())
         .merge(alerts::routes())
         .merge(audit::routes())
+        .merge(certificates::routes())
         .merge(metrics::routes())
         .merge(reports::routes())
         .merge(retention::routes())
@@ -383,6 +385,9 @@ mod tests {
         ("POST", "/drain", "operator"),
         ("DELETE", "/drain", "operator"),
         ("POST", "/doctor", "operator"),
+        ("GET", "/doctor/runs", "operator"),
+        ("GET", "/doctor/runs/{id}", "operator"),
+        ("GET", "/certificates", "signed"),
         ("POST", "/interfaces/{name}/destinations/{destination}/pause", "operator"),
         ("DELETE", "/interfaces/{name}/destinations/{destination}/pause", "operator"),
         ("POST", "/messages/{id}/resend", "operator"),

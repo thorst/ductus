@@ -1,14 +1,15 @@
 import { useQuery } from "@tanstack/react-query";
-import { CircleAlert, CircleCheck, Download, Stethoscope, TriangleAlert } from "lucide-react";
+import { CircleAlert, CircleCheck, Download, RefreshCw, Stethoscope, TriangleAlert } from "lucide-react";
 import { useState, type FormEvent } from "react";
-import { runDoctor, useCanOperate } from "@/api/actions";
+import { runDoctor, useCanOperate, useRefresh } from "@/api/actions";
 import { ApiError, type Schemas } from "@/api/client";
-import { interfaces } from "@/api/queries";
-import { PageHeader } from "@/components/page";
+import { certificates, interfaces, lastDoctorRun } from "@/api/queries";
+import { CertificateDays } from "@/components/certificates";
+import { Loaded, PageHeader } from "@/components/page";
 import { Button } from "@/components/ui/button";
-import { Card } from "@/components/ui/card";
+import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, Td, Th } from "@/components/ui/table";
-import { count } from "@/lib/format";
+import { ago, count, duration, timestamp } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const OUTCOMES = {
@@ -18,13 +19,16 @@ const OUTCOMES = {
 } as const;
 
 /**
- * `ductus doctor` from the browser: every connection the engine needs, checked from its own
- * server (DNS, TCP with the source address a firewall request needs, TLS, then each system's
- * login). Nothing is sent to a destination.
+ * The engine's connections: the certificates it connects to (from its own checks, every few hours),
+ * and `ductus doctor` from the browser: every connection checked from the engine's server (DNS, TCP
+ * with the source address a firewall request needs, TLS, then each system's login). Nothing is sent
+ * to a destination.
  */
 export function DoctorPage() {
   const canOperate = useCanOperate();
+  const refresh = useRefresh();
   const all = useQuery(interfaces);
+  const last = useQuery({ ...lastDoctorRun, enabled: canOperate });
   const [only, setOnly] = useState("");
   const [wait, setWait] = useState(5000);
   const [report, setReport] = useState<Schemas["Report"] | null>(null);
@@ -37,12 +41,16 @@ export function DoctorPage() {
     setError(null);
     try {
       setReport(await runDoctor(only ? [only] : [], wait));
+      await refresh();
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "The engine didn't answer.");
     } finally {
       setBusy(false);
     }
   };
+  // The report shown: the one just run, else the last one the engine kept.
+  const shown = report ?? last.data?.report;
+  const lastRun = report ? null : last.data?.run;
 
   return (
     <>
@@ -51,6 +59,8 @@ export function DoctorPage() {
         connection (with the address a firewall rule needs), TLS, then each system's own login. Nothing is sent to a
         destination.
       </PageHeader>
+      <Certificates />
+      <h2 className="mt-8 mb-3 text-lg font-semibold">Check every connection</h2>
       {!canOperate ? (
         <p className="text-sm text-muted">Running the checks needs an operator token.</p>
       ) : (
@@ -95,8 +105,128 @@ export function DoctorPage() {
           {error}
         </p>
       )}
-      {report && <Report report={report} />}
+      {lastRun && (
+        <p className="mb-2 text-sm text-muted">
+          The last check: {timestamp(lastRun.at)}, {lastRun.mode === "full" ? "everything" : "certificates only"},{" "}
+          {lastRun.started_by === "schedule" ? "by the engine on its schedule" : `asked for by ${lastRun.started_by}`}.
+        </p>
+      )}
+      {shown && <Report report={shown} />}
     </>
+  );
+}
+
+/** Every certificate the engine connects to, soonest expiry first, with the engine's own schedule. */
+function Certificates() {
+  const query = useQuery(certificates);
+  const canOperate = useCanOperate();
+  const refresh = useRefresh();
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ text: string; failed: boolean } | null>(null);
+  const checkNow = async () => {
+    setBusy(true);
+    setNote(null);
+    try {
+      const r = await runDoctor([], 5000, "certificates");
+      const read = r.checks.filter((c) => c.certificate?.fingerprint).length;
+      setNote({ text: `Checked ${count(r.checks.length)}: ${count(read)} certificates read.`, failed: false });
+    } catch (err) {
+      setNote({ text: err instanceof ApiError ? err.message : "The engine didn't answer.", failed: true });
+    } finally {
+      setBusy(false);
+      await refresh();
+    }
+  };
+  return (
+    <Card aria-label="Certificates">
+      <CardHeader>
+        <CardTitle>Certificates</CardTitle>
+        {canOperate && (
+          <Button size="sm" variant="outline" disabled={busy} onClick={() => void checkNow()}>
+            <RefreshCw aria-hidden className={cn("size-4", busy && "animate-spin")} />
+            {busy ? "Checking…" : "Check now"}
+          </Button>
+        )}
+      </CardHeader>
+      <Loaded query={query}>
+        {(data) => (
+          <>
+            <CardBody className="space-y-1 text-sm text-muted">
+              <p>
+                {data.schedule_seconds == null
+                  ? "The engine doesn't check by itself (doctor.schedule: off in ductus.yaml)."
+                  : data.last_scheduled
+                    ? `Last automatic check ${ago(data.last_scheduled.at)}; the engine checks every ${duration(data.schedule_seconds)} (${data.mode === "full" ? "everything" : "certificates only"}).`
+                    : `The engine checks every ${duration(data.schedule_seconds)}; its first check runs a minute or two after it starts.`}{" "}
+                Days are whole days in UTC, to the earliest expiry in each chain.
+              </p>
+              {!data.alerting && (
+                <p>No alert rule names certificate: nothing is sent about them (alerts.rules in ductus.yaml).</p>
+              )}
+              {note && (
+                <p role={note.failed ? "alert" : "status"} className={note.failed ? "text-bad" : undefined}>
+                  {note.text}
+                </p>
+              )}
+            </CardBody>
+            {data.certificates.length === 0 ? (
+              <CardBody className="text-sm text-muted">Nothing the engine connects to uses TLS.</CardBody>
+            ) : (
+              <Table aria-label="Certificates">
+                <thead>
+                  <tr>
+                    <Th>Days left</Th>
+                    <Th>Server</Th>
+                    <Th>Certificate</Th>
+                    <Th>Expires</Th>
+                    <Th>Last check</Th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.certificates.map((c) => (
+                    <tr key={`${c.resource}/${c.host}/${c.port}`}>
+                      <Td>
+                        <CertificateDays certificate={c} />
+                      </Td>
+                      <Td className="break-words">
+                        <div className="font-mono text-xs">
+                          {c.host}:{c.port}
+                        </div>
+                        <div className="text-xs text-muted">{c.resource}</div>
+                      </Td>
+                      <Td className="text-xs break-words">
+                        {c.subject ? (
+                          <>
+                            <div>{c.subject}</div>
+                            <div className="text-muted">
+                              {c.issuer === c.subject ? "self-signed" : `issued by ${c.issuer ?? "?"}`}
+                              {c.trusted === false && ", not trusted by this server"}
+                            </div>
+                            {c.chain_earliest && (
+                              <div>The earliest expiry in its chain is {c.chain_earliest}&apos;s.</div>
+                            )}
+                          </>
+                        ) : (
+                          <span className="text-muted">none read</span>
+                        )}
+                      </Td>
+                      <Td className="text-xs tabular-nums">{c.chain_not_after?.slice(0, 10) ?? "–"}</Td>
+                      <Td className="max-w-xs text-xs break-words">
+                        <div>{ago(c.checked_at)}</div>
+                        {c.error && <div className="text-muted">{c.error}</div>}
+                        {c.read_at && c.checked_at && c.read_at < c.checked_at && (
+                          <div className="text-muted">dates from {timestamp(c.read_at)}</div>
+                        )}
+                      </Td>
+                    </tr>
+                  ))}
+                </tbody>
+              </Table>
+            )}
+          </>
+        )}
+      </Loaded>
+    </Card>
   );
 }
 

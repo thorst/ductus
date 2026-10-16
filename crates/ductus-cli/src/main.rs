@@ -623,7 +623,10 @@ async fn run(cli: Cli) -> Result<()> {
             if matches!(cli.command, Command::Doctor { .. }) {
                 "warn,rustls_platform_verifier=off".into()
             } else {
-                "info,sqlx=warn".into()
+                // A certificate the platform verifier refuses is logged by it at ERROR every time,
+                // and said again where it matters (a delivery's error, a check's result): the
+                // engine checks certificates every few hours, private CAs included.
+                "info,sqlx=warn,rustls_platform_verifier=off".into()
             }
         }))
         .init();

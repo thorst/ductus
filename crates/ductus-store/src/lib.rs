@@ -11,6 +11,7 @@ mod activity;
 mod alerts;
 mod api;
 mod audit;
+mod certificates;
 mod docs;
 mod retention;
 mod users;
@@ -23,6 +24,7 @@ pub use api::{
     TOKEN_PREFIX, Token, clean_permissions,
 };
 pub use audit::{Audit, AuditFilter, AuditRow, By, PreviousRun};
+pub use certificates::{CertificateRow, DOCTOR_RUNS_KEPT, DoctorRunRow};
 pub use docs::DocsRow;
 pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};
 pub use users::{Candidate, Lockout, NewUser, SessionRow, User, UserChange, UserSettings};

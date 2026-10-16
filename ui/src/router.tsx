@@ -12,7 +12,6 @@ import { syncAppearance } from "@/api/appearance";
 import { ApiError } from "@/api/client";
 import { session, STATUSES, type ImpactSearch, type MessageStatus } from "@/api/queries";
 import { Layout } from "@/components/layout";
-import { DoctorPage } from "@/pages/doctor";
 import { DrainPage } from "@/pages/drain";
 import { HotspotsPage } from "@/pages/hotspots";
 import { ImpactPage } from "@/pages/impact";
@@ -153,7 +152,12 @@ const impact = createRoute({
 const owners = createRoute({ getParentRoute: () => app, path: "/owners", component: OwnersPage });
 const retention = createRoute({ getParentRoute: () => app, path: "/retention", component: RetentionPage });
 const drain = createRoute({ getParentRoute: () => app, path: "/drain", component: DrainPage });
-const doctor = createRoute({ getParentRoute: () => app, path: "/connections", component: DoctorPage });
+/** Its own chunk: opened when a connection or a certificate needs a look. */
+const doctor = createRoute({
+  getParentRoute: () => app,
+  path: "/connections",
+  component: lazyRouteComponent(() => import("@/pages/doctor"), "DoctorPage"),
+});
 const tokens = createRoute({ getParentRoute: () => app, path: "/tokens", component: TokensPage });
 const users = createRoute({ getParentRoute: () => app, path: "/users", component: UsersPage });
 

@@ -39,7 +39,17 @@ pub async fn run(o: Options) -> Result<bool> {
     let resources = Resources::load(&o.root, &environment).context("resources.yaml")?;
     let code = code_uses(&o.root, &interfaces).await?;
     let configs: Vec<&InterfaceConfig> = interfaces.iter().filter_map(|i| i.config.as_ref().ok()).collect();
-    let probes = doctor::plan(&configs, &resources, &code, &o.database_url, &o.interfaces);
+    let mut probes = doctor::plan(&configs, &resources, &code, &o.database_url, &o.interfaces);
+    // What alerts connect to (mail server, webhooks, heartbeat); broken alert settings are
+    // `ductus validate`'s to report.
+    if o.interfaces.is_empty() {
+        let alerts = ductus_core::settings::Settings::load(&o.root).and_then(|s| s.alerts(&environment));
+        match alerts {
+            Ok(Some(a)) => probes.extend(doctor::alert_probes(&a)),
+            Ok(None) => {}
+            Err(e) => println!("⚠ alerts: not checked, their settings don't load: {}", first_line(&format!("{e:#}"))),
+        }
+    }
 
     let started = Instant::now();
     let checks = doctor::check(probes, o.timeout).await;

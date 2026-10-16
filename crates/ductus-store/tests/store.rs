@@ -582,6 +582,7 @@ fn fired<'a>(deliveries: Vec<(String, chrono::DateTime<chrono::Utc>)>) -> ductus
         ok_since: None,
         last_notified_at: Some(now),
         summary: Some("stalled: nothing sent for 2 min"),
+        stage: None,
         fresh: true,
         unacknowledge: false,
         cancel_waiting: false,
@@ -651,6 +652,7 @@ async fn alert_notifications_are_stored_first_and_sent_once() {
         ok_since: None,
         last_notified_at: None,
         summary: None,
+        stage: None,
         fresh: true,
         unacknowledge: false,
         cancel_waiting: true,
@@ -736,6 +738,118 @@ async fn acknowledging_and_silencing_are_logged_with_the_change() {
     assert!(store.alert(row.id).await.unwrap().unwrap().ack_by.is_none());
     let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
     forget_alert(&pool, row.id).await;
+}
+
+/// A certificate alert keeps its step; a check that couldn't read the certificate keeps the dates
+/// from the one before (the certificate out there still ends then), with the error.
+#[tokio::test]
+async fn certificates_keep_their_dates_when_a_check_fails() {
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let resource = format!("test-cert-{}", std::process::id());
+    let now = chrono::Utc::now();
+    let seen = ductus_store::CertificateRow {
+        resource: resource.clone(),
+        host: "empi.example.org".into(),
+        port: 443,
+        subject: Some("empi.example.org".into()),
+        issuer: Some("Example CA".into()),
+        fingerprint: Some("ab12".into()),
+        not_before: Some(now - chrono::Duration::days(60)),
+        not_after: Some(now + chrono::Duration::days(20)),
+        chain_min_not_after: Some(now + chrono::Duration::days(10)),
+        chain_min_subject: Some("Example Intermediate".into()),
+        trusted: Some(true),
+        error: None,
+        checked_at: now,
+        read_at: None,
+    };
+    store.save_certificates(std::slice::from_ref(&seen)).await.unwrap();
+    let mine = |rows: Vec<ductus_store::CertificateRow>| rows.into_iter().find(|r| r.resource == resource).unwrap();
+    // Timestamps come back at microseconds.
+    let seen = mine(store.certificates().await.unwrap());
+    assert_eq!((seen.read_at, seen.fingerprint.as_deref()), (Some(seen.checked_at), Some("ab12")));
+
+    let later = now + chrono::Duration::hours(6);
+    let failed = ductus_store::CertificateRow {
+        subject: None,
+        issuer: None,
+        fingerprint: None,
+        not_before: None,
+        not_after: None,
+        chain_min_not_after: None,
+        chain_min_subject: None,
+        trusted: None,
+        error: Some("connection refused".into()),
+        checked_at: later,
+        ..seen.clone()
+    };
+    store.save_certificates(&[failed]).await.unwrap();
+    let row = mine(store.certificates().await.unwrap());
+    assert_eq!(row.error.as_deref(), Some("connection refused"));
+    assert!(row.checked_at > seen.checked_at);
+    assert_eq!(
+        (row.not_after, row.chain_min_not_after, row.trusted),
+        (seen.not_after, seen.chain_min_not_after, Some(true))
+    );
+    assert_eq!(row.read_at, seen.read_at, "still the certificate read before");
+
+    let renewed = ductus_store::CertificateRow {
+        fingerprint: Some("cd34".into()),
+        not_after: Some(now + chrono::Duration::days(400)),
+        chain_min_not_after: Some(now + chrono::Duration::days(400)),
+        chain_min_subject: None,
+        checked_at: later,
+        ..seen.clone()
+    };
+    store.save_certificates(std::slice::from_ref(&renewed)).await.unwrap();
+    let row = mine(store.certificates().await.unwrap());
+    assert_eq!(
+        (row.fingerprint.as_deref(), row.error, row.chain_min_subject),
+        (Some("cd34"), None, None),
+        "the error is gone"
+    );
+    assert!(row.read_at > seen.read_at);
+    sqlx::query("DELETE FROM certificate_status WHERE resource = $1").bind(&resource).execute(&pool).await.unwrap();
+
+    // The alert's step is stored with its change.
+    let row = test_alert(&store, "cert").await;
+    let change = ductus_store::AlertChange {
+        state: "certificate",
+        severity: Some("warning"),
+        stage: Some(14),
+        ..fired(Vec::new())
+    };
+    let change = ductus_store::AlertChange { event: None, ..change };
+    assert!(store.change_alert(row.id, row.rev, &change).await.unwrap());
+    let row = store.alert(row.id).await.unwrap().unwrap();
+    assert_eq!((row.state.as_str(), row.stage), ("certificate", Some(14)));
+    forget_alert(&pool, row.id).await;
+}
+
+/// Connection checks keep their reports, the last 30.
+#[tokio::test]
+async fn doctor_runs_keep_the_last_thirty() {
+    let Some(store) = store().await else { return };
+    let mut last = 0;
+    for n in 0..(ductus_store::DOCTOR_RUNS_KEPT + 3) {
+        let run = ductus_store::DoctorRunRow {
+            id: 0,
+            at: chrono::Utc::now(),
+            mode: "certificates".into(),
+            started_by: if n % 2 == 0 { "schedule".into() } else { "test-user-anna".into() },
+            seconds: 0.25,
+            checks: 2,
+            failed: (n % 3) as i32,
+        };
+        last = store.record_doctor_run(&run, &serde_json::json!({ "n": n })).await.unwrap();
+    }
+    let runs = store.doctor_runs(false, 100).await.unwrap();
+    assert_eq!(runs.len() as i64, ductus_store::DOCTOR_RUNS_KEPT);
+    assert_eq!(runs[0].id, last, "newest first");
+    assert!(store.doctor_runs(true, 100).await.unwrap().iter().all(|r| r.started_by == "schedule"));
+    assert_eq!(store.doctor_report(last).await.unwrap().unwrap()["n"], ductus_store::DOCTOR_RUNS_KEPT + 2);
+    assert!(store.doctor_report(runs.last().unwrap().id - 1).await.unwrap().is_none(), "older ones are gone");
 }
 
 /// The audit rows of one interface, oldest first, as (action, message id, detail).

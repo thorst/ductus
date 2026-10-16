@@ -271,15 +271,15 @@ Indexes: primary key `(kind, name)`; `docs_snapshot_docs` (GIN on `docs`).
 
 ## `alert_state`
 
-One row per thing that can alert: each interface (`iface:<interface>`) and each destination (`dest:<interface>/<destination>`), made when an engine with `alerts:` in ductus.yaml first runs it (so it can be silenced before anything fires). Changed by compare-and-set on `rev`: two engines on one database judge the same state and only one records each change.
+One row per thing that can alert: each interface (`iface:<interface>`), each destination (`dest:<interface>/<destination>`) and each certificate the engine connects to (`cert:<resource>:<host>:<port>`), made when an engine with `alerts:` in ductus.yaml first runs it (so it can be silenced before anything fires). Changed by compare-and-set on `rev`: two engines on one database judge the same state and only one records each change.
 
 | column | type | |
 |---|---|---|
 | `id` | integer | Identity; the API's `/alerts/{id}`. |
-| `key` | text | `iface:<interface>` or `dest:<interface>/<destination>` (unique). |
-| `interface` | text | The interface. |
-| `destination` | text | The destination; none for the interface's own alert. |
-| `state` | text | `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`, `missed` (an interface). |
+| `key` | text | `iface:<interface>`, `dest:<interface>/<destination>` or `cert:<resource>:<host>:<port>` (unique). |
+| `interface` | text | The interface; for a certificate, its resource (as in `certificate_status`). |
+| `destination` | text | The destination; none for the interface's own alert; `host:port` for a certificate. |
+| `state` | text | `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`, `missed` (an interface), `certificate` (expires within `alerts.certificates.warn_days`, or has expired). |
 | `severity` | text | `warning` or `critical` (from the first rule naming the state), while open. |
 | `since` | timestamptz | Bad since (when it fired). |
 | `ok_since` | timestamptz | Fine again since then, not yet for `alerts.settle`: bad again before that reopens the same alert. |
@@ -293,6 +293,7 @@ One row per thing that can alert: each interface (`iface:<interface>`) and each 
 | `silence_reason` | text | Why. |
 | `rev` | bigint | Each change adds one (compare-and-set). |
 | `updated_at` | timestamptz | Last change. |
+| `stage` | integer | A certificate alert's step: the warn day (30, 14, 7 by default) people were last told about, `0` once expired (migration 0021). None for other alerts. |
 
 Indexes: primary key `id`; unique `key`.
 
@@ -332,6 +333,46 @@ The outbox: one row per notification (an event to a channel), stored with the ev
 | `sent_at` | timestamptz | When it went out. |
 
 Indexes: primary key `id`; `alert_deliveries_due (next_try_at) WHERE status = 'pending'`; `alert_deliveries_event (event_id)`.
+
+## `certificate_status`
+
+The certificate each TLS server the engine connects to presented at its last check (migration 0021): HTTPS APIs and destinations, the alerts' mail server, webhooks and heartbeat. Written by the engine's scheduled checks (`doctor.schedule`, every 6 hours by default) and by checks someone asks for (`POST /api/v1/doctor`). Read even when this server doesn't trust it (a private CA). A check that couldn't read a certificate sets `error` and `checked_at` and keeps the dates from the check before.
+
+| column | type | |
+|---|---|---|
+| `resource` | text | `empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>` (a webhook), `alerts.heartbeat`, or `<interface>/<destination>` for a destination with a URL of its own. |
+| `host` | text | The server's name as configured. |
+| `port` | integer | Its port. |
+| `subject` | text | The server certificate's common name (or organisation). |
+| `issuer` | text | Who issued it. |
+| `fingerprint` | text | SHA-256 of the server certificate, hex: changes when it's renewed or replaced. |
+| `not_before` | timestamptz | Valid from. |
+| `not_after` | timestamptz | The server certificate's expiry. |
+| `chain_min_not_after` | timestamptz | The earliest expiry in the chain the server presents: what alerts count (an intermediate that ends breaks clients as surely). |
+| `chain_min_subject` | text | Whose that is, when it isn't the server certificate's. |
+| `trusted` | boolean | Whether this server trusts it (the system's trusted certificates). |
+| `error` | text | Why the last check failed (couldn't connect, not trusted, expired); none when it passed. |
+| `checked_at` | timestamptz | The last check. |
+| `read_at` | timestamptz | When the certificate in the row was read: the last check, unless that one couldn't read it (then `error` says why and the dates are older). |
+
+Index: primary key `(resource, host, port)`.
+
+## `doctor_runs`
+
+Each connection check the engine ran on its schedule or was asked for, with its whole report (migration 0021). The last 30 are kept.
+
+| column | type | |
+|---|---|---|
+| `id` | bigint | Identity. |
+| `at` | timestamptz | When it ran. |
+| `mode` | text | `certificates` (DNS, TCP, TLS handshake: nothing logs in) or `full` (`ductus doctor`'s checks, logins included). |
+| `started_by` | text | `schedule`, or who asked (a user or token name). |
+| `seconds` | double precision | How long it took. |
+| `checks` | integer | Connections checked. |
+| `failed` | integer | Of those, failed. |
+| `report` | jsonb | The report, as `POST /api/v1/doctor` returns it. |
+
+Index: primary key `id`.
 
 ## Functions
 

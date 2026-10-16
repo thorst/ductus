@@ -113,6 +113,10 @@ pub struct Engine {
     pub instance: String,
     /// Alerts (`alerts:` in ductus.yaml), if configured.
     pub alerts: Option<Arc<crate::alerts::Alerts>>,
+    /// The engine's own connection checks (`doctor:` in ductus.yaml).
+    pub doctor: ductus_core::settings::DoctorSettings,
+    /// The certificates the engine connects to (worked out from the project at start).
+    pub certificates: Vec<crate::certificates::CertificateTarget>,
 }
 
 /// What the engine is made of, from startup.
@@ -131,6 +135,7 @@ pub struct Parts {
     pub audit: ductus_core::settings::AuditSettings,
     pub instance: String,
     pub alerts: Option<Arc<crate::alerts::Alerts>>,
+    pub doctor: ductus_core::settings::DoctorSettings,
 }
 
 impl Engine {
@@ -150,7 +155,12 @@ impl Engine {
             audit,
             instance,
             alerts,
+            doctor,
         } = parts;
+        let certificates = {
+            let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
+            crate::certificates::targets(&configs, &resources, alerts.as_ref().map(|a| &a.settings))
+        };
         let engine = Arc::new(Self {
             started_at: Utc::now(),
             environment,
@@ -171,6 +181,8 @@ impl Engine {
             audit,
             instance,
             alerts,
+            doctor,
+            certificates,
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

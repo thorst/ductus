@@ -2,13 +2,15 @@ import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
 import { CircleCheck } from "lucide-react";
 import type { Schemas } from "@/api/client";
-import { engine, interfaces } from "@/api/queries";
+import { certificates, engine, interfaces } from "@/api/queries";
 import { AlertItem, useOpenAlerts } from "@/components/alerts";
+import { CertificateDays } from "@/components/certificates";
 import { HealthBadge } from "@/components/health-badge";
 import { Loaded, PageHeader } from "@/components/page";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, Td, Th } from "@/components/ui/table";
 import { count, duration, ms } from "@/lib/format";
+import { needingRenewal } from "@/lib/certificates";
 import { describe, problems } from "@/lib/health";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +31,7 @@ export function OverviewPage() {
           <div className="space-y-6">
             {info.data && <DrainBanner drain={info.data.drain} />}
             <OpenAlerts />
+            <ExpiringCertificates />
             <Totals all={all} />
             <Attention all={all} />
             {info.data && <Resources resources={info.data.resources.filter((r) => r.calls.count + r.errors > 0)} />}
@@ -73,6 +76,41 @@ function OpenAlerts() {
         ))}
       </ul>
       {open.length > 5 && <CardBody className="text-sm text-muted">and {count(open.length - 5)} more</CardBody>}
+    </Card>
+  );
+}
+
+/** Certificates expired or within the first warning step (only when there are any). */
+function ExpiringCertificates() {
+  const { data } = useQuery(certificates);
+  const expiring = needingRenewal(data?.certificates ?? []);
+  if (expiring.length === 0) return null;
+  return (
+    <Card aria-label="Certificates expiring">
+      <CardHeader>
+        <CardTitle>Certificates expiring</CardTitle>
+        <Link to="/connections" className="text-sm">
+          All certificates
+        </Link>
+      </CardHeader>
+      <ul className="divide-y">
+        {expiring.slice(0, 5).map((c) => (
+          <li
+            key={`${c.resource}/${c.host}/${c.port}`}
+            className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-sm"
+          >
+            <CertificateDays certificate={c} />
+            <span className="font-mono text-xs break-all">
+              {c.host}:{c.port}
+            </span>
+            <span className="text-muted">
+              {c.resource}
+              {c.chain_not_after && `, ends ${c.chain_not_after.slice(0, 10)}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+      {expiring.length > 5 && <CardBody className="text-sm text-muted">and {count(expiring.length - 5)} more</CardBody>}
     </Card>
   );
 }

@@ -475,6 +475,26 @@
         }
       }
     },
+    "/certificates": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "Every certificate the engine connects to, as its last check saw it, and when the engine\nchecks next by itself. Read even when this server doesn't trust them.",
+        "operationId": "list_certificates",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CertificatesOverview"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/docs": {
       "get": {
         "tags": [
@@ -500,7 +520,7 @@
         "tags": [
           "reports"
         ],
-        "summary": "Check every connection the engine needs, from its server: DNS, TCP (with the address a\nfirewall request needs), TLS (certificate, expiry), then each system's own login. Never\nsends anything to a destination. Listening ports aren't checked (the engine holds them).\nOperator.",
+        "summary": "Check every connection the engine needs, from its server: DNS, TCP (with the address a\nfirewall request needs), TLS (certificate, expiry), then each system's own login; also the\nalerts' mail server, webhooks and heartbeat. Never sends anything to a destination. Listening\nports aren't checked (the engine holds them). The run is kept (`/doctor/runs`), and the\ncertificates it saw (`/certificates`). Operator.",
         "operationId": "doctor_report",
         "requestBody": {
           "content": {
@@ -532,6 +552,88 @@
             }
           },
           "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/doctor/runs": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "The connection checks kept (the last 30), newest first. Operator.",
+        "operationId": "list_doctor_runs",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DoctorRun"
+                  }
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/doctor/runs/{id}": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "One kept connection check's report, as `POST /doctor` returned it. Operator.",
+        "operationId": "get_doctor_run",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The run's id",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Report"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
             "content": {
               "application/json": {
                 "schema": {
@@ -2777,18 +2879,20 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "The destination; for a certificate, `host:port`."
           },
           "id": {
             "type": "integer",
             "format": "int32"
           },
           "interface": {
-            "type": "string"
+            "type": "string",
+            "description": "The interface; for a certificate, its resource."
           },
           "key": {
             "type": "string",
-            "description": "`iface:<interface>` or `dest:<interface>/<destination>`."
+            "description": "`iface:<interface>`, `dest:<interface>/<destination>` or `cert:<resource>:<host>:<port>`."
           },
           "last_notified_at": {
             "type": [
@@ -2852,7 +2956,7 @@
           },
           "state": {
             "type": "string",
-            "description": "`ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`,\n`missed` (an interface)."
+            "description": "`ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`,\n`missed` (an interface), `certificate` (expiring or expired)."
           },
           "summary": {
             "type": [
@@ -3104,6 +3208,202 @@
           }
         }
       },
+      "CertificateInfo": {
+        "type": "object",
+        "required": [
+          "resource",
+          "host",
+          "port",
+          "state"
+        ],
+        "properties": {
+          "alert": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "Its alert (`/alerts/{id}`), when alerts are set up."
+          },
+          "chain_earliest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Whose that is, when it isn't the server certificate's (an intermediate)."
+          },
+          "chain_not_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The earliest expiry in its chain (what counts)."
+          },
+          "checked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The last check."
+          },
+          "days_left": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "Whole days left (UTC dates), counted to the earliest expiry in the chain; negative once\nexpired."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last check failed, if it did."
+          },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 of the server certificate, hex."
+          },
+          "host": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "not_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The server certificate's own expiry."
+          },
+          "not_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "read_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When the certificate shown was read (older than `checked_at` when the last check couldn't)."
+          },
+          "resource": {
+            "type": "string",
+            "description": "`empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>`, `alerts.heartbeat`, or\n`<interface>/<destination>`."
+          },
+          "stage": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The step of the countdown it is within (a warn day; 0 once expired)."
+          },
+          "state": {
+            "type": "string",
+            "description": "`ok`, `expiring` (within the first of `alerts.certificates.warn_days`), `expired`, or\n`unknown` (never read: not checked yet, or never reachable)."
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "trusted": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "This server trusts it."
+          }
+        }
+      },
+      "CertificatesOverview": {
+        "type": "object",
+        "required": [
+          "certificates",
+          "warn_days",
+          "mode",
+          "alerting"
+        ],
+        "properties": {
+          "alerting": {
+            "type": "boolean",
+            "description": "A rule names `certificate` (alerts are sent about them)."
+          },
+          "certificates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CertificateInfo"
+            },
+            "description": "Earliest expiry first; never read ones last."
+          },
+          "last_run": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DoctorRun",
+                "description": "The last check of any kind."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "last_scheduled": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DoctorRun",
+                "description": "The last check the engine ran by itself."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "mode": {
+            "type": "string",
+            "description": "What those checks cover: `certificates` or `full`."
+          },
+          "schedule_seconds": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "How often the engine checks by itself, in seconds; none when `doctor.schedule: off`.",
+            "minimum": 0
+          },
+          "warn_days": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32",
+              "minimum": 0
+            },
+            "description": "The steps of the countdown (`alerts.certificates.warn_days`)."
+          }
+        }
+      },
       "Change": {
         "type": "object",
         "required": [
@@ -3309,6 +3609,17 @@
               "type": "string"
             },
             "description": "What a failure or warning most likely means, and what to do about it."
+          },
+          "certificate": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SeenCertificate",
+                "description": "For a server that speaks TLS: the certificate it presented (or, if none could be read, why)."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "endpoint": {
             "type": "string",
@@ -3822,6 +4133,10 @@
             },
             "description": "Only what these interfaces use (the engine's database is always checked)."
           },
+          "mode": {
+            "$ref": "#/components/schemas/DoctorRunMode",
+            "description": "`full` (the default: logins included) or `certificates` (DNS, TCP and the TLS handshake of\nwhat has a certificate; nothing logs in)."
+          },
           "timeout_ms": {
             "type": [
               "integer",
@@ -3832,6 +4147,55 @@
             "minimum": 0
           }
         }
+      },
+      "DoctorRun": {
+        "type": "object",
+        "required": [
+          "id",
+          "at",
+          "mode",
+          "started_by",
+          "seconds",
+          "checks",
+          "failed"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "checks": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "failed": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "mode": {
+            "type": "string",
+            "description": "`certificates` or `full`."
+          },
+          "seconds": {
+            "type": "number",
+            "format": "double"
+          },
+          "started_by": {
+            "type": "string",
+            "description": "`schedule`, or who asked."
+          }
+        }
+      },
+      "DoctorRunMode": {
+        "type": "string",
+        "enum": [
+          "full",
+          "certificates"
+        ]
       },
       "DrainRequest": {
         "type": "object",
@@ -5593,6 +5957,90 @@
             ],
             "format": "date-time",
             "description": "When expired partitions were last dropped (hourly)."
+          }
+        }
+      },
+      "SeenCertificate": {
+        "type": "object",
+        "description": "A server's certificate as a check saw it.",
+        "required": [
+          "resource",
+          "host",
+          "port",
+          "trusted"
+        ],
+        "properties": {
+          "chain_earliest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Whose that is, when it isn't the server certificate's (an intermediate)."
+          },
+          "chain_not_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "The earliest expiry in the chain the server presented."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the check failed: couldn't connect, not trusted, expired."
+          },
+          "fingerprint": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "SHA-256 of the server certificate (DER), hex."
+          },
+          "host": {
+            "type": "string"
+          },
+          "issuer": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "not_after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "not_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "resource": {
+            "type": "string",
+            "description": "What it belongs to: `empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>`,\n`alerts.heartbeat`, `<interface>/<destination>`."
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The server certificate's common name (or organisation); none if none was read."
+          },
+          "trusted": {
+            "type": "boolean",
+            "description": "This server trusts it (the system's trusted certificates)."
           }
         }
       },

@@ -24,6 +24,9 @@
 //! alerts: ...         # where alerts go and when (see `crate::alerts`); may use ${secret:...}
 //! owners:             # owners that aren't users
 //!   "Lab Systems": { email: lab-systems@hospital.org }
+//! doctor:             # connection checks the engine runs by itself
+//!   schedule: 6h      # or `off`; the first a minute after start
+//!   mode: certificates  # certificates (DNS, TCP, TLS handshake: nothing logs in) | full
 //! ```
 
 use anyhow::{Context, Result, bail};
@@ -65,6 +68,63 @@ pub struct Settings {
     /// Owners that aren't users, and where alerts for them go (a team's mailing list).
     #[serde(default)]
     pub owners: std::collections::BTreeMap<String, crate::alerts::OwnerContact>,
+    /// Connection checks the engine runs by itself (certificate expiry, by default).
+    #[serde(default)]
+    pub doctor: DoctorSettings,
+}
+
+/// `doctor:` in ductus.yaml: the engine's own connection checks.
+#[derive(Debug, Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DoctorSettings {
+    /// How often: a duration (at least 1m), or `off`. The first run is a minute after the engine
+    /// starts (plus up to a minute at random, so engines started together don't check together).
+    #[serde(default = "default_doctor_schedule", deserialize_with = "off_or_duration")]
+    pub schedule: Option<std::time::Duration>,
+    #[serde(default)]
+    pub mode: DoctorMode,
+}
+
+impl Default for DoctorSettings {
+    fn default() -> Self {
+        Self { schedule: default_doctor_schedule(), mode: DoctorMode::default() }
+    }
+}
+
+fn default_doctor_schedule() -> Option<std::time::Duration> {
+    Some(std::time::Duration::from_secs(6 * 3600))
+}
+
+/// What a check covers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DoctorMode {
+    /// DNS, TCP and the TLS handshake of every connection with a certificate: nothing logs in,
+    /// so no service account's log fills up and none is locked out.
+    #[default]
+    Certificates,
+    /// Everything `ductus doctor` checks, logins included.
+    Full,
+}
+
+impl DoctorMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            DoctorMode::Certificates => "certificates",
+            DoctorMode::Full => "full",
+        }
+    }
+}
+
+/// `off`, or a duration.
+fn off_or_duration<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> std::result::Result<Option<std::time::Duration>, D::Error> {
+    let text = String::deserialize(d)?;
+    if text.trim().eq_ignore_ascii_case("off") {
+        return Ok(None);
+    }
+    crate::config::parse_duration(&text).map(Some).map_err(serde::de::Error::custom)
 }
 
 /// The audit log (`audit:` in ductus.yaml).
@@ -347,6 +407,9 @@ impl Settings {
                 file.display()
             );
         }
+        if settings.doctor.schedule.is_some_and(|s| s < std::time::Duration::from_secs(60)) {
+            bail!("in {}: doctor.schedule must be at least 1m (or `off`)", file.display());
+        }
         Ok(settings)
     }
 
@@ -525,6 +588,22 @@ mod tests {
         .unwrap();
         let err = format!("{:#}", Settings::load(dir.path()).unwrap().alerts(&env).unwrap_err());
         assert!(err.contains("no channel named `nope`"), "{err}");
+    }
+
+    #[test]
+    fn the_doctor_checks_certificates_every_six_hours_unless_told_otherwise() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = Settings::load(dir.path()).unwrap().doctor;
+        assert_eq!((d.schedule.map(|s| s.as_secs()), d.mode), (Some(6 * 3600), DoctorMode::Certificates));
+        std::fs::write(dir.path().join(FILE), "doctor: { schedule: 30m, mode: full }").unwrap();
+        let d = Settings::load(dir.path()).unwrap().doctor;
+        assert_eq!((d.schedule.map(|s| s.as_secs()), d.mode), (Some(1800), DoctorMode::Full));
+        std::fs::write(dir.path().join(FILE), "doctor: { schedule: off }").unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().doctor.schedule, None);
+        for bad in ["doctor: { schedule: 10s }", "doctor: { mode: logins }", "doctor: { schedule: sometimes }"] {
+            std::fs::write(dir.path().join(FILE), bad).unwrap();
+            assert!(Settings::load(dir.path()).is_err(), "{bad}");
+        }
     }
 
     #[test]

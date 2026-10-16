@@ -193,3 +193,22 @@ export const alertChannels = queryOptions({
   queryFn: async () => unwrap(await api.GET("/alerts/channels")),
   refetchInterval: HEALTH_REFRESH_MS,
 });
+
+/** Every certificate the engine connects to, as its last check saw it, and its schedule. */
+export const certificates = queryOptions({
+  queryKey: ["certificates"],
+  queryFn: async () => unwrap(await api.GET("/certificates")),
+  // Days left change at midnight UTC, not by the second.
+  refetchInterval: 60_000,
+});
+
+/** The latest kept connection check and its report (operators). */
+export const lastDoctorRun = queryOptions({
+  queryKey: ["doctor", "last"],
+  queryFn: async () => {
+    const [last] = unwrap(await api.GET("/doctor/runs"));
+    if (!last) return null;
+    const report = unwrap(await api.GET("/doctor/runs/{id}", { params: { path: { id: last.id } } }));
+    return { run: last, report };
+  },
+});

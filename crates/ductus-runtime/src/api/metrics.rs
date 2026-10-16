@@ -60,6 +60,26 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
             out.sample("ductus_alert_send_failures_total", &format!("channel=\"{}\"", label(&channel)), failed);
         }
     }
+    if !engine.certificates.is_empty() {
+        let seen = engine.store.certificates().await?;
+        out.family(
+            "ductus_certificate_expiry_seconds",
+            "gauge",
+            "Seconds until the earliest expiry in a server's certificate chain (negative once expired), as of its last check.",
+        );
+        let now = chrono::Utc::now();
+        for t in &engine.certificates {
+            let ends = seen
+                .iter()
+                .find(|c| c.resource == t.resource && c.host == t.host && c.port == i32::from(t.port))
+                .and_then(|c| c.chain_min_not_after);
+            if let Some(ends) = ends {
+                let labels =
+                    format!("resource=\"{}\",host=\"{}\",port=\"{}\"", label(&t.resource), label(&t.host), t.port);
+                out.sample("ductus_certificate_expiry_seconds", &labels, (ends - now).num_seconds());
+            }
+        }
+    }
     out.family("ductus_interface_stopped", "gauge", "1 if the interface was stopped because its code ran away.");
     for i in &engine.interfaces {
         out.sample("ductus_interface_stopped", &iface(&i.config.name), u8::from(i.health.stopped().is_some()));

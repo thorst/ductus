@@ -50,5 +50,12 @@ export default defineConfig({
       dependencies: ["audit"],
       use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
     },
+    {
+      // Certificates: checks them again ("Check now"), so it goes last.
+      name: "certificates",
+      testMatch: "certificates.spec.ts",
+      dependencies: ["alerts"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
   ],
 });
