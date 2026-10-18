@@ -51,10 +51,17 @@ export default defineConfig({
       use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
     },
     {
-      // Certificates: checks them again ("Check now"), so it goes last.
+      // Certificates: checks them again ("Check now").
       name: "certificates",
       testMatch: "certificates.spec.ts",
       dependencies: ["alerts"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
+    {
+      // People from the directory (OpenLDAP): makes an account at the first sign-in, so it goes last.
+      name: "directory",
+      testMatch: "directory.spec.ts",
+      dependencies: ["certificates"],
       use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
     },
   ],

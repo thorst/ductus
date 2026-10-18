@@ -58,6 +58,8 @@ ENGINE=$!
 trap 'kill -INT $ENGINE 2>/dev/null || true' EXIT
 until grep "started interfaces=" "$P/run.log" >/dev/null; do kill -0 $ENGINE || { cat "$P/run.log"; exit 1; }; sleep 0.2; done
 echo "engine log: $P/run.log"
+# A token of this name left by an earlier run (process ids repeat after a reboot) would refuse the new one.
+"$BIN" token revoke "demo-$$" >/dev/null 2>&1 || true
 export DUCTUS_API_TOKEN=$("$BIN" token create "demo-$$" --role operator 2>/dev/null)
 
 echo "== pause the archive, then $COUNT ADT messages (20 patients, MRN 100000 is 70% of them)"
@@ -112,4 +114,5 @@ grep '"kind":"blocked"' <<<"$json" >/dev/null && grep '"kind":"all_blocked"' <<<
 grep "no interface named \`nosuch\`" <<<"$missing" >/dev/null || fail+=" unknown-interface"
 grep "^adt → archive" <<<"$after" >/dev/null && fail+=" archive-still-listed"
 grep "^adt → lab: .*blocked by message $blocked_id" <<<"$after" >/dev/null || fail+=" lab-still-blocked"
+"$BIN" token revoke "demo-$$" >/dev/null 2>&1 || true
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; tail -20 "$P/run.log"; exit 1; fi

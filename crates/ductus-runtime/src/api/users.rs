@@ -40,6 +40,11 @@ pub struct UserInfo {
     pub locked_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub last_sign_in_at: Option<DateTime<Utc>>,
+    /// A directory account: when the directory was last asked about them (sign-in or refresh).
+    pub directory_checked_at: Option<DateTime<Utc>>,
+    /// A directory account the directory refused at its last check (no group, disabled or gone
+    /// there): it can't sign in or act until the directory says yes again.
+    pub directory_refused: bool,
 }
 
 impl From<User> for UserInfo {
@@ -57,8 +62,21 @@ impl From<User> for UserInfo {
             locked_until: u.locked_until.filter(|t| *t > Utc::now()),
             created_at: u.created_at,
             last_sign_in_at: u.last_sign_in_at,
+            directory_checked_at: u.directory_checked_at,
+            directory_refused: u.directory_refused_at.is_some(),
         }
     }
+}
+
+/// A directory account's name and email are the directory's: they would come back at the next
+/// sign-in or refresh, so changing them here would only look like it worked. The same values (a
+/// form that sends everything) are fine.
+pub fn directory_details_kept(user: &User, name: &Option<String>, email: &Option<String>) -> Result<(), ApiError> {
+    let differs = |new: &Option<String>, old: &str| new.as_deref().is_some_and(|n| n.trim() != old);
+    if user.source != "local" && (differs(name, &user.display_name) || differs(email, &user.email)) {
+        return Err(ApiError::bad_request("this account's name and email come from its directory: change them there"));
+    }
+    Ok(())
 }
 
 fn role_of(text: &str) -> Result<Role, ApiError> {
@@ -150,6 +168,7 @@ async fn update(
     if existing.source != "local" && (change.role.is_some() || change.permissions.is_some()) {
         return Err(ApiError::bad_request("this account's role is decided by its directory groups"));
     }
+    directory_details_kept(&existing, &change.display_name, &change.email)?;
     let user = engine
         .store
         .update_user(

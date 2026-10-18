@@ -2,7 +2,7 @@
 // lists every certificate the engine connects to, soonest first, with days left in words and an
 // icon; "Check now" reads them again; the Overview lists the ones to renew; a viewer only looks.
 // Both screens pass axe in every theme (AAA in High contrast) and in custom colors, and fit a phone.
-// Runs last (playwright.config.ts).
+// Runs after the alerts (playwright.config.ts).
 
 import AxeBuilder from "@axe-core/playwright";
 import { expect, test, type Page } from "@playwright/test";

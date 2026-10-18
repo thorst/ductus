@@ -31,12 +31,20 @@
 //!     timeout: 10s                             # default 30s
 //!     application: EMPI
 //!     vendor: Rhapsody
+//! ldap:
+//!   corp-ad:                                   # the directory people sign in with (`auth.ldap`)
+//!     url: ldaps://dc1.hospital.org            # ldaps://, or ldap:// with starttls: true
+//!     bind_dn: CN=svc-ductus,OU=Service,DC=hospital,DC=org
+//!     bind_password: ${secret:LDAP_BIND_PASSWORD}
+//!     ca: ${secret:HOSPITAL_CA}                # optional: a private CA this server doesn't trust yet
+//!     owner: Directory Services
 //! ```
 //!
 //! Interface code refers to them by name (`db("patient_db")`, `api("empi")`), so no connection
 //! details or credentials ever appear in interface code, and each environment supplies its own
 //! values. Every entry may say which `application` and `vendor` it belongs to; interfaces that
-//! use it are then found by `ductus impact`.
+//! use it are then found by `ductus impact`. `owner` is who to call about it (certificate alerts
+//! with `to: owner` reach them).
 
 use crate::InterfaceConfig;
 use crate::about::System;
@@ -56,6 +64,9 @@ pub struct Resources {
     pub sftp: BTreeMap<String, SftpServer>,
     #[serde(default)]
     pub apis: BTreeMap<String, Api>,
+    /// Directories people sign in with (`auth.ldap` in ductus.yaml names one).
+    #[serde(default)]
+    pub ldap: BTreeMap<String, LdapServer>,
 }
 
 /// The kinds of things resources.yaml defines.
@@ -64,16 +75,121 @@ pub enum Kind {
     Database,
     Api,
     Sftp,
+    Ldap,
 }
 
 impl Kind {
-    /// How it's named in messages and reports: `database`, `api`, `sftp server`.
+    /// How it's named in messages and reports: `database`, `api`, `sftp server`, `directory`.
     pub fn label(self) -> &'static str {
         match self {
             Kind::Database => "database",
             Kind::Api => "api",
             Kind::Sftp => "sftp server",
+            Kind::Ldap => "directory",
         }
+    }
+}
+
+/// An LDAP directory (Active Directory, OpenLDAP) people sign in with.
+#[derive(Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LdapServer {
+    /// `ldaps://host[:636]`, or `ldap://host[:389]` with `starttls: true`.
+    pub url: String,
+    /// Upgrade an `ldap://` connection to TLS before anything is sent (StartTLS).
+    #[serde(default)]
+    pub starttls: bool,
+    /// Allow plain `ldap://` without TLS: passwords cross the network readable. Test
+    /// directories only; validate and the engine warn about it.
+    #[serde(default)]
+    pub insecure: bool,
+    /// The service account that finds users and reads their groups. Without it, the directory is
+    /// searched anonymously (Active Directory refuses that).
+    #[serde(default)]
+    pub bind_dn: Option<String>,
+    #[serde(default)]
+    pub bind_password: Option<String>,
+    /// Certificates (PEM) to trust for this directory besides the system's: the hospital's own
+    /// CA, when this server doesn't have it installed.
+    #[serde(default)]
+    pub ca: Option<String>,
+    /// How long connecting, binding or one search may take (default 10s).
+    #[serde(default, deserialize_with = "crate::config::duration_opt")]
+    pub timeout: Option<Duration>,
+    #[serde(default)]
+    pub application: Option<String>,
+    #[serde(default)]
+    pub vendor: Option<String>,
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Company-defined documentation fields (`docs-schema.yaml`).
+    #[serde(default)]
+    pub custom: crate::docs::Custom,
+}
+
+/// How an LDAP connection is protected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LdapSecurity {
+    /// `ldaps://`: TLS from the start.
+    Tls,
+    /// `ldap://` upgraded with StartTLS.
+    StartTls,
+    /// `ldap://` with `insecure: true`.
+    Plain,
+}
+
+impl LdapServer {
+    pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+
+    /// Host and port, from the URL (389 for ldap://, 636 for ldaps://).
+    pub fn address(&self) -> Option<(String, u16)> {
+        let u = url::Url::parse(&self.url).ok()?;
+        let port = u.port().unwrap_or(if u.scheme() == "ldaps" { 636 } else { 389 });
+        Some((u.host_str()?.trim_matches(['[', ']']).to_string(), port))
+    }
+
+    pub fn security(&self) -> LdapSecurity {
+        if self.url.trim().to_ascii_lowercase().starts_with("ldaps://") {
+            LdapSecurity::Tls
+        } else if self.starttls {
+            LdapSecurity::StartTls
+        } else {
+            LdapSecurity::Plain
+        }
+    }
+
+    pub fn timeout(&self) -> Duration {
+        self.timeout.unwrap_or(Self::DEFAULT_TIMEOUT)
+    }
+
+    /// What's wrong with it, if anything (checked when resources.yaml is loaded).
+    fn problem(&self) -> Option<String> {
+        let scheme = url::Url::parse(&self.url).ok().filter(|u| u.host_str().is_some()).map(|u| u.scheme().to_string());
+        match scheme.as_deref() {
+            Some("ldaps") if self.starttls => Some("`starttls` is for ldap:// URLs (ldaps:// is TLS already)".into()),
+            Some("ldaps") => None,
+            Some("ldap") if self.starttls || self.insecure => None,
+            Some("ldap") => Some(
+                "plain ldap:// sends passwords readable: use ldaps://, or `starttls: true` (`insecure: true` for a test directory)".into(),
+            ),
+            _ => Some(format!("`url` must be an ldap:// or ldaps:// URL, not `{}`", self.url)),
+        }
+        .or_else(|| {
+            (self.bind_dn.is_some() != self.bind_password.is_some())
+                .then(|| "`bind_dn` and `bind_password` go together".into())
+        })
+    }
+}
+
+// Hand-written so the service account's password never ends up in logs.
+impl std::fmt::Debug for LdapServer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LdapServer")
+            .field("url", &self.url)
+            .field("starttls", &self.starttls)
+            .field("insecure", &self.insecure)
+            .field("bind_dn", &self.bind_dn)
+            .finish_non_exhaustive()
     }
 }
 
@@ -95,6 +211,9 @@ pub struct Api {
     pub application: Option<String>,
     #[serde(default)]
     pub vendor: Option<String>,
+    /// Who to call about it.
+    #[serde(default)]
+    pub owner: Option<String>,
     /// Company-defined documentation fields (`docs-schema.yaml`).
     #[serde(default)]
     pub custom: crate::docs::Custom,
@@ -151,6 +270,9 @@ pub struct SftpServer {
     pub application: Option<String>,
     #[serde(default)]
     pub vendor: Option<String>,
+    /// Who to call about it.
+    #[serde(default)]
+    pub owner: Option<String>,
     /// Company-defined documentation fields (`docs-schema.yaml`).
     #[serde(default)]
     pub custom: crate::docs::Custom,
@@ -196,6 +318,9 @@ pub struct DbConnection {
     pub application: Option<String>,
     #[serde(default)]
     pub vendor: Option<String>,
+    /// Who to call about it.
+    #[serde(default)]
+    pub owner: Option<String>,
     /// Company-defined documentation fields (`docs-schema.yaml`).
     #[serde(default)]
     pub custom: crate::docs::Custom,
@@ -226,6 +351,9 @@ pub struct SqlServerConnection {
     pub application: Option<String>,
     #[serde(default)]
     pub vendor: Option<String>,
+    /// Who to call about it.
+    #[serde(default)]
+    pub owner: Option<String>,
     /// Company-defined documentation fields (`docs-schema.yaml`).
     #[serde(default)]
     pub custom: crate::docs::Custom,
@@ -285,7 +413,35 @@ impl Resources {
                 _ => bail!("in {}: api `{name}`: `url` must be an http(s) URL, not `{}`", file.display(), api.url),
             }
         }
+        for (name, l) in &resources.ldap {
+            if let Some(problem) = l.problem() {
+                bail!("in {}: ldap `{name}`: {problem}", file.display());
+            }
+        }
         Ok(resources)
+    }
+
+    /// Directories reached without TLS (`insecure: true`), for warnings.
+    pub fn insecure_ldap(&self) -> Vec<&str> {
+        self.ldap.iter().filter(|(_, l)| l.security() == LdapSecurity::Plain).map(|(n, _)| n.as_str()).collect()
+    }
+
+    /// Who an entry's `owner` names (any kind), if anyone.
+    pub fn owner(&self, name: &str) -> Option<&str> {
+        let owner = match self.databases.get(name) {
+            Some(Database::Postgres(c)) => &c.owner,
+            Some(Database::Sqlserver(c)) => &c.owner,
+            None => {
+                if let Some(a) = self.apis.get(name) {
+                    &a.owner
+                } else if let Some(s) = self.sftp.get(name) {
+                    &s.owner
+                } else {
+                    &self.ldap.get(name)?.owner
+                }
+            }
+        };
+        crate::about::given(owner)
     }
 
     /// The names defined for a kind, for "defined: ..." hints.
@@ -294,6 +450,7 @@ impl Resources {
             Kind::Database => self.databases.keys().map(String::as_str).collect(),
             Kind::Api => self.apis.keys().map(String::as_str).collect(),
             Kind::Sftp => self.sftp.keys().map(String::as_str).collect(),
+            Kind::Ldap => self.ldap.keys().map(String::as_str).collect(),
         }
     }
 
@@ -323,6 +480,7 @@ impl Resources {
         }
         all.extend(self.apis.iter().map(|(n, a)| (Kind::Api, n.as_str(), &a.custom)));
         all.extend(self.sftp.iter().map(|(n, s)| (Kind::Sftp, n.as_str(), &s.custom)));
+        all.extend(self.ldap.iter().map(|(n, l)| (Kind::Ldap, n.as_str(), &l.custom)));
         all
     }
 
@@ -336,6 +494,7 @@ impl Resources {
             },
             Kind::Api => self.apis.get(name).map(|a| System::new(&a.application, &a.vendor)).unwrap_or_default(),
             Kind::Sftp => self.sftp.get(name).map(|s| System::new(&s.application, &s.vendor)).unwrap_or_default(),
+            Kind::Ldap => self.ldap.get(name).map(|l| System::new(&l.application, &l.vendor)).unwrap_or_default(),
         }
     }
 
@@ -357,6 +516,15 @@ impl Resources {
             },
             Kind::Api => self.apis.get(name).and_then(|a| Endpoint::from_url(&a.url)).into_iter().collect(),
             Kind::Sftp => self.sftp.get(name).map(|s| Endpoint::new(&s.host, s.port, "SFTP")).into_iter().collect(),
+            Kind::Ldap => self
+                .ldap
+                .get(name)
+                .and_then(|l| {
+                    let protocol = if l.security() == LdapSecurity::Tls { "LDAPS" } else { "LDAP" };
+                    l.address().map(|(host, port)| Endpoint::new(&host, port, protocol))
+                })
+                .into_iter()
+                .collect(),
         }
     }
 
@@ -380,7 +548,7 @@ impl Resources {
 pub struct Endpoint {
     pub host: String,
     pub port: u16,
-    /// `MLLP`, `HTTP`, `HTTPS`, `SFTP`, `Postgres`, `SQL Server` or `SQL Browser (UDP)`.
+    /// `MLLP`, `HTTP`, `HTTPS`, `SFTP`, `LDAP`, `LDAPS`, `Postgres`, `SQL Server` or `SQL Browser (UDP)`.
     pub protocol: &'static str,
     pub note: Option<String>,
 }
@@ -537,5 +705,53 @@ mod tests {
         std::fs::write(&file, "apis:\n  x: { url: 'empi.local/api' }\n").unwrap();
         let err = format!("{:#}", Resources::load(dir.path(), &env).unwrap_err());
         assert!(err.contains("api `x`: `url` must be an http(s) URL"), "{err}");
+    }
+
+    #[test]
+    fn loads_directories_and_refuses_plain_ldap_unless_insecure() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("resources.yaml");
+        let env = Environment::with_variables("dev", &[("PW", "s3cret")]);
+        let load = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            Resources::load(dir.path(), &env).map_err(|e| format!("{e:#}"))
+        };
+        let r = load(
+            "ldap:\n  corp:\n    url: ldaps://dc1.hospital.org\n    bind_dn: cn=svc\n    bind_password: ${PW}\n    owner: Directory Services\n    application: Active Directory\n",
+        )
+        .unwrap();
+        let corp = &r.ldap["corp"];
+        assert_eq!((corp.security(), corp.address()), (LdapSecurity::Tls, Some(("dc1.hospital.org".into(), 636))));
+        assert_eq!(corp.timeout(), Duration::from_secs(10));
+        assert!(!format!("{corp:?}").contains("s3cret"), "the bind password stays out of logs");
+        assert_eq!(r.owner("corp"), Some("Directory Services"));
+        assert_eq!(r.system(Kind::Ldap, "corp").label(), "Active Directory");
+        assert_eq!(
+            r.endpoints(Kind::Ldap, "corp").iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ["dc1.hospital.org:636 LDAPS"]
+        );
+        assert!(r.insecure_ldap().is_empty());
+        assert_eq!(r.missing(Kind::Ldap, "ad").unwrap(), "no directory named `ad` in resources.yaml (defined: corp)");
+
+        let r = load("ldap:\n  dc: { url: 'ldap://dc1:3389', starttls: true }\n").unwrap();
+        assert_eq!(
+            (r.ldap["dc"].security(), r.ldap["dc"].address()),
+            (LdapSecurity::StartTls, Some(("dc1".into(), 3389)))
+        );
+        let r = load("ldap:\n  test: { url: 'ldap://127.0.0.1', insecure: true }\n").unwrap();
+        assert_eq!(r.insecure_ldap(), ["test"]);
+
+        let err = load("ldap:\n  dc: { url: 'ldap://dc1' }\n").unwrap_err();
+        assert!(err.contains("ldap `dc`: plain ldap:// sends passwords readable"), "{err}");
+        let err = load("ldap:\n  dc: { url: 'ldaps://dc1', starttls: true }\n").unwrap_err();
+        assert!(err.contains("`starttls` is for ldap:// URLs"), "{err}");
+        let err = load("ldap:\n  dc: { url: 'https://dc1' }\n").unwrap_err();
+        assert!(err.contains("must be an ldap:// or ldaps:// URL"), "{err}");
+        let err = load("ldap:\n  dc: { url: 'ldaps://dc1', bind_dn: cn=svc }\n").unwrap_err();
+        assert!(err.contains("`bind_dn` and `bind_password` go together"), "{err}");
+
+        // Every kind takes an owner.
+        let r = load("apis:\n  a: { url: 'https://a', owner: ' Web Team ' }\nsftp:\n  s: { host: h, user: u, password: p, owner: Lab }\n").unwrap();
+        assert_eq!((r.owner("a"), r.owner("s"), r.owner("none")), (Some("Web Team"), Some("Lab"), None));
     }
 }

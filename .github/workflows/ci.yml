@@ -94,7 +94,16 @@ jobs:
           target/release/ductus api-spec | diff -u ui/openapi.json - || {
             echo "::error::The API changed: run scripts/dev/check.sh (it updates ui/openapi.json and the UI's types)"; exit 1; }
 
+      # OpenLDAP for the directory sign-in tests and demos (a user-level slapd each: scripts/dev/slapd.sh);
+      # from Ubuntu's packages, not Docker Hub. Its system service isn't needed.
+      - name: Install slapd
+        run: |
+          sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq slapd ldap-utils </dev/null >/dev/null
+          sudo systemctl disable --now slapd >/dev/null 2>&1 || true
+
       - name: Unit and integration tests
+        env:
+          DUCTUS_TEST_SLAPD: required
         run: cargo test --release --locked
 
       - name: Example interface tests
@@ -155,6 +164,9 @@ jobs:
 
       - name: Certificates demo (the engine's own check reads a certificate; 20, 10, 3 days and expired are mailed once each; renewed is a recovery)
         run: BIN=target/release/ductus bash scripts/demo-certs.sh
+
+      - name: Directory demo (OpenLDAP sign-in with groups and nested groups, refusals alike, the directory's certificate, a group removal ends the session at the refresh, the directory down and the local break-glass admin)
+        run: BIN=target/release/ductus bash scripts/demo-ldap.sh
 
       - name: Dev demo (ductus dev starts a Postgres of its own; same port and data on restart; a killed one is cleaned up)
         run: BIN=target/release/ductus bash scripts/demo-dev.sh

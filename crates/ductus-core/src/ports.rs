@@ -70,8 +70,8 @@ pub fn destination_endpoint(d: &Destination) -> Option<Endpoint> {
     }
 }
 
-/// Every host the project connects to: destinations, and the databases, SFTP servers and APIs
-/// in resources.yaml. Sorted by host then port.
+/// Every host the project connects to: destinations, and the databases, SFTP servers, APIs and
+/// directories in resources.yaml. Sorted by host then port.
 pub fn outbound<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>, resources: &Resources) -> Vec<Outbound> {
     let mut out = Vec::new();
     for c in configs {
@@ -86,6 +86,7 @@ pub fn outbound<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>, reso
         (Kind::Database, resources.databases.keys().collect::<Vec<_>>()),
         (Kind::Sftp, resources.sftp.keys().collect()),
         (Kind::Api, resources.apis.keys().collect()),
+        (Kind::Ldap, resources.ldap.keys().collect()),
     ];
     for (kind, names) in defined {
         for name in names {
@@ -135,7 +136,7 @@ mod tests {
         );
 
         let resources: Resources = serde_yaml_ng::from_str(
-            "databases:\n  pdb: { postgres: { host: db1, database: p, user: u } }\n  billing: { sqlserver: { host: sql1, instance: PROD, database: b, user: u } }\nsftp:\n  lab: { host: sftp.lab, user: u, password: x }\napis:\n  billing_api: { url: 'https://billing.example.org:8443/v2' }\n",
+            "databases:\n  pdb: { postgres: { host: db1, database: p, user: u } }\n  billing: { sqlserver: { host: sql1, instance: PROD, database: b, user: u } }\nsftp:\n  lab: { host: sftp.lab, user: u, password: x }\napis:\n  billing_api: { url: 'https://billing.example.org:8443/v2' }\nldap:\n  ad: { url: 'ldaps://dc1.hospital.org' }\n",
         )
         .unwrap();
         let o = outbound(&configs, &resources);
@@ -145,6 +146,7 @@ mod tests {
             [
                 ("billing.example.org", 8443, "HTTPS", "resources.yaml: billing_api"),
                 ("db1", 5432, "Postgres", "resources.yaml: pdb"),
+                ("dc1.hospital.org", 636, "LDAPS", "resources.yaml: ad"),
                 ("epic.local", 5000, "MLLP", "adt"),
                 ("lab.example.org", 443, "HTTPS", "hook"),
                 ("sftp.lab", 22, "SFTP", "resources.yaml: lab"),

@@ -166,6 +166,7 @@ async fn sign_in(
             return Err(ApiError::bad_request("give a username and password, or a token"));
         }
         let user = user_sign_in(&engine, &username, password, ip).await?;
+        let with = if user.source == "ldap" { "ldap" } else { "password" };
         let who = Principal {
             user_id: Some(user.id),
             token_id: None,
@@ -174,7 +175,7 @@ async fn sign_in(
             permissions: user.permissions,
             must_change_password: user.must_change_password,
         };
-        (who, SessionFor::User(user.id), "password")
+        (who, SessionFor::User(user.id), with)
     };
     let by = match owner {
         SessionFor::Token(id) => By::token(id, who.user_id, &who.name, "session", ip),
@@ -195,9 +196,13 @@ async fn refuse(engine: &Shared, ip: Option<IpAddr>, detail: serde_json::Value) 
     Ok(())
 }
 
-/// Check a username and password; the account on success. Every refusal but a lockout says the
-/// same thing, and takes about as long, so nobody learns which usernames exist. (The audit log
-/// does know which: its rows are for admins.)
+/// Check a username and password; the account on success. A name a local account holds is
+/// checked here and only here (a directory account of the same name can never take it over);
+/// any other name goes to the directory, when `auth.ldap` is configured. Every refusal but a
+/// lockout, a directory outage or a directory account without a group says the same thing, and
+/// takes about as long, so nobody learns which usernames exist. (With a directory, a name it
+/// doesn't know skips the bind: a few milliseconds quicker than a wrong password, against network
+/// times that vary more. The audit log does know which: its rows are for admins.)
 async fn user_sign_in(
     engine: &Shared,
     username: &str,
@@ -211,24 +216,32 @@ async fn user_sign_in(
             .detail(serde_json::json!({ "reason": reason }));
         async move { engine.store.record(&audit).await }
     };
-    let Some(candidate) = engine.store.candidate(username).await? else {
-        waste_time(password).await;
-        refuse(engine, ip, serde_json::json!({ "with": "password", "reason": "unknown username" })).await?;
-        return Err(wrong());
+    let candidate = engine.store.candidate(username).await?;
+    if let Some(c) = candidate.as_ref().filter(|c| c.source != "local")
+        && let Some(until) = c.locked_until.filter(|u| *u > Utc::now())
+    {
+        return Err(locked(engine, c.id, username, until, ip).await?);
+    }
+    let candidate = match (candidate, &engine.directory) {
+        (Some(c), _) if c.source == "local" => c,
+        (candidate, Some(directory)) => {
+            return directory_sign_in(engine, directory, candidate.map(|c| c.id), username, password, ip).await;
+        }
+        (Some(c), None) => {
+            waste_time(password).await;
+            failed(c.id, "a directory account, and auth.ldap isn't configured").await?;
+            return Err(wrong());
+        }
+        (None, None) => {
+            waste_time(password).await;
+            refuse(engine, ip, serde_json::json!({ "with": "password", "reason": "unknown username" })).await?;
+            return Err(wrong());
+        }
     };
     if let Some(until) = candidate.locked_until.filter(|u| *u > Utc::now()) {
-        let minutes = ((until - Utc::now()).num_seconds() + 59) / 60;
-        tracing::warn!(user = username, "sign-in refused: the account is locked after wrong passwords");
-        failed(candidate.id, "account locked").await?;
-        return Err(ApiError::new(
-            StatusCode::TOO_MANY_REQUESTS,
-            format!(
-                "too many wrong passwords: try again in {minutes} minute(s), or ask an admin to unlock the account"
-            ),
-        ));
+        return Err(locked(engine, candidate.id, username, until, ip).await?);
     }
-    let stored = candidate.password_hash.clone().filter(|_| candidate.source == "local");
-    let Some(stored) = stored else {
+    let Some(stored) = candidate.password_hash.clone() else {
         waste_time(password).await;
         failed(candidate.id, "no password kept here").await?;
         return Err(wrong());
@@ -247,6 +260,107 @@ async fn user_sign_in(
     }
     engine.store.record_sign_in(candidate.id).await?;
     engine.store.user(candidate.id).await?.ok_or_else(wrong)
+}
+
+/// The refusal of a locked account (logged).
+async fn locked(
+    engine: &Shared,
+    id: i32,
+    username: &str,
+    until: DateTime<Utc>,
+    ip: Option<IpAddr>,
+) -> Result<ApiError, ApiError> {
+    let minutes = ((until - Utc::now()).num_seconds() + 59) / 60;
+    tracing::warn!(user = username, "sign-in refused: the account is locked after wrong passwords");
+    let audit = Audit::new(By::user(id, username, "session", ip), "session.failed")
+        .failed()
+        .detail(serde_json::json!({ "reason": "account locked" }));
+    engine.store.record(&audit).await?;
+    Ok(ApiError::new(
+        StatusCode::TOO_MANY_REQUESTS,
+        format!("too many wrong passwords: try again in {minutes} minute(s), or ask an admin to unlock the account"),
+    ))
+}
+
+/// A sign-in the directory decides (`known`: the account, if this name signed in before). The
+/// account is made or brought up to date from the directory (role, permissions, name, email).
+async fn directory_sign_in(
+    engine: &Shared,
+    directory: &crate::ldap::Directory,
+    known: Option<i32>,
+    username: &str,
+    password: String,
+    ip: Option<IpAddr>,
+) -> Result<ductus_store::User, ApiError> {
+    use crate::ldap::Verdict;
+    let wrong = || ApiError::new(StatusCode::UNAUTHORIZED, WRONG);
+    let failed = |reason: &str| {
+        let by = match known {
+            Some(id) => By::user(id, username, "session", ip),
+            None => By::anonymous(ip),
+        };
+        Audit::new(by, "session.failed").failed().detail(serde_json::json!({ "with": "ldap", "reason": reason }))
+    };
+    let verdict = match directory.sign_in(username, &password).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::error!(directory = %directory.name, error = %format!("{e:#}"), "sign-in: the directory can't be asked");
+            engine.store.record(&failed("the directory can't be reached")).await?;
+            return Err(ApiError::new(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "the directory can't be reached right now: try again in a few minutes (local accounts still work)",
+            ));
+        }
+    };
+    match verdict {
+        Verdict::Allowed(person) => {
+            let by = By { kind: "system", id: None, user_id: None, name: "directory", via: "session", ip };
+            let audit = Audit::new(by, "user.directory_change");
+            let (user, _) = engine.store.save_directory_user(username, &person.for_store(), &audit).await?;
+            if user.disabled_at.is_some() {
+                engine.store.record(&failed("account disabled")).await?;
+                return Err(wrong());
+            }
+            engine.store.record_sign_in(user.id).await?;
+            Ok(user)
+        }
+        Verdict::WrongPassword => {
+            match known {
+                // Counted and logged in one transaction, like a local account's.
+                Some(id) => {
+                    let audit = failed(Verdict::WrongPassword.reason());
+                    let locked = engine.store.record_failed_login(id, lockout(engine), &audit).await?;
+                    tracing::warn!(
+                        user = username,
+                        locked = locked.is_some(),
+                        "sign-in failed: wrong password (directory)"
+                    );
+                }
+                None => {
+                    engine.store.record(&failed(Verdict::WrongPassword.reason())).await?;
+                }
+            }
+            Err(wrong())
+        }
+        refused => {
+            engine.store.record(&failed(refused.reason())).await?;
+            if let Some(id) = known {
+                let by = By { kind: "system", id: None, user_id: None, name: "directory", via: "session", ip };
+                engine
+                    .store
+                    .refuse_directory_user(id, refused.reason(), &Audit::new(by, "user.directory_refused"))
+                    .await?;
+            }
+            if refused == Verdict::NoGroup {
+                // The password was right: saying why helps them, and tells nobody anything new.
+                return Err(ApiError::new(
+                    StatusCode::FORBIDDEN,
+                    "your directory account has no access to Ductus: ask to be added to one of its groups",
+                ));
+            }
+            Err(wrong())
+        }
+    }
 }
 
 /// Who is calling, and as what. Works while a password change is still required.

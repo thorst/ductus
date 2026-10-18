@@ -2270,6 +2270,98 @@ async fn users_lock_after_wrong_passwords_and_stop_when_disabled() {
     store.revoke_token(&tname, None, &quiet()).await.unwrap();
 }
 
+/// Directory accounts: made at the first sign-in, kept as the directory says (each change logged
+/// once), refused accounts stop at once (sessions and tokens) and come back when the directory
+/// says yes again; a local account's name is never taken over.
+#[tokio::test]
+async fn directory_accounts_follow_the_directory() {
+    use ductus_store::{DirectoryPerson, DirectoryUpdate};
+    let Some(store) = store().await else { return };
+    let url = std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let limits = SessionLimits::default();
+    let name = unique("test-user-dir");
+    let audit = || ductus_store::Audit::new(ductus_store::By::engine(), "user.directory_change");
+    let viewer = DirectoryPerson {
+        display_name: "Anna Smith".into(),
+        email: "anna@h.org".into(),
+        role: Role::Viewer,
+        permissions: vec![],
+    };
+    let actions = |name: String| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, String>("SELECT action FROM audit_log WHERE subject = $1 ORDER BY id")
+                .bind(name)
+                .fetch_all(&pool)
+                .await
+                .unwrap()
+        }
+    };
+
+    let (user, update) = store.save_directory_user(&name, &viewer, &audit()).await.unwrap();
+    assert_eq!((update, user.source.as_str(), user.role), (DirectoryUpdate::Created, "ldap", Role::Viewer));
+    assert!(user.directory_checked_at.is_some() && user.directory_refused_at.is_none());
+    let candidate = store.candidate(&name.to_uppercase()).await.unwrap().unwrap();
+    assert_eq!((candidate.source.as_str(), candidate.password_hash), ("ldap", None), "no password kept here");
+    let (_, update) = store.save_directory_user(&name, &viewer, &audit()).await.unwrap();
+    assert_eq!(update, DirectoryUpdate::Unchanged);
+
+    let operator = DirectoryPerson { role: Role::Operator, permissions: vec!["payloads".into()], ..viewer.clone() };
+    let (user, update) = store.save_directory_user(&name.to_uppercase(), &operator, &audit()).await.unwrap();
+    assert_eq!(
+        (update, user.role, user.permissions.as_slice()),
+        (DirectoryUpdate::Changed, Role::Operator, &["payloads".to_string()][..])
+    );
+    assert_eq!(user.username, name, "the name keeps its first spelling");
+
+    // Refused: sessions end, tokens stop, logged once however often it's seen.
+    let (session, _) = store.create_session(SessionFor::User(user.id), limits, &quiet()).await.unwrap();
+    let (_, token) =
+        store.create_token(&unique("test-user-dirtoken"), Role::Operator, &[], Some(user.id), &quiet()).await.unwrap();
+    let to_check = store.directory_users_to_check().await.unwrap();
+    assert!(to_check.iter().any(|(id, n)| *id == user.id && *n == name), "has a session: checked at refresh");
+    let refused = || ductus_store::Audit::new(ductus_store::By::engine(), "user.directory_refused");
+    assert!(store.refuse_directory_user(user.id, "in no Ductus group", &refused()).await.unwrap());
+    assert!(!store.refuse_directory_user(user.id, "in no Ductus group", &refused()).await.unwrap(), "already refused");
+    assert!(store.authenticate_session(&session, limits).await.unwrap().is_none(), "the session ended");
+    assert!(store.authenticate(&token).await.unwrap().is_none(), "the token stops");
+    assert!(store.user(user.id).await.unwrap().unwrap().directory_refused_at.is_some());
+    assert!(
+        store.directory_users_to_check().await.unwrap().iter().any(|(id, _)| *id == user.id),
+        "still checked: it has a token, which comes back if the directory says yes"
+    );
+
+    // Back in a group: access comes back, logged as a change.
+    let (user, update) = store.save_directory_user(&name, &operator, &audit()).await.unwrap();
+    assert_eq!((update, user.directory_refused_at), (DirectoryUpdate::Changed, None));
+    assert!(store.authenticate(&token).await.unwrap().is_some(), "the token works again");
+    assert_eq!(
+        actions(name.clone()).await,
+        ["user.create", "user.directory_change", "user.directory_refused", "user.directory_change"]
+    );
+
+    // A local account's name is never taken over, and local accounts are never checked.
+    let local = make_user(&store, Role::Viewer, &[]).await;
+    let err = store.save_directory_user(&local.username, &viewer, &audit()).await.unwrap_err().to_string();
+    assert!(err.contains("is a local account"), "{err}");
+    assert!(!store.refuse_directory_user(local.id, "x", &refused()).await.unwrap());
+    assert!(store.user(local.id).await.unwrap().unwrap().directory_refused_at.is_none());
+    store.create_session(SessionFor::User(local.id), limits, &quiet()).await.unwrap();
+    assert!(!store.directory_users_to_check().await.unwrap().iter().any(|(id, _)| *id == local.id));
+
+    for sql in [
+        "DELETE FROM api_sessions WHERE user_id = $1 OR token_id IN (SELECT id FROM api_tokens WHERE user_id = $1)",
+        "DELETE FROM api_tokens WHERE user_id = $1",
+        "DELETE FROM audit_log WHERE user_id = $1 OR subject = (SELECT username FROM users WHERE id = $1)",
+        "DELETE FROM users WHERE id = $1",
+    ] {
+        for id in [user.id, local.id] {
+            sqlx::query(sql).bind(id).execute(&pool).await.unwrap();
+        }
+    }
+}
+
 /// Changing a password ends the user's other sessions but not the one changing it; people can end
 /// their own sessions and nobody else's; and an admin-chosen password has to be changed.
 #[tokio::test]

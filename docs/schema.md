@@ -125,6 +125,10 @@ People who sign in (`ductus user create`, or `POST /api/v1/users`). Passwords ar
 | `locked_until` | timestamptz | Past the limit, the account is refused until then. |
 | `created_at` | timestamptz | |
 | `last_sign_in_at` | timestamptz | |
+| `directory_checked_at` | timestamptz | `ldap` accounts: when the directory was last asked about them (each sign-in, and every `auth.ldap.refresh` while they have a session or a token). |
+| `directory_refused_at` | timestamptz | `ldap` accounts: when the directory said no (in no Ductus group, disabled or deleted there). The account can't act (sessions ended, tokens stopped), like a disabled one, until a directory check says yes again; separate from `disabled_at`, which is an admin's decision here. |
+
+Directory accounts (`source = 'ldap'`) are made at their first sign-in; their role, permissions, display name and email are the directory's, rewritten at every sign-in and refresh (migration 0022 added the two `directory_` columns).
 
 Indexes: primary key `id`; unique `users_username (lower(username))`.
 
@@ -195,7 +199,7 @@ Who did what, to what, from where, and how it ended. Written in the transaction 
 | `actor_name` | text | The user's or token's name at the time (a snapshot). |
 | `via` | text | `session` (the web UI), `token`, `cli`, `engine`; none for rows made from `message_actions` when this table was added. |
 | `ip` | inet | The address the connection came from (a proxy's address behind one). |
-| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create`, `user.update`, `user.disable`, `user.unlock`, `token.create`, `token.revoke`, `message.payload.read`, `message.release` (resend of quarantined), `message.replay`, `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `interface.stopped`. |
+| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create` (also a directory account's first sign-in, by `directory`), `user.update`, `user.disable`, `user.unlock`, `user.directory_change` (the directory changed an account's role, permissions, name or email, or let it back in), `user.directory_refused` (the directory said no to an account: its sessions ended), `token.create`, `token.revoke`, `message.payload.read`, `message.release` (resend of quarantined), `message.replay`, `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `interface.stopped`. |
 | `subject` | text | What it was done to: a username, a token name, `interface/destination`. |
 | `interface` | text | The interface it concerns. |
 | `message_id` | bigint | The message, when the request was about exactly one. |

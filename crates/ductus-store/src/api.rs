@@ -146,11 +146,11 @@ const TOKEN_COLUMNS: &str =
     u.username AS owner";
 
 /// What a token's or session's caller is made from: the token (if any) and the user (a session's
-/// own, or a token's owner), as one row.
+/// own, or a token's owner), as one row. A user the directory refused can't act, like a disabled one.
 const WHO: &str =
     "t.id AS t_id, t.name AS t_name, t.role AS t_role, t.permissions AS t_perms, t.revoked_at AS t_revoked,
     t.last_used_at AS t_last_used, u.id AS u_id, u.username AS u_name, u.role AS u_role, u.permissions AS u_perms,
-    u.disabled_at AS u_disabled, u.must_change_password AS u_must";
+    COALESCE(u.disabled_at, u.directory_refused_at) AS u_disabled, u.must_change_password AS u_must";
 
 #[derive(sqlx::FromRow)]
 struct WhoRow {

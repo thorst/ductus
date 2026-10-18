@@ -40,13 +40,15 @@ pub struct ProfileUpdate {
     pub email: Option<String>,
 }
 
-/// Change your own name and email.
+/// Change your own name and email (a directory account's come from the directory).
 #[utoipa::path(
     patch, path = "/me", tag = "me", operation_id = "update_me", request_body = ProfileUpdate,
     responses((status = 200, body = UserInfo), (status = 403, body = super::ErrorBody))
 )]
 async fn update_profile(engine: Eng, caller: Caller, Json(change): Json<ProfileUpdate>) -> ApiResult<UserInfo> {
     let id = caller.user_id()?;
+    let user = engine.store.user(id).await?.ok_or_else(|| ApiError::not_found("your account is gone"))?;
+    super::users::directory_details_kept(&user, &change.display_name, &change.email)?;
     let change = UserChange { display_name: change.display_name, email: change.email, ..UserChange::default() };
     let user = engine
         .store

@@ -1,5 +1,5 @@
 import { useQuery } from "@tanstack/react-query";
-import { KeyRound, Lock, LockOpen, Pencil, Plus, UserRoundX, UserRoundCheck } from "lucide-react";
+import { KeyRound, Lock, LockOpen, Network, Pencil, Plus, UserRoundX, UserRoundCheck } from "lucide-react";
 import { useState } from "react";
 import { createUser, resetPassword, unlockUser, updateUser, useIsAdmin, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
@@ -24,7 +24,7 @@ export function UsersPage() {
     <>
       <PageHeader title="Users">
         Who signs in, and what each may do. Accounts are disabled, never deleted: the record of what they did names
-        them.
+        them. Directory accounts are made at their first sign-in; their role, name and email come from the directory.
       </PageHeader>
       {isAdmin ? <Users /> : <p className="text-sm text-muted">Managing users needs an admin.</p>}
     </>
@@ -75,6 +75,17 @@ function Users() {
                           {[u.display_name, u.email].filter(Boolean).join(" · ")}
                         </div>
                       )}
+                      <div className="text-xs text-muted">
+                        {u.source === "ldap" ? (
+                          <span className="inline-flex items-center gap-1">
+                            <Network aria-hidden className="size-3" />
+                            Directory account
+                            {u.directory_checked_at && <>, checked {ago(u.directory_checked_at)}</>}
+                          </span>
+                        ) : (
+                          "Local account"
+                        )}
+                      </div>
                     </Td>
                     <Td>
                       {u.role}
@@ -88,15 +99,18 @@ function Users() {
                     <Td>{u.last_sign_in_at ? ago(u.last_sign_in_at) : "never"}</Td>
                     <Td>
                       <div className="flex flex-wrap gap-1">
-                        <Button size="sm" variant="ghost" onClick={() => setDialog({ kind: "edit", user: u })}>
-                          <Pencil aria-hidden />
-                          Edit<span className="sr-only"> {u.username}</span>
-                        </Button>
+                        {/* A directory account's role, name and email are the directory's: nothing to edit here. */}
                         {u.source === "local" && (
-                          <Button size="sm" variant="ghost" onClick={() => setDialog({ kind: "password", user: u })}>
-                            <KeyRound aria-hidden />
-                            Reset password<span className="sr-only"> for {u.username}</span>
-                          </Button>
+                          <>
+                            <Button size="sm" variant="ghost" onClick={() => setDialog({ kind: "edit", user: u })}>
+                              <Pencil aria-hidden />
+                              Edit<span className="sr-only"> {u.username}</span>
+                            </Button>
+                            <Button size="sm" variant="ghost" onClick={() => setDialog({ kind: "password", user: u })}>
+                              <KeyRound aria-hidden />
+                              Reset password<span className="sr-only"> for {u.username}</span>
+                            </Button>
+                          </>
                         )}
                         {u.locked_until && (
                           <Button
@@ -172,6 +186,13 @@ function State({ user }: { user: Schemas["UserInfo"] }) {
         Locked until {timestamp(user.locked_until)}
       </span>
     );
+  if (user.directory_refused)
+    return (
+      <span className="inline-flex items-center gap-1 text-warn" title="In no Ductus group, disabled or gone there">
+        <UserRoundX aria-hidden className="size-4" />
+        Refused by the directory
+      </span>
+    );
   if (user.must_change_password) return <span className="text-warn">Must change password</span>;
   return <span>Active</span>;
 }
@@ -242,7 +263,6 @@ function EditUser({ user, onClose }: { user: Schemas["UserInfo"]; onClose: () =>
   const [email, setEmail] = useState(user.email);
   const [role, setRole] = useState<Role>(user.role as Role);
   const [permissions, setPermissions] = useState<string[]>(user.permissions);
-  const local = user.source === "local";
   return (
     <ActionDialog
       open
@@ -250,16 +270,9 @@ function EditUser({ user, onClose }: { user: Schemas["UserInfo"]; onClose: () =>
       reason={false}
       wide
       title={`Edit ${user.username}`}
-      description={
-        local ? undefined : "This account's role comes from its directory groups: only its details can change here."
-      }
       confirm="Save"
       onConfirm={async () => {
-        await updateUser(user.id, {
-          display_name: displayName.trim(),
-          email: email.trim(),
-          ...(local ? { role, permissions } : {}),
-        });
+        await updateUser(user.id, { display_name: displayName.trim(), email: email.trim(), role, permissions });
         await refresh();
       }}
     >
@@ -273,12 +286,8 @@ function EditUser({ user, onClose }: { user: Schemas["UserInfo"]; onClose: () =>
           <Input className="mt-1" type="email" value={email} onChange={(e) => setEmail(e.target.value)} />
         </label>
       </div>
-      {local && (
-        <>
-          <RolePicker value={role} onChange={setRole} name="edit-user-role" />
-          <PermissionPicker value={permissions} onChange={setPermissions} isAdmin={role === "admin"} />
-        </>
-      )}
+      <RolePicker value={role} onChange={setRole} name="edit-user-role" />
+      <PermissionPicker value={permissions} onChange={setPermissions} isAdmin={role === "admin"} />
     </ActionDialog>
   );
 }

@@ -364,6 +364,7 @@ mod tests {
             max_connections: 1,
             application: None,
             vendor: None,
+            owner: None,
             custom: Default::default(),
         };
         Some(Resources { databases: BTreeMap::from([("db".into(), Database::Postgres(db))]), ..Default::default() })

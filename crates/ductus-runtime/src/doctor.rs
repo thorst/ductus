@@ -18,7 +18,9 @@ use chrono::{DateTime, Utc};
 use ductus_core::InterfaceConfig;
 use ductus_core::alerts::{AlertSettings, SmtpTls};
 use ductus_core::config::{Destination, Source};
-use ductus_core::resources::{Api, Database, Kind, Resources, SftpServer, SqlServerConnection};
+use ductus_core::resources::{
+    Api, Database, Kind, LdapSecurity, LdapServer, Resources, SftpServer, SqlServerConnection,
+};
 use ductus_script::TRANSIENT;
 use serde::Serialize;
 use sqlx::Connection;
@@ -114,6 +116,8 @@ pub enum Target {
     Database(String, Database),
     Sftp(String, SftpServer),
     Api(String, Api),
+    /// A directory people sign in with: TLS (ldaps:// or StartTLS) and its certificate; in full mode the service account's bind.
+    Ldap(String, LdapServer),
     Mllp {
         host: String,
         port: u16,
@@ -148,6 +152,7 @@ impl Target {
             Target::Api(_, api) => https(&api.url),
             Target::Http { url } => https(url),
             Target::Smtp { tls, .. } => *tls != SmtpTls::None,
+            Target::Ldap(_, l) => l.security() != LdapSecurity::Plain,
             _ => false,
         }
     }
@@ -159,6 +164,7 @@ impl Target {
                 ductus_core::resources::Endpoint::from_url(url).map(|e| (e.host, e.port))
             }
             Target::Smtp { host, port, .. } => Some((host.clone(), *port)),
+            Target::Ldap(_, l) => l.address(),
             _ => None,
         }
     }
@@ -245,7 +251,7 @@ pub fn certificates_only(probes: Vec<Probe>) -> Vec<Probe> {
 }
 
 async fn run(probe: Probe, timeout: Duration, mode: Mode) -> Check {
-    let mut r = Run { steps: Vec::new(), advice: Vec::new(), timeout, from: None, seen: None };
+    let mut r = Run { steps: Vec::new(), advice: Vec::new(), timeout, from: None, seen: None, roots: Vec::new() };
     let endpoint = match &probe.target {
         Target::Store(url) => r.store(url).await,
         Target::Database(_, Database::Postgres(c)) => {
@@ -280,6 +286,7 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode) -> Check {
             }
             format!("{host}:{port} SMTP")
         }
+        Target::Ldap(name, l) => r.ldap(name, l, mode).await,
         Target::Mllp { host, port } => {
             r.reach(host, *port).await;
             format!("{host}:{port} MLLP")
@@ -334,6 +341,8 @@ struct Run {
     from: Option<IpAddr>,
     /// The certificate a TLS handshake showed.
     seen: Option<Seen>,
+    /// Trusted besides the system's certificates (a directory's `ca`).
+    roots: Vec<rustls::pki_types::CertificateDer<'static>>,
 }
 
 impl Run {
@@ -669,7 +678,12 @@ impl Run {
         use rustls::pki_types::ServerName;
         let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
         let presented = Arc::new(Mutex::new(Vec::new()));
-        let verifier = match rustls_platform_verifier::Verifier::new(provider.clone()) {
+        let verifier = if self.roots.is_empty() {
+            rustls_platform_verifier::Verifier::new(provider.clone())
+        } else {
+            rustls_platform_verifier::Verifier::new_with_extra_roots(self.roots.iter().cloned(), provider.clone())
+        };
+        let verifier = match verifier {
             Ok(v) => Recording { inner: v, seen: presented.clone() },
             Err(e) => {
                 self.step("TLS", Outcome::Fail, format!("can't load this server's trusted certificates: {e}"));
@@ -774,6 +788,85 @@ impl Run {
             }
             Err(_) => {
                 self.step("SMTP", Outcome::Fail, format!("no SMTP answer in {}", self.waited()));
+                None
+            }
+        }
+    }
+
+    /// A directory: DNS, TCP, TLS (ldaps://, or StartTLS on ldap://) and its certificate; in
+    /// full mode also the service account's bind (never a person's).
+    async fn ldap(&mut self, name: &str, l: &LdapServer, mode: Mode) -> String {
+        let Some((host, port)) = l.address() else {
+            self.step("URL", Outcome::Fail, format!("not an ldap(s):// URL: {}", l.url));
+            return l.url.clone();
+        };
+        let security = l.security();
+        let endpoint = format!("{host}:{port} {}", if security == LdapSecurity::Tls { "LDAPS" } else { "LDAP" });
+        match crate::ldap::extra_roots(l.ca.as_deref()) {
+            Ok(roots) => self.roots = roots,
+            Err(e) => {
+                self.step("TLS", Outcome::Fail, format!("`ca`: {e:#}"));
+                return endpoint;
+            }
+        }
+        let Some(address) = self.connectable(&host, port).await else { return endpoint };
+        let secure = match security {
+            LdapSecurity::Tls => self.tls(&host, address).await,
+            LdapSecurity::StartTls => match self.ldap_starttls(address).await {
+                Some(stream) => self.tls_on(&host, stream).await,
+                None => false,
+            },
+            LdapSecurity::Plain => {
+                self.step("TLS", Outcome::Warn, "none: plain ldap:// (`insecure: true`)");
+                self.advise("Passwords cross the network readable: use ldaps:// (636) or `starttls: true` outside a test directory.");
+                true
+            }
+        };
+        if secure && mode == Mode::Full {
+            match crate::ldap::check_service_account(l).await {
+                Ok(()) => {
+                    let who = l.bind_dn.as_deref().map(|d| format!("as `{d}`")).unwrap_or_else(|| "anonymously".into());
+                    self.step("login", Outcome::Ok, format!("bound {who}"));
+                }
+                Err(e) => {
+                    self.step("login", Outcome::Fail, format!("{e:#}"));
+                    self.advise(format!("Check `bind_dn` and `bind_password` (a secret) of ldap `{name}` for this environment with the directory's owners."));
+                }
+            }
+        }
+        endpoint
+    }
+
+    /// LDAP up to StartTLS (the extended operation, written by hand like SMTP's): the
+    /// connection, ready for the handshake. Nothing is bound or searched.
+    async fn ldap_starttls(&mut self, address: SocketAddr) -> Option<TcpStream> {
+        let dialogue = async {
+            let mut tcp = TcpStream::connect(address).await?;
+            tcp.write_all(&STARTTLS_REQUEST).await?;
+            let reply = read_ldap_message(&mut tcp).await?;
+            Ok::<_, std::io::Error>((tcp, starttls_result(&reply)))
+        };
+        match tokio::time::timeout(self.timeout, dialogue).await {
+            Ok(Ok((stream, Some((0, _))))) => {
+                self.step("LDAP", Outcome::Ok, "StartTLS accepted");
+                Some(stream)
+            }
+            Ok(Ok((_, Some((code, text))))) => {
+                let text = if text.is_empty() { String::new() } else { format!(": {text}") };
+                self.step("LDAP", Outcome::Fail, format!("StartTLS refused (result {code}){text}"));
+                self.advise("The directory doesn't offer StartTLS on this port: use ldaps:// (usually 636), or ask its owners to enable StartTLS.");
+                None
+            }
+            Ok(Ok((_, None))) => {
+                self.step("LDAP", Outcome::Fail, "the answer to StartTLS isn't LDAP: is this the right port?");
+                None
+            }
+            Ok(Err(e)) => {
+                self.step("LDAP", Outcome::Fail, e.to_string());
+                None
+            }
+            Err(_) => {
+                self.step("LDAP", Outcome::Fail, format!("no LDAP answer in {}", self.waited()));
                 None
             }
         }
@@ -964,6 +1057,70 @@ async fn smtp_reply<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> std::io::R
     }
 }
 
+/// LDAP's StartTLS extended request (RFC 4511 4.14.1), message id 1: SEQUENCE { 1,
+/// [APPLICATION 23] { [0] "1.3.6.1.4.1.1466.20037" } }.
+const STARTTLS_REQUEST: [u8; 31] = [
+    0x30, 0x1d, 0x02, 0x01, 0x01, 0x77, 0x18, 0x80, 0x16, b'1', b'.', b'3', b'.', b'6', b'.', b'1', b'.', b'4', b'.',
+    b'1', b'.', b'1', b'4', b'6', b'6', b'.', b'2', b'0', b'0', b'3', b'7',
+];
+
+/// One LDAP message off the wire (a BER SEQUENCE: tag, length, contents), at most 64 KB.
+async fn read_ldap_message<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let bad = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_string());
+    let mut head = [0u8; 2];
+    r.read_exact(&mut head).await?;
+    let mut message = head.to_vec();
+    let length = if head[1] & 0x80 == 0 {
+        usize::from(head[1])
+    } else {
+        let n = usize::from(head[1] & 0x7f);
+        if n == 0 || n > 3 {
+            return Err(bad("not an LDAP answer"));
+        }
+        let mut bytes = vec![0u8; n];
+        r.read_exact(&mut bytes).await?;
+        message.extend_from_slice(&bytes);
+        bytes.iter().fold(0usize, |len, b| (len << 8) | usize::from(*b))
+    };
+    if length > 65_536 {
+        return Err(bad("an LDAP answer too long for StartTLS"));
+    }
+    let mut body = vec![0u8; length];
+    r.read_exact(&mut body).await?;
+    message.extend_from_slice(&body);
+    Ok(message)
+}
+
+/// One BER element: its tag, contents and what follows.
+fn ber(buf: &[u8]) -> Option<(u8, &[u8], &[u8])> {
+    let (&tag, rest) = buf.split_first()?;
+    let (&first, rest) = rest.split_first()?;
+    let (length, rest) = if first & 0x80 == 0 {
+        (usize::from(first), rest)
+    } else {
+        let n = usize::from(first & 0x7f);
+        if n == 0 || n > 4 || rest.len() < n {
+            return None;
+        }
+        (rest[..n].iter().fold(0usize, |len, b| (len << 8) | usize::from(*b)), &rest[n..])
+    };
+    (rest.len() >= length).then(|| (tag, &rest[..length], &rest[length..]))
+}
+
+/// The result code and diagnostic message of an ExtendedResponse ([APPLICATION 24]), or None if
+/// the bytes aren't one.
+fn starttls_result(message: &[u8]) -> Option<(u32, String)> {
+    let (0x30, body, _) = ber(message)? else { return None };
+    let (0x02, _, rest) = ber(body)? else { return None }; // message id
+    let (0x78, response, _) = ber(rest)? else { return None };
+    let (0x0a, code, rest) = ber(response)? else { return None };
+    let code = code.iter().fold(0u32, |c, b| (c << 8) | u32::from(*b));
+    let (_, _, rest) = ber(rest)?; // matched DN
+    let (_, text, _) = ber(rest)?;
+    Some((code, String::from_utf8_lossy(text).trim().to_string()))
+}
+
 /// The first line of a reply, trimmed.
 fn first(reply: &str) -> String {
     reply.lines().next().unwrap_or("").trim().to_string()
@@ -1142,7 +1299,7 @@ fn tls_failure(
 #[derive(Default)]
 struct Plan {
     /// By (section, key): 1 databases, 2 APIs, 3 SFTP servers, 4 destinations, 5 folders,
-    /// 6 listening ports.
+    /// 6 listening ports, 7 directories.
     entries: BTreeMap<(u8, String), Entry>,
 }
 
@@ -1196,6 +1353,10 @@ impl Plan {
             },
             Kind::Sftp => match resources.sftp.get(name) {
                 Some(s) => (3, Target::Sftp(name.into(), s.clone())),
+                None => return,
+            },
+            Kind::Ldap => match resources.ldap.get(name) {
+                Some(l) => (7, Target::Ldap(name.into(), l.clone())),
                 None => return,
             },
         };
@@ -1270,6 +1431,10 @@ pub fn plan(
         for name in names {
             plan.resource(resources, kind, name, UNUSED.into(), None);
         }
+    }
+    // Directories are what people sign in with, not something interfaces use.
+    for name in resources.ldap.keys() {
+        plan.resource(resources, Kind::Ldap, name, "sign-in for people (auth.ldap)".into(), None);
     }
 
     let store = Probe {
@@ -1581,6 +1746,30 @@ mod tests {
     }
 
     /// A pretend mail server: greets, answers EHLO (offering STARTTLS if `offer`), then TLS.
+    #[test]
+    fn the_starttls_request_and_its_answers_are_ldap() {
+        // The request parses as SEQUENCE { 1, [APPLICATION 23] { [0] the StartTLS OID } }.
+        let (0x30, body, rest) = ber(&STARTTLS_REQUEST).unwrap() else { panic!() };
+        assert!(rest.is_empty());
+        let (0x02, [1], op) = ber(body).unwrap() else { panic!() };
+        let (0x77, request, _) = ber(op).unwrap() else { panic!() };
+        let (0x80, oid, _) = ber(request).unwrap() else { panic!() };
+        assert_eq!(oid, b"1.3.6.1.4.1.1466.20037");
+
+        // slapd's success, and a refusal with its message (protocolError, 2).
+        let ok = [0x30, 0x0c, 0x02, 0x01, 0x01, 0x78, 0x07, 0x0a, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00];
+        assert_eq!(starttls_result(&ok), Some((0, String::new())));
+        let mut refused = vec![0x30, 0x1d, 0x02, 0x01, 0x01, 0x78, 0x18, 0x0a, 0x01, 0x02, 0x04, 0x00, 0x04, 0x11];
+        refused.extend_from_slice(b"unsupported op  ");
+        refused.push(b'x');
+        assert_eq!(starttls_result(&refused), Some((2, "unsupported op  x".into())));
+        // Long-form lengths, and what isn't LDAP.
+        let long = [0x30, 0x81, 0x0c, 0x02, 0x01, 0x01, 0x78, 0x07, 0x0a, 0x01, 0x00, 0x04, 0x00, 0x04, 0x00];
+        assert_eq!(starttls_result(&long), Some((0, String::new())));
+        assert_eq!(starttls_result(b"220 smtp.example.org ESMTP\r\n"), None);
+        assert_eq!(starttls_result(&ok[..8]), None, "cut short");
+    }
+
     async fn smtp_server(config: Arc<rustls::ServerConfig>, offer: bool) -> u16 {
         let acceptor = tokio_rustls::TlsAcceptor::from(config);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

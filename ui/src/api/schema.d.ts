@@ -436,7 +436,7 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** Change your own name and email. */
+        /** Change your own name and email (a directory account's come from the directory). */
         patch: operations["update_me"];
         trace?: never;
     };
@@ -2280,6 +2280,16 @@ export interface components {
         UserInfo: {
             /** Format: date-time */
             created_at: string;
+            /**
+             * Format: date-time
+             * @description A directory account: when the directory was last asked about them (sign-in or refresh).
+             */
+            directory_checked_at?: string | null;
+            /**
+             * @description A directory account the directory refused at its last check (no group, disabled or gone
+             *     there): it can't sign in or act until the directory says yes again.
+             */
+            directory_refused: boolean;
             disabled: boolean;
             display_name: string;
             email: string;

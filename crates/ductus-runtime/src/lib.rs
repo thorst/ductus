@@ -14,6 +14,7 @@ pub mod health;
 mod http;
 mod ingest;
 pub mod keys;
+pub mod ldap;
 mod limiter;
 mod mssql;
 pub mod project;
@@ -118,6 +119,13 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     let missing = resources.missing_references(&configs);
     if !missing.is_empty() {
         bail!("{}", missing.join("\n"));
+    }
+    let directory = ldap::Directory::new(settings.auth.ldap.as_ref(), &resources)?;
+    for name in resources.insecure_ldap() {
+        tracing::warn!(
+            directory = name,
+            "plain ldap:// (`insecure: true`): passwords cross the network readable; use ldaps:// or starttls"
+        );
     }
     let alerts = match alert_settings {
         Some(a) => {
@@ -369,6 +377,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         instance: instance.clone(),
         alerts,
         doctor: settings.doctor,
+        directory,
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse
@@ -376,6 +385,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     audit::start(&engine, stopped_rx, retention_days).await;
     alerts::start(&engine).await;
     certificates::start(&engine);
+    ldap::start(&engine);
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
         api_server = Some(api::serve(engine.clone(), host, *port).await?);

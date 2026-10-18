@@ -31,6 +31,7 @@ import { ago, timestamp } from "@/lib/format";
  */
 export function AccountPage() {
   const { data: me } = useQuery(session);
+  const { data: user } = useQuery({ ...account, enabled: me?.kind === "user" });
   if (!me) return null;
   if (me.kind !== "user") {
     return (
@@ -55,11 +56,25 @@ export function AccountPage() {
         </p>
       )}
       <div className="max-w-3xl space-y-6">
-        <PasswordCard mustChange={me.must_change_password} />
+        {user?.source === "ldap" ? (
+          <Card aria-label="Password">
+            <CardHeader>
+              <CardTitle>Password</CardTitle>
+            </CardHeader>
+            <CardBody>
+              <p className="max-w-prose text-sm">
+                You sign in with your directory account: your password is your directory password (change it where you
+                always do). Your name, email, role and permissions come from the directory too.
+              </p>
+            </CardBody>
+          </Card>
+        ) : (
+          <PasswordCard mustChange={me.must_change_password} />
+        )}
         {!me.must_change_password && (
           <>
             <ProfileCard />
-            <PermissionsCard me={me} />
+            <PermissionsCard me={me} directory={user?.source === "ldap"} />
             <SessionsCard />
             <TokensCard me={me} />
             <ActivityCard />
@@ -205,6 +220,28 @@ function ProfileCard() {
 }
 
 function ProfileForm({ user, onSaved }: { user: Schemas["UserInfo"]; onSaved: () => Promise<unknown> }) {
+  if (user.source !== "local") return <DirectoryDetails user={user} />;
+  return <LocalProfileForm user={user} onSaved={onSaved} />;
+}
+
+/** A directory account's details: the directory's, shown, not edited. */
+function DirectoryDetails({ user }: { user: Schemas["UserInfo"] }) {
+  return (
+    <dl className="grid max-w-md grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-sm">
+      <dt className="text-muted">Name</dt>
+      <dd>{user.display_name || "(none in the directory)"}</dd>
+      <dt className="text-muted">Email</dt>
+      <dd className="break-all">{user.email || "(none in the directory)"}</dd>
+      <dt className="text-muted">From</dt>
+      <dd>
+        the directory
+        {user.directory_checked_at && <>, checked {ago(user.directory_checked_at)}</>}
+      </dd>
+    </dl>
+  );
+}
+
+function LocalProfileForm({ user, onSaved }: { user: Schemas["UserInfo"]; onSaved: () => Promise<unknown> }) {
   const [name, setName] = useState(user.display_name);
   const [email, setEmail] = useState(user.email);
   const [error, setError] = useState<string | null>(null);
@@ -248,7 +285,7 @@ function ProfileForm({ user, onSaved }: { user: Schemas["UserInfo"]; onSaved: ()
   );
 }
 
-function PermissionsCard({ me }: { me: Schemas["Session"] }) {
+function PermissionsCard({ me, directory }: { me: Schemas["Session"]; directory: boolean }) {
   const has = (p: keyof typeof PERMISSION_HELP) => me.permissions.includes(p);
   return (
     <Card aria-label="What you can do">
@@ -267,7 +304,9 @@ function PermissionsCard({ me }: { me: Schemas["Session"] }) {
             </li>
           ))}
         </ul>
-        <p className="mt-3 text-xs text-muted">An admin changes these.</p>
+        <p className="mt-3 text-xs text-muted">
+          {directory ? "Your groups in the directory decide these." : "An admin changes these."}
+        </p>
       </CardBody>
     </Card>
   );

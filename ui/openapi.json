@@ -1210,7 +1210,7 @@
         "tags": [
           "me"
         ],
-        "summary": "Change your own name and email.",
+        "summary": "Change your own name and email (a directory account's come from the directory).",
         "operationId": "update_me",
         "requestBody": {
           "content": {
@@ -6338,12 +6338,25 @@
           "source",
           "must_change_password",
           "disabled",
-          "created_at"
+          "created_at",
+          "directory_refused"
         ],
         "properties": {
           "created_at": {
             "type": "string",
             "format": "date-time"
+          },
+          "directory_checked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "A directory account: when the directory was last asked about them (sign-in or refresh)."
+          },
+          "directory_refused": {
+            "type": "boolean",
+            "description": "A directory account the directory refused at its last check (no group, disabled or gone\nthere): it can't sign in or act until the directory says yes again."
           },
           "disabled": {
             "type": "boolean"

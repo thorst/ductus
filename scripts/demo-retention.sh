@@ -89,6 +89,8 @@ history lab 21 35 1000 1
 history lab 21 28 3 3     # quarantined, 28 days old
 echo "   adt: $(tier_counts adt)   lab: $(tier_counts lab)"
 adt120=$(leaf 49 120) lab35=$(leaf 21 35) lab28=$(leaf 21 28)
+# A token of this name left by an earlier run (process ids repeat after a reboot) would refuse the new one.
+"$BIN" token revoke "demo-$$" >/dev/null 2>&1 || true
 TOKEN=$("$BIN" token create "demo-$$" --role operator 2>/dev/null)
 export DUCTUS_API_TOKEN=$TOKEN
 

@@ -17,6 +17,7 @@
 //!   lockout: { attempts: 5, window: 15m, for: 15m }
 //!   token_sign_in: true
 //!   user_tokens: true
+//!   ldap: ...         # sign-in with a directory (see `crate::ldap::LdapAuth`)
 //! audit:              # the audit log
 //!   keep: 6y          # at least 1y
 //!   payload_reads: true
@@ -191,6 +192,9 @@ pub struct AuthSettings {
     /// Users may make API tokens of their own (never above their own role).
     #[serde(default = "yes")]
     pub user_tokens: bool,
+    /// Sign-in with a directory (Active Directory, OpenLDAP), besides local accounts.
+    #[serde(default)]
+    pub ldap: Option<crate::ldap::LdapAuth>,
 }
 
 impl Default for AuthSettings {
@@ -201,6 +205,7 @@ impl Default for AuthSettings {
             lockout: LockoutSettings::default(),
             token_sign_in: true,
             user_tokens: true,
+            ldap: None,
         }
     }
 }
@@ -437,6 +442,9 @@ impl AuthSettings {
         if self.lockout.attempts == 0 {
             bail!("auth.lockout.attempts must be at least 1");
         }
+        if let Some(ldap) = &self.ldap {
+            ldap.check().context("auth.ldap")?;
+        }
         Ok(())
     }
 }
@@ -546,6 +554,27 @@ mod tests {
             std::fs::write(dir.path().join(FILE), bad).unwrap();
             assert!(Settings::load(dir.path()).is_err(), "{bad}");
         }
+        assert!(a.ldap.is_none());
+    }
+
+    #[test]
+    fn directory_sign_in_is_read_from_auth() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(FILE),
+            "auth:\n  ldap:\n    resource: corp\n    user_base: ou=people,dc=example,dc=org\n    user_filter: (uid={username})\n    groups:\n      admin: cn=admins,ou=groups,dc=example,dc=org\n    nested: true\n    refresh: 5m\n",
+        )
+        .unwrap();
+        let l = Settings::load(dir.path()).unwrap().auth.ldap.unwrap();
+        assert_eq!((l.resource.as_str(), l.filter_for("anna").as_str()), ("corp", "(uid=anna)"));
+        assert_eq!((l.nested, l.refresh.as_secs(), l.groups.admin.len()), (true, 300, 1));
+        std::fs::write(
+            dir.path().join(FILE),
+            "auth:\n  ldap:\n    resource: corp\n    user_base: dc=x\n    groups: {}\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
+        assert!(err.contains("auth.ldap") && err.contains("at least one group"), "{err}");
     }
 
     #[test]

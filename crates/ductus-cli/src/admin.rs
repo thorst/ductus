@@ -161,6 +161,8 @@ pub async fn user(database_url: &str, root: &std::path::Path, command: UserComma
             for u in users {
                 let state = if u.disabled_at.is_some() {
                     "  disabled"
+                } else if u.directory_refused_at.is_some() {
+                    "  refused by the directory"
                 } else if u.locked_until.is_some_and(|t| t > chrono::Utc::now()) {
                     "  locked"
                 } else if u.must_change_password {
@@ -170,11 +172,18 @@ pub async fn user(database_url: &str, root: &std::path::Path, command: UserComma
                 };
                 let extra =
                     if u.permissions.is_empty() { String::new() } else { format!("  [{}]", u.permissions.join(", ")) };
-                println!("{:<24} {:<9} {}{extra}{state}", u.username, u.role.label(), u.email);
+                let source = if u.source == "local" { "" } else { "  (directory)" };
+                println!("{:<24} {:<9} {}{extra}{source}{state}", u.username, u.role.label(), u.email);
             }
         }
         UserCommand::Set { username, role, permissions } => {
             let user = find(username).await?;
+            if user.source != "local" {
+                bail!(
+                    "`{}` signs in with the directory: its groups there decide the role and permissions",
+                    user.username
+                );
+            }
             let role = role
                 .map(|r| Role::parse(&r).with_context(|| format!("unknown role `{r}` (viewer, operator or admin)")))
                 .transpose()?;

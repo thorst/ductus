@@ -87,6 +87,8 @@ held() { q "SELECT count(*) FROM messages WHERE interface = '$1' AND tier = 0 ${
 
 echo "== first start registers the interfaces; breached is paused (the breach)"
 start_engine 1
+# A token of this name left by an earlier run (process ids repeat after a reboot) would refuse the new one.
+"$BIN" token revoke "demo-$$" >/dev/null 2>&1 || true
 TOKEN=$("$BIN" token create "demo-$$" --role operator 2>/dev/null)
 export DUCTUS_API_TOKEN=$TOKEN
 "$BIN" pause adt breached --reason "data breach: cut off until the security audit clears it" | sed 's/^/   /'

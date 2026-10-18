@@ -117,6 +117,8 @@ pub struct Engine {
     pub doctor: ductus_core::settings::DoctorSettings,
     /// The certificates the engine connects to (worked out from the project at start).
     pub certificates: Vec<crate::certificates::CertificateTarget>,
+    /// The directory people sign in with (`auth.ldap`), if configured.
+    pub directory: Option<crate::ldap::Directory>,
 }
 
 /// What the engine is made of, from startup.
@@ -136,6 +138,7 @@ pub struct Parts {
     pub instance: String,
     pub alerts: Option<Arc<crate::alerts::Alerts>>,
     pub doctor: ductus_core::settings::DoctorSettings,
+    pub directory: Option<crate::ldap::Directory>,
 }
 
 impl Engine {
@@ -156,6 +159,7 @@ impl Engine {
             instance,
             alerts,
             doctor,
+            directory,
         } = parts;
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
@@ -183,6 +187,7 @@ impl Engine {
             alerts,
             doctor,
             certificates,
+            directory,
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

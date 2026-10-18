@@ -25,10 +25,16 @@ pub struct User {
     pub locked_until: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub last_sign_in_at: Option<DateTime<Utc>>,
+    /// A directory account: when the directory was last asked about them.
+    pub directory_checked_at: Option<DateTime<Utc>>,
+    /// A directory account the directory refused (no Ductus group, disabled or gone there): it
+    /// can't act until a check says yes again.
+    pub directory_refused_at: Option<DateTime<Utc>>,
 }
 
-const USER_COLUMNS: &str = "id, username, display_name, email, role, permissions, source, must_change_password,
-    disabled_at, locked_until, created_at, last_sign_in_at";
+pub(crate) const USER_COLUMNS: &str =
+    "id, username, display_name, email, role, permissions, source, must_change_password,
+    disabled_at, locked_until, created_at, last_sign_in_at, directory_checked_at, directory_refused_at";
 
 /// A new account.
 #[derive(Debug, Clone)]

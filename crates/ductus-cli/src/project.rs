@@ -154,12 +154,19 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
     };
     let resources = match ductus_core::Resources::load(root, &env) {
         Ok(r) => {
-            if !r.databases.is_empty() || !r.sftp.is_empty() || !r.apis.is_empty() {
+            if !r.databases.is_empty() || !r.sftp.is_empty() || !r.apis.is_empty() || !r.ldap.is_empty() {
+                let directories =
+                    if r.ldap.is_empty() { String::new() } else { format!(", {} directory(ies)", r.ldap.len()) };
                 println!(
-                    "✓ resources: {} database(s), {} SFTP server(s), {} API(s)",
+                    "✓ resources: {} database(s), {} SFTP server(s), {} API(s){directories}",
                     r.databases.len(),
                     r.sftp.len(),
                     r.apis.len()
+                );
+            }
+            for name in r.insecure_ldap() {
+                println!(
+                    "⚠ ldap `{name}`: plain ldap:// (`insecure: true`) sends passwords readable; use ldaps:// or `starttls: true` outside a test directory"
                 );
             }
             Some(r)
@@ -261,6 +268,20 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
             for line in ductus_core::docs::check_project(&schema, configs(), resources.as_ref().unwrap_or(&none)) {
                 problems += 1;
                 println!("✗ {line}");
+            }
+        }
+    }
+
+    // Directory sign-in (`auth.ldap`): its directory must be in resources.yaml, with a usable `ca`.
+    if let (Ok(settings), Some(r)) = (ductus_core::settings::Settings::load(root), &resources)
+        && settings.auth.ldap.is_some()
+    {
+        match ductus_runtime::ldap::Directory::new(settings.auth.ldap.as_ref(), r) {
+            Ok(Some(d)) => println!("✓ sign-in with directory `{}` ({})", d.name, d.server.url),
+            Ok(None) => {}
+            Err(e) => {
+                problems += 1;
+                println!("✗ {e:#}");
             }
         }
     }

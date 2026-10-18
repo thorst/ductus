@@ -25,7 +25,7 @@ pub struct CertificateTarget {
     pub resource: String,
     pub host: String,
     pub port: u16,
-    /// Who owns it, when anyone is named (a destination's owner, for a URL destination).
+    /// Who owns it, when anyone is named (a URL destination's owner, or the resources.yaml entry's).
     pub owner: String,
     /// The interface whose `alert:` options apply (a URL destination's).
     pub interface: Option<String>,
@@ -73,14 +73,11 @@ pub fn targets(
         if out.iter().any(|t| t.key == key) {
             continue;
         }
-        out.push(CertificateTarget {
-            key,
-            resource,
-            host,
-            port,
-            owner: destination.as_ref().map(|(_, o)| o.clone()).unwrap_or_default(),
-            interface: destination.map(|(i, _)| i),
-        });
+        let owner = match &destination {
+            Some((_, owner)) => owner.clone(),
+            None => resources.owner(&resource).unwrap_or("").to_string(),
+        };
+        out.push(CertificateTarget { key, resource, host, port, owner, interface: destination.map(|(i, _)| i) });
     }
     out
 }

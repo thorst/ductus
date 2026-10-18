@@ -18,10 +18,12 @@
 # acknowledged and silenced, a channel is tested (one works, one can't be reached), and a viewer
 # only looks. Certificates (`cert-server`, an example): five TLS servers whose certificates end in
 # 40, 20, 10 and 3 days and two days ago, and one that can't be reached, in the Connections table
-# and the Overview card. Screenshots: ui/test-results/.
+# and the Overview card. The directory (a throwaway OpenLDAP, scripts/dev/slapd.sh): a directory
+# person signs in, their account and the Users page show what the directory decides, read-only.
+# Screenshots: ui/test-results/.
 #
-# Needs Node and the UI's packages (cd ui && npm ci), and Playwright's Chromium
-# (npx playwright install --with-deps chromium).
+# Needs Node and the UI's packages (cd ui && npm ci), Playwright's Chromium
+# (npx playwright install --with-deps chromium), and slapd (apt-get install slapd).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
@@ -59,7 +61,23 @@ apis:
   hie: { url: "https://localhost:7464/", custom: { baa_signed: n/a } }
   legacy-portal: { url: "https://localhost:7465/", custom: { baa_signed: n/a } }
   fax-gateway: { url: "https://localhost:7469/", custom: { baa_signed: n/a } }
+# The directory people sign in with: plain LDAP (a test directory), so no certificate row.
+ldap:
+  corp-directory:
+    url: ldap://127.0.0.1:3392
+    insecure: true
+    bind_dn: cn=ductus-svc,ou=service,dc=example,dc=org
+    bind_password: svc-password
+    custom: { baa_signed: n/a }
 EOF
+L=$(mktemp -d /tmp/ductus-ldap.XXXX)
+SLAPD_SCRIPT=$(realpath "$(dirname "${BASH_SOURCE[0]}")/dev/slapd.sh")
+trap 'bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true' EXIT
+bash "$SLAPD_SCRIPT" start "$L" 3392 6639
+DIRECTORY_PEOPLE="'test-user-ada','test-user-olaf','test-user-anna','test-user-nested','test-user-nobody'"
+psql -q "$DB" -c "DELETE FROM api_sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ($DIRECTORY_PEOPLE))" \
+  -c "DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users WHERE username IN ($DIRECTORY_PEOPLE))" \
+  -c "DELETE FROM users WHERE username IN ($DIRECTORY_PEOPLE)"
 
 mkdir -p "$P/interfaces/adt" "$P/interfaces/orders" "$P/interfaces/billing"
 # Alerts (0.5.8.3): `chat` reaches a sink; `pager` reaches nothing, so its failures show.
@@ -72,6 +90,16 @@ alerts:
   rules:
     - { when: [error, stalled, stopped], severity: critical, to: [chat, pager] }
     - { when: [behind, silent, missed], severity: warning, to: [chat] }
+auth:
+  ldap:
+    resource: corp-directory
+    user_base: ou=people,dc=example,dc=org
+    user_filter: (uid={username})
+    attributes: { display_name: cn, email: mail }
+    groups:
+      admin: cn=ductus-admins,ou=groups,dc=example,dc=org
+      operator: cn=ductus-operators,ou=groups,dc=example,dc=org
+      viewer: cn=ductus-viewers,ou=groups,dc=example,dc=org
 EOF
 cat >"$P/interfaces/adt/interface.yaml" <<'EOF'
 name: adt
@@ -136,13 +164,15 @@ TLS=$!
 psql -q "$DB" -c "DELETE FROM certificate_status WHERE resource IN ('pharmacy', 'radiology', 'payer', 'hie', 'legacy-portal', 'fax-gateway')"
 "$BIN" run >"$P/run.log" 2>&1 &
 ENGINE=$!
-# cert-server has no SIGINT handler (a background job of a script ignores SIGINT): TERM.
-trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true' EXIT
+# cert-server has no SIGINT handler (a background job of a script ignores SIGINT): TERM. slapd too.
+trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true' EXIT
 # Alerts of earlier runs of this demo: start clean.
 psql -q "$DB" -c "DELETE FROM alert_events WHERE key IN ('dest:adt/lab', 'dest:adt/archive', 'dest:orders/default', 'dest:billing/default', 'iface:adt', 'iface:orders', 'iface:billing')" \
   -c "UPDATE alert_state SET state = 'ok', severity = NULL, since = NULL, ok_since = NULL, ack_by = NULL, ack_at = NULL, silenced_until = NULL, rev = rev + 1 WHERE interface IN ('adt', 'orders', 'billing')"
 until grep "started interfaces=" "$P/run.log" >/dev/null; do kill -0 $ENGINE || { cat "$P/run.log"; exit 1; }; sleep 0.2; done
 echo "engine log: $P/run.log"
+# A token of this name left by an earlier run (process ids repeat after a reboot) would refuse the new one.
+for t in operator viewer admin; do "$BIN" token revoke "ui-demo-$t-$$" >/dev/null 2>&1 || true; done
 export DUCTUS_API_TOKEN=$("$BIN" token create "ui-demo-operator-$$" --role operator --permission payloads 2>/dev/null)
 VIEWER=$("$BIN" token create "ui-demo-viewer-$$" --role viewer --permission payloads 2>/dev/null)
 ADMIN=$("$BIN" token create "ui-demo-admin-$$" --role admin 2>/dev/null)
@@ -184,7 +214,9 @@ cd "$UI"
 export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN \
   DUCTUS_ADMIN_TOKEN=$ADMIN DUCTUS_PERSON_ADMIN="test-user-ui-admin-$$:$PASSWORD" \
   DUCTUS_PERSON_OPERATOR="test-user-ui-operator-$$:$PASSWORD" DUCTUS_PERSON_VIEWER="test-user-ui-viewer-$$:$PASSWORD" \
-  DUCTUS_PERSON_AUDITOR="test-user-ui-auditor-$$:$PASSWORD"
+  DUCTUS_PERSON_AUDITOR="test-user-ui-auditor-$$:$PASSWORD" \
+  DUCTUS_DIRECTORY_OPERATOR="test-user-olaf:test-user-olaf-password" \
+  DUCTUS_DIRECTORY_NOBODY="test-user-nobody:test-user-nobody-password"
 if npx playwright test --reporter=line; then
   echo PASS
 else

@@ -16,6 +16,8 @@ export const ACTIONS: Record<string, string> = {
   "user.update": "Changed a user",
   "user.disable": "Disabled a user",
   "user.unlock": "Unlocked a user",
+  "user.directory_change": "Directory changed a user",
+  "user.directory_refused": "Directory refused a user",
   "token.create": "Created a token",
   "token.revoke": "Revoked a token",
   "message.payload.read": "Viewed a payload",

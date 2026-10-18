@@ -353,6 +353,7 @@ pub(crate) mod tests {
             trust_server_certificate: true,
             application: None,
             vendor: None,
+            owner: None,
             custom: Default::default(),
         })
     }
