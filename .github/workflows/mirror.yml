@@ -1,0 +1,35 @@
+name: Mirror CI images
+
+# CI's Postgres comes from this repository's own registry (ghcr.io), not straight from a public
+# one: anonymous pulls from Docker Hub and ECR Public share limits with everyone on GitHub's
+# runners, and failed whole runs ("toomanyrequests: Data limit exceeded"). This copies the
+# official image there; once a month picks up Postgres's patch releases. Run it by hand after
+# changing the image: gh workflow run mirror.yml
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 4 3 * *"
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  postgres:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Copy postgres:18 to ghcr.io
+        env:
+          SOURCE: public.ecr.aws/docker/library/postgres:18
+          TARGET: ghcr.io/${{ github.repository_owner }}/ductus-ci-postgres:18
+        run: |
+          echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # The public registry's limit is the reason for this job: try for a while before giving up.
+          for attempt in 1 2 3 4 5 6; do
+            docker pull "$SOURCE" && break
+            [ "$attempt" = 6 ] && exit 1
+            sleep $((attempt * 120))
+          done
+          # Rebuilt with one label, so the package belongs to this repository (CI's token can read it).
+          echo "FROM $SOURCE" | docker build --label "org.opencontainers.image.source=https://github.com/${{ github.repository }}" -t "$TARGET" -
+          docker push "$TARGET"
