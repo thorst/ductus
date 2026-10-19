@@ -59,7 +59,7 @@ done
 echo "== Postgres (its own container, like a database server)"
 docker network create "$NET" >/dev/null
 docker run -d --name ductus-pkg-db --network "$NET" -e POSTGRES_USER=ductus -e POSTGRES_PASSWORD=pkg-test \
-  -e POSTGRES_DB=ductus public.ecr.aws/docker/library/postgres:18 >/dev/null
+  -e POSTGRES_DB=ductus "${POSTGRES_IMAGE:-public.ecr.aws/docker/library/postgres:18}" >/dev/null
 for _ in $(seq 1 60); do
   docker exec ductus-pkg-db pg_isready -U ductus >/dev/null 2>&1 && break
   sleep 0.5

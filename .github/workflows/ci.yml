@@ -29,15 +29,25 @@ env:
   DUCTUS_TEST_SQLSERVER: sa:Ductus-ci-1@localhost:1433
   # The binary must embed the web UI (without it, build.rs embeds a "build the UI" page).
   DUCTUS_REQUIRE_UI: "1"
+  # The packages demo's database container (the same copy as the test job's service).
+  POSTGRES_IMAGE: ghcr.io/thorst/ductus-ci-postgres:18
+
+# Reading the mirrored images (mirror.yml) and the code; nothing writes.
+permissions:
+  contents: read
+  packages: read
 
 jobs:
   test:
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     services:
       postgres:
-        # The official image through AWS's public mirror: Docker Hub rate-limits anonymous pulls
-        # by IP, and shared runners hit it (every run failed on it for a while on 2026-10-09).
-        image: public.ecr.aws/docker/library/postgres:18
+        # The official image, copied to this repository's registry by mirror.yml: anonymous pulls
+        # from Docker Hub (2026-10-09) and then ECR Public ("Data limit exceeded") failed whole runs.
+        image: ghcr.io/thorst/ductus-ci-postgres:18
+        credentials:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
         env:
           POSTGRES_USER: ductus
           POSTGRES_PASSWORD: ductus
@@ -198,6 +208,9 @@ jobs:
     runs-on: ${{ inputs.runner || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: Sign in to ghcr.io (the mirrored Postgres image)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
       - name: Image (build; compose with Postgres; docker compose stop mid-stream re-sends nothing)
         run: bash scripts/demo-docker.sh
