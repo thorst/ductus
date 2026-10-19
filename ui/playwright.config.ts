@@ -64,5 +64,12 @@ export default defineConfig({
       dependencies: ["certificates"],
       use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
     },
+    {
+      // Owners matched to people: the directory operator (made by the directory tests) owns adt.
+      name: "owners",
+      testMatch: "owners.spec.ts",
+      dependencies: ["directory"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
   ],
 });

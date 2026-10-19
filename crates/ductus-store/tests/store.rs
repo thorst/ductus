@@ -962,9 +962,24 @@ async fn resend_and_edit_write_their_audit_row_with_the_change() {
     };
     let Edited::Copied { copy: made, .. } = store.copy_edited(copy, OPERATOR).await.unwrap() else { panic!("a copy") };
 
+    // Naming the destination of a quarantined delivery (as the message page does) is still a
+    // release: what it was decides, not how it was asked.
+    let b = store.insert(t.msg(2, b"b")).await.unwrap();
+    store.finish(lab, &[Done::with(b, Status::Quarantined, Some("AR"))]).await.unwrap();
+    let named = Resend { messages: &[b.id], destinations: &[lab], quarantined_only: false };
+    assert_eq!(store.resend(named, OPERATOR).await.unwrap().len(), 1);
+
     let rows = audit_of(&store, &t.name).await;
     let kinds: Vec<_> = rows.iter().map(|(a, m, _)| (a.as_str(), *m)).collect();
-    assert_eq!(kinds, [("message.release", Some(a.id)), ("message.replay", Some(a.id)), ("message.edit", Some(a.id))]);
+    assert_eq!(
+        kinds,
+        [
+            ("message.release", Some(a.id)),
+            ("message.replay", Some(a.id)),
+            ("message.edit", Some(a.id)),
+            ("message.release", Some(b.id))
+        ]
+    );
     assert_eq!(rows[0].2["destinations"], serde_json::json!([format!("{}/lab", t.name)]));
     assert_eq!(rows[2].2["copy"], made.id);
     assert_eq!(rows[2].2["reason"], "vendor fixed their side");

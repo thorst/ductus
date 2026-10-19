@@ -19,6 +19,7 @@ pub fn routes() -> OpenApiRouter<Shared> {
     OpenApiRouter::new()
         .routes(routes!(impact_report))
         .routes(routes!(owners))
+        .routes(routes!(owner_people))
         .routes(routes!(reassign_preview))
         .routes(routes!(doctor_report))
         .routes(routes!(docs_report))
@@ -130,7 +131,18 @@ async fn impact_report(engine: Eng, _caller: Caller, Query(p): Query<ImpactParam
 pub struct OwnerGroup {
     /// Absent for what nobody owns (listed last).
     owner: Option<String>,
+    /// Who the owner is: `user` (an account, in `person`), `disabled` (an account that is
+    /// disabled or refused by the directory, in `person`), `several` (names more than one
+    /// account: none is chosen), `team` (in `owners:` in ductus.yaml), `address` (an email
+    /// address, not an account) or `nobody`. Absent for the unowned.
+    reach: Option<String>,
+    person: Option<OwnerPerson>,
+    /// The owner is the caller (or the person whose token calls).
+    you: bool,
+    /// Interfaces, and destinations owned by someone other than their interface's owner.
     owns: Vec<Owned>,
+    /// resources.yaml entries with this `owner`.
+    resources: Vec<OwnedResource>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -140,19 +152,101 @@ pub struct Owned {
     destination: Option<String>,
 }
 
-/// Who owns which interface (`about.owner`) and destination (`owner` on one someone else owns).
+#[derive(Serialize, ToSchema)]
+pub struct OwnedResource {
+    /// `database`, `api`, `sftp server` or `directory`.
+    kind: String,
+    name: String,
+}
+
+/// An account, as an owner.
+#[derive(Serialize, ToSchema)]
+pub struct OwnerPerson {
+    username: String,
+    display_name: Option<String>,
+    email: Option<String>,
+    /// Disabled, or refused by the directory.
+    disabled: bool,
+}
+
+impl From<&ductus_core::owners::Person<'_>> for OwnerPerson {
+    fn from(p: &ductus_core::owners::Person) -> Self {
+        Self {
+            username: p.username.into(),
+            display_name: p.display_name.map(Into::into),
+            email: p.email.map(Into::into),
+            disabled: p.disabled,
+        }
+    }
+}
+
+fn reach_label(reach: &ductus_core::owners::Reach) -> &'static str {
+    use ductus_core::owners::Reach;
+    match reach {
+        Reach::User(_) => "user",
+        Reach::Disabled(_) => "disabled",
+        Reach::Several(_) => "several",
+        Reach::Team => "team",
+        Reach::Address => "address",
+        Reach::Nobody => "nobody",
+    }
+}
+
+/// Who owns which interface (`about.owner`), destination (`owner` on one someone else owns) and
+/// resources.yaml entry, and whether each owner is an account (username, email or display name,
+/// ignoring case), a team in `owners:`, or nobody the engine knows.
 #[utoipa::path(get, path = "/owners", tag = "reports", responses((status = 200, body = Vec<OwnerGroup>)))]
-async fn owners(engine: Eng, _caller: Caller) -> ApiResult<Vec<OwnerGroup>> {
-    let items = ductus_core::owners::owned(engine.interfaces.iter().map(|i| &*i.config));
+async fn owners(engine: Eng, caller: Caller) -> ApiResult<Vec<OwnerGroup>> {
+    use ductus_core::owners::{self, Found, What};
+    let users = engine.store.users().await?;
+    let people = crate::alerts::people(&users);
+    let me = caller.who.user_id.and_then(|id| users.iter().find(|u| u.id == id)).map(|u| u.username.as_str());
+    let items = owners::owned(engine.interfaces.iter().map(|i| &*i.config), &engine.resources);
     Ok(Json(
-        ductus_core::owners::by_owner(items)
+        owners::by_owner(items)
             .into_iter()
-            .map(|(owner, items)| OwnerGroup {
-                owner: (!owner.is_empty()).then_some(owner),
-                owns: items.into_iter().map(|o| Owned { interface: o.interface, destination: o.destination }).collect(),
+            .map(|(owner, items)| {
+                let person = match owners::find(&owner, &people) {
+                    Found::One(p) => Some(p),
+                    _ => None,
+                };
+                let (mut owns, mut resources) = (Vec::new(), Vec::new());
+                for item in items {
+                    match item.what {
+                        What::Interface(interface) => owns.push(Owned { interface, destination: None }),
+                        What::Destination { interface, destination } => {
+                            owns.push(Owned { interface, destination: Some(destination) })
+                        }
+                        What::Resource { kind, name } => {
+                            resources.push(OwnedResource { kind: kind.label().into(), name })
+                        }
+                    }
+                }
+                OwnerGroup {
+                    reach: (!owner.is_empty())
+                        .then(|| reach_label(&owners::reach(&owner, &people, &engine.teams)).to_string()),
+                    you: me.is_some() && person.map(|p| p.username) == me,
+                    person: person.map(Into::into),
+                    owner: (!owner.is_empty()).then_some(owner),
+                    owns,
+                    resources,
+                }
             })
             .collect(),
     ))
+}
+
+/// The accounts that can own things (enabled ones), for choosing a new owner: name and email.
+#[utoipa::path(
+    get, path = "/owners/people", tag = "reports", operation_id = "owner_people",
+    responses((status = 200, body = Vec<OwnerPerson>))
+)]
+async fn owner_people(engine: Eng, _caller: Caller) -> ApiResult<Vec<OwnerPerson>> {
+    let users = engine.store.users().await?;
+    let mut people: Vec<OwnerPerson> =
+        crate::alerts::people(&users).iter().filter(|p| !p.disabled).map(Into::into).collect();
+    people.sort_by_key(|p| p.display_name.as_deref().unwrap_or(&p.username).to_lowercase());
+    Ok(Json(people))
 }
 
 #[derive(Deserialize, ToSchema)]
@@ -161,9 +255,12 @@ pub struct ReassignRequest {
     from: String,
     /// The new owner.
     to: String,
-    /// Only these interfaces (all when empty).
+    /// Only these interfaces. With neither `interfaces` nor `resources`, everything moves.
     #[serde(default)]
     interfaces: Vec<String>,
+    /// Only these resources.yaml entries (by name).
+    #[serde(default)]
+    resources: Vec<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -181,11 +278,20 @@ pub struct ReassignPreview {
     command: String,
     /// The owners there are, when nothing matched `from`.
     known: Vec<String>,
+    /// The new owner, as `reach` in `/owners` says it.
+    to_reach: String,
+    /// The account the new owner names, if one does.
+    to_person: Option<OwnerPerson>,
+    /// Said when the new owner isn't an account (or names a disabled one, or several).
+    warning: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct ReassignFile {
-    interface: String,
+    /// The interface whose interface.yaml this is; absent for resources.yaml.
+    interface: Option<String>,
+    /// resources.yaml entries whose owner changes.
+    resources: Vec<String>,
     /// Relative to the project, `/`-separated.
     path: String,
     lines: Vec<ReassignLine>,
@@ -201,7 +307,8 @@ pub struct ReassignLine {
 
 #[derive(Serialize, ToSchema)]
 pub struct ReassignRefused {
-    interface: String,
+    /// Absent for resources.yaml.
+    interface: Option<String>,
     path: String,
     error: String,
 }
@@ -219,14 +326,37 @@ async fn reassign_preview(
     _caller: Caller,
     Json(request): Json<ReassignRequest>,
 ) -> ApiResult<ReassignPreview> {
+    use ductus_core::owners::{self, Reach};
     let unknown: Vec<&str> =
         request.interfaces.iter().filter(|n| engine.interface(n).is_none()).map(String::as_str).collect();
     if !unknown.is_empty() {
         return Err(ApiError::bad_request(format!("no interface named {}", unknown.join(", "))));
     }
+    let unknown: Vec<&str> =
+        request.resources.iter().filter(|n| !resource_exists(&engine.resources, n)).map(String::as_str).collect();
+    if !unknown.is_empty() {
+        return Err(ApiError::bad_request(format!("no resource named {} in resources.yaml", unknown.join(", "))));
+    }
     if request.from.trim().is_empty() {
         return Err(ApiError::bad_request("say whose interfaces move (`from`)"));
     }
+    let users = engine.store.users().await?;
+    let people = crate::alerts::people(&users);
+    let reach = owners::reach(&request.to, &people, &engine.teams);
+    let to_person = match owners::find(&request.to, &people) {
+        owners::Found::One(p) => Some(p.into()),
+        _ => None,
+    };
+    let to = request.to.trim();
+    let warning = match &reach {
+        Reach::User(_) | Reach::Team => None,
+        Reach::Disabled(u) => Some(format!("`{to}` is the account {u}, which is disabled")),
+        Reach::Several(n) => Some(format!("`{to}` names {n} accounts: use a username or an email address")),
+        Reach::Address => Some(format!("`{to}` isn't an account (alerts still reach the address)")),
+        Reach::Nobody => {
+            Some(format!("`{to}` isn't an account or a team in `owners:`: alerts for these would reach nobody"))
+        }
+    };
     let mut preview = ReassignPreview {
         files: Vec::new(),
         refused: Vec::new(),
@@ -234,25 +364,29 @@ async fn reassign_preview(
         patch: String::new(),
         command: String::new(),
         known: Vec::new(),
+        to_reach: reach_label(&reach).into(),
+        to_person,
+        warning,
+    };
+    let everything = request.interfaces.is_empty() && request.resources.is_empty();
+    let relative = |file: &std::path::Path| {
+        file.strip_prefix(&engine.root).unwrap_or(file).display().to_string().replace('\\', "/")
     };
     let mut patch = String::new();
-    for i in engine
-        .interfaces
-        .iter()
-        .filter(|i| request.interfaces.is_empty() || request.interfaces.contains(&i.config.name))
-    {
+    for i in engine.interfaces.iter().filter(|i| everything || request.interfaces.contains(&i.config.name)) {
         let file = i.config.dir.join("interface.yaml");
-        let path = file.strip_prefix(&engine.root).unwrap_or(&file).display().to_string().replace('\\', "/");
+        let path = relative(&file);
         let text = tokio::fs::read_to_string(&file)
             .await
             .map_err(|e| ApiError::bad_request(format!("reading {path}: {e}")))?;
-        match ductus_core::owners::reassign(&text, &request.from, &request.to) {
+        match owners::reassign(&text, &request.from, &request.to) {
             Ok((_, changes)) if changes.is_empty() => {}
             Ok((out, changes)) => {
                 preview.changed += changes.len();
-                patch.push_str(&ductus_core::owners::patch(&path, &text, &out));
+                patch.push_str(&owners::patch(&path, &text, &out));
                 preview.files.push(ReassignFile {
-                    interface: i.config.name.clone(),
+                    interface: Some(i.config.name.clone()),
+                    resources: Vec::new(),
                     path,
                     lines: changes
                         .into_iter()
@@ -261,20 +395,50 @@ async fn reassign_preview(
                 });
             }
             Err(e) => preview.refused.push(ReassignRefused {
-                interface: i.config.name.clone(),
+                interface: Some(i.config.name.clone()),
                 path,
                 error: format!("{e:#}"),
             }),
         }
     }
+    let file = engine.root.join("resources.yaml");
+    if (everything || !request.resources.is_empty()) && file.is_file() {
+        let path = relative(&file);
+        let text = tokio::fs::read_to_string(&file)
+            .await
+            .map_err(|e| ApiError::bad_request(format!("reading {path}: {e}")))?;
+        match owners::reassign_resources(&text, &request.from, &request.to, &request.resources) {
+            Ok((_, changes)) if changes.is_empty() => {}
+            Ok((out, changes)) => {
+                preview.changed += changes.len();
+                patch.push_str(&owners::patch(&path, &text, &out));
+                let mut names: Vec<String> = changes.iter().map(|c| c.name.clone()).collect();
+                names.dedup();
+                preview.files.push(ReassignFile {
+                    interface: None,
+                    resources: names,
+                    path,
+                    lines: changes
+                        .into_iter()
+                        .map(|c| ReassignLine { line: c.change.line, before: c.change.before, after: c.change.after })
+                        .collect(),
+                });
+            }
+            Err(e) => preview.refused.push(ReassignRefused { interface: None, path, error: format!("{e:#}") }),
+        }
+    }
     if preview.files.is_empty() && preview.refused.is_empty() {
-        let groups =
-            ductus_core::owners::by_owner(ductus_core::owners::owned(engine.interfaces.iter().map(|i| &*i.config)));
+        let groups = owners::by_owner(owners::owned(engine.interfaces.iter().map(|i| &*i.config), &engine.resources));
         preview.known = groups.into_iter().map(|(owner, _)| owner).filter(|o| !o.is_empty()).collect();
     }
     if preview.refused.is_empty() && !preview.files.is_empty() {
         preview.patch = patch;
-        let only: String = request.interfaces.iter().map(|n| format!(" --interface {}", shell_quote(n))).collect();
+        let only: String = request
+            .interfaces
+            .iter()
+            .map(|n| format!(" --interface {}", shell_quote(n)))
+            .chain(request.resources.iter().map(|n| format!(" --resource {}", shell_quote(n))))
+            .collect();
         preview.command = format!(
             "ductus owners reassign --from {} --to {}{only}",
             shell_quote(request.from.trim()),
@@ -282,6 +446,11 @@ async fn reassign_preview(
         );
     }
     Ok(Json(preview))
+}
+
+fn resource_exists(resources: &ductus_core::Resources, name: &str) -> bool {
+    use ductus_core::resources::Kind;
+    [Kind::Database, Kind::Api, Kind::Sftp, Kind::Ldap].into_iter().any(|k| resources.contains(k, name))
 }
 
 /// Quoted for a POSIX shell when it needs it: `'Ann Smith'`, `'O'"'"'Brien'`.

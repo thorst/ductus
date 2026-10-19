@@ -176,6 +176,9 @@ jobs:
           (cd ui && npx playwright install --with-deps chromium >/dev/null)
           BIN=target/release/ductus bash scripts/demo-ui.sh
 
+      - name: v0.5 release demo (one on-call night in the browser - directory sign-in, a stall diagnosed and mailed to the owner, pause with a note, recovery mail, replay/edit/dismiss, the audit log, a 7-day certificate)
+        run: BIN=target/release/ductus bash scripts/demo-v05.sh
+
       - name: Web UI report (on failure)
         if: failure()
         uses: actions/upload-artifact@v7

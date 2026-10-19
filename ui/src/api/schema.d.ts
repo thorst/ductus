@@ -718,8 +718,29 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** Who owns which interface (`about.owner`) and destination (`owner` on one someone else owns). */
+        /**
+         * Who owns which interface (`about.owner`), destination (`owner` on one someone else owns) and
+         *     resources.yaml entry, and whether each owner is an account (username, email or display name,
+         *     ignoring case), a team in `owners:`, or nobody the engine knows.
+         */
         get: operations["owners"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/owners/people": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The accounts that can own things (enabled ones), for choosing a new owner: name and email. */
+        get: operations["owner_people"];
         put?: never;
         post?: never;
         delete?: never;
@@ -1949,10 +1970,36 @@ export interface components {
             destination?: string | null;
             interface: string;
         };
+        OwnedResource: {
+            /** @description `database`, `api`, `sftp server` or `directory`. */
+            kind: string;
+            name: string;
+        };
         OwnerGroup: {
             /** @description Absent for what nobody owns (listed last). */
             owner?: string | null;
+            /** @description Interfaces, and destinations owned by someone other than their interface's owner. */
             owns: components["schemas"]["Owned"][];
+            person?: components["schemas"]["OwnerPerson"] | null;
+            /**
+             * @description Who the owner is: `user` (an account, in `person`), `disabled` (an account that is
+             *     disabled or refused by the directory, in `person`), `several` (names more than one
+             *     account: none is chosen), `team` (in `owners:` in ductus.yaml), `address` (an email
+             *     address, not an account) or `nobody`. Absent for the unowned.
+             */
+            reach?: string | null;
+            /** @description resources.yaml entries with this `owner`. */
+            resources: components["schemas"]["OwnedResource"][];
+            /** @description The owner is the caller (or the person whose token calls). */
+            you: boolean;
+        };
+        /** @description An account, as an owner. */
+        OwnerPerson: {
+            /** @description Disabled, or refused by the directory. */
+            disabled: boolean;
+            display_name?: string | null;
+            email?: string | null;
+            username: string;
         };
         OwnerReach: {
             /**
@@ -2049,10 +2096,13 @@ export interface components {
             send_ms?: number | null;
         };
         ReassignFile: {
-            interface: string;
+            /** @description The interface whose interface.yaml this is; absent for resources.yaml. */
+            interface?: string | null;
             lines: components["schemas"]["ReassignLine"][];
             /** @description Relative to the project, `/`-separated. */
             path: string;
+            /** @description resources.yaml entries whose owner changes. */
+            resources: string[];
         };
         ReassignLine: {
             after: string;
@@ -2076,17 +2126,25 @@ export interface components {
              *     layout): change them by hand. While any is listed, `patch` and `command` are empty.
              */
             refused: components["schemas"]["ReassignRefused"][];
+            to_person?: components["schemas"]["OwnerPerson"] | null;
+            /** @description The new owner, as `reach` in `/owners` says it. */
+            to_reach: string;
+            /** @description Said when the new owner isn't an account (or names a disabled one, or several). */
+            warning?: string | null;
         };
         ReassignRefused: {
             error: string;
-            interface: string;
+            /** @description Absent for resources.yaml. */
+            interface?: string | null;
             path: string;
         };
         ReassignRequest: {
             /** @description The current owner (ignores case). */
             from: string;
-            /** @description Only these interfaces (all when empty). */
+            /** @description Only these interfaces. With neither `interfaces` nor `resources`, everything moves. */
             interfaces?: string[];
+            /** @description Only these resources.yaml entries (by name). */
+            resources?: string[];
             /** @description The new owner. */
             to: string;
         };
@@ -3886,6 +3944,25 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OwnerGroup"][];
+                };
+            };
+        };
+    };
+    owner_people: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OwnerPerson"][];
                 };
             };
         };

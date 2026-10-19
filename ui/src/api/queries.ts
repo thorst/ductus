@@ -95,6 +95,13 @@ export const owners = queryOptions({
   queryFn: async () => unwrap(await api.GET("/owners")),
 });
 
+/** The accounts that can own things, for choosing a new owner. */
+export const ownerPeople = queryOptions({
+  queryKey: ["owners", "people"],
+  queryFn: async () => unwrap(await api.GET("/owners/people")),
+  staleTime: 60_000,
+});
+
 export const retention = queryOptions({
   queryKey: ["retention"],
   queryFn: async () => unwrap(await api.GET("/retention")),

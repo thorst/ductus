@@ -2022,7 +2022,7 @@
         "tags": [
           "reports"
         ],
-        "summary": "Who owns which interface (`about.owner`) and destination (`owner` on one someone else owns).",
+        "summary": "Who owns which interface (`about.owner`), destination (`owner` on one someone else owns) and\nresources.yaml entry, and whether each owner is an account (username, email or display name,\nignoring case), a team in `owners:`, or nobody the engine knows.",
         "operationId": "owners",
         "responses": {
           "200": {
@@ -2032,6 +2032,29 @@
                   "type": "array",
                   "items": {
                     "$ref": "#/components/schemas/OwnerGroup"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/owners/people": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "The accounts that can own things (enabled ones), for choosing a new owner: name and email.",
+        "operationId": "owner_people",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/OwnerPerson"
                   }
                 }
               }
@@ -5376,10 +5399,28 @@
           }
         }
       },
+      "OwnedResource": {
+        "type": "object",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`database`, `api`, `sftp server` or `directory`."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "OwnerGroup": {
         "type": "object",
         "required": [
-          "owns"
+          "you",
+          "owns",
+          "resources"
         ],
         "properties": {
           "owner": {
@@ -5393,7 +5434,65 @@
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/Owned"
-            }
+            },
+            "description": "Interfaces, and destinations owned by someone other than their interface's owner."
+          },
+          "person": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OwnerPerson"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "reach": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Who the owner is: `user` (an account, in `person`), `disabled` (an account that is\ndisabled or refused by the directory, in `person`), `several` (names more than one\naccount: none is chosen), `team` (in `owners:` in ductus.yaml), `address` (an email\naddress, not an account) or `nobody`. Absent for the unowned."
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OwnedResource"
+            },
+            "description": "resources.yaml entries with this `owner`."
+          },
+          "you": {
+            "type": "boolean",
+            "description": "The owner is the caller (or the person whose token calls)."
+          }
+        }
+      },
+      "OwnerPerson": {
+        "type": "object",
+        "description": "An account, as an owner.",
+        "required": [
+          "username",
+          "disabled"
+        ],
+        "properties": {
+          "disabled": {
+            "type": "boolean",
+            "description": "Disabled, or refused by the directory."
+          },
+          "display_name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "email": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "username": {
+            "type": "string"
           }
         }
       },
@@ -5658,13 +5757,17 @@
       "ReassignFile": {
         "type": "object",
         "required": [
-          "interface",
+          "resources",
           "path",
           "lines"
         ],
         "properties": {
           "interface": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The interface whose interface.yaml this is; absent for resources.yaml."
           },
           "lines": {
             "type": "array",
@@ -5675,6 +5778,13 @@
           "path": {
             "type": "string",
             "description": "Relative to the project, `/`-separated."
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "resources.yaml entries whose owner changes."
           }
         }
       },
@@ -5707,7 +5817,8 @@
           "changed",
           "patch",
           "command",
-          "known"
+          "known",
+          "to_reach"
         ],
         "properties": {
           "changed": {
@@ -5743,13 +5854,34 @@
               "$ref": "#/components/schemas/ReassignRefused"
             },
             "description": "Files with `owner: <from>` that can't be changed safely by a program (an unusual\nlayout): change them by hand. While any is listed, `patch` and `command` are empty."
+          },
+          "to_person": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OwnerPerson",
+                "description": "The account the new owner names, if one does."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "to_reach": {
+            "type": "string",
+            "description": "The new owner, as `reach` in `/owners` says it."
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Said when the new owner isn't an account (or names a disabled one, or several)."
           }
         }
       },
       "ReassignRefused": {
         "type": "object",
         "required": [
-          "interface",
           "path",
           "error"
         ],
@@ -5758,7 +5890,11 @@
             "type": "string"
           },
           "interface": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Absent for resources.yaml."
           },
           "path": {
             "type": "string"
@@ -5781,7 +5917,14 @@
             "items": {
               "type": "string"
             },
-            "description": "Only these interfaces (all when empty)."
+            "description": "Only these interfaces. With neither `interfaces` nor `resources`, everything moves."
+          },
+          "resources": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only these resources.yaml entries (by name)."
           },
           "to": {
             "type": "string",

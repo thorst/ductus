@@ -155,9 +155,12 @@ export async function resume(name: string, destination: string) {
   );
 }
 
-/** What moving ownership would change (writes nothing; `interfaces` empty = all of `from`'s). */
-export async function previewReassign(from: string, to: string, interfaces: string[]) {
-  return unwrap(await api.POST("/owners/reassign/preview", { body: { from, to, interfaces } }));
+/**
+ * What moving ownership would change (writes nothing). With no `interfaces` and no `resources`,
+ * everything of `from`'s moves; naming any moves only those.
+ */
+export async function previewReassign(from: string, to: string, interfaces: string[], resources: string[]) {
+  return unwrap(await api.POST("/owners/reassign/preview", { body: { from, to, interfaces, resources } }));
 }
 
 /** Confirm a shorter retention: deletes the interface's messages past it. */

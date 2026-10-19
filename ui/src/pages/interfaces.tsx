@@ -3,8 +3,9 @@ import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
 import { Search } from "lucide-react";
 import { useMemo, useState } from "react";
 import type { Schemas } from "@/api/client";
-import { docs, interfaces } from "@/api/queries";
+import { docs, interfaces, owners, session } from "@/api/queries";
 import { DocsFilter } from "@/components/docs-values";
+import { myInterfaces } from "@/components/owner";
 import { HealthBadge } from "@/components/health-badge";
 import { Loaded, PageHeader } from "@/components/page";
 import { Input } from "@/components/ui/input";
@@ -21,10 +22,15 @@ const route = getRouteApi("/app/interfaces");
 export function InterfacesPage() {
   const query = useQuery(interfaces);
   const { data: report } = useQuery(docs);
-  const { field, value } = route.useSearch();
+  const { data: groups } = useQuery(owners);
+  const { data: me } = useQuery(session);
+  const { field, value, mine: chosen } = route.useSearch();
   const navigate = useNavigate({ from: "/interfaces" });
   const [text, setText] = useState("");
   const [onlyProblems, setOnlyProblems] = useState(false);
+  const own = useMemo(() => myInterfaces(groups), [groups]);
+  // Operators start on their own interfaces, when they own any; everyone else on all of them.
+  const mine = own.size > 0 && (chosen ?? me?.role === "operator");
   const rows = useMemo(() => {
     const words = text.toLowerCase().split(/\s+/).filter(Boolean);
     return (query.data ?? [])
@@ -34,6 +40,7 @@ export function InterfacesPage() {
         waiting: i.destinations.reduce((n, d) => n + d.pending, 0),
         quarantined: i.destinations.reduce((n, d) => n + d.quarantined, 0),
       }))
+      .filter((i) => !mine || own.has(i.name))
       .filter((i) => !onlyProblems || describe(i.worst).rank >= 2)
       .filter((i) => {
         const chosen = report?.fields.find((f) => f.key === field);
@@ -47,12 +54,33 @@ export function InterfacesPage() {
         return words.every((w) => haystack.includes(w));
       })
       .sort((a, b) => describe(b.worst).rank - describe(a.worst).rank || a.name.localeCompare(b.name));
-  }, [query.data, text, onlyProblems, report, field, value]);
+  }, [query.data, text, onlyProblems, report, field, value, mine, own]);
 
   return (
     <>
       <PageHeader title="Interfaces">Worst first; then by name.</PageHeader>
       <div className="mb-4 flex flex-wrap items-center gap-4">
+        {own.size > 0 && (
+          <div role="group" aria-label="Whose interfaces" className="inline-flex rounded-md border">
+            {[
+              { label: `Mine (${own.size})`, on: true },
+              { label: "All", on: false },
+            ].map((b) => (
+              <button
+                key={b.label}
+                type="button"
+                aria-pressed={mine === b.on}
+                className={cn(
+                  "h-9 px-3 text-sm first:rounded-l-md last:rounded-r-md",
+                  mine === b.on ? "bg-accent font-semibold text-accent-fg" : "hover:bg-hover",
+                )}
+                onClick={() => void navigate({ search: (s) => ({ ...s, mine: b.on }) })}
+              >
+                {b.label}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="relative w-full max-w-sm">
           <Search aria-hidden className="pointer-events-none absolute top-2.5 left-3 size-4 text-muted" />
           <Input
@@ -78,7 +106,7 @@ export function InterfacesPage() {
             report={{ ...report, fields: report.fields.filter((f) => f.applies_to.includes("interface")) }}
             field={field}
             value={value}
-            onChange={(f, v) => void navigate({ search: { field: f, value: v } })}
+            onChange={(f, v) => void navigate({ search: (s) => ({ ...s, field: f, value: v }) })}
           />
         )}
       </div>

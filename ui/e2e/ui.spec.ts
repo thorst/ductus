@@ -211,8 +211,8 @@ test("moving an owner's interfaces is previewed as a patch for the repository", 
   for (const owner of ["ADT team", "Finance", "Orders team"]) await expect(owners).toContainText(owner);
 
   const move = page.getByRole("region", { name: "Move ownership" });
-  await move.getByRole("combobox").selectOption("ADT team");
-  await move.getByRole("textbox", { name: "To" }).fill("Integration team");
+  await move.locator("select").selectOption("ADT team");
+  await move.getByRole("combobox", { name: "To" }).fill("Integration team");
   await move.getByRole("button", { name: "Preview" }).click();
   const preview = page.getByRole("region", { name: "Preview" });
   await expect(preview).toContainText("1 owner value in 1 file would change. Nothing has been written.");

@@ -17,7 +17,7 @@ use ductus_core::impact::CodeUses;
 use ductus_core::monitor::{self, Diagnosis, Facts, InterfaceState};
 use ductus_core::{InterfaceConfig, Resources};
 use ductus_store::{DestinationId, QueueCount, Store};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
@@ -119,6 +119,8 @@ pub struct Engine {
     pub certificates: Vec<crate::certificates::CertificateTarget>,
     /// The directory people sign in with (`auth.ldap`), if configured.
     pub directory: Option<crate::ldap::Directory>,
+    /// Teams and lists that own things (`owners:` in ductus.yaml).
+    pub teams: BTreeMap<String, ductus_core::alerts::OwnerContact>,
 }
 
 /// What the engine is made of, from startup.
@@ -139,6 +141,7 @@ pub struct Parts {
     pub alerts: Option<Arc<crate::alerts::Alerts>>,
     pub doctor: ductus_core::settings::DoctorSettings,
     pub directory: Option<crate::ldap::Directory>,
+    pub teams: BTreeMap<String, ductus_core::alerts::OwnerContact>,
 }
 
 impl Engine {
@@ -160,6 +163,7 @@ impl Engine {
             alerts,
             doctor,
             directory,
+            teams,
         } = parts;
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
@@ -188,6 +192,7 @@ impl Engine {
             doctor,
             certificates,
             directory,
+            teams,
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

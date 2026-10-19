@@ -73,10 +73,23 @@ const docsSearch = (search: Record<string, unknown>): DocsSearch => {
   return { field, value: field && typeof search.value === "string" && search.value ? search.value : undefined };
 };
 
+export interface InterfacesSearch extends DocsSearch {
+  /** Only the caller's own (`true`) or all (`false`); unset: the default for their role. */
+  mine?: boolean;
+}
+
 const interfaces = createRoute({
   getParentRoute: () => app,
   path: "/interfaces",
-  validateSearch: docsSearch,
+  validateSearch: (search: Record<string, unknown>): InterfacesSearch => {
+    const mine =
+      search.mine === true || search.mine === "true"
+        ? true
+        : search.mine === false || search.mine === "false"
+          ? false
+          : undefined;
+    return { ...docsSearch(search), mine };
+  },
   component: InterfacesPage,
 });
 

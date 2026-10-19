@@ -1,38 +1,165 @@
-//! Who to call about what: `about.owner` per interface, and `owner` on a destination whose
-//! owner is someone else. `ductus owners` lists them; `ductus owners reassign` moves ownership
-//! (someone leaves, a team splits) by editing the `owner:` values in interface.yaml in place,
-//! so comments and layout stay as they were.
+//! Who to call about what: `about.owner` per interface, `owner` on a destination whose owner is
+//! someone else, and `owner` on resources.yaml entries. `ductus owners` lists them and says
+//! which are people with an account (`find`); `ductus owners reassign` moves ownership (someone
+//! leaves, a team splits) by editing the `owner:` values in interface.yaml and resources.yaml in
+//! place, so comments and layout stay as they were.
 
 use crate::InterfaceConfig;
 use crate::about::given;
+use crate::alerts::{OwnerContact, is_address};
+use crate::resources::{Kind, Resources};
 use anyhow::{Result, bail};
 use serde_yaml_ng::Value;
 use std::collections::BTreeMap;
 
-/// Something owned: an interface, or one of its destinations.
+/// Something owned: an interface, one of its destinations, or a resources.yaml entry.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Owned {
     /// Empty when nobody is named.
     pub owner: String,
-    pub interface: String,
-    /// Set for a destination whose owner differs from its interface's.
-    pub destination: Option<String>,
+    pub what: What,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum What {
+    Interface(String),
+    /// A destination whose owner differs from its interface's.
+    Destination {
+        interface: String,
+        destination: String,
+    },
+    Resource {
+        kind: Kind,
+        name: String,
+    },
+}
+
+impl What {
+    /// `adt`, `adt → lab`, `directory corp-ad`.
+    pub fn label(&self) -> String {
+        match self {
+            What::Interface(i) => i.clone(),
+            What::Destination { interface, destination } => format!("{interface} → {destination}"),
+            What::Resource { kind, name } => format!("{} {name}", kind.label()),
+        }
+    }
+
+    /// The interface it is or belongs to.
+    pub fn interface(&self) -> Option<&str> {
+        match self {
+            What::Interface(i) | What::Destination { interface: i, .. } => Some(i),
+            What::Resource { .. } => None,
+        }
+    }
 }
 
 /// One entry per interface, plus one per destination with an owner of its own (other
-/// destinations belong to their interface's owner).
-pub fn owned<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<Owned> {
+/// destinations belong to their interface's owner), plus one per resources.yaml entry that names
+/// an owner (an unowned resource isn't listed: most are fine without one).
+pub fn owned<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>, resources: &Resources) -> Vec<Owned> {
     let mut out = Vec::new();
     for c in configs {
         let owner = given(&c.about.owner).unwrap_or("");
-        out.push(Owned { owner: owner.into(), interface: c.name.clone(), destination: None });
+        out.push(Owned { owner: owner.into(), what: What::Interface(c.name.clone()) });
         for (name, d) in c.destinations() {
             if let Some(own) = given(&d.owner).filter(|o| !same(o, owner)) {
-                out.push(Owned { owner: own.into(), interface: c.name.clone(), destination: Some(name.into()) });
+                let what = What::Destination { interface: c.name.clone(), destination: name.into() };
+                out.push(Owned { owner: own.into(), what });
+            }
+        }
+    }
+    let kinds = [
+        (Kind::Database, resources.databases.keys().collect::<Vec<_>>()),
+        (Kind::Api, resources.apis.keys().collect()),
+        (Kind::Sftp, resources.sftp.keys().collect()),
+        (Kind::Ldap, resources.ldap.keys().collect()),
+    ];
+    for (kind, names) in kinds {
+        for name in names {
+            if let Some(owner) = resources.owner(name) {
+                out.push(Owned { owner: owner.into(), what: What::Resource { kind, name: name.clone() } });
             }
         }
     }
     out
+}
+
+/// A user account, as far as owners go.
+#[derive(Debug, Clone)]
+pub struct Person<'a> {
+    pub username: &'a str,
+    pub display_name: Option<&'a str>,
+    pub email: Option<&'a str>,
+    /// Disabled here, or refused by the directory.
+    pub disabled: bool,
+}
+
+/// Which account an owner text names.
+#[derive(Debug, Clone, Copy)]
+pub enum Found<'p, 'a> {
+    /// Exactly one account.
+    One(&'p Person<'a>),
+    /// Several accounts at the same level (two people with one display name): none is chosen.
+    Several(usize),
+    None,
+}
+
+/// The account an owner text names, ignoring case and surrounding spaces: a username first, then
+/// an email address, then a display name. The first of those levels that matches anyone decides;
+/// two matches there name nobody (a guess would send someone else's alerts to the wrong person).
+pub fn find<'p, 'a>(owner: &str, people: &'p [Person<'a>]) -> Found<'p, 'a> {
+    let owner = owner.trim();
+    if owner.is_empty() {
+        return Found::None;
+    }
+    let same = |a: Option<&str>| a.is_some_and(|a| a.trim().eq_ignore_ascii_case(owner));
+    let levels: [&dyn Fn(&Person) -> bool; 3] =
+        [&|p| same(Some(p.username)), &|p| same(p.email), &|p| same(p.display_name)];
+    for level in levels {
+        let hits: Vec<&Person> = people.iter().filter(|p| level(p)).collect();
+        match hits.len() {
+            0 => continue,
+            1 => return Found::One(hits[0]),
+            n => return Found::Several(n),
+        }
+    }
+    Found::None
+}
+
+/// Who an owner is, for reports and `ductus owners --check`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reach {
+    /// An account (its username).
+    User(String),
+    /// An account that is disabled (or refused by the directory): someone who left, probably.
+    Disabled(String),
+    /// Names several accounts.
+    Several(usize),
+    /// A team or list in `owners:` (ductus.yaml).
+    Team,
+    /// Not an account, but an email address.
+    Address,
+    /// Nobody this engine knows.
+    Nobody,
+}
+
+impl Reach {
+    /// Whether `ductus owners --check` accepts it.
+    pub fn ok(&self) -> bool {
+        matches!(self, Reach::User(_) | Reach::Team | Reach::Address)
+    }
+}
+
+/// What an owner text is: an account, else a team in `owners:`, else an address.
+pub fn reach(owner: &str, people: &[Person], teams: &BTreeMap<String, OwnerContact>) -> Reach {
+    match find(owner, people) {
+        Found::One(p) if p.disabled => Reach::Disabled(p.username.into()),
+        Found::One(p) => Reach::User(p.username.into()),
+        Found::Several(n) => Reach::Several(n),
+        Found::None if teams.keys().any(|t| same(t, owner)) => Reach::Team,
+        Found::None if is_address(owner) => Reach::Address,
+        Found::None => Reach::Nobody,
+    }
 }
 
 /// Grouped by owner (ignoring case; written as first seen), owners in name order and the
@@ -67,12 +194,97 @@ pub fn reassign(text: &str, from: &str, to: &str) -> Result<(String, Vec<Change>
     if given(&Some(to.to_string())).is_none() {
         bail!("the new owner can't be blank");
     }
+    let (out, changes, _) = edit(text, from, to, |_| true);
+    let mut expected = crate::env::parse_yaml(text)?;
+    for owner in owner_slots(&mut expected) {
+        if owner.as_str().is_some_and(|o| same(o, from)) {
+            *owner = Value::String(to.trim().into());
+        }
+    }
+    if !crate::env::parse_yaml(&out).is_ok_and(|e| e == expected) {
+        bail!("couldn't change the owner lines safely (an unusual layout?): change `owner: {from}` by hand");
+    }
+    Ok((out, changes))
+}
+
+/// One `owner:` line of resources.yaml changed, and whose it is.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResourceChange {
+    pub kind: Kind,
+    pub name: String,
+    pub change: Change,
+}
+
+/// resources.yaml with `owner: <from>` changed to `to` in every entry, or only in the entries
+/// named in `only`. Like `reassign`: only the values change, and the result is checked.
+pub fn reassign_resources(text: &str, from: &str, to: &str, only: &[String]) -> Result<(String, Vec<ResourceChange>)> {
+    if given(&Some(to.to_string())).is_none() {
+        bail!("the new owner can't be blank");
+    }
+    let by_hand =
+        || format!("couldn't change the owner lines safely (an unusual layout?): change `owner: {from}` by hand");
+    let original = crate::env::parse_yaml(text)?;
+    let set = |picked: &dyn Fn(&str) -> bool| {
+        let mut v = original.clone();
+        for (_, name, owner) in resource_slots(&mut v) {
+            if picked(&name) && owner.as_str().is_some_and(|o| same(o, from)) {
+                *owner = Value::String(to.trim().into());
+            }
+        }
+        v
+    };
+    // Whose is each `owner: <from>` on the page? Change it alone and see which entry changed.
+    let (_, _, hits) = edit(text, from, to, |_| false);
+    let mut whose: Vec<(Kind, String)> = Vec::with_capacity(hits);
+    for hit in 0..hits {
+        let (alone, _, _) = edit(text, from, to, |n| n == hit);
+        let Ok(alone) = crate::env::parse_yaml(&alone) else { bail!(by_hand()) };
+        let mut slots = original.clone();
+        let entries: Vec<(Kind, String)> =
+            resource_slots(&mut slots).into_iter().map(|(kind, name, _)| (kind, name)).collect();
+        let Some(entry) = entries.into_iter().find(|(_, name)| set(&|n| n == name) == alone) else {
+            bail!(by_hand());
+        };
+        whose.push(entry);
+    }
+    let picked = |name: &str| only.is_empty() || only.iter().any(|o| o == name);
+    let (out, changes, _) = edit(text, from, to, |n| picked(&whose[n].1));
+    if !crate::env::parse_yaml(&out).is_ok_and(|e| e == set(&picked)) {
+        bail!(by_hand());
+    }
+    // Each changed line belongs to the entry of its first change.
+    let mut hit = 0;
+    let mut first_on_line = BTreeMap::new();
+    for (n, line) in text.split_inclusive('\n').enumerate() {
+        for _ in owner_values(line).into_iter().filter(|v| same(&v.text, from)) {
+            first_on_line.entry(n + 1).or_insert(hit);
+            hit += 1;
+        }
+    }
+    let changes = changes
+        .into_iter()
+        .map(|change| {
+            let (kind, name) = whose[first_on_line[&change.line]].clone();
+            ResourceChange { kind, name, change }
+        })
+        .collect();
+    Ok((out, changes))
+}
+
+/// `text` with the `owner: <from>` values that `keep` picks (by their order on the page)
+/// changed to `to`; the changed lines, and how many such values there are.
+fn edit(text: &str, from: &str, to: &str, keep: impl Fn(usize) -> bool) -> (String, Vec<Change>, usize) {
     let mut changes = Vec::new();
     let mut out = String::with_capacity(text.len());
+    let mut hit = 0;
     for (n, line) in text.split_inclusive('\n').enumerate() {
         let mut edited = String::new();
         let mut rest = 0;
         for value in owner_values(line).into_iter().filter(|v| same(&v.text, from)) {
+            hit += 1;
+            if !keep(hit - 1) {
+                continue;
+            }
             edited.push_str(&line[rest..value.start]);
             edited.push_str(&render(to.trim(), value.quote, value.flow));
             rest = value.end;
@@ -85,18 +297,38 @@ pub fn reassign(text: &str, from: &str, to: &str) -> Result<(String, Vec<Change>
         changes.push(Change { line: n + 1, before: line.trim_end().into(), after: edited.trim_end().into() });
         out.push_str(&edited);
     }
+    (out, changes, hit)
+}
 
-    let mut expected = crate::env::parse_yaml(text)?;
-    for owner in owner_slots(&mut expected) {
-        if owner.as_str().is_some_and(|o| same(o, from)) {
-            *owner = Value::String(to.trim().into());
+/// Where owners live in resources.yaml: `databases.<name>.<postgres|sqlserver>.owner`,
+/// `apis|sftp|ldap.<name>.owner`.
+fn resource_slots(config: &mut Value) -> Vec<(Kind, String, &mut Value)> {
+    let Value::Mapping(top) = config else { return Vec::new() };
+    let mut slots = Vec::new();
+    for (key, value) in top.iter_mut() {
+        let kind = match key.as_str() {
+            Some("databases") => Kind::Database,
+            Some("apis") => Kind::Api,
+            Some("sftp") => Kind::Sftp,
+            Some("ldap") => Kind::Ldap,
+            _ => continue,
+        };
+        let Value::Mapping(entries) = value else { continue };
+        for (name, entry) in entries.iter_mut() {
+            let (Some(name), Value::Mapping(m)) = (name.as_str(), entry) else { continue };
+            let name = name.to_string();
+            if kind == Kind::Database {
+                for inner in m.values_mut() {
+                    if let Value::Mapping(db) = inner {
+                        slots.extend(db.get_mut("owner").map(|o| (kind, name.clone(), o)));
+                    }
+                }
+            } else {
+                slots.extend(m.get_mut("owner").map(|o| (kind, name, o)));
+            }
         }
     }
-    let edited = crate::env::parse_yaml(&out);
-    if !edited.as_ref().is_ok_and(|e| *e == expected) {
-        bail!("couldn't change the owner lines safely (an unusual layout?): change `owner: {from}` by hand");
-    }
-    Ok((out, changes))
+    slots
 }
 
 /// Where owners live in interface.yaml: `about.owner`, `destination.owner`,
@@ -290,29 +522,127 @@ destinations:
             ),
             config("name: nightly\nsource: { schedule: { every: 1h } }\ndestination: { file: { dir: o }, owner: Ops }"),
         ];
-        let groups: Vec<(String, Vec<String>)> = by_owner(owned(&configs))
+        let resources: Resources = serde_yaml_ng::from_str(RESOURCES).unwrap();
+        let groups: Vec<(String, Vec<String>)> = by_owner(owned(&configs, &resources))
             .into_iter()
-            .map(|(owner, items)| {
-                let items = items
-                    .into_iter()
-                    .map(|o| match o.destination {
-                        Some(d) => format!("{} → {d}", o.interface),
-                        None => o.interface,
-                    })
-                    .collect();
-                (owner, items)
-            })
+            .map(|(owner, items)| (owner, items.into_iter().map(|o| o.what.label()).collect()))
             .collect();
         assert_eq!(
             groups,
             [
-                ("Ann Smith".to_string(), vec!["results".to_string()]),
-                ("Billing team".into(), vec!["results → billing".into(), "adt".into()]),
+                ("Ann Smith".to_string(), vec!["results".to_string(), "database patients".into()]),
+                ("Billing team".into(), vec!["results → billing".into(), "adt".into(), "api billing".into()]),
+                ("Directory Services".into(), vec!["directory corp-ad".into()]),
                 ("Ops".into(), vec!["nightly → default".into()]),
                 ("".into(), vec!["nightly".into()]),
             ],
-            "emr and archive say the interface's owner (in other case), so they aren't listed apart"
+            "emr and archive say the interface's owner (in other case), so they aren't listed apart; \
+             resources without an owner aren't listed"
         );
+    }
+
+    const RESOURCES: &str = r#"# Shared connections
+databases:
+  patients:
+    postgres: { host: db, database: p, user: u, password: x, owner: Ann Smith }
+  billing_db:
+    sqlserver:
+      host: sql
+      database: b
+      user: u
+      password: x
+apis:
+  billing: { url: "https://billing", owner: "billing TEAM" }
+  empi:
+    url: https://empi   # owner: Ann Smith (a comment, not a key)
+ldap:
+  corp-ad:
+    url: ldaps://dc1
+    bind_dn: cn=svc
+    bind_password: x
+    owner: Directory Services   # since the merger
+"#;
+
+    fn people() -> Vec<Person<'static>> {
+        let p = |username, display_name, email, disabled| Person {
+            username,
+            display_name: Some(display_name),
+            email: Some(email),
+            disabled,
+        };
+        vec![
+            p("anna", "Anna Smith", "anna@h.org", false),
+            p("asmith2", "Anna Smith", "a.smith@h.org", false),
+            p("olaf", "Olaf Night", "olaf@h.org", false),
+            p("bob", "Bob Jones", "bob@h.org", true),
+            // Someone whose username is another's display name: the username wins.
+            p("Olaf Night", "Someone Else", "else@h.org", false),
+        ]
+    }
+
+    #[test]
+    fn owners_name_accounts_by_username_then_email_then_display_name() {
+        let people = people();
+        let user = |owner: &str| match find(owner, &people) {
+            Found::One(p) => p.username.to_string(),
+            Found::Several(n) => format!("{n} people"),
+            Found::None => "nobody".into(),
+        };
+        assert_eq!(user("  ANNA "), "anna");
+        assert_eq!(user("A.Smith@H.org"), "asmith2", "an email names its account");
+        assert_eq!(user("olaf night"), "Olaf Night", "a username before a display name");
+        assert_eq!(user("Anna Smith"), "2 people", "two display names: nobody is guessed");
+        assert_eq!(user("Lab Systems"), "nobody");
+        assert_eq!(user(""), "nobody");
+
+        let teams: BTreeMap<String, OwnerContact> =
+            [("Lab Systems".to_string(), OwnerContact { email: vec!["lab@h.org".into()] })].into();
+        let reach = |owner: &str| reach(owner, &people, &teams);
+        assert_eq!(reach("olaf@h.org"), Reach::User("olaf".into()));
+        assert_eq!(reach("Bob Jones"), Reach::Disabled("bob".into()));
+        assert_eq!(reach("Anna Smith"), Reach::Several(2));
+        assert_eq!(reach("lab systems"), Reach::Team);
+        assert_eq!(reach("oncall@h.org"), Reach::Address);
+        assert_eq!(reach("Night shift"), Reach::Nobody);
+        assert!(Reach::Team.ok() && Reach::Address.ok() && !Reach::Disabled("bob".into()).ok());
+        assert!(!Reach::Several(2).ok() && !Reach::Nobody.ok());
+    }
+
+    #[test]
+    fn reassigns_resources_yaml_entries_all_or_named() {
+        let (out, changes) = reassign_resources(RESOURCES, "ann smith", "Bob Jones", &[]).unwrap();
+        assert_eq!(
+            changes.iter().map(|c| (c.kind, c.name.as_str(), c.change.line)).collect::<Vec<_>>(),
+            [(Kind::Database, "patients", 4)],
+            "not the comment"
+        );
+        assert_eq!(
+            changes[0].change.after,
+            "    postgres: { host: db, database: p, user: u, password: x, owner: Bob Jones }"
+        );
+        assert_eq!(out.lines().count(), RESOURCES.lines().count());
+        let resources: Resources = serde_yaml_ng::from_str(&out).unwrap();
+        assert_eq!(resources.owner("patients"), Some("Bob Jones"));
+
+        // Two entries with one owner; only one named.
+        let two = RESOURCES.replace("owner: Directory Services", "owner: Billing Team");
+        let (out, changes) = reassign_resources(&two, "Billing Team", "Finance", &["corp-ad".into()]).unwrap();
+        assert_eq!(changes.len(), 1);
+        assert_eq!((changes[0].kind, changes[0].name.as_str()), (Kind::Ldap, "corp-ad"));
+        assert_eq!(changes[0].change.after, "    owner: Finance   # since the merger");
+        let resources: Resources = serde_yaml_ng::from_str(&out).unwrap();
+        assert_eq!((resources.owner("billing"), resources.owner("corp-ad")), (Some("billing TEAM"), Some("Finance")));
+        let (_, changes) = reassign_resources(&two, "Billing Team", "Finance", &[]).unwrap();
+        assert_eq!(changes.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["billing", "corp-ad"]);
+
+        // Nothing matching changes nothing; an owner value inside something else is refused.
+        let (out, changes) = reassign_resources(RESOURCES, "Nobody", "X", &[]).unwrap();
+        assert!(changes.is_empty() && out == RESOURCES);
+        let odd =
+            "apis:\n  a: { url: \"https://a\", owner: Ann }\n  b:\n    url: https://b\n    headers: { owner: Ann }\n";
+        let err = reassign_resources(odd, "Ann", "Bob", &[]).unwrap_err().to_string();
+        assert!(err.contains("by hand"), "{err}");
+        assert!(reassign_resources(RESOURCES, "Ann Smith", " ", &[]).is_err());
     }
 
     #[test]

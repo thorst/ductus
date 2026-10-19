@@ -200,16 +200,25 @@ enum Command {
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
-    /// Who owns which interface and destination (`about.owner`, and `owner` on a destination
-    /// someone else owns). `ductus owners reassign` moves ownership.
+    /// Who owns which interface, destination and resources.yaml entry (`about.owner`, `owner` on
+    /// a destination someone else owns, `owner` in resources.yaml), and, with a database, whether
+    /// each owner is an account (username, email or display name), a team in `owners:` or nobody.
+    /// `ductus owners reassign` moves ownership.
     #[command(args_conflicts_with_subcommands = true)]
     Owners {
         #[command(subcommand)]
         action: Option<OwnersAction>,
+        /// Fail (exit 1) if an owner is no account, team or address, a disabled account, or names
+        /// several accounts. Needs the database.
+        #[arg(long)]
+        check: bool,
         #[arg(long, default_value = ".")]
         root: PathBuf,
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
+        /// Where the accounts are (without it, owners aren't matched to them).
+        #[arg(long, env = "DUCTUS_DATABASE_URL")]
+        database_url: Option<String>,
     },
     /// Manage the people who sign in (in the engine's database; that is how the first admin is
     /// made). Roles: viewer reads, operator also drains, resends and runs connection checks, admin
@@ -366,6 +375,10 @@ enum Command {
         /// Also write each mail or request to a file of its own here.
         #[arg(long)]
         dir: Option<PathBuf>,
+        /// Answer AR (application reject) to messages that contain this text, as a receiver that
+        /// refuses them would (repeat for several). The engine quarantines them.
+        #[arg(long, conflicts_with_all = ["smtp", "http"])]
+        reject: Vec<String>,
     },
 }
 
@@ -407,9 +420,9 @@ enum NewCommand {
 
 #[derive(Subcommand)]
 enum OwnersAction {
-    /// Change an owner in interface.yaml files (someone left, or work is split up): only the
-    /// `owner:` values change, comments and layout stay. To split, run it per group of
-    /// interfaces with --interface.
+    /// Change an owner in interface.yaml files and resources.yaml (someone left, or work is split
+    /// up): only the `owner:` values change, comments and layout stay. To split, run it per group
+    /// with --interface and --resource.
     Reassign {
         /// The current owner (ignores case).
         #[arg(long)]
@@ -417,9 +430,13 @@ enum OwnersAction {
         /// The new owner.
         #[arg(long)]
         to: String,
-        /// Only these interfaces (repeat for several).
+        /// Only these interfaces (repeat for several). With neither this nor --resource,
+        /// everything of `--from` moves.
         #[arg(long)]
         interface: Vec<String>,
+        /// Only these resources.yaml entries (repeat for several).
+        #[arg(long)]
+        resource: Vec<String>,
         /// Show what would change without writing.
         #[arg(long)]
         dry_run: bool,
@@ -678,10 +695,13 @@ async fn run(cli: Cli) -> Result<()> {
             exit_on_failure(doctor::run(options).await)
         }
         Command::Docs { missing, json, root, env } => exit_on_failure(project::docs(&root, &env, missing, json)),
-        Command::Owners { action: None, root, env } => exit_on_failure(owners::report(&root, &env)),
+        Command::Owners { action: None, check, root, env, database_url } => {
+            exit_on_failure(owners::report(&root, &env, database_url, check).await)
+        }
         Command::Owners {
-            action: Some(OwnersAction::Reassign { from, to, interface, dry_run, root, env }), ..
-        } => exit_on_failure(owners::reassign(&root, &env, &from, &to, &interface, dry_run)),
+            action: Some(OwnersAction::Reassign { from, to, interface, resource, dry_run, root, env }),
+            ..
+        } => exit_on_failure(owners::reassign(&root, &env, &from, &to, &interface, &resource, dry_run)),
         Command::User { action, database_url, root } => {
             let command = match action {
                 UserAction::Create {
@@ -776,6 +796,6 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Sink { smtp: Some(port), dir, .. } => sinks::smtp(port, dir).await,
         Command::Sink { http: Some(port), dir, .. } => sinks::http(port, dir).await,
-        Command::Sink { port, .. } => tools::sink(port).await,
+        Command::Sink { port, reject, .. } => tools::sink(port, reject).await,
     }
 }

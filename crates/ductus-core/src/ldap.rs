@@ -179,6 +179,13 @@ impl LdapAuth {
         if self.groups.all().any(|dn| !dn.contains('=')) {
             bail!("`groups` must be full DNs, like CN=Ductus Admins,OU=Groups,DC=hospital,DC=org");
         }
+        // A list in flow style (`[CN=A,DC=h, CN=B,DC=h]`) splits at every comma of its DNs, and
+        // each piece still looks like a DN: a group is never directly under the root.
+        if let Some(dn) = self.groups.all().find(|dn| !dn.contains(',')) {
+            bail!(
+                "`groups`: `{dn}` is only part of a DN (a group's DN has several parts, like CN=Ductus Admins,OU=Groups,DC=hospital,DC=org); in a [flow, list] the commas of a DN split it: write lists one DN per line (- CN=...)"
+            );
+        }
         if self.refresh < Duration::from_secs(60) {
             bail!("`refresh` must be at least 1m");
         }
@@ -414,6 +421,9 @@ mod tests {
                 .contains("isn't a filter")
         );
         assert!(err(format!("{BASE}groups: {{ viewer: Ductus Viewers }}\n")).contains("full DNs"));
+        let split =
+            err(format!("{BASE}groups:\n  viewer: CN=V,DC=h\n  permissions: {{ payloads: [CN=P,DC=h, CN=Q,DC=h] }}\n"));
+        assert!(split.contains("`CN=P` is only part of a DN") && split.contains("one DN per line"), "{split}");
         assert!(err(format!("{BASE}groups: {{ viewer: 'CN=V,DC=h' }}\nrefresh: 30s\n")).contains("at least 1m"));
         assert!(err(format!("{BASE}groups: {{ viewer: 'CN=V,DC=h' }}\nsurprise: 1\n")).contains("unknown field"));
         assert!(balanced("(&(a=\\29)(b=c))"), "an escaped parenthesis doesn't count");

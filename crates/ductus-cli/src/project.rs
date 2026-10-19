@@ -311,7 +311,9 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
                     problems += 1;
                     println!("✗ {problem}");
                 }
-                for owner in unreachable_owners(&alerts, &settings.owners, configs()) {
+                for owner in
+                    unreachable_owners(&alerts, &settings.owners, &resources.clone().unwrap_or_default(), configs())
+                {
                     println!(
                         "⚠ owner `{owner}`: not in `owners:` in ductus.yaml and not an email address: its alerts reach someone only if a user has that name and an email (the engine checks at start)"
                     );
@@ -346,6 +348,7 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
 fn unreachable_owners<'a>(
     alerts: &ductus_core::alerts::AlertSettings,
     directory: &BTreeMap<String, ductus_core::alerts::OwnerContact>,
+    resources: &ductus_core::Resources,
     configs: impl Iterator<Item = &'a InterfaceConfig> + Clone,
 ) -> Vec<String> {
     use ductus_core::alerts::OWNER;
@@ -354,7 +357,7 @@ fn unreachable_owners<'a>(
     if !to_owner {
         return Vec::new();
     }
-    ductus_core::owners::by_owner(ductus_core::owners::owned(configs))
+    ductus_core::owners::by_owner(ductus_core::owners::owned(configs, resources))
         .into_iter()
         .map(|(owner, _)| owner)
         .filter(|o| !o.is_empty() && ductus_core::alerts::owner_addresses(o, &[], directory).is_none())

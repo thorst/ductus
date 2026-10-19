@@ -393,13 +393,20 @@ fn owners_lists_and_reassigns_in_place() {
             "name: nightly\nsource: { schedule: { every: 1h } }\nscript: t.ts\ndestination: { file: { dir: out } }\n",
         ),
         ("interfaces/nightly/t.ts", "export function transform() { return {}; }\n"),
+        (
+            "resources.yaml",
+            "apis:\n  portal: { url: \"https://portal\", owner: Ann Smith }\n  spare: { url: \"https://spare\" }\n",
+        ),
     ]);
-    let (ok, out) = ductus(dir.path(), &["owners"]);
+    let (ok, out) = without_a_database(dir.path(), &["owners"]);
     assert!(ok, "{out}");
     assert!(
-        out.contains("Ann Smith (2)\n  adt\n  orders\n\nBilling team (1)\n  adt → billing\n\nno owner (1)\n  nightly"),
+        out.contains("Ann Smith (3)\n  adt\n  orders\n  api portal\n\nBilling team (1)\n  adt → billing\n\nno owner (1)\n  nightly"),
         "{out}"
     );
+    assert!(out.contains("owners aren't matched to accounts without the database"), "{out}");
+    let (ok, out) = without_a_database(dir.path(), &["owners", "--check"]);
+    assert!(!ok && out.contains("no database: set DUCTUS_DATABASE_URL"), "{out}");
 
     // Split Ann's work: orders to Bob first, as a dry run, then for real; then the rest to Carol.
     let (ok, out) = ductus(
@@ -408,24 +415,118 @@ fn owners_lists_and_reassigns_in_place() {
     );
     assert!(ok && out.contains("- about: { owner: ann smith }\n") && out.contains("+ about: { owner: Bob }"), "{out}");
     assert!(out.contains("dry run: would change 1 owner value(s) in 1 file(s)"), "{out}");
-    assert!(ductus(dir.path(), &["owners"]).1.contains("Ann Smith (2)"), "a dry run writes nothing");
+    assert!(without_a_database(dir.path(), &["owners"]).1.contains("Ann Smith (3)"), "a dry run writes nothing");
     let (ok, out) =
         ductus(dir.path(), &["owners", "reassign", "--from", "Ann Smith", "--to", "Bob", "--interface", "orders"]);
     assert!(ok && out.contains("changed 1 owner value(s)"), "{out}");
+    // Naming an interface leaves resources.yaml alone; naming a resource moves only it.
+    assert!(std::fs::read_to_string(dir.path().join("resources.yaml")).unwrap().contains("owner: Ann Smith"));
+    let (ok, out) =
+        ductus(dir.path(), &["owners", "reassign", "--from", "Ann Smith", "--to", "Dee", "--resource", "portal"]);
+    assert!(
+        ok && out.contains("resources.yaml\n  2  - portal: { url: \"https://portal\", owner: Ann Smith }   (api portal)\n     + portal: { url: \"https://portal\", owner: Dee }"),
+        "{out}"
+    );
     let (ok, out) = ductus(dir.path(), &["owners", "reassign", "--from", "ann smith", "--to", "Carol"]);
     assert!(ok && out.contains("interfaces/adt/interface.yaml\n  4  - owner: Ann Smith   # on call: weekdays\n     + owner: Carol   # on call: weekdays"), "{out}");
     let written = std::fs::read_to_string(dir.path().join("interfaces/adt/interface.yaml")).unwrap();
     assert_eq!(written, adt.replace("Ann Smith", "Carol"), "only the value changed");
-    let (_, out) = ductus(dir.path(), &["owners"]);
+    let (_, out) = without_a_database(dir.path(), &["owners"]);
     assert!(
-        out.contains("Billing team (1)") && out.contains("Bob (1)\n  orders") && out.contains("Carol (1)\n  adt"),
+        out.contains("Billing team (1)")
+            && out.contains("Bob (1)\n  orders")
+            && out.contains("Carol (1)\n  adt")
+            && out.contains("Dee (1)\n  api portal"),
         "{out}"
     );
 
     let (ok, out) = ductus(dir.path(), &["owners", "reassign", "--from", "Ann Smith", "--to", "X"]);
-    assert!(!ok && out.contains("no `owner: Ann Smith` found (owners: Billing team, Bob, Carol)"), "{out}");
+    assert!(!ok && out.contains("no `owner: Ann Smith` found (owners: Billing team, Bob, Carol, Dee)"), "{out}");
     let (ok, out) = ductus(dir.path(), &["owners", "reassign", "--from", "Bob", "--to", "X", "--interface", "nope"]);
     assert!(!ok && out.contains("no interface named nope"), "{out}");
+    let (ok, out) = ductus(dir.path(), &["owners", "reassign", "--from", "Bob", "--to", "X", "--resource", "nope"]);
+    assert!(!ok && out.contains("no resource named nope in resources.yaml"), "{out}");
+}
+
+/// With the database, `ductus owners` says which owners are accounts (by username, email or
+/// display name), teams in `owners:`, or nobody; `--check` fails until each reaches someone.
+#[test]
+fn owners_are_matched_to_accounts() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let (olaf, gone) = (format!("test-user-owner-{nanos}"), format!("test-user-gone-{nanos}"));
+    let (olaf_name, gone_name, nobody) =
+        (format!("Olaf Night {nanos}"), format!("Gone {nanos}"), format!("Nobody {nanos}"));
+    let iface = |name: &str, owner: &str| {
+        (
+            format!("interfaces/{name}/interface.yaml"),
+            format!(
+                "name: {name}\nsource: {{ mllp: {{ port: {} }} }}\nabout: {{ owner: \"{owner}\" }}\ndestination: {{ file: {{ dir: out }} }}\n",
+                free_port()
+            ),
+        )
+    };
+    let files = [iface("a", &olaf_name), iface("b", &gone_name), iface("c", "lab systems"), iface("d", &nobody)];
+    let mut files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+    let resources = format!("apis:\n  portal: {{ url: \"https://portal\", owner: \"{gone_name}\" }}\n");
+    files.push(("resources.yaml", &resources));
+    files.push(("ductus.yaml", "owners:\n  Lab Systems: { email: lab@example.org }\n"));
+    let dir = project(&files);
+    let run = |args: &[&str], stdin: &str| {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(args)
+            .current_dir(dir.path())
+            .env("DUCTUS_DATABASE_URL", &db)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let password = "correct horse staple\n";
+    let email = format!("olaf-{nanos}@example.org");
+    for (user, name, email) in [(&olaf, &olaf_name, Some(email.as_str())), (&gone, &gone_name, None)] {
+        let mut args = vec!["user", "create", user, "--role", "operator", "--display-name", name, "--password-stdin"];
+        args.extend(email.map(|e| ["--email", e]).into_iter().flatten());
+        let (ok, out) = run(&args, password);
+        assert!(ok, "{out}");
+    }
+    assert!(run(&["user", "disable", &gone], "").0);
+
+    let (ok, out) = run(&["owners"], "");
+    assert!(ok, "without --check it only reports: {out}");
+    assert!(out.contains(&format!("✓ {olaf_name} (1): user {olaf} ({olaf_name}, {email})\n  a")), "{out}");
+    assert!(
+        out.contains(&format!("✗ {gone_name} (2): account {gone} ({gone_name}) is disabled\n  b\n  api portal")),
+        "{out}"
+    );
+    assert!(out.contains("✓ lab systems (1): team (`owners:` in ductus.yaml)\n  c"), "{out}");
+    assert!(out.contains(&format!("✗ {nobody} (1): not a user, not in `owners:`, not an address\n  d")), "{out}");
+    assert!(out.contains("2 owner(s) reach nobody or the wrong person"), "{out}");
+    let (ok, _) = run(&["owners", "--check"], "");
+    assert!(!ok);
+
+    // Gone's interface and resource move to Olaf (by email), the unknown owner to the team.
+    let (ok, out) = run(&["owners", "reassign", "--from", &gone_name, "--to", &email], "");
+    assert!(ok && out.contains("changed 2 owner value(s) in 2 file(s)"), "{out}");
+    assert!(run(&["owners", "reassign", "--from", &nobody, "--to", "Lab Systems"], "").0);
+    let (ok, out) = run(&["owners", "--check"], "");
+    assert!(ok, "{out}");
+    assert!(out.contains(&format!("✓ {email} (2): user {olaf}")), "{out}");
+
+    // What this test made (the audit rows stay, as they would for anyone).
+    let sql = format!("DELETE FROM users WHERE username IN ('{olaf}', '{gone}')");
+    match Command::new("psql").args(["-q", &db, "-c", &sql]).status() {
+        Ok(s) => assert!(s.success()),
+        Err(_) => eprintln!("psql not found: test users {olaf}, {gone} left in the database"),
+    }
 }
 
 #[test]
@@ -654,6 +755,8 @@ async fn the_api_shows_the_engine_and_drains_it() {
 
     let owners = json("/owners", &viewer).await;
     assert!(owners.to_string().contains("Lab team"), "{owners}");
+    assert_eq!((&owners[0]["reach"], &owners[0]["you"]), (&"nobody".into(), &false.into()), "not an account: {owners}");
+    assert!(json("/owners/people", &viewer).await.is_array());
     // Reassigning is previewed, as a patch for the project's repository: nothing is written.
     let file = dir.path().join(format!("interfaces/{name}/interface.yaml"));
     let preview = async |body: serde_json::Value| -> (u16, serde_json::Value) {
@@ -670,6 +773,14 @@ async fn the_api_shows_the_engine_and_drains_it() {
     assert_eq!(p["files"][0]["lines"][0]["after"], "about: { owner: Integration team }", "{p}");
     assert!(p["patch"].as_str().unwrap().contains("\n+about: { owner: Integration team }\n"), "{p}");
     assert_eq!(p["command"], "ductus owners reassign --from 'lab TEAM' --to 'Integration team'");
+    assert_eq!(p["to_reach"], "nobody");
+    assert!(
+        p["warning"]
+            .as_str()
+            .unwrap()
+            .contains("isn't an account or a team in `owners:`: alerts for these would reach nobody"),
+        "{p}"
+    );
     assert_eq!(std::fs::read_to_string(&file).unwrap(), config, "a preview writes nothing");
     let (_, p) = preview(serde_json::json!({ "from": "Nobody", "to": "X" })).await;
     assert_eq!((&p["changed"], &p["known"]), (&0.into(), &serde_json::json!(["Lab team"])), "{p}");
@@ -688,6 +799,7 @@ async fn the_api_shows_the_engine_and_drains_it() {
         "/metrics",
         "/hotspots",
         "/owners/reassign/preview",
+        "/owners/people",
     ] {
         assert!(spec["paths"][path].is_object(), "{path} missing from the OpenAPI document");
     }

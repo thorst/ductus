@@ -335,7 +335,8 @@ async fn warn_unreachable_owners(engine: &Engine, a: &Alerts) {
     let users = engine.store.users().await.unwrap_or_default();
     let people = people(&users);
     let configs = engine.interfaces.iter().map(|i| i.config.as_ref());
-    let mut owners: Vec<String> = ductus_core::owners::owned(configs).into_iter().map(|o| o.owner).collect();
+    let mut owners: Vec<String> =
+        ductus_core::owners::owned(configs, &engine.resources).into_iter().map(|o| o.owner).collect();
     owners.sort_by_key(|o| o.to_lowercase());
     owners.dedup_by(|x, y| ductus_core::owners::same(x, y));
     for owner in owners.iter().filter(|o| !o.is_empty()) {
@@ -345,14 +346,19 @@ async fn warn_unreachable_owners(engine: &Engine, a: &Alerts) {
     }
 }
 
-fn people(users: &[ductus_store::User]) -> Vec<Person<'_>> {
+/// The accounts as owners see them (disabled ones too: they still name someone, who gets nothing).
+pub(crate) fn people(users: &[ductus_store::User]) -> Vec<Person<'_>> {
     fn some(s: &str) -> Option<&str> {
         (!s.trim().is_empty()).then_some(s)
     }
     users
         .iter()
-        .filter(|u| u.disabled_at.is_none())
-        .map(|u| Person { username: &u.username, display_name: some(&u.display_name), email: some(&u.email) })
+        .map(|u| Person {
+            username: &u.username,
+            display_name: some(&u.display_name),
+            email: some(&u.email),
+            disabled: u.disabled_at.is_some() || u.directory_refused_at.is_some(),
+        })
         .collect()
 }
 
@@ -712,7 +718,7 @@ channels:
   hook: { webhook: { url: 'http://127.0.0.1:9/h', format: teams } }
 rules: [{ when: [error], severity: critical, to: [both, hook, owner] }]",
         );
-        let anna = [Person { username: "anna", display_name: None, email: Some("anna@example.org") }];
+        let anna = [Person { username: "anna", display_name: None, email: Some("anna@example.org"), disabled: false }];
         assert_eq!(
             a.channels(&["both", "hook", OWNER, "hook"], "Lab", &anna),
             ["both/email", "both/webhook", "hook", "email:lab@example.org"]

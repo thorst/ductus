@@ -399,17 +399,9 @@ async fn channels(engine: Eng, caller: Caller) -> ApiResult<ChannelsOverview> {
     let mut owner_notifications = None;
     if to_owner {
         let users = engine.store.users().await?;
-        let people: Vec<_> = users
-            .iter()
-            .filter(|u| u.disabled_at.is_none())
-            .map(|u| ductus_core::alerts::Person {
-                username: &u.username,
-                display_name: Some(u.display_name.as_str()).filter(|s| !s.is_empty()),
-                email: Some(u.email.as_str()).filter(|s| !s.is_empty()),
-            })
-            .collect();
+        let people = crate::alerts::people(&users);
         let configs = engine.interfaces.iter().map(|i| i.config.as_ref());
-        for (owner, _) in ductus_core::owners::by_owner(ductus_core::owners::owned(configs)) {
+        for (owner, _) in ductus_core::owners::by_owner(ductus_core::owners::owned(configs, &engine.resources)) {
             if owner.is_empty() {
                 continue;
             }

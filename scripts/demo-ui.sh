@@ -20,6 +20,8 @@
 # 40, 20, 10 and 3 days and two days ago, and one that can't be reached, in the Connections table
 # and the Overview card. The directory (a throwaway OpenLDAP, scripts/dev/slapd.sh): a directory
 # person signs in, their account and the Users page show what the directory decides, read-only.
+# Owners: that person owns adt's archive, so their Interfaces page opens on "Mine", and the Owners
+# page says which owners are people with an account and which reach nobody.
 # Screenshots: ui/test-results/.
 #
 # Needs Node and the UI's packages (cd ui && npm ci), Playwright's Chromium
@@ -68,6 +70,7 @@ ldap:
     insecure: true
     bind_dn: cn=ductus-svc,ou=service,dc=example,dc=org
     bind_password: svc-password
+    owner: Directory Services
     custom: { baa_signed: n/a }
 EOF
 L=$(mktemp -d /tmp/ductus-ldap.XXXX)
@@ -119,7 +122,8 @@ custom:
   runbook: https://wiki.example.org/adt
 destinations:
   lab: { mllp: { host: 127.0.0.1, port: 6799, timeout_ms: 300 }, custom: { runbook: "https://wiki.example.org/adt-lab" } }
-  archive: { file: { dir: out/archive } }
+  # Owned by the directory operator (test-user-olaf, "Olaf Night"): adt is one of their interfaces.
+  archive: { file: { dir: out/archive }, owner: Olaf Night }
 EOF
 cat >"$P/interfaces/orders/interface.yaml" <<'EOF'
 name: orders
@@ -165,7 +169,15 @@ psql -q "$DB" -c "DELETE FROM certificate_status WHERE resource IN ('pharmacy', 
 "$BIN" run >"$P/run.log" 2>&1 &
 ENGINE=$!
 # cert-server has no SIGINT handler (a background job of a script ignores SIGINT): TERM. slapd too.
-trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true' EXIT
+# The people this run made (their audit rows stay; one with message actions stays too, as history).
+RUN_PEOPLE="(username LIKE 'test-user-ui-%-$$' OR username IN ($DIRECTORY_PEOPLE)) AND NOT EXISTS (SELECT 1 FROM message_actions m WHERE m.user_id = users.id)"
+forget_people() {
+  psql -q "$DB" -c "DELETE FROM api_sessions WHERE user_id IN (SELECT id FROM users WHERE $RUN_PEOPLE) OR token_id IN (SELECT t.id FROM api_tokens t JOIN users ON users.id = t.user_id WHERE $RUN_PEOPLE)" \
+    -c "DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM users WHERE $RUN_PEOPLE)" \
+    -c "DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users WHERE $RUN_PEOPLE)" \
+    -c "DELETE FROM users WHERE $RUN_PEOPLE"
+}
+trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true' EXIT
 # Alerts of earlier runs of this demo: start clean.
 psql -q "$DB" -c "DELETE FROM alert_events WHERE key IN ('dest:adt/lab', 'dest:adt/archive', 'dest:orders/default', 'dest:billing/default', 'iface:adt', 'iface:orders', 'iface:billing')" \
   -c "UPDATE alert_state SET state = 'ok', severity = NULL, since = NULL, ok_since = NULL, ack_by = NULL, ack_at = NULL, silenced_until = NULL, rev = rev + 1 WHERE interface IN ('adt', 'orders', 'billing')"

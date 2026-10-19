@@ -34,9 +34,10 @@ fn destination_labels(rows: &[Resent]) -> Vec<String> {
     labels
 }
 
-/// Which action a request is, for the audit log.
-fn resend_action(quarantined_only: bool) -> &'static str {
-    if quarantined_only { "message.release" } else { "message.replay" }
+/// Which action a resend is, for the audit log: a release when it sends only quarantined
+/// deliveries again, else a replay.
+fn resend_action(released: bool) -> &'static str {
+    if released { "message.release" } else { "message.replay" }
 }
 
 /// The request's audit row, written first in the transaction so the `message_actions` it makes
@@ -234,6 +235,18 @@ impl Store {
             if resent.is_empty() {
                 // Nothing happened, so nothing to record (the audit row goes with the transaction).
                 return Ok(resent);
+            }
+            // What it was is what was reset, not how it was asked: sending quarantined deliveries
+            // again is a release even when the request named their destination (the message page
+            // names the one clicked on); a replay sends again what had finished.
+            let released = resent.iter().all(|d| d.previous_status == Status::Quarantined);
+            if released != r.quarantined_only {
+                sqlx::query("UPDATE audit_log SET action = $2 WHERE id = $1")
+                    .bind(audit_id)
+                    .bind(resend_action(released))
+                    .execute(&mut *tx)
+                    .await
+                    .context("naming the audit row")?;
             }
             let mut again: Vec<i64> = resent.iter().map(|r| r.message_id).collect();
             again.dedup();

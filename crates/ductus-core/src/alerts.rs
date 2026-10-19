@@ -519,17 +519,12 @@ pub fn recipients<'a>(rule: &'a Rule, options: &'a AlertOptions) -> Vec<&'a str>
     out
 }
 
-/// A user, as far as finding an owner's address goes.
-#[derive(Debug, Clone)]
-pub struct Person<'a> {
-    pub username: &'a str,
-    pub display_name: Option<&'a str>,
-    pub email: Option<&'a str>,
-}
+pub use crate::owners::Person;
 
-/// An owner's email addresses: the user whose username, email or display name is the owner
-/// text (ignoring case), else the `owners:` directory, else the text itself if it is an
-/// address. `None`: nobody to send to (the rule's other recipients still hear).
+/// An owner's email addresses: the account the owner text names (`owners::find`: username,
+/// email or display name, ignoring case; not a disabled one, nor one of several), else the
+/// `owners:` directory, else the text itself if it is an address. `None`: nobody to send to (the
+/// rule's other recipients still hear).
 pub fn owner_addresses(
     owner: &str,
     people: &[Person],
@@ -540,10 +535,10 @@ pub fn owner_addresses(
         return None;
     }
     let same = |a: &str| a.trim().eq_ignore_ascii_case(owner);
-    let person = people.iter().find(|p| {
-        p.email.is_some() && (same(p.username) || p.email.is_some_and(same) || p.display_name.is_some_and(same))
-    });
-    if let Some(email) = person.and_then(|p| p.email) {
+    if let crate::owners::Found::One(p) = crate::owners::find(owner, people)
+        && !p.disabled
+        && let Some(email) = p.email
+    {
         return Some(vec![email.to_string()]);
     }
     if let Some((_, contact)) = directory.iter().find(|(name, _)| same(name))
@@ -997,9 +992,13 @@ rules:
 
     #[test]
     fn finds_an_owner_s_address() {
+        let person = |username, display_name, email, disabled| Person { username, display_name, email, disabled };
         let people = [
-            Person { username: "anna", display_name: Some("Anna Lee"), email: Some("anna@example.org") },
-            Person { username: "bo", display_name: Some("Bo"), email: None },
+            person("anna", Some("Anna Lee"), Some("anna@example.org"), false),
+            person("bo", Some("Bo"), None, false),
+            person("cy", Some("Cy Gone"), Some("cy@example.org"), true),
+            person("dee", Some("Same Name"), Some("dee@example.org"), false),
+            person("eve", Some("Same Name"), Some("eve@example.org"), false),
         ];
         let mut directory = BTreeMap::new();
         directory.insert("Lab Systems".to_string(), OwnerContact { email: vec!["lab@example.org".into()] });
@@ -1010,6 +1009,9 @@ rules:
         assert_eq!(find("lab systems").unwrap(), ["lab@example.org"]);
         assert_eq!(find("someone@example.org").unwrap(), ["someone@example.org"]);
         assert_eq!(find("Bo"), None, "a user without an email");
+        assert_eq!(find("Cy Gone"), None, "a disabled account");
+        assert_eq!(find("same name"), None, "two accounts: no guess");
+        assert_eq!(find("eve").unwrap(), ["eve@example.org"]);
         assert_eq!(find("Radiology"), None);
         assert_eq!(find(""), None);
     }

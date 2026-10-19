@@ -378,6 +378,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         alerts,
         doctor: settings.doctor,
         directory,
+        teams: settings.owners.clone(),
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse

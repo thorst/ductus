@@ -4,12 +4,13 @@ import { ArrowRight, CirclePause, CirclePlay, Flame, MessageSquareText } from "l
 import { useState } from "react";
 import { pause, resume, useCanOperate, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
-import { alerts, docs, iface } from "@/api/queries";
+import { alerts, docs, iface, owners } from "@/api/queries";
 import { ActionDialog } from "@/components/action-dialog";
 import { AlertItem, isCertificate } from "@/components/alerts";
 import { DocFields } from "@/components/docs-values";
 import { HealthBadge } from "@/components/health-badge";
 import { MessageList } from "@/components/message-list";
+import { OwnerReach, ownerGroup } from "@/components/owner";
 import { Field, Loaded, PageHeader } from "@/components/page";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
@@ -70,6 +71,8 @@ export function InterfacePage() {
 function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
   const system = (s: Schemas["SystemInfo"]) =>
     [s.application, s.vendor && `(${s.vendor})`].filter(Boolean).join(" ") || "–";
+  const { data: groups } = useQuery(owners);
+  const owner = i.owner ? ownerGroup(groups, i.name) : undefined;
   return (
     <div className="space-y-6">
       {i.state === "stopped" && (
@@ -91,7 +94,10 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
             <Field label="Systems">
               {system(i.from)} <ArrowRight aria-label="to" className="inline size-3.5" /> {system(i.to)}
             </Field>
-            <Field label="Owner">{i.owner ?? "–"}</Field>
+            <Field label="Owner">
+              {i.owner ?? "–"}
+              {owner && <OwnerReach group={owner} className="mt-0.5 flex text-xs" />}
+            </Field>
             <Field label="Format">{i.format}</Field>
             <Field label="Runs">
               {i.isolation === "dedicated" ? `dedicated, ${i.workers} workers` : "shared pool"} · timeout{" "}

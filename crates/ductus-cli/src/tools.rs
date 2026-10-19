@@ -150,19 +150,29 @@ struct SinkStats {
     out_of_order: u64,
 }
 
-pub async fn sink(port: u16) -> Result<()> {
+pub async fn sink(port: u16, reject: Vec<String>) -> Result<()> {
     let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
     let stats = Arc::new(Mutex::new(SinkStats::default()));
-    println!("sink listening on {port}; Ctrl-C to stop");
+    let reject = Arc::new(reject);
+    if reject.is_empty() {
+        println!("sink listening on {port}; Ctrl-C to stop");
+    } else {
+        println!("sink listening on {port}, rejecting messages with {}; Ctrl-C to stop", reject.join(" or "));
+    }
 
     let handler_stats = stats.clone();
     let handler = move |frame: Bytes| {
         let stats = handler_stats.clone();
+        let reject = reject.clone();
         async move {
             let raw = String::from_utf8_lossy(&frame);
             let Ok(message) = Message::parse(&raw) else {
                 return Bytes::from(ductus_hl7::reject_unparseable("not HL7", &now()));
             };
+            if let Some(text) = reject.iter().find(|t| raw.contains(t.as_str())) {
+                println!("rejected {} (contains {text})", message.control_id());
+                return Bytes::from(message.ack(AckCode::Reject, "rejected by the receiver", &now()));
+            }
             if let Ok(seq) = message.control_id().parse::<u64>() {
                 let mrn = message.value("PID-3.1").to_string();
                 let mut s = stats.lock().unwrap();

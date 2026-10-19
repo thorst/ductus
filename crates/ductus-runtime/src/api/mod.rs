@@ -378,6 +378,7 @@ mod tests {
         ("GET", "/hotspots", "signed"),
         ("GET", "/impact", "signed"),
         ("GET", "/owners", "signed"),
+        ("GET", "/owners/people", "signed"),
         ("POST", "/owners/reassign/preview", "signed"),
         ("GET", "/docs", "signed"),
         ("GET", "/retention", "signed"),
