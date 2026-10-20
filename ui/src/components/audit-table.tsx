@@ -39,14 +39,36 @@ export const ACTIONS: Record<string, string> = {
   "alert.test": "Sent a test notification",
   "engine.start": "Engine started",
   "engine.stop": "Engine stopped",
+  "engine.refused": "Engine start refused",
   "interface.stopped": "Interface stopped",
+  "interface.partitions_raised": "Interface lanes raised with messages waiting",
 };
+
+/** Why a start was refused, from its detail (`reason`: `owned` or `lanes`). */
+function refusal(d: Record<string, unknown>): string {
+  if (d.reason === "owned") {
+    const owners = Array.isArray(d.owners) ? (d.owners as Record<string, unknown>[]) : [];
+    const names = Array.isArray(d.interfaces) ? (d.interfaces as string[]) : [];
+    const who = owners.map((o) => `${String(o.host)} (pid ${String(o.pid)})`).join(", ");
+    return `another engine runs ${names.join(", ")}${who ? ` on ${who}` : ""}`;
+  }
+  if (d.reason === "lanes") {
+    const stranded = Array.isArray(d.stranded) ? (d.stranded as Record<string, unknown>[]) : [];
+    const where = stranded.map((s) => `${String(s.interface)} → ${String(s.destination)}: ${String(s.waiting)}`);
+    return `messages waiting in lanes it no longer has (${where.join(", ")})`;
+  }
+  return "";
+}
 
 const VIA: Record<string, string> = { session: "web UI", token: "API token", cli: "command line", engine: "engine" };
 
 /** The most useful line about an entry: the reason if there is one, else what the detail says. */
 function summary(e: Entry): string {
   const d = (e.detail ?? {}) as Record<string, unknown>;
+  if (e.action === "engine.refused") return refusal(d);
+  if (e.action === "interface.partitions_raised") {
+    return `${String(d.before)} → ${String(d.now)} lanes with ${String(d.waiting)} waiting`;
+  }
   const parts: string[] = [];
   if (typeof d.reason === "string" && d.reason) parts.push(d.reason);
   if (Array.isArray(d.messages) && d.messages.length > 1) parts.push(`${d.messages.length} messages`);

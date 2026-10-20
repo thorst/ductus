@@ -23,6 +23,10 @@ Restart=on-failure
 RestartSec=5
 # A drained engine asked to stop (`ductus drain --stop`) exits 0: it stays stopped.
 SuccessExitStatus=0
+# A refused start exits 3: another engine runs these interfaces on the database, or a lane change
+# would strand waiting messages. Trying again every 5 s changes neither; a person has to act
+# (`journalctl -u ductus` says what), then `systemctl start ductus`.
+RestartPreventExitStatus=3
 # Many connections: one per sender and receiver, and the database pool.
 LimitNOFILE=65536
 

@@ -1577,9 +1577,19 @@ export interface components {
         EngineInfo: {
             drain: components["schemas"]["DrainStatus"];
             environment: string;
+            /**
+             * @description False while the engine has lost the database connection that holds its interfaces:
+             *     sending, file pickup and schedules wait until it is back (receiving goes on).
+             */
+            holds_interfaces: boolean;
             /** @description The server's name. */
             host: string;
             interfaces: number;
+            /**
+             * @description Other engines running on this database, oldest first, and the interfaces each runs.
+             *     An interface runs on one engine at a time.
+             */
+            others: components["schemas"]["OtherEngine"][];
             /**
              * @description Calls from interface code to each database and API in resources.yaml (`fetch`: URLs
              *     called directly), since the engine started.
@@ -1962,6 +1972,17 @@ export interface components {
             /** @description `viewer` (default), `operator` or `admin`. */
             role?: string | null;
             username: string;
+        };
+        OtherEngine: {
+            environment: string;
+            host: string;
+            /** @description The interfaces it runs (respond-mode HTTP interfaces aren't claimed, so not listed). */
+            interfaces: string[];
+            /** Format: int32 */
+            pid: number;
+            /** Format: date-time */
+            started_at: string;
+            version: string;
         };
         /** @enum {string} */
         Outcome: "ok" | "warn" | "fail";

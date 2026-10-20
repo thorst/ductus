@@ -29,11 +29,12 @@ struct State {
     previous: Option<DateTime<Utc>>,
 }
 
-pub async fn run(intake: Arc<Intake>, timing: Timing) {
+/// `ownership`: runs wait while this engine doesn't hold its interfaces (`ownership`).
+pub async fn run(intake: Arc<Intake>, timing: Timing, ownership: Arc<crate::ownership::Ownership>) {
     let name = intake.config.name.clone();
-    tracing::info!(interface = %name, "schedule started");
+    tracing::debug!(interface = %name, "schedule started");
     loop {
-        match next_run(&intake, &timing).await {
+        match next_run(&intake, &timing, &ownership).await {
             Ok(()) => {}
             // Draining: the run waits for the gate to open (and runs once then, however late).
             Err(e) if e.is::<Closed>() => {}
@@ -46,7 +47,7 @@ pub async fn run(intake: Arc<Intake>, timing: Timing) {
 }
 
 /// Wait for the next run and queue it.
-async fn next_run(intake: &Intake, timing: &Timing) -> Result<()> {
+async fn next_run(intake: &Intake, timing: &Timing, ownership: &crate::ownership::Ownership) -> Result<()> {
     let name = &intake.config.name;
     let state: State = match intake.store().source_state(name, STATE_KEY).await? {
         Some(json) => serde_json::from_str(&json).context("reading schedule state")?,
@@ -62,6 +63,7 @@ async fn next_run(intake: &Intake, timing: &Timing) -> Result<()> {
     }
 
     intake.gate.opened().await;
+    ownership.until_held().await;
     let now = Utc::now();
     let local = |t: DateTime<Utc>| t.with_timezone(&Local).to_rfc3339();
     let payload = serde_json::json!({ "due": local(due), "previous": state.previous.map(local) }).to_string();

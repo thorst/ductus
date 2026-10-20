@@ -199,7 +199,7 @@ Who did what, to what, from where, and how it ended. Written in the transaction 
 | `actor_name` | text | The user's or token's name at the time (a snapshot). |
 | `via` | text | `session` (the web UI), `token`, `cli`, `engine`; none for rows made from `message_actions` when this table was added. |
 | `ip` | inet | The address the connection came from (a proxy's address behind one). |
-| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create` (also a directory account's first sign-in, by `directory`), `user.update`, `user.disable`, `user.unlock`, `user.directory_change` (the directory changed an account's role, permissions, name or email, or let it back in), `user.directory_refused` (the directory said no to an account: its sessions ended), `token.create`, `token.revoke`, `message.payload.read`, `message.release` (a resend that put back only quarantined deliveries, whether or not it named their destinations), `message.replay` (one that sent again a delivery that had finished as sent or filtered), `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `interface.stopped`. |
+| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create` (also a directory account's first sign-in, by `directory`), `user.update`, `user.disable`, `user.unlock`, `user.directory_change` (the directory changed an account's role, permissions, name or email, or let it back in), `user.directory_refused` (the directory said no to an account: its sessions ended), `token.create`, `token.revoke`, `message.payload.read`, `message.release` (a resend that put back only quarantined deliveries, whether or not it named their destinations), `message.replay` (one that sent again a delivery that had finished as sent or filtered), `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `engine.refused` (a start refused: another live engine runs some of its interfaces, or its lanes would strand waiting messages; `detail.reason` is `owned` or `lanes`), `interface.stopped`, `interface.partitions_raised` (an interface started with more lanes while messages waited: a key's new messages may pass its older ones until those are sent). |
 | `subject` | text | What it was done to: a username, a token name, `interface/destination`. |
 | `interface` | text | The interface it concerns. |
 | `message_id` | bigint | The message, when the request was about exactly one. |
@@ -223,6 +223,47 @@ Each interface's retention as the engine applied it, and the change in progress.
 | `changed_at` | timestamptz | When the current value, or the running change, started. |
 | `updated_at` | timestamptz | Last change. |
 | `purge_quarantined` | boolean | `quarantined: purge`: its quarantined messages go with their expired partition instead of moving to the held area (`false`, the default: kept until resolved). |
+
+Index: primary key `interface`.
+
+## `engines`
+
+Every run of an engine on this database (migration 0023). While it runs, an engine holds a session advisory lock with `lock_key` on a connection of its own; that is what "alive" means here (`pg_locks`), so a crash or power loss needs no timeout to wait out (the server frees the lock with the session; the lock connection asks it to notice a vanished client within ~25 s). A refused start leaves no row. Rows of engines that started more than `audit.keep` ago, own nothing and aren't alive are deleted by the hourly audit job.
+
+| column | type | |
+|---|---|---|
+| `instance` | text | The run's name, as `audit_log` `engine.start`/`engine.stop` carry it in `detail.instance`. |
+| `lock_key` | bigint | Its advisory lock (positive, below 2^62: `pg_locks` shows it as `classid` × 2^32 + `objid`). |
+| `host` | text | The server it runs on. |
+| `pid` | integer | Its process id there. |
+| `version` | text | The engine's version. |
+| `environment` | text | `--env`. |
+| `started_at` | timestamptz | When it started. |
+| `stopped_at` | timestamptz | Set by a clean stop. NULL and not alive: it crashed. |
+
+Indexes: primary key `instance`; unique `lock_key`.
+
+## `interface_owners`
+
+Which engine runs each interface's workers, file pickup and schedule: one engine per interface across every engine on the database. An engine claims all of its (queued) interfaces at start, before changing anything for them, all or none; a row whose engine isn't alive any more is taken over. Respond-mode HTTP interfaces aren't claimed (no queue). A clean stop deletes its rows.
+
+| column | type | |
+|---|---|---|
+| `interface` | text | The interface's name. |
+| `instance` | text | `engines.instance` (deleted with it). |
+| `since` | timestamptz | When it was claimed. |
+
+Indexes: primary key `interface`; `interface_owners_instance (instance)`.
+
+## `interface_applied`
+
+The lanes each interface last ran with: `ordering.partitions`, or 1 without `ordering.key`. At start, an interface with fewer lanes than recorded (or none recorded) has its waiting deliveries checked: any in lanes it no longer has refuse the start (no worker would read them). More lanes with messages waiting only warn (`interface.partitions_raised`).
+
+| column | type | |
+|---|---|---|
+| `interface` | text | The interface's name. |
+| `lanes` | integer | Its lanes. |
+| `updated_at` | timestamptz | When it last changed. |
 
 Index: primary key `interface`.
 

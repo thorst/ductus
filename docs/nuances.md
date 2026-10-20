@@ -47,6 +47,26 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** each day's tables are created ahead of time, hourly. Creating one needs a brief exclusive lock on `messages`/`deliveries`, which has to wait for every open query on them. Maintenance gives up after 2 s and tries again in an hour (partitions exist 3 days ahead), so a long report never holds up ACKs. If tomorrow's partitions still don't exist (something held the tables through every try for two days), maintenance stops giving up and waits: new messages (and their ACKs) then wait as long as the blocking query runs, rather than fail at midnight. The engine logs a warning when that happens.
 - **What to do:** run long reports against a replica, or keep them short; never leave a transaction open on the store. Watch for the warning "a partition needed soon is missing".
 
+## Several engines on one database
+
+### An interface runs on one engine at a time; a second one is refused (level 2)
+- **What:** every engine holds a lock on the database while it runs and claims its interfaces when it starts. An engine started with an interface another live engine runs **refuses to start** (exit 3), whatever else it has: "another engine is running 2 of this engine's interfaces on this database: adt, orders; owned by: host-b, pid 4120, ductus 0.6.0, started …". The refusal is in the audit log (`engine.refused`). Engines with *different* interfaces share a database without trouble; each lists the others (Overview, `GET /engine` `others`). Respond-mode HTTP interfaces aren't claimed: they have no queue, so several engines may answer them behind a load balancer.
+- **Why:** two engines running one interface both read its queue: both send each message (duplicates), and per-patient order breaks. A DR server booted with production's config, or a test VM pointed at the production database, did exactly that before v0.6.
+- **What to do:** stop the other engine first (the message names its host and pid), or take the interfaces out of this one's project. A refused start isn't retried by the service manager (systemd: `RestartPreventExitStatus=3`; Windows restarts only after a crash): fix the cause, then start it.
+
+### A dead engine's interfaces are free at once; a vanished host's within ~25 s (level 3)
+- **What:** an engine's lock lives in its own database session. When the process ends in any way (`kill -9`, a crash), the operating system closes the connection and Postgres frees the lock: the next engine can claim its interfaces immediately (0.3 s after `kill -9` in `demo-one-owner.sh`). When the whole host vanishes (power loss, a network cut), nothing closes the connection; the engine asks Postgres to probe it (TCP keepalives on that session: 10 s idle, then 3 probes 5 s apart), so the lock goes within about 25 s.
+- **Automatic standby is not this:** a second engine doesn't wait to take over; it refuses, and you start it when the first is gone. A standby that takes over by itself is v1.2's clustering.
+- **What to do:** for DR, keep the standby engine stopped (or pointed elsewhere) and start it after the primary is down. Nothing else to configure.
+
+### Losing the database connection pauses sending, not receiving (level 3)
+- **What:** if the engine loses the connection that holds its lock (a database restart, a failover, a DBA ending the session), it pauses sending, file pickup and schedules within a few seconds (it checks every 2 s), keeps receiving (storing is safe from any number of engines), and takes the lock and its interfaces back as soon as it can; then it sends what came in meanwhile. If another engine took an interface over in the gap, this one stops (exit 3) rather than run it twice. The Overview says "Cut off from the database" while it lasts.
+- **What to do:** nothing for restarts and failovers. Don't end the `ductus engine lock` session by hand unless you mean to pause that engine.
+
+### PgBouncer in transaction mode can't hold the engine's lock (level 3)
+- **What:** the lock is a session advisory lock: it needs one database session for the engine's whole life. A pooler in transaction (or statement) mode hands each transaction a different server connection, so the lock would be taken on one and lost at once.
+- **What to do:** point the engine at Postgres directly, or through a pooler in session mode. The engine pools its own connections (`--db-connections` / `DUCTUS_DB_CONNECTIONS`, 32 by default) plus one for the lock.
+
 ## Retention
 
 ### Retention is 1, 3 or 7 weeks, not any number of days (level 1)
@@ -124,11 +144,12 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What to do:** choose a key that's as narrow as correctness allows. Set `retry.max_attempts` on destinations where waiting forever is worse than quarantining. When a destination is stalled, `ductus hotspots <interface>` names the message, its key and its worker (see Monitoring).
 
 ### Change `ordering.partitions` only with an empty queue (level 4)
-- **What:** each message's lane is computed from its key and `partitions` when it arrives, and stored. Change `partitions` while messages are waiting and two things can happen:
-  - **Lowered:** waiting messages in lanes at or above the new count belong to no worker and are **never sent** (and `ductus drain` never finishes) until `partitions` is set back. `ductus hotspots` lists them as "a lane no worker reads".
-  - **Raised:** a patient's waiting messages stay in their old lane while new ones go to a different lane (maybe another worker), so until the backlog drains that patient's messages can be delivered out of order.
+- **What:** each message's lane is computed from its key and the interface's lanes when it arrives, and stored. The lanes are `partitions` with an `ordering.key`, and **one** without (removing the key is lowering them to 1). Change them while messages are waiting and:
+  - **Lowered:** waiting messages in lanes at or above the new count would belong to no worker and never be sent. **The engine refuses to start** (exit 3), naming each destination, how many wait and in which lanes: "adt → lab: 412 messages waiting in lanes 32–63; adt now has 32 lanes (it had 64)". `ductus validate` with `DUCTUS_DATABASE_URL` set says the same before you deploy.
+  - **Raised:** allowed, with a warning in the log and an `interface.partitions_raised` row in the audit log: a patient's waiting messages stay in their old lane while new ones go to another (maybe another worker), so until the backlog drains that patient's messages can be delivered out of order. Raising doesn't lose anything, so it isn't refused; whether that brief disorder matters is your call.
   - **`workers` alone:** safe (every lane still has one owner).
-- **What to do:** change `partitions` only when the interface has nothing pending: `ductus drain --wait` (or stop the sender and check `ductus status`), then restart with the new value. If you lowered it by mistake, set it back and restart: the stranded messages are sent, in order within their lanes (a patient who also got messages while it was lowered may get those out of order, as when raising it). To give each of N workers 64 lanes, set `partitions: 64 * N`. (The engine will refuse an unsafe change, then re-assign waiting messages itself, in later releases; until then, this is on you.)
+- **Why:** the engine records the lanes each interface last ran with (`interface_applied`) and, when they went down, counts what waits in the lanes being dropped (one pass over the queue index: ~20–60 ms for 1,001 interfaces with 300,000 waiting, measured on WSL).
+- **What to do:** change the lanes only when the interface has nothing pending: keep the old value, `ductus drain --wait` (new messages wait at the sender, the engine sends what it has), then restart with the new value. Run `ductus validate` against the database before deploying. To give each of N workers 64 lanes, set `partitions: 64 * N`. Re-assigning waiting messages to the new lanes automatically is planned (v0.7).
 
 ### Without an ordering key, more workers don't help (level 3)
 - **What:** an interface with no `ordering.key` is one lane, and a lane has exactly one owner. `isolation: dedicated` with `workers: 8` still processes it one message at a time per destination (the other seven workers have no lanes).
@@ -326,6 +347,10 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** after downtime, a schedule runs once, not once per missed time. A run is skipped if the previous run's message is still pending.
 
 ## Operations: drain mode and the REST API
+
+### A start logs one line, not one per listener (level 2)
+- **What:** an engine's start ends with one line: `started interfaces=1001 mllp=1001 http=0 files=0 schedules=0 internal=0 shared=1001 pool_threads=8 dedicated_threads=0 took=712ms`. Since v0.6 the per-interface lines ("listening (MLLP)", "watching for files", "schedule started", and "MLLP listener closed" at a stop or drain) are debug lines: a thousand-interface engine wrote a thousand of each at every start, stop and drain. Measured with 1,001 interfaces (WSL): ready in 0.69–0.83 s warm (1.3 s with a cold file cache), down from ~5 s in v0.5.
+- **What to do:** `ductus ports` lists what a project listens on. To see each listener in the log, `RUST_LOG=info,ductus_runtime=debug`; that also logs how long each step of the start took ("start: ...").
 
 ### Draining closes MLLP listeners; it doesn't answer AE (level 4)
 - **What:** `ductus drain` (or `POST /api/v1/drain`) stops taking new messages. MLLP listeners close: open connections are closed after the message being handled is ACKed, new ones are refused. A message that was half received, or that arrived just as the drain started, is dropped unanswered, never ACKed, so the sender sends it again later. Queued HTTP sources answer 503 with `Retry-After: 30`. File pickup pauses (a file being read stops between batches and resumes at its saved offset after `ductus resume` or a restart). A schedule that comes due while draining runs once on resume, however many times it came due.

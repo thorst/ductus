@@ -259,6 +259,53 @@ impl Store {
         Ok(state)
     }
 
+    /// `apply_retention` for every interface at startup, in as few statements as the usual case
+    /// allows: an interface whose stored retention already is its configured one (nothing running,
+    /// nothing waiting) changes nothing and is only read; interfaces seen for the first time are
+    /// added in one statement (with the same rule as `apply_retention`'s); only the rest, a real
+    /// change, go through `apply_retention` one by one. One transaction per interface cost ~3 ms
+    /// each (a commit), 3.3 s at 1,001 interfaces, most of a start.
+    pub async fn apply_retention_all(&self, configured: &[(String, Tier)]) -> Result<Vec<RetentionState>> {
+        for (_, days) in configured {
+            check_tier(*days)?;
+        }
+        let (names, days): (Vec<&str>, Vec<Tier>) = configured.iter().map(|(n, d)| (n.as_str(), *d)).unzip();
+        sqlx::query(
+            "INSERT INTO retention (interface, days, changing_from)
+             SELECT c.interface, c.days, CASE WHEN EXISTS (
+                 SELECT 1 FROM messages m WHERE m.interface = c.interface AND m.tier <> c.days) THEN $3::smallint END
+             FROM unnest($1::text[], $2::smallint[]) AS c(interface, days)
+             WHERE NOT EXISTS (SELECT 1 FROM retention r WHERE r.interface = c.interface)
+             ORDER BY c.interface
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(&names)
+        .bind(&days)
+        .bind(LEGACY_TIER)
+        .execute(&self.pool)
+        .await
+        .context("saving the retention of new interfaces")?;
+        let stored: Vec<RetentionState> =
+            sqlx::query_as(sqlx::AssertSqlSafe(format!("{SELECT_STATE} WHERE interface = ANY($1)")))
+                .bind(&names)
+                .fetch_all(&self.pool)
+                .await
+                .context("reading retention")?;
+        let mut stored: std::collections::HashMap<String, RetentionState> =
+            stored.into_iter().map(|s| (s.interface.clone(), s)).collect();
+        let mut states = Vec::with_capacity(configured.len());
+        for (name, days) in configured {
+            let settled = |s: &RetentionState| {
+                s.days == *days && s.changing_from.is_none() && s.waiting.is_none() && s.confirmed.is_none()
+            };
+            match stored.remove(name) {
+                Some(s) if settled(&s) => states.push(s),
+                _ => states.push(self.apply_retention(name, *days).await?),
+            }
+        }
+        Ok(states)
+    }
+
     /// Confirm an interface's waiting, shorter retention. `None` if nothing is waiting for a
     /// confirmation. The engine then applies it (`apply_retention`), or does once the running
     /// change finishes.

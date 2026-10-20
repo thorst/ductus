@@ -130,6 +130,10 @@ enum Command {
         root: PathBuf,
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
+        /// Also check the project against this database, reading only: lanes that would strand
+        /// waiting messages, retention changes still running or waiting for a confirmation.
+        #[arg(long, env = "DUCTUS_DATABASE_URL")]
+        database_url: Option<String>,
     },
     /// Create something new in a project.
     New {
@@ -612,6 +616,18 @@ fn exit_on_failure(result: Result<bool>) -> Result<()> {
     Ok(())
 }
 
+/// A start the engine refused (another engine runs its interfaces; lanes would strand messages):
+/// the reason, then exit 3, which the systemd unit doesn't restart (a person has to act).
+fn exit_if_refused(result: Result<()>) -> Result<()> {
+    if let Err(e) = &result
+        && let Some(refused) = e.downcast_ref::<ductus_runtime::ownership::Refused>()
+    {
+        eprintln!("error: {refused}");
+        std::process::exit(ductus_runtime::ownership::REFUSED_EXIT);
+    }
+    result
+}
+
 fn main() -> Result<()> {
     if let Some(file) = envfile::requested() {
         envfile::load(&file)?;
@@ -651,7 +667,7 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Run(args) => {
             let (root, database_url, options) = args.parts()?;
-            ductus_runtime::run(&root, &database_url, options).await
+            exit_if_refused(ductus_runtime::run(&root, &database_url, options).await)
         }
         Command::Dev { root, threads, env, api_listen, stop_timeout, port, reset, yes, database_only } => {
             let defaults = ductus_runtime::EngineOptions::default();
@@ -667,7 +683,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Test { root, interface, env } => {
             exit_on_failure(project::test(&root, &env, interface.as_deref()).await)
         }
-        Command::Validate { root, env } => exit_on_failure(project::validate(&root, &env).await),
+        Command::Validate { root, env, database_url } => {
+            exit_on_failure(project::validate(&root, &env, database_url).await)
+        }
         Command::Init { dir } => init::project(&dir).await,
         Command::New { what: NewCommand::Interface { name, source, format, port, server, root } } => {
             new::interface(new::NewInterface { root, name, source, format, port, server })

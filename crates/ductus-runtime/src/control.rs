@@ -121,6 +121,8 @@ pub struct Engine {
     pub directory: Option<crate::ldap::Directory>,
     /// Teams and lists that own things (`owners:` in ductus.yaml).
     pub teams: BTreeMap<String, ductus_core::alerts::OwnerContact>,
+    /// Whether the engine holds its interfaces now (`ownership`).
+    pub ownership: Arc<crate::ownership::Ownership>,
 }
 
 /// What the engine is made of, from startup.
@@ -142,6 +144,7 @@ pub struct Parts {
     pub doctor: ductus_core::settings::DoctorSettings,
     pub directory: Option<crate::ldap::Directory>,
     pub teams: BTreeMap<String, ductus_core::alerts::OwnerContact>,
+    pub ownership: Arc<crate::ownership::Ownership>,
 }
 
 impl Engine {
@@ -164,6 +167,7 @@ impl Engine {
             doctor,
             directory,
             teams,
+            ownership,
         } = parts;
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
@@ -193,6 +197,7 @@ impl Engine {
             certificates,
             directory,
             teams,
+            ownership,
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

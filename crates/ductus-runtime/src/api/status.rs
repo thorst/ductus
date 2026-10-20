@@ -108,6 +108,23 @@ pub struct EngineInfo {
     /// Calls from interface code to each database and API in resources.yaml (`fetch`: URLs
     /// called directly), since the engine started.
     resources: Vec<ResourceCalls>,
+    /// False while the engine has lost the database connection that holds its interfaces:
+    /// sending, file pickup and schedules wait until it is back (receiving goes on).
+    holds_interfaces: bool,
+    /// Other engines running on this database, oldest first, and the interfaces each runs.
+    /// An interface runs on one engine at a time.
+    others: Vec<OtherEngine>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OtherEngine {
+    host: String,
+    pid: i32,
+    version: String,
+    environment: String,
+    started_at: DateTime<Utc>,
+    /// The interfaces it runs (respond-mode HTTP interfaces aren't claimed, so not listed).
+    interfaces: Vec<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -124,6 +141,7 @@ pub struct ResourceCalls {
 #[utoipa::path(get, path = "/engine", tag = "engine", responses((status = 200, body = EngineInfo)))]
 async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
     let snapshot = engine.snapshot().await?;
+    let others = engine.store.other_engines(&engine.instance).await?;
     Ok(Json(EngineInfo {
         version: env!("CARGO_PKG_VERSION"),
         environment: engine.environment.clone(),
@@ -141,6 +159,18 @@ async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
                 name: name.into(),
                 calls: Timing::of(&s.calls),
                 errors: stats::get(&s.errors),
+            })
+            .collect(),
+        holds_interfaces: engine.ownership.is_held(),
+        others: others
+            .into_iter()
+            .map(|e| OtherEngine {
+                host: e.host,
+                pid: e.pid,
+                version: e.version,
+                environment: e.environment,
+                started_at: e.started_at,
+                interfaces: e.interfaces,
             })
             .collect(),
     }))

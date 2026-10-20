@@ -28,6 +28,7 @@ echo "##### audit log";       bash scripts/demo-audit.sh | tail -1
 echo "##### alerts";          bash scripts/demo-alerts.sh | tail -1
 echo "##### certificates";    bash scripts/demo-certs.sh | tail -1
 echo "##### directory";       bash scripts/demo-ldap.sh | tail -1
+echo "##### one owner";       bash scripts/demo-one-owner.sh | tail -1
 echo "##### web UI";          bash scripts/demo-ui.sh | tail -1
 echo "##### v0.5 release";    bash scripts/demo-v05.sh | tail -1
 echo "##### ductus dev";      bash scripts/demo-dev.sh | tail -1

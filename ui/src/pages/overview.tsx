@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { CircleCheck } from "lucide-react";
+import { CircleCheck, Server } from "lucide-react";
 import type { Schemas } from "@/api/client";
 import { certificates, engine, interfaces } from "@/api/queries";
 import { AlertItem, useOpenAlerts } from "@/components/alerts";
@@ -9,7 +9,7 @@ import { HealthBadge } from "@/components/health-badge";
 import { Loaded, PageHeader } from "@/components/page";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, Td, Th } from "@/components/ui/table";
-import { count, duration, ms } from "@/lib/format";
+import { count, duration, ms, timestamp } from "@/lib/format";
 import { needingRenewal } from "@/lib/certificates";
 import { describe, problems } from "@/lib/health";
 import { cn } from "@/lib/utils";
@@ -30,7 +30,9 @@ export function OverviewPage() {
         {(all) => (
           <div className="space-y-6">
             {info.data && <DrainBanner drain={info.data.drain} />}
+            {info.data && !info.data.holds_interfaces && <LostLockBanner />}
             <OpenAlerts />
+            {info.data && <OtherEngines others={info.data.others} />}
             <ExpiringCertificates />
             <Totals all={all} />
             <Attention all={all} />
@@ -55,6 +57,47 @@ function DrainBanner({ drain }: { drain: Schemas["DrainStatus"] }) {
           "."}
       {drain.stop_when_drained && " The engine stops once drained."}
     </p>
+  );
+}
+
+/** The engine lost the database connection that holds its interfaces (a restart or failover). */
+function LostLockBanner() {
+  return (
+    <p role="status" className="rounded-md border border-bad/40 bg-bad/10 p-4 text-sm">
+      <strong>Cut off from the database:</strong> this engine lost the connection that holds its interfaces. Sending,
+      file pickup and schedules wait until it is back; receiving goes on.
+    </p>
+  );
+}
+
+/**
+ * Other engines on this database and what each runs (only when there are any). An interface runs
+ * on one engine at a time: a second engine with the same interface refuses to start.
+ */
+function OtherEngines({ others }: { others: Schemas["OtherEngine"][] }) {
+  if (others.length === 0) return null;
+  return (
+    <Card aria-label="Other engines on this database">
+      <CardHeader>
+        <CardTitle>Other engines on this database</CardTitle>
+      </CardHeader>
+      <ul className="divide-y">
+        {others.map((e) => (
+          <li key={`${e.host}/${e.pid}`} className="flex flex-wrap items-baseline gap-x-3 gap-y-1 px-4 py-3 text-sm">
+            <Server aria-hidden className="size-4 shrink-0 self-center text-muted" />
+            <span className="font-medium">{e.host}</span>
+            <span className="text-muted">
+              Ductus {e.version} · {e.environment} · since {timestamp(e.started_at)} · pid {e.pid}
+            </span>
+            <span className="basis-full text-muted">
+              {e.interfaces.length === 0
+                ? "Runs no queued interfaces."
+                : `Runs ${e.interfaces.length === 1 ? "" : `${count(e.interfaces.length)} interfaces: `}${e.interfaces.slice(0, 8).join(", ")}${e.interfaces.length > 8 ? ` and ${count(e.interfaces.length - 8)} more` : ""}`}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </Card>
   );
 }
 

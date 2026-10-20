@@ -58,8 +58,9 @@ impl Retention {
     /// Apply every interface's configured retention and start the background work.
     pub async fn start(store: Store, configured: Vec<Configured>) -> Result<Arc<Self>> {
         let mut interfaces = Vec::with_capacity(configured.len());
-        for c in &configured {
-            let state = store.apply_retention(&c.name, c.days).await?;
+        let wanted: Vec<(String, Tier)> = configured.iter().map(|c| (c.name.clone(), c.days)).collect();
+        let states = store.apply_retention_all(&wanted).await?;
+        for (c, state) in configured.iter().zip(states) {
             report(&state, c.days);
             // A change that just began is a decision about patient data worth keeping a record of.
             if state.changing_from.is_some() && Utc::now() - state.changed_at < chrono::TimeDelta::minutes(1) {

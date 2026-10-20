@@ -184,8 +184,15 @@ RUN_ALERTS="key ~ '^(iface:(adt|orders|billing)|dest:(adt|orders|billing)/.+|cer
 forget_alerts() {
   psql -q "$DB" -c "DELETE FROM alert_events WHERE $RUN_ALERTS" -c "DELETE FROM alert_state WHERE $RUN_ALERTS"
 }
+# What this run leaves waiting (billing is paused, the lab is down): filtered once the engine has
+# stopped, or later demos' interfaces of the same names would send it (or, with fewer lanes, be
+# refused for it).
+forget_waiting() {
+  psql -q "$DB" -c "UPDATE deliveries SET status = 2, last_error = 'demo-ui ended' WHERE status = 0 AND destination_id IN (SELECT id FROM destinations WHERE interface IN ('adt', 'orders', 'billing', 'ui-neighbour'))" \
+    -c "UPDATE messages SET status = 2, last_error = 'demo-ui ended' WHERE status = 0 AND interface IN ('adt', 'orders', 'billing', 'ui-neighbour')"
+}
 # The engine is stopped before its alerts are deleted, so it can't write more.
-trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE 2>/dev/null || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true' EXIT
+trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE 2>/dev/null || true; forget_waiting || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true' EXIT
 # Alerts of earlier runs of this demo (one killed before its cleanup): start clean.
 psql -q "$DB" -c "DELETE FROM alert_events WHERE $RUN_ALERTS" \
   -c "UPDATE alert_state SET state = 'ok', severity = NULL, since = NULL, ok_since = NULL, ack_by = NULL, ack_at = NULL, silenced_until = NULL, rev = rev + 1 WHERE interface IN ('adt', 'orders', 'billing')"
@@ -217,6 +224,26 @@ for _ in $(seq 1 100); do
   grep '"last_error":{' <<<"$status" >/dev/null && grep '"quarantined":4' <<<"$status" >/dev/null && break
   sleep 0.2
 done
+
+echo "== another engine on this database, and this project started twice"
+# A second project (another server's interfaces, say) shares the database: fine, and each engine
+# lists the other. The same project started again is refused (exit 3): the audit log says why.
+N=$P/neighbour
+mkdir -p "$N/interfaces/ui-neighbour"
+printf 'name: ui-neighbour\nsource: { mllp: { port: 6726 } }\ndestination: { file: { dir: out } }\n' \
+  >"$N/interfaces/ui-neighbour/interface.yaml"
+"$BIN" run --root "$N" --api-listen off >"$N/run.log" 2>&1 &
+NEIGHBOUR=$!
+trap 'kill -INT $ENGINE $HOOK $NEIGHBOUR 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE $NEIGHBOUR 2>/dev/null || true; forget_waiting || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true' EXIT
+until grep "started interfaces=" "$N/run.log" >/dev/null; do kill -0 $NEIGHBOUR || { cat "$N/run.log"; exit 1; }; sleep 0.2; done
+code=0
+refused=$("$BIN" run --api-listen off 2>&1) || code=$?
+[ "$code" = 3 ] && grep "another engine is running 3 of this engine's interfaces" <<<"$refused" >/dev/null || {
+  echo "$refused"
+  echo "FAIL: the second start of this project wasn't refused (exit $code)"
+  exit 1
+}
+echo "   ui-neighbour runs alongside; this project again: refused (exit 3), the other engine named"
 
 echo "== certificates (the engine's own check would run a minute or two after start: asked for now)"
 checks=$(curl -s -X POST -H "Authorization: Bearer $DUCTUS_API_TOKEN" -H 'Content-Type: application/json'   -d '{"mode": "certificates", "timeout_ms": 2000}' "$DUCTUS_API_URL/api/v1/doctor")

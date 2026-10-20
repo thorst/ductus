@@ -17,6 +17,7 @@ pub mod keys;
 pub mod ldap;
 mod limiter;
 mod mssql;
+pub mod ownership;
 pub mod project;
 pub mod retention;
 mod schedule;
@@ -89,8 +90,10 @@ impl Default for EngineOptions {
 /// Start every interface under `root` and run until Ctrl-C or SIGTERM (or until drained, when a
 /// drain asked to stop); then stop cleanly (`stop`).
 pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) -> Result<()> {
+    let mut phases = Phases::new();
     let env = Environment::load(root, &options.env)?;
     let configs = load_interfaces(root, &env)?;
+    phases.mark("interface.yaml files read");
     // Loaded now so a missing variable or secret stops startup; used by interface code (v0.4).
     let resources = ductus_core::Resources::load(root, &env)?;
     let settings = ductus_core::settings::Settings::load(root)?;
@@ -141,7 +144,18 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         None => None,
     };
     let sftp_server = |name: &str| resources.sftp.get(name).cloned();
+    phases.mark("project loaded and checked");
     let store = Store::connect(database_url, options.db_connections).await?;
+    phases.mark("database connected and migrated");
+    // Before anything is changed for an interface (deliveries reconciled, retention applied,
+    // workers started): it must be this engine's, and its lanes must still reach what waits.
+    let instance = audit::new_instance();
+    let me = ownership::Me { instance: instance.clone(), host: audit::host_name(), environment: options.env.clone() };
+    let queued = configs.iter().filter(|c| !c.responds()).map(|c| c.name.clone()).collect();
+    let owner = Arc::new(ownership::Owner::claim(&store, me, queued).await?);
+    let lanes: Vec<_> = configs.iter().filter_map(ownership::Lanes::of).collect();
+    owner.guard_lanes(&store, &lanes).await?;
+    phases.mark("interfaces claimed, lanes checked");
     // The company's documentation fields: a broken docs-schema.yaml is for `ductus validate` to report,
     // not a reason to stop the engine. The snapshot is for SQL reports, so it never blocks startup either.
     let docs = ductus_core::docs::Schema::load(root).unwrap_or_else(|e| {
@@ -158,14 +172,26 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     // Before any worker starts: stored deliveries must match the destinations configured now.
     let destinations: Vec<(String, String)> =
         configs.iter().flat_map(|c| c.destinations().map(|(name, _)| (c.name.clone(), name.to_string()))).collect();
-    let changes = store.reconcile(&destinations).await.context("matching stored deliveries to the destinations")?;
-    let mut ids = store.destination_ids(&destinations).await?.into_iter();
+    let all_ids = store.destination_ids(&destinations).await?;
+    // Interfaces with nothing waiting have nothing to reconcile, and their workers nothing to read
+    // yet (they wait for the first message's wake-up, or the idle poll).
+    let queued: Vec<String> = configs.iter().filter(|c| !c.responds()).map(|c| c.name.clone()).collect();
+    let waiting = store.with_waiting(&queued).await?;
+    let (busy, busy_ids): (Vec<(String, String)>, Vec<_>) =
+        destinations.iter().cloned().zip(all_ids.iter().copied()).filter(|((i, _), _)| waiting.contains(i)).unzip();
+    let changes = if busy.is_empty() {
+        ductus_store::Reconciled::default()
+    } else {
+        store.reconcile(&busy, &busy_ids).await.context("matching stored deliveries to the destinations")?
+    };
+    let mut ids = all_ids.into_iter();
     for (interface, count) in &changes.added {
         tracing::info!(%interface, count, "queued messages in flight for destinations they had no delivery for (new destination, or stored by an older version)");
     }
     for (interface, destination, count) in &changes.removed {
         tracing::warn!(%interface, %destination, count, "destination is no longer in interface.yaml: its pending deliveries were marked filtered");
     }
+    phases.mark("deliveries reconciled");
     // Each interface's retention, before anything is stored: intake needs the tier.
     let configured: Vec<retention::Configured> = configs
         .iter()
@@ -179,8 +205,8 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     // What the audit log's hourly job needs: how long each interface keeps its messages.
     let retention_days: Vec<(String, i32)> = configured.iter().map(|c| (c.name.clone(), i32::from(c.days))).collect();
     let retention = retention::Retention::start(store.clone(), configured).await.context("applying retention")?;
+    phases.mark("retention applied");
     let (stopped_tx, stopped_rx) = tokio::sync::mpsc::unbounded_channel();
-    let instance = audit::new_instance();
     // Keep dedupe keys a little longer than the longest window that uses them.
     let dedupe_retention = configs.iter().filter_map(|c| c.dedupe.as_ref()).map(|d| d.window).max().unwrap_or_default()
         + Duration::from_secs(3600);
@@ -227,6 +253,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     let stopping = tokio_util::sync::CancellationToken::new();
     let activity =
         activity::Activity::start(store.clone(), watched, stopping.clone()).await.context("loading last activity")?;
+    phases.mark("last activity loaded");
     for (config, wake, destination_ids, gate, stats) in parts {
         let health = Arc::new(health::Health::reporting(&config.name, stopped_tx.clone()));
         let outlets: Vec<worker::Outlet> = config
@@ -278,6 +305,8 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
                 health: health.clone(),
                 outlets: outlets.clone(),
                 stats: stats.clone(),
+                ownership: owner.ownership.clone(),
+                nothing_waiting: !waiting.contains(&config.name),
             };
             match config.isolation {
                 Isolation::Shared => {
@@ -333,23 +362,27 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         failed.dedup();
         bail!("{}", failed.join("\n"));
     }
+    phases.mark("interface code loaded, workers running");
 
     for (config, ..) in &interfaces {
         let intake = || intakes[&config.name].clone();
         match &config.source {
             Source::Mllp { .. } => ingest::spawn_mllp(intake()).await?,
             Source::File(f) | Source::Sftp(f) => {
-                let watcher = files::FileWatcher::new(intake(), f.server.as_deref().and_then(sftp_server))?;
+                let server = f.server.as_deref().and_then(sftp_server);
+                let watcher = files::FileWatcher::new(intake(), server, owner.ownership.clone())?;
                 tokio::spawn(watcher.run());
             }
             Source::Schedule(s) => {
-                tokio::spawn(schedule::run(intake(), ductus_core::schedule::Timing::new(s)?));
+                let timing = ductus_core::schedule::Timing::new(s)?;
+                tokio::spawn(schedule::run(intake(), timing, owner.ownership.clone()));
             }
             Source::Http { .. } => {} // served below, with the other HTTP interfaces on its port
             Source::Internal => {}    // other interfaces' workers store its messages (routes)
         }
     }
     http::serve(http_endpoints, stopping.clone()).await?;
+    phases.mark("listening");
     let running: Vec<control::Running> = interfaces
         .iter()
         .map(|(config, _, ids, health, gate, stats)| control::Running {
@@ -379,6 +412,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         doctor: settings.doctor,
         directory,
         teams: settings.owners.clone(),
+        ownership: owner.ownership.clone(),
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse
@@ -387,15 +421,41 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     alerts::start(&engine).await;
     certificates::start(&engine);
     ldap::start(&engine);
+    phases.mark("audit log and alerts started");
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
         api_server = Some(api::serve(engine.clone(), host, *port).await?);
     }
+    phases.mark("API listening");
+    // Messages left pending with nothing pending for them (after a crash, or reconcile's
+    // changes): workers don't wait for their overall status, so it's set after the start.
+    let settling = store.clone();
+    let busy: Vec<String> = waiting.into_iter().collect();
+    tokio::spawn(async move {
+        if busy.is_empty() {
+            return;
+        }
+        match settling.settle_finished(&busy).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(messages = n, "set the overall status of messages whose deliveries were all done"),
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "could not settle finished messages (the next start tries again)")
+            }
+        }
+    });
+    // One line for the whole start (demos wait for `started interfaces=`, so it comes first).
+    let count = |kind: fn(&Source) -> bool| interfaces.iter().filter(|(c, ..)| kind(&c.source)).count();
     tracing::info!(
         interfaces = interfaces.len(),
+        mllp = count(|s| matches!(s, Source::Mllp { .. })),
+        http = count(|s| matches!(s, Source::Http { .. })),
+        files = count(|s| matches!(s, Source::File(_) | Source::Sftp(_))),
+        schedules = count(|s| matches!(s, Source::Schedule(_))),
+        internal = count(|s| matches!(s, Source::Internal)),
         shared = shared_count,
         pool_threads,
         dedicated_threads = jobs - shared_count,
+        took = ?phases.total(),
         "started"
     );
     if let Some(started) = options.on_started.take() {
@@ -423,10 +483,12 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
             None => std::future::pending().await,
         }
     };
+    owner.watch(store.clone(), stopping.clone());
     let why = tokio::select! {
         signal = stop_signal() => signal,
         _ = engine.shutdown.cancelled() => "drained and asked to stop",
         _ = requested => "asked by the service manager",
+        _ = owner.taken_over() => "another engine took over its interfaces",
     };
     let limit = options.stop_timeout;
     tracing::info!(why, limit = ?limit, "stopping: taking no new messages, finishing the ones in hand");
@@ -448,8 +510,36 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
             tracing::warn!(signal, "asked again: stopping now; the messages in hand are processed again at the next start")
         }
     }
+    owner.release(&store).await;
     audit::stopped(&engine, why, forced).await;
-    Ok(())
+    match owner.taken_why() {
+        Some(why) => Err(ownership::Refused(why).into()),
+        None => Ok(()),
+    }
+}
+
+/// How long each step of a start took, logged at debug level as it goes (`RUST_LOG=ductus_runtime=debug`),
+/// so a slow start says where its time went.
+struct Phases {
+    started: std::time::Instant,
+    last: std::time::Instant,
+}
+
+impl Phases {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self { started: now, last: now }
+    }
+
+    fn mark(&mut self, phase: &'static str) {
+        let now = std::time::Instant::now();
+        tracing::debug!(took = ?(now - self.last), "start: {phase}");
+        self.last = now;
+    }
+
+    fn total(&self) -> Duration {
+        self.started.elapsed()
+    }
 }
 
 /// How long a stop may take by default: a transform or send under way finishes first, and

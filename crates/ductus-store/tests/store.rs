@@ -1276,12 +1276,18 @@ async fn reconcile_matches_deliveries_to_the_configured_destinations() {
 
     // Now the interface sends to `lab` and `emr`: `fax` was removed, `emr` added. The other
     // interface, reconciled in the same call, has its single destination.
+    let reconcile = async |destinations: &[(String, String)]| {
+        let ids = store.destination_ids(destinations).await.unwrap();
+        store.reconcile(destinations, &ids).await.unwrap()
+    };
+    let names = [t.name.clone(), other.name.clone()];
     let mut now = t.config(&["emr", "lab"]);
     now.extend(other.config(&["default"]));
-    let changes = store.reconcile(&now).await.unwrap();
+    let changes = reconcile(&now).await;
     let mut added = vec![(t.name.clone(), 3), (other.name.clone(), 1)];
     added.sort();
-    assert_eq!(changes, Reconciled { added, removed: vec![(t.name.clone(), "fax".into(), 1)], settled: 0 });
+    assert_eq!(changes, Reconciled { added, removed: vec![(t.name.clone(), "fax".into(), 1)] });
+    assert_eq!(store.settle_finished(&names).await.unwrap(), 0);
     assert_eq!(store.pending(other.dest(), &[0], 10).await.unwrap().len(), 1);
     let new = store.deliveries(m).await.unwrap();
     let new: Vec<_> = new.iter().map(|d| (d.destination.as_str(), d.status)).collect();
@@ -1293,16 +1299,18 @@ async fn reconcile_matches_deliveries_to_the_configured_destinations() {
     let old = store.pending(t.id("lab"), &[0], 10).await.unwrap()[0].reference();
     store.finish(t.id("lab"), &[sent(old)]).await.unwrap();
     let lab = t.config(&["lab"]);
-    let changes = store.reconcile(&lab).await.unwrap();
-    assert_eq!(changes, Reconciled { added: vec![], removed: vec![(t.name.clone(), "emr".into(), 2)], settled: 2 });
+    let changes = reconcile(&lab).await;
+    assert_eq!(changes, Reconciled { added: vec![], removed: vec![(t.name.clone(), "emr".into(), 2)] });
+    assert_eq!(store.settle_finished(&names).await.unwrap(), 2);
     assert_eq!(store.payloads(&t.name, Status::Sent).await.unwrap(), [b"old".to_vec(), b"new".to_vec()]);
-    assert_eq!(store.reconcile(&lab).await.unwrap(), Reconciled::default(), "nothing left to do");
+    assert_eq!(reconcile(&lab).await, Reconciled::default(), "nothing left to do");
+    assert_eq!(store.settle_finished(&names).await.unwrap(), 0);
 
     // An older version finished a message the deliveries still show pending: it takes that status.
     let only_lab = [t.id("lab")];
     let m = store.insert(NewMessage { destinations: &only_lab, ..t.msg(0, b"rolled back") }).await.unwrap();
     sqlx::query("UPDATE messages SET status = 1 WHERE id = $1").bind(m.id).execute(&pool).await.unwrap();
-    assert_eq!(store.reconcile(&lab).await.unwrap(), Reconciled::default());
+    assert_eq!(reconcile(&lab).await, Reconciled::default());
     assert_eq!(store.deliveries(m).await.unwrap()[0].status, Status::Sent);
 }
 
@@ -1740,6 +1748,179 @@ async fn partition_maintenance_waits_when_the_day_is_close() {
     assert!(exists, "every day up to {day} has both partitions");
 }
 
+/// Lock an engine named `instance` (as `ductus_runtime` does at start).
+async fn lock(store: &Store, instance: &str, host: &str) -> ductus_store::EngineLock {
+    let engine = ductus_store::NewEngine { instance, host, pid: 4120, version: "0.6.0-test", environment: "test" };
+    store.lock_engine(&engine, None).await.unwrap()
+}
+
+#[tokio::test]
+async fn an_interface_runs_on_one_engine_and_a_dead_ones_are_taken_over() {
+    let Some(store) = store().await else { return };
+    let (a, b) = (unique("engine-a"), unique("engine-b"));
+    let [x, y, z] = ["x", "y", "z"].map(|n| unique(&format!("owned-{n}")));
+    let lock_a = lock(&store, &a, "host-a").await;
+    assert!(store.claim(&a, &[x.clone(), y.clone()]).await.unwrap().is_empty(), "nobody owned them");
+    assert!(store.claim(&a, &[x.clone(), y.clone()]).await.unwrap().is_empty(), "claiming its own again is fine");
+
+    let lock_b = lock(&store, &b, "host-b").await;
+    // Overlapping: refused, naming the owner, and nothing of the set is claimed (all or none).
+    let owned = store.claim(&b, &[y.clone(), z.clone()]).await.unwrap();
+    assert_eq!(owned.len(), 1);
+    assert_eq!((owned[0].interface.as_str(), owned[0].host.as_str(), owned[0].pid), (y.as_str(), "host-a", 4120));
+    assert!(
+        store.claim(&b, std::slice::from_ref(&z)).await.unwrap().is_empty(),
+        "z was left free: disjoint sets share a database"
+    );
+    let others = store.other_engines(&b).await.unwrap();
+    let seen_a = others.iter().find(|e| e.instance == a).expect("A is alive");
+    assert_eq!(seen_a.interfaces, {
+        let mut v = vec![x.clone(), y.clone()];
+        v.sort();
+        v
+    });
+
+    // A dies (its lock connection closes): B takes y over at once, no timeout to wait out.
+    lock_a.release().await;
+    assert!(store.claim(&b, std::slice::from_ref(&y)).await.unwrap().is_empty(), "a dead engine's interfaces are free");
+    assert!(store.other_engines(&b).await.unwrap().iter().all(|e| e.instance != a), "a dead engine isn't listed");
+    // A refused start leaves no record; a clean stop lets go and says when.
+    store.forget_engine(&a).await.unwrap();
+    store.release_engine(&b).await.unwrap();
+    assert!(store.lost_claims(&b, &[y.clone(), z.clone()]).await.unwrap().is_empty());
+    lock_b.release().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn two_engines_claiming_the_same_interfaces_at_once_one_wins() {
+    let Some(store) = store().await else { return };
+    let names: Vec<String> = (0..50).map(|i| unique(&format!("race-{i}"))).collect();
+    for _ in 0..5 {
+        let (a, b) = (unique("race-a"), unique("race-b"));
+        let (lock_a, lock_b) = (lock(&store, &a, "host-a").await, lock(&store, &b, "host-b").await);
+        // Opposite orders: the claim sorts them, so they wait for each other instead of deadlocking.
+        let reversed: Vec<String> = names.iter().rev().cloned().collect();
+        let (ra, rb) = tokio::join!(store.claim(&a, &names), store.claim(&b, &reversed));
+        let (ra, rb) = (ra.unwrap(), rb.unwrap());
+        assert!(ra.is_empty() != rb.is_empty(), "exactly one engine wins: {} / {}", ra.len(), rb.len());
+        let loser = if ra.is_empty() { rb } else { ra };
+        assert_eq!(loser.len(), names.len(), "the other gets nothing and is told about every one");
+        lock_a.release().await;
+        lock_b.release().await;
+        store.forget_engine(&a).await.unwrap();
+        store.forget_engine(&b).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_lost_lock_connection_is_taken_again_with_the_claims() {
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let a = unique("lost");
+    let name = unique("lost-iface");
+    let mut lock_a = lock(&store, &a, "host-a").await;
+    assert!(store.claim(&a, std::slice::from_ref(&name)).await.unwrap().is_empty());
+    lock_a.check(std::time::Duration::from_secs(3)).await.unwrap();
+
+    // A database restart or failover, as far as this engine's session goes: it is killed.
+    let killed: bool = sqlx::query_scalar(
+        "SELECT pg_terminate_backend(pid) FROM pg_locks
+         WHERE locktype = 'advisory' AND objsubid = 1 AND ((classid::bigint << 32) | objid::bigint) = $1",
+    )
+    .bind(lock_a.key)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert!(killed);
+    assert!(lock_a.check(std::time::Duration::from_secs(3)).await.is_err(), "the engine notices");
+    // Meanwhile another engine could take the interface (the engine looks dead); none did here.
+    let engine =
+        ductus_store::NewEngine { instance: &a, host: "host-a", pid: 4120, version: "0.6.0-test", environment: "test" };
+    let again = store.lock_engine(&engine, Some(lock_a.key)).await.unwrap();
+    assert_eq!(again.key, lock_a.key, "the same lock again");
+    assert!(store.lost_claims(&a, std::slice::from_ref(&name)).await.unwrap().is_empty(), "still its own");
+    assert!(store.claim(&a, std::slice::from_ref(&name)).await.unwrap().is_empty());
+    store.release_engine(&a).await.unwrap();
+    again.release().await;
+}
+
+#[tokio::test]
+async fn lanes_no_worker_reads_are_found_from_the_queue() {
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "stranded", &["lab", "billing"]).await;
+    let only_lab = [t.id("lab")];
+    for lane in [3, 40, 63] {
+        store.insert(NewMessage { destinations: &only_lab, ..t.msg(lane, b"waiting") }).await.unwrap();
+    }
+    let done = store.insert(NewMessage { destinations: &only_lab, ..t.msg(50, b"sent") }).await.unwrap();
+    store.finish(t.id("lab"), &[sent(done)]).await.unwrap();
+    let check =
+        |lanes: i32| [(t.name.clone(), "lab".to_string(), lanes), (t.name.clone(), "billing".to_string(), lanes)];
+
+    let lowered = store.stranded(&check(32)).await.unwrap();
+    assert_eq!(lowered.len(), 1, "billing has nothing waiting: {lowered:?}");
+    let s = &lowered[0];
+    assert_eq!(
+        (s.destination.as_str(), s.waiting, s.first_lane, s.last_lane),
+        ("lab", 2, 40, 63),
+        "the sent one doesn't count"
+    );
+    assert_eq!(store.stranded(&check(1)).await.unwrap()[0].waiting, 3, "no ordering key: one lane");
+    assert!(store.stranded(&check(64)).await.unwrap().is_empty());
+    assert_eq!(store.waiting_by_interface(std::slice::from_ref(&t.name)).await.unwrap(), [(t.name.clone(), 3)]);
+
+    let names = [t.name.clone()];
+    assert!(store.applied_lanes(&names).await.unwrap().is_empty(), "never recorded");
+    store.save_lanes(&[(t.name.clone(), 64)]).await.unwrap();
+    store.save_lanes(&[(t.name.clone(), 32)]).await.unwrap();
+    assert_eq!(store.applied_lanes(&names).await.unwrap(), [(t.name.clone(), 32)]);
+}
+
+#[tokio::test]
+async fn with_waiting_finds_interfaces_with_anything_pending() {
+    let Some(store) = store().await else { return };
+    let busy = Iface::single(&store, "waiting-busy").await;
+    let idle = Iface::single(&store, "waiting-idle").await;
+    let removed = Iface::new(&store, "waiting-removed", &["old", "new"]).await;
+    store.insert(busy.msg(0, b"waiting")).await.unwrap();
+    let done = store.insert(idle.msg(0, b"done")).await.unwrap();
+    store.finish(idle.dest(), &[sent(done)]).await.unwrap();
+    // Pending only for a destination the interface may no longer have (reconcile filters it).
+    let old = [removed.id("old")];
+    store.insert(NewMessage { destinations: &old, ..removed.msg(0, b"for old") }).await.unwrap();
+    let names = [busy.name.clone(), idle.name.clone(), removed.name.clone(), unique("never-ran")];
+    let waiting = store.with_waiting(&names).await.unwrap();
+    let mut waiting: Vec<_> = waiting.into_iter().collect();
+    waiting.sort();
+    let mut expected = vec![busy.name.clone(), removed.name.clone()];
+    expected.sort();
+    assert_eq!(waiting, expected);
+}
+
+#[tokio::test]
+async fn old_engine_records_are_trimmed_live_ones_kept() {
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let (old, live) = (unique("trim-old"), unique("trim-live"));
+    let old_lock = lock(&store, &old, "host-a").await;
+    let live_lock = lock(&store, &live, "host-b").await;
+    old_lock.release().await;
+    sqlx::query("UPDATE engines SET started_at = now() - interval '7 years' WHERE instance = ANY($1)")
+        .bind([&old, &live])
+        .execute(&pool)
+        .await
+        .unwrap();
+    store.trim_engines(std::time::Duration::from_secs(6 * 365 * 86_400)).await.unwrap();
+    let left: Vec<String> = sqlx::query_scalar("SELECT instance FROM engines WHERE instance = ANY($1)")
+        .bind([&old, &live])
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert_eq!(left, std::slice::from_ref(&live), "a running engine stays however long it has run");
+    live_lock.release().await;
+    store.forget_engine(&live).await.unwrap();
+}
+
 /// Everything the engine does to the database, at once, for a while (`DUCTUS_STRESS_SECONDS`,
 /// default 5): single inserts with colliding dedupe keys (MLLP connections), a batch writer (a
 /// file source), three destinations draining and recording failures, partition maintenance
@@ -1987,6 +2168,39 @@ async fn everything_at_once_without_lock_errors() {
             held
         })
     };
+    // Engines starting and stopping on the same database (0.6.2): each takes its lock, claims the
+    // interfaces (a second one at the same moment is refused), checks lanes and what's waiting
+    // against the busy tables, then stops; the next takes over.
+    let engines = {
+        let (store, t, routed, stop) = (store.clone(), t.clone(), routed.clone(), stop.clone());
+        tokio::spawn(async move {
+            let names = [t.name.clone(), routed.name.clone()];
+            let (mut claimed, mut refused) = (0, 0);
+            while !stop.load(Relaxed) {
+                let (a, b) = (unique("stress-a"), unique("stress-b"));
+                let (lock_a, lock_b) = (lock(&store, &a, "host-a").await, lock(&store, &b, "host-b").await);
+                let (ra, rb) = tokio::join!(store.claim(&a, &names), store.claim(&b, &names));
+                let (ra, rb) = (ra.unwrap(), rb.unwrap());
+                assert!(ra.is_empty() != rb.is_empty(), "exactly one engine claims them");
+                claimed += 1;
+                refused += 1;
+                let lanes: Vec<_> = t.destinations.iter().map(|(d, _)| (t.name.clone(), d.clone(), 4)).collect();
+                store.stranded(&lanes).await.unwrap();
+                store.with_waiting(&names).await.unwrap();
+                store.waiting_by_interface(&names).await.unwrap();
+                store.save_lanes(&[(t.name.clone(), if claimed % 2 == 0 { 8 } else { 4 })]).await.unwrap();
+                store.other_engines(&a).await.unwrap();
+                let winner = if ra.is_empty() { &a } else { &b };
+                store.release_engine(winner).await.unwrap();
+                lock_a.release().await;
+                lock_b.release().await;
+                store.forget_engine(&a).await.unwrap();
+                store.forget_engine(&b).await.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            (claimed, refused)
+        })
+    };
     let maintenance = {
         let (store, stop) = (store.clone(), stop.clone());
         tokio::spawn(async move {
@@ -2014,7 +2228,10 @@ async fn everything_at_once_without_lock_errors() {
     let moved = mover.await;
     let held = holder.await;
     let resent = resender.await;
+    let engines = engines.await;
     drop_test_partitions(&pool).await;
+    let (claims, refusals) = engines.expect("engines claiming interfaces failed");
+    assert!(claims > 0 && refusals > 0, "engines claimed and were refused");
     for r in results {
         r.expect("a writer or drain failed");
     }
@@ -2054,7 +2271,7 @@ async fn everything_at_once_without_lock_errors() {
     assert!(store.payloads(&routed.name, Status::Pending).await.unwrap().is_empty(), "routed: nothing left pending");
     assert_eq!(store.payloads(&routed.name, Status::Sent).await.unwrap().len(), queued, "each routed exactly once");
     println!(
-        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations (one routing {queued} to another interface), {resent} resent, {moved} moved to another tier and {held} to the held area meanwhile, {days} maintenance rounds, {seconds}s",
+        "stress: {} messages stored ({queued} queued, {duplicates} duplicates), 3 destinations (one routing {queued} to another interface), {resent} resent, {moved} moved to another tier and {held} to the held area meanwhile, {claims} engine starts racing for the interfaces, {days} maintenance rounds, {seconds}s",
         queued + duplicates
     );
 }
@@ -2566,6 +2783,42 @@ async fn seven_day_partition(pool: &sqlx::PgPool, days_ago: i32) -> String {
 
 async fn exists(pool: &sqlx::PgPool, table: &str) -> bool {
     sqlx::query_scalar("SELECT to_regclass($1) IS NOT NULL").bind(table).fetch_one(pool).await.unwrap()
+}
+
+/// Startup applies every interface's retention at once, with `apply_retention`'s rules: new ones
+/// are added, unchanged ones only read, changes go through the one-by-one path.
+#[tokio::test]
+async fn retention_is_applied_to_every_interface_at_once() {
+    let Some(store) = store().await else { return };
+    let [new, same, longer, shorter] = ["ret-all-new", "ret-all-same", "ret-all-longer", "ret-all-shorter"].map(unique);
+    // Stored by an older version without a retention (49 days): the first apply starts a change.
+    let legacy = Iface::single(&store, "ret-all-legacy").await;
+    store.insert(NewMessage { tier: 49, ..legacy.msg(0, b"old") }).await.unwrap();
+    for (name, days) in [(&same, 21), (&longer, 7), (&shorter, 49)] {
+        store.apply_retention(name, days).await.unwrap();
+    }
+    let wanted: Vec<(String, ductus_store::Tier)> = vec![
+        (new.clone(), 21),
+        (same.clone(), 21),
+        (longer.clone(), 49),
+        (shorter.clone(), 7),
+        (legacy.name.clone(), 7),
+    ];
+    let states = store.apply_retention_all(&wanted).await.unwrap();
+    let got: Vec<_> = states.iter().map(|s| (s.interface.clone(), s.days, s.changing_from, s.waiting)).collect();
+    assert_eq!(
+        got,
+        [
+            (new.clone(), 21, None, None),
+            (same.clone(), 21, None, None),
+            (longer.clone(), 49, Some(7), None),
+            (shorter.clone(), 49, None, Some(7)),
+            (legacy.name.clone(), 7, Some(49), None),
+        ],
+        "in the order asked"
+    );
+    assert!(states[3].needs_confirmation());
+    assert!(store.apply_retention_all(&[(new, 30)]).await.is_err(), "not a tier");
 }
 
 /// One change at a time: longer starts at once, shorter waits for a confirmation, and a value

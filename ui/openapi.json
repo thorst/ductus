@@ -4355,7 +4355,9 @@
           "interfaces",
           "stopped",
           "drain",
-          "resources"
+          "resources",
+          "holds_interfaces",
+          "others"
         ],
         "properties": {
           "drain": {
@@ -4364,6 +4366,10 @@
           "environment": {
             "type": "string"
           },
+          "holds_interfaces": {
+            "type": "boolean",
+            "description": "False while the engine has lost the database connection that holds its interfaces:\nsending, file pickup and schedules wait until it is back (receiving goes on)."
+          },
           "host": {
             "type": "string",
             "description": "The server's name."
@@ -4371,6 +4377,13 @@
           "interfaces": {
             "type": "integer",
             "minimum": 0
+          },
+          "others": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OtherEngine"
+            },
+            "description": "Other engines running on this database, oldest first, and the interfaces each runs.\nAn interface runs on one engine at a time."
           },
           "resources": {
             "type": "array",
@@ -5369,6 +5382,43 @@
             "description": "`viewer` (default), `operator` or `admin`."
           },
           "username": {
+            "type": "string"
+          }
+        }
+      },
+      "OtherEngine": {
+        "type": "object",
+        "required": [
+          "host",
+          "pid",
+          "version",
+          "environment",
+          "started_at",
+          "interfaces"
+        ],
+        "properties": {
+          "environment": {
+            "type": "string"
+          },
+          "host": {
+            "type": "string"
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interfaces it runs (respond-mode HTTP interfaces aren't claimed, so not listed)."
+          },
+          "pid": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "started_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "version": {
             "type": "string"
           }
         }

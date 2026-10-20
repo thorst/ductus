@@ -18,7 +18,7 @@ pub async fn report(root: &Path, env: &str, database_url: Option<String>, check:
     let settings = ductus_core::settings::Settings::load(root)?;
     let users = match database_url.filter(|u| !u.trim().is_empty()) {
         Some(url) => {
-            let store = Store::connect(&url, 2).await.context("reading the accounts")?;
+            let store = Store::connect_read_only(&url).await.context("reading the accounts")?;
             Some(store.users().await?)
         }
         None if check => return Err(crate::tools::database_url(None).unwrap_err()),

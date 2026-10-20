@@ -343,7 +343,9 @@ pub async fn spawn_mllp(intake: Arc<Intake>) -> Result<()> {
                     }
                 },
             };
-            tracing::info!(interface = %name, address = %listener.local_addr().map(|a| a.to_string()).unwrap_or_default(), "listening (MLLP)");
+            // Debug: one line per interface is a thousand lines at every start, stop and drain of
+            // a big engine; the `started` line counts them, and `ductus ports` lists them.
+            tracing::debug!(interface = %name, address = %listener.local_addr().map(|a| a.to_string()).unwrap_or_default(), "listening (MLLP)");
             let stop = ductus_mllp::CancellationToken::new();
             let serve = ductus_mllp::serve_until(listener, handler.clone(), stop.clone());
             tokio::pin!(serve);
@@ -357,7 +359,7 @@ pub async fn spawn_mllp(intake: Arc<Intake>) -> Result<()> {
                 _ = intake.gate.closed() => {
                     stop.cancel();
                     let _ = serve.await;
-                    tracing::info!(interface = %name, "MLLP listener closed: not taking new messages");
+                    tracing::debug!(interface = %name, "MLLP listener closed: not taking new messages");
                 }
             }
         }

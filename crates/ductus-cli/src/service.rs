@@ -119,6 +119,13 @@ fn serve() -> Result<()> {
     ticker.abort();
     let exit = match &result {
         Ok(()) => ServiceExitCode::Win32(0),
+        // A refused start (another engine runs these interfaces; lanes would strand messages):
+        // the same code as on Linux. The service's failure actions don't restart it (only a crash
+        // does), so it waits for a person, as it should.
+        Err(e) if e.is::<ductus_runtime::ownership::Refused>() => {
+            tracing::error!("refusing to run: {e}");
+            ServiceExitCode::ServiceSpecific(ductus_runtime::ownership::REFUSED_EXIT as u32)
+        }
         Err(e) => {
             tracing::error!(error = %format!("{e:#}"), "the engine ended on an error");
             ServiceExitCode::ServiceSpecific(1)

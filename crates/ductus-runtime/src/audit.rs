@@ -93,8 +93,8 @@ async fn record(engine: &Engine, audit: Audit<'_>) {
     }
 }
 
-/// Delete what is past `audit.keep`, and clear payload copies kept with actions on messages that
-/// are gone.
+/// Delete what is past `audit.keep` (audit rows and the records of engines that ran that long
+/// ago), and clear payload copies kept with actions on messages that are gone.
 async fn trim(engine: &Engine, retention_days: &[(String, i32)]) {
     match engine.store.clear_action_outputs(retention_days, LONGEST_TIER_DAYS, BATCH, MAX_BATCHES).await {
         Ok(0) => {}
@@ -108,5 +108,9 @@ async fn trim(engine: &Engine, retention_days: &[(String, i32)]) {
         Ok((0, 0)) => {}
         Ok((actions, rows)) => tracing::info!(actions, rows, "deleted audit records past `audit.keep`"),
         Err(e) => tracing::error!(error = %format!("{e:#}"), "trimming the audit log failed"),
+    }
+    // Engines' records live as long as the audit rows that name their runs.
+    if let Err(e) = engine.store.trim_engines(engine.audit.keep).await {
+        tracing::error!(error = %format!("{e:#}"), "trimming the engines' records failed");
     }
 }

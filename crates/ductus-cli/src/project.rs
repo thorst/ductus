@@ -138,7 +138,7 @@ pub async fn test(root: &Path, env: &str, only: Option<&str>) -> Result<bool> {
 }
 
 /// Check configs, module loading and types. Returns false if anything is wrong.
-pub async fn validate(root: &Path, env: &str) -> Result<bool> {
+pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> Result<bool> {
     let types = write_types(root).await?;
     let mut problems = 0;
     let mut files = BTreeMap::new();
@@ -322,6 +322,16 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
         },
     }
 
+    // Against the database the engines use, reading only: what the next start would refuse or
+    // change. Without one, say what wasn't checked.
+    let configs: Vec<&InterfaceConfig> = configs().collect();
+    match database_url.filter(|u| !u.trim().is_empty()) {
+        Some(url) => problems += check_database(root, &url, &configs).await,
+        None => println!(
+            "note: not checked against a database (set DUCTUS_DATABASE_URL): lanes that would strand waiting messages, retention changes"
+        ),
+    }
+
     let diagnostics = &analysis.diagnostics;
     for d in diagnostics {
         if d.is_error() {
@@ -341,6 +351,103 @@ pub async fn validate(root: &Path, env: &str) -> Result<bool> {
 
     println!("\n{}", if problems == 0 { "valid".to_string() } else { format!("{problems} problem(s)") });
     Ok(problems == 0)
+}
+
+/// `validate` against a database, reading only (it may run with a newer binary than the engines
+/// there, before deploying it): the lanes guard the engine runs at start, and retention changes
+/// running, waiting for a confirmation, or that the next start would begin. Returns the problems
+/// (what would refuse the start), after printing everything.
+async fn check_database(root: &Path, url: &str, configs: &[&InterfaceConfig]) -> usize {
+    use ductus_runtime::ownership::{Lanes, check_lanes, stranded_lines};
+    use std::collections::HashMap;
+    let store = match ductus_store::Store::connect_read_only(url).await {
+        Ok(s) => s,
+        Err(e) => {
+            println!("✗ database: {e:#}");
+            return 1;
+        }
+    };
+    let lanes: Vec<Lanes> = configs.iter().filter_map(|c| Lanes::of(c)).collect();
+    let names: Vec<String> = lanes.iter().map(|l| l.interface.clone()).collect();
+    let recorded = store.has_table("interface_applied").await.unwrap_or(false);
+    let applied: HashMap<String, i32> = if recorded {
+        store.applied_lanes(&names).await.map(|v| v.into_iter().collect()).unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    let mut problems = 0;
+    match check_lanes(&store, &lanes, &applied).await {
+        Err(e) => {
+            println!("✗ database: checking lanes: {e:#}");
+            problems += 1;
+        }
+        Ok(check) => {
+            for line in stranded_lines(&check.stranded) {
+                problems += 1;
+                println!("✗ {line}");
+            }
+            if !check.stranded.is_empty() {
+                println!(
+                    "  (the engine would refuse to start: no worker reads those lanes. Keep `ordering` as it is until they're sent; `ductus drain --wait` stops new messages until nothing waits)"
+                );
+            }
+            for r in &check.raised {
+                println!(
+                    "⚠ {}: lanes go from {} to {} with {} message(s) waiting: a patient's (key's) new messages may be sent before its older ones until those are",
+                    r.interface, r.before, r.now, r.waiting
+                );
+            }
+            if check.stranded.is_empty() {
+                println!("✓ database: every interface's lanes reach the messages waiting for it");
+            }
+            if !recorded {
+                println!(
+                    "note: no engine of this version has run on this database yet: the lanes interfaces last ran with aren't recorded, so raised lanes can't be told (lowered ones are checked)"
+                );
+            }
+        }
+    }
+    // Retention: what the engine does with each interface's configured value at its next start.
+    let settings = ductus_core::settings::Settings::load(root).ok();
+    match store.retention().await {
+        Err(e) => println!("⚠ database: reading retention: {e:#}"),
+        Ok(states) => {
+            let states: HashMap<&str, &ductus_store::RetentionState> =
+                states.iter().map(|s| (s.interface.as_str(), s)).collect();
+            for c in configs.iter().filter(|c| !c.responds()) {
+                let Some(state) = states.get(c.name.as_str()) else { continue };
+                let default = settings.as_ref().map_or(ductus_core::Retention::DEFAULT, |s| s.retention);
+                let wanted = c.retention.unwrap_or(default).days() as ductus_store::Tier;
+                let window = |days: ductus_store::Tier| format!("{}w", days / 7);
+                if let Some(from) = state.changing_from {
+                    let left = state.rows_left.map(|n| format!(", ~{n} rows left")).unwrap_or_default();
+                    println!(
+                        "⚠ {}: a retention change from {} to {} is still running{left}",
+                        c.name,
+                        window(from),
+                        window(state.days)
+                    );
+                }
+                if wanted < state.days && state.confirmed != Some(wanted) {
+                    println!(
+                        "⚠ {}: retention {} is shorter than the {} applied: it deletes messages, so it waits for `ductus retention confirm {}`",
+                        c.name,
+                        window(wanted),
+                        window(state.days),
+                        c.name
+                    );
+                } else if wanted != state.days && state.changing_from.is_none() {
+                    println!(
+                        "⚠ {}: retention changes from {} to {} at the next start (its messages move in the background)",
+                        c.name,
+                        window(state.days),
+                        window(wanted)
+                    );
+                }
+            }
+        }
+    }
+    problems
 }
 
 /// Owners that alerts sent to `owner` can't reach from what's in the project (users live in the

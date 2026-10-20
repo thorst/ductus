@@ -181,6 +181,9 @@ jobs:
       - name: Dev demo (ductus dev starts a Postgres of its own; same port and data on restart; a killed one is cleaned up)
         run: BIN=target/release/ductus bash scripts/demo-dev.sh
 
+      - name: One-owner demo (a second engine with the same interfaces refused, another project alongside, the lock lost and taken back, kill -9 then a start at once, lowered lanes with a backlog refused)
+        run: BIN=target/release/ductus bash scripts/demo-one-owner.sh
+
       - name: Web UI demo (a real browser against the engine; sign-in, attention, messages, axe in every theme)
         run: |
           (cd ui && npx playwright install --with-deps chromium >/dev/null)

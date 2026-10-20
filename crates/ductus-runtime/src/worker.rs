@@ -57,6 +57,11 @@ pub struct Job {
     pub outlets: Vec<Outlet>,
     /// The interface's counts (respond mode: its requests).
     pub stats: Arc<InterfaceStats>,
+    /// Whether this engine holds its interfaces now (it waits like a pause while it doesn't).
+    pub ownership: Arc<crate::ownership::Ownership>,
+    /// Nothing was waiting for the interface at start (`Store::with_waiting`): its workers skip
+    /// their first read and wait for a wake-up (or the idle poll).
+    pub nothing_waiting: bool,
 }
 
 /// One destination's shared parts.
@@ -298,6 +303,9 @@ struct Worker {
     health: Arc<Health>,
     stats: Arc<DestinationStats>,
     pause: Arc<Pause>,
+    ownership: Arc<crate::ownership::Ownership>,
+    /// Skip the first read (see `Job::nothing_waiting`).
+    idle: bool,
     /// The engine is stopping: like a pause (a transform or send under way finishes, nothing new
     /// starts), but the worker then saves what it finished and ends.
     stop: CancellationToken,
@@ -349,6 +357,8 @@ impl Worker {
             health: job.health.clone(),
             stats: outlet.stats,
             pause: outlet.pause,
+            ownership: job.ownership.clone(),
+            idle: job.nothing_waiting,
             stop,
             config,
         }
@@ -360,6 +370,16 @@ impl Worker {
         }
         // A stopped interface's messages stay pending until it's fixed and restarted.
         while self.health.stopped().is_none() && self.hold_while_paused().await {
+            if std::mem::take(&mut self.idle) {
+                // Nothing was waiting at start: a message stored since has woken this worker
+                // (its permit is kept), so reading now would find nothing.
+                tokio::select! {
+                    _ = self.wake.get(self.slot, self.index).notified() => {}
+                    _ = tokio::time::sleep(IDLE_POLL) => {}
+                    _ = self.stop.cancelled() => {}
+                }
+                continue;
+            }
             let (destination, lanes) = (self.destination_id, self.lanes.clone());
             let read = |store: Store| async move { store.pending(destination, &lanes, BATCH).await };
             let batch = match self.db(read).await {
@@ -379,7 +399,11 @@ impl Worker {
                 continue;
             }
             for message in batch {
-                if self.health.stopped().is_some() || self.pause.is_paused() || self.stop.is_cancelled() {
+                if self.health.stopped().is_some()
+                    || self.pause.is_paused()
+                    || !self.ownership.is_held()
+                    || self.stop.is_cancelled()
+                {
                     break;
                 }
                 self.process(message).await;
@@ -566,18 +590,32 @@ impl Worker {
     /// While the destination is paused: save what's done, then wait until it's resumed. A send
     /// already under way finishes; nothing new starts, and nothing is retried. `false` once the
     /// engine is stopping (paused or not): the message in hand stays pending.
+    /// The same while the engine doesn't hold its interfaces (its lock connection was lost): a
+    /// send under way finishes, and what was sent is saved before waiting.
     async fn hold_while_paused(&mut self) -> bool {
-        if self.pause.is_paused() && !self.stop.is_cancelled() {
-            self.flush().await;
-            tracing::info!(interface = %self.config.name, destination = %self.destination, slot = self.slot, "paused: waiting to be resumed");
-            tokio::select! {
-                _ = self.pause.until_resumed() => {
-                    tracing::info!(interface = %self.config.name, destination = %self.destination, slot = self.slot, "resumed");
+        loop {
+            if self.stop.is_cancelled() {
+                return false;
+            }
+            if self.pause.is_paused() {
+                self.flush().await;
+                tracing::info!(interface = %self.config.name, destination = %self.destination, slot = self.slot, "paused: waiting to be resumed");
+                tokio::select! {
+                    _ = self.pause.until_resumed() => {
+                        tracing::info!(interface = %self.config.name, destination = %self.destination, slot = self.slot, "resumed");
+                    }
+                    _ = self.stop.cancelled() => {}
                 }
-                _ = self.stop.cancelled() => {}
+            } else if !self.ownership.is_held() {
+                self.flush().await;
+                tokio::select! {
+                    _ = self.ownership.until_held() => {}
+                    _ = self.stop.cancelled() => {}
+                }
+            } else {
+                return true;
             }
         }
-        !self.stop.is_cancelled()
     }
 
     /// Run a store call on the main runtime. Connections are pooled and shared with intake,

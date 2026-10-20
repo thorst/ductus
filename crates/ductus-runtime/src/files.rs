@@ -168,11 +168,17 @@ pub struct FileWatcher {
     last_seen: HashMap<String, (u64, i64)>,
     /// Files that can't be processed (too big), reported once and left in place.
     refused: HashSet<(String, u64)>,
+    /// Whether this engine holds its interfaces: pickup waits while it doesn't (`ownership`).
+    ownership: Arc<crate::ownership::Ownership>,
 }
 
 impl FileWatcher {
     /// For a `file` or `sftp` source. `server` is the SFTP server from resources.yaml.
-    pub fn new(intake: Arc<Intake>, server: Option<SftpServer>) -> Result<Self> {
+    pub fn new(
+        intake: Arc<Intake>,
+        server: Option<SftpServer>,
+        ownership: Arc<crate::ownership::Ownership>,
+    ) -> Result<Self> {
         let config = intake.config.clone();
         let (Source::File(source) | Source::Sftp(source)) = &config.source else {
             bail!("interface `{}` doesn't have a file source", config.name)
@@ -198,6 +204,7 @@ impl FileWatcher {
             splitter,
             last_seen: HashMap::new(),
             refused: HashSet::new(),
+            ownership,
         })
     }
 
@@ -210,7 +217,7 @@ impl FileWatcher {
             Backend::Local { dir, .. } => dir.display().to_string(),
             Backend::Sftp { connection: _, dir, .. } => format!("sftp:{dir}"),
         };
-        tracing::info!(interface = %self.name(), dir = %what, pattern = %self.source.pattern, "watching for files");
+        tracing::debug!(interface = %self.name(), dir = %what, pattern = %self.source.pattern, "watching for files");
         let mut ticker = tokio::time::interval(self.source.poll);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         // The same error on every look (server down, wrong password) is logged once a minute.
@@ -220,6 +227,11 @@ impl FileWatcher {
             if !self.intake.gate.is_open() {
                 // Draining: a file being read stopped between batches, its progress saved.
                 self.intake.gate.opened().await;
+                continue;
+            }
+            if !self.ownership.is_held() {
+                // Cut off from the database: another engine may be picking these files up soon.
+                self.ownership.until_held().await;
                 continue;
             }
             match self.poll().await {

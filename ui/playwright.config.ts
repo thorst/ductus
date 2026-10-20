@@ -71,5 +71,12 @@ export default defineConfig({
       dependencies: ["directory"],
       use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
     },
+    {
+      // Engines sharing the database: a second engine and a refused start (demo-ui.sh); reads only.
+      name: "engines",
+      testMatch: "engines.spec.ts",
+      dependencies: ["owners"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
   ],
 });

@@ -14,6 +14,7 @@ mod audit;
 mod certificates;
 mod directory;
 mod docs;
+mod engines;
 mod retention;
 mod users;
 
@@ -28,6 +29,7 @@ pub use audit::{Audit, AuditFilter, AuditRow, By, PreviousRun};
 pub use certificates::{CertificateRow, DOCTOR_RUNS_KEPT, DoctorRunRow};
 pub use directory::{DirectoryPerson, DirectoryUpdate};
 pub use docs::DocsRow;
+pub use engines::{EngineLock, EngineRow, NewEngine, Owned, Stranded};
 pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};
 pub use users::{Candidate, Lockout, NewUser, SessionRow, User, UserChange, UserSettings};
 
@@ -206,8 +208,6 @@ pub struct Reconciled {
     /// Pending deliveries to destinations no longer configured, now filtered:
     /// `(interface, destination, count)`.
     pub removed: Vec<(String, String, i64)>,
-    /// Messages whose overall status was brought up to date.
-    pub settled: u64,
 }
 
 /// How long partition maintenance waits for a table lock before giving up (see
@@ -245,6 +245,14 @@ impl Store {
             tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         }
         Ok(store)
+    }
+
+    /// Connect without changing anything: no migrations, no partitions. For commands that only
+    /// read (`ductus validate`, `ductus owners`), which may run with a newer binary than the
+    /// engines on that database, before it is deployed.
+    pub async fn connect_read_only(url: &str) -> Result<Self> {
+        let pool = PgPoolOptions::new().max_connections(2).connect(url).await.context("connecting to PostgreSQL")?;
+        Ok(Self { pool })
     }
 
     /// Day partitions from yesterday to `days_ahead` days ahead, for `messages` and then
@@ -668,10 +676,11 @@ impl Store {
     /// - pending messages get a delivery for every destination they lack one for (stored by an
     ///   older version, or the destination was added: messages still in flight go to it too);
     /// - pending deliveries to destinations no longer configured are filtered (renaming a
-    ///   destination moves its backlog to the new name, through the step above);
-    /// - messages whose deliveries are now all done get their overall status.
-    pub async fn reconcile(&self, destinations: &[(String, String)]) -> Result<Reconciled> {
-        let ids = self.destination_ids(destinations).await?;
+    ///   destination moves its backlog to the new name, through the step above).
+    ///
+    /// `ids`: the destinations' ids (`destination_ids`). Then `settle_finished`, which workers
+    /// don't wait for.
+    pub async fn reconcile(&self, destinations: &[(String, String)], ids: &[DestinationId]) -> Result<Reconciled> {
         let interfaces: Vec<&str> = destinations.iter().map(|(i, _)| i.as_str()).collect();
         sqlx::query(
             "UPDATE deliveries d SET status = m.status, updated_at = now()
@@ -683,12 +692,16 @@ impl Store {
         .execute(&self.pool)
         .await
         .context("syncing deliveries finished elsewhere")?;
+        // Only the missing ones are inserted: letting every pending message's insert run into its
+        // existing row (ON CONFLICT) took 0.9 s with 300,000 waiting; looking first is cheaper.
         let added: Vec<(String, i64)> = sqlx::query_as(
             "WITH added AS (
                  INSERT INTO deliveries (message_id, received_at, destination_id, partition_key, tier)
                  SELECT m.id, m.received_at, c.id, m.partition_key, m.tier
                  FROM messages m JOIN unnest($1::text[], $2::int[]) AS c(interface, id) ON m.interface = c.interface
                  WHERE m.interface = ANY($1) AND m.status = 0
+                   AND NOT EXISTS (SELECT 1 FROM deliveries d
+                                   WHERE d.message_id = m.id AND d.received_at = m.received_at AND d.destination_id = c.id)
                  ON CONFLICT DO NOTHING
                  RETURNING destination_id
              )
@@ -696,7 +709,7 @@ impl Store {
              GROUP BY 1 ORDER BY 1",
         )
         .bind(&interfaces)
-        .bind(&ids)
+        .bind(ids)
         .fetch_all(&self.pool)
         .await
         .context("adding deliveries")?;
@@ -713,23 +726,79 @@ impl Store {
              SELECT interface, name, count(*) FROM removed GROUP BY 1, 2 ORDER BY 1, 2",
         )
         .bind(&interfaces)
-        .bind(&ids)
+        .bind(ids)
         .fetch_all(&self.pool)
         .await
         .context("filtering deliveries to removed destinations")?;
+        Ok(Reconciled { added, removed })
+    }
+
+    /// Which of `interfaces` have anything waiting: a pending message, or a pending delivery to
+    /// any destination they ever had (removed ones too). The others have nothing for `reconcile`
+    /// to change, and their workers nothing to read at start.
+    ///
+    /// Two loose index scans (the next distinct value after the last, from the pending indexes),
+    /// so the cost is the number of interfaces with a backlog, not the backlog: ~20 ms for 1,001
+    /// interfaces whether one has 300,000 waiting or none has any. Reading every queue at start
+    /// instead kept a 32-connection pool busy for ~0.6 s at 1,001 interfaces.
+    pub async fn with_waiting(&self, interfaces: &[String]) -> Result<std::collections::HashSet<String>> {
+        let mut waiting: std::collections::HashSet<String> = sqlx::query_scalar(
+            "WITH RECURSIVE w AS (
+                 SELECT (SELECT min(interface) FROM messages WHERE status = 0 AND interface = ANY($1)) AS i
+                 UNION ALL
+                 SELECT (SELECT min(interface) FROM messages WHERE status = 0 AND interface = ANY($1) AND interface > w.i)
+                 FROM w WHERE w.i IS NOT NULL)
+             SELECT i FROM w WHERE i IS NOT NULL",
+        )
+        .bind(interfaces)
+        .fetch_all(&self.pool)
+        .await
+        .context("finding interfaces with pending messages")?
+        .into_iter()
+        .collect();
+        let destinations: Vec<(DestinationId, String)> =
+            sqlx::query_as("SELECT id, interface FROM destinations WHERE interface = ANY($1)")
+                .bind(interfaces)
+                .fetch_all(&self.pool)
+                .await
+                .context("reading destinations")?;
+        let ids: Vec<DestinationId> = destinations.iter().map(|(id, _)| *id).collect();
+        let delivering: Vec<DestinationId> = sqlx::query_scalar(
+            "WITH RECURSIVE w AS (
+                 SELECT (SELECT min(destination_id) FROM deliveries WHERE status = 0 AND destination_id = ANY($1)) AS id
+                 UNION ALL
+                 SELECT (SELECT min(destination_id) FROM deliveries
+                         WHERE status = 0 AND destination_id = ANY($1) AND destination_id > w.id)
+                 FROM w WHERE w.id IS NOT NULL)
+             SELECT id FROM w WHERE id IS NOT NULL",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .context("finding destinations with pending deliveries")?;
+        let by_id: std::collections::HashMap<DestinationId, String> = destinations.into_iter().collect();
+        waiting.extend(delivering.into_iter().filter_map(|id| by_id.get(&id).cloned()));
+        Ok(waiting)
+    }
+
+    /// Messages of `interfaces` still pending though none of their deliveries is (a crash
+    /// between a delivery's update and the settle after it; `reconcile`'s changes) get their
+    /// overall status. Returns how many. Workers don't read `messages.status`, so this can run
+    /// after they start (it locks like any settle).
+    pub async fn settle_finished(&self, interfaces: &[String]) -> Result<u64> {
         let done: Vec<(i64, DateTime<Utc>)> = sqlx::query_as(
             "SELECT id, received_at FROM messages m
              WHERE interface = ANY($1) AND status = 0 AND NOT EXISTS (
                  SELECT 1 FROM deliveries d
                  WHERE d.message_id = m.id AND d.received_at = m.received_at AND d.status = 0)",
         )
-        .bind(&interfaces)
+        .bind(interfaces)
         .fetch_all(&self.pool)
         .await
         .context("finding finished messages")?;
         let done: Vec<MessageRef> = done.into_iter().map(|(id, received_at)| MessageRef { id, received_at }).collect();
         self.settle(&done).await?;
-        Ok(Reconciled { added, removed, settled: done.len() as u64 })
+        Ok(done.len() as u64)
     }
 
     /// The ids of destinations (pairs of interface and destination name), in the same order,
@@ -737,6 +806,22 @@ impl Store {
     pub async fn destination_ids(&self, destinations: &[(String, String)]) -> Result<Vec<DestinationId>> {
         let (interfaces, names): (Vec<&str>, Vec<&str>) =
             destinations.iter().map(|(i, d)| (i.as_str(), d.as_str())).unzip();
+        let read = async || -> Result<Vec<DestinationId>> {
+            sqlx::query_scalar(
+                "SELECT t.id FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS c(interface, name, n)
+                 JOIN destinations t ON t.interface = c.interface AND t.name = c.name ORDER BY c.n",
+            )
+            .bind(&interfaces)
+            .bind(&names)
+            .fetch_all(&self.pool)
+            .await
+            .context("reading destination ids")
+        };
+        // Usually all are known: inserting them anyway costs a conflict check each.
+        let ids = read().await?;
+        if ids.len() == destinations.len() {
+            return Ok(ids);
+        }
         sqlx::query(
             "INSERT INTO destinations (interface, name) SELECT * FROM unnest($1::text[], $2::text[])
              ON CONFLICT DO NOTHING",
@@ -746,15 +831,7 @@ impl Store {
         .execute(&self.pool)
         .await
         .context("registering destinations")?;
-        sqlx::query_scalar(
-            "SELECT t.id FROM unnest($1::text[], $2::text[]) WITH ORDINALITY AS c(interface, name, n)
-             JOIN destinations t ON t.interface = c.interface AND t.name = c.name ORDER BY c.n",
-        )
-        .bind(&interfaces)
-        .bind(&names)
-        .fetch_all(&self.pool)
-        .await
-        .context("reading destination ids")
+        read().await
     }
 
     /// Every destination's record of a message, by destination name.

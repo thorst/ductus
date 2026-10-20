@@ -1877,3 +1877,178 @@ fn validate_checks_company_defined_fields_and_docs_lists_them() {
     let (ok, out) = ductus(root, &["validate"]);
     assert!(!ok && out.contains("✗ docs-schema.yaml:") && out.contains("ductus already uses that name"), "{out}");
 }
+
+/// `ductus run` on `dir` with its log in a file next to the project (the API only if `api`).
+fn start_engine(dir: &Path, db: &str, api: Option<u16>, log: &str) -> (Child, std::path::PathBuf) {
+    let path = dir.join(log);
+    let file = std::fs::File::create(&path).unwrap();
+    let api = api.map_or("off".to_string(), |p| format!("127.0.0.1:{p}"));
+    let child = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["run", "--root", &dir.to_string_lossy(), "--threads", "1", "--api-listen", &api])
+        .env("DUCTUS_DATABASE_URL", db)
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
+        .spawn()
+        .unwrap();
+    (Child(child), path)
+}
+
+/// Wait up to `seconds` for `text` in a log file.
+fn wait_for_log(path: &Path, text: &str, seconds: u64) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while std::time::Instant::now() < until {
+        if std::fs::read_to_string(path).unwrap_or_default().contains(text) {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
+/// `ductus run` to its end; returns its exit code and output.
+fn run_to_end(dir: &Path, db: &str) -> (Option<i32>, String) {
+    let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["run", "--root", &dir.to_string_lossy(), "--threads", "1", "--api-listen", "off"])
+        .env("DUCTUS_DATABASE_URL", db)
+        .output()
+        .unwrap();
+    (out.status.code(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
+}
+
+/// One engine per interface across engines on one database: a second engine with the same
+/// interface is refused (exit 3) and told whose it is; one with a different interface runs
+/// alongside and sees the first; once the first is killed, the refused one starts at once.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interface_runs_on_one_engine_at_a_time() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let (name, other) = (format!("owner-test-{nanos}"), format!("owner-other-{nanos}"));
+    let interface = |name: &str| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestination: {{ file: {{ dir: out }} }}\n",
+            free_port()
+        )
+    };
+    let dir = project(&[(format!("interfaces/{name}/interface.yaml").as_str(), interface(&name).as_str())]);
+    let second = project(&[(format!("interfaces/{other}/interface.yaml").as_str(), interface(&other).as_str())]);
+
+    let api = free_port();
+    let (mut first, log) = start_engine(dir.path(), &db, Some(api), "first.log");
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
+    let pid = first.0.id();
+
+    // The same project again (a DR server booted with production's config, say): refused.
+    let (code, out) = run_to_end(dir.path(), &db);
+    assert_eq!(code, Some(3), "{out}");
+    assert!(out.contains("another engine is running one of this engine's interfaces on this database"), "{out}");
+    assert!(out.contains(&name) && out.contains(&format!("pid {pid}")), "{out}");
+    assert!(out.contains("Stop that engine first"), "{out}");
+
+    // Different interfaces share the database; each engine sees the other.
+    let (_neighbour, neighbour_log) = start_engine(second.path(), &db, None, "neighbour.log");
+    assert!(
+        wait_for_log(&neighbour_log, "started interfaces=", 60),
+        "{}",
+        std::fs::read_to_string(&neighbour_log).unwrap()
+    );
+    let token_name = format!("{name}-viewer");
+    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
+    let (ok, token) = ductus(dir.path(), &["token", "create", &token_name, "--role", "viewer"]);
+    assert!(ok, "{token}");
+    let token = token.lines().next().unwrap().to_string();
+    let engine: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{api}/api/v1/engine"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(engine["holds_interfaces"], true);
+    let others = engine["others"].as_array().unwrap();
+    assert!(others.iter().any(|e| e["interfaces"] == serde_json::json!([other])), "{engine}");
+    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
+
+    // The first dies without a word (kill -9): its lock goes with it, so the next start takes over.
+    first.0.kill().unwrap();
+    first.0.wait().unwrap();
+    let (_again, log) = start_engine(dir.path(), &db, None, "again.log");
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
+}
+
+/// The lanes guard: lowering `ordering.partitions` (or removing `ordering.key`) with messages
+/// waiting in lanes it no longer has refuses the start, and `ductus validate` says so first;
+/// keeping them starts; raising them with messages waiting starts with a warning.
+#[tokio::test(flavor = "multi_thread")]
+async fn lanes_that_would_strand_messages_refuse_the_start() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("lanes-test-{nanos}");
+    let (mllp, receiver) = (free_port(), free_port()); // nothing listens on `receiver`: messages wait
+    let config = |ordering: &str| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\n{ordering}destination: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 200 }} }}\n"
+        )
+    };
+    let file = format!("interfaces/{name}/interface.yaml");
+    let dir = project(&[(file.as_str(), config("ordering: { key: PID-3.1, partitions: 64 }\n").as_str())]);
+    let yaml = dir.path().join(&file);
+
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let ids = store.destination_ids(&[(name.clone(), "default".to_string())]).await.unwrap();
+    let mut waiting = Vec::new();
+    for lane in [5, 40, 63] {
+        let m = ductus_store::NewMessage {
+            interface: &name,
+            partition_key: lane,
+            ordering_key: Some("100001"),
+            control_id: None,
+            payload: b"MSH|^~\\&|waiting",
+            relaxed: false,
+            destinations: &ids,
+            tier: 49,
+        };
+        waiting.push(store.insert(m).await.unwrap());
+    }
+
+    std::fs::write(&yaml, config("ordering: { key: PID-3.1, partitions: 32 }\n")).unwrap();
+    let (code, out) = run_to_end(dir.path(), &db);
+    assert_eq!(code, Some(3), "{out}");
+    let line = format!("{name} → default: 2 messages waiting in lanes 40–63; {name} now has 32 lanes");
+    assert!(out.contains(&line) && out.contains("ductus drain --wait"), "{out}");
+    let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
+    assert!(!ok && out.contains(&format!("✗ {line}")) && out.contains("would refuse to start"), "{out}");
+    let (_, out) = without_a_database(dir.path(), &["validate"]);
+    assert!(out.contains("note: not checked against a database"), "{out}");
+
+    std::fs::write(&yaml, config("")).unwrap();
+    let (code, out) = run_to_end(dir.path(), &db);
+    assert_eq!(code, Some(3), "{out}");
+    assert!(out.contains(&format!("{name} has no `ordering.key` now: 1 lane")) && out.contains("lanes 5–63"), "{out}");
+
+    // As it was: starts, and the lanes are recorded.
+    std::fs::write(&yaml, config("ordering: { key: PID-3.1, partitions: 64 }\n")).unwrap();
+    let (mut engine, log) = start_engine(dir.path(), &db, None, "64.log");
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
+    engine.0.kill().unwrap();
+    engine.0.wait().unwrap();
+    let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
+    assert!(ok && out.contains("✓ database: every interface's lanes reach the messages waiting for it"), "{out}");
+
+    // More lanes with messages waiting: a warning, in the log and the audit log; it starts.
+    std::fs::write(&yaml, config("ordering: { key: PID-3.1, partitions: 128 }\n")).unwrap();
+    let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
+    assert!(ok && out.contains(&format!("⚠ {name}: lanes go from 64 to 128 with 3 message(s) waiting")), "{out}");
+    let (mut engine, log) = start_engine(dir.path(), &db, None, "128.log");
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(text.contains("lanes raised with messages waiting") && text.contains("before=64 now=128"), "{text}");
+    engine.0.kill().unwrap();
+    engine.0.wait().unwrap();
+
+    // Leave nothing pending behind.
+    let destination = ids[0];
+    let done: Vec<_> = waiting.iter().map(|m| ductus_store::Done::sent(*m, None)).collect();
+    store.finish(destination, &done).await.unwrap();
+}
