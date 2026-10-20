@@ -177,9 +177,17 @@ forget_people() {
     -c "DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users WHERE $RUN_PEOPLE)" \
     -c "DELETE FROM users WHERE $RUN_PEOPLE"
 }
-trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true' EXIT
-# Alerts of earlier runs of this demo: start clean.
-psql -q "$DB" -c "DELETE FROM alert_events WHERE key IN ('dest:adt/lab', 'dest:adt/archive', 'dest:orders/default', 'dest:billing/default', 'iface:adt', 'iface:orders', 'iface:billing')" \
+# This run's alerts: its interfaces' and its certificates'. Their notifications go with the events
+# (ON DELETE CASCADE): left behind, the ones for `pager` (nobody listens) would be retried by later
+# engines on this database, which no longer have that channel.
+RUN_ALERTS="key ~ '^(iface:(adt|orders|billing)|dest:(adt|orders|billing)/.+|cert:(pharmacy|radiology|payer|hie|legacy-portal|fax-gateway):.+)\$'"
+forget_alerts() {
+  psql -q "$DB" -c "DELETE FROM alert_events WHERE $RUN_ALERTS" -c "DELETE FROM alert_state WHERE $RUN_ALERTS"
+}
+# The engine is stopped before its alerts are deleted, so it can't write more.
+trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE 2>/dev/null || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true' EXIT
+# Alerts of earlier runs of this demo (one killed before its cleanup): start clean.
+psql -q "$DB" -c "DELETE FROM alert_events WHERE $RUN_ALERTS" \
   -c "UPDATE alert_state SET state = 'ok', severity = NULL, since = NULL, ok_since = NULL, ack_by = NULL, ack_at = NULL, silenced_until = NULL, rev = rev + 1 WHERE interface IN ('adt', 'orders', 'billing')"
 until grep "started interfaces=" "$P/run.log" >/dev/null; do kill -0 $ENGINE || { cat "$P/run.log"; exit 1; }; sleep 0.2; done
 echo "engine log: $P/run.log"
