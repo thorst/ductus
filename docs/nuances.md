@@ -372,14 +372,14 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 
 ### The API listens on this machine only, until you open it (level 4)
 - **What:** the REST API listens on `127.0.0.1:7700` by default (`api.listen` in ductus.yaml, `--api-listen`, or `off`). Every call except `/health` and `/openapi.json` needs a token. Tokens are made on the server with `ductus token create` and are stored only as hashes: a lost token can't be shown again; revoke it and make a new one.
-- **What to do:** put a TLS reverse proxy in front before opening it to the network (the engine's own listeners have no TLS yet).
+- **What to do:** before opening it to the network, give it `tls:` (see "The API on the network needs `tls`"), or put a TLS reverse proxy in front and keep it on `127.0.0.1`.
 
 ## The web UI
 
 ### The UI works over https, or at localhost on the engine's own server (level 4)
 - **What:** the engine serves the web UI on the API's listener (`http://127.0.0.1:7700/` by default). Signing in trades a token for a session cookie marked `Secure`, which browsers keep only over https, or over plain http to `localhost`/`127.0.0.1`. Over plain http to another machine the browser drops it, and the sign-in page says so.
 - **Why:** the cookie is as good as the token while it lasts; sent in clear text over a hospital network, anyone on the path could take it.
-- **What to do:** to reach the UI from other machines, put a TLS reverse proxy in front of the engine (keep `api.listen` on `127.0.0.1` behind it), or use an SSH tunnel (`ssh -L 7700:127.0.0.1:7700 server`, then `http://localhost:7700`). The engine's own TLS comes in v0.6.
+- **What to do:** to reach the UI from other machines, give the API `tls:` in ductus.yaml (`api: { listen: 0.0.0.0:7700, tls: { certificate: ductus-api } }`) and open `https://`; or put a TLS reverse proxy in front (keep `api.listen` on `127.0.0.1` behind it), or use an SSH tunnel (`ssh -L 7700:127.0.0.1:7700 server`, then `http://localhost:7700`).
 
 ### A UI session is a token in disguise (level 2)
 - **What:** a browser session acts with the role of the token it signed in with, and logs show that token's name. It ends after 12 hours unused, 7 days after sign-in, on sign-out, or when the token is revoked. Changes made with the session cookie (pausing, draining) must carry the `X-Ductus: 1` header, which the UI sends and other websites can't, so a page elsewhere can't act through someone's session. Scripts use the token itself and don't need the header.
@@ -474,6 +474,42 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 ### Judging alerts costs little, and runs all the time (level 4)
 - **What:** every 15 s the engine counts its queues (as live updates do) and compares each state with its stored alert, writing only what changed. Measured with 1,001 interfaces (2,002 alerts, WSL): 35 ms a round, about 0.1% of one core in all, and 7 MB of memory.
 - **What to do:** nothing at that size. Each round's time is in the log at debug level (`RUST_LOG=ductus_runtime::alerts=debug`, "alerts judged").
+## TLS on what the engine listens on
+
+### The API on the network needs `tls` (level 1)
+- **What:** `api: { listen: 0.0.0.0:7700 }` without `tls:` serves the API and the web UI over plain HTTP: passwords and tokens cross the network readable, and browsers won't keep the session cookie (it is `Secure`), so the UI can't sign in. The engine and `ductus validate` warn about it.
+- **What to do:** name a certificate (`api: { listen: 0.0.0.0:7700, tls: { certificate: ductus-api } }`, with `ductus-api` under `certificates:` in resources.yaml). Browsers that have seen it over HTTPS won't try plain HTTP to it again for a year (HSTS).
+
+### A certificate the engine can't use stops the start, with the reason (level 2)
+- **What:** every `certificates:` entry is loaded at start, before the database: a missing file, a file that isn't PEM, a key that isn't the certificate's, or an expired certificate stops the engine and says which entry and why. `ductus validate` checks the same, and shows each certificate's names and days left.
+- **Why:** a typo should show at deploy, not as the first sender's refused handshake at 2 a.m.
+- **What to do:** run `ductus validate` in the environment you deploy to (certificates from secrets differ per environment).
+
+### Renewing: replace both files, no restart (level 2)
+- **What:** a certificate given as `cert_file` and `key_file` is read again every minute (one task for the whole engine, comparing the files' contents; nothing touches the database). A changed pair that loads is used for new connections; connections already open keep theirs until they close. A changed pair that doesn't load (half copied, a new certificate with the old key, expired) is logged once as an error, and the engine keeps presenting the pair it had: a bad renewal never takes a listener down.
+- **Why:** that's how certbot, win-acme, `step` and most PKI tooling deliver certificates: they replace files. Any ACME client works this way, with no engine feature needed.
+- **What to do:** write the new files, then check the log for `certificate renewed` within a minute. Either order works: while only one of the two has changed, the old pair stays in use (a check that lands in between logs one error, which the next check clears). Certificates from secrets (`cert:`/`key:`) and CAs change with a deploy and a restart.
+
+### Give the whole chain in `cert_file` (level 3)
+- **What:** the engine presents exactly what `cert_file` (or `cert`) holds: the certificate first, then its intermediates. Browsers often fetch a missing intermediate themselves; Java and .NET senders and most integration engines don't, and refuse the handshake.
+- **What to do:** put the CA's intermediate certificates after yours in the same file (the CA usually sends a "full chain" or "bundle" file).
+
+### Senders on TLS 1.0 or 1.1 can't connect (level 3)
+- **What:** listeners take TLS 1.2 and 1.3 only. Old engines and appliances that only speak 1.0/1.1 fail the handshake; the log says "no TLS version or cipher in common".
+- **What to do:** upgrade the sender, or put a TLS-terminating proxy in front for it alone (and keep that hop on a trusted network).
+
+### A client certificate says which system sent, not who (level 3)
+- **What:** with `clients: { ca: hospital-ca, subjects: [...] }`, a listener takes only senders whose certificate the CA issued and whose subject matches one pattern (`CN=bridges*.hospital.org`; all parts of a pattern must match; `DNS=` matches the certificate's DNS names). It identifies the sending system, not a person: nothing about it reaches the audit log as an actor.
+- **What to do:** keep `subjects` narrow: without it, every certificate that CA ever issued (often every machine in the hospital) is let in.
+
+### A refused handshake is logged once a minute per sender (level 3)
+- **What:** a sender that isn't speaking TLS, has no or the wrong client certificate, doesn't trust ours, or doesn't finish within 10 s is dropped without an answer (an MLLP sender sees the connection close, no ACK). The log says why, at most once a minute per listener and sender address: a misconfigured sender retries every few seconds, and the log isn't for counting them.
+- **What to do:** after changing a sender, wait a minute for the next line, or watch the sender's own log.
+
+### HTTP interfaces on one port share its `tls` (level 2)
+- **What:** HTTP interfaces on the same port are one server, so they're all HTTPS with the same certificate, or all plain. `ductus validate` and the engine refuse a port whose interfaces disagree.
+- **What to do:** give them the same `tls:`, or different ports.
+
 ## Certificates
 
 ### The engine checks certificates by itself, and logs in to nothing (level 2)
@@ -482,7 +518,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What to do:** keep `certificates` unless someone asked for scheduled login checks; run full checks when you want them (the Connections page, `POST /api/v1/doctor`, `ductus doctor`). `doctor: { schedule: off }` turns the scheduled checks off (and with them the countdown's freshness: dates then come from the last check someone ran).
 
 ### What has a certificate the engine watches (level 3)
-- **What:** HTTPS APIs (resources.yaml) and HTTPS destinations, the directory people sign in with (`ldap:` in resources.yaml, ldaps:// or StartTLS), and what alerts connect to: the mail server (`tls: starttls` or `tls`), HTTPS webhooks and the heartbeat. Not watched: Postgres resources (the engine connects to them without TLS), SFTP (host keys, not certificates), MLLP (plain TCP), and **SQL Server** (its TLS is inside the TDS protocol; it joins with the certificate manager in v0.6). Our own listeners have no TLS yet (v0.6).
+- **What:** HTTPS APIs (resources.yaml) and HTTPS destinations, the directory people sign in with (`ldap:` in resources.yaml, ldaps:// or StartTLS), and what alerts connect to: the mail server (`tls: starttls` or `tls`), HTTPS webhooks and the heartbeat. Not watched: Postgres resources (the engine connects to them without TLS), SFTP (host keys, not certificates), MLLP destinations (plain TCP), and **SQL Server** (its TLS is inside the TDS protocol; it joins in v0.6). Our own listeners' certificates (`certificates:` in resources.yaml) aren't in this table or its alerts yet (0.6.3.3): `ductus validate` shows how long each has, and the engine refuses to start with an expired one.
 - **What to do:** a SQL Server with `trust_server_certificate: false` stops accepting the engine's connections when its certificate expires: track that certificate where you track the server's others until v0.6.
 
 ### The earliest expiry in the chain counts, in whole days (level 2)

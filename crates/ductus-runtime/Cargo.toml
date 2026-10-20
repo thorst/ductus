@@ -18,6 +18,7 @@ ductus-script = { version = "0.5.0-dev", path = "../ductus-script" }
 ductus-store = { version = "0.5.0-dev", path = "../ductus-store" }
 futures-util = "0.3"
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-aws-lc-rs"] }
+rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "crypto", "pem"] }
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "pool", "builder", "hostname", "tokio1", "tokio1-rustls", "rustls-platform-verifier", "aws-lc-rs"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
@@ -42,6 +43,5 @@ x509-parser = "0.18.1"
 flate2 = "1.1.10"
 
 [dev-dependencies]
-rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "crypto", "pem"] }
 serde_yaml_ng = "0.10.0"
 tempfile = "3.27.0"

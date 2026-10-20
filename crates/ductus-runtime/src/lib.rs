@@ -25,6 +25,7 @@ mod services;
 mod sftp;
 mod split;
 pub mod stats;
+pub mod tls;
 mod worker;
 
 use anyhow::{Context, Result, bail};
@@ -122,6 +123,28 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     let missing = resources.missing_references(&configs);
     if !missing.is_empty() {
         bail!("{}", missing.join("\n"));
+    }
+    let tls_problems =
+        ductus_core::tls::check(&ductus_core::tls::listeners(&configs, settings.api.tls.as_ref()), &resources);
+    if !tls_problems.is_empty() {
+        bail!("{}", tls_problems.join("\n"));
+    }
+    // Every certificate, before the database: a broken or expired one stops the start here.
+    let certificates = Arc::new(tls::Certificates::load(&resources.certificates)?);
+    let server_tls = |t: &Option<ductus_core::tls::ListenTls>, alpn: &[&[u8]]| {
+        t.as_ref().map(|t| certificates.server(t, alpn)).transpose()
+    };
+    const HTTP1: &[&[u8]] = &[b"http/1.1"];
+    if let Some((host, port)) = &api_address
+        && settings.api.tls.is_none()
+        && !ductus_core::settings::loopback(host)
+    {
+        tracing::warn!(
+            %host,
+            port,
+            "the REST API listens on the network without TLS: passwords and tokens cross it readable, and browsers \
+             won't keep the session cookie; add `tls: {{ certificate: <name> }}` to `api` in ductus.yaml"
+        );
     }
     let directory = ldap::Directory::new(settings.auth.ldap.as_ref(), &resources)?;
     for name in resources.insecure_ldap() {
@@ -280,7 +303,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
             .collect();
         // Respond-mode HTTP interfaces get requests over a channel instead of a queue.
         let mut requests = None;
-        if let Source::Http { host, port, path, method, .. } = &config.source {
+        if let Source::Http { host, port, path, method, tls, .. } = &config.source {
             let route = if config.responds() {
                 let (calls, rx) = tokio::sync::mpsc::channel(1024);
                 requests = Some(rx);
@@ -294,6 +317,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
                 method: method.clone(),
                 path: path.clone(),
                 route,
+                tls: server_tls(tls, HTTP1)?,
             });
         }
         for slot in 0..config.slots() {
@@ -367,7 +391,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     for (config, ..) in &interfaces {
         let intake = || intakes[&config.name].clone();
         match &config.source {
-            Source::Mllp { .. } => ingest::spawn_mllp(intake()).await?,
+            Source::Mllp { tls, .. } => ingest::spawn_mllp(intake(), server_tls(tls, &[])?).await?,
             Source::File(f) | Source::Sftp(f) => {
                 let server = f.server.as_deref().and_then(sftp_server);
                 let watcher = files::FileWatcher::new(intake(), server, owner.ownership.clone())?;
@@ -382,6 +406,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         }
     }
     http::serve(http_endpoints, stopping.clone()).await?;
+    certificates.watch(stopping.clone());
     phases.mark("listening");
     let running: Vec<control::Running> = interfaces
         .iter()
@@ -424,7 +449,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     phases.mark("audit log and alerts started");
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
-        api_server = Some(api::serve(engine.clone(), host, *port).await?);
+        api_server = Some(api::serve(engine.clone(), host, *port, server_tls(&settings.api.tls, HTTP1)?).await?);
     }
     phases.mark("API listening");
     // Messages left pending with nothing pending for them (after a crash, or reconcile's

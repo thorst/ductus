@@ -9,6 +9,7 @@
 //! require_about: true # `ductus validate` fails when an interface doesn't name the systems it connects
 //! api:
 //!   listen: 127.0.0.1:7700  # the REST API (`/api/v1`); `off` to run without it
+//!   tls: { certificate: ductus-api }  # HTTPS (a `certificates:` entry in resources.yaml)
 //! retention: 7w       # how long messages are kept when an interface doesn't say (1w, 3w, 7w)
 //! quarantined: keep   # quarantined messages past it: keep until resolved, or purge
 //! auth:               # sign-in for people (all optional; see `AuthSettings`)
@@ -293,11 +294,23 @@ pub struct ApiSettings {
     /// choice (every call still needs a token).
     #[serde(default = "default_api_listen")]
     pub listen: String,
+    /// HTTPS only, with this `certificates:` entry (needed for the web UI anywhere but this
+    /// machine: its session cookie is `Secure`).
+    #[serde(default)]
+    pub tls: Option<crate::tls::ListenTls>,
 }
 
 impl Default for ApiSettings {
     fn default() -> Self {
-        Self { listen: default_api_listen() }
+        Self { listen: default_api_listen(), tls: None }
+    }
+}
+
+/// Whether `host` is only reachable from this machine (`127.0.0.1`, `::1`, `localhost`).
+pub fn loopback(host: &str) -> bool {
+    match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => host.eq_ignore_ascii_case("localhost"),
     }
 }
 
@@ -532,6 +545,13 @@ mod tests {
         .unwrap();
         let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
         assert!(err.contains("write it like 127.0.0.1:7700"), "{err}");
+
+        std::fs::write(dir.path().join(FILE), "api: { listen: '0.0.0.0:7700', tls: { certificate: ductus-api } }\n")
+            .unwrap();
+        let api = Settings::load(dir.path()).unwrap().api;
+        assert_eq!(api.tls.map(|t| t.certificate).as_deref(), Some("ductus-api"));
+        assert!(loopback("127.0.0.1") && loopback("::1") && loopback("LOCALHOST"));
+        assert!(!loopback("0.0.0.0") && !loopback("10.1.2.3") && !loopback("engine.hospital.org"));
     }
 
     #[test]

@@ -5,6 +5,7 @@
 use bytes::{Buf, Bytes, BytesMut};
 use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -71,13 +72,38 @@ where
     H: Fn(Bytes) -> F + Clone + Send + Sync + 'static,
     F: Future<Output = Option<Bytes>> + Send,
 {
+    serve_with(listener, |tcp, _| async move { Some(tcp) }, handler, stop).await
+}
+
+/// `serve_until` over connections that need setting up first (a TLS handshake): `open` turns
+/// each accepted connection into the stream messages are read from, or `None` to drop it. It
+/// runs on the connection's own task, so a slow handshake holds up no other sender, and the
+/// listener closes at once on `stop`.
+pub async fn serve_with<O, OF, S, H, F>(
+    listener: TcpListener,
+    open: O,
+    handler: H,
+    stop: CancellationToken,
+) -> io::Result<()>
+where
+    O: Fn(TcpStream, SocketAddr) -> OF + Clone + Send + Sync + 'static,
+    OF: Future<Output = Option<S>> + Send,
+    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    H: Fn(Bytes) -> F + Clone + Send + Sync + 'static,
+    F: Future<Output = Option<Bytes>> + Send,
+{
     loop {
-        let (mut stream, peer) = tokio::select! {
+        let (tcp, peer) = tokio::select! {
             accepted = listener.accept() => accepted?,
             _ = stop.cancelled() => return Ok(()),
         };
-        let (handler, stop) = (handler.clone(), stop.clone());
+        let (open, handler, stop) = (open.clone(), handler.clone(), stop.clone());
         tokio::spawn(async move {
+            let opened = tokio::select! {
+                opened = open(tcp, peer) => opened,
+                _ = stop.cancelled() => return,
+            };
+            let Some(mut stream) = opened else { return };
             let mut buf = BytesMut::with_capacity(16 * 1024);
             loop {
                 let frame = tokio::select! {
@@ -257,6 +283,35 @@ mod tests {
         assert!(open.send(b"MSH|3").await.is_err());
         let refused = TcpStream::connect(&addr).await.unwrap_err();
         assert_eq!(refused.kind(), io::ErrorKind::ConnectionRefused);
+    }
+
+    #[tokio::test]
+    async fn connections_are_opened_on_their_own_task_and_can_be_refused() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap().to_string();
+        let stop = CancellationToken::new();
+        // The first connection's setup never finishes; the second is refused; the third is served.
+        let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let open = move |tcp: TcpStream, _peer: SocketAddr| {
+            let n = opened.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move {
+                match n {
+                    0 => std::future::pending().await,
+                    1 => None,
+                    _ => Some(tcp),
+                }
+            }
+        };
+        let handler = |_m: Bytes| async move { Some(Bytes::from_static(b"ACK")) };
+        let server = tokio::spawn(serve_with(listener, open, handler, stop.clone()));
+        let _stuck = TcpStream::connect(&addr).await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let mut refused = Client::new(addr.clone(), Duration::from_secs(2));
+        assert!(refused.send(b"MSH|1").await.is_err(), "dropped without an answer");
+        let mut served = Client::new(addr.clone(), Duration::from_secs(2));
+        assert_eq!(&served.send(b"MSH|2").await.unwrap()[..], b"ACK", "not held up by the stuck one");
+        stop.cancel();
+        server.await.unwrap().unwrap();
     }
 
     #[tokio::test]

@@ -107,9 +107,12 @@ pub fn impact<'a>(
         .flatten()
         .collect();
         let endpoints = match &c.source {
-            Source::Mllp { host, port } => vec![listening(host, *port, "MLLP")],
-            Source::Http { host, port, path, method, .. } => {
-                vec![format!("{} {} {path}", listening(host, *port, "HTTP"), method.to_ascii_uppercase())]
+            Source::Mllp { host, port, tls } => {
+                vec![listening(host, *port, if tls.is_some() { "MLLP over TLS" } else { "MLLP" })]
+            }
+            Source::Http { host, port, path, method, tls, .. } => {
+                let protocol = if tls.is_some() { "HTTPS" } else { "HTTP" };
+                vec![format!("{} {} {path}", listening(host, *port, protocol), method.to_ascii_uppercase())]
             }
             Source::File(f) => vec![format!("folder {}", f.dir)],
             Source::Sftp(f) => {

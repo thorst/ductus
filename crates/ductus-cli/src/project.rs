@@ -137,6 +137,57 @@ pub async fn test(root: &Path, env: &str, only: Option<&str>) -> Result<bool> {
     Ok(failed == 0)
 }
 
+/// `tls:` on the listeners and the `certificates:` entries: names, files, keys, expiry, and the
+/// API on the network without TLS. Returns the number of problems.
+fn check_tls<'a>(
+    root: &Path,
+    resources: &ductus_core::Resources,
+    configs: impl IntoIterator<Item = &'a InterfaceConfig>,
+) -> usize {
+    let settings = ductus_core::settings::Settings::load(root).ok();
+    let api = settings.as_ref().map(|s| &s.api);
+    let mut problems = 0;
+    for problem in
+        ductus_core::tls::check(&ductus_core::tls::listeners(configs, api.and_then(|a| a.tls.as_ref())), resources)
+    {
+        problems += 1;
+        println!("✗ {problem}");
+    }
+    for (name, entry) in &resources.certificates {
+        // One at a time, so every broken one is reported.
+        match ductus_runtime::tls::Certificates::load(&BTreeMap::from([(name.clone(), entry.clone())])) {
+            Err(e) => {
+                problems += 1;
+                println!("✗ {e:#}");
+            }
+            Ok(loaded) => match loaded.pairs().next().map(|p| p.about()) {
+                None => println!("✓ certificate `{name}`: a CA"),
+                Some(about) => {
+                    let days = (about.not_after - chrono::Utc::now()).num_days();
+                    let line = format!(
+                        "certificate `{name}`: {} ({}), expires {} ({days} days)",
+                        about.subject,
+                        about.names.join(", "),
+                        about.not_after.format("%Y-%m-%d")
+                    );
+                    if days < 30 { println!("⚠ {line}: renew it soon") } else { println!("✓ {line}") }
+                }
+            },
+        }
+    }
+    if let Some(api) = api
+        && api.tls.is_none()
+        && let Ok(Some((host, _))) = api.address(None)
+        && !ductus_core::settings::loopback(&host)
+    {
+        println!(
+            "⚠ api.listen `{}` is on the network without TLS: passwords and tokens cross it readable, and browsers won't keep the session cookie; add `tls: {{ certificate: <name> }}` to `api`",
+            api.listen
+        );
+    }
+    problems
+}
+
 /// Check configs, module loading and types. Returns false if anything is wrong.
 pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> Result<bool> {
     let types = write_types(root).await?;
@@ -154,11 +205,21 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> R
     };
     let resources = match ductus_core::Resources::load(root, &env) {
         Ok(r) => {
-            if !r.databases.is_empty() || !r.sftp.is_empty() || !r.apis.is_empty() || !r.ldap.is_empty() {
+            if !r.databases.is_empty()
+                || !r.sftp.is_empty()
+                || !r.apis.is_empty()
+                || !r.ldap.is_empty()
+                || !r.certificates.is_empty()
+            {
                 let directories =
                     if r.ldap.is_empty() { String::new() } else { format!(", {} directory(ies)", r.ldap.len()) };
+                let certificates = if r.certificates.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {} certificate(s)", r.certificates.len())
+                };
                 println!(
-                    "✓ resources: {} database(s), {} SFTP server(s), {} API(s){directories}",
+                    "✓ resources: {} database(s), {} SFTP server(s), {} API(s){directories}{certificates}",
                     r.databases.len(),
                     r.sftp.len(),
                     r.apis.len()
@@ -284,6 +345,11 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> R
                 println!("✗ {e:#}");
             }
         }
+    }
+
+    // TLS: what each listener names, and each certificate loads as the engine would load it.
+    if let Some(r) = &resources {
+        problems += check_tls(root, r, configs());
     }
 
     // Alerts (`alerts:` in ductus.yaml), with this environment's variables and secrets.

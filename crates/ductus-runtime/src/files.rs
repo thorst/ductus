@@ -265,7 +265,7 @@ impl FileWatcher {
         for e in entries {
             if e.name.starts_with('.')
                 || marker.as_deref().is_some_and(|m| e.name.ends_with(m))
-                || !glob(&self.source.pattern, &e.name)
+                || !ductus_core::glob(&self.source.pattern, &e.name)
             {
                 continue;
             }
@@ -384,45 +384,5 @@ impl FileWatcher {
                 return Ok(queued);
             }
         }
-    }
-}
-
-/// File name matching with `*` (any run of characters) and `?` (any one character).
-fn glob(pattern: &str, name: &str) -> bool {
-    let (p, n): (Vec<char>, Vec<char>) = (pattern.chars().collect(), name.chars().collect());
-    let (mut pi, mut ni) = (0, 0);
-    // Where the last `*` was, and where in the name it started matching: on a mismatch, let
-    // that `*` swallow one more character and try again.
-    let mut star: Option<(usize, usize)> = None;
-    while ni < n.len() {
-        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
-            pi += 1;
-            ni += 1;
-        } else if pi < p.len() && p[pi] == '*' {
-            star = Some((pi, ni));
-            pi += 1;
-        } else if let Some((sp, sn)) = star {
-            pi = sp + 1;
-            ni = sn + 1;
-            star = Some((sp, sn + 1));
-        } else {
-            return false;
-        }
-    }
-    p[pi..].iter().all(|&c| c == '*')
-}
-
-#[cfg(test)]
-mod tests {
-    use super::glob;
-
-    #[test]
-    fn globs() {
-        assert!(glob("*", "anything.csv"));
-        assert!(glob("*.csv", "labs.csv") && !glob("*.csv", "labs.csv.done"));
-        assert!(glob("ADT_??.hl7", "ADT_01.hl7") && !glob("ADT_??.hl7", "ADT_1.hl7"));
-        assert!(glob("a*b*c", "aXXbYYc") && !glob("a*b*c", "aXXbYY"));
-        assert!(glob("*_*.txt", "x_y_z.txt"));
-        assert!(!glob("labs", "labs2"));
     }
 }

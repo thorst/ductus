@@ -6,6 +6,7 @@ use crate::gate::{Closed, Gate};
 use crate::hl7_now;
 use crate::keys::{self, KeyPath};
 use crate::stats::{self, InterfaceStats};
+use crate::tls::Conn;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use ductus_core::config::{Durability, Source};
@@ -15,7 +16,7 @@ use ductus_hl7::{AckCode, Message};
 use ductus_store::{Batch, BatchMessage, DedupeKey, DestinationId, Done, MessageRef, NewMessage, Store};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI16, Ordering::Relaxed};
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, TcpStream};
 
 /// What happened to an accepted message.
 pub enum Accepted {
@@ -307,12 +308,12 @@ struct Keys {
     dedupe: Option<String>,
 }
 
-/// Start an MLLP listener feeding `intake`. While its gate is closed (draining) the listener
-/// is closed, so senders see the engine as down and keep their messages; it opens again when
-/// the gate does.
-pub async fn spawn_mllp(intake: Arc<Intake>) -> Result<()> {
+/// Start an MLLP listener feeding `intake`, over TLS with `tls`. While its gate is closed
+/// (draining) the listener is closed, so senders see the engine as down and keep their messages;
+/// it opens again when the gate does.
+pub async fn spawn_mllp(intake: Arc<Intake>, tls: Option<Arc<rustls::ServerConfig>>) -> Result<()> {
     let config = intake.config.clone();
-    let Source::Mllp { host, port } = &config.source else { return Ok(()) };
+    let Source::Mllp { host, port, .. } = &config.source else { return Ok(()) };
     let (host, port) = (host.clone(), *port);
     let bind = move || {
         let host = host.clone();
@@ -326,6 +327,17 @@ pub async fn spawn_mllp(intake: Arc<Intake>) -> Result<()> {
         move |frame: Bytes| {
             let intake = intake.clone();
             async move { receive_hl7(&intake, &frame).await.map(Bytes::from) }
+        }
+    };
+    let acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
+    let label = format!("interface `{}` (MLLP)", config.name);
+    let open = move |tcp: TcpStream, peer: std::net::SocketAddr| {
+        let (acceptor, label) = (acceptor.clone(), label.clone());
+        async move {
+            match acceptor {
+                None => Some(Conn::Plain(tcp)),
+                Some(a) => crate::tls::handshake(&a, &label, tcp, peer).await.map(|s| Conn::Tls(Box::new(s))),
+            }
         }
     };
     tokio::spawn(async move {
@@ -347,7 +359,7 @@ pub async fn spawn_mllp(intake: Arc<Intake>) -> Result<()> {
             // a big engine; the `started` line counts them, and `ductus ports` lists them.
             tracing::debug!(interface = %name, address = %listener.local_addr().map(|a| a.to_string()).unwrap_or_default(), "listening (MLLP)");
             let stop = ductus_mllp::CancellationToken::new();
-            let serve = ductus_mllp::serve_until(listener, handler.clone(), stop.clone());
+            let serve = ductus_mllp::serve_with(listener, open.clone(), handler.clone(), stop.clone());
             tokio::pin!(serve);
             tokio::select! {
                 result = &mut serve => {

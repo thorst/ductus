@@ -18,6 +18,7 @@ pub mod retention;
 pub mod schedule;
 pub mod secrets;
 pub mod settings;
+pub mod tls;
 
 pub use config::InterfaceConfig;
 pub use env::Environment;
@@ -37,9 +38,45 @@ pub fn partition_of(key: &str, partitions: u32) -> i32 {
     (hash % u64::from(partitions.max(1))) as i32
 }
 
+/// Matching with `*` (any run of characters) and `?` (any one character): file names, and
+/// certificate subjects.
+pub fn glob(pattern: &str, name: &str) -> bool {
+    let (p, n): (Vec<char>, Vec<char>) = (pattern.chars().collect(), name.chars().collect());
+    let (mut pi, mut ni) = (0, 0);
+    // Where the last `*` was, and where in the name it started matching: on a mismatch, let
+    // that `*` swallow one more character and try again.
+    let mut star: Option<(usize, usize)> = None;
+    while ni < n.len() {
+        if pi < p.len() && (p[pi] == '?' || p[pi] == n[ni]) {
+            pi += 1;
+            ni += 1;
+        } else if pi < p.len() && p[pi] == '*' {
+            star = Some((pi, ni));
+            pi += 1;
+        } else if let Some((sp, sn)) = star {
+            pi = sp + 1;
+            ni = sn + 1;
+            star = Some((sp, sn + 1));
+        } else {
+            return false;
+        }
+    }
+    p[pi..].iter().all(|&c| c == '*')
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn globs() {
+        assert!(glob("*", "anything.csv"));
+        assert!(glob("*.csv", "labs.csv") && !glob("*.csv", "labs.csv.done"));
+        assert!(glob("ADT_??.hl7", "ADT_01.hl7") && !glob("ADT_??.hl7", "ADT_1.hl7"));
+        assert!(glob("a*b*c", "aXXbYYc") && !glob("a*b*c", "aXXbYY"));
+        assert!(glob("*_*.txt", "x_y_z.txt"));
+        assert!(!glob("labs", "labs2"));
+    }
 
     #[test]
     fn partitioning_is_stable_and_in_range() {

@@ -1,4 +1,5 @@
 mod admin;
+mod cert;
 mod dev;
 mod doctor;
 mod envfile;
@@ -324,6 +325,11 @@ enum Command {
         #[command(subcommand)]
         action: SecretAction,
     },
+    /// Certificates for `tls:` on listeners (`certificates:` in resources.yaml).
+    Cert {
+        #[command(subcommand)]
+        action: CertAction,
+    },
     /// Print the REST API's OpenAPI document (the same as `GET /api/v1/openapi.json`, without a
     /// running engine).
     ApiSpec,
@@ -383,6 +389,23 @@ enum Command {
         /// refuses them would (repeat for several). The engine quarantines them.
         #[arg(long, conflicts_with_all = ["smtp", "http"])]
         reject: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum CertAction {
+    /// A self-signed certificate and its key, for a lab or a test: writes OUT.pem and OUT.key and
+    /// prints the resources.yaml entry. Senders must be given OUT.pem to trust. Production
+    /// certificates come from the hospital's CA.
+    SelfSigned {
+        /// Where to write, without the extension: `tls/engine` writes tls/engine.pem and tls/engine.key.
+        out: PathBuf,
+        /// A DNS name or IP address senders connect to (repeat for several).
+        #[arg(long = "name", required = true)]
+        names: Vec<String>,
+        /// How long it is valid.
+        #[arg(long, default_value_t = 365)]
+        days: u32,
     },
 }
 
@@ -793,6 +816,7 @@ async fn run(cli: Cli) -> Result<()> {
             project::test_alert(&root, &env, &channel).await
         }
         Command::Secret { action } => project::secret(action_args(action)),
+        Command::Cert { action: CertAction::SelfSigned { out, names, days } } => cert::self_signed(&out, &names, days),
         Command::Types { root } => project::types(&root).await,
         Command::ApiSpec => {
             println!("{}", serde_json::to_string_pretty(&ductus_runtime::api::openapi())?);

@@ -119,17 +119,36 @@ pub fn router(engine: Shared) -> (Router, utoipa::openapi::OpenApi) {
     (Router::new().nest("/api/v1", api.with_state(engine)).fallback(ui::serve), doc)
 }
 
-/// Serve the API at `host:port` until the engine shuts down. The task ends once the requests
-/// in flight have been answered: the one that asked for the shutdown (a drain with `stop`) gets
-/// its answer before the process exits.
-pub async fn serve(engine: Shared, host: &str, port: u16) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+/// Serve the API at `host:port` (HTTPS with `tls`) until the engine shuts down. The task ends
+/// once the requests in flight have been answered: the one that asked for the shutdown (a drain
+/// with `stop`) gets its answer before the process exits.
+pub async fn serve(
+    engine: Shared,
+    host: &str,
+    port: u16,
+    tls: Option<Arc<rustls::ServerConfig>>,
+) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     use anyhow::Context;
+    use axum::serve::ListenerExt;
     let listener = tokio::net::TcpListener::bind((host, port)).await.with_context(|| {
         format!("binding the REST API to {host}:{port} (`api.listen` in ductus.yaml; `off` to run without it)")
     })?;
-    tracing::info!(%host, port, "REST API listening (/api/v1)");
+    let https = tls.is_some();
+    // `tap_io` gives the listener axum's connect info (the caller's address, for the audit log).
+    let listener = crate::tls::Listener::new(listener, tls, "the REST API")?.tap_io(|_| {});
+    tracing::info!(%host, port, https, "REST API listening (/api/v1)");
     let shutdown = engine.shutdown.clone();
-    let (router, _) = router(engine);
+    let (mut router, _) = router(engine);
+    if https {
+        // Browsers that have seen HTTPS here never try plain HTTP again (a year).
+        router = router.layer(axum::middleware::map_response(|mut response: axum::response::Response| async {
+            response.headers_mut().insert(
+                axum::http::header::STRICT_TRANSPORT_SECURITY,
+                axum::http::HeaderValue::from_static("max-age=31536000"),
+            );
+            response
+        }));
+    }
     Ok(tokio::spawn(async move {
         let app = router.into_make_service_with_connect_info::<SocketAddr>();
         if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned()).await {

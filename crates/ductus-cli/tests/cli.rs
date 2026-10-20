@@ -1878,6 +1878,131 @@ fn validate_checks_company_defined_fields_and_docs_lists_them() {
     assert!(!ok && out.contains("✗ docs-schema.yaml:") && out.contains("ductus already uses that name"), "{out}");
 }
 
+/// TLS on listeners: `ductus cert self-signed` makes a pair, validate reads it, a key that isn't
+/// the certificate's stops the start before the database, and with a database the MLLP listener
+/// takes only TLS and the API answers over HTTPS (with HSTS).
+#[tokio::test(flavor = "multi_thread")]
+async fn listeners_speak_tls_with_the_certificates_resources_yaml_names() {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("tls-test-{nanos}");
+    let (mllp, http, api) = (free_port(), free_port(), free_port());
+    let config = format!(
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp}, tls: {{ certificate: engine }} }} }}\ndestination: {{ file: {{ dir: out }} }}\n"
+    );
+    let orders = format!(
+        "name: {name}-orders\nsource: {{ http: {{ host: 127.0.0.1, port: {http}, path: /orders, tls: {{ certificate: engine }} }} }}\nformat: json\ndestination: {{ file: {{ dir: out }} }}\n"
+    );
+    let dir = project(&[
+        (format!("interfaces/{name}/interface.yaml").as_str(), config.as_str()),
+        (format!("interfaces/{name}-orders/interface.yaml").as_str(), orders.as_str()),
+        (
+            "resources.yaml",
+            "certificates:\n  engine: { cert_file: tls/engine.pem, key_file: tls/engine.key, owner: Infrastructure }\n",
+        ),
+        ("ductus.yaml", "api: { tls: { certificate: engine } }\n"),
+    ]);
+    let root = dir.path();
+    let (ok, out) = ductus(root, &["cert", "self-signed", "tls/engine", "--name", "localhost", "--name", "127.0.0.1"]);
+    assert!(ok && out.contains("cert_file: tls/engine.pem"), "{out}");
+    let (ok, out) = ductus(root, &["cert", "self-signed", "tls/engine", "--name", "localhost"]);
+    assert!(!ok && out.contains("exists already"), "never overwrites: {out}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(root.join("tls/engine.key")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the key is readable by its owner only");
+    }
+
+    let (ok, out) = without_a_database(root, &["validate"]);
+    assert!(ok && out.contains("✓ certificate `engine`: CN=localhost (localhost, 127.0.0.1), expires"), "{out}");
+    edit(&root.join("ductus.yaml"), "certificate: engine", "certificate: nope");
+    let (ok, out) = without_a_database(root, &["validate"]);
+    assert!(!ok && out.contains("✗ api (ductus.yaml): tls.certificate: no certificate named `nope`"), "{out}");
+    edit(&root.join("ductus.yaml"), "certificate: nope", "certificate: engine");
+
+    // Another pair's key: refused at start, before the database (this one doesn't exist).
+    let (_, _) = ductus(root, &["cert", "self-signed", "other", "--name", "localhost"]);
+    std::fs::rename(root.join("tls/engine.key"), root.join("engine.key.good")).unwrap();
+    std::fs::copy(root.join("other.key"), root.join("tls/engine.key")).unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["run", "--root", &root.to_string_lossy(), "--api-listen", "off"])
+        .env("DUCTUS_DATABASE_URL", "postgres://nobody@127.0.0.1:1/none")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{text}");
+    assert!(text.contains("certificate `engine` (resources.yaml)"), "{text}");
+    assert!(text.contains("the private key isn't this certificate's key"), "{text}");
+    std::fs::rename(root.join("engine.key.good"), root.join("tls/engine.key")).unwrap();
+
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (_engine, log) = start_engine(root, &db, Some(api), "engine.log");
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
+    let pem = std::fs::read(root.join("tls/engine.pem")).unwrap();
+
+    // MLLP over TLS: stored and ACKed.
+    let mut roots = rustls::RootCertStore::empty();
+    for cert in rustls::pki_types::pem::PemObject::pem_slice_iter(&pem) {
+        roots.add(cert.unwrap()).unwrap();
+    }
+    let tls =
+        rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+    let tcp = tokio::net::TcpStream::connect(("127.0.0.1", mllp)).await.unwrap();
+    let server = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+    let mut stream = tokio_rustls::TlsConnector::from(std::sync::Arc::new(tls)).connect(server, tcp).await.unwrap();
+    let ack = mllp_exchange(&mut stream, "MSH|^~\\&|A|B|C|D|20261020||ADT^A01|TLS1|P|2.5\rPID|1||123\r").await;
+    assert!(ack.contains("MSA|AA|TLS1"), "{ack}");
+
+    // A plain sender on the TLS port gets no answer, and the log says why (once).
+    let mut plain = tokio::net::TcpStream::connect(("127.0.0.1", mllp)).await.unwrap();
+    let ack = mllp_exchange(&mut plain, "MSH|^~\\&|A|B|C|D|20261020||ADT^A01|PLAIN1|P|2.5\r").await;
+    assert!(!ack.contains("MSA"), "{ack}");
+    assert!(wait_for_log(&log, "isn't speaking TLS", 5), "{}", std::fs::read_to_string(&log).unwrap());
+
+    // The API over HTTPS, with HSTS; plain HTTP isn't served.
+    let https =
+        reqwest::Client::builder().tls_certs_only([reqwest::Certificate::from_pem(&pem).unwrap()]).build().unwrap();
+    let health = https.get(format!("https://localhost:{api}/api/v1/health")).send().await.unwrap();
+    assert!(health.status().is_success());
+    assert_eq!(health.headers()["strict-transport-security"], "max-age=31536000");
+    assert!(reqwest::get(format!("http://127.0.0.1:{api}/api/v1/health")).await.is_err());
+
+    // An HTTPS source in queue mode stores what it's sent.
+    let posted = https.post(format!("https://localhost:{http}/orders")).body(r#"{"order": 1}"#).send().await.unwrap();
+    assert_eq!(posted.status(), reqwest::StatusCode::ACCEPTED);
+    assert!(reqwest::Client::new().post(format!("http://127.0.0.1:{http}/orders")).body("{}").send().await.is_err());
+}
+
+/// Send one MLLP frame and read until the end of a frame or the connection closes.
+async fn mllp_exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream: &mut S,
+    message: &str,
+) -> String {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut frame = vec![0x0b];
+    frame.extend_from_slice(message.as_bytes());
+    frame.extend_from_slice(&[0x1c, 0x0d]);
+    if stream.write_all(&frame).await.is_err() {
+        return String::new();
+    }
+    let mut got = Vec::new();
+    let mut buf = [0u8; 1024];
+    let read = async {
+        while !got.ends_with(&[0x1c, 0x0d]) {
+            match stream.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => got.extend_from_slice(&buf[..n]),
+            }
+        }
+    };
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(15), read).await;
+    String::from_utf8_lossy(&got).into_owned()
+}
+
 /// `ductus run` on `dir` with its log in a file next to the project (the API only if `api`).
 fn start_engine(dir: &Path, db: &str, api: Option<u16>, log: &str) -> (Child, std::path::PathBuf) {
     let path = dir.join(log);

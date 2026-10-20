@@ -38,6 +38,16 @@
 //!     bind_password: ${secret:LDAP_BIND_PASSWORD}
 //!     ca: ${secret:HOSPITAL_CA}                # optional: a private CA this server doesn't trust yet
 //!     owner: Directory Services
+//! certificates:                                # what our listeners present (`tls:`), and CAs
+//!   ductus-mllp:
+//!     cert_file: /etc/ductus/tls/mllp.pem       # leaf first, then intermediates; re-read when it changes
+//!     key_file: /etc/ductus/tls/mllp.key
+//!     owner: Infrastructure
+//!   ductus-api:
+//!     cert: ${secret:API_CERT}                  # or PEM text from secrets (read at start)
+//!     key: ${secret:API_KEY}
+//!   hospital-ca:
+//!     ca: ${secret:HOSPITAL_CA}                 # a CA only (or ca_file): clients it issued are trusted
 //! ```
 //!
 //! Interface code refers to them by name (`db("patient_db")`, `api("empi")`), so no connection
@@ -67,6 +77,9 @@ pub struct Resources {
     /// Directories people sign in with (`auth.ldap` in ductus.yaml names one).
     #[serde(default)]
     pub ldap: BTreeMap<String, LdapServer>,
+    /// Certificates our listeners present (`tls: { certificate: name }`) and CAs (`ca: name`).
+    #[serde(default)]
+    pub certificates: BTreeMap<String, CertificateEntry>,
 }
 
 /// The kinds of things resources.yaml defines.
@@ -76,17 +89,117 @@ pub enum Kind {
     Api,
     Sftp,
     Ldap,
+    Certificate,
 }
 
 impl Kind {
-    /// How it's named in messages and reports: `database`, `api`, `sftp server`, `directory`.
+    /// How it's named in messages and reports: `database`, `api`, `sftp server`, `directory`,
+    /// `certificate`.
     pub fn label(self) -> &'static str {
         match self {
             Kind::Database => "database",
             Kind::Api => "api",
             Kind::Sftp => "sftp server",
             Kind::Ldap => "directory",
+            Kind::Certificate => "certificate",
         }
+    }
+}
+
+/// A `certificates:` entry: a certificate with its private key (from files, which are re-read
+/// when they change, or PEM text from secrets), or a CA alone.
+#[derive(Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CertificateEntry {
+    /// PEM file: the certificate first, then its intermediates. Relative to the project folder.
+    #[serde(default)]
+    pub cert_file: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub key_file: Option<std::path::PathBuf>,
+    /// PEM text (usually `${secret:...}`).
+    #[serde(default)]
+    pub cert: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+    /// A CA's certificates as PEM text, or in a file: an entry with only this is a CA.
+    #[serde(default)]
+    pub ca: Option<String>,
+    #[serde(default)]
+    pub ca_file: Option<std::path::PathBuf>,
+    #[serde(default)]
+    pub application: Option<String>,
+    #[serde(default)]
+    pub vendor: Option<String>,
+    /// Who renews it (expiry alerts with `to: owner` reach them).
+    #[serde(default)]
+    pub owner: Option<String>,
+    /// Company-defined documentation fields (`docs-schema.yaml`).
+    #[serde(default)]
+    pub custom: crate::docs::Custom,
+}
+
+/// What a `certificates:` entry is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertificateKind {
+    /// A certificate with its private key: what a listener presents.
+    Pair,
+    /// Only a CA's certificates: what client certificates are checked against.
+    Ca,
+}
+
+/// Where a `certificates:` entry's PEM comes from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Pem<'a> {
+    Files { cert: &'a Path, key: &'a Path },
+    Text { cert: &'a str, key: &'a str },
+    CaText(&'a str),
+    CaFile(&'a Path),
+}
+
+impl CertificateEntry {
+    pub fn kind(&self) -> CertificateKind {
+        match self.pem() {
+            Some(Pem::Files { .. } | Pem::Text { .. }) => CertificateKind::Pair,
+            _ => CertificateKind::Ca,
+        }
+    }
+
+    /// Where its PEM is; None if the entry mixes or misses fields (`problem` says which).
+    pub fn pem(&self) -> Option<Pem<'_>> {
+        match (&self.cert_file, &self.key_file, &self.cert, &self.key, &self.ca, &self.ca_file) {
+            (Some(cert), Some(key), None, None, None, None) => Some(Pem::Files { cert, key }),
+            (None, None, Some(cert), Some(key), None, None) => Some(Pem::Text { cert, key }),
+            (None, None, None, None, Some(ca), None) => Some(Pem::CaText(ca)),
+            (None, None, None, None, None, Some(ca)) => Some(Pem::CaFile(ca)),
+            _ => None,
+        }
+    }
+
+    fn problem(&self) -> Option<&'static str> {
+        self.pem().is_none().then_some(
+            "give `cert_file` and `key_file`, or `cert` and `key` (PEM text, from secrets), or only a CA (`ca` or `ca_file`)",
+        )
+    }
+
+    /// Relative file names are read from the project folder.
+    fn resolve(&mut self, root: &Path) {
+        for file in [&mut self.cert_file, &mut self.key_file, &mut self.ca_file].into_iter().flatten() {
+            if file.is_relative() {
+                *file = root.join(&*file);
+            }
+        }
+    }
+}
+
+// Hand-written so private keys never end up in logs.
+impl std::fmt::Debug for CertificateEntry {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CertificateEntry")
+            .field("cert_file", &self.cert_file)
+            .field("key_file", &self.key_file)
+            .field("ca_file", &self.ca_file)
+            .field("kind", &self.kind())
+            .finish_non_exhaustive()
     }
 }
 
@@ -401,7 +514,13 @@ impl Resources {
             return Ok(Self::default()); // only comments (as `ductus init` writes it)
         }
         env.substitute(&mut value).with_context(|| format!("in {}", file.display()))?;
-        let resources: Self = serde_yaml_ng::from_value(value).with_context(|| format!("in {}", file.display()))?;
+        let mut resources: Self = serde_yaml_ng::from_value(value).with_context(|| format!("in {}", file.display()))?;
+        for (name, c) in &mut resources.certificates {
+            if let Some(problem) = c.problem() {
+                bail!("in {}: certificate `{name}`: {problem}", file.display());
+            }
+            c.resolve(root);
+        }
         for (name, s) in &resources.sftp {
             if s.password.is_none() && s.private_key.is_none() {
                 bail!("in {}: sftp server `{name}` needs `password` or `private_key`", file.display());
@@ -436,8 +555,10 @@ impl Resources {
                     &a.owner
                 } else if let Some(s) = self.sftp.get(name) {
                     &s.owner
+                } else if let Some(l) = self.ldap.get(name) {
+                    &l.owner
                 } else {
-                    &self.ldap.get(name)?.owner
+                    &self.certificates.get(name)?.owner
                 }
             }
         };
@@ -451,6 +572,7 @@ impl Resources {
             Kind::Api => self.apis.keys().map(String::as_str).collect(),
             Kind::Sftp => self.sftp.keys().map(String::as_str).collect(),
             Kind::Ldap => self.ldap.keys().map(String::as_str).collect(),
+            Kind::Certificate => self.certificates.keys().map(String::as_str).collect(),
         }
     }
 
@@ -481,6 +603,7 @@ impl Resources {
         all.extend(self.apis.iter().map(|(n, a)| (Kind::Api, n.as_str(), &a.custom)));
         all.extend(self.sftp.iter().map(|(n, s)| (Kind::Sftp, n.as_str(), &s.custom)));
         all.extend(self.ldap.iter().map(|(n, l)| (Kind::Ldap, n.as_str(), &l.custom)));
+        all.extend(self.certificates.iter().map(|(n, c)| (Kind::Certificate, n.as_str(), &c.custom)));
         all
     }
 
@@ -495,6 +618,9 @@ impl Resources {
             Kind::Api => self.apis.get(name).map(|a| System::new(&a.application, &a.vendor)).unwrap_or_default(),
             Kind::Sftp => self.sftp.get(name).map(|s| System::new(&s.application, &s.vendor)).unwrap_or_default(),
             Kind::Ldap => self.ldap.get(name).map(|l| System::new(&l.application, &l.vendor)).unwrap_or_default(),
+            Kind::Certificate => {
+                self.certificates.get(name).map(|c| System::new(&c.application, &c.vendor)).unwrap_or_default()
+            }
         }
     }
 
@@ -525,6 +651,7 @@ impl Resources {
                 })
                 .into_iter()
                 .collect(),
+            Kind::Certificate => Vec::new(), // presented by us, not connected to
         }
     }
 
@@ -753,5 +880,45 @@ mod tests {
         // Every kind takes an owner.
         let r = load("apis:\n  a: { url: 'https://a', owner: ' Web Team ' }\nsftp:\n  s: { host: h, user: u, password: p, owner: Lab }\n").unwrap();
         assert_eq!((r.owner("a"), r.owner("s"), r.owner("none")), (Some("Web Team"), Some("Lab"), None));
+    }
+
+    #[test]
+    fn loads_certificates_as_pairs_or_cas() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("resources.yaml");
+        let env = Environment::with_variables("dev", &[("KEY", "-----BEGIN PRIVATE KEY-----secret")]);
+        let load = |text: &str| {
+            std::fs::write(&file, text).unwrap();
+            Resources::load(dir.path(), &env).map_err(|e| format!("{e:#}"))
+        };
+        let r = load(
+            "certificates:\n  mllp: { cert_file: tls/mllp.pem, key_file: /etc/ductus/mllp.key, owner: Infrastructure }\n  api: { cert: CERT, key: '${KEY}' }\n  ca: { ca: CA }\n  ca2: { ca_file: ca.pem }\n",
+        )
+        .unwrap();
+        let mllp = &r.certificates["mllp"];
+        assert_eq!(
+            mllp.pem(),
+            Some(Pem::Files { cert: &dir.path().join("tls/mllp.pem"), key: Path::new("/etc/ductus/mllp.key") }),
+            "relative files are read from the project folder"
+        );
+        assert_eq!(
+            [&r.certificates["api"], &r.certificates["ca"], &r.certificates["ca2"]].map(CertificateEntry::kind),
+            [CertificateKind::Pair, CertificateKind::Ca, CertificateKind::Ca]
+        );
+        assert_eq!(r.owner("mllp"), Some("Infrastructure"));
+        assert!(!format!("{:?}", r.certificates).contains("secret"), "keys stay out of logs");
+        assert_eq!(
+            r.missing(Kind::Certificate, "x").unwrap(),
+            "no certificate named `x` in resources.yaml (defined: api, ca, ca2, mllp)"
+        );
+
+        for wrong in ["{ cert_file: a.pem }", "{ cert: C, key_file: k }", "{ cert: C, key: K, ca: A }", "{ owner: me }"]
+        {
+            let err = load(&format!("certificates:\n  x: {wrong}\n")).unwrap_err();
+            assert!(
+                err.contains("certificate `x`: give `cert_file` and `key_file`, or `cert` and `key`"),
+                "{wrong}: {err}"
+            );
+        }
     }
 }

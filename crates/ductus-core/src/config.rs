@@ -101,12 +101,19 @@ pub enum Source {
         #[serde(default = "defaults::host")]
         host: String,
         port: u16,
+        /// Accept only TLS, presenting this certificate (and asking senders for theirs).
+        #[serde(default)]
+        tls: Option<crate::tls::ListenTls>,
     },
-    /// An HTTP endpoint. Several interfaces can share a port with different paths.
+    /// An HTTP endpoint. Several interfaces can share a port with different paths (and the same
+    /// `tls`).
     Http {
         #[serde(default = "defaults::host")]
         host: String,
         port: u16,
+        /// HTTPS only, presenting this certificate.
+        #[serde(default)]
+        tls: Option<crate::tls::ListenTls>,
         /// Route, with `{name}` parameters: `/patients/{mrn}`.
         path: String,
         #[serde(default = "defaults::post")]
@@ -210,13 +217,15 @@ pub struct Schedule {
 }
 
 /// Problems with how a set of interfaces share network ports: two MLLP listeners on one port,
-/// MLLP and HTTP on one port, or two interfaces handling the same HTTP method and path.
-/// (Several HTTP interfaces may share a port with different routes.)
+/// MLLP and HTTP on one port, two interfaces handling the same HTTP method and path, or HTTP
+/// interfaces on one port with different `tls`. (Several HTTP interfaces may share a port with
+/// different routes: they share one server.)
 pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<String> {
     use std::collections::HashMap;
     let mut problems = Vec::new();
     let mut mllp: HashMap<u16, &str> = HashMap::new();
     let mut http_ports: HashMap<u16, &str> = HashMap::new();
+    let mut http_tls: HashMap<u16, (&str, &Option<crate::tls::ListenTls>)> = HashMap::new();
     let mut routes: HashMap<(u16, String, String), &str> = HashMap::new();
     for c in configs {
         match &c.source {
@@ -226,8 +235,15 @@ pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig
                     problems.push(format!("port {port}: MLLP listeners for both `{first}` and `{}`", c.name));
                 }
             }
-            Source::Http { port, method, path, .. } => {
+            Source::Http { port, method, path, tls, .. } => {
                 http_ports.entry(*port).or_insert(&c.name);
+                let (first, first_tls) = *http_tls.entry(*port).or_insert((&c.name, tls));
+                if first_tls != tls {
+                    problems.push(format!(
+                        "port {port}: `{first}` and `{}` share it with different `tls` (one server per port: give them the same)",
+                        c.name
+                    ));
+                }
                 let key = (*port, method.to_ascii_uppercase(), path.clone());
                 if let Some(other) = routes.insert(key, &c.name) {
                     problems.push(format!(
@@ -1109,6 +1125,17 @@ retry: { max_attempts: 3 }
         let e = load(&format!("name: e\nsource: {{ http: {{ port: 8080, path: /y }} }}\nformat: json\n{dest}"));
         let f = load(&format!("name: f\nsource: {{ http: {{ port: 6661, path: /z }} }}\nformat: json\n{dest}"));
         assert!(check_endpoints([&c, &e]).is_empty(), "different paths may share a port");
+        let tls = |name: &str, certificate: &str| {
+            load(&format!(
+                "name: {name}\nsource: {{ http: {{ port: 8443, path: /{name}, tls: {{ certificate: {certificate} }} }} }}\nformat: json\n{dest}"
+            ))
+        };
+        let (g, h, i) = (tls("g", "api"), tls("h", "api"), tls("i", "other"));
+        assert!(check_endpoints([&g, &h]).is_empty(), "the same tls may share a port");
+        assert_eq!(
+            check_endpoints([&g, &i]),
+            ["port 8443: `g` and `i` share it with different `tls` (one server per port: give them the same)"]
+        );
         assert_eq!(
             check_endpoints([&a, &b, &c, &d, &f]),
             [

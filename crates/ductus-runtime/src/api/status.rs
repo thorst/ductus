@@ -430,12 +430,24 @@ pub struct InterfaceDetail {
     folder: String,
 }
 
+/// ` over TLS`, and who may send: ` over TLS, clients need a certificate from hospital-ca`.
+fn tls_label(tls: &Option<ductus_core::tls::ListenTls>) -> String {
+    match tls {
+        None => String::new(),
+        Some(t) => match &t.clients {
+            None => " over TLS".into(),
+            Some(c) => format!(" over TLS, clients need a certificate from {}", c.ca),
+        },
+    }
+}
+
 fn source_label(source: &Source) -> String {
     match source {
-        Source::Mllp { host, port } => format!("mllp {host}:{port}"),
-        Source::Http { host, port, path, method, mode } => {
+        Source::Mllp { host, port, tls } => format!("mllp {host}:{port}{}", tls_label(tls)),
+        Source::Http { host, port, path, method, mode, tls } => {
             let mode = if *mode == HttpMode::Respond { "respond" } else { "queue" };
-            format!("http {} {path} on {host}:{port} ({mode})", method.to_ascii_uppercase())
+            let scheme = if tls.is_some() { "https" } else { "http" };
+            format!("{scheme} {} {path} on {host}:{port} ({mode}){}", method.to_ascii_uppercase(), tls_label(tls))
         }
         Source::File(f) => format!("file {}/{}", f.dir.trim_end_matches('/'), f.pattern),
         Source::Sftp(f) => {

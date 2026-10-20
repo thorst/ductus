@@ -10,7 +10,7 @@ use crate::{InterfaceConfig, Resources};
 pub struct Listener {
     pub port: u16,
     pub host: String,
-    /// `MLLP` or `HTTP`.
+    /// `MLLP`, `MLLP over TLS`, `HTTP` or `HTTPS`.
     pub protocol: &'static str,
     pub interface: String,
     /// HTTP only: `GET /patients/{mrn} (respond)`.
@@ -33,17 +33,17 @@ pub fn listeners<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> 
     let mut out: Vec<Listener> = configs
         .into_iter()
         .filter_map(|c| match &c.source {
-            Source::Mllp { host, port } => Some(Listener {
+            Source::Mllp { host, port, tls } => Some(Listener {
                 port: *port,
                 host: host.clone(),
-                protocol: "MLLP",
+                protocol: if tls.is_some() { "MLLP over TLS" } else { "MLLP" },
                 interface: c.name.clone(),
                 route: None,
             }),
-            Source::Http { host, port, path, method, mode } => Some(Listener {
+            Source::Http { host, port, path, method, mode, tls } => Some(Listener {
                 port: *port,
                 host: host.clone(),
-                protocol: "HTTP",
+                protocol: if tls.is_some() { "HTTPS" } else { "HTTP" },
                 interface: c.name.clone(),
                 route: Some(format!(
                     "{} {path} ({})",
@@ -119,6 +119,9 @@ mod tests {
                 "name: adt\nsource: { mllp: { port: 6661 } }\ndestination: { mllp: { host: epic.local, port: 5000 } }",
             ),
             config(
+                "name: secure\nsource: { mllp: { port: 6662, tls: { certificate: c } } }\ndestination: { file: { dir: o } }",
+            ),
+            config(
                 "name: hook\nsource: { http: { port: 8080, path: /orders } }\ndestination: { http: { url: 'https://lab.example.org/api' } }",
             ),
             config("name: files\nsource: { file: { dir: in } }\ndestination: { sftp: { server: lab, dir: out } }"),
@@ -130,6 +133,7 @@ mod tests {
             shown,
             [
                 (6661, "MLLP", "adt", None),
+                (6662, "MLLP over TLS", "secure", None),
                 (8080, "HTTP", "api", Some("GET /patients/{mrn} (respond)")),
                 (8080, "HTTP", "hook", Some("POST /orders (queue)")),
             ]

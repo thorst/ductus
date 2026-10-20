@@ -91,12 +91,13 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - **Web UI (`ui/`):** Node 24 in WSL is a per-user install in `~/.local/node` (check.sh and demos.sh put it on the PATH; non-interactive WSL shells don't read `.bashrc`). TypeScript is pinned to 6.0 (typescript-eslint doesn't support 7, the Go one); openapi-typescript's `typescript ^5` peer is overridden in package.json (`overrides`), not `--force`d. TS 6 deprecates `baseUrl`: `paths` alone. A new API field or route = run check.sh, which regenerates `ui/openapi.json` and `ui/src/api/schema.d.ts` and asks for a second run. A `<section>` is a landmark (`region`) only with a name: label cards that tests or screen readers look for (`aria-label`). axe runs in every theme in `demo-ui.sh` (AAA in high contrast): new colors must pass it. Under `set -o pipefail`, `curl` to a closed port fails the whole pipeline: capture its output first.
 - **utoipa names each operation after its handler function**: two modules' `list` once shared the operationId `list`, and the UI's generated types gave `GET /tokens` the message browser's answer. A handler named like another gets `operation_id = "..."` in `#[utoipa::path]` (`every_operation_has_its_own_id` guards it).
 - **Playwright sign-in waits until the URL has left `/sign-in`**: clicking "Sign in" and navigating at once can cancel the request (CI ran a test signed out), and the sign-in page has an h1 too, so "an h1 is visible" proves nothing.
+- **TLS on listeners (0.6.3):** inside `impl axum::serve::Listener for X`, `tcp.accept()` on a `&mut TcpListener` resolves to axum's trait method (it takes `&mut self`), not tokio's: write `TcpListener::accept(tcp)`. A custom listener keeps `ConnectInfo<SocketAddr>` only through `.tap_io(|_| {})` (axum implements `Connected` for `TapIo<L, _>`; it can't be implemented for our type: orphan rule). Tests and demos make certificates with `ductus cert self-signed` or rcgen (now a regular dependency of the runtime); a self-signed leaf works as its own trust anchor (rustls, reqwest's `tls_certs_only`). With TLS 1.3, a refused client certificate shows on the client only at its first read, not at `connect`.
 - **Accessible names in the UI:** an `sr-only` span adds a space before itself ("Where it's stuck" + `<span sr-only>: lab</span>` reads "Where it's stuck : lab"): start sr-only text with a space and a word, or scope the test by its region instead. A `<label>` wrapping a `<select>` includes the options' text in its name, so `getByLabel("Vendor")` matched both the select (option "Vendor") and the textbox: use `getByRole("textbox", { name })`. Links inside running text need more than color (axe `link-in-text-block`): `p a` is underlined in `index.css`.
 
 ## Where things are
 
 ```
-crates/ductus-core     config, alerts (`alerts:` settings, rules, owners as recipients, the alert state machine, notification text), formats, environments, secrets, password (argon2id, policy), resources (databases, sftp, apis, ldap; `owner`), ldap (`auth.ldap`, filters, groups → role), retention, docs (company-defined
+crates/ductus-core     config, tls (`tls:` on listeners, client subject patterns, checks), alerts (`alerts:` settings, rules, owners as recipients, the alert state machine, notification text), formats, environments, secrets, password (argon2id, policy), resources (databases, sftp, apis, ldap; `owner`), ldap (`auth.ldap`, filters, groups → role), retention, docs (company-defined
                        documentation fields: docs-schema.yaml, `custom:` values, checks, the snapshot), monitor
                        (`monitor:` expectations and their time rules), hotspots (backlog by lane and worker), about (systems,
                        host/subnet matching), impact, owners (report + in-place reassign), schedule timing, ports,
@@ -124,12 +125,14 @@ crates/ductus-runtime  engine: lib.rs (startup, its phases timed), ownership.rs 
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
+                       tls.rs (our listeners' TLS: certificates loaded and reloaded, client certificates,
+                       the HTTP `Listener`, the MLLP handshake, refusals; `self_signed`),
                        services.rs + mssql.rs (DB calls), limiter.rs, doctor.rs (connection checks: also SMTP STARTTLS,
                        the certificate seen, `Mode::Certificates`); examples/cert-server.rs (TLS servers for demos)
 crates/ductus-cli      the `ductus` command (init.rs: `init`, a new project; dev.rs: `dev`, the engine with an embedded Postgres; project.rs: test/validate/ports/impact/types/secret; new.rs: `new interface`;
                        admin.rs: `user`, `token`, `drain`, `resume`, `pause`, `retention`, `hotspots`;
                        doctor.rs: runs `doctor` (what to check is runtime's `doctor::plan`); owners.rs: `owners` report and reassign;
-                       tools.rs: gen/sink/status; sinks.rs: `sink --smtp`/`--http`;
+                       tools.rs: gen/sink/status; sinks.rs: `sink --smtp`/`--http`; cert.rs: `cert self-signed`;
                        tests/cli.rs runs the binary on temp projects)
 ui/                    web UI (React + Vite; README.md): src/api (typed client, queries, live updates), src/pages,
                        src/components, src/lib (format, hl7, health, theme, openapi: the API reference's reading of the

@@ -450,7 +450,9 @@ async fn reassign_preview(
 
 fn resource_exists(resources: &ductus_core::Resources, name: &str) -> bool {
     use ductus_core::resources::Kind;
-    [Kind::Database, Kind::Api, Kind::Sftp, Kind::Ldap].into_iter().any(|k| resources.contains(k, name))
+    [Kind::Database, Kind::Api, Kind::Sftp, Kind::Ldap, Kind::Certificate]
+        .into_iter()
+        .any(|k| resources.contains(k, name))
 }
 
 /// Quoted for a POSIX shell when it needs it: `'Ann Smith'`, `'O'"'"'Brien'`.

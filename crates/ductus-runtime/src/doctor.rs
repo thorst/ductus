@@ -1359,6 +1359,8 @@ impl Plan {
                 Some(l) => (7, Target::Ldap(name.into(), l.clone())),
                 None => return,
             },
+            // Ours, not something to connect to: checked when loaded (and served, 0.6.3.3).
+            Kind::Certificate => return,
         };
         self.add(section, name.into(), &format!("{} {name}", kind.label()), target, user, interface, name);
     }
@@ -1377,7 +1379,7 @@ pub fn plan(
     for c in configs {
         let me = Some(c.name.as_str());
         match &c.source {
-            Source::Mllp { host, port } | Source::Http { host, port, .. } => {
+            Source::Mllp { host, port, .. } | Source::Http { host, port, .. } => {
                 let protocol = if matches!(c.source, Source::Mllp { .. }) { "MLLP" } else { "HTTP" };
                 let target = Target::Listener { host: host.clone(), port: *port, protocol };
                 plan.add(6, format!("{port:05} {host}"), "listening port", target, c.name.clone(), me, &c.name);
