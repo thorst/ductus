@@ -62,7 +62,9 @@ test("the Connections page lists every certificate, soonest first, in words", as
   await expect(card.getByRole("status")).toHaveText("Checked 6: 5 certificates read.", { timeout: 20_000 });
   // The check is kept: the report below is the one just run (by this person).
   await page.reload();
-  await expect(page.getByText(/The last check: .*certificates only, asked for by test-user-ui-operator/)).toBeVisible();
+  await expect(
+    page.getByText(new RegExp(`The last check: .*certificates only, asked for by ${operator.user}`)),
+  ).toBeVisible();
 });
 
 test("the overview lists the certificates to renew", async ({ page }) => {

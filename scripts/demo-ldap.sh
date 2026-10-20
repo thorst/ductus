@@ -25,13 +25,10 @@ LDAP_PORT=3390 LDAPS_PORT=6637
 q() { psql -tA "$DB" -c "$1"; }
 fail=""
 PEOPLE="'test-user-ada','test-user-olaf','test-user-anna','test-user-nested','test-user-nobody','test-user-breakglass'"
+# At the start (what a killed run left) and at the end.
 forget() {
-  psql -q "$DB" -c "DELETE FROM api_sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ($PEOPLE))" \
-    -c "DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM users WHERE username IN ($PEOPLE))" \
-    -c "DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users WHERE username IN ($PEOPLE))" \
-    -c "UPDATE message_actions SET user_id = NULL WHERE user_id IN (SELECT id FROM users WHERE username IN ($PEOPLE))" \
-    -c "DELETE FROM users WHERE username IN ($PEOPLE)" \
-    -c "DELETE FROM certificate_status WHERE resource = 'corp-directory'"
+  forget_test_users test-user-ada test-user-olaf test-user-anna test-user-nested test-user-nobody test-user-breakglass
+  psql -q "$DB" -c "DELETE FROM certificate_status WHERE resource = 'corp-directory'"
 }
 forget
 # Audit rows outlive the accounts: this run's are the ones after this.
@@ -39,9 +36,10 @@ START=$(q "SELECT now()")
 
 ENGINE=""
 cleanup() {
-  [ -n "$ENGINE" ] && kill -INT "$ENGINE" 2>/dev/null || true
+  [ -n "$ENGINE" ] && { kill -INT "$ENGINE" 2>/dev/null || true; wait "$ENGINE" 2>/dev/null || true; }
   bash "$REPO/scripts/dev/slapd.sh" stop "$L" || true
   rm -rf "$L" || true
+  forget || true
 }
 trap cleanup EXIT
 bash scripts/dev/slapd.sh start "$L" $LDAP_PORT $LDAPS_PORT

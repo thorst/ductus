@@ -15,6 +15,8 @@ function person(key: string) {
 const admin = person("DUCTUS_PERSON_ADMIN");
 const operator = person("DUCTUS_PERSON_OPERATOR");
 const viewer = person("DUCTUS_PERSON_VIEWER");
+/** Accounts made here start with this: demo-ui.sh deletes them when it ends, pass or fail (there's no API for it). */
+const PREFIX = process.env.DUCTUS_PEOPLE_PREFIX ?? "test-user-ui-";
 
 type Who = { user: string; password: string };
 
@@ -114,7 +116,7 @@ test("an admin makes an account; its person must choose their own password befor
   page,
   browser,
 }) => {
-  const name = `test-user-ui-new-${Date.now()}`;
+  const name = `${PREFIX}new-${Date.now()}`;
   await signInAs(page, admin, "/users");
   await page.getByRole("button", { name: "New user" }).click();
   const dialog = page.getByRole("dialog");
@@ -216,7 +218,7 @@ test("the theme and colors follow the person to another browser", async ({ brows
 });
 
 test("too many wrong passwords lock the account until an admin unlocks it", async ({ page, browser }) => {
-  const name = `test-user-ui-lock-${Date.now()}`;
+  const name = `${PREFIX}lock-${Date.now()}`;
   const api = (await browser.newContext()).request;
   await signInAs(page, admin, "/users");
   await page.getByRole("button", { name: "New user" }).click();

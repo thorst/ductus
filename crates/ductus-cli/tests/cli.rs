@@ -1,5 +1,6 @@
 //! The `ductus` command run as a user would: on a project folder, checking output and exit code.
 
+use ductus_store::testing::TestUsers;
 use std::path::Path;
 use std::process::Command;
 
@@ -454,7 +455,10 @@ fn owners_lists_and_reassigns_in_place() {
 fn owners_are_matched_to_accounts() {
     let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let (olaf, gone) = (format!("test-user-owner-{nanos}"), format!("test-user-gone-{nanos}"));
+    // What this test makes goes when the guard drops at the end, pass or fail (a plain test: no
+    // runtime to block); the audit rows stay, as they would for anyone.
+    let people = TestUsers::new(&db);
+    let (olaf, gone) = (people.name("test-user-owner"), people.name("test-user-gone"));
     let (olaf_name, gone_name, nobody) =
         (format!("Olaf Night {nanos}"), format!("Gone {nanos}"), format!("Nobody {nanos}"));
     let iface = |name: &str, owner: &str| {
@@ -520,13 +524,6 @@ fn owners_are_matched_to_accounts() {
     let (ok, out) = run(&["owners", "--check"], "");
     assert!(ok, "{out}");
     assert!(out.contains(&format!("✓ {email} (2): user {olaf}")), "{out}");
-
-    // What this test made (the audit rows stay, as they would for anyone).
-    let sql = format!("DELETE FROM users WHERE username IN ('{olaf}', '{gone}')");
-    match Command::new("psql").args(["-q", &db, "-c", &sql]).status() {
-        Ok(s) => assert!(s.success()),
-        Err(_) => eprintln!("psql not found: test users {olaf}, {gone} left in the database"),
-    }
 }
 
 #[test]
@@ -1422,8 +1419,9 @@ async fn the_ui_is_served_and_a_browser_signs_in_with_a_session() {
 async fn people_sign_in_with_passwords_and_are_kept_in_check() {
     let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
     let api = free_port();
-    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let admin = format!("test-user-cli-{nanos}");
+    // Declared before the engine, so a failed run drops it after the engine has stopped.
+    let people = TestUsers::new(&db);
+    let admin = people.name("test-user-cli");
     let dir = project(&[(
         "interfaces/people/interface.yaml",
         format!("name: people\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestination: {{ file: {{ dir: out }} }}\n", free_port()).as_str(),
@@ -1519,7 +1517,7 @@ async fn people_sign_in_with_passwords_and_are_kept_in_check() {
     assert_eq!(me["must_change_password"], false);
 
     // An admin makes a viewer with a temporary password; the viewer can do nothing until they change it.
-    let viewer = format!("test-user-cli-v-{nanos}");
+    let viewer = people.name("test-user-cli-v");
     let bad = call(M::POST, &cookie, "/users", Some(serde_json::json!({"username": viewer, "password": "weak"})))
         .await
         .unwrap();
@@ -1690,6 +1688,8 @@ async fn people_sign_in_with_passwords_and_are_kept_in_check() {
     // A token can't be an account, and `auth.token_sign_in` isn't touched here.
     let bearer_me = http.get(format!("{base}/me")).bearer_auth(&secret).send().await.unwrap();
     assert!(bearer_me.status().is_client_error());
+    drop(_engine);
+    people.forget().await.unwrap();
 }
 
 const DOCS_SCHEMA: &str = r#"

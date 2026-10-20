@@ -1605,6 +1605,7 @@ version = "0.5.0-dev"
 dependencies = [
  "anyhow",
  "chrono",
+ "ductus-store",
  "getrandom 0.4.3",
  "serde_json",
  "sha2 0.10.9",

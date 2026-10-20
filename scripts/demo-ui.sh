@@ -77,10 +77,12 @@ L=$(mktemp -d /tmp/ductus-ldap.XXXX)
 SLAPD_SCRIPT=$(realpath "$(dirname "${BASH_SOURCE[0]}")/dev/slapd.sh")
 trap 'bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true' EXIT
 bash "$SLAPD_SCRIPT" start "$L" 3392 6639
-DIRECTORY_PEOPLE="'test-user-ada','test-user-olaf','test-user-anna','test-user-nested','test-user-nobody'"
-psql -q "$DB" -c "DELETE FROM api_sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ($DIRECTORY_PEOPLE))" \
-  -c "DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users WHERE username IN ($DIRECTORY_PEOPLE))" \
-  -c "DELETE FROM users WHERE username IN ($DIRECTORY_PEOPLE)"
+DIRECTORY_PEOPLE=(test-user-ada test-user-olaf test-user-anna test-user-nested test-user-nobody)
+# Every account this run makes, here and in the browser tests, starts with this.
+PEOPLE_PREFIX="test-user-ui-$$-"
+# The directory people sign in fresh; accounts a killed run left go too (only one run at a time:
+# its port is fixed).
+forget_test_users 'test-user-ui-%' "${DIRECTORY_PEOPLE[@]}"
 
 mkdir -p "$P/interfaces/adt" "$P/interfaces/orders" "$P/interfaces/billing"
 # Alerts (0.5.8.3): `chat` reaches a sink; `pager` reaches nothing, so its failures show.
@@ -169,13 +171,9 @@ psql -q "$DB" -c "DELETE FROM certificate_status WHERE resource IN ('pharmacy', 
 "$BIN" run >"$P/run.log" 2>&1 &
 ENGINE=$!
 # cert-server has no SIGINT handler (a background job of a script ignores SIGINT): TERM. slapd too.
-# The people this run made (their audit rows stay; one with message actions stays too, as history).
-RUN_PEOPLE="(username LIKE 'test-user-ui-%-$$' OR username IN ($DIRECTORY_PEOPLE)) AND NOT EXISTS (SELECT 1 FROM message_actions m WHERE m.user_id = users.id)"
+# The people this run made, also in the browser tests (their audit rows and actions stay, as history).
 forget_people() {
-  psql -q "$DB" -c "DELETE FROM api_sessions WHERE user_id IN (SELECT id FROM users WHERE $RUN_PEOPLE) OR token_id IN (SELECT t.id FROM api_tokens t JOIN users ON users.id = t.user_id WHERE $RUN_PEOPLE)" \
-    -c "DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM users WHERE $RUN_PEOPLE)" \
-    -c "DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users WHERE $RUN_PEOPLE)" \
-    -c "DELETE FROM users WHERE $RUN_PEOPLE"
+  forget_test_users "$PEOPLE_PREFIX%" "${DIRECTORY_PEOPLE[@]}"
 }
 # This run's alerts: its interfaces' and its certificates'. Their notifications go with the events
 # (ON DELETE CASCADE): left behind, the ones for `pager` (nobody listens) would be retried by later
@@ -203,14 +201,14 @@ for t in operator viewer admin; do "$BIN" token revoke "ui-demo-$t-$$" >/dev/nul
 export DUCTUS_API_TOKEN=$("$BIN" token create "ui-demo-operator-$$" --role operator --permission payloads 2>/dev/null)
 VIEWER=$("$BIN" token create "ui-demo-viewer-$$" --role viewer --permission payloads 2>/dev/null)
 ADMIN=$("$BIN" token create "ui-demo-admin-$$" --role admin 2>/dev/null)
-# People with passwords (named test-user-*: the store tests clean such admins up). The operator may
-# read payloads; the viewer may not.
+# People with passwords (deleted at exit by forget_people). The operator may read payloads; the
+# viewer may not.
 PASSWORD="correct horse staple"
-"$BIN" user create "test-user-ui-admin-$$" --role admin --password-stdin <<<"$PASSWORD" >/dev/null
-"$BIN" user create "test-user-ui-operator-$$" --role operator --permission payloads --password-stdin <<<"$PASSWORD" >/dev/null
-"$BIN" user create "test-user-ui-viewer-$$" --role viewer --password-stdin <<<"$PASSWORD" >/dev/null
+"$BIN" user create "${PEOPLE_PREFIX}admin" --role admin --password-stdin <<<"$PASSWORD" >/dev/null
+"$BIN" user create "${PEOPLE_PREFIX}operator" --role operator --permission payloads --password-stdin <<<"$PASSWORD" >/dev/null
+"$BIN" user create "${PEOPLE_PREFIX}viewer" --role viewer --password-stdin <<<"$PASSWORD" >/dev/null
 # May read the audit log, and nothing else beyond a viewer (no payloads).
-"$BIN" user create "test-user-ui-auditor-$$" --role viewer --permission audit --password-stdin <<<"$PASSWORD" >/dev/null
+"$BIN" user create "${PEOPLE_PREFIX}auditor" --role viewer --permission audit --password-stdin <<<"$PASSWORD" >/dev/null
 
 echo "== traffic"
 "$BIN" pause billing --reason "invoice system upgrade tonight" | sed 's/^/   /'
@@ -259,9 +257,9 @@ echo "   /interfaces/adt → index.html, gzip, CSP"
 echo "== the browser (Playwright)"
 cd "$UI"
 export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN \
-  DUCTUS_ADMIN_TOKEN=$ADMIN DUCTUS_PERSON_ADMIN="test-user-ui-admin-$$:$PASSWORD" \
-  DUCTUS_PERSON_OPERATOR="test-user-ui-operator-$$:$PASSWORD" DUCTUS_PERSON_VIEWER="test-user-ui-viewer-$$:$PASSWORD" \
-  DUCTUS_PERSON_AUDITOR="test-user-ui-auditor-$$:$PASSWORD" \
+  DUCTUS_ADMIN_TOKEN=$ADMIN DUCTUS_PEOPLE_PREFIX=$PEOPLE_PREFIX DUCTUS_PERSON_ADMIN="${PEOPLE_PREFIX}admin:$PASSWORD" \
+  DUCTUS_PERSON_OPERATOR="${PEOPLE_PREFIX}operator:$PASSWORD" DUCTUS_PERSON_VIEWER="${PEOPLE_PREFIX}viewer:$PASSWORD" \
+  DUCTUS_PERSON_AUDITOR="${PEOPLE_PREFIX}auditor:$PASSWORD" \
   DUCTUS_DIRECTORY_OPERATOR="test-user-olaf:test-user-olaf-password" \
   DUCTUS_DIRECTORY_NOBODY="test-user-nobody:test-user-nobody-password"
 if npx playwright test --reporter=line; then

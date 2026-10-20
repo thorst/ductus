@@ -16,6 +16,8 @@ mod directory;
 mod docs;
 mod engines;
 mod retention;
+#[cfg(feature = "testing")]
+pub mod testing;
 mod users;
 
 pub use actions::{Action, Actor, Copy, Dismissed, Edited, Quarantined, Resend, Resent};

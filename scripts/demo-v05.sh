@@ -89,14 +89,12 @@ EOF
 
 L=$(mktemp -d /tmp/ductus-ldap.XXXX)
 SLAPD_SCRIPT=$(realpath "$(dirname "${BASH_SOURCE[0]}")/dev/slapd.sh")
-PEOPLE="'test-user-olaf','test-user-ada'"
+PEOPLE=(test-user-olaf test-user-ada)
 # What this demo made: the directory accounts and what hangs off them. Their message actions go
 # too (they are this demo's own messages, truncated by the next demo anyway); audit rows stay.
 forget_people() {
-  psql -q "$DB" -c "DELETE FROM message_actions WHERE user_id IN (SELECT id FROM users WHERE username IN ($PEOPLE))" \
-    -c "DELETE FROM api_sessions WHERE user_id IN (SELECT id FROM users WHERE username IN ($PEOPLE))" \
-    -c "DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users WHERE username IN ($PEOPLE))" \
-    -c "DELETE FROM users WHERE username IN ($PEOPLE)"
+  psql -q "$DB" -c "DELETE FROM message_actions WHERE user_id IN (SELECT id FROM users WHERE username IN ('test-user-olaf', 'test-user-ada'))"
+  forget_test_users "${PEOPLE[@]}"
 }
 ENGINE="" MAIL="" TLS=""
 cleanup() {

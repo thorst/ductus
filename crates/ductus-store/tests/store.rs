@@ -3,7 +3,7 @@
 
 use ductus_store::{
     Batch, BatchMessage, Browse, DedupeKey, DestinationId, Done, MessageRef, NewMessage, QueueCount, Reconciled, Role,
-    SessionFor, SessionLimits, Status, Store,
+    SessionFor, SessionLimits, Status, Store, testing::TestUsers,
 };
 
 /// The retention tier test messages go to.
@@ -995,9 +995,10 @@ async fn payload_reads_within_the_window_are_one_row() {
     let m = store.insert(t.msg(0, b"x")).await.unwrap();
     let other = store.insert(t.msg(0, b"y")).await.unwrap();
     let window = std::time::Duration::from_secs(600);
+    let people = people();
     let (anna, ben) = (
-        make_user(&store, Role::Operator, &["payloads"]).await,
-        make_user(&store, Role::Operator, &["payloads"]).await,
+        make_user(&store, &people, Role::Operator, &["payloads"]).await,
+        make_user(&store, &people, Role::Operator, &["payloads"]).await,
     );
     fn read<'a>(who: &'a ductus_store::User, interface: &'a str, id: i64) -> Audit<'a> {
         Audit::new(By::user(who.id, &who.username, "session", None), "message.payload.read")
@@ -1015,6 +1016,7 @@ async fn payload_reads_within_the_window_are_one_row() {
     let rows = audit_of(&store, &t.name).await;
     assert_eq!(rows.len(), 4);
     assert!(rows.iter().all(|(a, _, _)| a == "message.payload.read"));
+    people.forget().await.unwrap();
 }
 
 /// Copies of payloads kept with message actions go when the messages' own retention ends (the row
@@ -1113,9 +1115,10 @@ async fn a_start_without_a_stop_is_a_crash() {
 async fn account_changes_are_logged_with_the_change() {
     use ductus_store::{Audit, AuditFilter, By};
     let Some(store) = store().await else { return };
-    let admin = make_user(&store, Role::Viewer, &[]).await;
+    let people = people();
+    let admin = make_user(&store, &people, Role::Viewer, &[]).await;
     let by = By::user(admin.id, &admin.username, "session", Some("192.0.2.7".parse().unwrap()));
-    let name = unique("test-user");
+    let name = people.name("test-user");
     let permissions = ["payloads".to_string()];
     let new = ductus_store::NewUser {
         username: &name,
@@ -1145,6 +1148,7 @@ async fn account_changes_are_logged_with_the_change() {
     // Their own activity, by person.
     let mine = AuditFilter { user_id: Some(admin.id), limit: 10, ..Default::default() };
     assert_eq!(store.audit_log(&mine).await.unwrap().len(), 1);
+    people.forget().await.unwrap();
 }
 
 /// A resend puts a finished delivery back to pending while another destination may be settling
@@ -2404,12 +2408,17 @@ fn unique(prefix: &str) -> String {
     format!("{prefix}-{}-{}", std::process::id(), N.fetch_add(1, Ordering::Relaxed))
 }
 
-async fn make_user(store: &Store, role: Role, permissions: &[&str]) -> ductus_store::User {
+/// The accounts a test makes, deleted when it ends (pass or fail).
+fn people() -> TestUsers {
+    TestUsers::new(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap())
+}
+
+async fn make_user(store: &Store, people: &TestUsers, role: Role, permissions: &[&str]) -> ductus_store::User {
     let permissions: Vec<String> = permissions.iter().map(|p| p.to_string()).collect();
     store
         .create_user(
             &ductus_store::NewUser {
-                username: &unique("test-user"),
+                username: &people.name("test-user"),
                 display_name: "",
                 email: "",
                 role,
@@ -2430,7 +2439,8 @@ async fn make_user(store: &Store, role: Role, permissions: &[&str]) -> ductus_st
 async fn users_lock_after_wrong_passwords_and_stop_when_disabled() {
     let Some(store) = store().await else { return };
     let limits = SessionLimits::default();
-    let user = make_user(&store, Role::Operator, &["payloads"]).await;
+    let people = people();
+    let user = make_user(&store, &people, Role::Operator, &["payloads"]).await;
     let err = store
         .create_user(
             &ductus_store::NewUser {
@@ -2500,6 +2510,7 @@ async fn users_lock_after_wrong_passwords_and_stop_when_disabled() {
         .unwrap();
     assert!(store.authenticate(&token_secret).await.unwrap().is_some(), "and works again when they are back");
     store.revoke_token(&tname, None, &quiet()).await.unwrap();
+    people.forget().await.unwrap();
 }
 
 /// Directory accounts: made at the first sign-in, kept as the directory says (each change logged
@@ -2512,7 +2523,8 @@ async fn directory_accounts_follow_the_directory() {
     let url = std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
     let limits = SessionLimits::default();
-    let name = unique("test-user-dir");
+    let people = people();
+    let name = people.name("test-user-dir");
     let audit = || ductus_store::Audit::new(ductus_store::By::engine(), "user.directory_change");
     let viewer = DirectoryPerson {
         display_name: "Anna Smith".into(),
@@ -2574,7 +2586,7 @@ async fn directory_accounts_follow_the_directory() {
     );
 
     // A local account's name is never taken over, and local accounts are never checked.
-    let local = make_user(&store, Role::Viewer, &[]).await;
+    let local = make_user(&store, &people, Role::Viewer, &[]).await;
     let err = store.save_directory_user(&local.username, &viewer, &audit()).await.unwrap_err().to_string();
     assert!(err.contains("is a local account"), "{err}");
     assert!(!store.refuse_directory_user(local.id, "x", &refused()).await.unwrap());
@@ -2582,16 +2594,15 @@ async fn directory_accounts_follow_the_directory() {
     store.create_session(SessionFor::User(local.id), limits, &quiet()).await.unwrap();
     assert!(!store.directory_users_to_check().await.unwrap().iter().any(|(id, _)| *id == local.id));
 
-    for sql in [
-        "DELETE FROM api_sessions WHERE user_id = $1 OR token_id IN (SELECT id FROM api_tokens WHERE user_id = $1)",
-        "DELETE FROM api_tokens WHERE user_id = $1",
-        "DELETE FROM audit_log WHERE user_id = $1 OR subject = (SELECT username FROM users WHERE id = $1)",
-        "DELETE FROM users WHERE id = $1",
-    ] {
-        for id in [user.id, local.id] {
-            sqlx::query(sql).bind(id).execute(&pool).await.unwrap();
-        }
+    // The accounts go with `people`; their audit rows too, which the checks above read by name.
+    for id in [user.id, local.id] {
+        sqlx::query("DELETE FROM audit_log WHERE user_id = $1 OR subject = (SELECT username FROM users WHERE id = $1)")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
     }
+    people.forget().await.unwrap();
 }
 
 /// Changing a password ends the user's other sessions but not the one changing it; people can end
@@ -2600,8 +2611,9 @@ async fn directory_accounts_follow_the_directory() {
 async fn password_changes_end_other_sessions() {
     let Some(store) = store().await else { return };
     let limits = SessionLimits::default();
-    let user = make_user(&store, Role::Viewer, &[]).await;
-    let other = make_user(&store, Role::Viewer, &[]).await;
+    let people = people();
+    let user = make_user(&store, &people, Role::Viewer, &[]).await;
+    let other = make_user(&store, &people, Role::Viewer, &[]).await;
     let (mine, _) = store.create_session(SessionFor::User(user.id), limits, &quiet()).await.unwrap();
     let (elsewhere, _) = store.create_session(SessionFor::User(user.id), limits, &quiet()).await.unwrap();
     let (theirs, _) = store.create_session(SessionFor::User(other.id), limits, &quiet()).await.unwrap();
@@ -2626,14 +2638,16 @@ async fn password_changes_end_other_sessions() {
     store.set_password(user.id, "$argon2id$mine", false, Some(&again), &quiet()).await.unwrap();
     let (who, _) = store.authenticate_session(&again, limits).await.unwrap().unwrap();
     assert!(!who.must_change_password);
+    people.forget().await.unwrap();
 }
 
 /// Appearance is saved per user and replaced as a whole.
 #[tokio::test]
 async fn appearance_is_kept_per_user() {
     let Some(store) = store().await else { return };
-    let a = make_user(&store, Role::Viewer, &[]).await;
-    let b = make_user(&store, Role::Viewer, &[]).await;
+    let people = people();
+    let a = make_user(&store, &people, Role::Viewer, &[]).await;
+    let b = make_user(&store, &people, Role::Viewer, &[]).await;
     assert!(store.user_settings(a.id).await.unwrap().is_none());
     store.save_user_settings(a.id, "custom", Some(r##"{"colors":{"accent":"#112233"}}"##)).await.unwrap();
     store.save_user_settings(b.id, "dark", None).await.unwrap();
@@ -2644,6 +2658,37 @@ async fn appearance_is_kept_per_user() {
     let saved = store.user_settings(a.id).await.unwrap().unwrap();
     assert_eq!((saved.theme.as_str(), saved.colors), ("light", None));
     assert_eq!(store.user_settings(b.id).await.unwrap().unwrap().theme, "dark");
+    people.forget().await.unwrap();
+}
+
+/// Tests delete the accounts they make, with their sessions, tokens and settings; nothing but a
+/// `test-user-*` account is ever deleted.
+#[tokio::test]
+async fn test_accounts_go_with_what_refers_to_them() {
+    let Some(store) = store().await else { return };
+    let err = store.forget_test_users(&["anna".into()]).await.unwrap_err().to_string();
+    assert!(err.contains("isn't a test account"), "{err}");
+    assert!(store.forget_test_users(&["%".into()]).await.is_err(), "not every account either");
+
+    let people = people();
+    let user = make_user(&store, &people, Role::Operator, &[]).await;
+    let limits = SessionLimits::default();
+    let (session, _) = store.create_session(SessionFor::User(user.id), limits, &quiet()).await.unwrap();
+    let (_, token) =
+        store.create_token(&unique("test-user-forget"), Role::Viewer, &[], Some(user.id), &quiet()).await.unwrap();
+    let token_session = {
+        let who = store.authenticate(&token).await.unwrap().unwrap();
+        store.create_session(SessionFor::Token(who.token_id.unwrap()), limits, &quiet()).await.unwrap().0
+    };
+    store.save_user_settings(user.id, "dark", None).await.unwrap();
+
+    assert_eq!(store.forget_test_users(std::slice::from_ref(&user.username)).await.unwrap(), 1);
+    assert!(store.user(user.id).await.unwrap().is_none());
+    assert!(store.authenticate(&token).await.unwrap().is_none());
+    for s in [&session, &token_session] {
+        assert!(store.authenticate_session(s, limits).await.unwrap().is_none());
+    }
+    assert_eq!(people.forget().await.unwrap(), 0, "already gone");
 }
 
 /// The last admin who can sign in can't be disabled or demoted (it would lock everyone out of
@@ -2653,13 +2698,12 @@ async fn appearance_is_kept_per_user() {
 async fn the_last_admin_stays() {
     let Some(store) = store().await else { return };
     let _serial = ADMINS.lock().await;
-    // Admins this test made on an earlier run would hide the guard.
-    let url = std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap();
-    let pool = sqlx::PgPool::connect(&url).await.unwrap();
-    forget_test_admins(&pool).await;
+    // Admins tests made and left (a killed run) would hide the guard.
+    forget_test_admins(&store).await;
     let others =
         store.users().await.unwrap().iter().filter(|u| u.role == Role::Admin && u.disabled_at.is_none()).count();
-    let admin = make_user(&store, Role::Admin, &[]).await;
+    let people = people();
+    let admin = make_user(&store, &people, Role::Admin, &[]).await;
     let demote = ductus_store::UserChange { role: Some(Role::Viewer), ..Default::default() };
     let disable = ductus_store::UserChange { disabled: Some(true), ..Default::default() };
     if others == 0 {
@@ -2667,31 +2711,28 @@ async fn the_last_admin_stays() {
             let err = store.update_user(admin.id, change, &quiet()).await.unwrap_err().to_string();
             assert!(err.contains("no admin who can sign in"), "{err}");
         }
-        let second = make_user(&store, Role::Admin, &[]).await;
+        let second = make_user(&store, &people, Role::Admin, &[]).await;
         store.update_user(admin.id, &demote, &quiet()).await.expect("another admin remains");
         let err = store.update_user(second.id, &disable, &quiet()).await.unwrap_err().to_string();
         assert!(err.contains("no admin who can sign in"), "{err}");
     } else {
         store.update_user(admin.id, &demote, &quiet()).await.expect("other admins remain");
     }
-    forget_test_admins(&pool).await;
+    people.forget().await.unwrap();
 }
 
-/// Delete the admins tests made (here and by the CLI tests, which name theirs `test-user-cli-...`)
-/// with what hangs off them.
-async fn forget_test_admins(pool: &sqlx::PgPool) {
-    for sql in [
-        "DELETE FROM api_sessions WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'test-user-%' AND role = 2)
-            OR token_id IN (SELECT t.id FROM api_tokens t JOIN users u ON u.id = t.user_id
-                            WHERE u.username LIKE 'test-user-%' AND u.role = 2)",
-        "UPDATE message_actions SET user_id = NULL
-            WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'test-user-%' AND role = 2)",
-        "DELETE FROM api_tokens WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'test-user-%' AND role = 2)",
-        "DELETE FROM user_settings WHERE user_id IN (SELECT id FROM users WHERE username LIKE 'test-user-%' AND role = 2)",
-        "DELETE FROM users WHERE username LIKE 'test-user-%' AND role = 2",
-    ] {
-        sqlx::query(sql).execute(pool).await.unwrap();
-    }
+/// Delete the test admins (`test-user-*`) in the database, whoever made them: admins only, since
+/// other tests running now use their viewers and operators (tests that make admins take `ADMINS`).
+async fn forget_test_admins(store: &Store) {
+    let admins: Vec<String> = store
+        .users()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|u| u.role == Role::Admin && u.username.starts_with("test-user-"))
+        .map(|u| u.username)
+        .collect();
+    store.forget_test_users(&admins).await.unwrap();
 }
 
 #[tokio::test]

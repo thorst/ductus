@@ -15,5 +15,11 @@ sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio
 tokio = { version = "1.53.2", features = ["time"] }
 tracing = "0.1.44"
 
+[features]
+# Helpers for tests (deleting the accounts they made): never in the binary.
+testing = ["tokio/rt"]
+
 [dev-dependencies]
+# The store's own tests use its `testing` helpers.
+ductus-store = { path = ".", features = ["testing"] }
 tokio = { version = "1.53.2", features = ["macros", "rt-multi-thread"] }
