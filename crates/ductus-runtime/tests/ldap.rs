@@ -6,11 +6,13 @@
 //! filter (`ductus_core::ldap`) and verified with the first pilot.
 
 use ductus_core::ldap::{Access, DirectoryRole, LdapAuth};
-use ductus_core::resources::{LdapServer, Resources};
+use ductus_core::resources::{CertificateEntry, LdapServer, Resources};
 use ductus_runtime::doctor::{self, Mode, Probe, Target};
 use ductus_runtime::ldap::{Directory, Verdict};
+use ductus_runtime::tls::Certificates;
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 /// A running slapd, stopped when dropped.
@@ -57,11 +59,14 @@ impl Slapd {
             .unwrap();
     }
 
-    fn ca(&self) -> String {
-        std::fs::read_to_string(self.dir.path().join("ca.pem")).unwrap()
+    /// Its CA as resources.yaml would name it: `slapd-ca: { ca_file: DIR/ca.pem }`.
+    fn certificates(&self) -> Arc<Certificates> {
+        let entry = CertificateEntry { ca_file: Some(self.dir.path().join("ca.pem")), ..Default::default() };
+        Arc::new(Certificates::load(&[("slapd-ca".to_string(), entry)].into()).unwrap())
     }
 
-    /// The directory as resources.yaml would have it: `security` is `ldaps`, `starttls` or `plain`.
+    /// The directory as resources.yaml would have it: `security` is `ldaps`, `starttls` or `plain`;
+    /// `ca`: trust the directory's CA (`ca: slapd-ca`).
     fn server(&self, security: &str, ca: bool) -> LdapServer {
         let (url, starttls, insecure) = match security {
             "ldaps" => (format!("ldaps://127.0.0.1:{}", self.tls_port), false, false),
@@ -74,7 +79,7 @@ impl Slapd {
             insecure,
             bind_dn: Some("cn=ductus-svc,ou=service,dc=example,dc=org".into()),
             bind_password: Some("svc-password".into()),
-            ca: ca.then(|| self.ca()),
+            ca: ca.then(|| "slapd-ca".into()),
             timeout: Some(Duration::from_secs(5)),
             application: None,
             vendor: None,
@@ -103,7 +108,7 @@ groups:
         ))
         .unwrap();
         auth.check().unwrap();
-        Directory::new(Some(&auth), &resources).unwrap().unwrap()
+        Directory::new(Some(&auth), &resources, &self.certificates()).unwrap().unwrap()
     }
 
     /// Change the directory as its admin would.
@@ -230,15 +235,22 @@ async fn a_directory_that_is_down_or_refuses_the_service_account_is_an_error() {
     let mut wrong = slapd.server("ldaps", true);
     wrong.bind_password = Some("not-it".into());
     let resources = Resources { ldap: [("corp".to_string(), wrong)].into(), ..Default::default() };
-    let broken = Directory::new(Some(&d.auth), &resources).unwrap().unwrap();
+    let broken = Directory::new(Some(&d.auth), &resources, &slapd.certificates()).unwrap().unwrap();
     let err = format!("{:#}", broken.sign_in("test-user-anna", "test-user-anna-password").await.unwrap_err());
     assert!(err.contains("service account"), "{err}");
 
     // A certificate this server doesn't trust (no `ca`): refused.
     let resources =
         Resources { ldap: [("corp".to_string(), slapd.server("ldaps", false))].into(), ..Default::default() };
-    let untrusted = Directory::new(Some(&d.auth), &resources).unwrap().unwrap();
+    let untrusted = Directory::new(Some(&d.auth), &resources, &slapd.certificates()).unwrap().unwrap();
     assert!(untrusted.sign_in("test-user-anna", "test-user-anna-password").await.is_err());
+
+    // `ca` names a certificates entry: one that isn't there stops the directory being set up.
+    let mut unnamed = slapd.server("ldaps", true);
+    unnamed.ca = Some("no-such-ca".into());
+    let resources = Resources { ldap: [("corp".to_string(), unnamed)].into(), ..Default::default() };
+    let err = format!("{:#}", Directory::new(Some(&d.auth), &resources, &slapd.certificates()).err().unwrap());
+    assert!(err.contains("ldap `corp`: ca: no CA named `no-such-ca`"), "{err}");
 
     slapd.stop();
     let started = std::time::Instant::now();
@@ -266,7 +278,7 @@ async fn doctor_reads_the_directory_certificate() {
         probe(slapd.server("plain", false)),
     ];
     assert_eq!(doctor::certificates_only(probes.clone()).len(), 3);
-    let checks = doctor::check_with(probes, Duration::from_secs(5), Mode::Full).await;
+    let checks = doctor::check_with(probes, Duration::from_secs(5), Mode::Full, &slapd.certificates()).await;
     for c in &checks[..3] {
         let cert = c.certificate.as_ref().expect("a certificate");
         assert_eq!(
@@ -302,6 +314,8 @@ async fn doctor_reads_the_directory_certificate() {
     // A port that doesn't do StartTLS (slapd's ldaps port speaks TLS at once).
     let mut wrong = slapd.server("starttls", true);
     wrong.url = format!("ldap://127.0.0.1:{}", slapd.tls_port);
-    let c = doctor::check_with(vec![probe(wrong)], Duration::from_secs(3), Mode::Certificates).await.remove(0);
+    let c = doctor::check_with(vec![probe(wrong)], Duration::from_secs(3), Mode::Certificates, &slapd.certificates())
+        .await
+        .remove(0);
     assert_eq!(c.outcome, doctor::Outcome::Fail, "{:?}", c.steps);
 }

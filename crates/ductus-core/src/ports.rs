@@ -62,7 +62,9 @@ pub fn listeners<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> 
 /// SFTP servers and APIs (those are listed from resources.yaml) and routes to other interfaces.
 pub fn destination_endpoint(d: &Destination) -> Option<Endpoint> {
     match d {
-        Destination::Mllp { host, port, .. } => Some(Endpoint::new(host, *port, "MLLP")),
+        Destination::Mllp { host, port, tls, .. } => {
+            Some(Endpoint::new(host, *port, if tls.is_some() { "MLLP over TLS" } else { "MLLP" }))
+        }
         Destination::Http { url: Some(url), .. } => Endpoint::from_url(url),
         Destination::Http { .. } | Destination::Sftp { .. } | Destination::File { .. } | Destination::Interface(_) => {
             None
@@ -126,6 +128,9 @@ mod tests {
             ),
             config("name: files\nsource: { file: { dir: in } }\ndestination: { sftp: { server: lab, dir: out } }"),
             config("name: charges\nsource: { file: { dir: in } }\ndestination: { http: { api: billing_api } }"),
+            config(
+                "name: hie\nsource: { file: { dir: in } }\ndestination: { mllp: { host: hie.example.org, port: 7443, tls: true } }",
+            ),
         ];
         let l = listeners(&configs);
         let shown: Vec<_> = l.iter().map(|l| (l.port, l.protocol, l.interface.as_str(), l.route.as_deref())).collect();
@@ -152,6 +157,7 @@ mod tests {
                 ("db1", 5432, "Postgres", "resources.yaml: pdb"),
                 ("dc1.hospital.org", 636, "LDAPS", "resources.yaml: ad"),
                 ("epic.local", 5000, "MLLP", "adt"),
+                ("hie.example.org", 7443, "MLLP over TLS", "hie"),
                 ("lab.example.org", 443, "HTTPS", "hook"),
                 ("sftp.lab", 22, "SFTP", "resources.yaml: lab"),
                 (

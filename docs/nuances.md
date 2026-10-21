@@ -510,6 +510,29 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** HTTP interfaces on the same port are one server, so they're all HTTPS with the same certificate, or all plain. `ductus validate` and the engine refuse a port whose interfaces disagree.
 - **What to do:** give them the same `tls:`, or different ports.
 
+## TLS on what the engine connects to
+
+### A private CA is trusted only where you name it (level 2)
+- **What:** every connection the engine makes over TLS (MLLP destinations with `tls:`, HTTPS destinations and `apis:`, the directory, the alerts' mail server, webhooks and heartbeat) trusts what this server's system trusts, plus the CA its `ca:` names (a `certificates:` entry in resources.yaml), for that connection only. `tls: true` on an MLLP destination is the system's alone. The receiver's certificate must also cover the `host` (or URL host) connected to: a certificate for `hie.example.org` is refused at `10.1.2.3`, unless it lists that address.
+- **Why:** a hospital CA added to the whole server would be trusted by every connection, and every program on it; naming it per connection keeps a partner's CA to that partner.
+- **What to do:** ask the receiver's team for the CA that issued their certificate (not their certificate itself, which changes at every renewal), put it under `certificates:` (`ca_file:` or `ca: ${secret:...}`), and name it in `ca:`. Connect by the name on their certificate. `ductus validate` and the engine's start refuse a `ca:` that names a pair, a `certificate:` that names a CA, or a name that isn't there.
+
+### A refused handshake is a temporary error: the message waits (level 2)
+- **What:** when TLS fails (the receiver's certificate is from a CA we don't trust, doesn't cover the host, has expired; the receiver wants a client certificate we didn't present, or refuses ours), the delivery is a temporary failure: it retries with the usual back-off, nothing is quarantined, and the destination's error says why in words ("TLS: the receiver wants a client certificate (name one in `tls.certificate`)"). With TLS 1.3 the receiver judges our client certificate after our side has finished the handshake, so the refusal arrives as the answer to the first message: that message was not delivered, and is sent again.
+- **What to do:** fix the configuration (or ask the receiver to); the waiting messages go as soon as the handshake works, in order. `tls:` pointed at a port that speaks plain MLLP gets no handshake and times out ("timed out waiting for ACK"): check with the receiver which port is TLS.
+
+### Our client certificate: tell the receiver what to expect (level 2)
+- **What:** `certificate:` (MLLP: `tls: { certificate: ... }`) presents a `certificates:` pair as our client certificate (mutual TLS). The receiver checks it against the CA it trusts for clients and often against its subject. A pair from files renews like ours (replace both files; new connections present the new one within a minute, no restart), as a listener's does; the mail server's connection picks it up at the next mail.
+- **What to do:** give the receiver's team the certificate's subject and the CA that issued it, and renew it before it expires (the receiver refuses an expired one, and every message waits). One pair can serve as both a listener's certificate and a client certificate if its CA allows both uses.
+
+### An HTTP destination through an API uses the API's TLS (level 2)
+- **What:** `ca:` and `certificate:` go on the `apis:` entry, which `api()` calls and `http: { api: ... }` destinations share. On an HTTP destination they are only for one with its own `url:` (https://): `validate` refuses them next to `api:` or on an http:// URL.
+- **What to do:** put TLS where the URL is.
+
+### Doctor makes the engine's handshake (level 3)
+- **What:** `ductus doctor`, the scheduled checks and the Connections page build each TLS connection from the same settings the engine uses (the named CA, the client certificate), so a check passes when the engine's connection would. After a handshake it waits up to half a second for the server to refuse the client certificate (TLS 1.3 says so only then), and says which. A certificate named in `ca:` or `certificate:` that doesn't load fails the checks that use it, with why, instead of stopping the run.
+- **What to do:** after changing TLS settings, run `ductus doctor --interface <name>` before deploying; the MLLP check connects and shakes hands but sends nothing.
+
 ## Certificates
 
 ### The engine checks certificates by itself, and logs in to nothing (level 2)
@@ -518,7 +541,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What to do:** keep `certificates` unless someone asked for scheduled login checks; run full checks when you want them (the Connections page, `POST /api/v1/doctor`, `ductus doctor`). `doctor: { schedule: off }` turns the scheduled checks off (and with them the countdown's freshness: dates then come from the last check someone ran).
 
 ### What has a certificate the engine watches (level 3)
-- **What:** HTTPS APIs (resources.yaml) and HTTPS destinations, the directory people sign in with (`ldap:` in resources.yaml, ldaps:// or StartTLS), and what alerts connect to: the mail server (`tls: starttls` or `tls`), HTTPS webhooks and the heartbeat. Not watched: Postgres resources (the engine connects to them without TLS), SFTP (host keys, not certificates), MLLP destinations (plain TCP), and **SQL Server** (its TLS is inside the TDS protocol; it joins in v0.6). Our own listeners' certificates (`certificates:` in resources.yaml) aren't in this table or its alerts yet (0.6.3.3): `ductus validate` shows how long each has, and the engine refuses to start with an expired one.
+- **What:** HTTPS APIs (resources.yaml) and HTTPS destinations, MLLP destinations with `tls:`, the directory people sign in with (`ldap:` in resources.yaml, ldaps:// or StartTLS), and what alerts connect to: the mail server (`tls: starttls` or `tls`), HTTPS webhooks and the heartbeat. Not watched: Postgres resources (the engine connects to them without TLS), SFTP (host keys, not certificates), MLLP destinations without `tls:` (plain TCP), and **SQL Server** (its TLS is inside the TDS protocol; it joins in v0.6). Our own listeners' certificates (`certificates:` in resources.yaml) aren't in this table or its alerts yet (0.6.3.3): `ductus validate` shows how long each has, and the engine refuses to start with an expired one.
 - **What to do:** a SQL Server with `trust_server_certificate: false` stops accepting the engine's connections when its certificate expires: track that certificate where you track the server's others until v0.6.
 
 ### The earliest expiry in the chain counts, in whole days (level 2)
@@ -602,7 +625,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What to do:** prefer direct membership of the Ductus groups: it is one search per group and easy to audit. With deep or wide nesting on OpenLDAP, set `group_base` to the groups' OU so the walk searches less.
 
 ### The directory connection is TLS, verified like the rest (level 3)
-- **What:** `url: ldaps://...` (TLS from the start, port 636) or `ldap://...` with `starttls: true`. The certificate is checked against this server's trusted certificates, the same as HTTPS; a directory signed by the hospital's own CA that this server doesn't trust is refused unless its CA is given in `ca:` (PEM text, e.g. `${secret:HOSPITAL_CA}`), which is trusted for this directory only. Plain `ldap://` is refused unless `insecure: true`, which `ductus validate` and the engine warn about: people's passwords would cross the network readable.
+- **What:** `url: ldaps://...` (TLS from the start, port 636) or `ldap://...` with `starttls: true`. The certificate is checked against this server's trusted certificates, the same as HTTPS; a directory signed by the hospital's own CA that this server doesn't trust is refused unless `ca:` names that CA (a `certificates:` entry: `hospital-ca: { ca: ${secret:HOSPITAL_CA} }` or `ca_file:`), which is then trusted for this directory only. Plain `ldap://` is refused unless `insecure: true`, which `ductus validate` and the engine warn about: people's passwords would cross the network readable.
 - **What to do:** use ldaps:// or StartTLS everywhere but a test directory. On Windows servers joined to the domain the CA is usually installed already; on Linux servers it usually isn't (`ca:`).
 
 ### Theme and colors follow the account (level 1)

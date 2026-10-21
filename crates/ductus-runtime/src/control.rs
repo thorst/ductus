@@ -123,6 +123,8 @@ pub struct Engine {
     pub teams: BTreeMap<String, ductus_core::alerts::OwnerContact>,
     /// Whether the engine holds its interfaces now (`ownership`).
     pub ownership: Arc<crate::ownership::Ownership>,
+    /// Every `certificates:` entry, loaded (what connections trust and present).
+    pub tls: Arc<crate::tls::Certificates>,
 }
 
 /// What the engine is made of, from startup.
@@ -145,6 +147,7 @@ pub struct Parts {
     pub directory: Option<crate::ldap::Directory>,
     pub teams: BTreeMap<String, ductus_core::alerts::OwnerContact>,
     pub ownership: Arc<crate::ownership::Ownership>,
+    pub tls: Arc<crate::tls::Certificates>,
 }
 
 impl Engine {
@@ -168,6 +171,7 @@ impl Engine {
             directory,
             teams,
             ownership,
+            tls,
         } = parts;
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
@@ -198,6 +202,7 @@ impl Engine {
             directory,
             teams,
             ownership,
+            tls,
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

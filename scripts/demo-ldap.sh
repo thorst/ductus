@@ -5,7 +5,7 @@
 #      made at the first sign-in, role and permissions from their groups (nested groups count).
 #   2. A wrong password, a name nobody has and an attempt to inject `*` all get the same answer;
 #      someone in no Ductus group is told so.
-#   3. The directory's certificate (ldaps:// with a private CA in `ca:`) is in the certificate table.
+#   3. The directory's certificate (ldaps:// with a private CA: `ca:` names a `certificates:` entry) is in the certificate table.
 #   4. Removed from the group: the next refresh (1m here) ends the session, logged; put back,
 #      they sign in again.
 #   5. The directory goes down: directory people can't sign in (503, said plainly), sessions
@@ -64,17 +64,18 @@ auth:
         payloads: cn=ductus-phi,ou=groups,dc=example,dc=org
         audit: cn=ductus-auditors,ou=groups,dc=example,dc=org
 EOF
-{
-  echo "ldap:"
-  echo "  corp-directory:"
-  echo "    url: ldaps://127.0.0.1:$LDAPS_PORT"
-  echo "    bind_dn: cn=ductus-svc,ou=service,dc=example,dc=org"
-  echo "    bind_password: svc-password"
-  echo "    owner: Directory Services"
-  echo "    application: Example Directory"
-  echo "    ca: |"
-  sed 's/^/      /' "$L/ca.pem"
-} >"$P/resources.yaml"
+cat >"$P/resources.yaml" <<EOF
+ldap:
+  corp-directory:
+    url: ldaps://127.0.0.1:$LDAPS_PORT
+    bind_dn: cn=ductus-svc,ou=service,dc=example,dc=org
+    bind_password: svc-password
+    owner: Directory Services
+    application: Example Directory
+    ca: directory-ca
+certificates:
+  directory-ca: { ca_file: $L/ca.pem }
+EOF
 cat >"$P/interfaces/ldap-demo/interface.yaml" <<'EOF'
 name: ldap-demo
 source: { mllp: { port: 6737 } }

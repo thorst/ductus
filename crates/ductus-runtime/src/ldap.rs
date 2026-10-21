@@ -5,18 +5,18 @@
 //! from the groups, disabled or deleted in the directory loses access within that long.
 //!
 //! Connections are TLS (ldaps:// or StartTLS) verified like every other outgoing connection (the
-//! system's trusted certificates through the platform verifier), plus the entry's `ca`; plain
-//! `ldap://` only with `insecure: true`. One connection per sign-in, and one per refresh round:
+//! system's trusted certificates through the platform verifier, `tls::Trust`), plus the CA the
+//! entry's `ca` names (a `certificates:` entry); plain `ldap://` only with `insecure: true`. One connection per sign-in, and one per refresh round:
 //! directories handle far more than people sign in.
 
 use crate::control::Engine;
+use crate::tls::{Certificates, Trust};
 use anyhow::{Context, Result, bail};
 use ductus_core::ldap::{self, Access, LdapAuth};
 use ductus_core::resources::{LdapSecurity, LdapServer, Resources};
+use ductus_core::tls::ConnectTls;
 use ductus_store::{Audit, By, DirectoryPerson, Role};
 use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
-use rustls::pki_types::CertificateDer;
-use rustls::pki_types::pem::PemObject;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::time::Duration;
@@ -82,7 +82,7 @@ pub struct Directory {
     pub name: String,
     pub auth: LdapAuth,
     pub server: LdapServer,
-    roots: Vec<CertificateDer<'static>>,
+    trust: Trust,
 }
 
 /// An open connection, bound as the service account (or anonymous).
@@ -93,15 +93,15 @@ struct Conn {
 
 impl Directory {
     /// The directory `auth.ldap` names, if it's configured. Fails when the resource is missing or
-    /// its `ca` holds no certificate.
-    pub fn new(auth: Option<&LdapAuth>, resources: &Resources) -> Result<Option<Self>> {
+    /// its `ca` names no loaded CA.
+    pub fn new(auth: Option<&LdapAuth>, resources: &Resources, certificates: &Certificates) -> Result<Option<Self>> {
         let Some(auth) = auth else { return Ok(None) };
         if let Some(missing) = resources.missing(ductus_core::resources::Kind::Ldap, &auth.resource) {
             bail!("auth.ldap.resource: {missing}");
         }
         let server = resources.ldap[&auth.resource].clone();
-        let roots = extra_roots(server.ca.as_deref()).with_context(|| format!("ldap `{}`: ca", auth.resource))?;
-        Ok(Some(Self { name: auth.resource.clone(), auth: auth.clone(), server, roots }))
+        let trust = trust(&server, certificates).with_context(|| format!("ldap `{}`", auth.resource))?;
+        Ok(Some(Self { name: auth.resource.clone(), auth: auth.clone(), server, trust }))
     }
 
     /// Check a sign-in: find the person, bind as them with `password`, read their groups.
@@ -168,15 +168,20 @@ impl Directory {
 
     /// Connect (TLS as configured) and bind as the service account.
     async fn connect(&self) -> Result<Conn> {
-        let mut conn = Conn::open(&self.server, &self.roots).await?;
+        let mut conn = Conn::open(&self.server, &self.trust).await?;
         conn.bind_service(&self.server).await?;
         Ok(conn)
     }
 }
 
+/// What a directory's connection trusts: the platform's roots, plus its `ca`.
+pub fn trust(server: &LdapServer, certificates: &Certificates) -> Result<Trust> {
+    certificates.trust(&ConnectTls::new(&server.ca, &None)).context("ca")
+}
+
 /// Connect to `server` and bind as its service account, then leave (`ductus doctor`'s login step).
-pub async fn check_service_account(server: &LdapServer) -> Result<()> {
-    let mut conn = Conn::open(server, &extra_roots(server.ca.as_deref())?).await?;
+pub async fn check_service_account(server: &LdapServer, trust: &Trust) -> Result<()> {
+    let mut conn = Conn::open(server, trust).await?;
     let bound = conn.bind_service(server).await;
     conn.close().await;
     bound
@@ -184,12 +189,12 @@ pub async fn check_service_account(server: &LdapServer) -> Result<()> {
 
 impl Conn {
     /// Connect (TLS as configured: ldaps://, StartTLS, or plain with `insecure`).
-    async fn open(server: &LdapServer, roots: &[CertificateDer<'static>]) -> Result<Conn> {
+    async fn open(server: &LdapServer, trust: &Trust) -> Result<Conn> {
         let timeout = server.timeout();
         let mut settings = LdapConnSettings::new().set_conn_timeout(timeout);
         match server.security() {
-            LdapSecurity::Tls => settings = settings.set_config(Arc::new(tls_config(roots)?)),
-            LdapSecurity::StartTls => settings = settings.set_config(Arc::new(tls_config(roots)?)).set_starttls(true),
+            LdapSecurity::Tls => settings = settings.set_config(Arc::new(trust.config()?)),
+            LdapSecurity::StartTls => settings = settings.set_config(Arc::new(trust.config()?)).set_starttls(true),
             LdapSecurity::Plain => {}
         }
         let (driver, ldap) = tokio::time::timeout(timeout, LdapConnAsync::with_settings(settings, &server.url))
@@ -315,31 +320,6 @@ fn first<'a>(entry: &'a SearchEntry, attribute: &str) -> Option<&'a str> {
     entry.attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(attribute)).and_then(|(_, v)| v.first()).map(String::as_str)
 }
 
-/// The certificates in `ca` (PEM text), trusted besides the system's.
-pub fn extra_roots(ca: Option<&str>) -> Result<Vec<CertificateDer<'static>>> {
-    let Some(ca) = ca.filter(|c| !c.trim().is_empty()) else { return Ok(Vec::new()) };
-    let roots = CertificateDer::pem_slice_iter(ca.as_bytes()).collect::<Result<Vec<_>, _>>()?;
-    if roots.is_empty() {
-        bail!("no certificate in it: give the CA's certificate as PEM text (-----BEGIN CERTIFICATE-----...)");
-    }
-    Ok(roots)
-}
-
-/// TLS as every other outgoing connection: the platform verifier, plus `roots`.
-pub fn tls_config(roots: &[CertificateDer<'static>]) -> Result<rustls::ClientConfig> {
-    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-    let verifier = if roots.is_empty() {
-        rustls_platform_verifier::Verifier::new(provider.clone())?
-    } else {
-        rustls_platform_verifier::Verifier::new_with_extra_roots(roots.iter().cloned(), provider.clone())?
-    };
-    Ok(rustls::ClientConfig::builder_with_provider(provider)
-        .with_safe_default_protocol_versions()?
-        .dangerous()
-        .with_custom_certificate_verifier(Arc::new(verifier))
-        .with_no_client_auth())
-}
-
 /// Read again what the directory says about everyone with a session or token (`refresh`):
 /// changes are saved, refusals end access. When the directory can't be reached nothing changes
 /// (sessions run on to their own end: an outage mustn't sign everyone out).
@@ -420,14 +400,19 @@ mod tests {
     use super::*;
 
     #[test]
-    fn a_ca_must_hold_a_certificate() {
-        assert!(extra_roots(None).unwrap().is_empty());
-        assert!(extra_roots(Some("  ")).unwrap().is_empty());
-        let err = format!("{:#}", extra_roots(Some("not a certificate")).unwrap_err());
-        assert!(err.contains("no certificate in it"), "{err}");
+    fn ca_names_a_loaded_ca() {
         let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap().cert.pem();
-        assert_eq!(extra_roots(Some(&format!("{cert}{cert}"))).unwrap().len(), 2);
-        assert!(tls_config(&extra_roots(Some(&cert)).unwrap()).is_ok());
+        let pem = format!("{cert}{cert}").replace('\n', "\n      ");
+        let resources: Resources = serde_yaml_ng::from_str(&format!(
+            "certificates:\n  corp-ca:\n    ca: |\n      {pem}\nldap:\n  d: {{ url: 'ldaps://127.0.0.1:1', ca: corp-ca }}\n  e: {{ url: 'ldaps://127.0.0.1:1', ca: nope }}\n"
+        ))
+        .unwrap();
+        let certificates = Certificates::load(&resources.certificates).unwrap();
+        let t = trust(&resources.ldap["d"], &certificates).unwrap();
+        assert_eq!(t.extra_roots().len(), 2);
+        assert!(t.config().is_ok());
+        let err = format!("{:#}", trust(&resources.ldap["e"], &certificates).unwrap_err());
+        assert!(err.contains("ca: no CA named `nope`"), "{err}");
     }
 
     #[test]
@@ -437,15 +422,16 @@ mod tests {
             serde_yaml_ng::from_str("ldap:\n  d: { url: 'ldap://127.0.0.1:1', insecure: true }\n").unwrap();
         let auth: LdapAuth =
             serde_yaml_ng::from_str("resource: d\nuser_base: dc=x\ngroups: { viewer: 'cn=v,dc=x' }\n").unwrap();
-        let d = Directory::new(Some(&auth), &resources).unwrap().unwrap();
+        let none = Certificates::default();
+        let d = Directory::new(Some(&auth), &resources, &none).unwrap().unwrap();
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
         assert_eq!(rt.block_on(d.sign_in("anna", "")).unwrap(), Verdict::WrongPassword);
         assert!(rt.block_on(d.sign_in("anna", "x")).is_err(), "a real password does connect (and fails here)");
 
         let missing: LdapAuth =
             serde_yaml_ng::from_str("resource: ad\nuser_base: dc=x\ngroups: { viewer: 'cn=v,dc=x' }\n").unwrap();
-        let err = format!("{:#}", Directory::new(Some(&missing), &resources).err().unwrap());
+        let err = format!("{:#}", Directory::new(Some(&missing), &resources, &none).err().unwrap());
         assert!(err.contains("no directory named `ad`"), "{err}");
-        assert!(Directory::new(None, &resources).unwrap().is_none());
+        assert!(Directory::new(None, &resources, &none).unwrap().is_none());
     }
 }

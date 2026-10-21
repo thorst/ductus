@@ -6,6 +6,8 @@ use bytes::{Buf, Bytes, BytesMut};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -129,17 +131,43 @@ where
     }
 }
 
+/// What a client's messages travel over: a TCP connection, or one set up on top of it (TLS).
+pub trait Stream: AsyncRead + AsyncWrite + Unpin + Send {}
+
+impl<S: AsyncRead + AsyncWrite + Unpin + Send> Stream for S {}
+
+type Opened = Pin<Box<dyn Future<Output = io::Result<Box<dyn Stream>>> + Send>>;
+type Open = Arc<dyn Fn(TcpStream) -> Opened + Send + Sync>;
+
 /// A persistent MLLP connection that reconnects on demand.
 pub struct Client {
     addr: String,
     timeout: Duration,
-    stream: Option<TcpStream>,
+    /// Turns a new TCP connection into the stream messages are sent on (a TLS handshake), within
+    /// the send's timeout. None: plain TCP.
+    open: Option<Open>,
+    stream: Option<Box<dyn Stream>>,
     buf: BytesMut,
 }
 
 impl Client {
     pub fn new(addr: impl Into<String>, timeout: Duration) -> Self {
-        Self { addr: addr.into(), timeout, stream: None, buf: BytesMut::new() }
+        Self { addr: addr.into(), timeout, open: None, stream: None, buf: BytesMut::new() }
+    }
+
+    /// A client whose connections need setting up first (a TLS handshake): `open` turns each new
+    /// TCP connection into the stream messages are sent on. Its errors are the send's errors.
+    pub fn with_connect<O, OF, S>(addr: impl Into<String>, timeout: Duration, open: O) -> Self
+    where
+        O: Fn(TcpStream) -> OF + Send + Sync + 'static,
+        OF: Future<Output = io::Result<S>> + Send + 'static,
+        S: Stream + 'static,
+    {
+        let open: Open = Arc::new(move |tcp| {
+            let opened = open(tcp);
+            Box::pin(async move { Ok(Box::new(opened.await?) as Box<dyn Stream>) })
+        });
+        Self { open: Some(open), ..Self::new(addr, timeout) }
     }
 
     /// Send one message and wait for its ACK payload. On any error the connection is dropped,
@@ -167,12 +195,12 @@ impl Client {
             write_frame(stream, message).await?;
             let mut scratch = [0u8; 4096];
             loop {
-                match stream.try_read(&mut scratch) {
-                    Ok(0) => {
+                match try_read(stream, &mut scratch) {
+                    Ok(Some(0)) => {
                         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "receiver closed the connection"));
                     }
-                    Ok(_) => continue,
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
+                    Ok(Some(_)) => continue,
+                    Ok(None) => return Ok(()),
                     Err(e) => return Err(e),
                 }
             }
@@ -196,10 +224,14 @@ impl Client {
         }
     }
 
-    async fn connect(&mut self) -> io::Result<&mut TcpStream> {
+    async fn connect(&mut self) -> io::Result<&mut Box<dyn Stream>> {
         if self.stream.is_none() {
-            let stream = TcpStream::connect(&self.addr).await?;
-            stream.set_nodelay(true)?;
+            let tcp = TcpStream::connect(&self.addr).await?;
+            tcp.set_nodelay(true)?;
+            let stream = match &self.open {
+                Some(open) => open(tcp).await?,
+                None => Box::new(tcp),
+            };
             self.stream = Some(stream);
             self.buf.clear();
         }
@@ -218,6 +250,17 @@ impl Client {
     fn reset(&mut self) {
         self.stream = None;
         self.buf.clear();
+    }
+}
+
+/// Read what has already arrived, without waiting: `None` when nothing has.
+fn try_read(stream: &mut Box<dyn Stream>, buf: &mut [u8]) -> io::Result<Option<usize>> {
+    let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
+    let mut read = tokio::io::ReadBuf::new(buf);
+    match Pin::new(stream).poll_read(&mut cx, &mut read) {
+        std::task::Poll::Ready(Ok(())) => Ok(Some(read.filled().len())),
+        std::task::Poll::Ready(Err(e)) => Err(e),
+        std::task::Poll::Pending => Ok(None),
     }
 }
 
@@ -312,6 +355,33 @@ mod tests {
         assert_eq!(&served.send(b"MSH|2").await.unwrap()[..], b"ACK", "not held up by the stuck one");
         stop.cancel();
         server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn connections_are_set_up_by_the_connect_step_once_each() {
+        let (addr, count) = receiver("AA").await;
+        let opened = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let o = opened.clone();
+        let mut client = Client::with_connect(addr.clone(), Duration::from_secs(2), move |tcp: TcpStream| {
+            o.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            async move { Ok(tcp) }
+        });
+        for _ in 0..3 {
+            client.send(b"MSH|^~\\&|A").await.unwrap();
+        }
+        client.send_no_ack(b"MSH|^~\\&|A").await.unwrap();
+        assert_eq!(opened.load(std::sync::atomic::Ordering::SeqCst), 1, "one connection, set up once");
+
+        // A connect step that fails (a refused handshake) is the send's error; the next send
+        // tries a new connection.
+        let mut refused = Client::with_connect(addr, Duration::from_secs(2), |_tcp: TcpStream| async {
+            Err::<TcpStream, _>(io::Error::new(io::ErrorKind::InvalidData, "handshake refused"))
+        });
+        let err = refused.send(b"MSH|^~\\&|A").await.unwrap_err();
+        assert_eq!(err.to_string(), "handshake refused");
+        assert!(refused.send_no_ack(b"MSH|^~\\&|A").await.is_err());
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 4, "nothing sent over a refused connection");
     }
 
     #[tokio::test]

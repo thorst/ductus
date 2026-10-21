@@ -11,12 +11,14 @@
 //! - **heartbeat**: calls a URL every so often, so an engine that is down is noticed by someone else.
 
 use crate::control::Engine;
+use crate::tls::{Certificates, Trust};
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::{DateTime, Utc};
 use ductus_core::alerts::{
     self, AlertOptions, AlertSettings, CertificateNow, Condition, Notice, Now, OWNER, OwnerContact, Person, Severity,
     Step,
 };
+use ductus_core::tls::ConnectTls;
 use ductus_store::{AlertChange, AlertRow, NewEvent, OutboxItem};
 use lettre::message::{Mailbox, header::ContentType};
 use lettre::transport::smtp::authentication::Credentials;
@@ -44,9 +46,13 @@ pub struct Alerts {
     pub settings: AlertSettings,
     pub owners: BTreeMap<String, OwnerContact>,
     environment: String,
-    mailer: Option<AsyncSmtpTransport<Tokio1Executor>>,
+    /// The mail server's TLS (its `ca` and `certificate`).
+    smtp_trust: Trust,
+    /// Built for the client certificate in use (its hash): rebuilt after a renewal.
+    mailer: Mutex<Option<([u8; 32], AsyncSmtpTransport<Tokio1Executor>)>>,
     from: Option<Mailbox>,
-    http: reqwest::Client,
+    /// By the webhook's or heartbeat's `ca` and `certificate` (none: the platform's roots).
+    http: HashMap<ConnectTls, reqwest::Client>,
     /// Wakes the sender when there is something new to send.
     wake: Notify,
     /// Failed sends per channel since the engine started (`ductus_alert_send_failures_total`).
@@ -54,35 +60,89 @@ pub struct Alerts {
 }
 
 impl Alerts {
-    pub fn new(settings: AlertSettings, owners: BTreeMap<String, OwnerContact>, environment: &str) -> Result<Self> {
-        let (mailer, from) = match &settings.smtp {
-            None => (None, None),
+    pub fn new(
+        settings: AlertSettings,
+        owners: BTreeMap<String, OwnerContact>,
+        environment: &str,
+        certificates: Arc<Certificates>,
+    ) -> Result<Self> {
+        let (smtp_trust, from) = match &settings.smtp {
+            None => (Trust::default(), None),
             Some(smtp) => {
-                use ductus_core::alerts::SmtpTls;
-                let builder = match smtp.tls {
-                    SmtpTls::Starttls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(&smtp.host)?,
-                    SmtpTls::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&smtp.host)?,
-                    SmtpTls::None => AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&smtp.host),
-                };
-                let mut builder = builder.port(smtp.port()).timeout(Some(SEND_TIMEOUT));
-                if let (Some(user), Some(password)) = (&smtp.username, &smtp.password) {
-                    builder = builder.credentials(Credentials::new(user.clone(), password.clone()));
-                }
                 let from: Mailbox = smtp.from.parse().with_context(|| format!("smtp.from `{}`", smtp.from))?;
-                (Some(builder.build()), Some(from))
+                let trust = certificates.trust(&ConnectTls::new(&smtp.ca, &smtp.certificate)).context("alerts.smtp")?;
+                (trust, Some(from))
             }
         };
-        let http = reqwest::Client::builder().timeout(SEND_TIMEOUT).build()?;
-        Ok(Self {
+        let mut http = HashMap::new();
+        let hooks = settings
+            .channels
+            .values()
+            .filter_map(|c| c.webhook.as_ref())
+            .map(|w| ConnectTls::new(&w.ca, &w.certificate));
+        let heartbeat = settings.heartbeat.iter().map(|h| ConnectTls::new(&h.ca, &h.certificate));
+        for tls in hooks.chain(heartbeat).chain([ConnectTls::default()]) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = http.entry(tls) {
+                let client = certificates.http(slot.key(), reqwest::Client::builder().timeout(SEND_TIMEOUT))?;
+                slot.insert(client);
+            }
+        }
+        let alerts = Self {
             settings,
             owners,
             environment: environment.to_string(),
-            mailer,
+            smtp_trust,
+            mailer: Mutex::default(),
             from,
             http,
             wake: Notify::new(),
             failures: Mutex::default(),
-        })
+        };
+        alerts.mailer()?; // a mail server setting that can't be used stops the start
+        Ok(alerts)
+    }
+
+    /// The mail transport (pooled), built again when the client certificate was renewed.
+    fn mailer(&self) -> Result<Option<AsyncSmtpTransport<Tokio1Executor>>> {
+        let Some(smtp) = &self.settings.smtp else { return Ok(None) };
+        let pair = self.smtp_trust.client_pair().map(|p| p.pem());
+        let hash = pair.as_ref().map(|(h, _)| *h).unwrap_or_default();
+        let mut mailer = self.mailer.lock().unwrap();
+        if let Some((built, transport)) = &*mailer
+            && *built == hash
+        {
+            return Ok(Some(transport.clone()));
+        }
+        use ductus_core::alerts::SmtpTls;
+        use lettre::transport::smtp::client::{Certificate, Identity, Tls, TlsParameters};
+        let mut builder = AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&smtp.host)
+            .port(smtp.port())
+            .timeout(Some(SEND_TIMEOUT));
+        if smtp.tls != SmtpTls::None {
+            // lettre takes certificates rather than rustls settings; with the platform verifier
+            // feature it verifies as `Trust` does (the platform's roots plus these).
+            let mut tls = TlsParameters::builder(smtp.host.clone());
+            for root in self.smtp_trust.extra_roots() {
+                tls = tls.add_root_certificate(Certificate::from_der(root.to_vec()).context("alerts.smtp: ca")?);
+            }
+            if let Some((_, pem)) = &pair {
+                tls = tls.identify_with(Identity::from_pem(&pem.0, &pem.1).context("alerts.smtp: certificate")?);
+            }
+            let tls = tls.build_rustls().context("alerts.smtp: TLS")?;
+            builder = builder.tls(if smtp.tls == SmtpTls::Tls { Tls::Wrapper(tls) } else { Tls::Required(tls) });
+        }
+        if let (Some(user), Some(password)) = (&smtp.username, &smtp.password) {
+            builder = builder.credentials(Credentials::new(user.clone(), password.clone()));
+        }
+        let transport = builder.build();
+        *mailer = Some((hash, transport.clone()));
+        Ok(Some(transport))
+    }
+
+    /// The HTTP client for a webhook or the heartbeat.
+    fn http_for(&self, ca: &Option<String>, certificate: &Option<String>) -> &reqwest::Client {
+        let default = &self.http[&ConnectTls::default()];
+        self.http.get(&ConnectTls::new(ca, certificate)).unwrap_or(default)
     }
 
     /// Failed sends per channel since the engine started.
@@ -132,7 +192,7 @@ impl Alerts {
     }
 
     async fn mail(&self, to: &[String], notice: &Notice<'_>) -> Result<()> {
-        let (Some(mailer), Some(from)) = (&self.mailer, &self.from) else {
+        let (Some(mailer), Some(from)) = (self.mailer()?, &self.from) else {
             bail!("no `smtp:` in alerts (the mail server)");
         };
         let mut message = lettre::Message::builder().from(from.clone()).subject(notice.title());
@@ -149,7 +209,7 @@ impl Alerts {
     async fn post(&self, hook: &alerts::Webhook, notice: &Notice<'_>) -> Result<()> {
         let body = notice.webhook_body(hook.format);
         let response = self
-            .http
+            .http_for(&hook.ca, &hook.certificate)
             .post(&hook.url)
             .header(reqwest::header::CONTENT_TYPE, "application/json")
             .body(body.to_string())
@@ -290,7 +350,8 @@ pub async fn start(engine: &Arc<Engine>) {
             let mut failing = false;
             loop {
                 let Some(a) = weak.upgrade() else { return };
-                let result = a.http.get(&heartbeat.url).send().await.and_then(|r| r.error_for_status());
+                let http = a.http_for(&heartbeat.ca, &heartbeat.certificate);
+                let result = http.get(&heartbeat.url).send().await.and_then(|r| r.error_for_status());
                 match (result, failing) {
                     (Ok(_), true) => {
                         failing = false;
@@ -705,7 +766,7 @@ mod tests {
         settings.check().unwrap();
         let mut owners = BTreeMap::new();
         owners.insert("Lab".to_string(), OwnerContact { email: vec!["lab@example.org".into()] });
-        Alerts::new(settings, owners, "test").unwrap()
+        Alerts::new(settings, owners, "test", Default::default()).unwrap()
     }
 
     /// (lettre's connection pool needs a Tokio runtime, as in the engine.)

@@ -9,6 +9,9 @@
 # binary is copied into DIR: Ubuntu's AppArmor profile for /usr/sbin/slapd would refuse a config
 # and database outside /etc/ldap and /var/lib/ldap, and a copy runs unconfined.
 #
+# Its CA is DIR/ca.pem; a project trusts it by name, as it would a hospital's CA:
+#   certificates: { directory-ca: { ca_file: DIR/ca.pem } }   and   ldap: { corp: { ..., ca: directory-ca } }
+#
 # The directory (dc=example,dc=org; every password is "<uid>-password"):
 #   cn=ductus-svc,ou=service              the service account (password svc-password)
 #   uid=test-user-ada                     ductus-admins + ductus-phi + ductus-auditors

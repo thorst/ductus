@@ -51,8 +51,10 @@ pub async fn run(o: Options) -> Result<bool> {
         }
     }
 
+    // As the engine loads them; one that doesn't load fails the checks that name it (with why).
+    let certificates = std::sync::Arc::new(ductus_runtime::tls::Certificates::load_what_loads(&resources.certificates));
     let started = Instant::now();
-    let checks = doctor::check(probes, o.timeout).await;
+    let checks = doctor::check(probes, o.timeout, &certificates).await;
     let report = Report {
         generated_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string(),
         environment: o.env.clone(),

@@ -474,7 +474,10 @@ fn humanize(d: std::time::Duration) -> String {
 
 fn connector_label(d: &Destination) -> String {
     match d {
-        Destination::Mllp { host, port, .. } => format!("mllp {host}:{port}"),
+        Destination::Mllp { host, port, tls, .. } => match tls {
+            Some(tls) => format!("mllp {host}:{port} over TLS{}", tls.describe()),
+            None => format!("mllp {host}:{port}"),
+        },
         Destination::File { dir } => format!("file {}", dir.display()),
         Destination::Sftp { server, dir } => format!("sftp {server}:{dir}"),
         Destination::Http { url: Some(url), method, .. } => {

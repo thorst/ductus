@@ -107,7 +107,7 @@ pub async fn run(engine: &Engine, mode: Mode, who: &str, only: &[String], timeou
     }
     let at = Utc::now();
     let started = Instant::now();
-    let checks = doctor::check_with(probes, timeout, mode).await;
+    let checks = doctor::check_with(probes, timeout, mode, &engine.tls).await;
     let report = Report {
         generated_at: chrono::Local::now().format("%Y-%m-%d %H:%M:%S %:z").to_string(),
         environment: engine.environment.clone(),

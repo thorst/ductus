@@ -13,6 +13,7 @@
 //! before they expire. `Mode::Certificates` checks only what has a certificate, and logs in to
 //! nothing (what the engine runs on its own every few hours).
 
+use crate::tls::{Certificates, Trust};
 use crate::{mssql, services, sftp};
 use chrono::{DateTime, Utc};
 use ductus_core::InterfaceConfig;
@@ -21,6 +22,7 @@ use ductus_core::config::{Destination, Source};
 use ductus_core::resources::{
     Api, Database, Kind, LdapSecurity, LdapServer, Resources, SftpServer, SqlServerConnection,
 };
+use ductus_core::tls::ConnectTls;
 use ductus_script::TRANSIENT;
 use serde::Serialize;
 use sqlx::Connection;
@@ -118,18 +120,22 @@ pub enum Target {
     Api(String, Api),
     /// A directory people sign in with: TLS (ldaps:// or StartTLS) and its certificate; in full mode the service account's bind.
     Ldap(String, LdapServer),
+    /// An MLLP receiver: connected to, and with `tls` the handshake the engine would make.
     Mllp {
         host: String,
         port: u16,
+        tls: Option<ConnectTls>,
     },
     Http {
         url: String,
+        tls: ConnectTls,
     },
     /// The alerts' mail server: connected to (and, with TLS, its certificate read); never logged in to.
     Smtp {
         host: String,
         port: u16,
         tls: SmtpTls,
+        trust: ConnectTls,
     },
     /// A local folder a file source reads or a file destination writes. Destinations create
     /// missing folders; sources need them to exist.
@@ -150,9 +156,10 @@ impl Target {
         let https = |url: &str| url.trim().to_ascii_lowercase().starts_with("https://");
         match self {
             Target::Api(_, api) => https(&api.url),
-            Target::Http { url } => https(url),
+            Target::Http { url, .. } => https(url),
             Target::Smtp { tls, .. } => *tls != SmtpTls::None,
             Target::Ldap(_, l) => l.security() != LdapSecurity::Plain,
+            Target::Mllp { tls, .. } => tls.is_some(),
             _ => false,
         }
     }
@@ -160,12 +167,24 @@ impl Target {
     /// Where its certificate is: the host and port.
     pub fn address(&self) -> Option<(String, u16)> {
         match self {
-            Target::Api(_, Api { url, .. }) | Target::Http { url } => {
+            Target::Api(_, Api { url, .. }) | Target::Http { url, .. } => {
                 ductus_core::resources::Endpoint::from_url(url).map(|e| (e.host, e.port))
             }
-            Target::Smtp { host, port, .. } => Some((host.clone(), *port)),
+            Target::Smtp { host, port, .. } | Target::Mllp { host, port, .. } => Some((host.clone(), *port)),
             Target::Ldap(_, l) => l.address(),
             _ => None,
+        }
+    }
+
+    /// The CA and client certificate its TLS names (the same the engine's connection uses).
+    fn connect_tls(&self) -> ConnectTls {
+        match self {
+            Target::Api(_, api) => api.tls(),
+            Target::Ldap(_, l) => ConnectTls::new(&l.ca, &None),
+            Target::Http { tls, .. } | Target::Smtp { trust: tls, .. } | Target::Mllp { tls: Some(tls), .. } => {
+                tls.clone()
+            }
+            _ => ConnectTls::default(),
         }
     }
 }
@@ -228,17 +247,24 @@ impl Report {
 }
 
 /// Check everything at once (so firewalls that drop traffic don't add up their timeouts) and
-/// return the results in the order given. `timeout` bounds each step.
-pub async fn check(probes: Vec<Probe>, timeout: Duration) -> Vec<Check> {
-    check_with(probes, timeout, Mode::Full).await
+/// return the results in the order given. `timeout` bounds each step. `certificates`: what TLS
+/// connections trust and present, as the engine loads them.
+pub async fn check(probes: Vec<Probe>, timeout: Duration, certificates: &Arc<Certificates>) -> Vec<Check> {
+    check_with(probes, timeout, Mode::Full, certificates).await
 }
 
 /// `check`, in a mode: `Certificates` checks only what has a certificate (see `certificates_only`)
 /// and stops after the TLS handshake (an API's GET is left out too).
-pub async fn check_with(probes: Vec<Probe>, timeout: Duration, mode: Mode) -> Vec<Check> {
+pub async fn check_with(
+    probes: Vec<Probe>,
+    timeout: Duration,
+    mode: Mode,
+    certificates: &Arc<Certificates>,
+) -> Vec<Check> {
     let mut tasks = tokio::task::JoinSet::new();
     for (n, probe) in probes.into_iter().enumerate() {
-        tasks.spawn(async move { (n, run(probe, timeout, mode).await) });
+        let certificates = certificates.clone();
+        tasks.spawn(async move { (n, run(probe, timeout, mode, &certificates).await) });
     }
     let mut checks: Vec<(usize, Check)> = tasks.join_all().await;
     checks.sort_by_key(|(n, _)| *n);
@@ -250,8 +276,13 @@ pub fn certificates_only(probes: Vec<Probe>) -> Vec<Probe> {
     probes.into_iter().filter(|p| p.target.has_certificate()).collect()
 }
 
-async fn run(probe: Probe, timeout: Duration, mode: Mode) -> Check {
-    let mut r = Run { steps: Vec::new(), advice: Vec::new(), timeout, from: None, seen: None, roots: Vec::new() };
+async fn run(probe: Probe, timeout: Duration, mode: Mode, certificates: &Certificates) -> Check {
+    let trust = if probe.target.has_certificate() {
+        certificates.trust(&probe.target.connect_tls()).map_err(|e| format!("{e:#}"))
+    } else {
+        Ok(Trust::default())
+    };
+    let mut r = Run { steps: Vec::new(), advice: Vec::new(), timeout, from: None, seen: None, trust, certificates };
     let endpoint = match &probe.target {
         Target::Store(url) => r.store(url).await,
         Target::Database(_, Database::Postgres(c)) => {
@@ -269,8 +300,8 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode) -> Check {
             format!("{}:{} SFTP", s.host, s.port)
         }
         Target::Api(_, api) => r.http(&api.url, (mode == Mode::Full).then_some(api)).await,
-        Target::Http { url } => r.http(url, None).await,
-        Target::Smtp { host, port, tls } => {
+        Target::Http { url, .. } => r.http(url, None).await,
+        Target::Smtp { host, port, tls, .. } => {
             if let Some(address) = r.connectable(host, *port).await {
                 match tls {
                     SmtpTls::Tls => {
@@ -287,9 +318,13 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode) -> Check {
             format!("{host}:{port} SMTP")
         }
         Target::Ldap(name, l) => r.ldap(name, l, mode).await,
-        Target::Mllp { host, port } => {
-            r.reach(host, *port).await;
-            format!("{host}:{port} MLLP")
+        Target::Mllp { host, port, tls } => {
+            if let Some(address) = r.connectable(host, *port).await
+                && tls.is_some()
+            {
+                r.tls(host, address).await;
+            }
+            format!("{host}:{port} MLLP{}", if tls.is_some() { " over TLS" } else { "" })
         }
         Target::Folder { path, created_if_missing } => {
             r.folder(path, *created_if_missing);
@@ -333,7 +368,7 @@ struct Seen {
 }
 
 /// The steps of one check as they happen.
-struct Run {
+struct Run<'a> {
     steps: Vec<Step>,
     advice: Vec<String>,
     timeout: Duration,
@@ -341,11 +376,13 @@ struct Run {
     from: Option<IpAddr>,
     /// The certificate a TLS handshake showed.
     seen: Option<Seen>,
-    /// Trusted besides the system's certificates (a directory's `ca`).
-    roots: Vec<rustls::pki_types::CertificateDer<'static>>,
+    /// What the target's TLS trusts and presents (its `ca` and `certificate`), or why that
+    /// can't be had (a certificate that didn't load).
+    trust: Result<Trust, String>,
+    certificates: &'a Certificates,
 }
 
-impl Run {
+impl Run<'_> {
     fn step(&mut self, name: &'static str, outcome: Outcome, detail: impl Into<String>) {
         self.steps.push(Step { name, outcome, detail: detail.into() });
     }
@@ -631,7 +668,14 @@ impl Run {
             return endpoint;
         }
         let Some(api) = api else { return endpoint };
-        let mut request = services::http_client().get(url).timeout(self.timeout);
+        let client = match services::api_client(api, self.certificates) {
+            Ok(c) => c,
+            Err(e) => {
+                self.step("HTTP", Outcome::Fail, format!("{e:#}"));
+                return endpoint;
+            }
+        };
+        let mut request = client.get(url).timeout(self.timeout);
         for (name, value) in &api.headers {
             request = request.header(name, value);
         }
@@ -657,8 +701,9 @@ impl Run {
         endpoint
     }
 
-    /// A TLS handshake, verified the way the engine's HTTP client verifies (the system's
-    /// trusted certificates), reporting the server's certificate either way.
+    /// A TLS handshake, verified the way the engine's connection verifies (`Trust`: the system's
+    /// trusted certificates plus the named CA, presenting the named client certificate),
+    /// reporting the server's certificate either way.
     async fn tls(&mut self, host: &str, address: SocketAddr) -> bool {
         match tokio::time::timeout(self.timeout, TcpStream::connect(address)).await {
             Ok(Ok(tcp)) => self.tls_on(host, tcp).await,
@@ -676,26 +721,24 @@ impl Run {
     /// The TLS handshake on a connection that is ready for it (fresh, or after STARTTLS).
     async fn tls_on<S: AsyncRead + AsyncWrite + Unpin>(&mut self, host: &str, stream: S) -> bool {
         use rustls::pki_types::ServerName;
-        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
-        let presented = Arc::new(Mutex::new(Vec::new()));
-        let verifier = if self.roots.is_empty() {
-            rustls_platform_verifier::Verifier::new(provider.clone())
-        } else {
-            rustls_platform_verifier::Verifier::new_with_extra_roots(self.roots.iter().cloned(), provider.clone())
-        };
-        let verifier = match verifier {
-            Ok(v) => Recording { inner: v, seen: presented.clone() },
-            Err(e) => {
-                self.step("TLS", Outcome::Fail, format!("can't load this server's trusted certificates: {e}"));
+        let trust = match &self.trust {
+            Ok(trust) => trust.clone(),
+            Err(why) => {
+                let why = why.clone();
+                self.step("TLS", Outcome::Fail, why);
+                self.advise("Fix the certificate named in `ca` or `certificate` (`ductus validate` checks every one).");
                 return false;
             }
         };
-        let config = rustls::ClientConfig::builder_with_provider(provider)
-            .with_safe_default_protocol_versions()
-            .expect("the default provider supports the default versions")
-            .dangerous()
-            .with_custom_certificate_verifier(Arc::new(verifier))
-            .with_no_client_auth();
+        let presented = Arc::new(Mutex::new(Vec::new()));
+        let verifier = match trust.verifier() {
+            Ok(v) => Recording { inner: v, seen: presented.clone() },
+            Err(e) => {
+                self.step("TLS", Outcome::Fail, format!("{e:#}"));
+                return false;
+            }
+        };
+        let config = trust.config_with(Arc::new(verifier));
         let Ok(name) = ServerName::try_from(host.to_string()) else {
             self.step("TLS", Outcome::Fail, format!("`{host}` isn't a valid name for TLS"));
             return false;
@@ -713,18 +756,34 @@ impl Run {
         let leaf = chain.into_iter().next();
         let about = leaf.as_ref().map(Certificate::describe).unwrap_or_default();
         let trusted = match result {
-            Ok(Ok(stream)) => {
+            Ok(Ok(mut stream)) => {
                 let version = stream.get_ref().1.protocol_version().map(|v| format!("{v:?}")).unwrap_or_default();
                 let version = version.replace("TLSv1_", "TLS 1.");
+                let client = trust.client_pair().map(|p| format!("; presented client certificate `{}`", p.name));
+                let client = client.unwrap_or_default();
                 let days = seen.chain_not_after.map(|t| (t - Utc::now()).num_days()).unwrap_or(i64::MAX);
+                // With TLS 1.3 the server judges our client certificate (or its absence) after
+                // the handshake has finished on our side: its refusal arrives with the first read.
+                if let Some(refused) = refused_after(&mut stream, self.timeout.min(REFUSAL_WAIT)).await {
+                    seen.error = Some(refused.clone());
+                    self.step("TLS", Outcome::Fail, format!("{version}, server trusted; {refused}{client}"));
+                    self.advise(match trust.client_pair() {
+                        Some(p) => format!("The server refused the client certificate `{}`: ask its owner which CA it trusts for clients, and whether this certificate's subject is allowed.", p.name),
+                        None => "The server asks for a client certificate: name one in `certificate` (`tls: { certificate: ... }` for MLLP).".into(),
+                    });
+                    seen.trusted = true;
+                    seen.leaf = leaf;
+                    self.seen = Some(seen);
+                    return false;
+                }
                 if days < EXPIRY_WARNING_DAYS {
-                    self.step("TLS", Outcome::Warn, format!("{version}, trusted; {about}"));
+                    self.step("TLS", Outcome::Warn, format!("{version}, trusted; {about}{client}"));
                     let whose = seen.chain_earliest.as_ref().map(|s| format!(" (its chain's {s})")).unwrap_or_default();
                     self.advise(format!(
                         "The certificate{whose} expires in {days} day(s): ask the server's owner to renew it before then."
                     ));
                 } else {
-                    self.step("TLS", Outcome::Ok, format!("{version}, trusted; {about}"));
+                    self.step("TLS", Outcome::Ok, format!("{version}, trusted; {about}{client}"));
                 }
                 true
             }
@@ -802,13 +861,6 @@ impl Run {
         };
         let security = l.security();
         let endpoint = format!("{host}:{port} {}", if security == LdapSecurity::Tls { "LDAPS" } else { "LDAP" });
-        match crate::ldap::extra_roots(l.ca.as_deref()) {
-            Ok(roots) => self.roots = roots,
-            Err(e) => {
-                self.step("TLS", Outcome::Fail, format!("`ca`: {e:#}"));
-                return endpoint;
-            }
-        }
         let Some(address) = self.connectable(&host, port).await else { return endpoint };
         let secure = match security {
             LdapSecurity::Tls => self.tls(&host, address).await,
@@ -823,7 +875,8 @@ impl Run {
             }
         };
         if secure && mode == Mode::Full {
-            match crate::ldap::check_service_account(l).await {
+            let trust = self.trust.clone().unwrap_or_default();
+            match crate::ldap::check_service_account(l, &trust).await {
                 Ok(()) => {
                     let who = l.bind_dn.as_deref().map(|d| format!("as `{d}`")).unwrap_or_else(|| "anonymously".into());
                     self.step("login", Outcome::Ok, format!("bound {who}"));
@@ -944,6 +997,24 @@ impl Run {
                 }
             }
         }
+    }
+}
+
+/// How long a finished handshake is watched for the server refusing our client certificate (a
+/// round trip is enough; a server that accepts sends nothing and waits for us).
+const REFUSAL_WAIT: Duration = Duration::from_millis(500);
+
+/// The server's refusal after the handshake (TLS 1.3: of our client certificate, or of none), in
+/// plain words: a TLS alert. `None` when it said nothing within `wait`, sent data, or just closed.
+async fn refused_after<S: AsyncRead + AsyncWrite + Unpin>(
+    stream: &mut tokio_rustls::client::TlsStream<S>,
+    wait: Duration,
+) -> Option<String> {
+    use tokio::io::AsyncReadExt;
+    let mut byte = [0u8; 1];
+    match tokio::time::timeout(wait, stream.read(&mut byte)).await {
+        Ok(Err(e)) if e.get_ref().is_some_and(|i| i.is::<rustls::Error>()) => crate::tls::outbound_failure(&e),
+        _ => None,
     }
 }
 
@@ -1261,6 +1332,14 @@ fn tls_failure(
 ) -> (String, String) {
     use rustls::CertificateError as C;
     let Some(rustls::Error::InvalidCertificate(c)) = error else {
+        if let Some(rustls::Error::AlertReceived(_)) = error
+            && let Some(words) = crate::tls::outbound_failure(io)
+        {
+            return (
+                words,
+                "The server ended the handshake: if it asks for a client certificate, name one in `certificate` and check its CA is the one the server trusts for clients.".into(),
+            );
+        }
         let what = error.map(|e| e.to_string()).unwrap_or_else(|| io.to_string());
         return (
             format!("handshake failed: {what}"),
@@ -1284,7 +1363,7 @@ fn tls_failure(
         }
         C::UnknownIssuer => (
             "not trusted: its issuer isn't one this server trusts (self-signed, or a private CA)".into(),
-            "Add the issuing CA to this server's trusted certificates (the engine uses the system's), or ask for a certificate from a public CA.".into(),
+            "Name the issuing CA in `ca` (a `certificates:` entry in resources.yaml), or add it to this server's trusted certificates, or ask for a certificate from a public CA.".into(),
         ),
         C::NotValidYet | C::NotValidYetContext { .. } => (
             "the certificate isn't valid yet".into(),
@@ -1399,13 +1478,18 @@ pub fn plan(
             let label = if c.destination.is_some() { c.name.clone() } else { format!("{} → {name}", c.name) };
             let resource = format!("{}/{name}", c.name);
             match &d.connector {
-                Destination::Mllp { host, port, .. } => {
-                    let target = Target::Mllp { host: host.clone(), port: *port };
-                    plan.add(4, format!("{host}:{port}"), "MLLP destination", target, label, me, &resource);
+                Destination::Mllp { host, port, tls, .. } => {
+                    let target = Target::Mllp { host: host.clone(), port: *port, tls: tls.clone() };
+                    // The same receiver over TLS with other settings is checked on its own.
+                    let key =
+                        format!("{host}:{port}{}", tls.as_ref().map(|t| format!(" tls{t:?}")).unwrap_or_default());
+                    plan.add(4, key, "MLLP destination", target, label, me, &resource);
                 }
-                Destination::Http { url: Some(url), .. } => {
-                    let target = Target::Http { url: url.clone() };
-                    plan.add(4, url.clone(), "HTTP destination", target, label, me, &resource);
+                Destination::Http { url: Some(url), ca, certificate, .. } => {
+                    let tls = ConnectTls::new(ca, certificate);
+                    let key = format!("{url}{}", if tls.is_set() { format!(" {tls:?}") } else { String::new() });
+                    let target = Target::Http { url: url.clone(), tls };
+                    plan.add(4, key, "HTTP destination", target, label, me, &resource);
                 }
                 Destination::Http { api: Some(api), .. } => plan.resource(resources, Kind::Api, api, label, me),
                 Destination::Http { .. } | Destination::Interface(_) => {}
@@ -1463,7 +1547,12 @@ pub fn alert_probes(a: &AlertSettings) -> Vec<Probe> {
     if let Some(smtp) = &a.smtp {
         probes.push(Probe {
             what: "mail server (alerts)".into(),
-            target: Target::Smtp { host: smtp.host.clone(), port: smtp.port(), tls: smtp.tls },
+            target: Target::Smtp {
+                host: smtp.host.clone(),
+                port: smtp.port(),
+                tls: smtp.tls,
+                trust: ConnectTls::new(&smtp.ca, &smtp.certificate),
+            },
             used_by: vec!["alerts".into()],
             resource: Some("alerts.smtp".into()),
         });
@@ -1472,7 +1561,7 @@ pub fn alert_probes(a: &AlertSettings) -> Vec<Probe> {
         if let Some(hook) = &channel.webhook {
             probes.push(Probe {
                 what: format!("webhook {name} (alerts)"),
-                target: Target::Http { url: hook.url.clone() },
+                target: Target::Http { url: hook.url.clone(), tls: ConnectTls::new(&hook.ca, &hook.certificate) },
                 used_by: vec![format!("alerts → {name}")],
                 resource: Some(format!("alerts.{name}")),
             });
@@ -1481,7 +1570,10 @@ pub fn alert_probes(a: &AlertSettings) -> Vec<Probe> {
     if let Some(heartbeat) = &a.heartbeat {
         probes.push(Probe {
             what: "heartbeat (alerts)".into(),
-            target: Target::Http { url: heartbeat.url.clone() },
+            target: Target::Http {
+                url: heartbeat.url.clone(),
+                tls: ConnectTls::new(&heartbeat.ca, &heartbeat.certificate),
+            },
             used_by: vec!["alerts".into()],
             resource: Some("alerts.heartbeat".into()),
         });
@@ -1509,7 +1601,11 @@ mod tests {
     }
 
     async fn one(target: Target) -> Check {
-        check(vec![probe(target)], Duration::from_secs(2)).await.remove(0)
+        check(vec![probe(target)], Duration::from_secs(2), &Default::default()).await.remove(0)
+    }
+
+    fn https(url: &str) -> Target {
+        Target::Http { url: url.into(), tls: Default::default() }
     }
 
     fn step<'a>(c: &'a Check, name: &str) -> &'a Step {
@@ -1520,20 +1616,20 @@ mod tests {
     async fn explains_refused_connections_and_names_that_dont_resolve() {
         // A port nothing listens on.
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let c = one(Target::Mllp { host: "127.0.0.1".into(), port: free }).await;
+        let c = one(Target::Mllp { host: "127.0.0.1".into(), port: free, tls: None }).await;
         assert_eq!(c.outcome, Outcome::Fail);
         assert_eq!(step(&c, "address").outcome, Outcome::Ok);
         assert!(step(&c, "connect").detail.ends_with("from 127.0.0.1: refused"), "{c:#?}");
         assert!(c.advice.iter().any(|a| a.contains("nothing accepts connections on port")), "{c:#?}");
 
-        let c = one(Target::Mllp { host: "no-such-host.invalid".into(), port: 1 }).await;
+        let c = one(Target::Mllp { host: "no-such-host.invalid".into(), port: 1, tls: None }).await;
         assert_eq!(step(&c, "DNS").outcome, Outcome::Fail);
         assert!(c.advice.iter().any(|a| a.contains("can't look up `no-such-host.invalid`")), "{c:#?}");
 
         // Something listening.
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
-        let c = one(Target::Mllp { host: "localhost".into(), port }).await;
+        let c = one(Target::Mllp { host: "localhost".into(), port, tls: None }).await;
         assert!(
             c.steps.iter().any(|s| s.name == "connect" && s.outcome == Outcome::Ok),
             "connects to 127.0.0.1: {c:#?}"
@@ -1586,7 +1682,7 @@ mod tests {
                 tokio::spawn(async move { drop(acceptor.accept(tcp).await) });
             }
         });
-        let c = one(Target::Http { url: format!("https://localhost:{port}/orders") }).await;
+        let c = one(https(&format!("https://localhost:{port}/orders"))).await;
         let tls = step(&c, "TLS");
         assert_eq!(tls.outcome, Outcome::Fail);
         assert!(tls.detail.starts_with("not trusted"), "{c:#?}");
@@ -1704,7 +1800,9 @@ mod tests {
     }
 
     async fn certificate_of(target: Target) -> (Check, SeenCertificate) {
-        let c = check_with(vec![probe(target)], Duration::from_secs(2), Mode::Certificates).await.remove(0);
+        let c = check_with(vec![probe(target)], Duration::from_secs(2), Mode::Certificates, &Default::default())
+            .await
+            .remove(0);
         let seen = c.certificate.clone().unwrap_or_else(|| panic!("no certificate: {c:#?}"));
         (c, seen)
     }
@@ -1715,7 +1813,7 @@ mod tests {
         for (days, stage) in [(40, None), (20, Some(30)), (10, Some(14)), (3, Some(7)), (-2, Some(0))] {
             let (cert, _, key) = certificate("Test Server", days, false, None);
             let port = tls_server(tls_config(&[&cert], &key)).await;
-            let (c, seen) = certificate_of(Target::Http { url: format!("https://localhost:{port}/orders") }).await;
+            let (c, seen) = certificate_of(https(&format!("https://localhost:{port}/orders"))).await;
             let ends = seen.chain_not_after.expect("read though not trusted");
             assert_eq!(ductus_core::alerts::days_left(ends, Utc::now()), days, "{seen:#?}");
             assert_eq!(ductus_core::alerts::certificate_stage(ends, Utc::now(), &warn), stage, "{days} days");
@@ -1740,7 +1838,7 @@ mod tests {
         let intermediate_issuer = rcgen::Issuer::new(int_params, int_key);
         let (leaf, _, leaf_key) = certificate("Test Server", 60, false, Some(&intermediate_issuer));
         let port = tls_server(tls_config(&[&leaf, &intermediate], &leaf_key)).await;
-        let (_, seen) = certificate_of(Target::Http { url: format!("https://localhost:{port}/") }).await;
+        let (_, seen) = certificate_of(https(&format!("https://localhost:{port}/"))).await;
         let days = |t: Option<DateTime<Utc>>| ductus_core::alerts::days_left(t.unwrap(), Utc::now());
         assert_eq!((days(seen.not_after), days(seen.chain_not_after)), (60, 5), "{seen:#?}");
         assert_eq!(seen.chain_earliest.as_deref(), Some("Test Intermediate"));
@@ -1804,7 +1902,7 @@ mod tests {
         let (cert, _, key) = certificate("Test Mail", 10, false, None);
         let config = tls_config(&[&cert], &key);
         let port = smtp_server(config.clone(), true).await;
-        let target = Target::Smtp { host: "localhost".into(), port, tls: SmtpTls::Starttls };
+        let target = Target::Smtp { host: "localhost".into(), port, tls: SmtpTls::Starttls, trust: Default::default() };
         let (c, seen) = certificate_of(target).await;
         assert_eq!(step(&c, "SMTP").outcome, Outcome::Ok, "{c:#?}");
         assert!(step(&c, "SMTP").detail.contains("STARTTLS offered and accepted"), "{c:#?}");
@@ -1812,21 +1910,67 @@ mod tests {
         assert_eq!(c.endpoint, format!("localhost:{port} SMTP"));
 
         let port = smtp_server(config.clone(), false).await;
-        let (c, seen) = certificate_of(Target::Smtp { host: "localhost".into(), port, tls: SmtpTls::Starttls }).await;
+        let target = Target::Smtp { host: "localhost".into(), port, tls: SmtpTls::Starttls, trust: Default::default() };
+        let (c, seen) = certificate_of(target).await;
         assert_eq!(step(&c, "SMTP").detail, "the server doesn't offer STARTTLS");
         assert!(c.advice.iter().any(|a| a.contains("usually 587")), "{c:#?}");
         assert_eq!((seen.fingerprint, seen.error.as_deref()), (None, Some("the server doesn't offer STARTTLS")));
 
         // TLS from the first byte (port 465).
         let port = tls_server(config).await;
-        let (_, seen) = certificate_of(Target::Smtp { host: "localhost".into(), port, tls: SmtpTls::Tls }).await;
+        let target = Target::Smtp { host: "localhost".into(), port, tls: SmtpTls::Tls, trust: Default::default() };
+        let (_, seen) = certificate_of(target).await;
         assert_eq!(seen.subject.as_deref(), Some("Test Mail"));
+    }
+
+    #[tokio::test]
+    async fn checks_an_mllp_receiver_over_tls_as_the_engine_connects() {
+        use crate::tls::testing::{ca, connecting, receiver_and_client, receiving};
+        let (server_ca, client_ca) = (ca("receiver's CA"), ca("clients' CA"));
+        let certificates = Arc::new(receiver_and_client(&server_ca, &client_ca));
+        // A receiver that asks for a client certificate and keeps the connection open, as MLLP does.
+        let acceptor = tokio_rustls::TlsAcceptor::from(certificates.server(&receiving(true), &[]).unwrap());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    if let Ok(mut tls) = acceptor.accept(tcp).await {
+                        let _ = tls.read(&mut [0u8; 16]).await;
+                    }
+                });
+            }
+        });
+        let mllp = |tls| Target::Mllp { host: "localhost".into(), port, tls: Some(tls) };
+        let check = |target| {
+            let certificates = certificates.clone();
+            async move { check(vec![probe(target)], Duration::from_secs(2), &certificates).await.remove(0) }
+        };
+
+        let c = check(mllp(connecting(Some("server-ca"), Some("client")))).await;
+        assert_eq!(c.outcome, Outcome::Ok, "{c:#?}");
+        assert!(step(&c, "TLS").detail.contains("presented client certificate `client`"), "{c:#?}");
+        assert_eq!(c.endpoint, format!("localhost:{port} MLLP over TLS"));
+        assert!(c.certificate.as_ref().is_some_and(|s| s.trusted && s.subject.as_deref() == Some("receiver")));
+
+        // What the engine would see: no client certificate, or its CA not named.
+        let c = check(mllp(connecting(Some("server-ca"), None))).await;
+        assert!(step(&c, "TLS").detail.contains("the receiver wants a client certificate"), "{c:#?}");
+        assert!(c.advice.iter().any(|a| a.contains("name one in `certificate`")), "{c:#?}");
+        let c = check(mllp(connecting(None, Some("client")))).await;
+        assert!(step(&c, "TLS").detail.starts_with("not trusted"), "{c:#?}");
+        assert!(c.advice.iter().any(|a| a.contains("Name the issuing CA in `ca`")), "{c:#?}");
+        // A name that doesn't load fails the check with why.
+        let c = check(mllp(connecting(Some("missing"), None))).await;
+        assert!(step(&c, "TLS").detail.contains("no CA named `missing`"), "{c:#?}");
     }
 
     #[tokio::test]
     async fn a_server_that_can_t_be_reached_has_an_error_and_no_certificate() {
         let free = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        let (_, seen) = certificate_of(Target::Http { url: format!("https://127.0.0.1:{free}/") }).await;
+        let (_, seen) = certificate_of(https(&format!("https://127.0.0.1:{free}/"))).await;
         assert_eq!((seen.fingerprint.as_deref(), seen.chain_not_after), (None, None));
         assert!(seen.error.as_deref().is_some_and(|e| e.ends_with("refused")), "{seen:#?}");
     }
@@ -1842,7 +1986,8 @@ heartbeat: { url: 'https://hb.example.org/ping/abc' }",
         )
         .unwrap();
         let mut probes = alert_probes(&alerts);
-        probes.push(probe(Target::Mllp { host: "lab".into(), port: 6661 }));
+        probes.push(probe(Target::Mllp { host: "lab".into(), port: 6661, tls: None }));
+        probes.push(probe(Target::Mllp { host: "hie".into(), port: 7443, tls: Some(Default::default()) }));
         let kept: Vec<(String, Option<(String, u16)>)> =
             certificates_only(probes).into_iter().map(|p| (p.resource.unwrap(), p.target.address())).collect();
         assert_eq!(
@@ -1851,6 +1996,7 @@ heartbeat: { url: 'https://hb.example.org/ping/abc' }",
                 ("alerts.smtp".into(), Some(("mail.example.org".into(), 587))),
                 ("alerts.chat".into(), Some(("hooks.example.org".into(), 443))),
                 ("alerts.heartbeat".into(), Some(("hb.example.org".into(), 443))),
+                ("test".into(), Some(("hie".into(), 7443))),
             ]
         );
     }

@@ -8,7 +8,8 @@
 //! ```yaml
 //! alerts:
 //!   smtp: { host: smtp.hospital.org, port: 587, tls: starttls, username: ductus,
-//!           password: "${secret:SMTP_PASSWORD}", from: ductus@hospital.org }
+//!           password: "${secret:SMTP_PASSWORD}", from: ductus@hospital.org,
+//!           ca: hospital-ca }   # optional, as `certificate:` (mTLS): `certificates:` names in resources.yaml
 //!   channels:
 //!     oncall: { email: [interfaces-oncall@hospital.org] }
 //!     chat:   { webhook: { url: "${secret:CHAT_WEBHOOK}", format: slack } }   # slack | teams | json
@@ -138,6 +139,12 @@ pub struct Smtp {
     pub password: Option<String>,
     /// The sender address.
     pub from: String,
+    /// Also trust this CA for the mail server (a `certificates:` entry in resources.yaml).
+    #[serde(default)]
+    pub ca: Option<String>,
+    /// Present this client certificate (a `certificates:` pair).
+    #[serde(default)]
+    pub certificate: Option<String>,
 }
 
 impl std::fmt::Debug for Smtp {
@@ -191,6 +198,12 @@ pub struct Webhook {
     pub url: String,
     #[serde(default)]
     pub format: WebhookFormat,
+    /// Also trust this CA (a `certificates:` entry in resources.yaml).
+    #[serde(default)]
+    pub ca: Option<String>,
+    /// Present this client certificate (a `certificates:` pair).
+    #[serde(default)]
+    pub certificate: Option<String>,
 }
 
 impl std::fmt::Debug for Webhook {
@@ -349,6 +362,12 @@ pub struct Heartbeat {
     pub url: String,
     #[serde(default = "default_heartbeat", deserialize_with = "crate::config::duration")]
     pub every: Duration,
+    /// Also trust this CA (a `certificates:` entry in resources.yaml).
+    #[serde(default)]
+    pub ca: Option<String>,
+    /// Present this client certificate (a `certificates:` pair).
+    #[serde(default)]
+    pub certificate: Option<String>,
 }
 
 fn default_heartbeat() -> Duration {
@@ -399,6 +418,9 @@ impl AlertSettings {
             }
             if let Some(w) = &c.webhook {
                 match url::Url::parse(&w.url) {
+                    Ok(u) if u.scheme() == "http" && (w.ca.is_some() || w.certificate.is_some()) => problems.push(
+                        format!("channel `{name}`: the webhook's `ca` and `certificate` are for an https:// `url`"),
+                    ),
                     Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => {}
                     _ => problems.push(format!("channel `{name}`: the webhook `url` must be an http(s) URL")),
                 }
@@ -412,6 +434,9 @@ impl AlertSettings {
             Some(s) if s.username.is_some() != s.password.is_some() => {
                 problems.push("smtp: give both `username` and `password`, or neither".into())
             }
+            Some(s) if s.tls == SmtpTls::None && (s.ca.is_some() || s.certificate.is_some()) => {
+                problems.push("smtp: `ca` and `certificate` need TLS (`tls: starttls` or `tls: tls`)".into())
+            }
             _ => {}
         }
         for (n, rule) in self.rules.iter().enumerate() {
@@ -423,8 +448,12 @@ impl AlertSettings {
             }
         }
         if let Some(h) = &self.heartbeat {
-            if !matches!(url::Url::parse(&h.url), Ok(u) if matches!(u.scheme(), "http" | "https")) {
-                problems.push("heartbeat.url must be an http(s) URL".into());
+            match url::Url::parse(&h.url) {
+                Ok(u) if u.scheme() == "http" && (h.ca.is_some() || h.certificate.is_some()) => {
+                    problems.push("heartbeat: `ca` and `certificate` are for an https:// `url`".into())
+                }
+                Ok(u) if matches!(u.scheme(), "http" | "https") => {}
+                _ => problems.push("heartbeat.url must be an http(s) URL".into()),
             }
             if h.every < Duration::from_secs(30) {
                 problems.push("heartbeat.every must be at least 30s".into());
@@ -951,6 +980,9 @@ rules:
             ("channels: { a: { email: nobody } }", "`nobody` isn't an email address"),
             ("channels: { a: { email: a@b.org } }", "email channels and `owner` need `smtp:`"),
             ("channels: { a: { webhook: { url: 'ftp://x' } } }", "must be an http(s) URL"),
+            ("channels: { a: { webhook: { url: 'http://x/h', ca: c } } }", "are for an https:// `url`"),
+            ("smtp: { host: m, from: a@b.org, tls: none, certificate: c }", "smtp: `ca` and `certificate` need TLS"),
+            ("heartbeat: { url: 'http://x/h', certificate: c }", "heartbeat: `ca` and `certificate` are for an https"),
             (
                 "rules: [{ when: [error], severity: critical, to: [pager] }]",
                 "no channel named `pager` (none are defined)",

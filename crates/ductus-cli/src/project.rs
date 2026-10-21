@@ -137,19 +137,29 @@ pub async fn test(root: &Path, env: &str, only: Option<&str>) -> Result<bool> {
     Ok(failed == 0)
 }
 
-/// `tls:` on the listeners and the `certificates:` entries: names, files, keys, expiry, and the
-/// API on the network without TLS. Returns the number of problems.
+/// `tls:` on the listeners, `ca` and `certificate` on what the engine connects to, and the
+/// `certificates:` entries: names, kinds, files, keys, expiry, and the API on the network without
+/// TLS. Returns the number of problems.
 fn check_tls<'a>(
     root: &Path,
+    env: &Environment,
     resources: &ductus_core::Resources,
-    configs: impl IntoIterator<Item = &'a InterfaceConfig>,
+    configs: impl IntoIterator<Item = &'a InterfaceConfig> + Clone,
 ) -> usize {
     let settings = ductus_core::settings::Settings::load(root).ok();
     let api = settings.as_ref().map(|s| &s.api);
+    // Broken alert settings are reported below; their TLS names are checked once they load.
+    let alerts = settings.as_ref().and_then(|s| s.alerts(env).ok().flatten());
     let mut problems = 0;
-    for problem in
-        ductus_core::tls::check(&ductus_core::tls::listeners(configs, api.and_then(|a| a.tls.as_ref())), resources)
-    {
+    let mut wrong = ductus_core::tls::check(
+        &ductus_core::tls::listeners(configs.clone(), api.and_then(|a| a.tls.as_ref())),
+        resources,
+    );
+    wrong.extend(ductus_core::tls::check_outbound(
+        &ductus_core::tls::outbound(configs, resources, alerts.as_ref()),
+        resources,
+    ));
+    for problem in wrong {
         problems += 1;
         println!("✗ {problem}");
     }
@@ -337,9 +347,18 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> R
     if let (Ok(settings), Some(r)) = (ductus_core::settings::Settings::load(root), &resources)
         && settings.auth.ldap.is_some()
     {
-        match ductus_runtime::ldap::Directory::new(settings.auth.ldap.as_ref(), r) {
+        // Its `ca` (a wrong name or kind, a CA that doesn't load) is reported with TLS below.
+        let certificates = ductus_runtime::tls::Certificates::load_what_loads(&r.certificates);
+        let ca_reported = settings
+            .auth
+            .ldap
+            .as_ref()
+            .and_then(|a| r.ldap.get(&a.resource))
+            .is_some_and(|l| ductus_runtime::ldap::trust(l, &certificates).is_err());
+        match ductus_runtime::ldap::Directory::new(settings.auth.ldap.as_ref(), r, &certificates) {
             Ok(Some(d)) => println!("✓ sign-in with directory `{}` ({})", d.name, d.server.url),
             Ok(None) => {}
+            Err(_) if ca_reported => {}
             Err(e) => {
                 problems += 1;
                 println!("✗ {e:#}");
@@ -349,7 +368,7 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> R
 
     // TLS: what each listener names, and each certificate loads as the engine would load it.
     if let Some(r) = &resources {
-        problems += check_tls(root, r, configs());
+        problems += check_tls(root, &env, r, configs());
     }
 
     // Alerts (`alerts:` in ductus.yaml), with this environment's variables and secrets.
@@ -544,7 +563,9 @@ pub async fn test_alert(root: &Path, env: &str, channel: &str) -> Result<()> {
     let Some(alerts) = settings.alerts(&environment)? else {
         anyhow::bail!("ductus.yaml has no `alerts:`");
     };
-    let alerts = ductus_runtime::alerts::Alerts::new(alerts, settings.owners, env)?;
+    let resources = ductus_core::Resources::load(root, &environment)?;
+    let certificates = std::sync::Arc::new(ductus_runtime::tls::Certificates::load(&resources.certificates)?);
+    let alerts = ductus_runtime::alerts::Alerts::new(alerts, settings.owners, env, certificates)?;
     alerts.test(channel).await?;
     println!("sent a test notification to `{channel}`");
     Ok(())

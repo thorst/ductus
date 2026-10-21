@@ -29,6 +29,8 @@
 //!     url: https://empi.hospital.local/api/v2
 //!     headers: { Authorization: "Bearer ${secret:EMPI_TOKEN}" }
 //!     timeout: 10s                             # default 30s
+//!     ca: hospital-ca                          # optional: also trust this CA (a `certificates:` entry)
+//!     certificate: ductus-client               # optional: present this client certificate (mTLS)
 //!     application: EMPI
 //!     vendor: Rhapsody
 //! ldap:
@@ -36,9 +38,9 @@
 //!     url: ldaps://dc1.hospital.org            # ldaps://, or ldap:// with starttls: true
 //!     bind_dn: CN=svc-ductus,OU=Service,DC=hospital,DC=org
 //!     bind_password: ${secret:LDAP_BIND_PASSWORD}
-//!     ca: ${secret:HOSPITAL_CA}                # optional: a private CA this server doesn't trust yet
+//!     ca: hospital-ca                          # optional: a private CA this server doesn't trust yet
 //!     owner: Directory Services
-//! certificates:                                # what our listeners present (`tls:`), and CAs
+//! certificates:                                # what we present (`tls:`, `certificate:`), and CAs
 //!   ductus-mllp:
 //!     cert_file: /etc/ductus/tls/mllp.pem       # leaf first, then intermediates; re-read when it changes
 //!     key_file: /etc/ductus/tls/mllp.key
@@ -47,7 +49,7 @@
 //!     cert: ${secret:API_CERT}                  # or PEM text from secrets (read at start)
 //!     key: ${secret:API_KEY}
 //!   hospital-ca:
-//!     ca: ${secret:HOSPITAL_CA}                 # a CA only (or ca_file): clients it issued are trusted
+//!     ca: ${secret:HOSPITAL_CA}                 # a CA only (or ca_file): clients or servers it issued are trusted
 //! ```
 //!
 //! Interface code refers to them by name (`db("patient_db")`, `api("empi")`), so no connection
@@ -222,8 +224,8 @@ pub struct LdapServer {
     pub bind_dn: Option<String>,
     #[serde(default)]
     pub bind_password: Option<String>,
-    /// Certificates (PEM) to trust for this directory besides the system's: the hospital's own
-    /// CA, when this server doesn't have it installed.
+    /// A CA to trust for this directory besides the system's (a `certificates:` entry): the
+    /// hospital's own, when this server doesn't have it installed.
     #[serde(default)]
     pub ca: Option<String>,
     /// How long connecting, binding or one search may take (default 10s).
@@ -320,6 +322,13 @@ pub struct Api {
     /// Default for calls that don't set their own (default 30s from code, 10s for destinations).
     #[serde(default, deserialize_with = "crate::config::duration_opt")]
     pub timeout: Option<Duration>,
+    /// Its server may also be issued by this CA (a `certificates:` entry), besides those the
+    /// platform trusts.
+    #[serde(default)]
+    pub ca: Option<String>,
+    /// Presented as the client certificate (mTLS; a `certificates:` pair).
+    #[serde(default)]
+    pub certificate: Option<String>,
     #[serde(default)]
     pub application: Option<String>,
     #[serde(default)]
@@ -333,6 +342,11 @@ pub struct Api {
 }
 
 impl Api {
+    /// Its `ca` and `certificate`.
+    pub fn tls(&self) -> crate::tls::ConnectTls {
+        crate::tls::ConnectTls::new(&self.ca, &self.certificate)
+    }
+
     /// The URL of `path` under this API: `/patients/1` under `https://h/api/v2` is
     /// `https://h/api/v2/patients/1`.
     pub fn url_for(&self, path: &str) -> String {
@@ -528,6 +542,9 @@ impl Resources {
         }
         for (name, api) in &resources.apis {
             match url::Url::parse(&api.url) {
+                Ok(u) if u.scheme() == "http" && api.tls().is_set() => {
+                    bail!("in {}: api `{name}`: `ca` and `certificate` are for an https:// `url`", file.display())
+                }
                 Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => {}
                 _ => bail!("in {}: api `{name}`: `url` must be an http(s) URL, not `{}`", file.display(), api.url),
             }
@@ -832,6 +849,9 @@ mod tests {
         std::fs::write(&file, "apis:\n  x: { url: 'empi.local/api' }\n").unwrap();
         let err = format!("{:#}", Resources::load(dir.path(), &env).unwrap_err());
         assert!(err.contains("api `x`: `url` must be an http(s) URL"), "{err}");
+        std::fs::write(&file, "apis:\n  x: { url: 'http://empi.local/api', certificate: ours }\n").unwrap();
+        let err = format!("{:#}", Resources::load(dir.path(), &env).unwrap_err());
+        assert!(err.contains("api `x`: `ca` and `certificate` are for an https:// `url`"), "{err}");
     }
 
     #[test]

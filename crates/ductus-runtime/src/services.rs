@@ -47,6 +47,8 @@ pub struct SharedServices {
     databases: HashMap<String, Pool>,
     apis: BTreeMap<String, Api>,
     http: reqwest::Client,
+    /// APIs that name a CA or client certificate have a client of their own.
+    api_http: BTreeMap<String, reqwest::Client>,
     /// Each resource's calls: counted and timed.
     calls: Arc<ResourceCalls>,
     /// Database and HTTP calls run on the engine's main (multi-threaded) runtime. A socket is served by
@@ -60,17 +62,23 @@ impl SharedServices {
     /// queries against it fail as temporary errors and the messages wait.
     ///
     /// Must be called on the engine's main runtime.
-    pub fn new(env: Environment, resources: &Resources) -> Self {
+    pub fn new(env: Environment, resources: &Resources, certificates: &crate::tls::Certificates) -> Result<Self> {
         let databases = resources.databases.iter().map(|(name, db)| (name.clone(), make_pool(db, None))).collect();
-        Self {
+        let mut api_http = BTreeMap::new();
+        for (name, api) in resources.apis.iter().filter(|(_, a)| a.tls().is_set()) {
+            let client = api_client(api, certificates).map_err(|e| anyhow!("api `{name}`: {e:#}"))?;
+            api_http.insert(name.clone(), client);
+        }
+        Ok(Self {
             env,
             definitions: resources.databases.clone(),
             databases,
             apis: resources.apis.clone(),
             http: http_client(),
+            api_http,
             calls: Arc::new(ResourceCalls::new(resources.databases.keys().cloned(), resources.apis.keys().cloned())),
             io: tokio::runtime::Handle::current(),
-        }
+        })
     }
 
     /// Each resource's call counts and timings (for the API and `/metrics`).
@@ -112,12 +120,19 @@ impl SharedServices {
     }
 }
 
-pub(crate) fn http_client() -> reqwest::Client {
+fn http_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .user_agent(concat!("ductus/", env!("CARGO_PKG_VERSION")))
         .connect_timeout(Duration::from_secs(10))
-        .build()
-        .expect("building the HTTP client")
+}
+
+pub(crate) fn http_client() -> reqwest::Client {
+    http_builder().build().expect("building the HTTP client")
+}
+
+/// The client for calls to `api` (one of its own when it names a CA or client certificate).
+pub(crate) fn api_client(api: &Api, certificates: &crate::tls::Certificates) -> Result<reqwest::Client> {
+    certificates.http(&api.tls(), http_builder())
 }
 
 /// The URL for messages: without query string, fragment or password (they may carry secrets).
@@ -334,8 +349,8 @@ impl Services for EngineServices {
         self.shared.spawn(async move {
             let api = request.api.clone();
             let stats = shared.calls.http(api.as_deref());
-            SharedServices::timed(stats, async { http_fetch(&shared.http, resolve_api(&shared.apis, request)?).await })
-                .await
+            let client = api.as_ref().and_then(|a| shared.api_http.get(a)).unwrap_or(&shared.http);
+            SharedServices::timed(stats, async { http_fetch(client, resolve_api(&shared.apis, request)?).await }).await
         })
     }
 
@@ -373,7 +388,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn a_dedicated_pool_is_not_held_up_by_the_shared_one() {
         let Some(resources) = test_resources() else { return };
-        let shared = Arc::new(SharedServices::new(Environment::with_variables("dev", &[]), &resources));
+        let shared = Arc::new(
+            SharedServices::new(Environment::with_variables("dev", &[]), &resources, &Default::default()).unwrap(),
+        );
         let config: InterfaceConfig = serde_yaml_ng::from_str(
             "name: x\nsource: { mllp: { port: 1 } }\ndestination: { file: { dir: o } }\nisolation: dedicated\ndedicated_pools: { db: 1 }\n",
         )
@@ -447,7 +464,9 @@ mod tests {
         let base = server().await;
         let resources: Resources =
             serde_yaml_ng::from_str(&format!("apis:\n  echo: {{ url: '{base}/', timeout: 300ms }}\n")).unwrap();
-        let shared = Arc::new(SharedServices::new(Environment::with_variables("dev", &[]), &resources));
+        let shared = Arc::new(
+            SharedServices::new(Environment::with_variables("dev", &[]), &resources, &Default::default()).unwrap(),
+        );
         let services = EngineServices::new(shared.clone(), Default::default());
         let via = |api: Option<&str>, url: &str| FetchRequest {
             api: api.map(Into::into),
@@ -467,6 +486,41 @@ mod tests {
         let fetch = calls.http(None).unwrap();
         assert_eq!((fetch.calls.count(), crate::stats::get(&fetch.errors)), (1, 0));
         assert!(calls.http(Some("nope")).is_none());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn api_calls_trust_the_api_s_ca_and_present_its_client_certificate() {
+        use crate::tls::testing::{ca, receiver_and_client, receiving};
+        let (server_ca, client_ca) = (ca("API's CA"), ca("clients' CA"));
+        let certificates = receiver_and_client(&server_ca, &client_ca);
+        let app = axum::Router::new().route("/patients/1", axum::routing::get(|| async { "Ada" }));
+        let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = tcp.local_addr().unwrap().port();
+        let tls = certificates.server(&receiving(true), &[b"http/1.1"]).unwrap();
+        let listener = crate::tls::Listener::new(tcp, Some(tls), "test").unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+
+        let resources: Resources = serde_yaml_ng::from_str(&format!(
+            "apis:\n  empi: {{ url: 'https://localhost:{port}/', ca: server-ca, certificate: client }}\n  empi-no-client: {{ url: 'https://localhost:{port}/', ca: server-ca }}\n  empi-platform: {{ url: 'https://localhost:{port}/' }}\n"
+        ))
+        .unwrap();
+        let shared =
+            Arc::new(SharedServices::new(Environment::with_variables("dev", &[]), &resources, &certificates).unwrap());
+        let services = EngineServices::new(shared, Default::default());
+        let get = |api: &str| FetchRequest {
+            api: Some(api.into()),
+            url: "/patients/1".into(),
+            method: "GET".into(),
+            headers: BTreeMap::new(),
+            body: None,
+            timeout_ms: Some(5000),
+        };
+        let r = services.fetch(get("empi")).await.unwrap();
+        assert_eq!((r.status, r.body.as_str()), (200, "Ada"));
+        for refused in ["empi-no-client", "empi-platform"] {
+            let err = services.fetch(get(refused)).await.unwrap_err().to_string();
+            assert!(err.starts_with(TRANSIENT), "{refused}: a refused handshake retries: {err}");
+        }
     }
 
     /// A local HTTP server: /echo answers with what it got, /slow takes 2 s, /big is 17 MB.

@@ -1977,6 +1977,78 @@ async fn listeners_speak_tls_with_the_certificates_resources_yaml_names() {
     assert!(reqwest::Client::new().post(format!("http://127.0.0.1:{http}/orders")).body("{}").send().await.is_err());
 }
 
+/// Outbound TLS through the engine: an MLLP destination sends over TLS, trusting the receiver's
+/// certificate through `ca` and presenting a client certificate, to a listener that requires
+/// one (the same engine's). Wrong names and kinds are refused by validate and at start.
+#[tokio::test(flavor = "multi_thread")]
+async fn mllp_destinations_send_over_tls_with_a_client_certificate() {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("tls-out-{nanos}");
+    let (inbound, relay) = (free_port(), free_port());
+    let sender = format!(
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {inbound} }} }}\ndestination: {{ mllp: {{ host: localhost, port: {relay}, tls: {{ ca: engine-ca, certificate: client }} }} }}\n"
+    );
+    let receiver = format!(
+        "name: {name}-relay\nsource: {{ mllp: {{ host: 127.0.0.1, port: {relay}, tls: {{ certificate: engine, clients: {{ ca: client-ca, subjects: ['CN=ductus-client'] }} }} }} }}\ndestination: {{ file: {{ dir: out }} }}\n"
+    );
+    let dir = project(&[
+        (format!("interfaces/{name}/interface.yaml").as_str(), sender.as_str()),
+        (format!("interfaces/{name}-relay/interface.yaml").as_str(), receiver.as_str()),
+        (
+            "resources.yaml",
+            "certificates:\n  engine: { cert_file: tls/engine.pem, key_file: tls/engine.key }\n  engine-ca: { ca_file: tls/engine.pem }\n  client: { cert_file: tls/client.pem, key_file: tls/client.key }\n  client-ca: { ca_file: tls/client.pem }\n",
+        ),
+    ]);
+    let root = dir.path();
+    for (file, cn) in [("tls/engine", "localhost"), ("tls/client", "ductus-client")] {
+        let (ok, out) = ductus(root, &["cert", "self-signed", file, "--name", cn]);
+        assert!(ok, "{out}");
+    }
+    let (ok, out) = without_a_database(root, &["validate"]);
+    assert!(ok, "{out}");
+
+    // A CA where the client certificate belongs, a pair where the CA belongs, a name that isn't there.
+    let iface = root.join(format!("interfaces/{name}/interface.yaml"));
+    edit(&iface, "ca: engine-ca, certificate: client", "ca: client, certificate: engine-ca");
+    let (ok, out) = without_a_database(root, &["validate"]);
+    assert!(!ok, "{out}");
+    assert!(
+        out.contains(&format!(
+            "✗ interface `{name}` destination `default`: ca: `client` is a certificate with its key"
+        )),
+        "{out}"
+    );
+    assert!(out.contains("certificate: `engine-ca` is a CA; a client certificate needs its key"), "{out}");
+    let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["run", "--root", &root.to_string_lossy(), "--api-listen", "off"])
+        .env("DUCTUS_DATABASE_URL", "postgres://nobody@127.0.0.1:1/none")
+        .output()
+        .unwrap();
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && text.contains("ca: `client` is a certificate with its key"),
+        "refused before the database: {text}"
+    );
+    edit(&iface, "ca: client, certificate: engine-ca", "ca: nope, certificate: client");
+    let (ok, out) = without_a_database(root, &["validate"]);
+    assert!(!ok && out.contains("ca: no certificate named `nope` in resources.yaml"), "{out}");
+    edit(&iface, "ca: nope, certificate: client", "ca: engine-ca, certificate: client");
+
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (_engine, log) = start_engine(root, &db, None, "engine.log");
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
+    let mut tcp = tokio::net::TcpStream::connect(("127.0.0.1", inbound)).await.unwrap();
+    let ack = mllp_exchange(&mut tcp, "MSH|^~\\&|A|B|C|D|20261020||ADT^A01|OUT1|P|2.5\rPID|1||123\r").await;
+    assert!(ack.contains("MSA|AA|OUT1"), "{ack}");
+    let out = root.join(format!("interfaces/{name}-relay/out"));
+    let arrived = || std::fs::read_dir(&out).map(|d| d.count()).unwrap_or(0) >= 1;
+    let started = std::time::Instant::now();
+    while !arrived() && started.elapsed() < std::time::Duration::from_secs(20) {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(arrived(), "relayed over TLS: {}", std::fs::read_to_string(&log).unwrap());
+}
+
 /// Send one MLLP frame and read until the end of a frame or the connection closes.
 async fn mllp_exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     stream: &mut S,

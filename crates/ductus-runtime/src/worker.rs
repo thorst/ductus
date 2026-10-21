@@ -75,6 +75,8 @@ pub struct Outlet {
     pub server: Option<ductus_core::resources::SftpServer>,
     /// HTTP destinations through an API: the API, from resources.yaml.
     pub api: Option<ductus_core::resources::Api>,
+    /// MLLP over TLS, or HTTPS naming a CA or client certificate: the client settings.
+    pub tls: Option<Arc<rustls::ClientConfig>>,
     /// Routes to another interface: where its messages are stored.
     pub route: Option<Arc<Intake>>,
     /// Its counts and timings, shared by its slots.
@@ -340,7 +342,7 @@ impl Worker {
             destination: name.into(),
             destination_id: outlet.id,
             lanes: config.partitions_for_worker(job.slot),
-            sender: Sender::new(&config, destination, outlet.server, outlet.api),
+            sender: Sender::new(&config, destination, outlet.server, outlet.api, outlet.tls),
             route: outlet.route,
             retry: config.retry_for(destination).clone(),
             save_output: destination.save_output,

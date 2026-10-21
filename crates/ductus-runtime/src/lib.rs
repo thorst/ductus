@@ -124,8 +124,10 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     if !missing.is_empty() {
         bail!("{}", missing.join("\n"));
     }
-    let tls_problems =
+    let mut tls_problems =
         ductus_core::tls::check(&ductus_core::tls::listeners(&configs, settings.api.tls.as_ref()), &resources);
+    let outbound = ductus_core::tls::outbound(&configs, &resources, alert_settings.as_ref());
+    tls_problems.extend(ductus_core::tls::check_outbound(&outbound, &resources));
     if !tls_problems.is_empty() {
         bail!("{}", tls_problems.join("\n"));
     }
@@ -146,7 +148,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
              won't keep the session cookie; add `tls: {{ certificate: <name> }}` to `api` in ductus.yaml"
         );
     }
-    let directory = ldap::Directory::new(settings.auth.ldap.as_ref(), &resources)?;
+    let directory = ldap::Directory::new(settings.auth.ldap.as_ref(), &resources, &certificates)?;
     for name in resources.insecure_ldap() {
         tracing::warn!(
             directory = name,
@@ -162,7 +164,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
             for warning in a.warnings() {
                 tracing::warn!("{warning}");
             }
-            Some(Arc::new(alerts::Alerts::new(a, settings.owners.clone(), &options.env)?))
+            Some(Arc::new(alerts::Alerts::new(a, settings.owners.clone(), &options.env, certificates.clone())?))
         }
         None => None,
     };
@@ -283,24 +285,40 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
             .destinations()
             .zip(&destination_ids)
             .zip(&stats.destinations)
-            .map(|(((_, d), &id), destination_stats)| worker::Outlet {
-                id,
-                stats: destination_stats.clone(),
-                pause: activity.pauses[&id].clone(),
-                limiter: config
-                    .rate_limit_for(d)
-                    .map(|r| Arc::new(limiter::Limiter::new(r.clone(), std::time::Instant::now()))),
-                server: match &d.connector {
-                    Destination::Sftp { server, .. } => sftp_server(server),
+            .map(|(((name, d), &id), destination_stats)| {
+                // Built here, once: the names were checked above, and destinations naming the
+                // same CA and certificate share their settings.
+                let tls = match &d.connector {
+                    Destination::Mllp { tls: Some(t), .. } => Some(certificates.client(t)),
+                    Destination::Http { api: Some(api), .. } => {
+                        resources.apis.get(api).and_then(|a| certificates.named(&a.tls()).transpose())
+                    }
+                    Destination::Http { ca, certificate, .. } => {
+                        certificates.named(&ductus_core::tls::ConnectTls::new(ca, certificate)).transpose()
+                    }
                     _ => None,
-                },
-                api: match &d.connector {
-                    Destination::Http { api: Some(api), .. } => resources.apis.get(api).cloned(),
-                    _ => None,
-                },
-                route: d.route().map(|target| intakes[target].clone()), // checked by check_routes
+                };
+                let tls = tls.transpose().with_context(|| format!("{}: TLS", config.label_destination(name)))?;
+                anyhow::Ok(worker::Outlet {
+                    id,
+                    tls,
+                    stats: destination_stats.clone(),
+                    pause: activity.pauses[&id].clone(),
+                    limiter: config
+                        .rate_limit_for(d)
+                        .map(|r| Arc::new(limiter::Limiter::new(r.clone(), std::time::Instant::now()))),
+                    server: match &d.connector {
+                        Destination::Sftp { server, .. } => sftp_server(server),
+                        _ => None,
+                    },
+                    api: match &d.connector {
+                        Destination::Http { api: Some(api), .. } => resources.apis.get(api).cloned(),
+                        _ => None,
+                    },
+                    route: d.route().map(|target| intakes[target].clone()), // checked by check_routes
+                })
             })
-            .collect();
+            .collect::<Result<_>>()?;
         // Respond-mode HTTP interfaces get requests over a channel instead of a queue.
         let mut requests = None;
         if let Source::Http { host, port, path, method, tls, .. } = &config.source {
@@ -343,7 +361,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         interfaces.push((config, wake, destination_ids, health, gate, stats));
     }
 
-    let services = Arc::new(services::SharedServices::new(env, &resources));
+    let services = Arc::new(services::SharedServices::new(env, &resources, &certificates)?);
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let mut jobs = 0;
     let mut threads = Vec::new();
@@ -438,6 +456,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         directory,
         teams: settings.owners.clone(),
         ownership: owner.ownership.clone(),
+        tls: certificates.clone(),
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse

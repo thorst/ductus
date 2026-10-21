@@ -489,6 +489,11 @@ pub enum Destination {
         /// What to do when the receiver answers AR (reject). AE (error) is always retried.
         #[serde(default)]
         on_reject: OnReject,
+        /// Send over TLS: `true` trusts what the platform trusts; `{ ca, certificate }` also
+        /// trusts that CA and presents that client certificate. The receiver's certificate must
+        /// cover `host`.
+        #[serde(default, deserialize_with = "crate::tls::connect_tls_opt")]
+        tls: Option<crate::tls::ConnectTls>,
     },
     File {
         dir: PathBuf,
@@ -518,6 +523,12 @@ pub enum Destination {
         /// Default: the API's `timeout`, else 10 s.
         #[serde(default)]
         timeout_ms: Option<u64>,
+        /// An https `url`'s server may also be issued by this CA (a `certificates:` entry).
+        #[serde(default)]
+        ca: Option<String>,
+        /// Presented as the client certificate (mTLS; a `certificates:` pair).
+        #[serde(default)]
+        certificate: Option<String>,
     },
     /// Put each message into another interface's queue (it has `source: internal`), in the
     /// same transaction that marks it sent here: no network hop, nothing sent twice.
@@ -811,7 +822,14 @@ impl InterfaceConfig {
             {
                 bail!("{}: SFTP needs `server` (a name under `sftp:` in resources.yaml)", what());
             }
-            if let Destination::Http { url, api, path, .. } = &d.connector {
+            if let Destination::Http { url, api, path, ca, certificate, .. } = &d.connector {
+                let tls = ca.is_some() || certificate.is_some();
+                if tls && api.is_some() {
+                    bail!("{}: `ca` and `certificate` go on the API in resources.yaml (it brings them)", what());
+                }
+                if tls && url.as_deref().is_some_and(|u| !u.trim().to_ascii_lowercase().starts_with("https://")) {
+                    bail!("{}: `ca` and `certificate` are for an https:// `url`", what());
+                }
                 match (url, api) {
                     (Some(_), Some(_)) | (None, None) => {
                         bail!("{}: HTTP needs either `url` or `api` (a name under `apis:` in resources.yaml)", what())
@@ -1082,6 +1100,18 @@ retry: { max_attempts: 3 }
         let mut bad = queue.clone();
         bad.destination = None;
         assert!(bad.validate().unwrap_err().to_string().contains("required"));
+
+        // `ca` and `certificate`: for an https URL; an API brings its own.
+        let with = |http: &str| {
+            let c: InterfaceConfig = serde_yaml_ng::from_str(&format!(
+                "name: orders\nsource: {{ http: {{ port: 8080, path: /orders }} }}\nformat: json\ndestination: {{ http: {{ {http} }} }}\n"
+            ))
+            .unwrap();
+            c.validate().map_err(|e| e.to_string())
+        };
+        assert!(with("url: 'https://x/api', ca: lab-ca, certificate: ours").is_ok());
+        assert!(with("url: 'http://x/api', ca: lab-ca").unwrap_err().contains("are for an https:// `url`"));
+        assert!(with("api: lab, certificate: ours").unwrap_err().contains("go on the API in resources.yaml"));
     }
 
     #[test]
