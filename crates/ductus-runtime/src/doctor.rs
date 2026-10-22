@@ -1950,7 +1950,8 @@ mod tests {
         };
 
         let c = check(mllp(connecting(Some("server-ca"), Some("client")))).await;
-        assert_eq!(c.outcome, Outcome::Ok, "{c:#?}");
+        // Not the whole check: where localhost is also ::1 (CI), that address warns (nothing listens there).
+        assert_eq!(step(&c, "TLS").outcome, Outcome::Ok, "{c:#?}");
         assert!(step(&c, "TLS").detail.contains("presented client certificate `client`"), "{c:#?}");
         assert_eq!(c.endpoint, format!("localhost:{port} MLLP over TLS"));
         assert!(c.certificate.as_ref().is_some_and(|s| s.trusted && s.subject.as_deref() == Some("receiver")));
