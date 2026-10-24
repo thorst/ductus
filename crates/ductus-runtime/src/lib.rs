@@ -4,6 +4,7 @@ pub mod activity;
 pub mod alerts;
 pub mod api;
 pub mod audit;
+pub mod cert_show;
 pub mod certificates;
 pub mod control;
 mod destination;

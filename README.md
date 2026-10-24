@@ -160,7 +160,8 @@ Past that, the limit is PostgreSQL, and mostly its disk: Ductus spends little CP
 | `ductus types` | Write editor typings and `tsconfig.json` for VS Code |
 | `ductus retention` | How long each interface keeps messages, changes in progress, partitions kept and why; `confirm` applies a shorter one |
 | `ductus status` | Message counts by interface, status and destination |
-| `ductus gen` / `ductus sink` | Synthetic HL7 traffic and an order-verifying receiver |
+| `ductus cert` | `request`: a key and a CSR for your CA; `show`: what a certificate file holds (chain, days left, key); `self-signed` for labs |
+| `ductus gen` / `ductus sink` | Synthetic HL7 traffic and an order-verifying receiver, both also over TLS with client certificates |
 
 ## Guarantees
 

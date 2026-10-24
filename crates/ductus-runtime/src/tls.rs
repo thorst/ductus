@@ -55,7 +55,8 @@ pub struct About {
 }
 
 impl About {
-    fn read(der: &[u8]) -> Result<Self> {
+    /// What a certificate (DER) says about itself.
+    pub fn read(der: &[u8]) -> Result<Self> {
         use x509_parser::prelude::*;
         let (_, cert) = X509Certificate::from_der(der).map_err(|e| anyhow!("not a certificate: {e}"))?;
         let mut names = Vec::new();
@@ -524,6 +525,63 @@ pub fn self_signed(names: &[String], days: u32) -> Result<(String, String)> {
     Ok((cert.pem(), key.serialize_pem()))
 }
 
+/// What a new key is (`ductus cert request --key`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyType {
+    /// RSA 2048: what every CA takes (Microsoft AD CS templates often still ask for RSA).
+    Rsa,
+    /// ECDSA P-256: smaller and faster, where the CA takes it.
+    Ecdsa,
+}
+
+/// A new key and a certificate signing request for `names` (DNS names or IP addresses), with
+/// `subject` (`O=General Hospital, OU=Interfaces`; its CN is the first name unless it gives one),
+/// asking for a certificate a server and a client can both use: (CSR PEM, key PEM). The key
+/// never leaves this server; the CSR goes to the CA.
+pub fn request(names: &[String], subject: &str, key: KeyType) -> Result<(String, String)> {
+    if names.is_empty() {
+        bail!("give at least one name the certificate is for (--dns, the host senders connect to)");
+    }
+    let key = match key {
+        KeyType::Rsa => rcgen::KeyPair::generate_for(&rcgen::PKCS_RSA_SHA256),
+        KeyType::Ecdsa => rcgen::KeyPair::generate_for(&rcgen::PKCS_ECDSA_P256_SHA256),
+    }
+    .context("making a key")?;
+    let mut params = rcgen::CertificateParams::new(names.to_vec()).context("the names")?;
+    let mut common_name = false;
+    for part in subject.split(',').map(str::trim).filter(|p| !p.is_empty()) {
+        let Some((attribute, value)) = part.split_once('=') else {
+            bail!("subject `{subject}`: write each part as ATTR=value, like O=General Hospital");
+        };
+        let kind = match attribute.trim().to_ascii_uppercase().as_str() {
+            "CN" => {
+                common_name = true;
+                rcgen::DnType::CommonName
+            }
+            "O" => rcgen::DnType::OrganizationName,
+            "OU" => rcgen::DnType::OrganizationalUnitName,
+            "C" => rcgen::DnType::CountryName,
+            "ST" => rcgen::DnType::StateOrProvinceName,
+            "L" => rcgen::DnType::LocalityName,
+            other => bail!("subject `{subject}`: `{other}` isn't one of CN, O, OU, C, ST, L"),
+        };
+        params.distinguished_name.push(kind, value.trim());
+    }
+    if !common_name {
+        params.distinguished_name.push(rcgen::DnType::CommonName, names[0].clone());
+    }
+    params.extended_key_usages =
+        vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth, rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+    let csr = params.serialize_request(&key).context("making the request")?;
+    Ok((csr.pem().context("writing the request")?, key.serialize_pem()))
+}
+
+/// Whether `key_pem` is the key of the first certificate in `cert_pem`: the certificate's
+/// details, or why not (in the words the engine's start would use).
+pub fn check_pair(cert_pem: &[u8], key_pem: &[u8]) -> Result<About> {
+    load_pair(cert_pem, key_pem).map(|loaded| loaded.about)
+}
+
 fn read(file: &Path) -> Result<Vec<u8>> {
     std::fs::read(file).with_context(|| format!("reading {}", file.display()))
 }
@@ -618,6 +676,9 @@ pub fn outbound_failure(error: &std::io::Error) -> Option<String> {
         E::InvalidCertificate(C::NotValidYet | C::NotValidYetContext { .. }) => {
             "TLS: the receiver's certificate isn't valid yet (is this server's clock right?)".into()
         }
+        E::InvalidCertificate(C::Other(e)) if is_ca_as_leaf(e) => {
+            "TLS: the receiver presents a CA's certificate (CA:TRUE) as its own: it needs a server certificate (`openssl req -x509` makes a CA's by default)".into()
+        }
         E::InvalidCertificate(other) => format!("TLS: the receiver's certificate was refused ({other:?})"),
         E::InvalidMessage(_) => "TLS: the receiver isn't speaking TLS (a plain MLLP port?)".into(),
         E::PeerIncompatible(_) => "TLS: no TLS version or cipher in common (TLS 1.2 is our minimum)".into(),
@@ -638,6 +699,11 @@ pub fn outbound_failure(error: &std::io::Error) -> Option<String> {
         }
         other => format!("TLS: {other}"),
     })
+}
+
+/// A certificate refused for being a CA's where a server's or client's belongs.
+fn is_ca_as_leaf(e: &rustls::OtherError) -> bool {
+    matches!(e.0.downcast_ref::<webpki::Error>(), Some(webpki::Error::CaUsedAsEndEntity))
 }
 
 /// Client certificates: the CA's check, then the subject patterns.
@@ -709,6 +775,10 @@ impl rustls::server::danger::ClientCertVerifier for ClientCheck {
 #[derive(Default)]
 pub struct Refusals {
     last: Mutex<HashMap<(String, IpAddr), Instant>>,
+    /// Connections doctor makes to our own listeners (by the address they come from): it sends
+    /// no client certificate and hangs up once it has the chain, which isn't a sender refused.
+    /// Logged, it would also hide a real refusal from this address for a minute.
+    own: Mutex<HashMap<SocketAddr, Instant>>,
 }
 
 impl Refusals {
@@ -719,7 +789,21 @@ impl Refusals {
         REFUSALS.get_or_init(Refusals::default)
     }
 
-    fn note(&self, listener: &str, peer: SocketAddr, error: &std::io::Error) {
+    /// A connection from `local` is this engine's own check: its handshake isn't logged.
+    pub fn our_own(&self, local: SocketAddr) {
+        let now = Instant::now();
+        let mut own = self.own.lock().expect("refusals lock");
+        own.retain(|_, at| now.duration_since(*at) < HANDSHAKE_TIMEOUT * 2);
+        own.insert(local, now);
+    }
+
+    /// Log a refused handshake, unless this sender's was logged in the last minute or it's our
+    /// own check. True if logged.
+    fn note(&self, listener: &str, peer: SocketAddr, error: &std::io::Error) -> bool {
+        if self.own.lock().expect("refusals lock").remove(&peer).is_some() {
+            tracing::debug!(listener, %peer, reason = %why(error), "our own check's handshake ended");
+            return false;
+        }
         let now = Instant::now();
         let mut last = self.last.lock().expect("refusals lock");
         if last.len() > 10_000 {
@@ -727,11 +811,12 @@ impl Refusals {
         }
         let key = (listener.to_string(), peer.ip());
         if last.get(&key).is_some_and(|at| now.duration_since(*at) < Self::EVERY) {
-            return;
+            return false;
         }
         last.insert(key, now);
         drop(last);
         tracing::warn!(listener, peer = %peer.ip(), reason = %why(error), "TLS handshake refused (logged once a minute per sender)");
+        true
     }
 }
 
@@ -757,6 +842,9 @@ fn why(error: &std::io::Error) -> String {
         }
         rustls::Error::InvalidCertificate(rustls::CertificateError::Expired) => {
             "the client certificate has expired".into()
+        }
+        rustls::Error::InvalidCertificate(rustls::CertificateError::Other(e)) if is_ca_as_leaf(e) => {
+            "the client certificate is a CA's (CA:TRUE), not one issued to a client".into()
         }
         rustls::Error::InvalidCertificate(rustls::CertificateError::Other(e)) => e.to_string(),
         rustls::Error::AlertReceived(alert) => {
@@ -1024,6 +1112,68 @@ mod tests {
     use super::*;
     use ductus_core::tls::Clients;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A sender's refusals are logged once a minute; our own check's handshake isn't one, and
+    /// doesn't use up that minute for a real sender on the same address.
+    #[test]
+    fn refusals_are_logged_once_a_minute_and_not_for_our_own_check() {
+        let refusals = Refusals::default();
+        let error = std::io::Error::from(std::io::ErrorKind::UnexpectedEof);
+        let (doctor, sender, later): (SocketAddr, SocketAddr, SocketAddr) = (
+            "127.0.0.1:50001".parse().unwrap(),
+            "127.0.0.1:50002".parse().unwrap(),
+            "127.0.0.1:50003".parse().unwrap(),
+        );
+        refusals.our_own(doctor);
+        assert!(!refusals.note("adt", doctor, &error), "our own check");
+        assert!(refusals.note("adt", sender, &error), "the sender on that address is still logged");
+        assert!(!refusals.note("adt", later, &error), "once a minute per address");
+        assert!(refusals.note("orders", later, &error), "per listener");
+        assert!(refusals.note("billing", doctor, &error), "an address is our own once only");
+    }
+
+    /// The request names what the CA needs (subject, names, use as server and client) and carries
+    /// the new key's public half; the key is one the engine loads.
+    #[test]
+    fn a_request_carries_the_names_and_the_new_keys_public_half() {
+        use x509_parser::prelude::*;
+        let names = ["mllp.hospital.org".to_string(), "10.1.2.3".to_string()];
+        for key_type in [KeyType::Rsa, KeyType::Ecdsa] {
+            let (csr, key) = request(&names, "O=General Hospital, OU=Interfaces", key_type).unwrap();
+            assert!(csr.starts_with("-----BEGIN CERTIFICATE REQUEST-----"), "{csr}");
+            let der = rustls::pki_types::CertificateSigningRequestDer::from_pem_slice(csr.as_bytes()).unwrap();
+            let (_, req) = X509CertificationRequest::from_der(der.as_ref()).unwrap();
+            let info = &req.certification_request_info;
+            assert_eq!(info.subject.to_string(), "CN=mllp.hospital.org, O=General Hospital, OU=Interfaces");
+            let mut seen = Vec::new();
+            let mut usages = None;
+            for ext in req.requested_extensions().into_iter().flatten() {
+                match ext {
+                    ParsedExtension::SubjectAlternativeName(san) => {
+                        for n in &san.general_names {
+                            match n {
+                                GeneralName::DNSName(d) => seen.push(d.to_string()),
+                                GeneralName::IPAddress(ip) => seen.push(format!("{ip:?}")),
+                                _ => {}
+                            }
+                        }
+                    }
+                    ParsedExtension::ExtendedKeyUsage(eku) => usages = Some((eku.server_auth, eku.client_auth)),
+                    _ => {}
+                }
+            }
+            assert_eq!(seen, ["mllp.hospital.org", "[10, 1, 2, 3]"], "{key_type:?}");
+            assert_eq!(usages, Some((true, true)), "{key_type:?}");
+            use rcgen::PublicKeyData;
+            let public = rcgen::KeyPair::from_pem(&key).unwrap().subject_public_key_info();
+            assert_eq!(info.subject_pki.raw, public.as_slice(), "{key_type:?}: the CSR is the key's");
+        }
+        let err = request(&names, "OU", KeyType::Ecdsa).unwrap_err().to_string();
+        assert!(err.contains("write each part as ATTR=value"), "{err}");
+        let err = request(&names, "EMAIL=a@b", KeyType::Ecdsa).unwrap_err().to_string();
+        assert!(err.contains("`EMAIL` isn't one of CN, O, OU, C, ST, L"), "{err}");
+        assert!(request(&[], "", KeyType::Ecdsa).is_err());
+    }
 
     fn client_config(ca: &Ca, client: Option<(&str, &str)>) -> Arc<rustls::ClientConfig> {
         let mut roots = rustls::RootCertStore::empty();

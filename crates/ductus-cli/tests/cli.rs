@@ -2090,6 +2090,129 @@ async fn mllp_destinations_send_over_tls_with_a_client_certificate() {
     assert!(arrived(), "relayed over TLS: {}", std::fs::read_to_string(&log).unwrap());
 }
 
+/// `ductus cert request` writes a private key and a CSR and never overwrites them; `cert show`
+/// judges a file or a resources.yaml entry and exits 1 when the engine would refuse the pair.
+#[test]
+fn cert_request_writes_a_key_and_a_request_and_show_judges_what_comes_back() {
+    let dir = project(&[(
+        "resources.yaml",
+        "certificates:\n  engine: { cert_file: tls/engine.pem, key_file: tls/engine.key }\n  lab-ca: { ca_file: tls/engine.pem }\n",
+    )]);
+    let root = dir.path();
+    let (ok, out) = ductus(root, &["cert", "request", "tls/mllp", "--dns", "mllp.hospital.org", "--ip", "10.1.2.3"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("Send tls/mllp.csr to the hospital's CA"), "{out}");
+    assert!(out.contains("a certificate for mllp.hospital.org, 10.1.2.3"), "{out}");
+    assert!(out.contains("Never send tls/mllp.key"), "{out}");
+    assert!(out.contains("cert_file: tls/mllp.pem\n      key_file: tls/mllp.key"), "{out}");
+    let csr = std::fs::read_to_string(root.join("tls/mllp.csr")).unwrap();
+    assert!(csr.starts_with("-----BEGIN CERTIFICATE REQUEST-----"), "{csr}");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(root.join("tls/mllp.key")).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o600, "the key is readable by its owner only");
+    }
+    let key = std::fs::read(root.join("tls/mllp.key")).unwrap();
+    let (ok, out) = ductus(root, &["cert", "request", "tls/mllp", "--dns", "other"]);
+    assert!(!ok && out.contains("tls/mllp.key exists already"), "never overwrites: {out}");
+    assert_eq!(std::fs::read(root.join("tls/mllp.key")).unwrap(), key, "the key is as it was");
+    let (ok, out) = ductus(root, &["cert", "request", "tls/x", "--dns", "10.0.0.1"]);
+    assert!(!ok && out.contains("--dns 10.0.0.1 is an IP address: give it as --ip 10.0.0.1"), "{out}");
+
+    // What comes back, judged: here a self-signed pair stands in for the CA's answer.
+    let (ok, out) = ductus(root, &["cert", "self-signed", "tls/engine", "--name", "localhost"]);
+    assert!(ok, "{out}");
+    let (ok, out) = ductus(root, &["cert", "show", "tls/engine.pem"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("subject  CN=localhost"), "{out}");
+    assert!(out.contains("chain    self-signed: senders must trust this very certificate"), "{out}");
+    assert!(out.contains("key      matches (tls/engine.key)"), "the .key beside it: {out}");
+    let (ok, out) = ductus(root, &["cert", "show", "engine"]);
+    assert!(ok && out.starts_with("✓ certificate `engine` (resources.yaml)"), "{out}");
+    let (ok, out) = ductus(root, &["cert", "show", "lab-ca"]);
+    assert!(ok && out.contains("a CA"), "{out}");
+    let (ok, out) = ductus(root, &["cert", "show", "tls/engine.pem", "--key", "tls/mllp.key"]);
+    assert!(!ok && out.contains("✗ key      the private key isn't this certificate's key (tls/mllp.key)"), "{out}");
+    let (ok, out) = ductus(root, &["cert", "show", "tls/mllp.csr"]);
+    assert!(!ok && out.contains("a certificate signing request (CSR), not a certificate"), "{out}");
+    let (ok, out) = ductus(root, &["cert", "show", "nope"]);
+    assert!(!ok && out.contains("no `certificates:` entry by that name in resources.yaml (engine, lab-ca)"), "{out}");
+}
+
+/// `ductus sink --tls` takes MLLP over TLS only, asking for a client certificate its CA issued
+/// with an allowed subject; `ductus gen --tls` trusts `--ca` and presents `--cert`. A sender
+/// without a certificate is told why, and nothing it sends arrives.
+#[tokio::test(flavor = "multi_thread")]
+async fn gen_and_sink_speak_tls_with_client_certificates() {
+    let dir = project(&[]);
+    let root = dir.path();
+    // 127.0.0.1, not localhost: in WSL localhost is only ::1, and the sink listens on IPv4.
+    for (file, name) in [("sink", "127.0.0.1"), ("sender", "sender.hospital.org"), ("stranger", "stranger")] {
+        let (ok, out) = ductus(root, &["cert", "self-signed", file, "--name", name]);
+        assert!(ok, "{out}");
+    }
+    let port = free_port().to_string();
+    let log = root.join("sink.log");
+    let file = std::fs::File::create(&log).unwrap();
+    let sink = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["sink", "--port", &port, "--tls", "--cert", "sink.pem", "--key", "sink.key"])
+        .args(["--clients-ca", "sender.pem", "--subject", "CN=sender.hospital.org"])
+        .current_dir(root)
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
+        .spawn()
+        .unwrap();
+    let _sink = Child(sink);
+    assert!(wait_for_log(&log, "MLLP over TLS, senders need a certificate from sender.pem", 10));
+    let to = format!("127.0.0.1:{port}");
+    let (ok, out) = ductus(
+        root,
+        &[
+            "gen",
+            "--to",
+            &to,
+            "--count",
+            "20",
+            "--patients",
+            "4",
+            "--ca",
+            "sink.pem",
+            "--cert",
+            "sender.pem",
+            "--key",
+            "sender.key",
+        ],
+    );
+    assert!(ok && out.contains("sent 20 messages over 1 connection(s)"), "{out}");
+    assert!(wait_for_log(&log, "received 20 | unique 20 | duplicates 0 | out of order 0", 10));
+
+    // Refused senders retry forever: each runs a moment and says why.
+    let refused = |args: &[&str]| {
+        let child = Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["gen", "--to", &to, "--count", "1"])
+            .args(args)
+            .current_dir(root)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1500));
+        let mut child = child;
+        child.kill().unwrap();
+        String::from_utf8_lossy(&child.wait_with_output().unwrap().stderr).into_owned()
+    };
+    let out = refused(&["--ca", "sink.pem"]);
+    assert!(out.contains("TLS: the receiver wants a client certificate (name one in --cert)"), "{out}");
+    let out = refused(&["--tls"]);
+    assert!(out.contains("isn't from a CA we trust (name its CA in --ca"), "{out}");
+    let out = refused(&["--ca", "sink.pem", "--cert", "stranger.pem", "--key", "stranger.key"]);
+    assert!(out.contains("the receiver refused our client certificate"), "{out}");
+    assert!(wait_for_log(&log, "reason=the sender presented no client certificate", 5));
+    std::thread::sleep(std::time::Duration::from_millis(5500));
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(!text.contains("received 21"), "nothing refused arrived: {text}");
+}
+
 /// Send one MLLP frame and read until the end of a frame or the connection closes.
 async fn mllp_exchange<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
     stream: &mut S,

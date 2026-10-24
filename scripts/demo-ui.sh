@@ -19,8 +19,7 @@
 # only looks. Certificates (`cert-server`, an example): five TLS servers whose certificates end in
 # 40, 20, 10 and 3 days and two days ago, and one that can't be reached, in the Connections table
 # and the Overview card; ours: orders listens over TLS and takes only senders with a client
-# certificate (a second engine on the database relays its traffic, presenting one), shown on its
-# page, in the "Ours" group and the Ports card. The directory (a throwaway OpenLDAP, scripts/dev/slapd.sh): a directory
+# certificate (`gen --tls` presents one), shown on its page, in the "Ours" group and the Ports card. The directory (a throwaway OpenLDAP, scripts/dev/slapd.sh): a directory
 # person signs in, their account and the Users page show what the directory decides, read-only.
 # Owners: that person owns adt's archive, so their Interfaces page opens on "Mine", and the Owners
 # page says which owners are people with an account and which reach nobody.
@@ -55,15 +54,15 @@ fields:
   downstream: { type: list, label: Downstream systems }
   runbook: { type: url, applies_to: [interface, destination], label: Runbook }
 EOF
-# Ours (0.6.3.3): orders listens over TLS and takes only senders with a certificate relay-ca
-# issued (the second engine below relays orders' traffic: it presents `relay`).
+# Ours (0.6.3.3): orders listens over TLS and takes only senders with a certificate senders-ca
+# issued (`gen` presents `sender`'s below).
 "$BIN" cert self-signed "$P/tls/orders" --name localhost --name 127.0.0.1 >/dev/null
-"$BIN" cert self-signed "$P/tls/relay" --name ui-neighbour >/dev/null
+"$BIN" cert self-signed "$P/tls/sender" --name orders-sender >/dev/null
 # Certificates: five servers (cert-server below) and one nobody listens on.
 cat >"$P/resources.yaml" <<'EOF'
 certificates:
   orders-tls: { cert_file: tls/orders.pem, key_file: tls/orders.key, owner: Orders team, custom: { baa_signed: n/a } }
-  relay-ca: { ca_file: tls/relay.pem, custom: { baa_signed: n/a } }
+  senders-ca: { ca_file: tls/sender.pem, custom: { baa_signed: n/a } }
 apis:
   empi: { url: "http://127.0.0.1:7794/api/v1", application: EMPI, custom: { baa_signed: "yes" } }
   pharmacy: { url: "https://localhost:7461/", custom: { baa_signed: n/a } }
@@ -138,7 +137,7 @@ destinations:
 EOF
 cat >"$P/interfaces/orders/interface.yaml" <<'EOF'
 name: orders
-source: { mllp: { port: 6722, tls: { certificate: orders-tls, clients: { ca: relay-ca, subjects: ["CN=ui-neighbour"] } } } }
+source: { mllp: { port: 6722, tls: { certificate: orders-tls, clients: { ca: senders-ca, subjects: ["CN=orders-sender"] } } } }
 script: transform.ts
 about: { description: Orders checked against the order system, owner: Orders team }
 custom: { data_classification: Internal }
@@ -176,7 +175,7 @@ validation=$("$BIN" validate || true)
 HOOK=$!
 "$CERTS" 7461=40 7462=20 7463=10 7464=3 7465=-2 >"$P/certs.log" 2>&1 &
 TLS=$!
-psql -q "$DB" -c "DELETE FROM certificate_status WHERE resource IN ('pharmacy', 'radiology', 'payer', 'hie', 'legacy-portal', 'fax-gateway', 'orders-tls', 'relay')"
+psql -q "$DB" -c "DELETE FROM certificate_status WHERE resource IN ('pharmacy', 'radiology', 'payer', 'hie', 'legacy-portal', 'fax-gateway', 'orders-tls')"
 "$BIN" run >"$P/run.log" 2>&1 &
 ENGINE=$!
 # cert-server has no SIGINT handler (a background job of a script ignores SIGINT): TERM. slapd too.
@@ -222,13 +221,10 @@ PASSWORD="correct horse staple"
 echo "== another engine on this database, and this project started twice"
 # A second project (another server's interfaces, say) shares the database: fine, and each engine
 # lists the other. The same project started again is refused (exit 3): the audit log says why.
-# It relays orders' traffic over TLS, presenting its client certificate (orders takes no other).
 N=$P/neighbour
 mkdir -p "$N/interfaces/ui-neighbour"
-printf 'name: ui-neighbour\nsource: { mllp: { port: 6726 } }\ndestination: { mllp: { host: 127.0.0.1, port: 6722, tls: { ca: orders-ca, certificate: relay } } }\n' \
+printf 'name: ui-neighbour\nsource: { mllp: { port: 6726 } }\ndestination: { file: { dir: out } }\n' \
   >"$N/interfaces/ui-neighbour/interface.yaml"
-printf 'certificates:\n  orders-ca: { ca_file: %s }\n  relay: { cert_file: %s, key_file: %s }\n' \
-  "$P/tls/orders.pem" "$P/tls/relay.pem" "$P/tls/relay.key" >"$N/resources.yaml"
 "$BIN" run --root "$N" --api-listen off >"$N/run.log" 2>&1 &
 NEIGHBOUR=$!
 trap 'kill -INT $ENGINE $HOOK $NEIGHBOUR 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE $NEIGHBOUR 2>/dev/null || true; forget_waiting || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true' EXIT
@@ -245,8 +241,9 @@ echo "   ui-neighbour runs alongside; this project again: refused (exit 3), the 
 echo "== traffic"
 "$BIN" pause billing --reason "invoice system upgrade tonight" | sed 's/^/   /'
 "$BIN" gen --to 127.0.0.1:6721 --count 30 --patients 5 | tail -1 | sed 's/^/   adt: /'
-# Orders only takes TLS with a client certificate: through ui-neighbour, which presents one.
-"$BIN" gen --to 127.0.0.1:6726 --count 20 --patients 5 | tail -1 | sed 's/^/   orders (relayed over TLS): /'
+# Orders only takes TLS with a client certificate senders-ca issued.
+"$BIN" gen --to 127.0.0.1:6722 --count 20 --patients 5 --ca "$P/tls/orders.pem" --cert "$P/tls/sender.pem" --key "$P/tls/sender.key" \
+  | tail -1 | sed 's/^/   orders (over TLS, with a client certificate): /'
 "$BIN" gen --to 127.0.0.1:6723 --count 10 --patients 5 | tail -1 | sed 's/^/   billing: /'
 # The engine calls a destination stalled after a minute without progress; until then, the lab
 # shows as behind with its last error. Wait for the error and for orders' quarantines.
@@ -255,7 +252,7 @@ for _ in $(seq 1 150); do
   grep '"last_error":{' <<<"$status" >/dev/null && grep '"quarantined":4' <<<"$status" >/dev/null && break
   sleep 0.2
 done
-grep '"quarantined":4' <<<"$status" >/dev/null || { echo "FAIL: orders' traffic didn't arrive over TLS"; tail -20 "$N/run.log"; exit 1; }
+grep '"quarantined":4' <<<"$status" >/dev/null || { echo "FAIL: orders' traffic didn't arrive over TLS"; tail -20 "$P/run.log"; exit 1; }
 
 echo "== certificates (the engine's own check would run a minute or two after start: asked for now)"
 checks=$(curl -s -X POST -H "Authorization: Bearer $DUCTUS_API_TOKEN" -H 'Content-Type: application/json'   -d '{"mode": "certificates", "timeout_ms": 2000}' "$DUCTUS_API_URL/api/v1/doctor")

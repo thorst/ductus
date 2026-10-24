@@ -121,6 +121,13 @@ where
                         }
                     }
                     Ok(None) => break,
+                    // A TLS sender that hangs up without a close_notify: an ordinary close for
+                    // MLLP (frames carry their own end; a half-received one is dropped anyway),
+                    // and many senders do it.
+                    Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                        tracing::debug!(%peer, error = %e, "connection closed");
+                        break;
+                    }
                     Err(e) => {
                         tracing::warn!(%peer, error = %e, "connection error");
                         break;

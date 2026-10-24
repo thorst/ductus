@@ -22,6 +22,7 @@ postgresql_embedded = { version = "0.21.0", default-features = false, features =
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "json"] }
 serde_json = "1.0.151"
 tokio = { version = "1.53.2", features = ["full"] }
+tokio-rustls = "0.26.6"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 
 [target.'cfg(windows)'.dependencies]
@@ -36,4 +37,3 @@ libc = "0.2.190"
 ductus-store = { version = "0.5.0-dev", path = "../ductus-store", features = ["testing"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 tempfile = "3.27.0"
-tokio-rustls = "0.26.6"

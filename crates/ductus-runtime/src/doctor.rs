@@ -40,7 +40,7 @@ pub use ductus_core::settings::DoctorMode as Mode;
 /// Commits timed against the engine's database: enough for a stable median, quick to run.
 const COMMITS: usize = 20;
 /// Warn when a certificate expires within this many days.
-const EXPIRY_WARNING_DAYS: i64 = 30;
+pub const EXPIRY_WARNING_DAYS: i64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, utoipa::ToSchema)]
 #[serde(rename_all = "lowercase")]
@@ -452,6 +452,10 @@ impl Run<'_> {
             };
             match attempt {
                 Ok(Ok(stream)) => {
+                    // Closed unused: one of our TLS listeners mustn't log it as a refused sender.
+                    if let Ok(local) = stream.local_addr() {
+                        crate::tls::Refusals::global().our_own(local);
+                    }
                     let local = stream.local_addr().ok().map(|a| a.ip()).or(from);
                     self.from = self.from.or(local);
                     let at = match local {
@@ -1030,6 +1034,8 @@ impl Run<'_> {
         let config = served_config(presented.clone());
         let handshake = async {
             let tcp = TcpStream::connect(address).await?;
+            // In the engine (the API's checks), the listener is in this process: not a refusal.
+            crate::tls::Refusals::global().our_own(tcp.local_addr()?);
             tokio_rustls::TlsConnector::from(Arc::new(config)).connect(server_name, tcp).await
         };
         let result = tokio::time::timeout(self.timeout, handshake).await;
@@ -1151,7 +1157,8 @@ impl rustls::client::danger::ServerCertVerifier for Accepting {
 /// one this server knows (the system's trusted certificates, or a `certificates:` CA). A last
 /// certificate whose issuer is neither is a missing intermediate, or a private root senders must
 /// have: said both ways, since this server can't tell. The step's outcome and words, and advice.
-fn judge_chain(served: &[Vec<u8>], certificates: &Certificates) -> (Outcome, String, Vec<String>) {
+/// `ductus cert show` judges a file the same way.
+pub fn judge_chain(served: &[Vec<u8>], certificates: &Certificates) -> (Outcome, String, Vec<String>) {
     use x509_parser::prelude::*;
     struct Names {
         subject: Vec<u8>,
@@ -1511,14 +1518,15 @@ impl Chain {
 }
 
 /// What a report says about a certificate.
-pub(crate) struct Certificate {
-    pub(crate) subject: String,
-    pub(crate) issuer: String,
-    pub(crate) names: Vec<String>,
-    pub(crate) not_before: DateTime<Utc>,
-    pub(crate) not_after: DateTime<Utc>,
+pub struct Certificate {
+    /// Its common name (or organisation): the name people say.
+    pub subject: String,
+    pub issuer: String,
+    pub names: Vec<String>,
+    pub not_before: DateTime<Utc>,
+    pub not_after: DateTime<Utc>,
     /// SHA-256 of the DER, hex.
-    pub(crate) fingerprint: String,
+    pub fingerprint: String,
 }
 
 impl Certificate {
@@ -1531,7 +1539,7 @@ impl Certificate {
             .unwrap_or_else(|| n.to_string())
     }
 
-    fn read(der: &[u8]) -> Option<Self> {
+    pub fn read(der: &[u8]) -> Option<Self> {
         use x509_parser::prelude::*;
         let (_, cert) = X509Certificate::from_der(der).ok()?;
         let name = Self::name;
@@ -1562,7 +1570,7 @@ impl Certificate {
         })
     }
 
-    fn days_left(&self) -> i64 {
+    pub fn days_left(&self) -> i64 {
         (self.not_after - chrono::Utc::now()).num_days()
     }
 

@@ -175,6 +175,9 @@ jobs:
       - name: Certificates demo (the engine's own check reads a certificate; 20, 10, 3 days and expired are mailed once each; renewed is a recovery)
         run: BIN=target/release/ductus bash scripts/demo-certs.sh
 
+      - name: TLS demo (cert request and show with an openssl CA; gen → TLS listener with client certificates → TLS destination → sink; a renewal mid-stream, nothing failed or duplicated; our certificate's alert; doctor's chain check)
+        run: BIN=target/release/ductus bash scripts/demo-tls.sh
+
       - name: Directory demo (OpenLDAP sign-in with groups and nested groups, refusals alike, the directory's certificate, a group removal ends the session at the refresh, the directory down and the local break-glass admin)
         run: BIN=target/release/ductus bash scripts/demo-ldap.sh
 

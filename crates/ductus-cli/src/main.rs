@@ -369,6 +369,18 @@ enum Command {
         /// sink without their messages looking like duplicates.
         #[arg(long, default_value_t = 0)]
         offset: u64,
+        /// Send over TLS (also on with --ca or --cert), checking the receiver's certificate
+        /// against this system's trusted roots and --ca, as the engine's `tls:` does.
+        #[arg(long)]
+        tls: bool,
+        /// A CA (PEM) the receiver's certificate may come from (a self-signed one: that file).
+        #[arg(long)]
+        ca: Option<PathBuf>,
+        /// Present this client certificate (PEM, ours first), with --key.
+        #[arg(long, requires = "key")]
+        cert: Option<PathBuf>,
+        #[arg(long, requires = "cert")]
+        key: Option<PathBuf>,
     },
     /// Receive messages over MLLP, ACK them, and verify per-patient ordering. With --smtp or
     /// --http, a mail server or web server that accepts everything and prints it instead (to see
@@ -389,11 +401,65 @@ enum Command {
         /// refuses them would (repeat for several). The engine quarantines them.
         #[arg(long, conflicts_with_all = ["smtp", "http"])]
         reject: Vec<String>,
+        /// Take MLLP over TLS only, presenting --cert and --key (as the engine's `tls:` on a
+        /// listener).
+        #[arg(long, requires_all = ["cert", "key"], conflicts_with_all = ["smtp", "http"])]
+        tls: bool,
+        /// The certificate to present (PEM, ours first, then intermediates).
+        #[arg(long, requires_all = ["tls", "key"])]
+        cert: Option<PathBuf>,
+        #[arg(long, requires_all = ["tls", "cert"])]
+        key: Option<PathBuf>,
+        /// Ask senders for a client certificate this CA (PEM) issued; others are refused.
+        #[arg(long, requires = "tls")]
+        clients_ca: Option<PathBuf>,
+        /// Only client certificates whose subject matches (`CN=bridges*.hospital.org`; repeat).
+        #[arg(long = "subject", requires = "clients_ca")]
+        subjects: Vec<String>,
     },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum KeyKind {
+    Rsa,
+    Ecdsa,
 }
 
 #[derive(Subcommand)]
 enum CertAction {
+    /// A new key and a certificate signing request (CSR) for the hospital's CA: writes OUT.key
+    /// (private, never overwritten) and OUT.csr, and says what to send, what comes back and
+    /// where it goes.
+    Request {
+        /// Where to write, without the extension: `tls/mllp` writes tls/mllp.key and tls/mllp.csr.
+        out: PathBuf,
+        /// A DNS name senders connect to (repeat for several; the first is the CN).
+        #[arg(long = "dns", required_unless_present = "ips")]
+        dns: Vec<String>,
+        /// An IP address senders connect to (repeat for several).
+        #[arg(long = "ip")]
+        ips: Vec<String>,
+        /// The rest of the subject, as the CA wants it: "O=General Hospital, OU=Interfaces, C=US".
+        #[arg(long, default_value = "")]
+        subject: String,
+        /// The key: rsa (2048, what every CA takes) or ecdsa (P-256).
+        #[arg(long, value_enum, default_value_t = KeyKind::Rsa)]
+        key: KeyKind,
+    },
+    /// What a certificate file or a `certificates:` entry holds: subject, names, issuer, the
+    /// chain's order and completeness, days left, and whether the key is the certificate's.
+    /// Exits 1 when the engine or senders would refuse it.
+    Show {
+        /// A PEM file, or the name of a `certificates:` entry in resources.yaml.
+        target: String,
+        /// The key to check (default: the .key file beside a .pem, or the entry's key).
+        #[arg(long)]
+        key: Option<PathBuf>,
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+    },
     /// A self-signed certificate and its key, for a lab or a test: writes OUT.pem and OUT.key and
     /// prints the resources.yaml entry. Senders must be given OUT.pem to trust. Production
     /// certificates come from the hospital's CA.
@@ -817,6 +883,16 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Secret { action } => project::secret(action_args(action)),
         Command::Cert { action: CertAction::SelfSigned { out, names, days } } => cert::self_signed(&out, &names, days),
+        Command::Cert { action: CertAction::Request { out, dns, ips, subject, key } } => {
+            let key = match key {
+                KeyKind::Rsa => ductus_runtime::tls::KeyType::Rsa,
+                KeyKind::Ecdsa => ductus_runtime::tls::KeyType::Ecdsa,
+            };
+            cert::request(&out, &dns, &ips, &subject, key)
+        }
+        Command::Cert { action: CertAction::Show { target, key, root, env } } => {
+            exit_on_failure(cert::show(&target, key.as_deref(), &root, &env))
+        }
         Command::Types { root } => project::types(&root).await,
         Command::ApiSpec => {
             println!("{}", serde_json::to_string_pretty(&ductus_runtime::api::openapi())?);
@@ -833,11 +909,15 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Gen { to, count, patients, rate, connections, hot, offset } => {
-            tools::generate(tools::GenOptions { to, count, patients, rate, connections, hot, offset }).await
+        Command::Gen { to, count, patients, rate, connections, hot, offset, tls, ca, cert, key } => {
+            let tls = (tls || ca.is_some() || cert.is_some()).then_some(tools::TlsFiles { ca, cert, key });
+            tools::generate(tools::GenOptions { to, count, patients, rate, connections, hot, offset, tls }).await
         }
         Command::Sink { smtp: Some(port), dir, .. } => sinks::smtp(port, dir).await,
         Command::Sink { http: Some(port), dir, .. } => sinks::http(port, dir).await,
-        Command::Sink { port, reject, .. } => tools::sink(port, reject).await,
+        Command::Sink { port, reject, tls, cert, key, clients_ca, subjects, .. } => {
+            let files = tools::TlsFiles { ca: clients_ca, cert, key };
+            tools::sink(port, reject, tls.then_some(tools::SinkTls { files, subjects })).await
+        }
     }
 }

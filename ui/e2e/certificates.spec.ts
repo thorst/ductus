@@ -87,7 +87,7 @@ test("ours: orders' certificate, where it's presented, and the ports with their 
   const ports = page.getByRole("region", { name: "Ports" });
   const listening = ports.getByRole("table", { name: "Listening" }).getByRole("row", { name: /6722/ });
   await expect(listening).toContainText("MLLP over TLS");
-  await expect(listening).toContainText("presents orders-tls, clients need a certificate from relay-ca");
+  await expect(listening).toContainText("presents orders-tls, clients need a certificate from senders-ca");
   await expect(ports.getByRole("table", { name: "Listening" }).getByRole("row", { name: /6721/ })).toContainText(
     "none",
   );
@@ -101,7 +101,7 @@ test("ours: orders' certificate, where it's presented, and the ports with their 
 test("orders' source line says it takes TLS, and from whom", async ({ page }) => {
   await signInAs(page, viewer, "/interfaces/orders");
   const source = page.getByRole("definition").filter({ hasText: "MLLP over TLS" });
-  await expect(source).toContainText("MLLP over TLS, clients need a certificate from relay-ca (CN=ui-neighbour)");
+  await expect(source).toContainText("MLLP over TLS, clients need a certificate from senders-ca (CN=orders-sender)");
   await expect(source).toContainText("0.0.0.0:6722");
   await expect(source).toContainText("presents orders-tls");
   await expect(source.locator("svg.lucide-lock")).toHaveCount(1);

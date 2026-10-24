@@ -301,6 +301,30 @@ mod tests {
         assert_eq!(send_mllp(&certificates, port, Some(connecting(Some("server-ca"), None)), "wait").await, Ok(()));
     }
 
+    /// A lab receiver whose certificate was made as a CA's (`openssl req -x509` does by default):
+    /// refused, in words that say so.
+    #[tokio::test]
+    async fn a_receiver_presenting_a_ca_certificate_is_refused_in_words() {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let cert = params.self_signed(&key).unwrap();
+        let entries = std::collections::BTreeMap::from([
+            ("ours".to_string(), crate::tls::testing::entry(&cert.pem(), &key.serialize_pem())),
+            (
+                "server-ca".to_string(),
+                ductus_core::resources::CertificateEntry { ca: Some(cert.pem()), ..Default::default() },
+            ),
+        ]);
+        let certificates = Certificates::load(&entries).unwrap();
+        let port = tls_receiver(&certificates, &ListenTls { certificate: "ours".into(), clients: None }).await;
+        let err = send_mllp(&certificates, port, Some(connecting(Some("server-ca"), None)), "wait").await.unwrap_err();
+        assert!(
+            err.starts_with("transient: TLS: the receiver presents a CA's certificate (CA:TRUE) as its own"),
+            "{err}"
+        );
+    }
+
     #[tokio::test]
     async fn https_destinations_present_a_client_certificate() {
         let (server_ca, client_ca) = (ca("receiver's CA"), ca("clients' CA"));
