@@ -1321,6 +1321,35 @@ mod tests {
         assert!(talk(addr, client_config(&server_ca, None)).await.is_err(), "no client certificate");
     }
 
+    /// Post-quantum key exchange (X25519 + ML-KEM-768, the hybrid browsers use) between our own
+    /// ends, and still a plain X25519 handshake with a peer that doesn't offer it.
+    #[tokio::test]
+    async fn key_exchange_is_post_quantum_and_falls_back() {
+        let server_ca = ca("server CA");
+        let (cert, key) = leaf(&server_ca, &[(rcgen::DnType::CommonName, "engine")], &["localhost"], 90);
+        let certificates = Certificates::load(&BTreeMap::from([("ours".to_string(), entry(&cert, &key))])).unwrap();
+        let config = certificates.server(&ListenTls { certificate: "ours".into(), clients: None }, &[]).unwrap();
+        let addr = echo(config).await;
+        let group = |client: Arc<rustls::ClientConfig>| async move {
+            let tcp = TcpStream::connect(addr).await.unwrap();
+            let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+            let tls = tokio_rustls::TlsConnector::from(client).connect(name, tcp).await.unwrap();
+            tls.get_ref().1.negotiated_key_exchange_group().map(|g| g.name())
+        };
+        assert_eq!(group(client_config(&server_ca, None)).await, Some(rustls::NamedGroup::X25519MLKEM768));
+
+        let mut old = rustls::crypto::aws_lc_rs::default_provider();
+        old.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add(server_ca.cert.der().clone()).unwrap();
+        let old = rustls::ClientConfig::builder_with_provider(Arc::new(old))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_root_certificates(roots)
+            .with_no_client_auth();
+        assert_eq!(group(Arc::new(old)).await, Some(rustls::NamedGroup::X25519), "a peer without it");
+    }
+
     /// Linux: every 127.x address is this machine, so a test can connect from one not allowed.
     #[cfg(target_os = "linux")]
     #[tokio::test]

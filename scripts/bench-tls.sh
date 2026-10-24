@@ -3,7 +3,8 @@
 #   1. Strict MLLP ingest (ACKs per second) over TLS and plain, with 1 and 16 connections.
 #   2. Handshake time (a sender's connect to the end of its handshake), full and resumed: an
 #      ECDSA P-256 certificate (`cert self-signed`), an RSA 2048 one (what many hospital CAs
-#      issue), and ECDSA with a client certificate checked.
+#      issue), and ECDSA with a client certificate checked. Post-quantum key exchange (the
+#      default since 0.6.4.1) against X25519 only (a peer without it).
 #   3. The engine's memory per idle connection, 1,000 held open, TLS and plain (one engine each).
 #   4. Respond mode over HTTPS and HTTP: p50/p95 with keep-alive and with a new connection (and a
 #      full handshake) per request.
@@ -85,8 +86,10 @@ done
 echo "== handshake: a sender's connect to the end of its handshake (500 one after another)"
 "$TB" connect 127.0.0.1:6761 500 | sed 's/^/   plain TCP            /'
 "$TB" connect 127.0.0.1:6762 500 --ca tls/ecdsa.pem | sed 's/^/   ECDSA, full          /'
+"$TB" connect 127.0.0.1:6762 500 --ca tls/ecdsa.pem --classic | sed 's/^/   ECDSA, X25519 only   /'
 "$TB" connect 127.0.0.1:6762 500 --ca tls/ecdsa.pem --resume | sed 's/^/   ECDSA, resumed       /'
 "$TB" connect 127.0.0.1:6763 500 --ca tls/ca.pem | sed 's/^/   RSA 2048, full       /'
+"$TB" connect 127.0.0.1:6763 500 --ca tls/ca.pem --classic | sed 's/^/   RSA 2048, X25519 only/'
 "$TB" connect 127.0.0.1:6764 500 --ca tls/ecdsa.pem --cert tls/client.pem --key tls/client.key | sed 's/^/   ECDSA + client cert  /'
 
 echo "== respond mode, 2,000 GETs one after another (p50/p95)"

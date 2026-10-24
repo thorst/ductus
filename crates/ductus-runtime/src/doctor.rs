@@ -768,8 +768,7 @@ impl Run<'_> {
         let about = leaf.as_ref().map(Certificate::describe).unwrap_or_default();
         let trusted = match result {
             Ok(Ok(mut stream)) => {
-                let version = stream.get_ref().1.protocol_version().map(|v| format!("{v:?}")).unwrap_or_default();
-                let version = version.replace("TLSv1_", "TLS 1.");
+                let version = negotiated(stream.get_ref().1);
                 let client = trust.client_pair().map(|p| format!("; presented client certificate `{}`", p.name));
                 let client = client.unwrap_or_default();
                 let days = seen.chain_not_after.map(|t| (t - Utc::now()).num_days()).unwrap_or(i64::MAX);
@@ -1108,12 +1107,7 @@ impl Run<'_> {
         let result = tokio::time::timeout(self.timeout, handshake).await;
         let served: Vec<Vec<u8>> = presented.lock().expect("certificate lock").clone();
         let version = match &result {
-            Ok(Ok(stream)) => stream
-                .get_ref()
-                .1
-                .protocol_version()
-                .map(|v| format!("{v:?}").replace("TLSv1_", "TLS 1."))
-                .unwrap_or_default(),
+            Ok(Ok(stream)) => negotiated(stream.get_ref().1),
             _ => String::new(),
         };
         if served.is_empty() {
@@ -1308,6 +1302,20 @@ pub fn judge_chain(served: &[Vec<u8>], certificates: &Certificates) -> (Outcome,
 /// How long a finished handshake is watched for the server refusing our client certificate (a
 /// round trip is enough; a server that accepts sends nothing and waits for us).
 const REFUSAL_WAIT: Duration = Duration::from_millis(500);
+
+/// The TLS version and key exchange a handshake agreed: `TLS 1.3, post-quantum key exchange
+/// (X25519MLKEM768)` or `TLS 1.3, key exchange X25519` (a peer that doesn't offer the hybrid yet:
+/// what it sends today can be recorded and decrypted once quantum computers can).
+fn negotiated(conn: &rustls::CommonState) -> String {
+    let version = conn.protocol_version().map(|v| format!("{v:?}").replace("TLSv1_", "TLS 1.")).unwrap_or_default();
+    match conn.negotiated_key_exchange_group().map(|g| g.name()) {
+        Some(g @ (rustls::NamedGroup::X25519MLKEM768 | rustls::NamedGroup::secp256r1MLKEM768)) => {
+            format!("{version}, post-quantum key exchange ({g:?})")
+        }
+        Some(g) => format!("{version}, key exchange {g:?}"),
+        None => version,
+    }
+}
 
 /// The server's refusal after the handshake (TLS 1.3: of our client certificate, or of none), in
 /// plain words: a TLS alert. `None` when it said nothing within `wait`, sent data, or just closed.
@@ -2062,6 +2070,7 @@ mod tests {
         assert!(step(&c, "connect").detail.starts_with("127.0.0.1:"), "over loopback: {c:#?}");
         assert!(step(&c, "TLS").detail.contains("serves `full`: certificate for engine, issued by Test Intermediate"));
         assert!(step(&c, "TLS").detail.contains("covers engine.lab, 127.0.0.1"), "{c:#?}");
+        assert!(step(&c, "TLS").detail.starts_with("TLS 1.3, post-quantum key exchange (X25519MLKEM768)"), "{c:#?}");
         assert_eq!(
             step(&c, "chain").detail,
             "complete: engine → Test Intermediate, issued by Test Root (the CA `root` in resources.yaml)"
@@ -2402,6 +2411,7 @@ mod tests {
         // Not the whole check: where localhost is also ::1 (CI), that address warns (nothing listens there).
         assert_eq!(step(&c, "TLS").outcome, Outcome::Ok, "{c:#?}");
         assert!(step(&c, "TLS").detail.contains("presented client certificate `client`"), "{c:#?}");
+        assert!(step(&c, "TLS").detail.contains("post-quantum key exchange (X25519MLKEM768), trusted"), "{c:#?}");
         assert_eq!(c.endpoint, format!("localhost:{port} MLLP over TLS"));
         assert!(c.certificate.as_ref().is_some_and(|s| s.trusted && s.subject.as_deref() == Some("receiver")));
 

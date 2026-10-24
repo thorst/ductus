@@ -3,7 +3,8 @@
 //! ```text
 //! tls-bench connect 127.0.0.1:6762 500 [--ca FILE] [--cert FILE --key FILE] [--resume]
 //!     500 connections one after another, each to the end of its handshake (TCP only without
-//!     --ca); full handshakes unless --resume: p50/p95/mean in ms
+//!     --ca); full handshakes unless --resume: p50/p95/mean in ms. Post-quantum key exchange
+//!     (X25519MLKEM768) unless --classic (X25519 only, as a peer without it)
 //! tls-bench hold 127.0.0.1:6762 1000 [--ca FILE] [--cert FILE --key FILE]
 //!     open 1,000 connections and keep them idle until SIGTERM
 //! tls-bench http https://localhost:6766/ping 2000 [--ca FILE] [--new]
@@ -26,15 +27,16 @@ struct Args {
     pair: Option<(String, String)>,
     resume: bool,
     new: bool,
+    /// Offer only X25519, as a peer without post-quantum key exchange does.
+    classic: bool,
 }
 
 fn args() -> Args {
     let mut it = std::env::args().skip(1);
-    let usage =
-        "usage: tls-bench connect|hold|http TARGET COUNT [--ca FILE] [--cert FILE --key FILE] [--resume] [--new]";
+    let usage = "usage: tls-bench connect|hold|http TARGET COUNT [--ca FILE] [--cert FILE --key FILE] [--resume] [--new] [--classic]";
     let (mode, target, count) = (it.next().expect(usage), it.next().expect(usage), it.next().expect(usage));
-    let mut a =
-        Args { mode, target, count: count.parse().expect(usage), ca: None, pair: None, resume: false, new: false };
+    let count = count.parse().expect(usage);
+    let mut a = Args { mode, target, count, ca: None, pair: None, resume: false, new: false, classic: false };
     let (mut cert, mut key) = (None, None);
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -43,6 +45,7 @@ fn args() -> Args {
             "--key" => key = it.next(),
             "--resume" => a.resume = true,
             "--new" => a.new = true,
+            "--classic" => a.classic = true,
             _ => panic!("{usage}"),
         }
     }
@@ -58,7 +61,11 @@ fn client(a: &Args) -> rustls::ClientConfig {
     for cert in CertificateDer::pem_slice_iter(&ca) {
         roots.add(cert.expect("a certificate")).expect("a CA");
     }
-    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(rustls::crypto::aws_lc_rs::default_provider()))
+    let mut provider = rustls::crypto::aws_lc_rs::default_provider();
+    if a.classic {
+        provider.kx_groups = vec![rustls::crypto::aws_lc_rs::kx_group::X25519];
+    }
+    let builder = rustls::ClientConfig::builder_with_provider(Arc::new(provider))
         .with_safe_default_protocol_versions()
         .unwrap()
         .with_root_certificates(roots);

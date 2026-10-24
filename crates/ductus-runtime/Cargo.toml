@@ -21,7 +21,9 @@ ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "crypto", "pem"] }
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "pool", "builder", "hostname", "tokio1", "tokio1-rustls", "rustls-platform-verifier", "aws-lc-rs"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls", "http2"] }
-rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+# prefer-post-quantum (rustls's own default): the hybrid X25519MLKEM768 key exchange first, for
+# every TLS connection in the binary (features unify); peers without it fall back at no extra cost.
+rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12", "prefer-post-quantum"] }
 rustls-native-certs = "0.8.4"
 rustls-platform-verifier = "0.7.1"
 # Already in the tree through rustls: its errors, read for plain words (`tls::outbound_failure`).
