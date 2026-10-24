@@ -224,6 +224,9 @@ PARTIAL=$(sql "SELECT count(*) FROM messages WHERE interface = 'big'")
 echo "  killed after $PARTIAL of $ROWS rows were stored"
 start run2.log
 wait_for 120 '[ -f interfaces/big/in/archive/labs.csv ]' || true
+# The progress row goes just after the file is archived (in that order: a crash in between leaves a
+# stale row, never a file read twice), so wait for it rather than read it once.
+wait_for 10 '[ "$(sql "SELECT count(*) FROM source_state WHERE interface = '"'big'"'")" = 0 ]' || true
 check "resumed where it stopped" "1" "$(grep -c 'resuming a partly read file' run2.log)"
 check "every row stored" "$ROWS" "$(sql "SELECT count(*) FROM messages WHERE interface = 'big'")"
 check "no row stored twice" "$ROWS" "$(sql "SELECT count(DISTINCT payload) FROM messages WHERE interface = 'big'")"
