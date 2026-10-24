@@ -1610,11 +1610,14 @@ dependencies = [
  "chrono",
  "ductus-store",
  "getrandom 0.4.3",
+ "rustls",
  "serde_json",
  "sha2 0.10.9",
  "sqlx",
+ "sqlx-core",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4708,6 +4711,7 @@ dependencies = [
  "memchr",
  "percent-encoding",
  "rustls",
+ "rustls-native-certs",
  "serde",
  "serde_json",
  "sha2 0.10.9",

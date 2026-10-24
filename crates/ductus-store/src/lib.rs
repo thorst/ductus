@@ -18,6 +18,7 @@ mod engines;
 mod retention;
 #[cfg(feature = "testing")]
 pub mod testing;
+pub mod tls;
 mod users;
 
 pub use actions::{Action, Actor, Copy, Dismissed, Edited, Quarantined, Resend, Resent};
@@ -222,13 +223,15 @@ pub struct Store {
 }
 
 impl Store {
-    /// Connect, apply migrations, and make sure upcoming partitions exist.
+    /// Connect, apply migrations, and make sure upcoming partitions exist. The URL's TLS is
+    /// libpq's (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`; `prefer` by default), trusting the
+    /// system's certificates plus `sslrootcert`; a refusal says why in words.
     pub async fn connect(url: &str, max_connections: u32) -> Result<Self> {
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
-            .connect(url)
+            .connect(&tls::connect_url(url))
             .await
-            .context("connecting to PostgreSQL")?;
+            .map_err(|e| tls::connect_error(e, url))?;
         let mut migrator = sqlx::migrate!("./migrations");
         // A newer engine may have applied migrations this binary doesn't know. Migrations are
         // expand-only, so older binaries keep working: that's what makes rollback safe.
@@ -253,8 +256,18 @@ impl Store {
     /// read (`ductus validate`, `ductus owners`), which may run with a newer binary than the
     /// engines on that database, before it is deployed.
     pub async fn connect_read_only(url: &str) -> Result<Self> {
-        let pool = PgPoolOptions::new().max_connections(2).connect(url).await.context("connecting to PostgreSQL")?;
+        let pool = PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&tls::connect_url(url))
+            .await
+            .map_err(|e| tls::connect_error(e, url))?;
         Ok(Self { pool })
+    }
+
+    /// The TLS version of a connection to this database as the server reports it (`TLSv1.3`),
+    /// None when plain. Every pool connection is made the same way, so one tells for all.
+    pub async fn tls_version(&self) -> Result<Option<String>> {
+        tls::version(&self.pool).await
     }
 
     /// Day partitions from yesterday to `days_ahead` days ahead, for `messages` and then

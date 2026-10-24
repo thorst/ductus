@@ -87,6 +87,65 @@ impl TestUsers {
     }
 }
 
+/// A throwaway Postgres with TLS (`scripts/dev/pgtls.sh`: its own CA and certificates, on
+/// 127.0.0.1 and 127.0.0.2), stopped and deleted when dropped. `start` is None, with a note, when
+/// the Postgres server binaries aren't installed, unless `DUCTUS_TEST_PGTLS=required` (CI), which
+/// makes that a failure.
+pub struct PgTls {
+    pub dir: std::path::PathBuf,
+    pub port: u16,
+}
+
+impl PgTls {
+    fn script() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/dev/pgtls.sh")
+    }
+
+    pub fn start() -> Option<Self> {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
+        let dir = std::env::temp_dir().join(format!("ductus-pgtls.{}.{nanos}", std::process::id()));
+        let port = std::net::TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok()?.port();
+        let started = std::process::Command::new("bash")
+            .arg(Self::script())
+            .args(["start", dir.to_str()?, &port.to_string()])
+            .status()
+            .expect("running scripts/dev/pgtls.sh");
+        let required = std::env::var("DUCTUS_TEST_PGTLS").as_deref() == Ok("required");
+        match started.code() {
+            Some(0) => Some(Self { dir, port }),
+            Some(2) if !required => {
+                eprintln!("(Postgres TLS tests skipped: apt-get install postgresql)");
+                let _ = std::fs::remove_dir_all(&dir);
+                None
+            }
+            _ => panic!("the TLS Postgres didn't start (scripts/dev/pgtls.sh)"),
+        }
+    }
+
+    /// A file it made (`ca.pem`, `other-ca.pem`, `client.pem`, `client.key`, ...).
+    pub fn file(&self, name: &str) -> String {
+        self.dir.join(name).display().to_string()
+    }
+
+    /// `postgres://ductus:ductus@<host>:<port>/ductus?<query>`.
+    pub fn url(&self, host: &str, query: &str) -> String {
+        format!("postgres://ductus:ductus@{host}:{}/ductus?{query}", self.port)
+    }
+
+    /// verify-full against its own CA.
+    pub fn verified_url(&self) -> String {
+        self.url("127.0.0.1", &format!("sslmode=verify-full&sslrootcert={}", self.file("ca.pem")))
+    }
+}
+
+impl Drop for PgTls {
+    fn drop(&mut self) {
+        let _ = std::process::Command::new("bash").arg(Self::script()).arg("stop").arg(&self.dir).status();
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
+}
+
 /// A test that failed before `forget`. Drop can't await and can't block on the test's runtime (it
 /// runs inside it), so a thread of its own deletes them. That blocks the test's runtime meanwhile:
 /// a ROLLBACK it hasn't sent yet keeps its locks, so the delete gives up after `lock_timeout` and

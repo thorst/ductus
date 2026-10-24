@@ -56,9 +56,27 @@ pub struct Outbound {
     /// The interface, or `resources.yaml: <name>`.
     pub used_by: String,
     /// For MLLP, HTTP and directories: `none`, or TLS with what it trusts and presents
-    /// (`TLS: hie-ca trusted, client certificate ductus-client`). Empty for the rest (SFTP is
-    /// SSH; databases are 0.6.4's).
+    /// (`TLS: hie-ca trusted, client certificate ductus-client`). Postgres: whether it's verified
+    /// (`TLS, verified: hospital-ca trusted`, `TLS if offered, not verified (prefer)`). Empty for
+    /// the rest (SFTP is SSH; SQL Server is 0.6.4.3's).
     pub tls: String,
+}
+
+/// The engine's own database (`DUCTUS_DATABASE_URL`) as a connection, with its TLS as the URL
+/// sets it. None for a Unix socket (nothing to open in a firewall) or what isn't a Postgres URL.
+pub fn engine_database(url: &str) -> Option<Outbound> {
+    let u = crate::pgtls::UrlTls::read(url).filter(|u| !u.socket())?;
+    let mut tls = u.mode.expected().to_string();
+    if let Some(ca) = &u.root_cert {
+        tls = format!("{tls}: {} trusted", ca.display());
+    }
+    Some(Outbound {
+        host: u.host,
+        port: u.port,
+        protocol: "Postgres",
+        used_by: "the engine (DUCTUS_DATABASE_URL)".into(),
+        tls,
+    })
 }
 
 /// TLS on a connection, for a table: `TLS` (the platform's trusted certificates), or with what it
@@ -167,6 +185,10 @@ pub fn outbound<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>, reso
                         }
                         None => String::new(),
                     },
+                    Kind::Database => match resources.databases.get(name) {
+                        Some(crate::resources::Database::Postgres(c)) => c.tls_summary(),
+                        _ => String::new(),
+                    },
                     _ => String::new(),
                 };
                 out.push(Outbound { host: e.host, port: e.port, protocol: e.protocol, used_by, tls });
@@ -254,7 +276,19 @@ mod tests {
             ]
         );
         let tls: Vec<_> = o.iter().map(|o| o.tls.as_str()).collect();
-        assert_eq!(tls, ["TLS", "", "TLS", "none", "TLS", "TLS", "", ""], "TLS where the protocol has it");
+        assert_eq!(
+            tls,
+            ["TLS", "TLS if offered, not verified (prefer)", "TLS", "none", "TLS", "TLS", "", ""],
+            "TLS where the protocol has it"
+        );
+        let db =
+            engine_database("postgres://ductus@db1.hospital.org/ductus?sslmode=verify-full&sslrootcert=/etc/ca.pem")
+                .unwrap();
+        assert_eq!(
+            (db.host.as_str(), db.port, db.tls.as_str()),
+            ("db1.hospital.org", 5432, "TLS, verified: /etc/ca.pem trusted")
+        );
+        assert!(engine_database("postgres:///ductus?host=/run/postgresql").is_none(), "a socket opens nothing");
 
         let configs = [config(
             "name: x\nsource: { file: { dir: in } }\ndestinations:\n  a: { mllp: { host: h, port: 1, tls: { ca: hie-ca, certificate: me } } }\n  b: { http: { url: 'http://h:2/x' } }\n",

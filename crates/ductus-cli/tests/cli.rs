@@ -75,6 +75,34 @@ DUCTUS_ENV=\"prod\"
     assert!(!ok && out.contains("reading the env file"), "{out}");
 }
 
+/// A CA installed on this server counts for the engine's database as for MLLP and HTTPS: sqlx
+/// trusts the system's certificates (sqlx-core's internal `rustls-native-certs` feature; without
+/// it, only bundled Mozilla roots). `SSL_CERT_FILE` stands in for the system's store. Guards that
+/// feature name across sqlx bumps. A throwaway TLS Postgres (`scripts/dev/pgtls.sh`).
+#[test]
+fn the_system_s_trusted_certificates_count() {
+    let Some(pg) = ductus_store::testing::PgTls::start() else { return };
+    let parent = tempfile::tempdir().unwrap();
+    assert!(ductus(parent.path(), &["init", "p"]).0);
+    let validate = |system: Option<String>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ductus"));
+        command
+            .arg("validate")
+            .current_dir(parent.path().join("p"))
+            .env("DUCTUS_DATABASE_URL", pg.url("127.0.0.1", "sslmode=verify-full"))
+            .env_remove("SSL_CERT_DIR");
+        match system {
+            Some(file) => command.env("SSL_CERT_FILE", file),
+            None => command.env_remove("SSL_CERT_FILE"),
+        };
+        String::from_utf8_lossy(&command.output().unwrap().stdout).into_owned()
+    };
+    let out = validate(Some(pg.file("ca.pem")));
+    assert!(out.contains("✓ database: TLS 1.3, verified (sslmode=verify-full)"), "{out}");
+    let out = validate(None);
+    assert!(out.contains("✗ database: connecting to PostgreSQL over TLS: the database server's certificate isn't from a CA this server trusts"), "{out}");
+}
+
 #[test]
 fn a_new_project_passes_test_and_validate_as_generated() {
     let parent = tempfile::tempdir().unwrap();
@@ -173,7 +201,7 @@ fn hospital() -> tempfile::TempDir {
             "resources.yaml",
             r#"
 databases:
-  clarity: { postgres: { host: 10.20.30.9, database: clarity, user: u, application: Clarity, vendor: Epic Systems } }
+  clarity: { postgres: { host: 10.20.30.9, database: clarity, user: u, tls: verify-full, application: Clarity, vendor: Epic Systems } }
 sftp:
   quest: { host: sftp.quest.example.com, user: u, password: p, host_key: any, vendor: Quest }
 apis:
@@ -359,7 +387,7 @@ Listening
 
 Connects to
   HOST        PORT  PROTOCOL  USED BY{}TLS
-  db1         5432  Postgres  resources.yaml: pdb
+  db1         5432  Postgres  resources.yaml: pdb  TLS if offered, not verified (prefer)
   epic.local  5000  MLLP      adt{}none
 
 ✓ no port conflicts

@@ -315,6 +315,11 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> R
                     "⚠ ldap `{name}`: plain ldap:// (`insecure: true`) sends passwords readable; use ldaps:// or `starttls: true` outside a test directory"
                 );
             }
+            for (name, mode) in r.unverified_postgres() {
+                println!(
+                    "⚠ database `{name}`: `tls: {mode}` doesn't check its certificate (whoever answers at its address is believed, and sees every query): set `tls: verify-full`, with `ca:` for a private CA"
+                );
+            }
             Some(r)
         }
         Err(e) => {
@@ -532,6 +537,14 @@ async fn check_database(root: &Path, url: &str, configs: &[&InterfaceConfig]) ->
             return 1;
         }
     };
+    match ductus_runtime::database_security(&store, url).await {
+        Ok(s) if s.warns() => println!(
+            "⚠ database: {s}; whoever answers at its address is believed: add sslmode=verify-full to DUCTUS_DATABASE_URL (sslrootcert=/path/ca.pem for a private CA)"
+        ),
+        Ok(s) if s.local && !s.verified() => println!("✓ database: {s} (on this machine)"),
+        Ok(s) => println!("✓ database: {s}"),
+        Err(e) => println!("⚠ database: couldn't read how the connection is protected: {e:#}"),
+    }
     let lanes: Vec<Lanes> = configs.iter().filter_map(|c| Lanes::of(c)).collect();
     let names: Vec<String> = lanes.iter().map(|l| l.interface.clone()).collect();
     let recorded = store.has_table("interface_applied").await.unwrap_or(false);

@@ -177,13 +177,15 @@ pub fn probes(
     probes
 }
 
-/// The certificates the engine connects to (what scheduled checks read and alerts judge).
+/// The certificates the engine connects to (what scheduled checks read and alerts judge), its
+/// own database's included when it verifies it (`database_url`).
 pub fn targets(
     configs: &[&InterfaceConfig],
     resources: &ductus_core::Resources,
+    database_url: &str,
     alerts: Option<&ductus_core::alerts::AlertSettings>,
 ) -> Vec<CertificateTarget> {
-    let probes = probes(configs, resources, "", &Default::default(), alerts, &[]);
+    let probes = probes(configs, resources, database_url, &Default::default(), alerts, &[]);
     let mut out: Vec<CertificateTarget> = Vec::new();
     for p in doctor::certificates_only(probes) {
         let Some((host, port)) = p.target.address() else { continue };

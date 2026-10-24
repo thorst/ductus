@@ -9,6 +9,9 @@
 //!       user: ductus
 //!       password: ${secret:PATIENT_DB_PASSWORD}
 //!       max_connections: 10
+//!       tls: verify-full                       # libpq's sslmode; default prefer (not verified), or
+//!       ca: hospital-ca                        #   verify-full when a CA is named (`certificates:`)
+//!       certificate: ductus-db                 # optional: log in with a client certificate
 //!   billing_db:
 //!     sqlserver:
 //!       host: billing.hospital.local
@@ -441,6 +444,19 @@ pub struct DbConnection {
     /// Size of the shared connection pool.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// libpq's `sslmode`: `disable`, `prefer` (TLS when offered, not verified: libpq's default),
+    /// `require` (not verified), `verify-ca` or `verify-full`. Default: `verify-full` when `ca`
+    /// is given, else `prefer` (`mode()`).
+    #[serde(default)]
+    pub tls: Option<crate::pgtls::SslMode>,
+    /// The server may also be issued by this CA (a `certificates:` entry), besides those this
+    /// server trusts.
+    #[serde(default)]
+    pub ca: Option<String>,
+    /// Log in with this client certificate (a `certificates:` pair; Postgres's `cert` login in
+    /// pg_hba.conf, or presented alongside the password).
+    #[serde(default)]
+    pub certificate: Option<String>,
     #[serde(default)]
     pub application: Option<String>,
     #[serde(default)]
@@ -451,6 +467,39 @@ pub struct DbConnection {
     /// Company-defined documentation fields (`docs-schema.yaml`).
     #[serde(default)]
     pub custom: crate::docs::Custom,
+}
+
+impl DbConnection {
+    /// Its `sslmode`: `tls:`, else `verify-full` when it names a CA (naming one only makes sense
+    /// to check against it), else libpq's `prefer`.
+    pub fn mode(&self) -> crate::pgtls::SslMode {
+        use crate::pgtls::SslMode;
+        self.tls.unwrap_or(if self.ca.is_some() { SslMode::VerifyFull } else { SslMode::Prefer })
+    }
+
+    /// Its `ca` and `certificate`.
+    pub fn connect_tls(&self) -> crate::tls::ConnectTls {
+        crate::tls::ConnectTls::new(&self.ca, &self.certificate)
+    }
+
+    /// What's wrong with its TLS settings, if anything (checked when resources.yaml is loaded).
+    fn problem(&self) -> Option<String> {
+        let mode = self.mode();
+        if self.ca.is_some() && !mode.verifies() {
+            return Some(format!(
+                "`ca` is only checked with `tls: verify-full` (or verify-ca), and this says `tls: {mode}`: drop `tls` (naming a CA means verify-full) or set it"
+            ));
+        }
+        (self.certificate.is_some() && !mode.tries_tls())
+            .then(|| format!("`certificate` is presented over TLS, and `tls: {mode}` turns TLS off"))
+    }
+
+    /// Its TLS for a table (`ductus ports`, Connections): `TLS, verified: hospital-ca trusted`.
+    pub fn tls_summary(&self) -> String {
+        let summary = self.connect_tls().summary();
+        let expected = self.mode().expected();
+        if summary.is_empty() { expected.to_string() } else { format!("{expected}: {summary}") }
+    }
 }
 
 /// SQL Server, with SQL Server authentication (user and password).
@@ -498,6 +547,7 @@ impl std::fmt::Debug for DbConnection {
             .field("port", &self.port)
             .field("database", &self.database)
             .field("user", &self.user)
+            .field("tls", &self.mode())
             .finish_non_exhaustive()
     }
 }
@@ -554,7 +604,28 @@ impl Resources {
                 bail!("in {}: ldap `{name}`: {problem}", file.display());
             }
         }
+        for (name, db) in &resources.databases {
+            if let Database::Postgres(c) = db
+                && let Some(problem) = c.problem()
+            {
+                bail!("in {}: database `{name}`: {problem}", file.display());
+            }
+        }
         Ok(resources)
+    }
+
+    /// Postgres databases on another machine whose certificate the engine doesn't check
+    /// (`tls:` other than verify-full or verify-ca), with how they're set: for warnings.
+    pub fn unverified_postgres(&self) -> Vec<(&str, crate::pgtls::SslMode)> {
+        self.databases
+            .iter()
+            .filter_map(|(name, d)| match d {
+                Database::Postgres(c) if !c.mode().verifies() && !crate::pgtls::local(&c.host) => {
+                    Some((name.as_str(), c.mode()))
+                }
+                _ => None,
+            })
+            .collect()
     }
 
     /// Directories reached without TLS (`insecure: true`), for warnings.
@@ -776,6 +847,42 @@ mod tests {
         std::fs::write(&file, "databases:\n  p:\n    postgres: { host: h, database: d, user: u, instance: X }\n")
             .unwrap();
         assert!(Resources::load(dir.path(), &Environment::with_variables("dev", &[])).is_err());
+    }
+
+    #[test]
+    fn postgres_tls_is_libpq_s_sslmode_and_a_named_ca_means_verify_full() {
+        use crate::pgtls::SslMode;
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("resources.yaml");
+        let load = |text: &str| {
+            std::fs::write(&file, format!("databases:\n{text}")).unwrap();
+            Resources::load(dir.path(), &Environment::with_variables("dev", &[])).map_err(|e| format!("{e:#}"))
+        };
+        let r = load(
+            "  a: { postgres: { host: db1, database: d, user: u } }\n  b: { postgres: { host: db1, database: d, user: u, ca: hospital-ca } }\n  c: { postgres: { host: db1, database: d, user: u, tls: require, certificate: me } }\n  d: { postgres: { host: localhost, database: d, user: u } }\n  e: { postgres: { host: db1, database: d, user: u, tls: verify-ca, ca: x } }\n",
+        )
+        .unwrap();
+        let mode = |name: &str| match &r.databases[name] {
+            Database::Postgres(c) => (c.mode(), c.tls_summary()),
+            _ => unreachable!(),
+        };
+        assert_eq!(mode("a"), (SslMode::Prefer, "TLS if offered, not verified (prefer)".into()), "libpq's default");
+        assert_eq!(mode("b"), (SslMode::VerifyFull, "TLS, verified: hospital-ca trusted".into()));
+        assert_eq!(mode("c"), (SslMode::Require, "TLS, not verified (require): client certificate me".into()));
+        assert_eq!(mode("e").0, SslMode::VerifyCa);
+        assert_eq!(
+            r.unverified_postgres(),
+            [("a", SslMode::Prefer), ("c", SslMode::Require)],
+            "elsewhere and not checked; d is this machine"
+        );
+
+        let err = load("  a: { postgres: { host: h, database: d, user: u, tls: prefer, ca: x } }\n").unwrap_err();
+        assert!(err.contains("database `a`: `ca` is only checked with `tls: verify-full`"), "{err}");
+        let err =
+            load("  a: { postgres: { host: h, database: d, user: u, tls: disable, certificate: x } }\n").unwrap_err();
+        assert!(err.contains("`tls: disable` turns TLS off"), "{err}");
+        let err = load("  a: { postgres: { host: h, database: d, user: u, tls: strict } }\n").unwrap_err();
+        assert!(err.contains("unknown variant `strict`"), "{err}");
     }
 
     #[test]

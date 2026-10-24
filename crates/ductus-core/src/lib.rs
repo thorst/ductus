@@ -13,6 +13,7 @@ pub mod ldap;
 pub mod monitor;
 pub mod owners;
 pub mod password;
+pub mod pgtls;
 pub mod ports;
 pub mod resources;
 pub mod retention;

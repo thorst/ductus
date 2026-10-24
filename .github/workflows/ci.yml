@@ -111,9 +111,22 @@ jobs:
           sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq slapd ldap-utils </dev/null >/dev/null
           sudo systemctl disable --now slapd >/dev/null 2>&1 || true
 
+      # Postgres's server binaries for the TLS tests and demos (a throwaway server each, as this user:
+      # scripts/dev/pgtls.sh). The runner image usually has them; otherwise from Ubuntu's packages,
+      # without the main cluster (the service container holds 5432).
+      - name: Postgres server binaries
+        run: |
+          if ! ls /usr/lib/postgresql/*/bin/initdb >/dev/null 2>&1; then
+            sudo mkdir -p /etc/postgresql-common/createcluster.d
+            echo 'create_main_cluster = false' | sudo tee /etc/postgresql-common/createcluster.d/ductus.conf >/dev/null
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql </dev/null >/dev/null
+          fi
+          ls -d /usr/lib/postgresql/*/bin
+
       - name: Unit and integration tests
         env:
           DUCTUS_TEST_SLAPD: required
+          DUCTUS_TEST_PGTLS: required
         run: cargo test --release --locked
 
       - name: Example interface tests

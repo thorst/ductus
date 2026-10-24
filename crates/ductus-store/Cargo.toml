@@ -11,9 +11,18 @@ chrono = "0.4.45"
 getrandom = "0.4.3"
 serde_json = "1.0.151"
 sha2 = "0.10.9"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "migrate", "macros"] }
+# TLS through rustls with aws-lc (the engine's one TLS stack; post-quantum key exchange first, as
+# everywhere: rustls's `prefer-post-quantum` is on in the runtime). sqlx's aws-lc feature alone
+# trusts only the bundled Mozilla roots; sqlx-core's `rustls-native-certs` makes it trust the
+# system's (a CA installed on this server counts, as for MLLP and HTTPS). It's an internal feature
+# name: `the_system_s_trusted_certificates_count` (cli tests) fails if a bump drops it.
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "chrono", "migrate", "macros", "tls-rustls-aws-lc-rs"] }
+sqlx-core = { version = "0.9.0", default-features = false, features = ["rustls-native-certs"] }
+# Already in the tree through sqlx: its errors, read for plain words (`tls::refusal`).
+rustls = { version = "0.23.45", default-features = false }
 tokio = { version = "1.53.2", features = ["time"] }
 tracing = "0.1.44"
+url = "2.5.8"
 
 [features]
 # Helpers for tests (deleting the accounts they made): never in the binary.

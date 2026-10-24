@@ -10,6 +10,9 @@
 //! tls-bench http https://localhost:6766/ping 2000 [--ca FILE] [--new]
 //!     2,000 GETs one after another, on one kept-alive connection or (--new) a new connection and
 //!     full handshake each: p50/p95/mean in ms
+//! tls-bench pg-connect 'postgres://u:p@127.0.0.1:5432/d?sslmode=verify-full&sslrootcert=ca.pem' 200
+//!     200 Postgres connections one after another, as the store's pool opens them (TLS and
+//!     login): p50/p95/mean in ms (for `scripts/bench-pgtls.sh`)
 //! ```
 //!
 //! An example, not part of the `ductus` binary: `cargo build --release -p ductus-runtime --example tls-bench`.
@@ -33,7 +36,7 @@ struct Args {
 
 fn args() -> Args {
     let mut it = std::env::args().skip(1);
-    let usage = "usage: tls-bench connect|hold|http TARGET COUNT [--ca FILE] [--cert FILE --key FILE] [--resume] [--new] [--classic]";
+    let usage = "usage: tls-bench connect|hold|http|pg-connect TARGET COUNT [--ca FILE] [--cert FILE --key FILE] [--resume] [--new] [--classic]";
     let (mode, target, count) = (it.next().expect(usage), it.next().expect(usage), it.next().expect(usage));
     let count = count.parse().expect(usage);
     let mut a = Args { mode, target, count, ca: None, pair: None, resume: false, new: false, classic: false };
@@ -148,6 +151,20 @@ async fn main() {
                 ms.push(started.elapsed().as_secs_f64() * 1000.0);
             }
             report(if a.new { "new connection each" } else { "kept alive" }, ms);
+        }
+        "pg-connect" => {
+            use sqlx::Connection;
+            // As the store's pool opens a connection: the URL's TLS (sqlx: the system's
+            // certificates, read at each one, plus sslrootcert), then the login.
+            let options: sqlx::postgres::PgConnectOptions = a.target.parse().expect("a Postgres URL");
+            let mut ms = Vec::with_capacity(a.count);
+            for _ in 0..a.count {
+                let started = Instant::now();
+                let connection = sqlx::PgConnection::connect_with(&options).await.expect("connecting");
+                ms.push(started.elapsed().as_secs_f64() * 1000.0);
+                connection.close().await.ok();
+            }
+            report("connect and log in", ms);
         }
         other => panic!("no mode {other}"),
     }

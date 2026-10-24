@@ -12,10 +12,17 @@
 #      alert to on-call and to its owner; a half renewal (a new certificate, the old key) shows on
 #      its row while the engine keeps presenting the one that works; the key follows → recovered.
 #      Doctor's full mode connects to the listener and reads the chain it serves.
+#   6. The engine's own database over verified TLS (0.6.4.2): a throwaway Postgres with its own CA
+#      (scripts/dev/pgtls.sh) as DUCTUS_DATABASE_URL with sslmode=verify-full. Another CA refuses
+#      the start in words; validate and the start log say "TLS 1.3, verified"; a `patients`
+#      resource over verify-full with `ca:`; the database's certificate in the engine's checks,
+#      /certificates and /ports; its DBA renews it for only 10 days (Check now: on-call told, once
+#      per connection), then for a year (recovered).
 # The certificates are made by `cert-server` (an example, not part of ductus) from a file of days,
 # read at every connection; mail goes to `ductus sink --smtp`.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
+DEV=$(realpath "$(dirname "${BASH_SOURCE[0]}")/dev")
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
 CERTS=${CERT_SERVER:-$(dirname "$BIN")/examples/cert-server}
@@ -74,11 +81,13 @@ export function transform(msg: Message) {
 EOF
 cd "$P"
 
-ENGINE="" MAIL="" TLS=""
+ENGINE="" MAIL="" TLS="" PG=""
 cleanup() {
   for pid in $ENGINE $MAIL; do kill -INT "$pid" 2>/dev/null || true; done
   # cert-server has no SIGINT handler (a background job of a script ignores SIGINT): TERM.
   [ -n "$TLS" ] && kill "$TLS" 2>/dev/null || true
+  [ -n "$ENGINE" ] && wait "$ENGINE" 2>/dev/null || true
+  [ -n "$PG" ] && bash "$DEV/pgtls.sh" stop "$PG" || true
 }
 trap cleanup EXIT
 echo 40 >"$P/days"
@@ -203,6 +212,74 @@ wait_for 40 '[ "$(mails)" -ge 9 ]' || fail+=" no-ours-recovery"
 grep "^mail [89] .*to infra@hospital.example: \[Ductus dev\] RECOVERED Our certificate certs-demo-mllp" "$P/mail.log" >/dev/null || fail+=" ours-recovered"
 ours=$(api GET /certificates)
 [ "$(js "$ours" "$OURS['days_left'], $OURS['error']")" = "90 None" ] || fail+=" ours-renewed($ours)"
-
 "$BIN" token revoke "$OPS_NAME" >/dev/null 2>&1 || true
-if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; tail -20 "$P/run.log"; exit 1; fi
+kill -INT "$ENGINE" && wait "$ENGINE" || true
+ENGINE=""
+
+echo "== the engine's own database over verified TLS: a Postgres with its own CA"
+PG=$P/pg
+PGPORT=$(python3 -c 'import socket; s = socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1])')
+bash "$DEV/pgtls.sh" start "$PG" "$PGPORT"
+at() { echo "postgres://ductus:ductus@127.0.0.1:$PGPORT/ductus?sslmode=verify-full&sslrootcert=$PG/$1"; }
+out=$(DUCTUS_DATABASE_URL=$(at other-ca.pem) "$BIN" run 2>&1 || true)
+echo "   another CA: $(grep -o "connecting to PostgreSQL over TLS.*" <<<"$out" | sed -n 1p)"
+grep "the database server's certificate isn't from a CA this server trusts: add its CA as sslrootcert=" <<<"$out" >/dev/null || fail+=" wrong-ca-start"
+export DUCTUS_DATABASE_URL=$(at ca.pem)
+out=$("$BIN" validate 2>&1 || true)
+echo "   validate: $(grep "database:" <<<"$out" | sed -n 1p)"
+grep "✓ database: TLS 1.3, verified (sslmode=verify-full)" <<<"$out" >/dev/null || fail+=" validate($out)"
+cat >"$P/resources.yaml" <<EOF
+apis:
+  empi: { url: 'https://localhost:7447/patients', vendor: Example EMPI }
+databases:
+  patients: { postgres: { host: 127.0.0.1, port: $PGPORT, database: ductus, user: ductus, password: ductus, ca: pg-ca } }
+certificates:
+  certs-demo-mllp: { cert_file: tls/mllp.pem, key_file: tls/mllp.key, owner: infra@hospital.example }
+  pg-ca: { ca_file: $PG/ca.pem }
+EOF
+"$BIN" run >"$P/run2.log" 2>&1 &
+ENGINE=$!
+until grep "started interfaces=" "$P/run2.log" 2>/dev/null >/dev/null; do kill -0 $ENGINE || { cat "$P/run2.log"; exit 1; }; sleep 0.2; done
+echo "   start log: $(grep -o "the engine's database database=.*" "$P/run2.log")"
+grep "the engine's database database=TLS 1.3, verified (sslmode=verify-full)" "$P/run2.log" >/dev/null || fail+=" start-log"
+OPS=$("$BIN" token create "$OPS_NAME-tls" --role operator 2>/dev/null)
+DBS="[c['certificate'] for c in d['checks'] if 'Postgres' in c['endpoint']]"
+report=$(api POST /doctor '{"mode": "certificates"}')
+echo "   Check now: $(js "$report" "', '.join(f\"{c['resource']} {c['host']}:{c['port']} {c['subject']} until {c['not_after'][:10]}\" for c in $DBS)")"
+[ "$(js "$report" "sorted(c['resource'] for c in $DBS)")" = "['engine database', 'patients']" ] || fail+=" checked($report)"
+certs=$(api GET /certificates)
+DB_ROW="[c for c in d['certificates'] if c['resource'] == 'engine database'][0]"
+[ "$(js "$certs" "$DB_ROW['state'] == 'ok' and $DB_ROW['days_left'] in (364, 365) and $DB_ROW['trusted']")" = True ] || fail+=" db-row($certs)"
+ports=$(api GET /ports)
+echo "   Connections → Connects to: $(js "$ports" "'; '.join(f\"{o['used_by']}: {o['tls']}\" for o in d['connects_to'] if o['protocol'] == 'Postgres')")"
+[ "$(js "$ports" "[o['tls'] for o in d['connects_to'] if o['protocol'] == 'Postgres']")" = "['TLS, verified: $PG/ca.pem trusted', 'TLS, verified: pg-ca trusted']" ] || fail+=" ports($ports)"
+report=$(api POST /doctor '{"mode": "full", "timeout_ms": 3000}')
+login=$(js "$report" "[s['detail'] for c in d['checks'] if c['what'] == 'database patients' for s in c['steps'] if s['name'] == 'login'][0]")
+echo "   doctor, database patients: $login"
+[[ "$login" == *"TLS 1.3, verified (tls: verify-full)"* ]] || fail+=" doctor-login($login)"
+
+server_cert() { # days: the DBA renews the server's certificate (from the same CA), Postgres reloads it
+  openssl req -newkey rsa:2048 -nodes -subj /CN=localhost -keyout "$PG/server.key" -out "$PG/server.csr" 2>/dev/null
+  openssl x509 -req -in "$PG/server.csr" -CA "$PG/ca.pem" -CAkey "$PG/ca.key" -CAcreateserial -days "$1" \
+    -extfile "$PG/server.ext" -out "$PG/server.pem" 2>/dev/null
+  bash "$DEV/pgtls.sh" reload "$PG"
+  sleep 1
+}
+told=$(mails)
+echo "== its DBA renews the database's certificate for only 10 days: Check now"
+server_cert 10
+api POST /doctor '{"mode": "certificates"}' >/dev/null
+wait_for 40 "[ \"\$(mails)\" -ge $((told + 2)) ]" || fail+=" no-db-mail"
+grep "^mail " "$P/mail.log" | tail -n 2 | sed 's/^/   | /'
+for what in "engine database" patients; do
+  grep -E "^mail .*\[Ductus dev\] WARNING Certificate of 127.0.0.1:$PGPORT \($what\) expires in (9|10) days" "$P/mail.log" >/dev/null || fail+=" db-mail($what)"
+done
+echo "== renewed for a year: recovered"
+server_cert 365
+api POST /doctor '{"mode": "certificates"}' >/dev/null
+wait_for 40 "[ \"\$(mails)\" -ge $((told + 4)) ]" || fail+=" no-db-recovery"
+grep "^mail " "$P/mail.log" | tail -n 2 | sed 's/^/   | /'
+grep "RECOVERED Certificate of 127.0.0.1:$PGPORT (engine database)" "$P/mail.log" >/dev/null || fail+=" db-recovered"
+grep "ERROR" "$P/run2.log" >/dev/null && fail+=" errors-in-the-log-2"
+
+if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; tail -n 20 "$P/run.log" "$P/run2.log"; exit 1; fi

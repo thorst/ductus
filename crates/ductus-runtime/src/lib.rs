@@ -157,6 +157,13 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
             "plain ldap:// (`insecure: true`): passwords cross the network readable; use ldaps:// or starttls"
         );
     }
+    for (name, mode) in resources.unverified_postgres() {
+        tracing::warn!(
+            database = name,
+            tls = mode.label(),
+            "its certificate isn't checked: whoever answers at its address is believed (and sees every query); set `tls: verify-full` (with `ca:` for a private CA)"
+        );
+    }
     let alerts = match alert_settings {
         Some(a) => {
             let wrong: Vec<String> = configs.iter().flat_map(|c| a.check_interface(&c.name, &c.alert)).collect();
@@ -185,6 +192,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     phases.mark("project loaded and checked");
     let store = Store::connect(database_url, options.db_connections).await?;
     phases.mark("database connected and migrated");
+    log_database_security(&store, database_url).await;
     // Before anything is changed for an interface (deliveries reconciled, retention applied,
     // workers started): it must be this engine's, and its lanes must still reach what waits.
     let instance = audit::new_instance();
@@ -631,6 +639,29 @@ impl Phases {
 /// How long a stop may take by default: a transform or send under way finishes first, and
 /// both have their own limits (a transform's `timeout`, 5 s by default).
 pub const STOP_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// How the connection to the engine's database is protected, as its server reports it: `TLS
+/// 1.3, verified (sslmode=verify-full)`. A database on another machine whose certificate isn't
+/// checked is a warning (libpq's default `prefer` believes whoever answers at its address).
+pub async fn database_security(store: &Store, database_url: &str) -> Result<ductus_core::pgtls::Security> {
+    use ductus_core::pgtls::{Security, Setting, UrlTls};
+    let url = UrlTls::read(database_url);
+    let mode = url.as_ref().map(|u| u.mode).unwrap_or_default();
+    let host = url.map(|u| u.host).unwrap_or_default();
+    let version = store.tls_version().await.context("reading pg_stat_ssl")?;
+    Ok(Security::new(mode, version.as_deref(), &host, Setting::Url))
+}
+
+async fn log_database_security(store: &Store, database_url: &str) {
+    match database_security(store, database_url).await {
+        Ok(s) if s.warns() => tracing::warn!(
+            database = %s,
+            "the engine's database connection isn't verified: whoever answers at its address is believed; add sslmode=verify-full to DUCTUS_DATABASE_URL (sslrootcert=/path/ca.pem for a private CA)"
+        ),
+        Ok(s) => tracing::info!(database = %s, "the engine's database"),
+        Err(e) => tracing::debug!(error = %format!("{e:#}"), "couldn't read how the database connection is protected"),
+    }
+}
 
 /// Stop in order, so nothing is left half done: close every interface's gate (listeners close,
 /// queued HTTP answers 503, file pickup and schedules wait) and wait for messages being stored,

@@ -565,7 +565,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 ## TLS on what the engine connects to
 
 ### A private CA is trusted only where you name it (level 2)
-- **What:** every connection the engine makes over TLS (MLLP destinations with `tls:`, HTTPS destinations and `apis:`, the directory, the alerts' mail server, webhooks and heartbeat) trusts what this server's system trusts, plus the CA its `ca:` names (a `certificates:` entry in resources.yaml), for that connection only. `tls: true` on an MLLP destination is the system's alone. The receiver's certificate must also cover the `host` (or URL host) connected to: a certificate for `hie.example.org` is refused at `10.1.2.3`, unless it lists that address.
+- **What:** every connection the engine makes over TLS (MLLP destinations with `tls:`, HTTPS destinations and `apis:`, the directory, Postgres `databases:` entries, the alerts' mail server, webhooks and heartbeat) trusts what this server's system trusts, plus the CA its `ca:` names (a `certificates:` entry in resources.yaml), for that connection only. `tls: true` on an MLLP destination is the system's alone. The receiver's certificate must also cover the `host` (or URL host) connected to: a certificate for `hie.example.org` is refused at `10.1.2.3`, unless it lists that address.
 - **Why:** a hospital CA added to the whole server would be trusted by every connection, and every program on it; naming it per connection keeps a partner's CA to that partner.
 - **What to do:** ask the receiver's team for the CA that issued their certificate (not their certificate itself, which changes at every renewal), put it under `certificates:` (`ca_file:` or `ca: ${secret:...}`), and name it in `ca:`. Connect by the name on their certificate. `ductus validate` and the engine's start refuse a `ca:` that names a pair, a `certificate:` that names a CA, or a name that isn't there.
 
@@ -585,6 +585,33 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** `ductus doctor`, the scheduled checks and the Connections page build each TLS connection from the same settings the engine uses (the named CA, the client certificate), so a check passes when the engine's connection would. After a handshake it waits up to half a second for the server to refuse the client certificate (TLS 1.3 says so only then), and says which. A certificate named in `ca:` or `certificate:` that doesn't load fails the checks that use it, with why, instead of stopping the run.
 - **What to do:** after changing TLS settings, run `ductus doctor --interface <name>` before deploying; the MLLP check connects and shakes hands but sends nothing.
 
+## TLS to Postgres
+
+### Without `sslmode`, the database connection is TLS when offered, and nobody is checked (level 3)
+- **What:** `DUCTUS_DATABASE_URL` means what it means in psql: without `sslmode` it is libpq's `prefer`, TLS when the server offers it (Ubuntu's Postgres and most packages do, with a self-signed certificate), plain when it doesn't, and the certificate is never checked. `require` insists on TLS and checks nothing either. Only `verify-full` checks that a trusted CA issued the server's certificate and that it is for the host connected to (`verify-ca`: the CA, not the name). resources.yaml `postgres` entries work the same with `tls:` (default `prefer`; `verify-full` when `ca:` names a CA). The start log, `ductus validate`, doctor and the Connections page say which ("TLS 1.3, not verified (sslmode=prefer)", "TLS 1.3, verified (sslmode=verify-full)", "plain, no TLS"), and warn when the database is on another machine and not verified.
+- **Why:** a URL that works with psql must work here, and `verify-full` by default would refuse every install whose Postgres has its own self-signed certificate. But TLS that checks nothing stops only someone listening: anyone who can answer at the database's address (a DNS entry, a spoofed address on the way) gets the password and every query.
+- **What to do:** for a database on another machine, `?sslmode=verify-full`, plus `&sslrootcert=/path/ca.pem` when this server doesn't already trust its CA (`sslrootcert=system`: the system's alone); in resources.yaml `tls: verify-full` and `ca:` (a `certificates:` entry). `ductus validate` says "verified" when it works. For one on this machine, a Unix socket (`postgres:///ductus?host=/var/run/postgresql`) needs no TLS and is the fastest.
+
+### Cloud Postgres requires TLS (level 1)
+- **What:** Azure Database for PostgreSQL and Amazon RDS are usually set to refuse plain connections. Azure's certificates chain to public roots this server already trusts; RDS's are issued by Amazon's own RDS CAs, which it doesn't.
+- **What to do:** `sslmode=verify-full`; for RDS add `sslrootcert=` with Amazon's RDS CA bundle (downloaded from AWS) for the region. Connect by the endpoint's DNS name, the one on its certificate.
+
+### A CA installed on this server counts (level 2)
+- **What:** the database's certificate is checked against this server's trusted certificates (Linux: `update-ca-certificates`; Windows: the machine's store) plus `sslrootcert` (or `ca:`), as MLLP and HTTPS connections are. sqlx reads the system's certificates at every new connection (about 10 ms with `verify-full`), so a CA installed while the engine runs counts from the next one.
+- **What to do:** install a hospital CA once on the server, or name it per connection; both work.
+
+### The database's certificate is watched when the engine checks it (level 3)
+- **What:** a Postgres connection with `verify-full` or `verify-ca` (the engine's own database or a resources.yaml entry) is in the engine's certificate checks: the 8-byte SSLRequest, then the handshake the engine would make, its dates kept and alerted at 30, 14 and 7 days, as "engine database" or the entry's name. Its expiry would stop the engine connecting. With `prefer` or `require`, doctor shows the certificate (and whether `verify-full` would accept it) but doesn't watch it: an expired one changes nothing for a connection that checks nothing.
+- **What to do:** switch to `verify-full`, and it's watched.
+
+### A client certificate renews at the next connection (level 3)
+- **What:** `certificate:` on a Postgres entry logs in with a `certificates:` pair (pg_hba's `cert` method: no password; or with a password and `clientcert=verify-full`). Renewed from its files, the pool's next connection presents it; open ones keep theirs until they close (sqlx keeps a connection up to 30 minutes, an idle one 10). The engine's own database reads `sslcert=` and `sslkey=` at every new connection.
+- **What to do:** renew before expiry: it counts down with "Ours" on the Connections page. Ask the DBA which CA they trust for clients and which name (the certificate's CN) maps to the database role.
+
+### Opening a database connection over TLS costs ~60 ms, for now (level 4)
+- **What:** sqlx 0.9.0 doesn't set `TCP_NODELAY`, and a TLS handshake followed by the login waits on the server's delayed ACKs: opening a connection took 64 ms (`prefer`) and 79 ms (`verify-full`) against 5 ms plain, on a local Postgres. Pools keep their connections, so messages rarely see it; a start does: 1,001 interfaces were ready in 0.91–1.06 s over TLS against 0.52–0.66 s plain. Strict ingest with 1 sender is within noise; with 16 senders it was ~7% lower (2,636 against 2,831 ACKs/s), ~2% with `TCP_NODELAY` set. Fixed in sqlx (transact-rs/sqlx#4336, after 0.9.0): with it, opening takes 8–11 ms (22 ms `verify-full`) and the start 0.63–0.72 s.
+- **What to do:** nothing in most installs; the next sqlx release removes it. If start time or pool growth matters for a database on this machine, use a Unix socket. Don't give up verification for it.
+
 ## Certificates
 
 ### The engine checks certificates by itself, and logs in to nothing (level 2)
@@ -593,8 +620,8 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What to do:** keep `certificates` unless someone asked for scheduled login checks; run full checks when you want them (the Connections page, `POST /api/v1/doctor`, `ductus doctor`). `doctor: { schedule: off }` turns the scheduled checks off (and with them the countdown's freshness: dates then come from the last check someone ran).
 
 ### What has a certificate the engine watches (level 3)
-- **What:** HTTPS APIs (resources.yaml) and HTTPS destinations, MLLP destinations with `tls:`, the directory people sign in with (`ldap:` in resources.yaml, ldaps:// or StartTLS), and what alerts connect to: the mail server (`tls: starttls` or `tls`), HTTPS webhooks and the heartbeat. Not watched: Postgres resources (the engine connects to them without TLS), SFTP (host keys, not certificates), MLLP destinations without `tls:` (plain TCP), and **SQL Server** (its TLS is inside the TDS protocol; it joins in v0.6). Our own certificates are watched too, from what the engine loaded (see "Our certificates count down like the rest").
-- **What to do:** a SQL Server with `trust_server_certificate: false` stops accepting the engine's connections when its certificate expires: track that certificate where you track the server's others until v0.6.
+- **What:** HTTPS APIs (resources.yaml) and HTTPS destinations, MLLP destinations with `tls:`, the directory people sign in with (`ldap:` in resources.yaml, ldaps:// or StartTLS), Postgres with `verify-full` or `verify-ca` (the engine's own database and resources.yaml entries: see "The database's certificate is watched when the engine checks it"), and what alerts connect to: the mail server (`tls: starttls` or `tls`), HTTPS webhooks and the heartbeat. Not watched: Postgres that isn't verified, SFTP (host keys, not certificates), MLLP destinations without `tls:` (plain TCP), and **SQL Server** (its TLS is inside the TDS protocol; it joins in 0.6.4.3). Our own certificates are watched too, from what the engine loaded (see "Our certificates count down like the rest").
+- **What to do:** a SQL Server with `trust_server_certificate: false` stops accepting the engine's connections when its certificate expires: track that certificate where you track the server's others until 0.6.4.3.
 
 ### The earliest expiry in the chain counts, in whole days (level 2)
 - **What:** a server presents its certificate and usually one or more intermediates. Clients refuse the connection when any of them has expired, so the countdown runs to the earliest of them (the Connections page names an intermediate that ends first). Days are whole days in UTC dates: a certificate ending tomorrow at 00:30 UTC has 1 day left all of today, wherever the server is.

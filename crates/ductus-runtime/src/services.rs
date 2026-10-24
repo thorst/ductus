@@ -4,11 +4,12 @@
 use crate::mssql;
 use crate::stats::ResourceCalls;
 use anyhow::{Result, anyhow, bail};
+use ductus_core::pgtls::SslMode;
 use ductus_core::resources::{Api, Database, DbConnection};
 use ductus_core::{Environment, InterfaceConfig, Resources};
 use ductus_script::{BoxFuture, FetchRequest, FetchResponse, Services, TRANSIENT};
 use serde_json::Value;
-use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions};
+use sqlx::postgres::{PgConnectOptions, PgPool, PgPoolOptions, PgSslMode};
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::Duration;
@@ -24,13 +25,14 @@ pub(crate) enum Pool {
 /// Database pools by resource name.
 pub(crate) type Pools = Arc<HashMap<String, Pool>>;
 
-/// A pool for a database resource; `size` overrides its `max_connections`.
-fn make_pool(db: &Database, size: Option<u32>) -> Pool {
+/// A pool for a database resource; `size` overrides its `max_connections`. `tls`: what its CA
+/// and client certificate name, loaded (Postgres).
+fn make_pool(db: &Database, size: Option<u32>, tls: Option<&PgTls>) -> Pool {
     match db {
-        Database::Postgres(c) => Pool::Postgres(postgres_pool(&DbConnection {
-            max_connections: size.unwrap_or(c.max_connections),
-            ..c.clone()
-        })),
+        Database::Postgres(c) => {
+            let c = DbConnection { max_connections: size.unwrap_or(c.max_connections), ..c.clone() };
+            Pool::Postgres(postgres_pool(&c, tls.cloned().unwrap_or_default()))
+        }
         Database::Sqlserver(c) => {
             Pool::Sqlserver(Box::new(mssql::Pool::new(&ductus_core::resources::SqlServerConnection {
                 max_connections: size.unwrap_or(c.max_connections),
@@ -44,6 +46,8 @@ fn make_pool(db: &Database, size: Option<u32>) -> Pool {
 pub struct SharedServices {
     env: Environment,
     definitions: BTreeMap<String, Database>,
+    /// Postgres resources' CA and client certificate, loaded once (dedicated pools use them too).
+    postgres_tls: HashMap<String, PgTls>,
     databases: HashMap<String, Pool>,
     apis: BTreeMap<String, Api>,
     http: reqwest::Client,
@@ -63,7 +67,18 @@ impl SharedServices {
     ///
     /// Must be called on the engine's main runtime.
     pub fn new(env: Environment, resources: &Resources, certificates: &crate::tls::Certificates) -> Result<Self> {
-        let databases = resources.databases.iter().map(|(name, db)| (name.clone(), make_pool(db, None))).collect();
+        let mut postgres_tls = HashMap::new();
+        for (name, db) in &resources.databases {
+            if let Database::Postgres(c) = db {
+                let tls = PgTls::load(c, certificates).map_err(|e| anyhow!("database `{name}`: {e:#}"))?;
+                postgres_tls.insert(name.clone(), tls);
+            }
+        }
+        let databases = resources
+            .databases
+            .iter()
+            .map(|(name, db)| (name.clone(), make_pool(db, None, postgres_tls.get(name))))
+            .collect();
         let mut api_http = BTreeMap::new();
         for (name, api) in resources.apis.iter().filter(|(_, a)| a.tls().is_set()) {
             let client = api_client(api, certificates).map_err(|e| anyhow!("api `{name}`: {e:#}"))?;
@@ -72,6 +87,7 @@ impl SharedServices {
         Ok(Self {
             env,
             definitions: resources.databases.clone(),
+            postgres_tls,
             databases,
             apis: resources.apis.clone(),
             http: http_client(),
@@ -101,7 +117,10 @@ impl SharedServices {
             config
                 .dedicated_pools
                 .iter()
-                .filter_map(|(name, size)| Some((name.clone(), make_pool(self.definitions.get(name)?, Some(*size)))))
+                .filter_map(|(name, size)| {
+                    let pool = make_pool(self.definitions.get(name)?, Some(*size), self.postgres_tls.get(name));
+                    Some((name.clone(), pool))
+                })
                 .collect(),
         )
     }
@@ -225,28 +244,87 @@ async fn http_fetch(client: &reqwest::Client, r: FetchRequest) -> Result<FetchRe
     Ok(FetchResponse { status, headers, body: String::from_utf8_lossy(&body).into_owned() })
 }
 
-/// How the engine connects to a Postgres resource (also what `ductus doctor` checks).
-pub(crate) fn postgres_options(c: &DbConnection) -> PgConnectOptions {
-    PgConnectOptions::new()
+/// A Postgres resource's `ca` and `certificate`, loaded: what its connections trust besides the
+/// system's certificates, and present.
+#[derive(Clone, Default)]
+pub(crate) struct PgTls {
+    ca: Option<Vec<u8>>,
+    certificate: Option<Arc<crate::tls::Pair>>,
+}
+
+impl PgTls {
+    /// The names were checked by `ductus_core::tls::check_outbound`; one that didn't load fails
+    /// with why.
+    pub(crate) fn load(c: &DbConnection, certificates: &crate::tls::Certificates) -> Result<Self> {
+        let ca = c.ca.as_deref().map(|name| certificates.ca_pem(name).map(<[u8]>::to_vec)).transpose()?;
+        let certificate = c.certificate.as_deref().map(|name| certificates.pair_or_why(name).cloned()).transpose()?;
+        Ok(Self { ca, certificate })
+    }
+}
+
+/// How the engine connects to a Postgres resource (also what `ductus doctor` checks): its
+/// `tls:` mode, trusting the system's certificates plus its `ca`, presenting its `certificate`.
+pub(crate) fn postgres_options(c: &DbConnection, tls: &PgTls) -> PgConnectOptions {
+    let mode = match c.mode() {
+        SslMode::Disable | SslMode::Allow => PgSslMode::Disable,
+        SslMode::Prefer => PgSslMode::Prefer,
+        SslMode::Require => PgSslMode::Require,
+        SslMode::VerifyCa => PgSslMode::VerifyCa,
+        SslMode::VerifyFull => PgSslMode::VerifyFull,
+    };
+    let mut options = PgConnectOptions::new()
         .host(&c.host)
         .port(c.port.unwrap_or(5432))
         .database(&c.database)
         .username(&c.user)
         .password(&c.password)
+        .ssl_mode(mode);
+    if let Some(ca) = &tls.ca {
+        options = options.ssl_root_cert_from_pem(ca.clone());
+    }
+    match &tls.certificate {
+        Some(pair) => with_client_certificate(options, &pair.pem().1),
+        None => options,
+    }
 }
 
-fn postgres_pool(c: &DbConnection) -> PgPool {
-    PgPoolOptions::new()
+fn with_client_certificate(options: PgConnectOptions, pem: &crate::tls::PairPem) -> PgConnectOptions {
+    options.ssl_client_cert_from_pem(&pem.0).ssl_client_key_from_pem(&pem.1)
+}
+
+/// The pool copies the client certificate into its options: a renewal from the pair's files is
+/// put there too, so the next connection presents it (open ones keep theirs until they close).
+fn postgres_pool(c: &DbConnection, tls: PgTls) -> PgPool {
+    let pool = PgPoolOptions::new()
         .max_connections(c.max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))
-        .connect_lazy_with(postgres_options(c))
+        .connect_lazy_with(postgres_options(c, &tls));
+    if let Some(pair) = &tls.certificate {
+        let renewing = pool.clone();
+        pair.on_renewal(move |pem| {
+            let options = (*renewing.connect_options()).clone();
+            renewing.set_connect_options(with_client_certificate(options, pem));
+        });
+    }
+    pool
 }
 
 /// Temporary failures (can't connect, pool exhausted, server restarting) are marked so the
 /// worker retries the message instead of quarantining it. So are login failures (28...) and a
 /// missing database (3D000): fixing the configuration fixes them, and the messages should wait
-/// for that rather than all be quarantined.
-fn classify(e: sqlx::Error) -> anyhow::Error {
+/// for that rather than all be quarantined. A TLS refusal is said in words (the server's
+/// certificate isn't from a CA we trust, or isn't for its host), and waits too.
+fn classify(e: sqlx::Error, host: &str) -> anyhow::Error {
+    if let Some((words, fix)) = ductus_store::tls::refusal(&e, host) {
+        use ductus_store::tls::Fix;
+        let advice = match fix {
+            Fix::Ca => ": name its CA in `ca:` (resources.yaml), or install it on this server",
+            Fix::Name => ": connect with a name it lists (`ductus doctor` shows them), or `tls: verify-ca`",
+            Fix::ClientCertificate => ": is `certificate:` one the server's CA for clients issued?",
+            _ => "",
+        };
+        return anyhow!("{TRANSIENT} database unavailable: TLS: {words}{advice}");
+    }
     let transient = match &e {
         sqlx::Error::Io(_) | sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Tls(_) => true,
         sqlx::Error::Database(db) => db.code().is_some_and(|c| {
@@ -290,7 +368,7 @@ async fn postgres_query(pool: &PgPool, sql: &str, params: Vec<Value>) -> Result<
     let rows: Value = bind_json!(sqlx::query_scalar::<_, Value>(sqlx::AssertSqlSafe(wrapped)), params)
         .fetch_one(pool)
         .await
-        .map_err(classify)?;
+        .map_err(|e| classify(e, pool.connect_options().get_host()))?;
     match rows {
         Value::Array(rows) => Ok(rows),
         other => Err(anyhow!("unexpected query result: {other}")),
@@ -298,7 +376,10 @@ async fn postgres_query(pool: &PgPool, sql: &str, params: Vec<Value>) -> Result<
 }
 
 async fn postgres_execute(pool: &PgPool, sql: String, params: Vec<Value>) -> Result<u64> {
-    let done = bind_json!(sqlx::query(sqlx::AssertSqlSafe(sql)), params).execute(pool).await.map_err(classify)?;
+    let done = bind_json!(sqlx::query(sqlx::AssertSqlSafe(sql)), params)
+        .execute(pool)
+        .await
+        .map_err(|e| classify(e, pool.connect_options().get_host()))?;
     Ok(done.rows_affected())
 }
 
@@ -377,6 +458,9 @@ mod tests {
             user: url.username().into(),
             password: url.password().unwrap_or("").into(),
             max_connections: 1,
+            tls: None,
+            ca: None,
+            certificate: None,
             application: None,
             vendor: None,
             owner: None,
@@ -411,6 +495,98 @@ mod tests {
         busy.db_query("db", "SELECT 1 AS one", vec![]).await.unwrap();
         assert!(start.elapsed() >= Duration::from_millis(500), "shared pool took {:?}", start.elapsed());
         assert_eq!(slow.await.unwrap(), [serde_json::json!({"slept": 1})]);
+    }
+
+    /// `db()` over TLS from resources.yaml (a throwaway Postgres with its own CA): verify-full with
+    /// the server's CA (`ca:`), refused in words with another CA, a client-certificate login, and a
+    /// renewed client certificate presented by the pool's next connection.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn postgres_resources_connect_over_verified_tls_with_a_renewable_client_certificate() {
+        use ductus_core::resources::CertificateEntry;
+        use sqlx::Connection;
+        let Some(pg) = ductus_store::testing::PgTls::start() else { return };
+        let dir = tempfile::tempdir().unwrap();
+        let (cert, key) = (dir.path().join("client.pem"), dir.path().join("client.key"));
+        std::fs::copy(pg.file("client.pem"), &cert).unwrap();
+        std::fs::copy(pg.file("client.key"), &key).unwrap();
+        let ca = |file: &str| CertificateEntry { ca_file: Some(pg.dir.join(file)), ..Default::default() };
+        let entries = BTreeMap::from([
+            ("pg-ca".to_string(), ca("ca.pem")),
+            ("other-ca".to_string(), ca("other-ca.pem")),
+            (
+                "pg-client".to_string(),
+                CertificateEntry { cert_file: Some(cert.clone()), key_file: Some(key.clone()), ..Default::default() },
+            ),
+        ]);
+        let certificates = crate::tls::Certificates::load(&entries).unwrap();
+        let p = pg.port;
+        let resources: Resources = serde_yaml_ng::from_str(&format!(
+            "databases:
+  ok: {{ postgres: {{ host: 127.0.0.1, port: {p}, database: ductus, user: ductus, password: ductus, ca: pg-ca }} }}
+  wrong: {{ postgres: {{ host: 127.0.0.1, port: {p}, database: ductus, user: ductus, password: ductus, ca: other-ca }} }}
+  cert: {{ postgres: {{ host: 127.0.0.1, port: {p}, database: ductus, user: ductus_cert, ca: pg-ca, certificate: pg-client }} }}
+"
+        ))
+        .unwrap();
+        let shared =
+            Arc::new(SharedServices::new(Environment::with_variables("dev", &[]), &resources, &certificates).unwrap());
+        let services = EngineServices::new(shared.clone(), Default::default());
+        const TLS: &str = "SELECT version, client_serial::text AS serial FROM pg_stat_ssl WHERE pid = pg_backend_pid()";
+
+        let rows = services.db_query("ok", TLS, vec![]).await.unwrap();
+        assert_eq!(rows[0]["version"], "TLSv1.3");
+        let err = services.db_query("wrong", "SELECT 1", vec![]).await.unwrap_err().to_string();
+        assert!(err.starts_with(TRANSIENT), "a refused handshake retries: {err}");
+        assert!(err.contains("isn't from a CA this server trusts: name its CA in `ca:`"), "{err}");
+
+        // The client certificate is the login (pg_hba `cert`): no password.
+        let before = services.db_query("cert", TLS, vec![]).await.unwrap()[0]["serial"].clone();
+        assert!(before.is_string(), "a client certificate was presented: {before}");
+        // Renewed from the same CA, written over the files: the next connection presents it.
+        let run = |args: &[&str]| {
+            assert!(std::process::Command::new("openssl").args(args).output().unwrap().status.success())
+        };
+        let (new_key, csr, new_cert) =
+            (dir.path().join("new.key"), dir.path().join("new.csr"), dir.path().join("new.pem"));
+        let path = |p: &std::path::Path| p.to_str().unwrap().to_string();
+        run(&[
+            "req",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-subj",
+            "/CN=ductus_cert",
+            "-keyout",
+            &path(&new_key),
+            "-out",
+            &path(&csr),
+        ]);
+        run(&[
+            "x509",
+            "-req",
+            "-in",
+            &path(&csr),
+            "-CA",
+            &pg.file("ca.pem"),
+            "-CAkey",
+            &pg.file("ca.key"),
+            "-CAcreateserial",
+            "-days",
+            "30",
+            "-out",
+            &path(&new_cert),
+        ]);
+        std::fs::rename(&new_cert, &cert).unwrap();
+        std::fs::rename(&new_key, &key).unwrap();
+        assert_eq!(certificates.reload().await, ["pg-client"]);
+        let Pool::Postgres(pool) = &shared.databases["cert"] else { unreachable!() };
+        let mut next = sqlx::PgConnection::connect_with(&pool.connect_options()).await.unwrap();
+        let after: Option<String> =
+            sqlx::query_scalar("SELECT client_serial::text FROM pg_stat_ssl WHERE pid = pg_backend_pid()")
+                .fetch_one(&mut next)
+                .await
+                .unwrap();
+        assert_ne!(Some(before.as_str().unwrap().to_string()), after, "the renewed certificate is presented");
     }
 
     fn request(url: &str, timeout_ms: u64) -> FetchRequest {

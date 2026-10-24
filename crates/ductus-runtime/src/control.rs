@@ -195,7 +195,7 @@ impl Engine {
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
             let alerts = alerts.as_ref().map(|a| &a.settings);
-            let mut all = crate::certificates::targets(&configs, &resources, alerts);
+            let mut all = crate::certificates::targets(&configs, &resources, &database_url, alerts);
             all.extend(crate::certificates::ours(&configs, &resources, alerts, api.as_ref(), &host));
             all
         };

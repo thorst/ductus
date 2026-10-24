@@ -13,12 +13,14 @@
 //! before they expire. `Mode::Certificates` checks only what has a certificate, and logs in to
 //! nothing (what the engine runs on its own every few hours).
 
+use crate::services::PgTls;
 use crate::tls::{Certificates, Trust};
 use crate::{mssql, services, sftp};
 use chrono::{DateTime, Utc};
 use ductus_core::InterfaceConfig;
 use ductus_core::alerts::{AlertSettings, SmtpTls};
 use ductus_core::config::{Destination, Source};
+use ductus_core::pgtls::{Security, Setting, SslMode, UrlTls};
 use ductus_core::resources::{
     Api, Database, Kind, LdapSecurity, LdapServer, Resources, SftpServer, SqlServerConnection,
 };
@@ -159,7 +161,9 @@ pub enum Target {
 }
 
 impl Target {
-    /// Whether the connection has a certificate to read (TLS).
+    /// Whether the connection has a certificate to read and watch (TLS). A Postgres database's
+    /// only when the engine verifies it (`verify-full` or `verify-ca`): only then does its expiry
+    /// stop the engine connecting. Others with TLS are read and described, not watched.
     pub fn has_certificate(&self) -> bool {
         let https = |url: &str| url.trim().to_ascii_lowercase().starts_with("https://");
         match self {
@@ -168,6 +172,8 @@ impl Target {
             Target::Smtp { tls, .. } => *tls != SmtpTls::None,
             Target::Ldap(_, l) => l.security() != LdapSecurity::Plain,
             Target::Mllp { tls, .. } => tls.is_some(),
+            Target::Store(url) => UrlTls::read(url).is_some_and(|u| u.mode.verifies() && !u.socket()),
+            Target::Database(_, Database::Postgres(c)) => c.mode().verifies(),
             _ => false,
         }
     }
@@ -180,7 +186,27 @@ impl Target {
             }
             Target::Smtp { host, port, .. } | Target::Mllp { host, port, .. } => Some((host.clone(), *port)),
             Target::Ldap(_, l) => l.address(),
+            Target::Store(url) => UrlTls::read(url).filter(|u| !u.socket()).map(|u| (u.host, u.port)),
+            Target::Database(_, Database::Postgres(c)) => Some((c.host.clone(), c.port.unwrap_or(5432))),
             _ => None,
+        }
+    }
+
+    /// What its TLS trusts and presents, as the engine's connection does: the named CA and
+    /// client certificate; for the engine's database, the URL's `sslrootcert`, `sslcert` and
+    /// `sslkey` files.
+    fn trust(&self, certificates: &Certificates) -> Result<Trust, String> {
+        match self {
+            Target::Store(url) => {
+                let Some(u) = UrlTls::read(url) else { return Ok(Trust::default()) };
+                let client = u.cert.as_deref().zip(u.key.as_deref());
+                Trust::from_files(u.root_cert.as_deref(), client).map_err(|e| format!("{e:#}"))
+            }
+            Target::Database(_, Database::Postgres(c)) => {
+                certificates.trust(&c.connect_tls()).map_err(|e| format!("{e:#}"))
+            }
+            t if t.has_certificate() => certificates.trust(&t.connect_tls()).map_err(|e| format!("{e:#}")),
+            _ => Ok(Trust::default()),
         }
     }
 
@@ -285,18 +311,31 @@ pub fn certificates_only(probes: Vec<Probe>) -> Vec<Probe> {
 }
 
 async fn run(probe: Probe, timeout: Duration, mode: Mode, certificates: &Certificates) -> Check {
-    let trust = if probe.target.has_certificate() {
-        certificates.trust(&probe.target.connect_tls()).map_err(|e| format!("{e:#}"))
-    } else {
-        Ok(Trust::default())
+    let trust = probe.target.trust(certificates);
+    let mut r = Run {
+        steps: Vec::new(),
+        advice: Vec::new(),
+        timeout,
+        from: None,
+        seen: None,
+        trust,
+        certificates,
+        name_unchecked: false,
     };
-    let mut r = Run { steps: Vec::new(), advice: Vec::new(), timeout, from: None, seen: None, trust, certificates };
     let endpoint = match &probe.target {
-        Target::Store(url) => r.store(url).await,
+        Target::Store(url) => r.store(url, mode).await,
         Target::Database(_, Database::Postgres(c)) => {
-            let endpoint = format!("{}:{} Postgres", c.host, c.port.unwrap_or(5432));
-            if r.reach(&c.host, c.port.unwrap_or(5432)).await {
-                r.postgres_login(&services::postgres_options(c)).await;
+            let port = c.port.unwrap_or(5432);
+            let endpoint = format!("{}:{port} Postgres", c.host);
+            let Some(address) = r.connectable(&c.host, port).await else { return r.check(probe, endpoint) };
+            let tls_ok = !c.mode().tries_tls() || r.postgres_tls(&c.host, address, c.mode(), Setting::Resource).await;
+            if tls_ok && mode == Mode::Full {
+                match PgTls::load(c, certificates) {
+                    Ok(tls) => {
+                        r.postgres_login(&services::postgres_options(c, &tls), c.mode(), Setting::Resource).await;
+                    }
+                    Err(e) => r.step("login", Outcome::Fail, format!("{e:#}")),
+                }
             }
             endpoint
         }
@@ -350,26 +389,7 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode, certificates: &Certifi
             format!("{host}:{port} {protocol}")
         }
     };
-    let outcome = r.steps.iter().map(|s| s.outcome).max().unwrap_or(Outcome::Ok);
-    let certificate = probe.target.address().filter(|_| probe.target.has_certificate()).map(|(host, port)| {
-        let failed = r.steps.iter().find(|s| s.outcome == Outcome::Fail).map(|s| s.detail.clone());
-        let seen = r.seen.take().unwrap_or_default();
-        SeenCertificate {
-            resource: probe.resource.clone().unwrap_or_else(|| probe.what.clone()),
-            host,
-            port,
-            subject: seen.leaf.as_ref().map(|c| c.subject.clone()),
-            issuer: seen.leaf.as_ref().map(|c| c.issuer.clone()),
-            fingerprint: seen.leaf.as_ref().map(|c| c.fingerprint.clone()),
-            not_before: seen.leaf.as_ref().map(|c| c.not_before),
-            not_after: seen.leaf.as_ref().map(|c| c.not_after),
-            chain_not_after: seen.chain_not_after,
-            chain_earliest: seen.chain_earliest,
-            trusted: seen.trusted,
-            error: seen.error.or(failed),
-        }
-    });
-    Check { what: probe.what, endpoint, used_by: probe.used_by, outcome, steps: r.steps, advice: r.advice, certificate }
+    r.check(probe, endpoint)
 }
 
 /// What a TLS handshake showed.
@@ -395,9 +415,43 @@ struct Run<'a> {
     /// can't be had (a certificate that didn't load).
     trust: Result<Trust, String>,
     certificates: &'a Certificates,
+    /// The handshake checks the CA, not the name (Postgres's `verify-ca`).
+    name_unchecked: bool,
 }
 
 impl Run<'_> {
+    /// The check, from the steps so far: the worst step, and the certificate a handshake read.
+    fn check(mut self, probe: Probe, endpoint: String) -> Check {
+        let outcome = self.steps.iter().map(|s| s.outcome).max().unwrap_or(Outcome::Ok);
+        let certificate = probe.target.address().filter(|_| probe.target.has_certificate()).map(|(host, port)| {
+            let failed = self.steps.iter().find(|s| s.outcome == Outcome::Fail).map(|s| s.detail.clone());
+            let seen = self.seen.take().unwrap_or_default();
+            SeenCertificate {
+                resource: probe.resource.clone().unwrap_or_else(|| probe.what.clone()),
+                host,
+                port,
+                subject: seen.leaf.as_ref().map(|c| c.subject.clone()),
+                issuer: seen.leaf.as_ref().map(|c| c.issuer.clone()),
+                fingerprint: seen.leaf.as_ref().map(|c| c.fingerprint.clone()),
+                not_before: seen.leaf.as_ref().map(|c| c.not_before),
+                not_after: seen.leaf.as_ref().map(|c| c.not_after),
+                chain_not_after: seen.chain_not_after,
+                chain_earliest: seen.chain_earliest,
+                trusted: seen.trusted,
+                error: seen.error.or(failed),
+            }
+        });
+        Check {
+            what: probe.what,
+            endpoint,
+            used_by: probe.used_by,
+            outcome,
+            steps: self.steps,
+            advice: self.advice,
+            certificate,
+        }
+    }
+
     fn step(&mut self, name: &'static str, outcome: Outcome, detail: impl Into<String>) {
         self.steps.push(Step { name, outcome, detail: detail.into() });
     }
@@ -499,23 +553,35 @@ impl Run<'_> {
         first_ok
     }
 
-    /// The engine's database: login, then how long a durable commit takes.
-    async fn store(&mut self, url: &str) -> String {
-        let options: PgConnectOptions = match url.parse() {
+    /// The engine's database: TLS and its certificate, login, then how long a durable commit
+    /// takes. In `Certificates` mode only TLS (nothing logs in).
+    async fn store(&mut self, url: &str, mode: Mode) -> String {
+        let options: PgConnectOptions = match ductus_store::tls::connect_url(url).parse() {
             Ok(o) => o,
             Err(e) => {
                 self.step("URL", Outcome::Fail, format!("not a Postgres URL: {e}"));
                 return "(DUCTUS_DATABASE_URL)".into();
             }
         };
+        let ssl = UrlTls::read(url).map(|u| u.mode).unwrap_or_default();
         let (host, port) = (options.get_host().to_string(), options.get_port());
         let endpoint = format!("{host}:{port} Postgres");
         if host.starts_with('/') {
-            self.step("socket", Outcome::Ok, format!("local socket in {host}"));
-        } else if !self.reach(&host, port).await {
+            self.step(
+                "socket",
+                Outcome::Ok,
+                format!("local socket in {host} (no TLS there: nothing crosses a network)"),
+            );
+        } else {
+            let Some(address) = self.connectable(&host, port).await else { return endpoint };
+            if ssl.tries_tls() && !self.postgres_tls(&host, address, ssl, Setting::Url).await {
+                return endpoint;
+            }
+        }
+        if mode == Mode::Certificates {
             return endpoint;
         }
-        let Some(mut connection) = self.postgres_login(&options).await else { return endpoint };
+        let Some(mut connection) = self.postgres_login(&options, ssl, Setting::Url).await else { return endpoint };
         let timed = tokio::time::timeout(self.timeout * 4, commit_times(&mut connection)).await;
         match timed {
             Ok(Ok((median, synchronous))) => {
@@ -545,10 +611,112 @@ impl Run<'_> {
         endpoint
     }
 
-    async fn postgres_login(&mut self, options: &PgConnectOptions) -> Option<PgConnection> {
+    /// Postgres's TLS by hand, as its clients start it (the 8-byte SSLRequest; the server answers
+    /// `S` and the handshake follows, or `N`), so its certificate is read and judged however the
+    /// connection is set. A connection that doesn't verify (`prefer`, `require`) is said to be
+    /// unverified, with what `verify-full` would make of the certificate. False when the
+    /// connection can't work (a verified handshake refused, TLS required but not offered).
+    async fn postgres_tls(&mut self, host: &str, address: SocketAddr, mode: SslMode, setting: Setting) -> bool {
+        use tokio::io::AsyncReadExt;
+        let said = setting.written(mode);
+        let full = setting.written(SslMode::VerifyFull);
+        let local = ductus_core::pgtls::local(host);
+        let unverified = if local { Outcome::Ok } else { Outcome::Warn };
+        let asked = async {
+            let mut tcp = TcpStream::connect(address).await?;
+            tcp.write_all(&SSL_REQUEST).await?;
+            let mut answer = [0u8; 1];
+            tcp.read_exact(&mut answer).await?;
+            Ok::<_, std::io::Error>((tcp, answer[0]))
+        };
+        let tcp = match tokio::time::timeout(self.timeout, asked).await {
+            Ok(Ok((tcp, b'S'))) => tcp,
+            Ok(Ok((_, b'N'))) if mode.requires_tls() => {
+                self.step("TLS", Outcome::Fail, format!("the server doesn't offer TLS, and {said} needs it"));
+                self.advise(
+                    "Ask the database's DBA to turn on ssl (postgresql.conf), with a certificate for this host name.",
+                );
+                return false;
+            }
+            Ok(Ok((_, b'N'))) => {
+                self.step(
+                    "TLS",
+                    unverified,
+                    format!("none: the server doesn't offer TLS ({said}), the connection is plain"),
+                );
+                if !local {
+                    self.advise(format!("Queries, their results and the login cross the network readable: ask the DBA to turn on ssl, then set {full}."));
+                }
+                return true;
+            }
+            Ok(Ok((_, other))) => {
+                self.step(
+                    "TLS",
+                    Outcome::Fail,
+                    format!("the answer to Postgres's SSLRequest is 0x{other:02x}, not S or N: is this Postgres?"),
+                );
+                return false;
+            }
+            Ok(Err(e)) => {
+                self.step("TLS", Outcome::Fail, format!("asking for TLS: {e}"));
+                return false;
+            }
+            Err(_) => {
+                self.step("TLS", Outcome::Fail, format!("no answer to Postgres's SSLRequest in {}", self.waited()));
+                return false;
+            }
+        };
+        let advice = self.advice.len();
+        self.name_unchecked = mode == SslMode::VerifyCa;
+        let trusted = self.tls_on(host, tcp).await;
+        if mode.verifies() {
+            if setting == Setting::Url {
+                // The engine's database names its CA in its URL, not in resources.yaml.
+                for a in &mut self.advice[advice..] {
+                    *a = a.replace(
+                        "Name the issuing CA in `ca` (a `certificates:` entry in resources.yaml)",
+                        "Give the issuing CA as sslrootcert=/path/ca.pem in DUCTUS_DATABASE_URL",
+                    );
+                }
+            }
+            return trusted;
+        }
+        // The connection checks nothing: what the handshake showed is what verify-full would do.
+        let shown = self.steps.pop().map(|s| s.detail).unwrap_or_default();
+        self.advice.truncate(advice);
+        if trusted {
+            self.step("TLS", unverified, format!("{shown}; not verified by the engine ({said}): {full} would pass"));
+            if !local {
+                self.advise(format!("This server already trusts the database's certificate: set {full} to have it checked at every connection."));
+            }
+        } else {
+            self.step("TLS", unverified, format!("not verified ({said}), and {full} would refuse it: {shown}"));
+            if !local {
+                let ca = match setting {
+                    Setting::Url => "sslrootcert=/path/ca.pem in DUCTUS_DATABASE_URL",
+                    Setting::Resource => "`ca:` (a `certificates:` entry)",
+                };
+                self.advise(format!("To have it checked, trust the CA that issued it ({ca}, or install it on this server) and set {full}."));
+            }
+        }
+        true
+    }
+
+    async fn postgres_login(
+        &mut self,
+        options: &PgConnectOptions,
+        mode: SslMode,
+        setting: Setting,
+    ) -> Option<PgConnection> {
         let user = options.get_username().to_string();
         let database = options.get_database().unwrap_or(&user).to_string();
         let attempt = tokio::time::timeout(self.timeout, PgConnection::connect_with(options)).await;
+        if let Ok(Err(e)) = &attempt
+            && let Some((words, _)) = ductus_store::tls::refusal(e, options.get_host())
+        {
+            self.step("login", Outcome::Fail, format!("TLS: {words}"));
+            return None;
+        }
         let mut connection = match attempt {
             Ok(Ok(c)) => c,
             Ok(Err(sqlx::Error::Database(e))) => {
@@ -582,7 +750,9 @@ impl Run<'_> {
         };
         let version: Result<String, _> = sqlx::query_scalar("SHOW server_version").fetch_one(&mut connection).await;
         let version = version.map(|v| format!(": PostgreSQL {v}")).unwrap_or_default();
-        self.step("login", Outcome::Ok, format!("as `{user}`, database `{database}`{version}"));
+        let tls = ductus_store::tls::version(&mut connection).await.ok().flatten();
+        let security = Security::new(mode, tls.as_deref(), options.get_host(), setting);
+        self.step("login", Outcome::Ok, format!("as `{user}`, database `{database}`{version}; {security}"));
         Some(connection)
     }
 
@@ -748,7 +918,7 @@ impl Run<'_> {
         };
         let presented = Arc::new(Mutex::new(Vec::new()));
         let verifier = match trust.verifier() {
-            Ok(v) => Recording { inner: v, seen: presented.clone() },
+            Ok(v) => Recording { inner: v, seen: presented.clone(), name_unchecked: self.name_unchecked },
             Err(e) => {
                 self.step("TLS", Outcome::Fail, format!("{e:#}"));
                 return false;
@@ -1441,6 +1611,9 @@ async fn smtp_reply<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> std::io::R
     }
 }
 
+/// Postgres's SSLRequest: length 8, then the code 1234 5679 (protocol docs, "SSLSessionEncryption").
+const SSL_REQUEST: [u8; 8] = [0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f];
+
 /// LDAP's StartTLS extended request (RFC 4511 4.14.1), message id 1: SEQUENCE { 1,
 /// [APPLICATION 23] { [0] "1.3.6.1.4.1.1466.20037" } }.
 const STARTTLS_REQUEST: [u8; 31] = [
@@ -1529,6 +1702,8 @@ fn strip_query(url: &str) -> String {
 struct Recording {
     inner: rustls_platform_verifier::Verifier,
     seen: Arc<Mutex<Vec<Vec<u8>>>>,
+    /// A certificate that isn't for the host still passes (Postgres's `verify-ca`).
+    name_unchecked: bool,
 }
 
 impl rustls::client::danger::ServerCertVerifier for Recording {
@@ -1544,7 +1719,15 @@ impl rustls::client::danger::ServerCertVerifier for Recording {
         seen.push(end_entity.to_vec());
         seen.extend(intermediates.iter().map(|c| c.to_vec()));
         drop(seen);
-        self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now)
+        use rustls::CertificateError as C;
+        match self.inner.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now) {
+            Err(rustls::Error::InvalidCertificate(C::NotValidForName | C::NotValidForNameContext { .. }))
+                if self.name_unchecked =>
+            {
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+            verdict => verdict,
+        }
     }
 
     fn verify_tls12_signature(

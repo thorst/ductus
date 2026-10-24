@@ -172,9 +172,45 @@ pub struct Pair {
     current: RwLock<Arc<Loaded>>,
     /// The last renewal that didn't load, and why (so it's logged once, not every minute).
     failed: Mutex<Option<([u8; 32], String)>>,
+    /// Told the new PEM when it is renewed: for clients that copy it in (a Postgres pool's
+    /// connect options), not those that ask for it at each handshake.
+    renewed: Renewed,
+}
+
+type OnRenewal = Box<dyn Fn(&PairPem) + Send + Sync>;
+
+#[derive(Default)]
+struct Renewed(Mutex<Vec<OnRenewal>>);
+
+impl std::fmt::Debug for Renewed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{} listener(s)", self.0.lock().expect("renewal lock").len())
+    }
 }
 
 impl Pair {
+    /// A pair read from its files here (not a `certificates:` entry: the engine database URL's
+    /// `sslcert` and `sslkey`), for doctor's handshake.
+    pub fn from_files(name: &str, cert: &Path, key: &Path) -> Result<Self> {
+        let loaded = load_pair(&read(cert)?, &read(key)?)?;
+        Ok(Self::new(name, loaded, None))
+    }
+
+    fn new(name: &str, loaded: Loaded, files: Option<(PathBuf, PathBuf)>) -> Self {
+        Pair {
+            name: name.to_string(),
+            files,
+            current: RwLock::new(Arc::new(loaded)),
+            failed: Mutex::new(None),
+            renewed: Renewed::default(),
+        }
+    }
+
+    /// Call `f` with the new PEM each time the pair is renewed from its files.
+    pub fn on_renewal(&self, f: impl Fn(&PairPem) + Send + Sync + 'static) {
+        self.renewed.0.lock().expect("renewal lock").push(Box::new(f));
+    }
+
     pub fn about(&self) -> About {
         self.current.read().expect("certificate lock").about.clone()
     }
@@ -232,8 +268,12 @@ impl Pair {
                     expires = %loaded.about.not_after.format("%Y-%m-%d"),
                     "certificate renewed: new connections use it"
                 );
+                let pem = loaded.pem.clone();
                 *self.current.write().expect("certificate lock") = Arc::new(loaded);
                 *self.failed.lock().expect("certificate lock") = None;
+                for f in self.renewed.0.lock().expect("renewal lock").iter() {
+                    f(&pem);
+                }
                 true
             }
             Err(e) => {
@@ -275,6 +315,8 @@ impl ResolvesClientCert for Pair {
 struct Authority {
     store: Arc<rustls::RootCertStore>,
     certificates: Vec<CertificateDer<'static>>,
+    /// As written, for a client that takes PEM (sqlx's `ssl_root_cert_from_pem`).
+    pem: Vec<u8>,
 }
 
 /// Every `certificates:` entry, loaded.
@@ -328,7 +370,7 @@ impl Certificates {
 
     fn add_ca(&mut self, name: &str, pem: &[u8]) -> Result<()> {
         let (store, certificates) = roots(pem)?;
-        self.cas.insert(name.to_string(), Authority { store: Arc::new(store), certificates });
+        self.cas.insert(name.to_string(), Authority { store: Arc::new(store), certificates, pem: pem.to_vec() });
         Ok(())
     }
 
@@ -348,9 +390,7 @@ impl Certificates {
                 "certificate isn't valid yet: senders will refuse it until then (is this server's clock right?)"
             );
         }
-        let pair =
-            Pair { name: name.to_string(), files, current: RwLock::new(Arc::new(loaded)), failed: Mutex::new(None) };
-        self.pairs.insert(name.to_string(), Arc::new(pair));
+        self.pairs.insert(name.to_string(), Arc::new(Pair::new(name, loaded, files)));
         Ok(())
     }
 
@@ -498,6 +538,19 @@ impl Certificates {
         self.pairs.get(name)
     }
 
+    /// A CA entry's PEM, or why there is none (for clients that take PEM: Postgres).
+    pub fn ca_pem(&self, name: &str) -> Result<&[u8]> {
+        match self.cas.get(name) {
+            Some(ca) => Ok(&ca.pem),
+            None => bail!("{}", self.why_not(name, "CA")),
+        }
+    }
+
+    /// The pair named, or why there is none.
+    pub fn pair_or_why(&self, name: &str) -> Result<&Arc<Pair>> {
+        self.pairs.get(name).ok_or_else(|| anyhow!("{}", self.why_not(name, "certificate with its key")))
+    }
+
     /// The CAs' certificates, every `certificates:` CA entry's (doctor: whether a chain we serve
     /// ends at one of them).
     pub fn authorities(&self) -> impl Iterator<Item = (&str, &CertificateDer<'static>)> {
@@ -609,6 +662,22 @@ pub struct Trust {
 }
 
 impl Trust {
+    /// What a Postgres URL's `sslrootcert` and `sslcert`/`sslkey` files say (the engine's own
+    /// database), read now.
+    pub fn from_files(root_cert: Option<&Path>, client: Option<(&Path, &Path)>) -> Result<Self> {
+        let roots = match root_cert {
+            Some(file) => roots(&read(file)?).with_context(|| format!("sslrootcert {}", file.display()))?.1,
+            None => Vec::new(),
+        };
+        let client = match client {
+            Some((cert, key)) => Some(Arc::new(
+                Pair::from_files("sslcert", cert, key).with_context(|| format!("sslcert {}", cert.display()))?,
+            )),
+            None => None,
+        };
+        Ok(Self { roots, client })
+    }
+
     /// The certificates trusted besides the platform's, for a client that takes only those.
     pub fn extra_roots(&self) -> &[CertificateDer<'static>] {
         &self.roots

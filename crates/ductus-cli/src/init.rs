@@ -38,7 +38,8 @@ pub async fn project(dir: &Path) -> Result<()> {
     let git = if dir.join(".git").exists() { String::new() } else { "  git init\n".into() };
     println!(
         "\nnew project in {shown}: {}\n\nnext:\n  cd {shown}\n{git}  ductus test         # runs interfaces/{FIRST}/transform.test.ts\n  ductus validate     # types, config, ports\n  ductus dev          # runs it all with a Postgres of its own (downloaded once)
-  ductus run          # for a real Postgres: needs DUCTUS_DATABASE_URL",
+  ductus run          # for a real Postgres: needs DUCTUS_DATABASE_URL, e.g.
+                      #   postgres://ductus@db1/ductus?sslmode=verify-full&sslrootcert=/path/ca.pem",
         FILES.iter().map(|(f, _)| *f).collect::<Vec<_>>().join(", ")
     );
     Ok(())
@@ -105,6 +106,8 @@ variables: {}
 #       database: patients
 #       user: ductus
 #       password: ${secret:PATIENT_DB_PASSWORD}
+#       tls: verify-full              # check its certificate (without it: TLS if offered, unchecked)
+#       # ca: hospital-ca             # a private CA's certificate (a `certificates:` entry)
 # sftp:
 #   lab_server:
 #     host: sftp.lab.example.org
@@ -145,7 +148,7 @@ them), tests and sample messages.
 | `ductus validate` | check types, config and ports, for every environment |
 | `ductus new interface <name> --source mllp\|http\|file\|sftp\|schedule` | add an interface |
 | `ductus dev` | run them all with a Postgres of its own (nothing to install; data in `.ductus/postgres`) |
-| `ductus run` | run them all against your Postgres (needs `DUCTUS_DATABASE_URL`) |
+| `ductus run` | run them all against your Postgres (needs `DUCTUS_DATABASE_URL`; on another machine add `?sslmode=verify-full`, and `&sslrootcert=/path/ca.pem` for a private CA) |
 
 Settings are in `ductus.yaml`, shared connections in `resources.yaml`, per-environment values in
 `environments/`, encrypted secrets in `secrets/` (`ductus secret`).

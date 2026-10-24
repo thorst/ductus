@@ -373,7 +373,7 @@ function Ports() {
                       {o.host}:{o.port}
                     </Td>
                     <Td className="text-xs whitespace-nowrap">
-                      {o.tls && <Secure on={!o.tls.startsWith("none")} />}
+                      {o.tls && <Secure on={!o.tls.startsWith("none") && !o.tls.includes("not verified")} />}
                       {o.protocol}
                     </Td>
                     <Td className="text-xs break-words">{o.used_by}</Td>

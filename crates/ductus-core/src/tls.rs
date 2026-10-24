@@ -94,7 +94,8 @@ pub fn connect_tls_opt<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::R
 }
 
 /// Every connection the engine makes that names `ca` or `certificate`, with where it is: MLLP and
-/// HTTP destinations, `apis:` and `ldap:` entries, the alerts' mail server, webhooks and heartbeat.
+/// HTTP destinations, `apis:`, `ldap:` and Postgres `databases:` entries, the alerts' mail server,
+/// webhooks and heartbeat.
 pub fn outbound<'a>(
     configs: impl IntoIterator<Item = &'a InterfaceConfig>,
     resources: &Resources,
@@ -116,6 +117,11 @@ pub fn outbound<'a>(
     }
     for (name, l) in &resources.ldap {
         all.push((format!("ldap `{name}` (resources.yaml)"), ConnectTls::new(&l.ca, &None)));
+    }
+    for (name, d) in &resources.databases {
+        if let crate::resources::Database::Postgres(c) = d {
+            all.push((format!("database `{name}` (resources.yaml)"), c.connect_tls()));
+        }
     }
     if let Some(a) = alerts {
         if let Some(s) = &a.smtp {
@@ -339,6 +345,13 @@ pub fn presented<'a>(
     for (name, a) in &resources.apis {
         if let Some(certificate) = &a.certificate {
             add(certificate, format!("client certificate to api {name}"), None);
+        }
+    }
+    for (name, d) in &resources.databases {
+        if let crate::resources::Database::Postgres(c) = d
+            && let Some(certificate) = &c.certificate
+        {
+            add(certificate, format!("client certificate to database {name}"), None);
         }
     }
     if let Some(a) = alerts {

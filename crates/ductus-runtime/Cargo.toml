@@ -35,7 +35,7 @@ serde_json = "1.0.151"
 sha2 = "0.10.9"
 # Already in the tree through tokio: TCP keepalive on accepted connections (`allow::keepalive`).
 socket2 = "0.6.5"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "json"] }
+sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "json", "tls-rustls-aws-lc-rs"] }
 tiberius = { version = "0.13.0", default-features = false, features = ["tds80", "rustls", "chrono", "sql-browser-tokio"] }
 tokio = { version = "1.53.2", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
@@ -50,5 +50,7 @@ x509-parser = "0.18.1"
 flate2 = "1.1.10"
 
 [dev-dependencies]
+# Its `testing` helpers: the throwaway TLS Postgres (`PgTls`).
+ductus-store = { version = "0.5.0-dev", path = "../ductus-store", features = ["testing"] }
 serde_yaml_ng = "0.10.0"
 tempfile = "3.27.0"

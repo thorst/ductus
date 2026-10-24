@@ -96,8 +96,10 @@ async fn ports(engine: Eng, _caller: Caller) -> ApiResult<PortsReport> {
             allow: l.allow,
         })
         .collect();
-    let connects_to = ports::outbound(configs, &engine.resources)
+    // The engine's own database first: the one connection every engine makes.
+    let connects_to = ports::engine_database(&engine.database_url)
         .into_iter()
+        .chain(ports::outbound(configs, &engine.resources))
         .map(|o| OutboundPort {
             host: o.host,
             port: o.port,
