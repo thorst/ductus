@@ -107,7 +107,7 @@ pub fn impact<'a>(
         .flatten()
         .collect();
         let endpoints = match &c.source {
-            Source::Mllp { host, port, tls } => {
+            Source::Mllp { host, port, tls, .. } => {
                 vec![listening(host, *port, if tls.is_some() { "MLLP over TLS" } else { "MLLP" })]
             }
             Source::Http { host, port, path, method, tls, .. } => {

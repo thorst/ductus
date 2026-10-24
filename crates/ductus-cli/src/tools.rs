@@ -93,6 +93,8 @@ pub struct GenOptions {
     pub offset: u64,
     /// Send over TLS: the receiver checked against the platform's roots and `ca`, `cert` presented.
     pub tls: Option<TlsFiles>,
+    /// Connect from this local address (to try a receiver's `allow:` list).
+    pub from: Option<std::net::IpAddr>,
 }
 
 /// Small deterministic PRNG (xorshift64*), so runs are reproducible.
@@ -134,10 +136,13 @@ pub async fn generate(opts: GenOptions) -> Result<()> {
     let mut tasks = Vec::new();
     for lane in lanes {
         let timeout = Duration::from_secs(10);
-        let client = match &tls {
+        let mut client = match &tls {
             Some(config) => ductus_runtime::tls::mllp_client(&host, port, timeout, config.clone()),
             None => ductus_mllp::Client::new(opts.to.clone(), timeout),
         };
+        if let Some(local) = opts.from {
+            client = client.from(local);
+        }
         tasks.push(tokio::spawn(async move { send_lane(client, lane, per_connection_rate, start).await }));
     }
     let (mut retries, mut rejected) = (0u64, 0u64);

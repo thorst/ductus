@@ -3038,6 +3038,40 @@
           }
         }
       },
+      "AllowedName": {
+        "type": "object",
+        "required": [
+          "name",
+          "addresses"
+        ],
+        "properties": {
+          "addresses": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The addresses let in for it: the last lookup that found some (kept when a later one fails)."
+          },
+          "checked_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When it was last looked up."
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why the last lookup failed, if it did."
+          },
+          "name": {
+            "type": "string"
+          }
+        }
+      },
       "Appearance": {
         "type": "object",
         "required": [
@@ -4825,6 +4859,17 @@
                   "type": "string"
                 }
               },
+              "source_allow": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SourceAllow",
+                    "description": "Who may connect to the source, when it has an `allow:` list (none: anyone)."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "source_tls": {
                 "oneOf": [
                   {
@@ -5100,9 +5145,25 @@
           "host",
           "protocol",
           "interface",
-          "tls"
+          "tls",
+          "allow"
         ],
         "properties": {
+          "allow": {
+            "type": "string",
+            "description": "Who may connect: the `allow:` list (`10.1.20.0/24, epic-bridge01`), or `anyone`."
+          },
+          "allow_detail": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/SourceAllow",
+                "description": "With a list: each host name's addresses now, and the connections refused since start."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "host": {
             "type": "string"
           },
@@ -6525,6 +6586,51 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "SourceAllow": {
+        "type": "object",
+        "description": "A listener's `allow:` list and how it's doing.",
+        "required": [
+          "entries",
+          "names",
+          "refused"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The list as written: addresses, subnets and host names."
+          },
+          "last_refused": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The last refused connection's address and time."
+          },
+          "last_refused_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "names": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AllowedName"
+            },
+            "description": "Each host name in it with what it resolves to now."
+          },
+          "refused": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Connections refused since the engine started (0 when this engine doesn't hold the listener).",
+            "minimum": 0
           }
         }
       },

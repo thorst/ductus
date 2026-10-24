@@ -152,6 +152,9 @@ pub enum Target {
         protocol: &'static str,
         tls: Option<String>,
         held: bool,
+        /// Who may connect: each host name in it is looked up, and whether this check can be
+        /// let in is said.
+        allow: Option<ductus_core::allow::Allow>,
     },
 }
 
@@ -335,9 +338,13 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode, certificates: &Certifi
             r.folder(path, *created_if_missing);
             path.display().to_string()
         }
-        Target::Listener { host, port, protocol, tls, held } => {
+        Target::Listener { host, port, protocol, tls, held, allow } => {
             let in_use = *held || r.listen(host, *port).await;
-            if let Some(name) = tls.as_deref().filter(|_| in_use) {
+            let let_in = match allow {
+                Some(allow) => r.allow(allow, *port, in_use).await,
+                None => true,
+            };
+            if let Some(name) = tls.as_deref().filter(|_| in_use && let_in) {
                 r.served(host, *port, name).await;
             }
             format!("{host}:{port} {protocol}")
@@ -445,17 +452,14 @@ impl Run<'_> {
         for address in &addresses {
             let from = source_address(*address);
             let started = Instant::now();
-            let attempt = tokio::time::timeout(self.timeout, TcpStream::connect(address)).await;
+            // Registered as our own: one of our listeners lets it in and doesn't log it.
+            let attempt = tokio::time::timeout(self.timeout, crate::tls::connect_own(*address)).await;
             let at = match from {
                 Some(ip) => format!("{} from {ip}", show(address)),
                 None => show(address),
             };
             match attempt {
                 Ok(Ok(stream)) => {
-                    // Closed unused: one of our TLS listeners mustn't log it as a refused sender.
-                    if let Ok(local) = stream.local_addr() {
-                        crate::tls::Refusals::global().our_own(local);
-                    }
                     let local = stream.local_addr().ok().map(|a| a.ip()).or(from);
                     self.from = self.from.or(local);
                     let at = match local {
@@ -1009,6 +1013,70 @@ impl Run<'_> {
         false
     }
 
+    /// A listener's `allow:` list: each host name looked up from here (a name that doesn't
+    /// resolve lets no one in for it), and whether this check itself can be let in (false: the
+    /// listener is another process's, and this machine isn't on its list, so connecting to it
+    /// would only be closed and logged there).
+    async fn allow(&mut self, allow: &ductus_core::allow::Allow, port: u16, in_use: bool) -> bool {
+        let rules = match allow.rules() {
+            Ok(r) => r,
+            Err(e) => {
+                self.step("allow", Outcome::Fail, e.to_string());
+                return false;
+            }
+        };
+        let mut found: std::collections::HashMap<String, Vec<IpAddr>> = Default::default();
+        let mut shown = Vec::new();
+        for entry in &allow.0 {
+            let entry = entry.trim();
+            let name = entry.to_ascii_lowercase();
+            if !rules.names.contains(&name) {
+                shown.push(entry.to_string());
+                continue;
+            }
+            let lookup = tokio::time::timeout(self.timeout, tokio::net::lookup_host((name.as_str(), 0)))
+                .await
+                .map(|found| found.map(|a| a.map(|a| ductus_core::allow::canonical(a.ip())).collect::<Vec<IpAddr>>()));
+            match lookup {
+                Ok(Ok(mut ips)) => {
+                    ips.sort();
+                    ips.dedup();
+                    let list: Vec<String> = ips.iter().map(|ip| ip.to_string()).collect();
+                    shown.push(format!("{entry} → {}", list.join(", ")));
+                    found.insert(name, ips);
+                }
+                _ => {
+                    shown.push(format!("{entry} (doesn't resolve)"));
+                    self.step(
+                        "allow",
+                        Outcome::Warn,
+                        format!("{entry} doesn't resolve from this server: nothing is let in for it until it does"),
+                    );
+                    self.advise(format!(
+                        "Check the spelling of `{entry}` in `allow:`, or ask for a DNS entry; or list its address instead."
+                    ));
+                }
+            }
+        }
+        self.step("allow", Outcome::Ok, format!("only {} may connect", shown.join(", ")));
+        // In the engine its own checks are let in; `ductus doctor` is another process.
+        if !in_use || crate::allow::on_port(port).is_some() {
+            return true;
+        }
+        let here = |ip: IpAddr| rules.permits(ip, |n, ip| found.get(n).is_some_and(|a| a.contains(&ip)));
+        let local = [IpAddr::from([127, 0, 0, 1]), IpAddr::from(std::net::Ipv6Addr::LOCALHOST)];
+        if local.into_iter().any(here) {
+            return true;
+        }
+        self.step(
+            "allow",
+            Outcome::Ok,
+            "this machine (127.0.0.1) isn't on the list, so the running engine closes this program's connection: \
+             not checked from here (the engine's own check, Connections → Check now, is let in)",
+        );
+        false
+    }
+
     /// One of our TLS listeners, as a sender meets it: connected to (over loopback when it
     /// listens on every address), its chain taken from the handshake whatever it is, and judged
     /// the way senders build a path. Java and .NET senders don't fetch a missing intermediate
@@ -1033,9 +1101,8 @@ impl Run<'_> {
         let presented = Arc::new(Mutex::new(Vec::new()));
         let config = served_config(presented.clone());
         let handshake = async {
-            let tcp = TcpStream::connect(address).await?;
             // In the engine (the API's checks), the listener is in this process: not a refusal.
-            crate::tls::Refusals::global().our_own(tcp.local_addr()?);
+            let tcp = crate::tls::connect_own(address).await?;
             tokio_rustls::TlsConnector::from(Arc::new(config)).connect(server_name, tcp).await
         };
         let result = tokio::time::timeout(self.timeout, handshake).await;
@@ -1722,7 +1789,7 @@ pub fn plan(
     for c in configs {
         let me = Some(c.name.as_str());
         match &c.source {
-            Source::Mllp { host, port, tls } | Source::Http { host, port, tls, .. } => {
+            Source::Mllp { host, port, tls, allow } | Source::Http { host, port, tls, allow, .. } => {
                 let protocol = match (&c.source, tls) {
                     (Source::Mllp { .. }, None) => "MLLP",
                     (Source::Mllp { .. }, Some(_)) => "MLLP over TLS",
@@ -1730,7 +1797,14 @@ pub fn plan(
                     (_, Some(_)) => "HTTPS",
                 };
                 let tls = tls.as_ref().map(|t| t.certificate.clone());
-                let target = Target::Listener { host: host.clone(), port: *port, protocol, tls, held: false };
+                let target = Target::Listener {
+                    host: host.clone(),
+                    port: *port,
+                    protocol,
+                    tls,
+                    held: false,
+                    allow: allow.clone(),
+                };
                 plan.add(6, format!("{port:05} {host}"), "listening port", target, c.name.clone(), me, &c.name);
             }
             Source::File(f) => {
@@ -1810,7 +1884,12 @@ pub fn plan(
 }
 
 /// The REST API's listener with `tls`, for the engine's own full check (it holds the port).
-pub fn api_probe(host: &str, port: u16, tls: &ductus_core::tls::ListenTls) -> Probe {
+pub fn api_probe(
+    host: &str,
+    port: u16,
+    tls: &ductus_core::tls::ListenTls,
+    allow: Option<&ductus_core::allow::Allow>,
+) -> Probe {
     Probe {
         what: "listening port".into(),
         target: Target::Listener {
@@ -1819,6 +1898,7 @@ pub fn api_probe(host: &str, port: u16, tls: &ductus_core::tls::ListenTls) -> Pr
             protocol: "HTTPS",
             tls: Some(tls.certificate.clone()),
             held: true,
+            allow: allow.cloned(),
         },
         used_by: vec!["the REST API and web UI (ductus.yaml)".into()],
         resource: None,
@@ -1971,6 +2051,7 @@ mod tests {
                 protocol: "MLLP over TLS",
                 tls: Some(name.into()),
                 held: true,
+                allow: None,
             };
             let certificates = certificates.clone();
             async move { check(vec![probe(target)], Duration::from_secs(2), &certificates).await.remove(0) }
@@ -2005,7 +2086,14 @@ mod tests {
     async fn checks_listening_ports_and_folders() {
         let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = held.local_addr().unwrap().port();
-        let listener = || Target::Listener { host: "127.0.0.1".into(), port, protocol: "MLLP", tls: None, held: false };
+        let listener = || Target::Listener {
+            host: "127.0.0.1".into(),
+            port,
+            protocol: "MLLP",
+            tls: None,
+            held: false,
+            allow: None,
+        };
         let c = one(listener()).await;
         assert_eq!((c.outcome, c.endpoint.as_str()), (Outcome::Warn, &*format!("127.0.0.1:{port} MLLP")));
         drop(held);

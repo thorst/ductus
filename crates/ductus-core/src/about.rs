@@ -129,6 +129,11 @@ impl Network {
         Self { address, prefix: if address.is_ipv4() { 32 } else { 128 } }
     }
 
+    /// Every address of `other` is in this one.
+    pub fn contains(&self, other: &Network) -> bool {
+        self.prefix <= other.prefix && self.overlaps(other)
+    }
+
     /// Some address is in both (one contains the other, or they're the same).
     pub fn overlaps(&self, other: &Network) -> bool {
         let bits = self.prefix.min(other.prefix);

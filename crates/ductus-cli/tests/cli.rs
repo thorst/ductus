@@ -352,10 +352,10 @@ fn ports_lists_listeners_and_connections_per_environment_and_flags_conflicts() {
             "environment: prod
 
 Listening
-  PORT  PROTOCOL  HOST       INTERFACE          ROUTE{}TLS
-  7661  MLLP      0.0.0.0    adt{}none
-  7700  HTTP      127.0.0.1  (engine REST API)  /api/v1{}none
-  8080  HTTP      0.0.0.0    api                GET /patients/{{mrn}} (queue)  none
+  PORT  PROTOCOL  HOST       INTERFACE          ROUTE{}TLS   ALLOWED
+  7661  MLLP      0.0.0.0    adt{}none  anyone
+  7700  HTTP      127.0.0.1  (engine REST API)  /api/v1{}none  anyone
+  8080  HTTP      0.0.0.0    api                GET /patients/{{mrn}} (queue)  none  anyone
 
 Connects to
   HOST        PORT  PROTOCOL  USED BY{}TLS
@@ -381,11 +381,14 @@ Connects to
     .unwrap();
     std::fs::write(
         dir.path().join("interfaces/adt/interface.yaml"),
-        "name: adt\nsource: { mllp: { port: ${ADT_PORT}, tls: { certificate: web, clients: { ca: hie-ca } } } }\ndestination: { mllp: { host: ${EPIC}, port: 5000, tls: { ca: hie-ca } } }\n",
+        "name: adt\nsource: { mllp: { port: ${ADT_PORT}, tls: { certificate: web, clients: { ca: hie-ca } }, allow: [10.1.20.0/24, epic-bridge01] } }\ndestination: { mllp: { host: ${EPIC}, port: 5000, tls: { ca: hie-ca } } }\n",
     )
     .unwrap();
-    std::fs::write(dir.path().join("ductus.yaml"), "api: { listen: '0.0.0.0:7700', tls: { certificate: web } }\n")
-        .unwrap();
+    std::fs::write(
+        dir.path().join("ductus.yaml"),
+        "api: { listen: '0.0.0.0:7700', tls: { certificate: web }, allow: [127.0.0.1] }\n",
+    )
+    .unwrap();
     let (ok, out) = ductus(dir.path(), &["ports", "--env", "prod"]);
     assert!(ok, "{out}");
     let line = |start: &str| out.lines().find(|l| l.trim_start().starts_with(start)).unwrap_or_default().to_string();
@@ -393,10 +396,20 @@ Connects to
         |l: String| l.split("  ").map(str::trim).filter(|w| !w.is_empty()).map(String::from).collect::<Vec<_>>();
     assert_eq!(
         words(line("7661")),
-        ["7661", "MLLP over TLS", "0.0.0.0", "adt", "presents web, clients need a certificate from hie-ca"],
+        [
+            "7661",
+            "MLLP over TLS",
+            "0.0.0.0",
+            "adt",
+            "presents web, clients need a certificate from hie-ca",
+            "10.1.20.0/24, epic-bridge01"
+        ],
         "{out}"
     );
-    assert_eq!(words(line("7700")), ["7700", "HTTPS", "0.0.0.0", "(engine REST API)", "/api/v1", "presents web"]);
+    assert_eq!(
+        words(line("7700")),
+        ["7700", "HTTPS", "0.0.0.0", "(engine REST API)", "/api/v1", "presents web", "127.0.0.1"]
+    );
     assert_eq!(words(line("epic.local")), ["epic.local", "5000", "MLLP over TLS", "adt", "TLS: hie-ca trusted"]);
     std::fs::remove_file(dir.path().join("ductus.yaml")).unwrap();
     std::fs::write(

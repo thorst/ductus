@@ -497,7 +497,7 @@ mod tests {
         let tcp = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = tcp.local_addr().unwrap().port();
         let tls = certificates.server(&receiving(true), &[b"http/1.1"]).unwrap();
-        let listener = crate::tls::Listener::new(tcp, Some(tls), "test").unwrap();
+        let listener = crate::tls::Listener::new(tcp, Some(tls), "test", None).unwrap();
         tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
 
         let resources: Resources = serde_yaml_ng::from_str(&format!(

@@ -298,11 +298,15 @@ pub struct ApiSettings {
     /// machine: its session cookie is `Secure`).
     #[serde(default)]
     pub tls: Option<crate::tls::ListenTls>,
+    /// Only these addresses, subnets and host names may connect (default: anyone who can reach
+    /// `listen`). List 127.0.0.1 too, or commands on this machine (`ductus status`) are refused.
+    #[serde(default)]
+    pub allow: Option<crate::allow::Allow>,
 }
 
 impl Default for ApiSettings {
     fn default() -> Self {
-        Self { listen: default_api_listen(), tls: None }
+        Self { listen: default_api_listen(), tls: None, allow: None }
     }
 }
 
@@ -415,6 +419,9 @@ impl Settings {
         }
         let settings: Self = serde_yaml_ng::from_value(value).with_context(|| format!("in {}", file.display()))?;
         settings.api.address(None).with_context(|| format!("in {}", file.display()))?;
+        if let Some(allow) = &settings.api.allow {
+            allow.rules().with_context(|| format!("in {}: api.allow", file.display()))?;
+        }
         if settings.isolates.heap_mb < 64 {
             bail!("in {}: isolates.heap_mb must be at least 64 (the SDK alone needs a few MB)", file.display());
         }
@@ -550,6 +557,12 @@ mod tests {
             .unwrap();
         let api = Settings::load(dir.path()).unwrap().api;
         assert_eq!(api.tls.map(|t| t.certificate).as_deref(), Some("ductus-api"));
+        std::fs::write(dir.path().join(FILE), "api: { listen: '0.0.0.0:7700', allow: [127.0.0.1, 10.1.0.0/16] }\n")
+            .unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().api.allow.unwrap().summary(), "127.0.0.1, 10.1.0.0/16");
+        std::fs::write(dir.path().join(FILE), "api: { allow: [10.1.0.0/40] }\n").unwrap();
+        let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
+        assert!(err.contains("api.allow") && err.contains("prefix"), "{err}");
         assert!(loopback("127.0.0.1") && loopback("::1") && loopback("LOCALHOST"));
         assert!(!loopback("0.0.0.0") && !loopback("10.1.2.3") && !loopback("engine.hospital.org"));
     }

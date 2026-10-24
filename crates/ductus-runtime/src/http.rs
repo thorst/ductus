@@ -40,6 +40,8 @@ pub struct Endpoint {
     pub route: Route,
     /// HTTPS (every endpoint on a port has the same: `check_endpoints`).
     pub tls: Option<Arc<rustls::ServerConfig>>,
+    /// Who may connect (the port's `allow:`, the same on every endpoint: `check_endpoints`).
+    pub admission: crate::tls::Admission,
 }
 
 const RESPOND_TIMEOUT: Duration = Duration::from_secs(30);
@@ -53,6 +55,7 @@ pub async fn serve(endpoints: Vec<Endpoint>, stop: tokio_util::sync::Cancellatio
     }
     for ((host, port), endpoints) in servers {
         let tls = endpoints.first().and_then(|e| e.tls.clone());
+        let admission = endpoints.first().and_then(|e| e.admission.clone());
         let mut router = Router::new();
         let mut seen = HashSet::new();
         // Group methods per path: axum wants one route per path.
@@ -83,7 +86,7 @@ pub async fn serve(endpoints: Vec<Endpoint>, stop: tokio_util::sync::Cancellatio
         let listener = tokio::net::TcpListener::bind((host.as_str(), port))
             .await
             .with_context(|| format!("binding {protocol} {host}:{port}"))?;
-        let listener = crate::tls::Listener::new(listener, tls, &format!("{protocol} {host}:{port}"))?;
+        let listener = crate::tls::Listener::new(listener, tls, &format!("{protocol} {host}:{port}"), admission)?;
         tracing::info!(%host, port, "listening ({protocol})");
         let stop = stop.clone();
         tokio::spawn(async move {

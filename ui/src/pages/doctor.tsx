@@ -13,6 +13,7 @@ import { useState, type FormEvent } from "react";
 import { runDoctor, useCanOperate, useRefresh } from "@/api/actions";
 import { ApiError, type Schemas } from "@/api/client";
 import { certificates, interfaces, lastDoctorRun, ports } from "@/api/queries";
+import { AllowList } from "@/components/allow-list";
 import { CertificateDays } from "@/components/certificates";
 import { Loaded, PageHeader } from "@/components/page";
 import { Button } from "@/components/ui/button";
@@ -326,6 +327,7 @@ function Ports() {
                   <Th>Protocol</Th>
                   <Th>Interface</Th>
                   <Th>TLS</Th>
+                  <Th>Allowed</Th>
                 </tr>
               </thead>
               <tbody>
@@ -343,6 +345,13 @@ function Ports() {
                       {l.route && <div className="text-muted">{l.route}</div>}
                     </Td>
                     <Td className="text-xs break-words">{l.tls}</Td>
+                    <Td className="max-w-xs break-words">
+                      {l.allow_detail ? (
+                        <AllowList allow={l.allow_detail} />
+                      ) : (
+                        <span className="text-xs text-muted">anyone</span>
+                      )}
+                    </Td>
                   </tr>
                 ))}
               </tbody>

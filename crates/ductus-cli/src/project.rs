@@ -198,6 +198,81 @@ fn check_tls<'a>(
     problems
 }
 
+/// What `validate` says about `allow:` lists: a summary, names that don't resolve from here,
+/// senders `about.from.hosts` names that the list would refuse, and an API list that leaves
+/// out this machine. Warnings only: DNS seen from here may not be the engine's.
+async fn check_allow<'a>(
+    configs: impl Iterator<Item = &'a InterfaceConfig>,
+    api: Option<&ductus_core::allow::Allow>,
+) -> Vec<String> {
+    const API: &str = "api (ductus.yaml)";
+    let lists: Vec<(String, &ductus_core::allow::Allow, &[String])> = configs
+        .filter_map(|c| c.source.allow().map(|a| (c.name.clone(), a, c.about.from.hosts.as_slice())))
+        .chain(api.map(|a| (API.to_string(), a, &[][..])))
+        .collect();
+    if lists.is_empty() {
+        return Vec::new();
+    }
+    // Every name once (lists, and the hosts `about` names).
+    let mut names: Vec<String> = lists
+        .iter()
+        .flat_map(|(_, a, hosts)| {
+            let listed = a.rules().map(|r| r.names).unwrap_or_default();
+            let about = hosts.iter().filter(|h| matches!(ductus_core::about::Network::parse(h), Ok(None)));
+            listed.into_iter().chain(about.map(|h| h.trim().to_ascii_lowercase()))
+        })
+        .collect();
+    names.sort();
+    names.dedup();
+    let mut found: BTreeMap<String, Vec<std::net::IpAddr>> = BTreeMap::new();
+    for name in names {
+        let lookup =
+            tokio::time::timeout(std::time::Duration::from_secs(5), tokio::net::lookup_host((name.as_str(), 0)));
+        let ips = match lookup.await {
+            Ok(Ok(a)) => a.map(|a| ductus_core::allow::canonical(a.ip())).collect(),
+            _ => Vec::new(),
+        };
+        found.insert(name, ips);
+    }
+    let resolve = |name: &str| found.get(name).cloned().unwrap_or_default();
+
+    let mut lines = vec![format!(
+        "✓ who may connect: {} listener(s) with an `allow:` list ({})",
+        lists.len(),
+        lists.iter().map(|(n, ..)| n.as_str()).collect::<Vec<_>>().join(", ")
+    )];
+    for (name, allow, hosts) in &lists {
+        let Ok(rules) = allow.rules() else { continue };
+        for listed in &rules.names {
+            if resolve(listed).is_empty() {
+                lines.push(format!(
+                    "⚠ {name}: `allow` names `{listed}`, which doesn't resolve from here: nothing is let in for it until it does (the engine looks again every 5 minutes)"
+                ));
+            }
+        }
+        for host in hosts.iter() {
+            match rules.covers(host, &resolve) {
+                Some(true) => {}
+                Some(false) => lines.push(format!(
+                    "⚠ {name}: about.from.hosts `{host}` isn't covered by `allow`: connections from it will be refused"
+                )),
+                None => lines.push(format!(
+                    "⚠ {name}: can't tell whether about.from.hosts `{host}` is allowed (it doesn't resolve from here)"
+                )),
+            }
+        }
+        let local = [std::net::IpAddr::from([127, 0, 0, 1]), std::net::Ipv6Addr::LOCALHOST.into()];
+        let here = |ip| rules.permits(ip, |n, ip| resolve(n).contains(&ip));
+        if name == API && !local.into_iter().any(here) {
+            lines.push(
+                "⚠ api.allow leaves out 127.0.0.1: `ductus status`, `drain` and the web UI on this machine will be refused (add 127.0.0.1 if you use them here)"
+                    .into(),
+            );
+        }
+    }
+    lines
+}
+
 /// Check configs, module loading and types. Returns false if anything is wrong.
 pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> Result<bool> {
     let types = write_types(root).await?;
@@ -369,6 +444,11 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> R
     // TLS: what each listener names, and each certificate loads as the engine would load it.
     if let Some(r) = &resources {
         problems += check_tls(root, &env, r, configs());
+    }
+    // Who may connect: warnings only (malformed lists are refused when the config loads).
+    let api_allow = ductus_core::settings::Settings::load(root).ok().and_then(|s| s.api.allow);
+    for line in check_allow(configs(), api_allow.as_ref()).await {
+        println!("{line}");
     }
 
     // Alerts (`alerts:` in ductus.yaml), with this environment's variables and secrets.
@@ -757,7 +837,7 @@ pub fn ports(root: &Path, env: &str) -> Result<bool> {
         if let Some(l) = listening.iter().find(|l| l.port == port) {
             conflicts.push(format!("port {port}: the REST API (`api.listen` in ductus.yaml) and `{}`", l.interface));
         }
-        listening.push(ports::api_listener(&host, port, settings.api.tls.as_ref()));
+        listening.push(ports::api_listener(&host, port, settings.api.tls.as_ref(), settings.api.allow.as_ref()));
         listening.sort();
     }
     println!("\nListening");
@@ -765,9 +845,17 @@ pub fn ports(root: &Path, env: &str) -> Result<bool> {
         println!("  (nothing: no MLLP or HTTP sources, and the REST API is off)");
     } else {
         table(
-            &["PORT", "PROTOCOL", "HOST", "INTERFACE", "ROUTE", "TLS"],
+            &["PORT", "PROTOCOL", "HOST", "INTERFACE", "ROUTE", "TLS", "ALLOWED"],
             listening.into_iter().map(|l| {
-                vec![l.port.to_string(), l.protocol.into(), l.host, l.interface, l.route.unwrap_or_default(), l.tls]
+                vec![
+                    l.port.to_string(),
+                    l.protocol.into(),
+                    l.host,
+                    l.interface,
+                    l.route.unwrap_or_default(),
+                    l.tls,
+                    l.allow,
+                ]
             }),
         );
     }

@@ -39,6 +39,10 @@ pub struct ListeningPort {
     /// `none`, or what it presents and asks for (`presents ductus-mllp, clients need a
     /// certificate from hospital-ca`).
     tls: String,
+    /// Who may connect: the `allow:` list (`10.1.20.0/24, epic-bridge01`), or `anyone`.
+    allow: String,
+    /// With a list: each host name's addresses now, and the connections refused since start.
+    allow_detail: Option<super::status::SourceAllow>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -71,18 +75,25 @@ async fn ports(engine: Eng, _caller: Caller) -> ApiResult<PortsReport> {
     let configs = engine.interfaces.iter().map(|i| &*i.config);
     let mut listening = ports::listeners(configs.clone());
     if let Some(api) = &engine.api {
-        listening.push(ports::api_listener(&api.host, api.port, api.tls.as_ref()));
+        listening.push(ports::api_listener(&api.host, api.port, api.tls.as_ref(), api.allow.as_ref()));
         listening.sort();
     }
+    // Each listener's list as configured (the row only has its text).
+    let list = |port: u16, interface: &str| match engine.interface(interface) {
+        Some(i) => i.config.source.allow().cloned(),
+        None => engine.api.as_ref().filter(|a| a.port == port).and_then(|a| a.allow.clone()),
+    };
     let listening = listening
         .into_iter()
         .map(|l| ListeningPort {
+            allow_detail: list(l.port, &l.interface).map(|a| super::status::SourceAllow::on_port(&a, Some(l.port))),
             port: l.port,
             host: l.host,
             protocol: l.protocol.into(),
             interface: l.interface,
             route: l.route,
             tls: l.tls,
+            allow: l.allow,
         })
         .collect();
     let connects_to = ports::outbound(configs, &engine.resources)

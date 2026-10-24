@@ -1100,6 +1100,18 @@ export interface components {
             /** @description The latest events, newest first. */
             recent: components["schemas"]["AlertEvent"][];
         };
+        AllowedName: {
+            /** @description The addresses let in for it: the last lookup that found some (kept when a later one fails). */
+            addresses: string[];
+            /**
+             * Format: date-time
+             * @description When it was last looked up.
+             */
+            checked_at?: string | null;
+            /** @description Why the last lookup failed, if it did. */
+            error?: string | null;
+            name: string;
+        };
         Appearance: {
             /** @description The custom colors, as the UI saves them (a JSON object). */
             colors?: Record<string, never> | null;
@@ -1781,6 +1793,7 @@ export interface components {
             /** @description The sending system and where its connections come from. */
             from: components["schemas"]["SystemInfo"];
             from_hosts: string[];
+            source_allow?: components["schemas"]["SourceAllow"] | null;
             source_tls?: components["schemas"]["SourceTls"] | null;
             /**
              * Format: int64
@@ -1896,6 +1909,9 @@ export interface components {
             error: string;
         };
         ListeningPort: {
+            /** @description Who may connect: the `allow:` list (`10.1.20.0/24, epic-bridge01`), or `anyone`. */
+            allow: string;
+            allow_detail?: components["schemas"]["SourceAllow"] | null;
             host: string;
             /** @description The interface, or `(engine REST API)`. */
             interface: string;
@@ -2387,6 +2403,22 @@ export interface components {
             /** @description `starttls`, `tls` or `none`. */
             tls: string;
             username?: string | null;
+        };
+        /** @description A listener's `allow:` list and how it's doing. */
+        SourceAllow: {
+            /** @description The list as written: addresses, subnets and host names. */
+            entries: string[];
+            /** @description The last refused connection's address and time. */
+            last_refused?: string | null;
+            /** Format: date-time */
+            last_refused_at?: string | null;
+            /** @description Each host name in it with what it resolves to now. */
+            names: components["schemas"]["AllowedName"][];
+            /**
+             * Format: int64
+             * @description Connections refused since the engine started (0 when this engine doesn't hold the listener).
+             */
+            refused: number;
         };
         /** @description TLS on an interface's listener. */
         SourceTls: {

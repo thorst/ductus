@@ -7,6 +7,7 @@ import type { Schemas } from "@/api/client";
 import { alerts, docs, iface, owners } from "@/api/queries";
 import { ActionDialog } from "@/components/action-dialog";
 import { AlertItem, isCertificate } from "@/components/alerts";
+import { AllowList } from "@/components/allow-list";
 import { DocFields } from "@/components/docs-values";
 import { HealthBadge } from "@/components/health-badge";
 import { MessageList } from "@/components/message-list";
@@ -90,6 +91,7 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
             </Field>
             <Field label="Source">
               {i.source_tls ? <TlsSource tls={i.source_tls} /> : <span className="font-mono text-xs">{i.source}</span>}
+              {i.source_allow && <AllowList allow={i.source_allow} />}
             </Field>
             <Field label="Systems">
               {system(i.from)} <ArrowRight aria-label="to" className="inline size-3.5" /> {system(i.to)}

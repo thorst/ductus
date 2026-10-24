@@ -127,6 +127,7 @@ pub async fn serve(
     host: &str,
     port: u16,
     tls: Option<Arc<rustls::ServerConfig>>,
+    admission: crate::tls::Admission,
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     use anyhow::Context;
     use axum::serve::ListenerExt;
@@ -135,7 +136,7 @@ pub async fn serve(
     })?;
     let https = tls.is_some();
     // `tap_io` gives the listener axum's connect info (the caller's address, for the audit log).
-    let listener = crate::tls::Listener::new(listener, tls, "the REST API")?.tap_io(|_| {});
+    let listener = crate::tls::Listener::new(listener, tls, "the REST API", admission)?.tap_io(|_| {});
     tracing::info!(%host, port, https, "REST API listening (/api/v1)");
     let shutdown = engine.shutdown.clone();
     let (mut router, _) = router(engine);

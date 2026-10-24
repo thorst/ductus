@@ -302,7 +302,7 @@ pub fn presented<'a>(
     let mut ports: Vec<(&str, String, Vec<&str>)> = Vec::new();
     for c in configs {
         match &c.source {
-            Source::Mllp { host, port, tls: Some(t) } => {
+            Source::Mllp { host, port, tls: Some(t), .. } => {
                 add(&t.certificate, format!("{host}:{port} MLLP over TLS ({})", c.name), Some(&c.name))
             }
             Source::Http { host, port, tls: Some(t), .. } => {

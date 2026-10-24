@@ -161,7 +161,9 @@ pub fn probes(
     let mut probes: Vec<Probe> = doctor::plan(configs, resources, code, database_url, only)
         .into_iter()
         .filter_map(|mut p| match &mut p.target {
-            Target::Listener { tls: None, .. } => None,
+            // The engine holds its ports: a plain listener has nothing to check, unless its
+            // `allow:` names hosts to look up.
+            Target::Listener { tls: None, allow: None, .. } => None,
             Target::Listener { held, .. } => {
                 *held = true;
                 Some(p)
@@ -244,7 +246,7 @@ pub async fn run(engine: &Engine, mode: Mode, who: &str, only: &[String], timeou
     if let Some(api) = engine.api.as_ref().filter(|_| only.is_empty())
         && let Some(tls) = &api.tls
     {
-        probes.push(doctor::api_probe(&api.host, api.port, tls));
+        probes.push(doctor::api_probe(&api.host, api.port, tls, api.allow.as_ref()));
     }
     if mode == Mode::Certificates {
         probes = doctor::certificates_only(probes);
@@ -393,6 +395,7 @@ mod tests {
             host: "0.0.0.0".into(),
             port: 7700,
             tls: Some(ductus_core::tls::ListenTls { certificate: "web".into(), clients: None }),
+            allow: None,
         };
         let ours = ours(&configs, &resources, None, Some(&api), "engine-1");
         let shown: Vec<_> = ours

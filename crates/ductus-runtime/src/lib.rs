@@ -2,6 +2,7 @@
 
 pub mod activity;
 pub mod alerts;
+pub mod allow;
 pub mod api;
 pub mod audit;
 pub mod cert_show;
@@ -170,6 +171,17 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         None => None,
     };
     let sftp_server = |name: &str| resources.sftp.get(name).cloned();
+    // Host names in `allow:` lists, looked up while the database connects (needed before
+    // anything listens); nothing at all when no list names a host.
+    let allow_lists = configs.iter().filter_map(|c| c.source.allow()).chain(settings.api.allow.iter());
+    let names = allow::Names::new(allow::names_in(allow_lists), allow::system_resolver());
+    let resolving = (!names.is_empty()).then(|| {
+        let names = names.clone();
+        tokio::spawn(async move { names.resolve_all().await })
+    });
+    let admission = |listener: &str, host: &str, port: u16, list: Option<&ductus_core::allow::Allow>| {
+        list.map(|a| allow::Admission::new(listener, host, port, a, names.clone())).transpose()
+    };
     phases.mark("project loaded and checked");
     let store = Store::connect(database_url, options.db_connections).await?;
     phases.mark("database connected and migrated");
@@ -244,6 +256,8 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     let mut dedicated: Vec<(String, worker::Job)> = Vec::new();
     let mut interfaces = Vec::new();
     let mut http_endpoints = Vec::new();
+    // One admission per HTTP port (its interfaces share one list: `check_endpoints`).
+    let mut http_admissions: std::collections::HashMap<(String, u16), tls::Admission> = Default::default();
     let mut shared_count = 0;
     // Every queued interface's intake first: routes need their target's.
     let mut intakes = std::collections::HashMap::new();
@@ -322,7 +336,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
             .collect::<Result<_>>()?;
         // Respond-mode HTTP interfaces get requests over a channel instead of a queue.
         let mut requests = None;
-        if let Source::Http { host, port, path, method, tls, .. } = &config.source {
+        if let Source::Http { host, port, path, method, tls, allow, .. } = &config.source {
             let route = if config.responds() {
                 let (calls, rx) = tokio::sync::mpsc::channel(1024);
                 requests = Some(rx);
@@ -337,6 +351,15 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
                 path: path.clone(),
                 route,
                 tls: server_tls(tls, HTTP1)?,
+                admission: match http_admissions.get(&(host.clone(), *port)) {
+                    Some(a) => a.clone(),
+                    None => {
+                        let protocol = if tls.is_some() { "HTTPS" } else { "HTTP" };
+                        let a = admission(&format!("{protocol} {host}:{port}"), host, *port, allow.as_ref())?;
+                        http_admissions.insert((host.clone(), *port), a.clone());
+                        a
+                    }
+                },
             });
         }
         for slot in 0..config.slots() {
@@ -406,11 +429,20 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         bail!("{}", failed.join("\n"));
     }
     phases.mark("interface code loaded, workers running");
+    if let Some(resolving) = resolving {
+        resolving.await.context("looking up the host names in `allow:` lists")?;
+        phases.mark("allow: host names looked up");
+    }
+    names.start(stopping.clone());
 
     for (config, ..) in &interfaces {
         let intake = || intakes[&config.name].clone();
         match &config.source {
-            Source::Mllp { tls, .. } => ingest::spawn_mllp(intake(), server_tls(tls, &[])?).await?,
+            Source::Mllp { host, port, tls, allow } => {
+                let label = format!("interface `{}` (MLLP)", config.name);
+                let admission = admission(&label, host, *port, allow.as_ref())?;
+                ingest::spawn_mllp(intake(), server_tls(tls, &[])?, admission).await?
+            }
             Source::File(f) | Source::Sftp(f) => {
                 let server = f.server.as_deref().and_then(sftp_server);
                 let watcher = files::FileWatcher::new(intake(), server, owner.ownership.clone())?;
@@ -458,7 +490,12 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         teams: settings.owners.clone(),
         ownership: owner.ownership.clone(),
         tls: certificates.clone(),
-        api: api_address.clone().map(|(host, port)| control::ApiListener { host, port, tls: settings.api.tls.clone() }),
+        api: api_address.clone().map(|(host, port)| control::ApiListener {
+            host,
+            port,
+            tls: settings.api.tls.clone(),
+            allow: settings.api.allow.clone(),
+        }),
         host: audit::host_name(),
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
@@ -471,7 +508,9 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     phases.mark("audit log and alerts started");
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
-        api_server = Some(api::serve(engine.clone(), host, *port, server_tls(&settings.api.tls, HTTP1)?).await?);
+        let admission = admission("the REST API", host, *port, settings.api.allow.as_ref())?;
+        api_server =
+            Some(api::serve(engine.clone(), host, *port, server_tls(&settings.api.tls, HTTP1)?, admission).await?);
     }
     phases.mark("API listening");
     // Messages left pending with nothing pending for them (after a crash, or reconcile's

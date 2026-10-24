@@ -30,7 +30,11 @@ export DUCTUS_API_URL=http://127.0.0.1:7797
 psql -q "$DB" -c "DELETE FROM alert_events WHERE key LIKE 'cert:empi:%' OR key LIKE '%certs-demo%'" \
   -c "DELETE FROM alert_state WHERE key LIKE 'cert:empi:%' OR key LIKE '%certs-demo%'" \
   -c "DELETE FROM certificate_status WHERE resource IN ('empi', 'certs-demo-mllp')"
-q() { psql -tA "$DB" -c "$1"; }
+# Dates in UTC: certificates end at UTC times, and a local zone west of UTC reads a midnight as
+# the day before.
+q() { PGTZ=UTC psql -tA "$DB" -c "$1"; }
+# Unique per run: PIDs repeat after WSL restarts, and audit rows stay for years.
+OPS_NAME=certs-demo-ops-$$-$(date +%s)
 fail=""
 
 mkdir -p "$P/interfaces/certs-demo"
@@ -96,7 +100,7 @@ echo "== the engine checks by itself: 40 days left"
 ENGINE=$!
 until grep "started interfaces=" "$P/run.log" 2>/dev/null >/dev/null; do kill -0 $ENGINE || { cat "$P/run.log"; exit 1; }; sleep 0.2; done
 echo "   engine log: $P/run.log"
-OPS=$("$BIN" token create "certs-demo-ops-$$" --role operator 2>/dev/null)
+OPS=$("$BIN" token create "$OPS_NAME" --role operator 2>/dev/null)
 api() { # method path [json]
   local body=()
   [ -n "${3:-}" ] && body=(-H 'Content-Type: application/json' -d "$3")
@@ -152,10 +156,10 @@ days=$(awk '{ printf "%d", $2 / 86400 }' <<<"$gauge")
 [ "$days" -ge 89 ] && [ "$days" -le 90 ] || fail+=" gauge($gauge)"
 runs=$(api GET /doctor/runs)
 echo "   kept runs: $(js "$runs" "', '.join(f\"{r['mode']} by {r['started_by']}\" for r in d[:3])") ..."
-[ "$(js "$runs" "sum(1 for r in d if r['started_by'] == 'schedule') >= 1 and sum(1 for r in d if r['started_by'] == 'certs-demo-ops-$$') == 6")" = True ] || fail+=" runs"
+[ "$(js "$runs" "sum(1 for r in d if r['started_by'] == 'schedule') >= 1 and sum(1 for r in d if r['started_by'] == '$OPS_NAME') == 6")" = True ] || fail+=" runs"
 report=$(api GET "/doctor/runs/$(js "$runs" "d[0]['id']")")
 [ "$(js "$report" "d['checks'][0]['certificate']['resource']")" = empi ] || fail+=" stored-report"
-logged=$(q "SELECT count(*) FROM audit_log WHERE action = 'doctor.run' AND actor_name = 'certs-demo-ops-$$'")
+logged=$(q "SELECT count(*) FROM audit_log WHERE action = 'doctor.run' AND actor_name = '$OPS_NAME'")
 [ "$logged" = 6 ] || fail+=" audit($logged)"
 alert=$(api GET /alerts)
 [ "$(js "$alert" "[a['state'] for a in d['alerts'] if a['key'] == 'cert:empi:localhost:7447']")" = "['ok']" ] || fail+=" alerts-api"
@@ -181,7 +185,8 @@ check_now 90
 wait_for 40 '[ "$(mails)" -ge 7 ]' || fail+=" no-ours-mail"
 grep "^mail [67] " "$P/mail.log" | sed 's/^/   | /'
 grep "^mail [67] .*to infra@hospital.example: \[Ductus dev\] WARNING Our certificate certs-demo-mllp (on $HOST) expires in 10 days" "$P/mail.log" >/dev/null || fail+=" ours-to-owner"
-[ "$(q "SELECT chain_min_not_after::date - current_date FROM certificate_status WHERE resource = 'certs-demo-mllp' AND host = '$HOST'")" = 10 ] || fail+=" ours-row-renewed"
+row=$(q "SELECT chain_min_not_after::date - current_date FROM certificate_status WHERE resource = 'certs-demo-mllp' AND host = '$HOST'")
+[ "$row" = 10 ] || fail+=" ours-row-renewed($row; $(q "SELECT chain_min_not_after, read_at, now() FROM certificate_status WHERE resource = 'certs-demo-mllp'"))"
 
 echo "== ours, half renewed (a new certificate, the old key): shown, the one that works kept"
 cp "$P/tls/long.pem" "$P/tls/mllp.pem"
@@ -199,5 +204,5 @@ grep "^mail [89] .*to infra@hospital.example: \[Ductus dev\] RECOVERED Our certi
 ours=$(api GET /certificates)
 [ "$(js "$ours" "$OURS['days_left'], $OURS['error']")" = "90 None" ] || fail+=" ours-renewed($ours)"
 
-"$BIN" token revoke "certs-demo-ops-$$" >/dev/null 2>&1 || true
+"$BIN" token revoke "$OPS_NAME" >/dev/null 2>&1 || true
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; tail -20 "$P/run.log"; exit 1; fi

@@ -5,7 +5,7 @@
 use bytes::{Buf, Bytes, BytesMut};
 use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -153,13 +153,21 @@ pub struct Client {
     /// Turns a new TCP connection into the stream messages are sent on (a TLS handshake), within
     /// the send's timeout. None: plain TCP.
     open: Option<Open>,
+    /// Connect from this local address (None: the OS picks).
+    from: Option<IpAddr>,
     stream: Option<Box<dyn Stream>>,
     buf: BytesMut,
 }
 
 impl Client {
     pub fn new(addr: impl Into<String>, timeout: Duration) -> Self {
-        Self { addr: addr.into(), timeout, open: None, stream: None, buf: BytesMut::new() }
+        Self { addr: addr.into(), timeout, open: None, from: None, stream: None, buf: BytesMut::new() }
+    }
+
+    /// Connect from `local` (one of this machine's addresses), as a sender elsewhere would:
+    /// `ductus gen --from` tries a receiver's `allow:` list.
+    pub fn from(self, local: IpAddr) -> Self {
+        Self { from: Some(local), ..self }
     }
 
     /// A client whose connections need setting up first (a TLS handshake): `open` turns each new
@@ -233,7 +241,22 @@ impl Client {
 
     async fn connect(&mut self) -> io::Result<&mut Box<dyn Stream>> {
         if self.stream.is_none() {
-            let tcp = TcpStream::connect(&self.addr).await?;
+            let tcp = match self.from {
+                None => TcpStream::connect(&self.addr).await?,
+                Some(local) => {
+                    let target = tokio::net::lookup_host(&self.addr)
+                        .await?
+                        .find(|a| a.is_ipv4() == local.is_ipv4())
+                        .ok_or_else(|| io::Error::other(format!("{} has no address of {local}'s kind", self.addr)))?;
+                    let socket = if local.is_ipv4() {
+                        tokio::net::TcpSocket::new_v4()?
+                    } else {
+                        tokio::net::TcpSocket::new_v6()?
+                    };
+                    socket.bind(SocketAddr::new(local, 0))?;
+                    socket.connect(target).await?
+                }
+            };
             tcp.set_nodelay(true)?;
             let stream = match &self.open {
                 Some(open) => open(tcp).await?,

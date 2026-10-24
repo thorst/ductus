@@ -381,6 +381,10 @@ enum Command {
         cert: Option<PathBuf>,
         #[arg(long, requires = "cert")]
         key: Option<PathBuf>,
+        /// Connect from this address of this machine (127.0.0.2 on Linux, say), to try a
+        /// receiver's `allow:` list as a sender elsewhere would.
+        #[arg(long)]
+        from: Option<std::net::IpAddr>,
     },
     /// Receive messages over MLLP, ACK them, and verify per-patient ordering. With --smtp or
     /// --http, a mail server or web server that accepts everything and prints it instead (to see
@@ -909,9 +913,9 @@ async fn run(cli: Cli) -> Result<()> {
             }
             Ok(())
         }
-        Command::Gen { to, count, patients, rate, connections, hot, offset, tls, ca, cert, key } => {
+        Command::Gen { to, count, patients, rate, connections, hot, offset, tls, ca, cert, key, from } => {
             let tls = (tls || ca.is_some() || cert.is_some()).then_some(tools::TlsFiles { ca, cert, key });
-            tools::generate(tools::GenOptions { to, count, patients, rate, connections, hot, offset, tls }).await
+            tools::generate(tools::GenOptions { to, count, patients, rate, connections, hot, offset, tls, from }).await
         }
         Command::Sink { smtp: Some(port), dir, .. } => sinks::smtp(port, dir).await,
         Command::Sink { http: Some(port), dir, .. } => sinks::http(port, dir).await,

@@ -104,9 +104,12 @@ pub enum Source {
         /// Accept only TLS, presenting this certificate (and asking senders for theirs).
         #[serde(default)]
         tls: Option<crate::tls::ListenTls>,
+        /// Only these addresses, subnets and host names may connect (default: anyone).
+        #[serde(default)]
+        allow: Option<crate::allow::Allow>,
     },
     /// An HTTP endpoint. Several interfaces can share a port with different paths (and the same
-    /// `tls`).
+    /// `tls` and `allow`).
     Http {
         #[serde(default = "defaults::host")]
         host: String,
@@ -114,6 +117,9 @@ pub enum Source {
         /// HTTPS only, presenting this certificate.
         #[serde(default)]
         tls: Option<crate::tls::ListenTls>,
+        /// Only these addresses, subnets and host names may connect (default: anyone).
+        #[serde(default)]
+        allow: Option<crate::allow::Allow>,
         /// Route, with `{name}` parameters: `/patients/{mrn}`.
         path: String,
         #[serde(default = "defaults::post")]
@@ -144,6 +150,14 @@ impl Source {
             Source::Sftp(_) => "sftp",
             Source::Schedule(_) => "schedule",
             Source::Internal => "internal",
+        }
+    }
+
+    /// Who may connect, for a listening source with an `allow:` list.
+    pub fn allow(&self) -> Option<&crate::allow::Allow> {
+        match self {
+            Source::Mllp { allow, .. } | Source::Http { allow, .. } => allow.as_ref(),
+            _ => None,
         }
     }
 }
@@ -226,6 +240,7 @@ pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig
     let mut mllp: HashMap<u16, &str> = HashMap::new();
     let mut http_ports: HashMap<u16, &str> = HashMap::new();
     let mut http_tls: HashMap<u16, (&str, &Option<crate::tls::ListenTls>)> = HashMap::new();
+    let mut http_allow: HashMap<u16, (&str, &Option<crate::allow::Allow>)> = HashMap::new();
     let mut routes: HashMap<(u16, String, String), &str> = HashMap::new();
     for c in configs {
         match &c.source {
@@ -235,12 +250,20 @@ pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig
                     problems.push(format!("port {port}: MLLP listeners for both `{first}` and `{}`", c.name));
                 }
             }
-            Source::Http { port, method, path, tls, .. } => {
+            Source::Http { port, method, path, tls, allow, .. } => {
                 http_ports.entry(*port).or_insert(&c.name);
                 let (first, first_tls) = *http_tls.entry(*port).or_insert((&c.name, tls));
                 if first_tls != tls {
                     problems.push(format!(
                         "port {port}: `{first}` and `{}` share it with different `tls` (one server per port: give them the same)",
+                        c.name
+                    ));
+                }
+                // Checked before anything is read, so before the path is known: one list per port.
+                let (first, first_allow) = *http_allow.entry(*port).or_insert((&c.name, allow));
+                if first_allow != allow {
+                    problems.push(format!(
+                        "port {port}: `{first}` and `{}` share it with different `allow` (it's checked before the request is read: give them the same)",
                         c.name
                     ));
                 }
@@ -858,6 +881,9 @@ impl InterfaceConfig {
         for host in &self.about.from.hosts {
             crate::about::Network::parse(host).context("about.from.hosts")?;
         }
+        if let Some(allow) = self.source.allow() {
+            allow.rules().context("source: allow")?;
+        }
         if let Source::Http { path, method, .. } = &self.source {
             if !path.starts_with('/') {
                 bail!("HTTP path must start with /");
@@ -1166,6 +1192,24 @@ retry: { max_attempts: 3 }
             check_endpoints([&g, &i]),
             ["port 8443: `g` and `i` share it with different `tls` (one server per port: give them the same)"]
         );
+        let allow = |name: &str, list: &str| {
+            load(&format!(
+                "name: {name}\nsource: {{ http: {{ port: 8081, path: /{name}, allow: [{list}] }} }}\nformat: json\n{dest}"
+            ))
+        };
+        let (j, k, l) = (allow("j", "10.1.20.0/24"), allow("k", "10.1.20.0/24"), allow("l", "epic"));
+        assert!(check_endpoints([&j, &k]).is_empty(), "the same allow may share a port");
+        assert_eq!(
+            check_endpoints([&j, &l]),
+            [
+                "port 8081: `j` and `l` share it with different `allow` (it's checked before the request is read: give them the same)"
+            ]
+        );
+        assert_eq!(j.source.allow().map(|a| a.summary()).as_deref(), Some("10.1.20.0/24"));
+        let mut bad = load(&format!("name: m\nsource: {{ mllp: {{ port: 6670, allow: [] }} }}\n{dest}"));
+        bad.dir = std::env::temp_dir();
+        let err = format!("{:#}", bad.validate().unwrap_err());
+        assert!(err.contains("source: allow") && err.contains("lets no one connect"), "{err}");
         assert_eq!(
             check_endpoints([&a, &b, &c, &d, &f]),
             [

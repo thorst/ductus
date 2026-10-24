@@ -28,6 +28,7 @@ echo "##### audit log";       bash scripts/demo-audit.sh | tail -1
 echo "##### alerts";          bash scripts/demo-alerts.sh | tail -1
 echo "##### certificates";    bash scripts/demo-certs.sh | tail -1
 echo "##### TLS";             bash scripts/demo-tls.sh | tail -1
+echo "##### who may connect"; bash scripts/demo-allow.sh | tail -1
 echo "##### directory";       bash scripts/demo-ldap.sh | tail -1
 echo "##### one owner";       bash scripts/demo-one-owner.sh | tail -1
 echo "##### web UI";          bash scripts/demo-ui.sh | tail -1

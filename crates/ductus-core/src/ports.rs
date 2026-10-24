@@ -1,6 +1,7 @@
 //! Which ports a project listens on and which hosts it connects to: `ductus ports` shows
 //! them (with conflicts from `config::check_endpoints`), and `ductus new` picks free ports.
 
+use crate::allow::Allow;
 use crate::config::{Destination, HttpMode, Source};
 use crate::resources::{Endpoint, Kind, LdapSecurity};
 use crate::tls::{ConnectTls, ListenTls};
@@ -19,10 +20,12 @@ pub struct Listener {
     /// With TLS, what it presents and asks for (`presents ductus-mllp, clients need a
     /// certificate from hospital-ca`); `none` without.
     pub tls: String,
+    /// Who may connect: the `allow:` list (`10.1.20.0/24, epic-bridge01`), or `anyone`.
+    pub allow: String,
 }
 
 /// The engine's REST API (and web UI) as a listener.
-pub fn api_listener(host: &str, port: u16, tls: Option<&ListenTls>) -> Listener {
+pub fn api_listener(host: &str, port: u16, tls: Option<&ListenTls>, allow: Option<&Allow>) -> Listener {
     Listener {
         port,
         host: host.to_string(),
@@ -30,11 +33,17 @@ pub fn api_listener(host: &str, port: u16, tls: Option<&ListenTls>) -> Listener 
         interface: "(engine REST API)".into(),
         route: Some("/api/v1".into()),
         tls: listen_tls(tls),
+        allow: allowed(allow),
     }
 }
 
 fn listen_tls(tls: Option<&ListenTls>) -> String {
     tls.map_or_else(|| "none".to_string(), ListenTls::summary)
+}
+
+/// An `allow:` list for a table: the list, or `anyone`.
+pub fn allowed(allow: Option<&Allow>) -> String {
+    allow.map_or_else(|| "anyone".to_string(), Allow::summary)
 }
 
 /// A host and port the project connects to (what a firewall request lists).
@@ -67,15 +76,16 @@ pub fn listeners<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> 
     let mut out: Vec<Listener> = configs
         .into_iter()
         .filter_map(|c| match &c.source {
-            Source::Mllp { host, port, tls } => Some(Listener {
+            Source::Mllp { host, port, tls, allow } => Some(Listener {
                 port: *port,
                 host: host.clone(),
                 protocol: if tls.is_some() { "MLLP over TLS" } else { "MLLP" },
                 interface: c.name.clone(),
                 route: None,
                 tls: listen_tls(tls.as_ref()),
+                allow: allowed(allow.as_ref()),
             }),
-            Source::Http { host, port, path, method, mode, tls } => Some(Listener {
+            Source::Http { host, port, path, method, mode, tls, allow } => Some(Listener {
                 port: *port,
                 host: host.clone(),
                 protocol: if tls.is_some() { "HTTPS" } else { "HTTP" },
@@ -86,6 +96,7 @@ pub fn listeners<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> 
                     if *mode == HttpMode::Respond { "respond" } else { "queue" }
                 )),
                 tls: listen_tls(tls.as_ref()),
+                allow: allowed(allow.as_ref()),
             }),
             Source::File(_) | Source::Sftp(_) | Source::Schedule(_) | Source::Internal => None,
         })
@@ -179,7 +190,7 @@ mod tests {
         let configs = [
             config("name: api\nsource: { http: { port: 8080, path: '/patients/{mrn}', method: get, mode: respond } }"),
             config(
-                "name: adt\nsource: { mllp: { port: 6661 } }\ndestination: { mllp: { host: epic.local, port: 5000 } }",
+                "name: adt\nsource: { mllp: { port: 6661, allow: [10.1.20.0/24, epic-bridge01] } }\ndestination: { mllp: { host: epic.local, port: 5000 } }",
             ),
             config(
                 "name: secure\nsource: { mllp: { port: 6662, tls: { certificate: c } } }\ndestination: { file: { dir: o } }",
@@ -205,12 +216,18 @@ mod tests {
             ]
         );
         assert_eq!(l.iter().map(|l| l.tls.as_str()).collect::<Vec<_>>(), ["none", "presents c", "none", "none"]);
-        let api = ListenTls { certificate: "web".into(), clients: None };
         assert_eq!(
-            (api_listener("0.0.0.0", 7700, Some(&api)).protocol, api_listener("0.0.0.0", 7700, Some(&api)).tls),
-            ("HTTPS", "presents web".to_string())
+            l.iter().map(|l| l.allow.as_str()).collect::<Vec<_>>(),
+            ["10.1.20.0/24, epic-bridge01", "anyone", "anyone", "anyone"]
         );
-        assert_eq!(api_listener("127.0.0.1", 7700, None).protocol, "HTTP");
+        let api = ListenTls { certificate: "web".into(), clients: None };
+        let allow = Allow(vec!["127.0.0.1".into()]);
+        let listener = api_listener("0.0.0.0", 7700, Some(&api), Some(&allow));
+        assert_eq!(
+            (listener.protocol, listener.tls.as_str(), listener.allow.as_str()),
+            ("HTTPS", "presents web", "127.0.0.1")
+        );
+        assert_eq!(api_listener("127.0.0.1", 7700, None, None).protocol, "HTTP");
 
         let resources: Resources = serde_yaml_ng::from_str(
             "databases:\n  pdb: { postgres: { host: db1, database: p, user: u } }\n  billing: { sqlserver: { host: sql1, instance: PROD, database: b, user: u } }\nsftp:\n  lab: { host: sftp.lab, user: u, password: x }\napis:\n  billing_api: { url: 'https://billing.example.org:8443/v2' }\nldap:\n  ad: { url: 'ldaps://dc1.hospital.org' }\n",

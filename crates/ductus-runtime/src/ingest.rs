@@ -308,10 +308,15 @@ struct Keys {
     dedupe: Option<String>,
 }
 
-/// Start an MLLP listener feeding `intake`, over TLS with `tls`. While its gate is closed
+/// Start an MLLP listener feeding `intake`, over TLS with `tls`; connections from addresses
+/// `admission` refuses are closed before the handshake or any read. While its gate is closed
 /// (draining) the listener is closed, so senders see the engine as down and keep their messages;
 /// it opens again when the gate does.
-pub async fn spawn_mllp(intake: Arc<Intake>, tls: Option<Arc<rustls::ServerConfig>>) -> Result<()> {
+pub async fn spawn_mllp(
+    intake: Arc<Intake>,
+    tls: Option<Arc<rustls::ServerConfig>>,
+    admission: crate::tls::Admission,
+) -> Result<()> {
     let config = intake.config.clone();
     let Source::Mllp { host, port, .. } = &config.source else { return Ok(()) };
     let (host, port) = (host.clone(), *port);
@@ -332,8 +337,12 @@ pub async fn spawn_mllp(intake: Arc<Intake>, tls: Option<Arc<rustls::ServerConfi
     let acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
     let label = format!("interface `{}` (MLLP)", config.name);
     let open = move |tcp: TcpStream, peer: std::net::SocketAddr| {
-        let (acceptor, label) = (acceptor.clone(), label.clone());
+        let (acceptor, label, admission) = (acceptor.clone(), label.clone(), admission.clone());
         async move {
+            crate::allow::keepalive(&tcp);
+            if admission.is_some_and(|a| !a.admits(peer)) {
+                return None;
+            }
             match acceptor {
                 None => Some(Conn::Plain(tcp)),
                 Some(a) => crate::tls::handshake(&a, &label, tcp, peer).await.map(|s| Conn::Tls(Box::new(s))),

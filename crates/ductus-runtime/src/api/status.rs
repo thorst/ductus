@@ -430,6 +430,69 @@ pub struct InterfaceDetail {
     folder: String,
     /// The source's TLS, when it listens with it.
     source_tls: Option<SourceTls>,
+    /// Who may connect to the source, when it has an `allow:` list (none: anyone).
+    source_allow: Option<SourceAllow>,
+}
+
+/// A listener's `allow:` list and how it's doing.
+#[derive(Serialize, ToSchema)]
+pub struct SourceAllow {
+    /// The list as written: addresses, subnets and host names.
+    entries: Vec<String>,
+    /// Each host name in it with what it resolves to now.
+    names: Vec<AllowedName>,
+    /// Connections refused since the engine started (0 when this engine doesn't hold the listener).
+    refused: u64,
+    /// The last refused connection's address and time.
+    last_refused: Option<String>,
+    last_refused_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct AllowedName {
+    name: String,
+    /// The addresses let in for it: the last lookup that found some (kept when a later one fails).
+    addresses: Vec<String>,
+    /// When it was last looked up.
+    checked_at: Option<DateTime<Utc>>,
+    /// Why the last lookup failed, if it did.
+    error: Option<String>,
+}
+
+impl SourceAllow {
+    /// A listener's list, with what the running listener on its port knows (names and refusals).
+    pub fn of(allow: &ductus_core::allow::Allow, source: &Source) -> Self {
+        let port = match source {
+            Source::Mllp { port, .. } | Source::Http { port, .. } => Some(*port),
+            _ => None,
+        };
+        Self::on_port(allow, port)
+    }
+
+    pub fn on_port(allow: &ductus_core::allow::Allow, port: Option<u16>) -> Self {
+        let running = port.and_then(crate::allow::on_port);
+        let names = match &running {
+            Some(a) => a
+                .names()
+                .into_iter()
+                .map(|(name, r)| AllowedName {
+                    name,
+                    addresses: r.addresses.iter().map(|a| a.to_string()).collect(),
+                    checked_at: r.checked_at,
+                    error: r.error,
+                })
+                .collect(),
+            None => Vec::new(),
+        };
+        let (refused, last) = running.map(|a| a.refused()).unwrap_or_default();
+        Self {
+            entries: allow.0.iter().map(|e| e.trim().to_string()).collect(),
+            names,
+            refused,
+            last_refused: last.map(|(ip, _)| ip.to_string()),
+            last_refused_at: last.map(|(_, at)| at),
+        }
+    }
 }
 
 /// TLS on an interface's listener.
@@ -449,8 +512,8 @@ pub struct SourceTls {
 
 fn source_tls(source: &Source) -> Option<SourceTls> {
     let (protocol, address, tls) = match source {
-        Source::Mllp { host, port, tls: Some(t) } => ("MLLP over TLS", format!("{host}:{port}"), t),
-        Source::Http { host, port, path, method, mode, tls: Some(t) } => {
+        Source::Mllp { host, port, tls: Some(t), .. } => ("MLLP over TLS", format!("{host}:{port}"), t),
+        Source::Http { host, port, path, method, mode, tls: Some(t), .. } => {
             let mode = if *mode == HttpMode::Respond { "respond" } else { "queue" };
             ("HTTPS", format!("{} {path} on {host}:{port} ({mode})", method.to_ascii_uppercase()), t)
         }
@@ -478,8 +541,8 @@ fn tls_label(tls: &Option<ductus_core::tls::ListenTls>) -> String {
 
 fn source_label(source: &Source) -> String {
     match source {
-        Source::Mllp { host, port, tls } => format!("mllp {host}:{port}{}", tls_label(tls)),
-        Source::Http { host, port, path, method, mode, tls } => {
+        Source::Mllp { host, port, tls, .. } => format!("mllp {host}:{port}{}", tls_label(tls)),
+        Source::Http { host, port, path, method, mode, tls, .. } => {
             let mode = if *mode == HttpMode::Respond { "respond" } else { "queue" };
             let scheme = if tls.is_some() { "https" } else { "http" };
             format!("{scheme} {} {path} on {host}:{port} ({mode}){}", method.to_ascii_uppercase(), tls_label(tls))
@@ -614,6 +677,7 @@ async fn interface(engine: Eng, _caller: Caller, Path(name): Path<String>) -> Ap
         format: i.config.format.name().to_string(),
         folder: i.config.dir.display().to_string(),
         source_tls: source_tls(&i.config.source),
+        source_allow: i.config.source.allow().map(|a| SourceAllow::of(a, &i.config.source)),
     }))
 }
 

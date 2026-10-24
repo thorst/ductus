@@ -797,6 +797,12 @@ impl Refusals {
         own.insert(local, now);
     }
 
+    /// Whether a connection from `peer` is one of this engine's own checks (kept for its
+    /// handshake, which `note` judges next).
+    pub fn is_our_own(&self, peer: SocketAddr) -> bool {
+        self.own.lock().expect("refusals lock").contains_key(&peer)
+    }
+
     /// Log a refused handshake, unless this sender's was logged in the last minute or it's our
     /// own check. True if logged.
     fn note(&self, listener: &str, peer: SocketAddr, error: &std::io::Error) -> bool {
@@ -804,20 +810,54 @@ impl Refusals {
             tracing::debug!(listener, %peer, reason = %why(error), "our own check's handshake ended");
             return false;
         }
+        if !self.due(listener, peer.ip()) {
+            return false;
+        }
+        tracing::warn!(listener, peer = %peer.ip(), reason = %why(error), "TLS handshake refused (logged once a minute per sender)");
+        true
+    }
+
+    /// Log a connection closed because its address isn't on the listener's `allow:` list
+    /// (`allowed`: the list, names with their addresses), once a minute per sender. True if logged.
+    pub fn not_allowed(&self, listener: &str, peer: SocketAddr, allowed: &str) -> bool {
+        if !self.due(listener, peer.ip()) {
+            return false;
+        }
+        tracing::warn!(listener, peer = %peer.ip(), allowed, "connection refused: not on the allow list (logged once a minute per sender)");
+        true
+    }
+
+    /// Whether a refusal from `ip` at `listener` should be logged now (none in the last minute).
+    fn due(&self, listener: &str, ip: IpAddr) -> bool {
         let now = Instant::now();
         let mut last = self.last.lock().expect("refusals lock");
         if last.len() > 10_000 {
             last.retain(|_, at| now.duration_since(*at) < Self::EVERY);
         }
-        let key = (listener.to_string(), peer.ip());
+        let key = (listener.to_string(), ip);
         if last.get(&key).is_some_and(|at| now.duration_since(*at) < Self::EVERY) {
             return false;
         }
         last.insert(key, now);
-        drop(last);
-        tracing::warn!(listener, peer = %peer.ip(), reason = %why(error), "TLS handshake refused (logged once a minute per sender)");
         true
     }
+}
+
+/// Connect to `address` as one of the engine's own checks: the local address is registered
+/// before connecting, so our listeners let it in (`allow:`) and don't log its handshake.
+pub async fn connect_own(address: SocketAddr) -> std::io::Result<TcpStream> {
+    let socket = || if address.is_ipv4() { tokio::net::TcpSocket::new_v4() } else { tokio::net::TcpSocket::new_v6() };
+    // Our listeners are on this machine: connecting from the listener's own address (loopback
+    // for 0.0.0.0) gives a local address known before connecting. Elsewhere that bind fails, and
+    // the address is only known once connected (nothing of ours is listening there anyway).
+    let own = socket()?;
+    if own.bind(SocketAddr::new(address.ip(), 0)).is_ok() {
+        Refusals::global().our_own(own.local_addr()?);
+        return own.connect(address).await;
+    }
+    let tcp = socket()?.connect(address).await?;
+    Refusals::global().our_own(tcp.local_addr()?);
+    Ok(tcp)
 }
 
 /// A refused handshake in plain words.
@@ -937,9 +977,18 @@ pub struct Listener {
     inner: Inner,
 }
 
+/// Who may connect: the listener's `allow:` list, checked before anything else.
+pub type Admission = Option<Arc<crate::allow::Admission>>;
+
 enum Inner {
-    Plain(TcpListener),
+    Plain(TcpListener, Admission),
     Tls { ready: tokio::sync::mpsc::Receiver<(Conn, SocketAddr)>, task: tokio::task::AbortHandle },
+}
+
+/// A connection just accepted: keepalive on, and whether its address may connect.
+fn admitted(admission: &Admission, tcp: &TcpStream, peer: SocketAddr) -> bool {
+    crate::allow::keepalive(tcp);
+    admission.as_ref().is_none_or(|a| a.admits(peer))
 }
 
 impl Drop for Listener {
@@ -951,10 +1000,16 @@ impl Drop for Listener {
 }
 
 impl Listener {
-    /// Listen on `tcp`; `name` labels refused handshakes in the log.
-    pub fn new(tcp: TcpListener, tls: Option<Arc<rustls::ServerConfig>>, name: &str) -> std::io::Result<Self> {
+    /// Listen on `tcp`; `name` labels refused handshakes in the log. Connections from addresses
+    /// `admission` refuses are closed before the handshake or any read.
+    pub fn new(
+        tcp: TcpListener,
+        tls: Option<Arc<rustls::ServerConfig>>,
+        name: &str,
+        admission: Admission,
+    ) -> std::io::Result<Self> {
         let local = tcp.local_addr()?;
-        let Some(tls) = tls else { return Ok(Self { local, inner: Inner::Plain(tcp) }) };
+        let Some(tls) = tls else { return Ok(Self { local, inner: Inner::Plain(tcp, admission) }) };
         let acceptor = tokio_rustls::TlsAcceptor::from(tls);
         let (tx, ready) = tokio::sync::mpsc::channel(64);
         let name = name.to_string();
@@ -970,6 +1025,9 @@ impl Listener {
                     },
                     _ = tx.closed() => return,
                 };
+                if !admitted(&admission, &stream, peer) {
+                    continue;
+                }
                 let (acceptor, tx, name) = (acceptor.clone(), tx.clone(), name.clone());
                 tokio::spawn(async move {
                     if let Some(tls) = handshake(&acceptor, &name, stream, peer).await {
@@ -999,9 +1057,10 @@ impl axum::serve::Listener for Listener {
 
     async fn accept(&mut self) -> (Conn, SocketAddr) {
         match &mut self.inner {
-            Inner::Plain(tcp) => loop {
+            Inner::Plain(tcp, admission) => loop {
                 match TcpListener::accept(tcp).await {
-                    Ok((stream, peer)) => return (Conn::Plain(stream), peer),
+                    Ok((stream, peer)) if admitted(admission, &stream, peer) => return (Conn::Plain(stream), peer),
+                    Ok(_) => {}
                     Err(e) => accept_error(e).await,
                 }
             },
@@ -1195,8 +1254,12 @@ mod tests {
 
     /// An echo server behind `Listener` (what the HTTP sources and API use); its address.
     async fn echo(config: Arc<rustls::ServerConfig>) -> SocketAddr {
+        echo_with(config, None).await
+    }
+
+    async fn echo_with(config: Arc<rustls::ServerConfig>, admission: Admission) -> SocketAddr {
         let mut listener =
-            Listener::new(TcpListener::bind("127.0.0.1:0").await.unwrap(), Some(config), "test").unwrap();
+            Listener::new(TcpListener::bind("127.0.0.1:0").await.unwrap(), Some(config), "test", admission).unwrap();
         let addr = axum::serve::Listener::local_addr(&listener).unwrap();
         tokio::spawn(async move {
             loop {
@@ -1256,6 +1319,54 @@ mod tests {
         assert!(talk(addr, with(&stranger)).await.is_err(), "a subject no pattern allows");
         assert!(talk(addr, with(&forged)).await.is_err(), "issued by another CA");
         assert!(talk(addr, client_config(&server_ca, None)).await.is_err(), "no client certificate");
+    }
+
+    /// Linux: every 127.x address is this machine, so a test can connect from one not allowed.
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn refuses_addresses_off_the_allow_list_before_the_handshake() {
+        let server_ca = ca("server CA");
+        let (cert, key) = leaf(&server_ca, &[(rcgen::DnType::CommonName, "engine")], &["localhost"], 90);
+        let certificates = Certificates::load(&BTreeMap::from([("ours".to_string(), entry(&cert, &key))])).unwrap();
+        let config = certificates.server(&ListenTls { certificate: "ours".into(), clients: None }, &[]).unwrap();
+        let allow = ductus_core::allow::Allow(vec!["127.0.0.1".into()]);
+        let names = crate::allow::Names::new([], crate::allow::system_resolver());
+        let admission = crate::allow::Admission::new("test-before-handshake", "127.0.0.1", 0, &allow, names).unwrap();
+        let addr = echo_with(config, Some(admission.clone())).await;
+        assert_eq!(talk(addr, client_config(&server_ca, None)).await.unwrap().0, "hello", "127.0.0.1 is allowed");
+
+        // From 127.0.0.2: the start of a ClientHello gets not one byte back (no ServerHello, no
+        // alert): the connection is closed unread.
+        let socket = tokio::net::TcpSocket::new_v4().unwrap();
+        socket.bind("127.0.0.2:0".parse().unwrap()).unwrap();
+        let mut tcp = socket.connect(addr).await.unwrap();
+        let _ = tcp.write_all(&[0x16, 0x03, 0x01, 0x00, 0x05, 1, 0, 0, 1, 3]).await;
+        let mut buf = [0u8; 16];
+        let read = tokio::time::timeout(Duration::from_secs(5), tcp.read(&mut buf)).await.expect("closed at once");
+        assert!(matches!(read, Ok(0) | Err(_)), "nothing sent back: {read:?}");
+        let (refused, last) = admission.refused();
+        assert_eq!((refused, last.map(|(ip, _)| ip.to_string())), (1, Some("127.0.0.2".to_string())));
+
+        // Logged once a minute per listener and address, however often it retries.
+        let refusals = Refusals::default();
+        let from = "10.1.40.7:50000".parse().unwrap();
+        assert!(refusals.not_allowed("adt", from, "10.1.20.0/24"));
+        assert!(!refusals.not_allowed("adt", "10.1.40.7:50001".parse().unwrap(), "10.1.20.0/24"));
+        assert!(refusals.not_allowed("lab", from, "10.1.20.0/24"), "another listener's line is its own");
+    }
+
+    #[test]
+    fn accepted_connections_get_keepalive() {
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        runtime.block_on(async {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let client = TcpStream::connect(listener.local_addr().unwrap()).await.unwrap();
+            let (accepted, _) = listener.accept().await.unwrap();
+            assert!(!socket2::SockRef::from(&accepted).keepalive().unwrap());
+            crate::allow::keepalive(&accepted);
+            assert!(socket2::SockRef::from(&accepted).keepalive().unwrap());
+            drop(client);
+        });
     }
 
     #[tokio::test]

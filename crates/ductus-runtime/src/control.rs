@@ -138,6 +138,8 @@ pub struct ApiListener {
     pub host: String,
     pub port: u16,
     pub tls: Option<ductus_core::tls::ListenTls>,
+    /// Who may connect (none: anyone who can reach it).
+    pub allow: Option<ductus_core::allow::Allow>,
 }
 
 /// What the engine is made of, from startup.
