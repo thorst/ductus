@@ -573,12 +573,17 @@ mod tests {
             "-CAcreateserial",
             "-days",
             "30",
+            // As pgtls.sh makes it (OpenSSL 3.0 makes a v1 certificate without extensions).
+            "-extfile",
+            &pg.file("client.ext"),
             "-out",
             &path(&new_cert),
         ]);
         std::fs::rename(&new_cert, &cert).unwrap();
         std::fs::rename(&new_key, &key).unwrap();
         assert_eq!(certificates.reload().await, ["pg-client"]);
+        let renewal = certificates.pair("pg-client").unwrap().renewal_error();
+        assert_eq!(renewal, None, "the renewed pair loads");
         let Pool::Postgres(pool) = &shared.databases["cert"] else { unreachable!() };
         let mut next = sqlx::PgConnection::connect_with(&pool.connect_options()).await.unwrap();
         let after: Option<String> =
