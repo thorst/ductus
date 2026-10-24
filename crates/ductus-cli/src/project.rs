@@ -751,19 +751,13 @@ pub fn ports(root: &Path, env: &str) -> Result<bool> {
 
     let mut listening = ports::listeners(configs.iter().copied());
     // The engine's own REST API listens too (unless it's `off`).
-    let api = ductus_core::settings::Settings::load(root)?.api.address(None)?;
+    let settings = ductus_core::settings::Settings::load(root)?;
     let mut conflicts = Vec::new();
-    if let Some((host, port)) = api {
+    if let Some((host, port)) = settings.api.address(None)? {
         if let Some(l) = listening.iter().find(|l| l.port == port) {
             conflicts.push(format!("port {port}: the REST API (`api.listen` in ductus.yaml) and `{}`", l.interface));
         }
-        listening.push(ports::Listener {
-            port,
-            host,
-            protocol: "HTTP",
-            interface: "(engine REST API)".into(),
-            route: Some("/api/v1".into()),
-        });
+        listening.push(ports::api_listener(&host, port, settings.api.tls.as_ref()));
         listening.sort();
     }
     println!("\nListening");
@@ -771,10 +765,10 @@ pub fn ports(root: &Path, env: &str) -> Result<bool> {
         println!("  (nothing: no MLLP or HTTP sources, and the REST API is off)");
     } else {
         table(
-            &["PORT", "PROTOCOL", "HOST", "INTERFACE", "ROUTE"],
-            listening
-                .into_iter()
-                .map(|l| vec![l.port.to_string(), l.protocol.into(), l.host, l.interface, l.route.unwrap_or_default()]),
+            &["PORT", "PROTOCOL", "HOST", "INTERFACE", "ROUTE", "TLS"],
+            listening.into_iter().map(|l| {
+                vec![l.port.to_string(), l.protocol.into(), l.host, l.interface, l.route.unwrap_or_default(), l.tls]
+            }),
         );
     }
 
@@ -792,8 +786,8 @@ pub fn ports(root: &Path, env: &str) -> Result<bool> {
         println!("  (nothing)");
     } else {
         table(
-            &["HOST", "PORT", "PROTOCOL", "USED BY"],
-            outbound.into_iter().map(|o| vec![o.host, o.port.to_string(), o.protocol.into(), o.used_by]),
+            &["HOST", "PORT", "PROTOCOL", "USED BY", "TLS"],
+            outbound.into_iter().map(|o| vec![o.host, o.port.to_string(), o.protocol.into(), o.used_by, o.tls]),
         );
     }
 

@@ -424,7 +424,7 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         }
     }
     http::serve(http_endpoints, stopping.clone()).await?;
-    certificates.watch(stopping.clone());
+    let certificate_changes = certificates.watch(stopping.clone());
     phases.mark("listening");
     let running: Vec<control::Running> = interfaces
         .iter()
@@ -457,13 +457,15 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         teams: settings.owners.clone(),
         ownership: owner.ownership.clone(),
         tls: certificates.clone(),
+        api: api_address.clone().map(|(host, port)| control::ApiListener { host, port, tls: settings.api.tls.clone() }),
+        host: audit::host_name(),
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse
     // to start (the engine may be all that is left to move messages), but it is an error.
     audit::start(&engine, stopped_rx, retention_days).await;
     alerts::start(&engine).await;
-    certificates::start(&engine);
+    certificates::start(&engine, certificate_changes).await;
     ldap::start(&engine);
     phases.mark("audit log and alerts started");
     let mut api_server = None;

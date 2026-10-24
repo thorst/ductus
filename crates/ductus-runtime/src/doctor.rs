@@ -143,10 +143,15 @@ pub enum Target {
         path: PathBuf,
         created_if_missing: bool,
     },
+    /// A port we listen on: free to listen on, unless `held` (the engine's own check: it holds
+    /// it). With `tls` (the `certificates:` pair it presents), a port in use or held is
+    /// connected to, and the chain it serves checked as a sender would see it.
     Listener {
         host: String,
         port: u16,
         protocol: &'static str,
+        tls: Option<String>,
+        held: bool,
     },
 }
 
@@ -330,8 +335,11 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode, certificates: &Certifi
             r.folder(path, *created_if_missing);
             path.display().to_string()
         }
-        Target::Listener { host, port, protocol } => {
-            r.listen(host, *port).await;
+        Target::Listener { host, port, protocol, tls, held } => {
+            let in_use = *held || r.listen(host, *port).await;
+            if let Some(name) = tls.as_deref().filter(|_| in_use) {
+                r.served(host, *port, name).await;
+            }
             format!("{host}:{port} {protocol}")
         }
     };
@@ -746,14 +754,9 @@ impl Run<'_> {
         let handshake = tokio_rustls::TlsConnector::from(Arc::new(config)).connect(name, stream);
         let result = tokio::time::timeout(self.timeout, handshake).await;
         // The verifier records the chain before it judges it: read even when it isn't trusted.
-        let chain: Vec<Certificate> =
-            presented.lock().expect("certificate lock").iter().filter_map(|c| Certificate::read(c)).collect();
-        let mut seen = Seen::default();
-        if let Some((n, earliest)) = chain.iter().enumerate().min_by_key(|(_, c)| c.not_after) {
-            seen.chain_not_after = Some(earliest.not_after);
-            seen.chain_earliest = (n > 0 && earliest.not_after < chain[0].not_after).then(|| earliest.subject.clone());
-        }
-        let leaf = chain.into_iter().next();
+        let chain = Chain::read(presented.lock().expect("certificate lock").as_slice());
+        let mut seen = Seen { chain_not_after: chain.not_after, chain_earliest: chain.earliest, ..Default::default() };
+        let leaf = chain.leaf;
         let about = leaf.as_ref().map(Certificate::describe).unwrap_or_default();
         let trusted = match result {
             Ok(Ok(mut stream)) => {
@@ -973,7 +976,8 @@ impl Run<'_> {
         }
     }
 
-    async fn listen(&mut self, host: &str, port: u16) {
+    /// Whether the port is free to listen on. True if it's in use (by a running engine, or not).
+    async fn listen(&mut self, host: &str, port: u16) -> bool {
         match tokio::net::TcpListener::bind((host, port)).await {
             Ok(_) => self.step("port", Outcome::Ok, "free: the engine can listen here"),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
@@ -981,6 +985,7 @@ impl Run<'_> {
                 self.advise(format!(
                     "If the engine isn't running on this server, another program holds port {port}: find it with `ss -ltnp` (Linux) or `netstat -ano` (Windows)."
                 ));
+                return true;
             }
             Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
                 self.step("port", Outcome::Fail, format!("not allowed: {e}"));
@@ -997,7 +1002,233 @@ impl Run<'_> {
                 }
             }
         }
+        false
     }
+
+    /// One of our TLS listeners, as a sender meets it: connected to (over loopback when it
+    /// listens on every address), its chain taken from the handshake whatever it is, and judged
+    /// the way senders build a path. Java and .NET senders don't fetch a missing intermediate
+    /// (browsers often do), so a chain that stops short of a root is a warning. What this can't
+    /// know: the name senders connect with, and which roots they trust.
+    async fn served(&mut self, host: &str, port: u16, name: &str) {
+        let target = match host.parse::<IpAddr>() {
+            Ok(IpAddr::V4(ip)) if ip.is_unspecified() => "127.0.0.1".to_string(),
+            Ok(IpAddr::V6(ip)) if ip.is_unspecified() => "::1".to_string(),
+            _ => host.to_string(),
+        };
+        let Some(address) = self.connectable(&target, port).await else { return };
+        let pair = self.certificates.pair(name).cloned();
+        let loaded = pair.as_ref().map(|p| p.about());
+        // The name we ask for (SNI) is the certificate's own: our listeners serve one pair
+        // whatever is asked, so any name gets the same chain.
+        let server_name = loaded.as_ref().and_then(|a| a.names.first().cloned()).unwrap_or_else(|| "localhost".into());
+        let Ok(server_name) = rustls::pki_types::ServerName::try_from(server_name) else {
+            self.step("TLS", Outcome::Fail, "the certificate's first name isn't one TLS can ask for");
+            return;
+        };
+        let presented = Arc::new(Mutex::new(Vec::new()));
+        let config = served_config(presented.clone());
+        let handshake = async {
+            let tcp = TcpStream::connect(address).await?;
+            tokio_rustls::TlsConnector::from(Arc::new(config)).connect(server_name, tcp).await
+        };
+        let result = tokio::time::timeout(self.timeout, handshake).await;
+        let served: Vec<Vec<u8>> = presented.lock().expect("certificate lock").clone();
+        let version = match &result {
+            Ok(Ok(stream)) => stream
+                .get_ref()
+                .1
+                .protocol_version()
+                .map(|v| format!("{v:?}").replace("TLSv1_", "TLS 1."))
+                .unwrap_or_default(),
+            _ => String::new(),
+        };
+        if served.is_empty() {
+            let why = match result {
+                Ok(Err(e)) => format!("handshake failed: {e}"),
+                Err(_) => format!("no TLS answer in {}", self.waited()),
+                Ok(Ok(_)) => "no certificate served".into(),
+            };
+            self.step("TLS", Outcome::Fail, why);
+            self.advise(format!(
+                "Port {port} should speak TLS with certificate `{name}`: is another program listening on it?"
+            ));
+            return;
+        }
+        let chain = Chain::read(served.as_slice());
+        let Some(leaf) = chain.leaf.as_ref() else {
+            self.step("TLS", Outcome::Fail, "the certificate served can't be read");
+            return;
+        };
+        // Its handshake may then end for want of a client certificate (we send none): the chain
+        // is all this check is about.
+        let version = if version.is_empty() { String::new() } else { format!("{version}, ") };
+        let names = if leaf.names.is_empty() { "no names".to_string() } else { leaf.names.join(", ") };
+        self.step("TLS", Outcome::Ok, format!("{version}serves `{name}`: {}; covers {names}", leaf.describe()));
+        let loaded_leaf = pair.as_ref().and_then(|p| Chain::read(p.chain().as_slice()).leaf).map(|c| c.fingerprint);
+        if loaded_leaf.as_ref().is_some_and(|f| *f != leaf.fingerprint) {
+            self.step("served", Outcome::Warn, format!("not the certificate `{name}` the engine loaded"));
+            self.advise(format!("Port {port} answers with another certificate than `{name}`: another program may hold it, or an older engine still runs."));
+        }
+        let (outcome, detail, advice) = judge_chain(&served, self.certificates);
+        self.step("chain", outcome, detail);
+        self.advice.extend(advice);
+        if let Some(ends) = chain.not_after {
+            let days = (ends - Utc::now()).num_days();
+            if days < EXPIRY_WARNING_DAYS {
+                let whose = chain.earliest.as_ref().map(|s| format!(" (its chain's {s})")).unwrap_or_default();
+                self.step("expiry", Outcome::Warn, format!("expires in {days} day(s){whose}"));
+                self.advise(format!(
+                    "Renew `{name}` before then: replace its files (the engine picks them up within a minute)."
+                ));
+            }
+        }
+        self.advise(format!(
+            "Doctor can't know the name senders connect with: it must be one of {names} (ask senders which name or address they use)."
+        ));
+    }
+}
+
+/// Client settings that take whatever chain a server presents, and record it (still checking
+/// the handshake's signatures): for looking at what our own listeners serve.
+fn served_config(seen: Arc<Mutex<Vec<Vec<u8>>>>) -> rustls::ClientConfig {
+    let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+    rustls::ClientConfig::builder_with_provider(provider.clone())
+        .with_safe_default_protocol_versions()
+        .expect("the default provider supports the default versions")
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Accepting { seen, provider }))
+        .with_no_client_auth()
+}
+
+/// Records the chain and accepts it (see `served_config`).
+#[derive(Debug)]
+struct Accepting {
+    seen: Arc<Mutex<Vec<Vec<u8>>>>,
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl rustls::client::danger::ServerCertVerifier for Accepting {
+    fn verify_server_cert(
+        &self,
+        end_entity: &rustls::pki_types::CertificateDer<'_>,
+        intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let mut seen = self.seen.lock().expect("certificate lock");
+        seen.push(end_entity.to_vec());
+        seen.extend(intermediates.iter().map(|c| c.to_vec()));
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &rustls::pki_types::CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(message, cert, dss, &self.provider.signature_verification_algorithms)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.provider.signature_verification_algorithms.supported_schemes()
+    }
+}
+
+/// Whether a sender can build a path from the chain we serve (leaf first): each certificate
+/// issued by the next, and the last a root (self-signed: sending it is harmless) or issued by
+/// one this server knows (the system's trusted certificates, or a `certificates:` CA). A last
+/// certificate whose issuer is neither is a missing intermediate, or a private root senders must
+/// have: said both ways, since this server can't tell. The step's outcome and words, and advice.
+fn judge_chain(served: &[Vec<u8>], certificates: &Certificates) -> (Outcome, String, Vec<String>) {
+    use x509_parser::prelude::*;
+    struct Names {
+        subject: Vec<u8>,
+        issuer: Vec<u8>,
+        subject_name: String,
+        issuer_name: String,
+    }
+    let read = |der: &[u8]| {
+        let (_, c) = X509Certificate::from_der(der).ok()?;
+        let name = |n: &X509Name| Certificate::name(n);
+        Some(Names {
+            subject: c.subject().as_raw().to_vec(),
+            issuer: c.issuer().as_raw().to_vec(),
+            subject_name: name(c.subject()),
+            issuer_name: name(c.issuer()),
+        })
+    };
+    let chain: Vec<Names> = served.iter().filter_map(|d| read(d)).collect();
+    let (Some(leaf), Some(last)) = (chain.first(), chain.last()) else {
+        return (Outcome::Fail, "no certificate could be read".into(), Vec::new());
+    };
+    let path: Vec<&str> = chain.iter().map(|c| c.subject_name.as_str()).collect();
+    let path = path.join(" → ");
+    if let Some(w) = chain.windows(2).find(|w| w[0].issuer != w[1].subject) {
+        return (
+            Outcome::Warn,
+            format!("out of order: {path} ({} isn't issued by {})", w[0].subject_name, w[1].subject_name),
+            vec![
+                "Put the certificates in cert_file in order: ours first, then the one that issued it, and so on up."
+                    .into(),
+            ],
+        );
+    }
+    if chain.len() == 1 && leaf.subject == leaf.issuer {
+        return (
+            Outcome::Ok,
+            "self-signed: senders must trust this very certificate".into(),
+            vec!["A self-signed certificate is for labs: senders must add it to what they trust; one from the hospital's CA spares them that.".into()],
+        );
+    }
+    if last.subject == last.issuer {
+        return (Outcome::Ok, format!("complete: {path} (a root; sending it is harmless)"), Vec::new());
+    }
+    if let Some((ca, _)) = certificates.authorities().find(|(_, c)| read(c).is_some_and(|r| r.subject == last.issuer)) {
+        return (
+            Outcome::Ok,
+            format!("complete: {path}, issued by {} (the CA `{ca}` in resources.yaml)", last.issuer_name),
+            vec![format!("Senders must trust {} (the hospital's CA): ask them to confirm.", last.issuer_name)],
+        );
+    }
+    let roots = rustls_native_certs::load_native_certs().certs;
+    if roots.iter().any(|r| read(r).is_some_and(|r| r.subject == last.issuer)) {
+        return (
+            Outcome::Ok,
+            format!("complete: {path}, issued by {} (a root this server trusts)", last.issuer_name),
+            Vec::new(),
+        );
+    }
+    let what = if chain.len() == 1 {
+        format!("only our certificate is served ({path}), not the one that issued it ({})", last.issuer_name)
+    } else {
+        format!("it stops at {} ({path}), issued by {}, which isn't served", last.subject_name, last.issuer_name)
+    };
+    (
+        Outcome::Warn,
+        format!("incomplete: {what}"),
+        vec![
+            format!(
+                "If {} is an intermediate, append its certificate to cert_file after ours (leaf first): Java and .NET senders don't fetch a missing intermediate and refuse the connection (browsers often do, so a browser test passes).",
+                last.issuer_name
+            ),
+            format!(
+                "If {} is your private CA's root, senders need it in what they trust; name it as a `certificates:` CA (ca_file) and doctor will know it.",
+                last.issuer_name
+            ),
+        ],
+    )
 }
 
 /// How long a finished handshake is watched for the server refusing our client certificate (a
@@ -1257,28 +1488,53 @@ impl rustls::client::danger::ServerCertVerifier for Recording {
     }
 }
 
+/// A chain of certificates, read: its first (the server's own), and the earliest expiry in it.
+#[derive(Default)]
+pub(crate) struct Chain {
+    pub(crate) leaf: Option<Certificate>,
+    pub(crate) not_after: Option<DateTime<Utc>>,
+    /// Whose that is, when it isn't the first's (an intermediate ends sooner).
+    pub(crate) earliest: Option<String>,
+}
+
+impl Chain {
+    pub(crate) fn read<C: AsRef<[u8]>>(chain: &[C]) -> Self {
+        let chain: Vec<Certificate> = chain.iter().filter_map(|c| Certificate::read(c.as_ref())).collect();
+        let mut out = Chain::default();
+        if let Some((n, earliest)) = chain.iter().enumerate().min_by_key(|(_, c)| c.not_after) {
+            out.not_after = Some(earliest.not_after);
+            out.earliest = (n > 0 && earliest.not_after < chain[0].not_after).then(|| earliest.subject.clone());
+        }
+        out.leaf = chain.into_iter().next();
+        out
+    }
+}
+
 /// What a report says about a certificate.
-struct Certificate {
-    subject: String,
-    issuer: String,
-    names: Vec<String>,
-    not_before: DateTime<Utc>,
-    not_after: DateTime<Utc>,
+pub(crate) struct Certificate {
+    pub(crate) subject: String,
+    pub(crate) issuer: String,
+    pub(crate) names: Vec<String>,
+    pub(crate) not_before: DateTime<Utc>,
+    pub(crate) not_after: DateTime<Utc>,
     /// SHA-256 of the DER, hex.
-    fingerprint: String,
+    pub(crate) fingerprint: String,
 }
 
 impl Certificate {
+    /// A name as people say it: its common name, else its organisation, else all of it.
+    fn name(n: &x509_parser::x509::X509Name) -> String {
+        n.iter_common_name()
+            .next()
+            .and_then(|cn| cn.as_str().ok().map(str::to_string))
+            .or_else(|| n.iter_organization().next().and_then(|o| o.as_str().ok().map(str::to_string)))
+            .unwrap_or_else(|| n.to_string())
+    }
+
     fn read(der: &[u8]) -> Option<Self> {
         use x509_parser::prelude::*;
         let (_, cert) = X509Certificate::from_der(der).ok()?;
-        let name = |n: &X509Name| {
-            n.iter_common_name()
-                .next()
-                .and_then(|cn| cn.as_str().ok().map(str::to_string))
-                .or_else(|| n.iter_organization().next().and_then(|o| o.as_str().ok().map(str::to_string)))
-                .unwrap_or_else(|| n.to_string())
-        };
+        let name = Self::name;
         let mut names = Vec::new();
         if let Ok(Some(san)) = cert.subject_alternative_name() {
             for n in &san.value.general_names {
@@ -1458,9 +1714,15 @@ pub fn plan(
     for c in configs {
         let me = Some(c.name.as_str());
         match &c.source {
-            Source::Mllp { host, port, .. } | Source::Http { host, port, .. } => {
-                let protocol = if matches!(c.source, Source::Mllp { .. }) { "MLLP" } else { "HTTP" };
-                let target = Target::Listener { host: host.clone(), port: *port, protocol };
+            Source::Mllp { host, port, tls } | Source::Http { host, port, tls, .. } => {
+                let protocol = match (&c.source, tls) {
+                    (Source::Mllp { .. }, None) => "MLLP",
+                    (Source::Mllp { .. }, Some(_)) => "MLLP over TLS",
+                    (_, None) => "HTTP",
+                    (_, Some(_)) => "HTTPS",
+                };
+                let tls = tls.as_ref().map(|t| t.certificate.clone());
+                let target = Target::Listener { host: host.clone(), port: *port, protocol, tls, held: false };
                 plan.add(6, format!("{port:05} {host}"), "listening port", target, c.name.clone(), me, &c.name);
             }
             Source::File(f) => {
@@ -1537,6 +1799,22 @@ pub fn plan(
         Probe { what: e.what, target: e.target, used_by: e.used_by, resource: Some(e.resource) }
     });
     std::iter::once(store).chain(rest).collect()
+}
+
+/// The REST API's listener with `tls`, for the engine's own full check (it holds the port).
+pub fn api_probe(host: &str, port: u16, tls: &ductus_core::tls::ListenTls) -> Probe {
+    Probe {
+        what: "listening port".into(),
+        target: Target::Listener {
+            host: host.into(),
+            port,
+            protocol: "HTTPS",
+            tls: Some(tls.certificate.clone()),
+            held: true,
+        },
+        used_by: vec!["the REST API and web UI (ductus.yaml)".into()],
+        resource: None,
+    }
 }
 
 /// What alerts connect to (`alerts:` in ductus.yaml): the mail server, each webhook, the
@@ -1638,17 +1916,92 @@ mod tests {
         assert!(step(&c, "DNS").detail.starts_with("localhost → "), "{c:#?}");
     }
 
+    /// Our TLS listener, as senders meet it: over loopback when it listens on every address. A
+    /// chain up to a root it knows passes; our certificate alone, without the intermediate that
+    /// issued it, warns (Java and .NET senders refuse it); and it says what it can't know.
+    #[tokio::test]
+    async fn checks_the_chain_our_listener_serves() {
+        use crate::tls::testing::*;
+        let root = ca("Test Root");
+        let middle = intermediate(&root, "Test Intermediate");
+        let (leaf_pem, key) = leaf(&middle, &[(rcgen::DnType::CommonName, "engine")], &["engine.lab", "127.0.0.1"], 90);
+        let full = format!("{leaf_pem}{}", middle.cert.pem());
+        let other = leaf(&middle, &[(rcgen::DnType::CommonName, "other")], &["other.lab"], 90);
+        let certificates = Arc::new(
+            Certificates::load(&BTreeMap::from([
+                ("full".to_string(), entry(&full, &key)),
+                ("short".to_string(), entry(&leaf_pem, &key)),
+                ("other".to_string(), entry(&other.0, &other.1)),
+                ("root".to_string(), ca_entry(&root)),
+            ]))
+            .unwrap(),
+        );
+        // Our listener (as the engine's: it asks for client certificates too, which doctor
+        // doesn't have), on every address.
+        let serve = |name: &str| {
+            let tls = ductus_core::tls::ListenTls {
+                certificate: name.into(),
+                clients: Some(ductus_core::tls::Clients { ca: "root".into(), subjects: vec![] }),
+            };
+            let acceptor = tokio_rustls::TlsAcceptor::from(certificates.server(&tls, &[]).unwrap());
+            let listener = std::net::TcpListener::bind("0.0.0.0:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let listener = tokio::net::TcpListener::from_std(listener).unwrap();
+            tokio::spawn(async move {
+                while let Ok((tcp, _)) = listener.accept().await {
+                    let acceptor = acceptor.clone();
+                    tokio::spawn(async move { drop(acceptor.accept(tcp).await) });
+                }
+            });
+            port
+        };
+        let checked = |port: u16, name: &str| {
+            let target = Target::Listener {
+                host: "0.0.0.0".into(),
+                port,
+                protocol: "MLLP over TLS",
+                tls: Some(name.into()),
+                held: true,
+            };
+            let certificates = certificates.clone();
+            async move { check(vec![probe(target)], Duration::from_secs(2), &certificates).await.remove(0) }
+        };
+
+        let c = checked(serve("full"), "full").await;
+        assert_eq!(c.outcome, Outcome::Ok, "{c:#?}");
+        assert!(step(&c, "connect").detail.starts_with("127.0.0.1:"), "over loopback: {c:#?}");
+        assert!(step(&c, "TLS").detail.contains("serves `full`: certificate for engine, issued by Test Intermediate"));
+        assert!(step(&c, "TLS").detail.contains("covers engine.lab, 127.0.0.1"), "{c:#?}");
+        assert_eq!(
+            step(&c, "chain").detail,
+            "complete: engine → Test Intermediate, issued by Test Root (the CA `root` in resources.yaml)"
+        );
+        assert!(c.advice.iter().any(|a| a.contains("can't know the name senders connect with")), "{c:#?}");
+        assert!(c.certificate.is_none(), "ours aren't kept from a check: the engine reads them from memory");
+
+        let c = checked(serve("short"), "short").await;
+        assert_eq!((c.outcome, step(&c, "chain").outcome), (Outcome::Warn, Outcome::Warn), "{c:#?}");
+        assert_eq!(
+            step(&c, "chain").detail,
+            "incomplete: only our certificate is served (engine), not the one that issued it (Test Intermediate)"
+        );
+        assert!(c.advice.iter().any(|a| a.contains("Java and .NET senders don't fetch a missing intermediate")));
+
+        // A port serving another certificate than the one named (another program, an old engine).
+        let c = checked(serve("other"), "full").await;
+        assert_eq!(step(&c, "served").outcome, Outcome::Warn, "{c:#?}");
+    }
+
     #[tokio::test]
     async fn checks_listening_ports_and_folders() {
         let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let port = held.local_addr().unwrap().port();
-        let c = one(Target::Listener { host: "127.0.0.1".into(), port, protocol: "MLLP" }).await;
+        let listener = || Target::Listener { host: "127.0.0.1".into(), port, protocol: "MLLP", tls: None, held: false };
+        let c = one(listener()).await;
         assert_eq!((c.outcome, c.endpoint.as_str()), (Outcome::Warn, &*format!("127.0.0.1:{port} MLLP")));
         drop(held);
-        assert_eq!(
-            one(Target::Listener { host: "127.0.0.1".into(), port, protocol: "MLLP" }).await.outcome,
-            Outcome::Ok
-        );
+        assert_eq!(one(listener()).await.outcome, Outcome::Ok);
 
         let dir = tempfile::tempdir().unwrap();
         let c = one(Target::Folder { path: dir.path().into(), created_if_missing: false }).await;

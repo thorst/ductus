@@ -1,9 +1,18 @@
 import { useQuery } from "@tanstack/react-query";
-import { CircleAlert, CircleCheck, Download, RefreshCw, Stethoscope, TriangleAlert } from "lucide-react";
+import {
+  CircleAlert,
+  CircleCheck,
+  Download,
+  Lock,
+  LockOpen,
+  RefreshCw,
+  Stethoscope,
+  TriangleAlert,
+} from "lucide-react";
 import { useState, type FormEvent } from "react";
 import { runDoctor, useCanOperate, useRefresh } from "@/api/actions";
 import { ApiError, type Schemas } from "@/api/client";
-import { certificates, interfaces, lastDoctorRun } from "@/api/queries";
+import { certificates, interfaces, lastDoctorRun, ports } from "@/api/queries";
 import { CertificateDays } from "@/components/certificates";
 import { Loaded, PageHeader } from "@/components/page";
 import { Button } from "@/components/ui/button";
@@ -60,6 +69,7 @@ export function DoctorPage() {
         destination.
       </PageHeader>
       <Certificates />
+      <Ports />
       <h2 className="mt-8 mb-3 text-lg font-semibold">Check every connection</h2>
       {!canOperate ? (
         <p className="text-sm text-muted">Running the checks needs an operator token.</p>
@@ -149,85 +159,231 @@ function Certificates() {
         )}
       </CardHeader>
       <Loaded query={query}>
+        {(data) => {
+          const remote = data.certificates.filter((c) => c.side !== "ours");
+          const ours = data.certificates.filter((c) => c.side === "ours");
+          return (
+            <>
+              <CardBody className="space-y-1 text-sm text-muted">
+                <p>
+                  {data.schedule_seconds == null
+                    ? "The engine doesn't check by itself (doctor.schedule: off in ductus.yaml)."
+                    : data.last_scheduled
+                      ? `Last automatic check ${ago(data.last_scheduled.at)}; the engine checks every ${duration(data.schedule_seconds)} (${data.mode === "full" ? "everything" : "certificates only"}).`
+                      : `The engine checks every ${duration(data.schedule_seconds)}; its first check runs a minute or two after it starts.`}{" "}
+                  Days are whole days in UTC, to the earliest expiry in each chain.
+                </p>
+                {!data.alerting && (
+                  <p>No alert rule names certificate: nothing is sent about them (alerts.rules in ductus.yaml).</p>
+                )}
+                {note && (
+                  <p role={note.failed ? "alert" : "status"} className={note.failed ? "text-bad" : undefined}>
+                    {note.text}
+                  </p>
+                )}
+              </CardBody>
+              {remote.length === 0 ? (
+                <CardBody className="text-sm text-muted">Nothing the engine connects to uses TLS.</CardBody>
+              ) : (
+                <Table aria-label="Certificates">
+                  <thead>
+                    <tr>
+                      <Th>Days left</Th>
+                      <Th>Server</Th>
+                      <Th>Certificate</Th>
+                      <Th>Expires</Th>
+                      <Th>Last check</Th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {remote.map((c) => (
+                      <tr key={`${c.resource}/${c.host}/${c.port}`}>
+                        <Td>
+                          <CertificateDays certificate={c} />
+                        </Td>
+                        <Td className="break-words">
+                          <div className="font-mono text-xs">
+                            {c.host}:{c.port}
+                          </div>
+                          <div className="text-xs text-muted">{c.resource}</div>
+                        </Td>
+                        <Td className="text-xs break-words">
+                          {c.subject ? (
+                            <>
+                              <div>{c.subject}</div>
+                              <div className="text-muted">
+                                {c.issuer === c.subject ? "self-signed" : `issued by ${c.issuer ?? "?"}`}
+                                {c.trusted === false && ", not trusted by this server"}
+                              </div>
+                              {c.chain_earliest && (
+                                <div>The earliest expiry in its chain is {c.chain_earliest}&apos;s.</div>
+                              )}
+                            </>
+                          ) : (
+                            <span className="text-muted">none read</span>
+                          )}
+                        </Td>
+                        <Td className="text-xs tabular-nums">{c.chain_not_after?.slice(0, 10) ?? "–"}</Td>
+                        <Td className="max-w-xs text-xs break-words">
+                          <div>{ago(c.checked_at)}</div>
+                          {c.error && <div className="text-muted">{c.error}</div>}
+                          {c.read_at && c.checked_at && c.read_at < c.checked_at && (
+                            <div className="text-muted">dates from {timestamp(c.read_at)}</div>
+                          )}
+                        </Td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </Table>
+              )}
+              {ours.length > 0 && <Ours certificates={ours} />}
+            </>
+          );
+        }}
+      </Loaded>
+    </Card>
+  );
+}
+
+/**
+ * The certificates the engine presents (to senders on its TLS listeners, or as its client certificate), as it
+ * loaded them: no check needed, and a renewal shows within a minute.
+ */
+function Ours({ certificates }: { certificates: Schemas["CertificateInfo"][] }) {
+  return (
+    <section aria-label="Ours" className="border-t">
+      <h3 className="px-4 pt-4 text-sm font-semibold">Ours</h3>
+      <p className="px-4 pb-2 text-sm text-muted">
+        What the engine presents, as loaded from resources.yaml. Renewed files are picked up within a minute (or at
+        Check now), without a restart.
+      </p>
+      <Table aria-label="Our certificates">
+        <thead>
+          <tr>
+            <Th>Days left</Th>
+            <Th>Ours</Th>
+            <Th>Certificate</Th>
+            <Th>Expires</Th>
+            <Th>Renewal</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {certificates.map((c) => (
+            <tr key={c.resource}>
+              <Td>
+                <CertificateDays certificate={c} />
+              </Td>
+              <Td className="break-words">
+                <div className="font-medium">{c.resource}</div>
+                <ul className="text-xs text-muted">
+                  {c.presented.map((p) => (
+                    <li key={p}>{p}</li>
+                  ))}
+                </ul>
+              </Td>
+              <Td className="text-xs break-words">
+                <div>{c.subject}</div>
+                <div className="text-muted">
+                  {c.issuer === c.subject ? "self-signed" : `issued by ${c.issuer ?? "?"}`}
+                </div>
+                {c.chain_earliest && <div>The earliest expiry in its chain is {c.chain_earliest}&apos;s.</div>}
+              </Td>
+              <Td className="text-xs tabular-nums">{c.chain_not_after?.slice(0, 10) ?? "–"}</Td>
+              <Td className="max-w-xs text-xs break-words">
+                {c.error ? (
+                  <span className="inline-flex gap-1 text-bad">
+                    <CircleAlert aria-hidden className="mt-px size-3.5 shrink-0" />
+                    <span>The new files can&apos;t be used: {c.error}. Still presenting this one.</span>
+                  </span>
+                ) : (
+                  <span className="text-muted">In use as loaded</span>
+                )}
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </Table>
+    </section>
+  );
+}
+
+/** What the engine listens on and connects to, with TLS in and out: the same report as `ductus ports`. */
+function Ports() {
+  const query = useQuery(ports);
+  return (
+    <Card aria-label="Ports" className="mt-6">
+      <CardHeader>
+        <CardTitle>Ports</CardTitle>
+      </CardHeader>
+      <Loaded query={query}>
         {(data) => (
           <>
-            <CardBody className="space-y-1 text-sm text-muted">
-              <p>
-                {data.schedule_seconds == null
-                  ? "The engine doesn't check by itself (doctor.schedule: off in ductus.yaml)."
-                  : data.last_scheduled
-                    ? `Last automatic check ${ago(data.last_scheduled.at)}; the engine checks every ${duration(data.schedule_seconds)} (${data.mode === "full" ? "everything" : "certificates only"}).`
-                    : `The engine checks every ${duration(data.schedule_seconds)}; its first check runs a minute or two after it starts.`}{" "}
-                Days are whole days in UTC, to the earliest expiry in each chain.
-              </p>
-              {!data.alerting && (
-                <p>No alert rule names certificate: nothing is sent about them (alerts.rules in ductus.yaml).</p>
-              )}
-              {note && (
-                <p role={note.failed ? "alert" : "status"} className={note.failed ? "text-bad" : undefined}>
-                  {note.text}
-                </p>
-              )}
-            </CardBody>
-            {data.certificates.length === 0 ? (
-              <CardBody className="text-sm text-muted">Nothing the engine connects to uses TLS.</CardBody>
-            ) : (
-              <Table aria-label="Certificates">
-                <thead>
-                  <tr>
-                    <Th>Days left</Th>
-                    <Th>Server</Th>
-                    <Th>Certificate</Th>
-                    <Th>Expires</Th>
-                    <Th>Last check</Th>
+            <h3 className="px-4 pt-1 text-sm font-semibold">Listening</h3>
+            <Table aria-label="Listening">
+              <thead>
+                <tr>
+                  <Th>Port</Th>
+                  <Th>Protocol</Th>
+                  <Th>Interface</Th>
+                  <Th>TLS</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.listening.map((l) => (
+                  <tr key={`${l.port}/${l.interface}`}>
+                    <Td className="font-mono text-xs">
+                      {l.host}:{l.port}
+                    </Td>
+                    <Td className="text-xs whitespace-nowrap">
+                      <Secure on={l.tls !== "none"} />
+                      {l.protocol}
+                    </Td>
+                    <Td className="text-xs break-words">
+                      {l.interface}
+                      {l.route && <div className="text-muted">{l.route}</div>}
+                    </Td>
+                    <Td className="text-xs break-words">{l.tls}</Td>
                   </tr>
-                </thead>
-                <tbody>
-                  {data.certificates.map((c) => (
-                    <tr key={`${c.resource}/${c.host}/${c.port}`}>
-                      <Td>
-                        <CertificateDays certificate={c} />
-                      </Td>
-                      <Td className="break-words">
-                        <div className="font-mono text-xs">
-                          {c.host}:{c.port}
-                        </div>
-                        <div className="text-xs text-muted">{c.resource}</div>
-                      </Td>
-                      <Td className="text-xs break-words">
-                        {c.subject ? (
-                          <>
-                            <div>{c.subject}</div>
-                            <div className="text-muted">
-                              {c.issuer === c.subject ? "self-signed" : `issued by ${c.issuer ?? "?"}`}
-                              {c.trusted === false && ", not trusted by this server"}
-                            </div>
-                            {c.chain_earliest && (
-                              <div>The earliest expiry in its chain is {c.chain_earliest}&apos;s.</div>
-                            )}
-                          </>
-                        ) : (
-                          <span className="text-muted">none read</span>
-                        )}
-                      </Td>
-                      <Td className="text-xs tabular-nums">{c.chain_not_after?.slice(0, 10) ?? "–"}</Td>
-                      <Td className="max-w-xs text-xs break-words">
-                        <div>{ago(c.checked_at)}</div>
-                        {c.error && <div className="text-muted">{c.error}</div>}
-                        {c.read_at && c.checked_at && c.read_at < c.checked_at && (
-                          <div className="text-muted">dates from {timestamp(c.read_at)}</div>
-                        )}
-                      </Td>
-                    </tr>
-                  ))}
-                </tbody>
-              </Table>
-            )}
+                ))}
+              </tbody>
+            </Table>
+            <h3 className="border-t px-4 pt-4 text-sm font-semibold">Connects to</h3>
+            <Table aria-label="Connects to">
+              <thead>
+                <tr>
+                  <Th>Server</Th>
+                  <Th>Protocol</Th>
+                  <Th>Used by</Th>
+                  <Th>TLS</Th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.connects_to.map((o, n) => (
+                  <tr key={n}>
+                    <Td className="font-mono text-xs break-all">
+                      {o.host}:{o.port}
+                    </Td>
+                    <Td className="text-xs whitespace-nowrap">
+                      {o.tls && <Secure on={!o.tls.startsWith("none")} />}
+                      {o.protocol}
+                    </Td>
+                    <Td className="text-xs break-words">{o.used_by}</Td>
+                    <Td className="text-xs break-words">{o.tls || <span className="text-muted">–</span>}</Td>
+                  </tr>
+                ))}
+              </tbody>
+            </Table>
           </>
         )}
       </Loaded>
     </Card>
   );
+}
+
+/** A lock, closed or open, beside the protocol (whose words say the same: never the icon alone). */
+function Secure({ on }: { on: boolean }) {
+  const Icon = on ? Lock : LockOpen;
+  return <Icon aria-hidden className={cn("mr-1 inline size-3.5 align-[-2px]", on ? "text-ok" : "text-muted")} />;
 }
 
 function Report({ report }: { report: Schemas["Report"] }) {

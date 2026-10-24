@@ -345,24 +345,65 @@ fn ports_lists_listeners_and_connections_per_environment_and_flags_conflicts() {
 
     let (ok, out) = ductus(dir.path(), &["ports", "--env", "prod"]);
     assert!(ok, "{out}");
+    let pad = |n: usize| " ".repeat(n);
     assert_eq!(
         out,
-        "environment: prod
+        format!(
+            "environment: prod
 
 Listening
-  PORT  PROTOCOL  HOST       INTERFACE          ROUTE
-  7661  MLLP      0.0.0.0    adt
-  7700  HTTP      127.0.0.1  (engine REST API)  /api/v1
-  8080  HTTP      0.0.0.0    api                GET /patients/{mrn} (queue)
+  PORT  PROTOCOL  HOST       INTERFACE          ROUTE{}TLS
+  7661  MLLP      0.0.0.0    adt{}none
+  7700  HTTP      127.0.0.1  (engine REST API)  /api/v1{}none
+  8080  HTTP      0.0.0.0    api                GET /patients/{{mrn}} (queue)  none
 
 Connects to
-  HOST        PORT  PROTOCOL  USED BY
+  HOST        PORT  PROTOCOL  USED BY{}TLS
   db1         5432  Postgres  resources.yaml: pdb
-  epic.local  5000  MLLP      adt
+  epic.local  5000  MLLP      adt{}none
 
 ✓ no port conflicts
-"
+",
+            pad(24),
+            pad(45),
+            pad(22),
+            pad(14),
+            pad(18)
+        )
     );
+
+    // TLS in and out: what each listener presents and asks for, what each connection trusts and
+    // presents, and the API over HTTPS.
+    std::fs::write(
+        dir.path().join("resources.yaml"),
+        "certificates:\n  web: { cert: C, key: K }\n  hie-ca: { ca: CA }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("interfaces/adt/interface.yaml"),
+        "name: adt\nsource: { mllp: { port: ${ADT_PORT}, tls: { certificate: web, clients: { ca: hie-ca } } } }\ndestination: { mllp: { host: ${EPIC}, port: 5000, tls: { ca: hie-ca } } }\n",
+    )
+    .unwrap();
+    std::fs::write(dir.path().join("ductus.yaml"), "api: { listen: '0.0.0.0:7700', tls: { certificate: web } }\n")
+        .unwrap();
+    let (ok, out) = ductus(dir.path(), &["ports", "--env", "prod"]);
+    assert!(ok, "{out}");
+    let line = |start: &str| out.lines().find(|l| l.trim_start().starts_with(start)).unwrap_or_default().to_string();
+    let words =
+        |l: String| l.split("  ").map(str::trim).filter(|w| !w.is_empty()).map(String::from).collect::<Vec<_>>();
+    assert_eq!(
+        words(line("7661")),
+        ["7661", "MLLP over TLS", "0.0.0.0", "adt", "presents web, clients need a certificate from hie-ca"],
+        "{out}"
+    );
+    assert_eq!(words(line("7700")), ["7700", "HTTPS", "0.0.0.0", "(engine REST API)", "/api/v1", "presents web"]);
+    assert_eq!(words(line("epic.local")), ["epic.local", "5000", "MLLP over TLS", "adt", "TLS: hie-ca trusted"]);
+    std::fs::remove_file(dir.path().join("ductus.yaml")).unwrap();
+    std::fs::write(
+        dir.path().join("interfaces/adt/interface.yaml"),
+        "name: adt\nsource: { mllp: { port: ${ADT_PORT} } }\ndestination: { mllp: { host: ${EPIC}, port: 5000 } }\n",
+    )
+    .unwrap();
 
     // Dev's ADT port collides with another MLLP listener.
     std::fs::write(

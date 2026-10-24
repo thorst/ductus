@@ -19,6 +19,11 @@ export function countdown(c: Countdown): { text: string; tone: Tone } {
   return { text, tone: c.state === "expiring" ? "warn" : "ok" };
 }
 
+/** Where a certificate is: a server's `host:port`, or ours "on engine-1" (presented on several ports). */
+export function place(c: { side: string; host: string; port: number }): string {
+  return c.side === "ours" ? `ours, on ${c.host}` : `${c.host}:${c.port}`;
+}
+
 /** Certificates that need someone: expired or within the first step, worst first. */
 export function needingRenewal<T extends Countdown>(all: T[]): T[] {
   return all

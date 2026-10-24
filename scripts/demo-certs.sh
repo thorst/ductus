@@ -7,6 +7,11 @@
 #      3 days → escalated; expired → critical. Each step is mailed once.
 #   3. Renewed (90 days): recovered, mailed to the same people.
 #   4. GET /certificates, the Prometheus gauge, the kept runs and the audit log agree.
+#   5. Ours (0.6.3.3): the demo's MLLP listener presents a certificate of ours (owned by an
+#      address). Its files are replaced with one ending in 10 days → Check now picks it up → an
+#      alert to on-call and to its owner; a half renewal (a new certificate, the old key) shows on
+#      its row while the engine keeps presenting the one that works; the key follows → recovered.
+#      Doctor's full mode connects to the listener and reads the chain it serves.
 # The certificates are made by `cert-server` (an example, not part of ductus) from a file of days,
 # read at every connection; mail goes to `ductus sink --smtp`.
 set -euo pipefail
@@ -24,7 +29,7 @@ export DUCTUS_DATABASE_URL=$DB
 export DUCTUS_API_URL=http://127.0.0.1:7797
 psql -q "$DB" -c "DELETE FROM alert_events WHERE key LIKE 'cert:empi:%' OR key LIKE '%certs-demo%'" \
   -c "DELETE FROM alert_state WHERE key LIKE 'cert:empi:%' OR key LIKE '%certs-demo%'" \
-  -c "DELETE FROM certificate_status WHERE resource = 'empi'"
+  -c "DELETE FROM certificate_status WHERE resource IN ('empi', 'certs-demo-mllp')"
 q() { psql -tA "$DB" -c "$1"; }
 fail=""
 
@@ -37,17 +42,23 @@ alerts:
     oncall: { email: [interfaces-oncall@hospital.example] }
   rules:
     - { when: [error, stalled, stopped], severity: critical, to: [oncall] }
-    - { when: [certificate], severity: warning, to: [oncall] }
+    - { when: [certificate], severity: warning, to: [oncall, owner] }
   settle: 0s
 doctor: { schedule: 1h }
 EOF
 cat >"$P/resources.yaml" <<'EOF'
 apis:
   empi: { url: 'https://localhost:7447/patients', vendor: Example EMPI }
+certificates:
+  certs-demo-mllp: { cert_file: tls/mllp.pem, key_file: tls/mllp.key, owner: infra@hospital.example }
 EOF
+# Ours: a year now; later replaced by `short` (10 days), then `long` (90 days).
+for c in mllp:365 short:10 long:90; do
+  "$BIN" cert self-signed "$P/tls/${c%%:*}" --name localhost --name 127.0.0.1 --days "${c##*:}" >/dev/null
+done
 cat >"$P/interfaces/certs-demo/interface.yaml" <<'EOF'
 name: certs-demo
-source: { mllp: { port: 6736 } }
+source: { mllp: { port: 6736, tls: { certificate: certs-demo-mllp } } }
 script: transform.ts
 destination: { file: { dir: out } }
 EOF
@@ -135,7 +146,7 @@ certs=$(api GET /certificates)
 [ "$(js "$certs" "$row['state'], $row['days_left'], $row['trusted']")" = "ok 90 False" ] || fail+=" renewed($certs)"
 grep "ERROR" "$P/run.log" >/dev/null && fail+=" errors-in-the-log"
 metrics=$(curl -s -H "Authorization: Bearer $OPS" "$DUCTUS_API_URL/api/v1/metrics")
-gauge=$(grep '^ductus_certificate_expiry_seconds{resource="empi",host="localhost",port="7447"}' <<<"$metrics" || true)
+gauge=$(grep '^ductus_certificate_expiry_seconds{side="remote",resource="empi",host="localhost",port="7447"}' <<<"$metrics" || true)
 echo "   $gauge"
 days=$(awk '{ printf "%d", $2 / 86400 }' <<<"$gauge")
 [ "$days" -ge 89 ] && [ "$days" -le 90 ] || fail+=" gauge($gauge)"
@@ -148,6 +159,45 @@ logged=$(q "SELECT count(*) FROM audit_log WHERE action = 'doctor.run' AND actor
 [ "$logged" = 6 ] || fail+=" audit($logged)"
 alert=$(api GET /alerts)
 [ "$(js "$alert" "[a['state'] for a in d['alerts'] if a['key'] == 'cert:empi:localhost:7447']")" = "['ok']" ] || fail+=" alerts-api"
+
+echo "== ours: the listener's certificate, read from what the engine loaded"
+OURS="[c for c in d['certificates'] if c['side'] == 'ours'][0]"
+ours=$(api GET /certificates)
+HOST=$(js "$ours" "$OURS['host']")
+echo "   $(js "$ours" "f\"{$OURS['resource']} on {$OURS['host']} (port {$OURS['port']}): {$OURS['days_left']} days, presented at {', '.join($OURS['presented'])}\"")"
+[ "$(js "$ours" "$OURS['resource'], $OURS['port'], $OURS['presented'], $OURS['days_left']")" = \
+  "certs-demo-mllp 0 ['0.0.0.0:6736 MLLP over TLS (certs-demo)'] 365" ] || fail+=" ours-listed($ours)"
+[ "$(q "SELECT side || ' ' || port FROM certificate_status WHERE resource = 'certs-demo-mllp' AND host = '$HOST'")" = "ours 0" ] || fail+=" ours-row"
+grep "^ductus_certificate_expiry_seconds{side=\"ours\",resource=\"certs-demo-mllp\",host=\"$HOST\",port=\"0\"}" \
+  <(curl -s -H "Authorization: Bearer $OPS" "$DUCTUS_API_URL/api/v1/metrics") >/dev/null || fail+=" ours-gauge"
+report=$(api POST /doctor '{"mode": "full", "timeout_ms": 2000}')
+chain=$(js "$report" "[s['detail'] for c in d['checks'] if c['endpoint'] == '0.0.0.0:6736 MLLP over TLS' for s in c['steps'] if s['name'] == 'chain']")
+echo "   doctor (full) on our listener: $chain"
+[[ "$chain" == *"self-signed: senders must trust this very certificate"* ]] || fail+=" doctor-listener($chain)"
+
+echo "== ours, replaced by one ending in 10 days (Check now reads the files): to on-call and its owner"
+cp "$P/tls/short.pem" "$P/tls/mllp.pem" && cp "$P/tls/short.key" "$P/tls/mllp.key"
+check_now 90
+wait_for 40 '[ "$(mails)" -ge 7 ]' || fail+=" no-ours-mail"
+grep "^mail [67] " "$P/mail.log" | sed 's/^/   | /'
+grep "^mail [67] .*to infra@hospital.example: \[Ductus dev\] WARNING Our certificate certs-demo-mllp (on $HOST) expires in 10 days" "$P/mail.log" >/dev/null || fail+=" ours-to-owner"
+[ "$(q "SELECT chain_min_not_after::date - current_date FROM certificate_status WHERE resource = 'certs-demo-mllp' AND host = '$HOST'")" = 10 ] || fail+=" ours-row-renewed"
+
+echo "== ours, half renewed (a new certificate, the old key): shown, the one that works kept"
+cp "$P/tls/long.pem" "$P/tls/mllp.pem"
+check_now 90
+ours=$(api GET /certificates)
+echo "   $(js "$ours" "$OURS['error']")"
+[ "$(js "$ours" "$OURS['days_left'], 'key' in ($OURS['error'] or '')")" = "10 True" ] || fail+=" ours-broken($ours)"
+[ "$(q "SELECT error IS NOT NULL FROM certificate_status WHERE resource = 'certs-demo-mllp' AND host = '$HOST'")" = t ] || fail+=" ours-broken-row"
+
+echo "== ours, the key follows: renewed for 90 days, recovered"
+cp "$P/tls/long.key" "$P/tls/mllp.key"
+check_now 90
+wait_for 40 '[ "$(mails)" -ge 9 ]' || fail+=" no-ours-recovery"
+grep "^mail [89] .*to infra@hospital.example: \[Ductus dev\] RECOVERED Our certificate certs-demo-mllp" "$P/mail.log" >/dev/null || fail+=" ours-recovered"
+ours=$(api GET /certificates)
+[ "$(js "$ours" "$OURS['days_left'], $OURS['error']")" = "90 None" ] || fail+=" ours-renewed($ours)"
 
 "$BIN" token revoke "certs-demo-ops-$$" >/dev/null 2>&1 || true
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; tail -20 "$P/run.log"; exit 1; fi

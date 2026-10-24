@@ -299,12 +299,14 @@ pub async fn start(engine: &Arc<Engine>) {
                     .map(move |(d, _)| (alerts::destination_key(&name, d), name.clone(), Some(d.clone()))),
             )
         })
-        .chain(
-            engine
-                .certificates
-                .iter()
-                .map(|t| (t.key.clone(), t.resource.clone(), Some(format!("{}:{}", t.host, t.port)))),
-        )
+        .chain(engine.certificates.iter().map(|t| {
+            // Ours is on this server, on as many ports as it is presented on.
+            let place = match t.side {
+                crate::certificates::Side::Ours => t.host.clone(),
+                crate::certificates::Side::Remote => format!("{}:{}", t.host, t.port),
+            };
+            (t.key.clone(), t.resource.clone(), Some(place))
+        }))
         .collect();
     if let Err(e) = engine.store.ensure_alerts(&keys).await {
         tracing::error!(error = %format!("{e:#}"), "could not set up alerts: none will be sent");
@@ -529,16 +531,26 @@ pub async fn evaluate(engine: &Engine) -> Result<()> {
     Ok(())
 }
 
-/// Each certificate the engine connects to, from its last check: its step, and the words.
+/// Each certificate the engine connects to, from its last check, and each it presents, from what
+/// it loaded (no database read for those): its step, and the words.
 async fn judge_certificates(engine: &Engine, a: &Alerts, now: DateTime<Utc>) -> Result<Vec<Judged>> {
+    use crate::certificates::Side;
     if engine.certificates.is_empty() {
         return Ok(Vec::new());
     }
-    let seen = engine.store.certificates().await?;
+    let seen = if engine.certificates.iter().any(|t| t.side == Side::Remote) {
+        engine.store.certificates().await?
+    } else {
+        Vec::new()
+    };
     let rule = a.settings.rule_for(Condition::Certificate).map(|r| r.severity);
     let mut out = Vec::new();
     for t in &engine.certificates {
-        let row = seen.iter().find(|c| c.resource == t.resource && c.host == t.host && c.port == i32::from(t.port));
+        let ours = crate::certificates::our_row(t, &engine.tls, now);
+        let row = ours.as_ref().or_else(|| {
+            seen.iter().find(|c| c.resource == t.resource && c.host == t.host && c.port == i32::from(t.port))
+        });
+        let presented = t.presented.join(", ");
         let options = t
             .interface
             .as_deref()
@@ -558,8 +570,13 @@ async fn judge_certificates(engine: &Engine, a: &Alerts, now: DateTime<Utc>) -> 
                     port: t.port,
                     not_after,
                     earliest: r.chain_min_subject.as_deref(),
-                    // The dates are older than the last check only when it couldn't read them.
-                    error: r.error.as_deref().filter(|_| r.read_at.is_none_or(|read| read < r.checked_at)),
+                    // The dates are older than the last check only when it couldn't read them;
+                    // ours are always current, and their error is a renewal that can't be used.
+                    error: match t.side {
+                        Side::Ours => r.error.as_deref(),
+                        Side::Remote => r.error.as_deref().filter(|_| r.read_at.is_none_or(|read| read < r.checked_at)),
+                    },
+                    ours: (t.side == Side::Ours).then_some(presented.as_str()),
                 };
                 let summary = alerts::certificate_summary(&facts, now);
                 let judgement = match rule {

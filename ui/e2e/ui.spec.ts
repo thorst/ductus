@@ -470,8 +470,9 @@ test("company-defined documentation: on the interface, missing flagged, filtered
   const required = page.getByRole("list", { name: "Required fields" });
   await expect(required).toContainText("Data classification (required)");
   await expect(required).toContainText("All 3 have it");
-  // 3 interfaces and 8 resources (the EMPI, the six certificate servers and the directory).
-  await required.getByRole("button", { name: "1 of 11 missing" }).click();
+  // 3 interfaces and 10 resources (the EMPI, the six certificate servers, the directory, orders'
+  // certificate and the CA of its senders').
+  await required.getByRole("button", { name: "1 of 13 missing" }).click();
   await expect(page).toHaveURL(/field=baa_signed/);
   const interfaces = page.getByRole("region", { name: "Interfaces" });
   await expect(interfaces.locator("tbody tr")).toHaveCount(1);

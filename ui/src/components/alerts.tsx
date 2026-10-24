@@ -23,13 +23,17 @@ export function useOpenAlerts() {
   };
 }
 
-/** A certificate's alert (`cert:<resource>:<host>:<port>`): `interface` is its resource, `destination` the server. */
+/**
+ * A certificate's alert (`cert:<resource>:<host>:<port>`): `interface` is its resource, `destination` the server.
+ * Ours (one the engine presents) are at port 0, which no server can be (`destination` is the engine's server).
+ */
 export function isCertificate(a: { key: string }) {
   return a.key.startsWith("cert:");
 }
 
-/** `adt-relay → lab`, `adt-relay` (its own alert, or its only destination), or `certificate of host:443 (empi)`. */
+/** `adt-relay → lab`, `adt-relay` (its own alert, or its only destination), `certificate of host:443 (empi)` or `our certificate ductus-mllp (on engine-1)`. */
 export function alertName(a: { key: string; interface: string; destination?: string | null }) {
+  if (isCertificate(a) && a.key.endsWith(":0")) return `our certificate ${a.interface} (on ${a.destination ?? "?"})`;
   if (isCertificate(a)) return `certificate of ${a.destination ?? "?"} (${a.interface})`;
   return a.destination && a.destination !== "default" ? `${a.interface} → ${a.destination}` : a.interface;
 }

@@ -316,7 +316,7 @@ Indexes: primary key `(kind, name)`; `docs_snapshot_docs` (GIN on `docs`).
 
 ## `alert_state`
 
-One row per thing that can alert: each interface (`iface:<interface>`), each destination (`dest:<interface>/<destination>`) and each certificate the engine connects to (`cert:<resource>:<host>:<port>`), made when an engine with `alerts:` in ductus.yaml first runs it (so it can be silenced before anything fires). Changed by compare-and-set on `rev`: two engines on one database judge the same state and only one records each change.
+One row per thing that can alert: each interface (`iface:<interface>`), each destination (`dest:<interface>/<destination>`) and each certificate the engine connects to (`cert:<resource>:<host>:<port>`) or presents (`cert:<name>:<engine's host>:0`), made when an engine with `alerts:` in ductus.yaml first runs it (so it can be silenced before anything fires). Changed by compare-and-set on `rev`: two engines on one database judge the same state and only one records each change.
 
 | column | type | |
 |---|---|---|
@@ -383,11 +383,14 @@ Indexes: primary key `id`; `alert_deliveries_due (next_try_at) WHERE status = 'p
 
 The certificate each TLS server the engine connects to presented at its last check (migration 0021): HTTPS APIs and destinations, the alerts' mail server, webhooks and heartbeat. Written by the engine's scheduled checks (`doctor.schedule`, every 6 hours by default) and by checks someone asks for (`POST /api/v1/doctor`). Read even when this server doesn't trust it (a private CA). A check that couldn't read a certificate sets `error` and `checked_at` and keeps the dates from the check before.
 
+Our own certificates are rows too (migration 0024, `side = 'ours'`): each `certificates:` pair the engine presents, to senders on a TLS listener or as a client certificate. They are read from what the engine loaded (no network), written at its start and again only when a renewal is picked up or a renewed pair can't be used.
+
 | column | type | |
 |---|---|---|
-| `resource` | text | `empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>` (a webhook), `alerts.heartbeat`, or `<interface>/<destination>` for a destination with a URL of its own. |
-| `host` | text | The server's name as configured. |
-| `port` | integer | Its port. |
+| `side` | text | `remote` (a server the engine connects to) or `ours` (a pair it presents; migration 0024). Older engines' rows are `remote`. |
+| `resource` | text | `empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>` (a webhook), `alerts.heartbeat`, or `<interface>/<destination>` for a destination with a URL of its own; ours: the `certificates:` entry's name. |
+| `host` | text | The server's name as configured; ours: the engine's server (its host name). |
+| `port` | integer | Its port; ours: 0 (one pair may be served on several ports). |
 | `subject` | text | The server certificate's common name (or organisation). |
 | `issuer` | text | Who issued it. |
 | `fingerprint` | text | SHA-256 of the server certificate, hex: changes when it's renewed or replaced. |
@@ -395,9 +398,9 @@ The certificate each TLS server the engine connects to presented at its last che
 | `not_after` | timestamptz | The server certificate's expiry. |
 | `chain_min_not_after` | timestamptz | The earliest expiry in the chain the server presents: what alerts count (an intermediate that ends breaks clients as surely). |
 | `chain_min_subject` | text | Whose that is, when it isn't the server certificate's. |
-| `trusted` | boolean | Whether this server trusts it (the system's trusted certificates). |
-| `error` | text | Why the last check failed (couldn't connect, not trusted, expired); none when it passed. |
-| `checked_at` | timestamptz | The last check. |
+| `trusted` | boolean | Whether this server trusts it (the system's trusted certificates); none for ours (whether senders do isn't known here). |
+| `error` | text | Why the last check failed (couldn't connect, not trusted, expired); none when it passed. Ours: why renewed files can't be used (the pair loaded before is still presented). |
+| `checked_at` | timestamptz | The last check; ours: when the engine last read the pair (its start, or a renewal). |
 | `read_at` | timestamptz | When the certificate in the row was read: the last check, unless that one couldn't read it (then `error` says why and the dates are older). |
 
 Index: primary key `(resource, host, port)`.

@@ -396,6 +396,7 @@ mod tests {
         ("GET", "/quarantine", "signed"),
         ("GET", "/hotspots", "signed"),
         ("GET", "/impact", "signed"),
+        ("GET", "/ports", "signed"),
         ("GET", "/owners", "signed"),
         ("GET", "/owners/people", "signed"),
         ("POST", "/owners/reassign/preview", "signed"),

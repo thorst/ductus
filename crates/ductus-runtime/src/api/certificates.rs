@@ -18,11 +18,19 @@ pub fn routes() -> OpenApiRouter<Shared> {
 
 #[derive(Serialize, ToSchema)]
 pub struct CertificateInfo {
+    /// `remote` (a server the engine connects to, as its last check saw it) or `ours` (a pair
+    /// the engine presents, as it loaded it).
+    pub side: String,
     /// `empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>`, `alerts.heartbeat`, or
-    /// `<interface>/<destination>`.
+    /// `<interface>/<destination>`; ours: the `certificates:` entry.
     pub resource: String,
+    /// Ours: this server's name.
     pub host: String,
+    /// Ours: 0 (see `presented`).
     pub port: u16,
+    /// Ours: where it is presented (`0.0.0.0:6661 MLLP over TLS (adt)`, `client certificate to
+    /// hie.example.org:7443 (adt → hie)`).
+    pub presented: Vec<String>,
     /// `ok`, `expiring` (within the first of `alerts.certificates.warn_days`), `expired`, or
     /// `unknown` (never read: not checked yet, or never reachable).
     pub state: String,
@@ -42,11 +50,12 @@ pub struct CertificateInfo {
     pub chain_not_after: Option<DateTime<Utc>>,
     /// Whose that is, when it isn't the server certificate's (an intermediate).
     pub chain_earliest: Option<String>,
-    /// This server trusts it.
+    /// This server trusts it (none for ours: whether senders do isn't known here).
     pub trusted: Option<bool>,
-    /// Why the last check failed, if it did.
+    /// Why the last check failed, if it did; ours: why renewed files can't be used (the pair
+    /// loaded before is still presented).
     pub error: Option<String>,
-    /// The last check.
+    /// The last check; ours: now (read from memory).
     pub checked_at: Option<DateTime<Utc>>,
     /// When the certificate shown was read (older than `checked_at` when the last check couldn't).
     pub read_at: Option<DateTime<Utc>>,
@@ -99,8 +108,9 @@ pub struct CertificatesOverview {
     pub alerting: bool,
 }
 
-/// Every certificate the engine connects to, as its last check saw it, and when the engine
-/// checks next by itself. Read even when this server doesn't trust them.
+/// Every certificate the engine connects to, as its last check saw it (read even when this
+/// server doesn't trust them), every one it presents (`side: ours`, as loaded), and when the
+/// engine checks next by itself.
 #[utoipa::path(
     get, path = "/certificates", tag = "reports", operation_id = "list_certificates",
     responses((status = 200, body = CertificatesOverview))
@@ -112,17 +122,20 @@ async fn list(engine: Eng, _caller: Caller) -> ApiResult<CertificatesOverview> {
         .map(|a| a.settings.certificates.warn_days.clone())
         .unwrap_or_else(|| CertificateSettings::default().warn_days);
     let seen = engine.store.certificates().await?;
+    let now = Utc::now();
     let alert_ids: std::collections::HashMap<String, i32> = if engine.alerts.is_some() {
         engine.store.alerts().await?.into_iter().filter(|r| r.key.starts_with("cert:")).map(|r| (r.key, r.id)).collect()
     } else {
         Default::default()
     };
-    let now = Utc::now();
     let mut certificates: Vec<CertificateInfo> = engine
         .certificates
         .iter()
         .map(|t| {
-            let row = seen.iter().find(|c| c.resource == t.resource && c.host == t.host && c.port == i32::from(t.port));
+            let ours = crate::certificates::our_row(t, &engine.tls, now);
+            let row = ours.as_ref().or_else(|| {
+                seen.iter().find(|c| c.resource == t.resource && c.host == t.host && c.port == i32::from(t.port))
+            });
             let ends = row.and_then(|r| r.chain_min_not_after);
             let stage = ends.and_then(|e| alerts::certificate_stage(e, now, &warn_days));
             let state = match (ends, stage) {
@@ -132,9 +145,11 @@ async fn list(engine: Eng, _caller: Caller) -> ApiResult<CertificatesOverview> {
                 (Some(_), None) => "ok",
             };
             CertificateInfo {
+                side: t.side.label().into(),
                 resource: t.resource.clone(),
                 host: t.host.clone(),
                 port: t.port,
+                presented: t.presented.clone(),
                 state: state.into(),
                 days_left: ends.map(|e| alerts::days_left(e, now)),
                 stage,

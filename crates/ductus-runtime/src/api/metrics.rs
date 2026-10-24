@@ -61,21 +61,35 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
         }
     }
     if !engine.certificates.is_empty() {
-        let seen = engine.store.certificates().await?;
+        use crate::certificates::Side;
+        // Ours are read from memory; the table only for the servers the engine checks.
+        let seen = if engine.certificates.iter().any(|t| t.side == Side::Remote) {
+            engine.store.certificates().await?
+        } else {
+            Vec::new()
+        };
         out.family(
             "ductus_certificate_expiry_seconds",
             "gauge",
-            "Seconds until the earliest expiry in a server's certificate chain (negative once expired), as of its last check.",
+            "Seconds until the earliest expiry in a certificate chain (negative once expired): a server's as of its last check (side remote), or one the engine presents (side ours: host is this server, port 0).",
         );
         let now = chrono::Utc::now();
         for t in &engine.certificates {
-            let ends = seen
-                .iter()
-                .find(|c| c.resource == t.resource && c.host == t.host && c.port == i32::from(t.port))
-                .and_then(|c| c.chain_min_not_after);
+            let ends = match crate::certificates::our_row(t, &engine.tls, now) {
+                Some(ours) => ours.chain_min_not_after,
+                None => seen
+                    .iter()
+                    .find(|c| c.resource == t.resource && c.host == t.host && c.port == i32::from(t.port))
+                    .and_then(|c| c.chain_min_not_after),
+            };
             if let Some(ends) = ends {
-                let labels =
-                    format!("resource=\"{}\",host=\"{}\",port=\"{}\"", label(&t.resource), label(&t.host), t.port);
+                let labels = format!(
+                    "side=\"{}\",resource=\"{}\",host=\"{}\",port=\"{}\"",
+                    t.side.label(),
+                    label(&t.resource),
+                    label(&t.host),
+                    t.port
+                );
                 out.sample("ductus_certificate_expiry_seconds", &labels, (ends - now).num_seconds());
             }
         }

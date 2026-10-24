@@ -115,7 +115,8 @@ pub struct Engine {
     pub alerts: Option<Arc<crate::alerts::Alerts>>,
     /// The engine's own connection checks (`doctor:` in ductus.yaml).
     pub doctor: ductus_core::settings::DoctorSettings,
-    /// The certificates the engine connects to (worked out from the project at start).
+    /// The certificates the engine connects to and those it presents (worked out from the
+    /// project at start).
     pub certificates: Vec<crate::certificates::CertificateTarget>,
     /// The directory people sign in with (`auth.ldap`), if configured.
     pub directory: Option<crate::ldap::Directory>,
@@ -125,6 +126,18 @@ pub struct Engine {
     pub ownership: Arc<crate::ownership::Ownership>,
     /// Every `certificates:` entry, loaded (what connections trust and present).
     pub tls: Arc<crate::tls::Certificates>,
+    /// Where the REST API listens, if it does.
+    pub api: Option<ApiListener>,
+    /// This server's name (as the audit log and `engines` name it): our certificates' rows.
+    pub host: String,
+}
+
+/// Where the engine's REST API (and web UI) listens, and its `tls` (none: plain HTTP).
+#[derive(Debug, Clone)]
+pub struct ApiListener {
+    pub host: String,
+    pub port: u16,
+    pub tls: Option<ductus_core::tls::ListenTls>,
 }
 
 /// What the engine is made of, from startup.
@@ -148,6 +161,8 @@ pub struct Parts {
     pub teams: BTreeMap<String, ductus_core::alerts::OwnerContact>,
     pub ownership: Arc<crate::ownership::Ownership>,
     pub tls: Arc<crate::tls::Certificates>,
+    pub api: Option<ApiListener>,
+    pub host: String,
 }
 
 impl Engine {
@@ -172,10 +187,15 @@ impl Engine {
             teams,
             ownership,
             tls,
+            api,
+            host,
         } = parts;
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
-            crate::certificates::targets(&configs, &resources, alerts.as_ref().map(|a| &a.settings))
+            let alerts = alerts.as_ref().map(|a| &a.settings);
+            let mut all = crate::certificates::targets(&configs, &resources, alerts);
+            all.extend(crate::certificates::ours(&configs, &resources, alerts, api.as_ref(), &host));
+            all
         };
         let engine = Arc::new(Self {
             started_at: Utc::now(),
@@ -203,6 +223,8 @@ impl Engine {
             teams,
             ownership,
             tls,
+            api,
+            host,
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

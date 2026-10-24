@@ -209,6 +209,14 @@ export const certificates = queryOptions({
   refetchInterval: 60_000,
 });
 
+/** What the engine listens on and connects to, with TLS in and out (`ductus ports`). */
+export const ports = queryOptions({
+  queryKey: ["ports"],
+  queryFn: async () => unwrap(await api.GET("/ports")),
+  // The project doesn't change while the engine runs.
+  staleTime: Infinity,
+});
+
 /** The latest kept connection check and its report (operators). */
 export const lastDoctorRun = queryOptions({
   queryKey: ["doctor", "last"],

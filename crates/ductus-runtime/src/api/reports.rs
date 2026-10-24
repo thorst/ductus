@@ -1,5 +1,5 @@
-//! The reports the CLI prints, as data: `impact`, `owners` and `doctor`, for the interfaces
-//! this engine runs.
+//! The reports the CLI prints, as data: `impact`, `owners`, `ports` and `doctor`, for the
+//! interfaces this engine runs.
 
 use super::{ApiError, ApiResult, Caller, Eng, Shared};
 use crate::doctor::{Mode, Report};
@@ -18,11 +18,84 @@ use utoipa_axum::routes;
 pub fn routes() -> OpenApiRouter<Shared> {
     OpenApiRouter::new()
         .routes(routes!(impact_report))
+        .routes(routes!(ports))
         .routes(routes!(owners))
         .routes(routes!(owner_people))
         .routes(routes!(reassign_preview))
         .routes(routes!(doctor_report))
         .routes(routes!(docs_report))
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct ListeningPort {
+    port: u16,
+    host: String,
+    /// `MLLP`, `MLLP over TLS`, `HTTP` or `HTTPS`.
+    protocol: String,
+    /// The interface, or `(engine REST API)`.
+    interface: String,
+    /// HTTP only: `GET /patients/{mrn} (respond)`.
+    route: Option<String>,
+    /// `none`, or what it presents and asks for (`presents ductus-mllp, clients need a
+    /// certificate from hospital-ca`).
+    tls: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OutboundPort {
+    host: String,
+    port: u16,
+    /// `MLLP`, `MLLP over TLS`, `HTTP`, `HTTPS`, `SFTP`, `LDAP`, `LDAPS`, `Postgres`, `SQL Server`, `SQL Browser (UDP)`.
+    protocol: String,
+    /// The interface (`adt → lab`), or `resources.yaml: <name>`.
+    used_by: String,
+    /// For MLLP, HTTP and directories: `none`, `TLS` (the platform's trusted certificates), or
+    /// TLS with what it trusts and presents (`TLS: hie-ca trusted, client certificate
+    /// ductus-client`). Empty for SFTP (SSH) and databases.
+    tls: String,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PortsReport {
+    /// What the engine listens on (its interfaces and the API), by port.
+    listening: Vec<ListeningPort>,
+    /// What it connects to (destinations and resources.yaml), by host: what a firewall request lists.
+    connects_to: Vec<OutboundPort>,
+}
+
+/// What the engine listens on and connects to, with TLS in and out: the same report as
+/// `ductus ports`.
+#[utoipa::path(get, path = "/ports", tag = "reports", responses((status = 200, body = PortsReport)))]
+async fn ports(engine: Eng, _caller: Caller) -> ApiResult<PortsReport> {
+    use ductus_core::ports;
+    let configs = engine.interfaces.iter().map(|i| &*i.config);
+    let mut listening = ports::listeners(configs.clone());
+    if let Some(api) = &engine.api {
+        listening.push(ports::api_listener(&api.host, api.port, api.tls.as_ref()));
+        listening.sort();
+    }
+    let listening = listening
+        .into_iter()
+        .map(|l| ListeningPort {
+            port: l.port,
+            host: l.host,
+            protocol: l.protocol.into(),
+            interface: l.interface,
+            route: l.route,
+            tls: l.tls,
+        })
+        .collect();
+    let connects_to = ports::outbound(configs, &engine.resources)
+        .into_iter()
+        .map(|o| OutboundPort {
+            host: o.host,
+            port: o.port,
+            protocol: o.protocol.into(),
+            used_by: o.used_by,
+            tls: o.tls,
+        })
+        .collect();
+    Ok(Json(PortsReport { listening, connects_to }))
 }
 
 #[derive(Deserialize, IntoParams)]

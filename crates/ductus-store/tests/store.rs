@@ -740,6 +740,66 @@ async fn acknowledging_and_silencing_are_logged_with_the_change() {
     forget_alert(&pool, row.id).await;
 }
 
+/// Our certificates (migration 0024) are rows beside the remote ones, even under the same name:
+/// they sit on the engine's server at port 0, which no remote row can, and keep their side.
+#[tokio::test]
+async fn our_certificates_are_rows_of_their_own() {
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let name = format!("test-ours-{}", std::process::id());
+    let now = chrono::Utc::now();
+    let remote = ductus_store::CertificateRow {
+        side: "remote".into(),
+        resource: name.clone(),
+        host: "empi.example.org".into(),
+        port: 443,
+        subject: Some("empi.example.org".into()),
+        issuer: Some("Example CA".into()),
+        fingerprint: Some("ab12".into()),
+        not_before: Some(now - chrono::Duration::days(60)),
+        not_after: Some(now + chrono::Duration::days(20)),
+        chain_min_not_after: Some(now + chrono::Duration::days(20)),
+        chain_min_subject: None,
+        trusted: Some(true),
+        error: None,
+        checked_at: now,
+        read_at: None,
+    };
+    let ours = ductus_store::CertificateRow {
+        side: "ours".into(),
+        host: "engine-1".into(),
+        port: 0,
+        fingerprint: Some("cd34".into()),
+        trusted: None,
+        error: Some("the private key isn't this certificate's key".into()),
+        ..remote.clone()
+    };
+    store.save_certificates(&[remote, ours]).await.unwrap();
+    let mut rows: Vec<_> = store.certificates().await.unwrap().into_iter().filter(|r| r.resource == name).collect();
+    rows.sort_by_key(|r| r.port);
+    let shown: Vec<_> = rows.iter().map(|r| (r.side.as_str(), r.host.as_str(), r.port, r.error.is_some())).collect();
+    assert_eq!(shown, [("ours", "engine-1", 0, true), ("remote", "empi.example.org", 443, false)]);
+
+    // An older engine's insert (no `side`) is a remote row.
+    sqlx::query(
+        "INSERT INTO certificate_status (resource, host, port, checked_at) VALUES ($1, 'old.example.org', 443, now())",
+    )
+    .bind(&name)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let side: String =
+        sqlx::query_scalar("SELECT side FROM certificate_status WHERE resource = $1 AND host = 'old.example.org'")
+            .bind(&name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(side, "remote");
+    let wrong = sqlx::query("UPDATE certificate_status SET side = 'theirs' WHERE resource = $1").bind(&name);
+    assert!(wrong.execute(&pool).await.is_err(), "only remote or ours");
+    sqlx::query("DELETE FROM certificate_status WHERE resource = $1").bind(&name).execute(&pool).await.unwrap();
+}
+
 /// A certificate alert keeps its step; a check that couldn't read the certificate keeps the dates
 /// from the one before (the certificate out there still ends then), with the error.
 #[tokio::test]
@@ -749,6 +809,7 @@ async fn certificates_keep_their_dates_when_a_check_fails() {
     let resource = format!("test-cert-{}", std::process::id());
     let now = chrono::Utc::now();
     let seen = ductus_store::CertificateRow {
+        side: "remote".into(),
         resource: resource.clone(),
         host: "empi.example.org".into(),
         port: 443,

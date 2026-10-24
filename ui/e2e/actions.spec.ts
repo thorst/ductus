@@ -128,6 +128,13 @@ test("running the connection checks and saving the report", async ({ page }) => 
   const lab = report.getByRole("table", { name: "Checks" }).locator("tbody tr").filter({ hasText: "127.0.0.1:6799" });
   await expect(lab).toContainText("Failed");
   await expect(report.getByRole("table", { name: "Checks" }).locator("tbody tr").first()).toContainText("Failed");
+  // Orders' TLS listener, as its senders meet it (over loopback): the chain it serves, and what
+  // doctor can't know.
+  const orders = report.getByRole("table", { name: "Checks" }).locator("tbody tr").filter({ hasText: "0.0.0.0:6722" });
+  await expect(orders).toContainText("MLLP over TLS");
+  await expect(orders).toContainText("serves `orders-tls`");
+  await expect(orders).toContainText("self-signed: senders must trust this very certificate");
+  await expect(orders).toContainText("can't know the name senders connect with");
   await page.screenshot({ path: "test-results/connections.png", fullPage: true });
   const [download] = await Promise.all([
     page.waitForEvent("download"),

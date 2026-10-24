@@ -428,6 +428,41 @@ pub struct InterfaceDetail {
     timeout_ms: u64,
     format: String,
     folder: String,
+    /// The source's TLS, when it listens with it.
+    source_tls: Option<SourceTls>,
+}
+
+/// TLS on an interface's listener.
+#[derive(Serialize, ToSchema)]
+pub struct SourceTls {
+    /// `MLLP over TLS` or `HTTPS`.
+    protocol: &'static str,
+    /// Where: `0.0.0.0:6661`, `POST /orders on 0.0.0.0:8443 (queue)`.
+    address: String,
+    /// The `certificates:` pair it presents.
+    certificate: String,
+    /// Senders need a certificate this CA (a `certificates:` entry) issued; none: any sender.
+    clients_ca: Option<String>,
+    /// And one of these subjects (none: any the CA issued).
+    subjects: Vec<String>,
+}
+
+fn source_tls(source: &Source) -> Option<SourceTls> {
+    let (protocol, address, tls) = match source {
+        Source::Mllp { host, port, tls: Some(t) } => ("MLLP over TLS", format!("{host}:{port}"), t),
+        Source::Http { host, port, path, method, mode, tls: Some(t) } => {
+            let mode = if *mode == HttpMode::Respond { "respond" } else { "queue" };
+            ("HTTPS", format!("{} {path} on {host}:{port} ({mode})", method.to_ascii_uppercase()), t)
+        }
+        _ => return None,
+    };
+    Some(SourceTls {
+        protocol,
+        address,
+        certificate: tls.certificate.clone(),
+        clients_ca: tls.clients.as_ref().map(|c| c.ca.clone()),
+        subjects: tls.clients.as_ref().map(|c| c.subjects.clone()).unwrap_or_default(),
+    })
 }
 
 /// ` over TLS`, and who may send: ` over TLS, clients need a certificate from hospital-ca`.
@@ -578,6 +613,7 @@ async fn interface(engine: Eng, _caller: Caller, Path(name): Path<String>) -> Ap
         timeout_ms: i.config.timeout.as_millis() as u64,
         format: i.config.format.name().to_string(),
         folder: i.config.dir.display().to_string(),
+        source_tls: source_tls(&i.config.source),
     }))
 }
 

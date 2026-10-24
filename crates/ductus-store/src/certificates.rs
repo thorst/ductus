@@ -1,6 +1,7 @@
 //! Certificates and connection checks (migration 0021): what each TLS server the engine connects
 //! to presented at its last check (`certificate_status`), and the reports of the checks themselves
-//! (`doctor_runs`, the last 30).
+//! (`doctor_runs`, the last 30). Our own certificates (migration 0024: `side = 'ours'`) are rows
+//! too, written from what the engine loaded.
 
 use crate::Store;
 use anyhow::{Context, Result};
@@ -14,6 +15,8 @@ pub const DOCTOR_RUNS_KEPT: i64 = 30;
 /// by the store (ignored when saving).
 #[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
 pub struct CertificateRow {
+    /// `remote` (a server the engine connects to) or `ours` (a pair the engine presents).
+    pub side: String,
     pub resource: String,
     pub host: String,
     pub port: i32,
@@ -50,10 +53,11 @@ impl Store {
         for r in rows {
             sqlx::query(
                 "INSERT INTO certificate_status AS c (resource, host, port, subject, issuer, fingerprint, not_before,
-                     not_after, chain_min_not_after, chain_min_subject, trusted, error, checked_at, read_at)
+                     not_after, chain_min_not_after, chain_min_subject, trusted, error, checked_at, read_at, side)
                  VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                         CASE WHEN $6::text IS NULL THEN NULL ELSE $13 END)
+                         CASE WHEN $6::text IS NULL THEN NULL ELSE $13 END, $14)
                  ON CONFLICT (resource, host, port) DO UPDATE SET
+                     side = EXCLUDED.side,
                      subject = CASE WHEN EXCLUDED.fingerprint IS NULL THEN c.subject ELSE EXCLUDED.subject END,
                      issuer = CASE WHEN EXCLUDED.fingerprint IS NULL THEN c.issuer ELSE EXCLUDED.issuer END,
                      fingerprint = COALESCE(EXCLUDED.fingerprint, c.fingerprint),
@@ -81,6 +85,7 @@ impl Store {
             .bind(r.trusted)
             .bind(&r.error)
             .bind(r.checked_at)
+            .bind(&r.side)
             .execute(&mut *tx)
             .await
             .with_context(|| format!("saving the certificate of {}:{}", r.host, r.port))?;
@@ -92,7 +97,7 @@ impl Store {
     /// Every certificate seen, earliest expiry first (never read ones last).
     pub async fn certificates(&self) -> Result<Vec<CertificateRow>> {
         sqlx::query_as(
-            "SELECT resource, host, port, subject, issuer, fingerprint, not_before, not_after, chain_min_not_after,
+            "SELECT side, resource, host, port, subject, issuer, fingerprint, not_before, not_after, chain_min_not_after,
                     chain_min_subject, trusted, error, checked_at, read_at
              FROM certificate_status ORDER BY chain_min_not_after NULLS LAST, resource, host, port",
         )

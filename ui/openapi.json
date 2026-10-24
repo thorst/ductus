@@ -480,7 +480,7 @@
         "tags": [
           "reports"
         ],
-        "summary": "Every certificate the engine connects to, as its last check saw it, and when the engine\nchecks next by itself. Read even when this server doesn't trust them.",
+        "summary": "Every certificate the engine connects to, as its last check saw it (read even when this\nserver doesn't trust them), every one it presents (`side: ours`, as loaded), and when the\nengine checks next by itself.",
         "operationId": "list_certificates",
         "responses": {
           "200": {
@@ -2102,6 +2102,26 @@
         }
       }
     },
+    "/ports": {
+      "get": {
+        "tags": [
+          "reports"
+        ],
+        "summary": "What the engine listens on and connects to, with TLS in and out: the same report as\n`ductus ports`.",
+        "operationId": "ports",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PortsReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/quarantine": {
       "get": {
         "tags": [
@@ -3234,9 +3254,11 @@
       "CertificateInfo": {
         "type": "object",
         "required": [
+          "side",
           "resource",
           "host",
           "port",
+          "presented",
           "state"
         ],
         "properties": {
@@ -3269,7 +3291,7 @@
               "null"
             ],
             "format": "date-time",
-            "description": "The last check."
+            "description": "The last check; ours: now (read from memory)."
           },
           "days_left": {
             "type": [
@@ -3284,7 +3306,7 @@
               "string",
               "null"
             ],
-            "description": "Why the last check failed, if it did."
+            "description": "Why the last check failed, if it did; ours: why renewed files can't be used (the pair\nloaded before is still presented)."
           },
           "fingerprint": {
             "type": [
@@ -3294,7 +3316,8 @@
             "description": "SHA-256 of the server certificate, hex."
           },
           "host": {
-            "type": "string"
+            "type": "string",
+            "description": "Ours: this server's name."
           },
           "issuer": {
             "type": [
@@ -3320,7 +3343,15 @@
           "port": {
             "type": "integer",
             "format": "int32",
+            "description": "Ours: 0 (see `presented`).",
             "minimum": 0
+          },
+          "presented": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Ours: where it is presented (`0.0.0.0:6661 MLLP over TLS (adt)`, `client certificate to\nhie.example.org:7443 (adt → hie)`)."
           },
           "read_at": {
             "type": [
@@ -3332,7 +3363,11 @@
           },
           "resource": {
             "type": "string",
-            "description": "`empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>`, `alerts.heartbeat`, or\n`<interface>/<destination>`."
+            "description": "`empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>`, `alerts.heartbeat`, or\n`<interface>/<destination>`; ours: the `certificates:` entry."
+          },
+          "side": {
+            "type": "string",
+            "description": "`remote` (a server the engine connects to, as its last check saw it) or `ours` (a pair\nthe engine presents, as it loaded it)."
           },
           "stage": {
             "type": [
@@ -3357,7 +3392,7 @@
               "boolean",
               "null"
             ],
-            "description": "This server trusts it."
+            "description": "This server trusts it (none for ours: whether senders do isn't known here)."
           }
         }
       },
@@ -4790,6 +4825,17 @@
                   "type": "string"
                 }
               },
+              "source_tls": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SourceTls",
+                    "description": "The source's TLS, when it listens with it."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "timeout_ms": {
                 "type": "integer",
                 "format": "int64",
@@ -5044,6 +5090,45 @@
           },
           "error": {
             "type": "string"
+          }
+        }
+      },
+      "ListeningPort": {
+        "type": "object",
+        "required": [
+          "port",
+          "host",
+          "protocol",
+          "interface",
+          "tls"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "interface": {
+            "type": "string",
+            "description": "The interface, or `(engine REST API)`."
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "string",
+            "description": "`MLLP`, `MLLP over TLS`, `HTTP` or `HTTPS`."
+          },
+          "route": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "HTTP only: `GET /patients/{mrn} (respond)`."
+          },
+          "tls": {
+            "type": "string",
+            "description": "`none`, or what it presents and asks for (`presents ductus-mllp, clients need a\ncertificate from hospital-ca`)."
           }
         }
       },
@@ -5423,6 +5508,38 @@
           }
         }
       },
+      "OutboundPort": {
+        "type": "object",
+        "required": [
+          "host",
+          "port",
+          "protocol",
+          "used_by",
+          "tls"
+        ],
+        "properties": {
+          "host": {
+            "type": "string"
+          },
+          "port": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "protocol": {
+            "type": "string",
+            "description": "`MLLP`, `MLLP over TLS`, `HTTP`, `HTTPS`, `SFTP`, `LDAP`, `LDAPS`, `Postgres`, `SQL Server`, `SQL Browser (UDP)`."
+          },
+          "tls": {
+            "type": "string",
+            "description": "For MLLP, HTTP and directories: `none`, `TLS` (the platform's trusted certificates), or\nTLS with what it trusts and presents (`TLS: hie-ca trusted, client certificate\nductus-client`). Empty for SFTP (SSH) and databases."
+          },
+          "used_by": {
+            "type": "string",
+            "description": "The interface (`adt → lab`), or `resources.yaml: <name>`."
+          }
+        }
+      },
       "Outcome": {
         "type": "string",
         "enum": [
@@ -5671,6 +5788,29 @@
             "type": "integer",
             "format": "int64",
             "description": "Messages waiting for it."
+          }
+        }
+      },
+      "PortsReport": {
+        "type": "object",
+        "required": [
+          "listening",
+          "connects_to"
+        ],
+        "properties": {
+          "connects_to": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OutboundPort"
+            },
+            "description": "What it connects to (destinations and resources.yaml), by host: what a firewall request lists."
+          },
+          "listening": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ListeningPort"
+            },
+            "description": "What the engine listens on (its interfaces and the API), by port."
           }
         }
       },
@@ -6385,6 +6525,44 @@
               "string",
               "null"
             ]
+          }
+        }
+      },
+      "SourceTls": {
+        "type": "object",
+        "description": "TLS on an interface's listener.",
+        "required": [
+          "protocol",
+          "address",
+          "certificate",
+          "subjects"
+        ],
+        "properties": {
+          "address": {
+            "type": "string",
+            "description": "Where: `0.0.0.0:6661`, `POST /orders on 0.0.0.0:8443 (queue)`."
+          },
+          "certificate": {
+            "type": "string",
+            "description": "The `certificates:` pair it presents."
+          },
+          "clients_ca": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Senders need a certificate this CA (a `certificates:` entry) issued; none: any sender."
+          },
+          "protocol": {
+            "type": "string",
+            "description": "`MLLP over TLS` or `HTTPS`."
+          },
+          "subjects": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "And one of these subjects (none: any the CA issued)."
           }
         }
       },

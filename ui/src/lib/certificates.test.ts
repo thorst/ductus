@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { countdown, needingRenewal } from "./certificates";
+import { countdown, needingRenewal, place } from "./certificates";
 
 describe("a certificate's countdown", () => {
   it("says how long is left, in words", () => {
@@ -25,5 +25,10 @@ describe("a certificate's countdown", () => {
       { state: "expiring", days_left: 3 },
     ];
     expect(needingRenewal(all).map((c) => c.days_left)).toEqual([-3, 3, 20]);
+  });
+
+  it("names a server by its address, and ours by the engine's server", () => {
+    expect(place({ side: "remote", host: "empi.example.org", port: 443 })).toBe("empi.example.org:443");
+    expect(place({ side: "ours", host: "engine-1", port: 0 })).toBe("ours, on engine-1");
   });
 });

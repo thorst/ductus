@@ -56,12 +56,19 @@ impl ConnectTls {
         self.ca.is_some() || self.certificate.is_some()
     }
 
-    /// How it reads in a sentence: `with hie-ca trusted and client certificate ductus-client`.
+    /// How it reads after a connection: ` (hie-ca trusted, client certificate ductus-client)`.
     pub fn describe(&self) -> String {
+        let summary = self.summary();
+        if summary.is_empty() { summary } else { format!(" ({summary})") }
+    }
+
+    /// What it names, for a table: `hie-ca trusted, client certificate ductus-client`; empty when
+    /// it names nothing.
+    pub fn summary(&self) -> String {
         let mut parts = Vec::new();
         parts.extend(self.ca.as_ref().map(|ca| format!("{ca} trusted")));
         parts.extend(self.certificate.as_ref().map(|c| format!("client certificate {c}")));
-        if parts.is_empty() { String::new() } else { format!(" ({})", parts.join(", ")) }
+        parts.join(", ")
     }
 }
 
@@ -165,6 +172,17 @@ pub struct ListenTls {
     pub clients: Option<Clients>,
 }
 
+impl ListenTls {
+    /// What it presents and asks for, for a table: `presents ductus-mllp, clients need a
+    /// certificate from hospital-ca`.
+    pub fn summary(&self) -> String {
+        match &self.clients {
+            None => format!("presents {}", self.certificate),
+            Some(c) => format!("presents {}, clients need a certificate from {}", self.certificate, c.ca),
+        }
+    }
+}
+
 /// Which client certificates a listener takes.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -252,6 +270,91 @@ pub fn listeners<'a>(
         })
         .collect();
     all.extend(api.map(|t| ("api (ductus.yaml)".to_string(), t.clone())));
+    all
+}
+
+/// One place the engine presents a `certificates:` pair: a TLS listener (to its senders), or a
+/// connection it makes (as its client certificate).
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Presenting {
+    /// The `certificates:` entry.
+    pub certificate: String,
+    /// `0.0.0.0:6661 MLLP over TLS (adt)`, `client certificate to hie.example.org:7443 (adt → hie)`.
+    pub place: String,
+    /// The interface it serves there, if one (the API and resources.yaml entries serve none).
+    pub interface: Option<String>,
+}
+
+/// Every place the engine presents a pair, sorted by certificate: listeners with `tls`
+/// (interfaces sharing an HTTP port are one place), the API's (`api`: its address and `tls`), and
+/// connections naming a client `certificate`.
+pub fn presented<'a>(
+    configs: impl IntoIterator<Item = &'a InterfaceConfig>,
+    api: Option<(&str, u16, &ListenTls)>,
+    resources: &Resources,
+    alerts: Option<&AlertSettings>,
+) -> Vec<Presenting> {
+    let mut all: Vec<Presenting> = Vec::new();
+    let mut add = |certificate: &str, place: String, interface: Option<&str>| {
+        all.push(Presenting { certificate: certificate.into(), place, interface: interface.map(str::to_string) })
+    };
+    // HTTP interfaces on one port share its listener (and `tls`): one place, naming them all.
+    let mut ports: Vec<(&str, String, Vec<&str>)> = Vec::new();
+    for c in configs {
+        match &c.source {
+            Source::Mllp { host, port, tls: Some(t) } => {
+                add(&t.certificate, format!("{host}:{port} MLLP over TLS ({})", c.name), Some(&c.name))
+            }
+            Source::Http { host, port, tls: Some(t), .. } => {
+                let address = format!("{host}:{port}");
+                match ports.iter_mut().find(|(_, a, _)| *a == address) {
+                    Some((_, _, names)) => names.push(&c.name),
+                    None => ports.push((&t.certificate, address, vec![&c.name])),
+                }
+            }
+            _ => {}
+        }
+        for (name, d) in c.destinations() {
+            let (tls, to) = match &d.connector {
+                Destination::Mllp { host, port, tls: Some(t), .. } => (t.clone(), format!("{host}:{port}")),
+                Destination::Http { url: Some(url), ca, certificate, .. } => {
+                    let to = crate::resources::Endpoint::from_url(url).map(|e| format!("{}:{}", e.host, e.port));
+                    (ConnectTls::new(ca, certificate), to.unwrap_or_default())
+                }
+                _ => continue,
+            };
+            if let Some(certificate) = &tls.certificate {
+                let label = if c.destination.is_some() { c.name.clone() } else { format!("{} → {name}", c.name) };
+                add(certificate, format!("client certificate to {to} ({label})"), Some(&c.name));
+            }
+        }
+    }
+    for (certificate, address, names) in ports {
+        let only = (names.len() == 1).then(|| names[0]);
+        add(certificate, format!("{address} HTTPS ({})", names.join(", ")), only);
+    }
+    if let Some((host, port, t)) = api {
+        add(&t.certificate, format!("{host}:{port} HTTPS (the REST API and web UI)"), None);
+    }
+    for (name, a) in &resources.apis {
+        if let Some(certificate) = &a.certificate {
+            add(certificate, format!("client certificate to api {name}"), None);
+        }
+    }
+    if let Some(a) = alerts {
+        let mut uses: Vec<(&Option<String>, String)> = Vec::new();
+        uses.extend(a.smtp.iter().map(|s| (&s.certificate, "the alerts' mail server".to_string())));
+        for (name, channel) in &a.channels {
+            uses.extend(channel.webhook.iter().map(|w| (&w.certificate, format!("the {name} webhook (alerts)"))));
+        }
+        uses.extend(a.heartbeat.iter().map(|h| (&h.certificate, "the heartbeat (alerts)".to_string())));
+        for (certificate, to) in uses {
+            if let Some(certificate) = certificate {
+                add(certificate, format!("client certificate to {to}"), None);
+            }
+        }
+    }
+    all.sort();
     all
 }
 
@@ -424,6 +527,52 @@ mod tests {
                 "interface `adt` destination `lab`: certificate: no certificate named `nope` in resources.yaml (defined: hie-ca, ours)",
                 "api `empi` (resources.yaml): ca: `ours` is a certificate with its key; name an entry with `ca` or `ca_file` (the CA that issued the server's certificate)",
             ]
+        );
+    }
+
+    #[test]
+    fn lists_where_each_pair_is_presented() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("resources.yaml"),
+            "certificates:\n  mllp: { cert: C, key: K }\n  client: { cert: C, key: K }\n  ca: { ca: CA }\napis:\n  empi: { url: 'https://empi/x', certificate: client }\n  plain: { url: 'https://p/x' }\n",
+        )
+        .unwrap();
+        let resources = Resources::load(dir.path(), &crate::Environment::with_variables("dev", &[])).unwrap();
+        let config = |yaml: &str| serde_yaml_ng::from_str::<InterfaceConfig>(yaml).unwrap();
+        let configs = [
+            config(
+                "name: adt\nsource: { mllp: { port: 6661, tls: { certificate: mllp, clients: { ca: ca } } } }\ndestinations:\n  hie: { mllp: { host: hie.org, port: 7443, tls: { certificate: client } } }\n  lab: { mllp: { host: lab, port: 1, tls: true } }\n",
+            ),
+            config(
+                "name: orders\nsource: { http: { port: 8443, path: /o, tls: { certificate: mllp } } }\ndestination: { file: { dir: o } }",
+            ),
+            config(
+                "name: results\nsource: { http: { port: 8443, path: /r, tls: { certificate: mllp } } }\ndestination: { file: { dir: o } }",
+            ),
+            config("name: plain\nsource: { mllp: { port: 6662 } }\ndestination: { file: { dir: o } }"),
+        ];
+        let alerts: AlertSettings = serde_yaml_ng::from_str(
+            "smtp: { host: m, from: d@example.org, certificate: client }\nheartbeat: { url: 'https://hb/x', every: 1m }\n",
+        )
+        .unwrap();
+        let api = ListenTls { certificate: "mllp".into(), clients: None };
+        let shown: Vec<_> = super::presented(&configs, Some(("0.0.0.0", 7700, &api)), &resources, Some(&alerts))
+            .into_iter()
+            .map(|p| (p.certificate, p.place, p.interface))
+            .collect();
+        let row = |c: &str, place: &str, i: Option<&str>| (c.to_string(), place.to_string(), i.map(str::to_string));
+        assert_eq!(
+            shown,
+            [
+                row("client", "client certificate to api empi", None),
+                row("client", "client certificate to hie.org:7443 (adt → hie)", Some("adt")),
+                row("client", "client certificate to the alerts' mail server", None),
+                row("mllp", "0.0.0.0:6661 MLLP over TLS (adt)", Some("adt")),
+                row("mllp", "0.0.0.0:7700 HTTPS (the REST API and web UI)", None),
+                row("mllp", "0.0.0.0:8443 HTTPS (orders, results)", None),
+            ],
+            "one place per shared HTTP port; nothing for plain listeners or `tls: true`"
         );
     }
 }

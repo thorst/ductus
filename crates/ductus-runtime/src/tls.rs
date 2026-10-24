@@ -189,8 +189,21 @@ impl Pair {
         self.failed.lock().expect("certificate lock").as_ref().map(|(_, why)| why.clone())
     }
 
-    /// Read the files again; use them if they changed and load. True if renewed.
+    /// The chain in use, leaf first (as senders get it).
+    pub fn chain(&self) -> Vec<CertificateDer<'static>> {
+        self.current.read().expect("certificate lock").key.cert.clone()
+    }
+
+    /// Read the files again; use them if they changed and load. True if what the pair shows
+    /// changed: renewed, or its renewal error appeared, changed or went.
     async fn reload(&self) -> bool {
+        let before = self.renewal_error();
+        let renewed = self.reload_files().await;
+        renewed || self.renewal_error() != before
+    }
+
+    /// True if renewed.
+    async fn reload_files(&self) -> bool {
         let Some((cert, key)) = &self.files else { return false };
         let read = async { Ok::<_, std::io::Error>((tokio::fs::read(cert).await?, tokio::fs::read(key).await?)) };
         let (outcome, seen) = match read.await {
@@ -438,10 +451,17 @@ pub fn http_client(
 }
 
 impl Certificates {
-    /// Check the pairs read from files every minute until `stop`.
-    pub fn watch(self: &Arc<Self>, stop: tokio_util::sync::CancellationToken) {
+    /// Check the pairs read from files every minute until `stop`. What comes out are the names
+    /// of the pairs whose state changed in a check (renewed, or a renewal that can't be used
+    /// appeared or went): nothing at all while nothing changes. Closed at once when no pair
+    /// comes from files.
+    pub fn watch(
+        self: &Arc<Self>,
+        stop: tokio_util::sync::CancellationToken,
+    ) -> tokio::sync::mpsc::Receiver<Vec<String>> {
+        let (tx, rx) = tokio::sync::mpsc::channel(4);
         if !self.pairs.values().any(|p| p.files.is_some()) {
-            return;
+            return rx;
         }
         let me = self.clone();
         tokio::spawn(async move {
@@ -450,20 +470,37 @@ impl Certificates {
                     _ = tokio::time::sleep(RELOAD_EVERY) => {}
                     _ = stop.cancelled() => return,
                 }
-                me.reload().await;
+                let changed = me.reload().await;
+                // Nobody listening (an engine without listeners' rows to keep) is fine.
+                if !changed.is_empty() && tx.try_send(changed).is_err() {
+                    tracing::debug!("certificate changes not passed on: nobody is reading them");
+                }
             }
         });
+        rx
     }
 
-    /// Check every file-backed pair once; the names of those renewed.
+    /// Check every file-backed pair once; the names of those whose state changed (renewed, or
+    /// their renewal error appeared, changed or went).
     pub async fn reload(&self) -> Vec<String> {
-        let mut renewed = Vec::new();
+        let mut changed = Vec::new();
         for pair in self.pairs.values() {
             if pair.reload().await {
-                renewed.push(pair.name.clone());
+                changed.push(pair.name.clone());
             }
         }
-        renewed
+        changed
+    }
+
+    /// The pair named, if it loaded.
+    pub fn pair(&self, name: &str) -> Option<&Arc<Pair>> {
+        self.pairs.get(name)
+    }
+
+    /// The CAs' certificates, every `certificates:` CA entry's (doctor: whether a chain we serve
+    /// ends at one of them).
+    pub fn authorities(&self) -> impl Iterator<Item = (&str, &CertificateDer<'static>)> {
+        self.cas.iter().flat_map(|(name, ca)| ca.certificates.iter().map(move |c| (name.as_str(), c)))
     }
 }
 
@@ -911,6 +948,16 @@ pub(crate) mod testing {
         Ca { cert, issuer: rcgen::Issuer::new(params, key) }
     }
 
+    /// An intermediate CA `root` issued.
+    pub fn intermediate(root: &Ca, name: &str) -> Ca {
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(Vec::<String>::new()).unwrap();
+        params.distinguished_name.push(rcgen::DnType::CommonName, name);
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let cert = params.signed_by(&key, &root.issuer).unwrap();
+        Ca { cert, issuer: rcgen::Issuer::new(params, key) }
+    }
+
     /// A certificate `ca` issued: (PEM chain, PEM key).
     pub fn leaf(ca: &Ca, subject: &[(rcgen::DnType, &str)], names: &[&str], days: i64) -> (String, String) {
         let key = rcgen::KeyPair::generate().unwrap();
@@ -1115,10 +1162,12 @@ mod tests {
         assert_eq!(certificates.reload().await, ["ours"]);
         assert_eq!(subject().await, "CN=second", "new connections get the renewed one");
 
-        // Half a renewal (a new certificate, the old key): kept on the one that works.
+        // Half a renewal (a new certificate, the old key): kept on the one that works. Its error
+        // is a change once (the pair's row shows it), not at every check after.
         let third = leaf(&server_ca, &[(rcgen::DnType::CommonName, "third")], &["localhost"], 90);
         std::fs::write(&cert_file, &third.0).unwrap();
-        assert!(certificates.reload().await.is_empty());
+        assert_eq!(certificates.reload().await, ["ours"]);
+        assert!(certificates.reload().await.is_empty(), "the same error: nothing new");
         let pair = certificates.pairs().next().unwrap();
         assert!(pair.renewal_error().unwrap().contains("the private key isn't this certificate's key"));
         assert_eq!(subject().await, "CN=second");

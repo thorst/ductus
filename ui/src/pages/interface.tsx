@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
-import { ArrowRight, CirclePause, CirclePlay, Flame, MessageSquareText } from "lucide-react";
+import { ArrowRight, CirclePause, CirclePlay, Flame, Lock, MessageSquareText } from "lucide-react";
 import { useState } from "react";
 import { pause, resume, useCanOperate, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
@@ -89,7 +89,7 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
               {i.health.summary}
             </Field>
             <Field label="Source">
-              <span className="font-mono text-xs">{i.source}</span>
+              {i.source_tls ? <TlsSource tls={i.source_tls} /> : <span className="font-mono text-xs">{i.source}</span>}
             </Field>
             <Field label="Systems">
               {system(i.from)} <ArrowRight aria-label="to" className="inline size-3.5" /> {system(i.to)}
@@ -124,6 +124,29 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * A listener with TLS, in words beside a lock: "MLLP over TLS, clients need a certificate from hospital-ca", then
+ * where it listens and the certificate it presents.
+ */
+function TlsSource({ tls }: { tls: Schemas["SourceTls"] }) {
+  const who = tls.clients_ca
+    ? `, clients need a certificate from ${tls.clients_ca}${tls.subjects.length > 0 ? ` (${tls.subjects.join(" or ")})` : ""}`
+    : "";
+  return (
+    <>
+      <span className="inline-flex items-start gap-1.5">
+        <Lock aria-hidden className="mt-0.5 size-3.5 shrink-0 text-ok" />
+        <span>
+          {tls.protocol}
+          {who}
+        </span>
+      </span>
+      <span className="mt-0.5 block font-mono text-xs break-all">{tls.address}</span>
+      <span className="block text-xs text-muted">presents {tls.certificate}</span>
+    </>
   );
 }
 

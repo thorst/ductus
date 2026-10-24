@@ -142,8 +142,9 @@ export interface paths {
             cookie?: never;
         };
         /**
-         * Every certificate the engine connects to, as its last check saw it, and when the engine
-         *     checks next by itself. Read even when this server doesn't trust them.
+         * Every certificate the engine connects to, as its last check saw it (read even when this
+         *     server doesn't trust them), every one it presents (`side: ours`, as loaded), and when the
+         *     engine checks next by itself.
          */
         get: operations["list_certificates"];
         put?: never;
@@ -771,6 +772,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/ports": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * What the engine listens on and connects to, with TLS in and out: the same report as
+         *     `ductus ports`.
+         */
+        get: operations["ports"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/quarantine": {
         parameters: {
             query?: never;
@@ -1176,7 +1197,7 @@ export interface components {
             chain_not_after?: string | null;
             /**
              * Format: date-time
-             * @description The last check.
+             * @description The last check; ours: now (read from memory).
              */
             checked_at?: string | null;
             /**
@@ -1185,10 +1206,14 @@ export interface components {
              *     expired.
              */
             days_left?: number | null;
-            /** @description Why the last check failed, if it did. */
+            /**
+             * @description Why the last check failed, if it did; ours: why renewed files can't be used (the pair
+             *     loaded before is still presented).
+             */
             error?: string | null;
             /** @description SHA-256 of the server certificate, hex. */
             fingerprint?: string | null;
+            /** @description Ours: this server's name. */
             host: string;
             issuer?: string | null;
             /**
@@ -1198,8 +1223,16 @@ export interface components {
             not_after?: string | null;
             /** Format: date-time */
             not_before?: string | null;
-            /** Format: int32 */
+            /**
+             * Format: int32
+             * @description Ours: 0 (see `presented`).
+             */
             port: number;
+            /**
+             * @description Ours: where it is presented (`0.0.0.0:6661 MLLP over TLS (adt)`, `client certificate to
+             *     hie.example.org:7443 (adt → hie)`).
+             */
+            presented: string[];
             /**
              * Format: date-time
              * @description When the certificate shown was read (older than `checked_at` when the last check couldn't).
@@ -1207,9 +1240,14 @@ export interface components {
             read_at?: string | null;
             /**
              * @description `empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>`, `alerts.heartbeat`, or
-             *     `<interface>/<destination>`.
+             *     `<interface>/<destination>`; ours: the `certificates:` entry.
              */
             resource: string;
+            /**
+             * @description `remote` (a server the engine connects to, as its last check saw it) or `ours` (a pair
+             *     the engine presents, as it loaded it).
+             */
+            side: string;
             /**
              * Format: int32
              * @description The step of the countdown it is within (a warn day; 0 once expired).
@@ -1221,7 +1259,7 @@ export interface components {
              */
             state: string;
             subject?: string | null;
-            /** @description This server trusts it. */
+            /** @description This server trusts it (none for ours: whether senders do isn't known here). */
             trusted?: boolean | null;
         };
         CertificatesOverview: {
@@ -1743,6 +1781,7 @@ export interface components {
             /** @description The sending system and where its connections come from. */
             from: components["schemas"]["SystemInfo"];
             from_hosts: string[];
+            source_tls?: components["schemas"]["SourceTls"] | null;
             /**
              * Format: int64
              * @description Longest the code may run without pausing.
@@ -1855,6 +1894,22 @@ export interface components {
             /** Format: date-time */
             at: string;
             error: string;
+        };
+        ListeningPort: {
+            host: string;
+            /** @description The interface, or `(engine REST API)`. */
+            interface: string;
+            /** Format: int32 */
+            port: number;
+            /** @description `MLLP`, `MLLP over TLS`, `HTTP` or `HTTPS`. */
+            protocol: string;
+            /** @description HTTP only: `GET /patients/{mrn} (respond)`. */
+            route?: string | null;
+            /**
+             * @description `none`, or what it presents and asks for (`presents ductus-mllp, clients need a
+             *     certificate from hospital-ca`).
+             */
+            tls: string;
         };
         LiveDestination: {
             /**
@@ -1984,6 +2039,21 @@ export interface components {
             started_at: string;
             version: string;
         };
+        OutboundPort: {
+            host: string;
+            /** Format: int32 */
+            port: number;
+            /** @description `MLLP`, `MLLP over TLS`, `HTTP`, `HTTPS`, `SFTP`, `LDAP`, `LDAPS`, `Postgres`, `SQL Server`, `SQL Browser (UDP)`. */
+            protocol: string;
+            /**
+             * @description For MLLP, HTTP and directories: `none`, `TLS` (the platform's trusted certificates), or
+             *     TLS with what it trusts and presents (`TLS: hie-ca trusted, client certificate
+             *     ductus-client`). Empty for SFTP (SSH) and databases.
+             */
+            tls: string;
+            /** @description The interface (`adt → lab`), or `resources.yaml: <name>`. */
+            used_by: string;
+        };
         /** @enum {string} */
         Outcome: "ok" | "warn" | "fail";
         Owned: {
@@ -2063,6 +2133,12 @@ export interface components {
              * @description Messages waiting for it.
              */
             pending: number;
+        };
+        PortsReport: {
+            /** @description What it connects to (destinations and resources.yaml), by host: what a firewall request lists. */
+            connects_to: components["schemas"]["OutboundPort"][];
+            /** @description What the engine listens on (its interfaces and the API), by port. */
+            listening: components["schemas"]["ListeningPort"][];
         };
         ProfileUpdate: {
             display_name?: string | null;
@@ -2311,6 +2387,19 @@ export interface components {
             /** @description `starttls`, `tls` or `none`. */
             tls: string;
             username?: string | null;
+        };
+        /** @description TLS on an interface's listener. */
+        SourceTls: {
+            /** @description Where: `0.0.0.0:6661`, `POST /orders on 0.0.0.0:8443 (queue)`. */
+            address: string;
+            /** @description The `certificates:` pair it presents. */
+            certificate: string;
+            /** @description Senders need a certificate this CA (a `certificates:` entry) issued; none: any sender. */
+            clients_ca?: string | null;
+            /** @description `MLLP over TLS` or `HTTPS`. */
+            protocol: string;
+            /** @description And one of these subjects (none: any the CA issued). */
+            subjects: string[];
         };
         /** @description One step of a check: `DNS`, `connect`, `TLS`, `login`, `HTTP`, `commits`, `folder`, `port`. */
         Step: {
@@ -4015,6 +4104,25 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    ports: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PortsReport"];
                 };
             };
         };

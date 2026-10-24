@@ -10,7 +10,7 @@ import { Loaded, PageHeader } from "@/components/page";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, Td, Th } from "@/components/ui/table";
 import { count, duration, ms, timestamp } from "@/lib/format";
-import { needingRenewal } from "@/lib/certificates";
+import { needingRenewal, place } from "@/lib/certificates";
 import { describe, problems } from "@/lib/health";
 import { cn } from "@/lib/utils";
 
@@ -143,9 +143,7 @@ function ExpiringCertificates() {
             className="flex flex-wrap items-center gap-x-3 gap-y-1 px-4 py-3 text-sm"
           >
             <CertificateDays certificate={c} />
-            <span className="font-mono text-xs break-all">
-              {c.host}:{c.port}
-            </span>
+            <span className="font-mono text-xs break-all">{place(c)}</span>
             <span className="text-muted">
               {c.resource}
               {c.chain_not_after && `, ends ${c.chain_not_after.slice(0, 10)}`}

@@ -621,17 +621,25 @@ pub struct CertificateFacts<'a> {
     pub not_after: DateTime<Utc>,
     /// The certificate that expires first, when it isn't the server's own (an intermediate).
     pub earliest: Option<&'a str>,
-    /// The last check's failure, if it failed (the dates are then from the check before).
+    /// The last check's failure, if it failed (the dates are then from the check before). Ours:
+    /// why renewed files can't be used.
     pub error: Option<&'a str>,
+    /// Ours (a pair the engine presents): where it is presented (`0.0.0.0:6661 MLLP over TLS
+    /// (adt)`, ...). None for a server the engine connects to.
+    pub ours: Option<&'a str>,
 }
 
 /// "Certificate of empi.example.org:443 (empi) expires in 14 days, on 2026-10-29." and what else
-/// matters; dates in UTC. The first sentence is a notification's title.
+/// matters; dates in UTC. The first sentence is a notification's title. Ours: "Our certificate
+/// ductus-mllp (on engine-1) expires ...", then where senders meet it.
 pub fn certificate_summary(f: &CertificateFacts, now: DateTime<Utc>) -> String {
     let date = f.not_after.format("%Y-%m-%d");
     let days = days_left(f.not_after, now);
     let plural = |n: i64| if n == 1 { "day" } else { "days" };
-    let what = format!("Certificate of {}:{} ({})", f.host, f.port, f.resource);
+    let what = match f.ours {
+        Some(_) => format!("Our certificate {} (on {})", f.resource, f.host),
+        None => format!("Certificate of {}:{} ({})", f.host, f.port, f.resource),
+    };
     let mut text = if f.not_after <= now {
         match -days {
             0 => format!("{what} expired today ({} UTC).", f.not_after.format("%Y-%m-%d %H:%M")),
@@ -644,13 +652,20 @@ pub fn certificate_summary(f: &CertificateFacts, now: DateTime<Utc>) -> String {
         }
     };
     if let Some(subject) = f.earliest {
-        text.push_str(&format!(
-            " The earliest expiry in its chain is {subject}'s (an intermediate), not the server's own certificate."
-        ));
+        let whose = if f.ours.is_some() { "our certificate's own" } else { "the server's own certificate" };
+        text.push_str(&format!(" The earliest expiry in its chain is {subject}'s (an intermediate), not {whose}."));
+    }
+    if let Some(places) = f.ours {
+        text.push_str(&format!(" Presented at {places}."));
     }
     if let Some(error) = f.error {
         let error: String = error.chars().take(200).collect();
-        text.push_str(&format!(" The last check failed ({error}): these dates are from the check before."));
+        match f.ours {
+            Some(_) => text.push_str(&format!(
+                " Its files changed but can't be used ({error}): the engine still presents the one loaded before."
+            )),
+            None => text.push_str(&format!(" The last check failed ({error}): these dates are from the check before.")),
+        }
     }
     text
 }
@@ -862,8 +877,14 @@ impl Notice<'_> {
             );
         }
         if self.condition == Some(Condition::Certificate) {
+            // Ours (`certificate_summary` starts so): renewing it is our side's job.
+            let ours = self.summary.starts_with("Our certificate");
             let todo = if self.kind == "recovered" {
                 "It was renewed: nothing more to do."
+            } else if ours && self.summary.contains(" expired") {
+                "Senders that check it refuse to connect until it is renewed: replace its files (cert_file and key_file; the engine picks them up within a minute), or its secrets and restart."
+            } else if ours {
+                "Renew it before then: replace its files (cert_file and key_file; the engine picks them up within a minute, no restart), or its secrets and restart. Senders refuse it once it expires."
             } else if self.summary.contains(" expired") {
                 "Connections that check it fail until the server's owner renews it."
             } else {
@@ -1294,6 +1315,7 @@ rules:
             not_after: ends_in(14, now),
             earliest: None,
             error: None,
+            ours: None,
         };
         let summary = certificate_summary(&facts, now);
         assert_eq!(summary, "Certificate of empi.example.org:443 (empi) expires in 14 days, on 2026-10-28.");
@@ -1328,8 +1350,28 @@ rules:
         let gone = Notice { summary: &expired, severity: Some(Severity::Critical), ..n.clone() };
         assert!(gone.title().starts_with("[Ductus prod] CRITICAL Certificate of"), "{}", gone.title());
         assert!(gone.body().contains("fail until the server's owner renews it"), "{}", gone.body());
-        let renewed = Notice { kind: "recovered", summary: &summary, ..n };
+        let renewed = Notice { kind: "recovered", summary: &summary, ..n.clone() };
         assert!(renewed.title().starts_with("[Ductus prod] RECOVERED Certificate of"), "{}", renewed.title());
         assert!(renewed.body().contains("It was renewed"));
+
+        // Ours: where senders meet it, and that renewing it is ours to do.
+        let ours = CertificateFacts {
+            resource: "ductus-mllp",
+            host: "engine-1",
+            port: 0,
+            ours: Some("0.0.0.0:6661 MLLP over TLS (adt)"),
+            error: Some("the private key isn't this certificate's key"),
+            ..facts
+        };
+        let ours = certificate_summary(&ours, now);
+        assert_eq!(
+            ours,
+            "Our certificate ductus-mllp (on engine-1) expires in 14 days, on 2026-10-28. Presented at 0.0.0.0:6661 MLLP over TLS (adt). Its files changed but can't be used (the private key isn't this certificate's key): the engine still presents the one loaded before."
+        );
+        let n = Notice { summary: &ours, key: "cert:ductus-mllp:engine-1:0", ..n };
+        assert!(
+            n.title().ends_with("WARNING Our certificate ductus-mllp (on engine-1) expires in 14 days, on 2026-10-28")
+        );
+        assert!(n.body().contains("Renew it before then: replace its files"), "{}", n.body());
     }
 }
