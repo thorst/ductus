@@ -49,9 +49,17 @@
         <!-- If it dies, try again after a minute, twice; then leave it for a person. -->
         <util:ServiceConfig ServiceName="Ductus" FirstFailureActionType="restart" SecondFailureActionType="restart"
                             ThirdFailureActionType="none" RestartServiceDelayInSeconds="60" ResetPeriodInDays="1" />
-        <!-- When Windows shuts down, give the clean stop up to 90 s instead of the default 5 s. -->
+      </Component>
+      <!--
+        When Windows shuts down, give the clean stop up to 90 s instead of the default 5 s. Its own
+        component, permanent: the value lives in the service's key, which deleting the service
+        removes with it. Owned by the engine's component, uninstall removed the value after
+        DeleteServices had marked the key for deletion, and failed (error 1409, system error 1018)
+        whenever the just-stopped service still held the key.
+      -->
+      <Component Id="PreshutdownTimeout" Bitness="always64" Permanent="yes">
         <RegistryValue Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\Ductus" Name="PreshutdownTimeout"
-                       Type="integer" Value="90000" />
+                       Type="integer" Value="90000" KeyPath="yes" />
       </Component>
     </ComponentGroup>
 
