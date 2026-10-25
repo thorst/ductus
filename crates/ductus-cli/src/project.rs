@@ -320,6 +320,11 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> R
                     "⚠ database `{name}`: `tls: {mode}` doesn't check its certificate (whoever answers at its address is believed, and sees every query): set `tls: verify-full`, with `ca:` for a private CA"
                 );
             }
+            for name in r.unverified_sqlserver() {
+                println!(
+                    "⚠ database `{name}`: `trust_server_certificate: true` doesn't check its certificate (whoever answers at its address is believed, and sees every query): remove it, with `ca:` for a private CA (SQL Server's own generated certificate can't be verified: ask the DBA for one from your CA)"
+                );
+            }
             Some(r)
         }
         Err(e) => {

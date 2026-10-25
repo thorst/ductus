@@ -187,6 +187,8 @@ pub fn outbound<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>, reso
                     },
                     Kind::Database => match resources.databases.get(name) {
                         Some(crate::resources::Database::Postgres(c)) => c.tls_summary(),
+                        // The Browser's UDP row isn't the connection.
+                        Some(crate::resources::Database::Sqlserver(c)) if e.protocol == "SQL Server" => c.tls_summary(),
                         _ => String::new(),
                     },
                     _ => String::new(),
@@ -252,7 +254,7 @@ mod tests {
         assert_eq!(api_listener("127.0.0.1", 7700, None, None).protocol, "HTTP");
 
         let resources: Resources = serde_yaml_ng::from_str(
-            "databases:\n  pdb: { postgres: { host: db1, database: p, user: u } }\n  billing: { sqlserver: { host: sql1, instance: PROD, database: b, user: u } }\nsftp:\n  lab: { host: sftp.lab, user: u, password: x }\napis:\n  billing_api: { url: 'https://billing.example.org:8443/v2' }\nldap:\n  ad: { url: 'ldaps://dc1.hospital.org' }\n",
+            "databases:\n  pdb: { postgres: { host: db1, database: p, user: u } }\n  billing: { sqlserver: { host: sql1, instance: PROD, database: b, user: u } }\n  claims: { sqlserver: { host: sql2, database: c, user: u, ca: hospital-ca, encrypt: strict } }\nsftp:\n  lab: { host: sftp.lab, user: u, password: x }\napis:\n  billing_api: { url: 'https://billing.example.org:8443/v2' }\nldap:\n  ad: { url: 'ldaps://dc1.hospital.org' }\n",
         )
         .unwrap();
         let o = outbound(&configs, &resources);
@@ -273,12 +275,23 @@ mod tests {
                     "SQL Browser (UDP)",
                     "resources.yaml: billing (instance PROD; also its TCP port, set on the server)"
                 ),
+                ("sql2", 1433, "SQL Server", "resources.yaml: claims"),
             ]
         );
         let tls: Vec<_> = o.iter().map(|o| o.tls.as_str()).collect();
         assert_eq!(
             tls,
-            ["TLS", "TLS if offered, not verified (prefer)", "TLS", "none", "TLS", "TLS", "", ""],
+            [
+                "TLS",
+                "TLS if offered, not verified (prefer)",
+                "TLS",
+                "none",
+                "TLS",
+                "TLS",
+                "",
+                "",
+                "TDS 8 strict, TLS verified: hospital-ca trusted"
+            ],
             "TLS where the protocol has it"
         );
         let db =

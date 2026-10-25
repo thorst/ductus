@@ -108,6 +108,8 @@ variables: {}
 #       password: ${secret:PATIENT_DB_PASSWORD}
 #       tls: verify-full              # check its certificate (without it: TLS if offered, unchecked)
 #       # ca: hospital-ca             # a private CA's certificate (a `certificates:` entry)
+#                                     # (sqlserver: always TLS and verified; `ca:` the same;
+#                                     #  `encrypt: strict` where the server forces TDS 8)
 # sftp:
 #   lab_server:
 #     host: sftp.lab.example.org

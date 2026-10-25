@@ -13,6 +13,13 @@
 //! tls-bench pg-connect 'postgres://u:p@127.0.0.1:5432/d?sslmode=verify-full&sslrootcert=ca.pem' 200
 //!     200 Postgres connections one after another, as the store's pool opens them (TLS and
 //!     login): p50/p95/mean in ms (for `scripts/bench-pgtls.sh`)
+//! tls-bench mssql-connect sa:password@localhost:1433 100 [--ca FILE] [--strict]
+//!     100 SQL Server connections one after another, as `db()`'s pool opens them (PRELOGIN, TLS,
+//!     login, a first query): verified with --ca, else `trust_server_certificate`; --strict for
+//!     TDS 8 (for `scripts/bench-mssqltls.sh`)
+//! tls-bench mssql-check sa:password@localhost:1433 50 --ca FILE [--strict]
+//!     50 of doctor's certificate checks of that SQL Server, one after another (connect, PRELOGIN,
+//!     the handshake inside it, and the wait every TLS check makes for a late refusal)
 //! ```
 //!
 //! An example, not part of the `ductus` binary: `cargo build --release -p ductus-runtime --example tls-bench`.
@@ -32,14 +39,17 @@ struct Args {
     new: bool,
     /// Offer only X25519, as a peer without post-quantum key exchange does.
     classic: bool,
+    /// SQL Server's TDS 8 (`encrypt: strict`).
+    strict: bool,
 }
 
 fn args() -> Args {
     let mut it = std::env::args().skip(1);
-    let usage = "usage: tls-bench connect|hold|http|pg-connect TARGET COUNT [--ca FILE] [--cert FILE --key FILE] [--resume] [--new] [--classic]";
+    let usage = "usage: tls-bench connect|hold|http|pg-connect|mssql-connect|mssql-check TARGET COUNT [--ca FILE] [--cert FILE --key FILE] [--resume] [--new] [--classic] [--strict]";
     let (mode, target, count) = (it.next().expect(usage), it.next().expect(usage), it.next().expect(usage));
     let count = count.parse().expect(usage);
-    let mut a = Args { mode, target, count, ca: None, pair: None, resume: false, new: false, classic: false };
+    let mut a =
+        Args { mode, target, count, ca: None, pair: None, resume: false, new: false, classic: false, strict: false };
     let (mut cert, mut key) = (None, None);
     while let Some(flag) = it.next() {
         match flag.as_str() {
@@ -49,6 +59,7 @@ fn args() -> Args {
             "--resume" => a.resume = true,
             "--new" => a.new = true,
             "--classic" => a.classic = true,
+            "--strict" => a.strict = true,
             _ => panic!("{usage}"),
         }
     }
@@ -166,8 +177,61 @@ async fn main() {
             }
             report("connect and log in", ms);
         }
+        "mssql-connect" => {
+            let c = sql_server(&a);
+            let ca = a.ca.as_ref().map(|f| std::fs::read(f).expect("reading --ca"));
+            let mut ms = Vec::with_capacity(a.count);
+            for _ in 0..a.count {
+                // A new pool each time: its first query opens the connection.
+                let pool = ductus_runtime::mssql::Pool::new(&c, ca.as_deref());
+                let started = Instant::now();
+                pool.query("SELECT 1 AS ok", Vec::new()).await.expect("a query");
+                ms.push(started.elapsed().as_secs_f64() * 1000.0);
+            }
+            report("connect, log in and SELECT 1", ms);
+        }
+        "mssql-check" => {
+            use ductus_runtime::doctor;
+            let ca = std::fs::read_to_string(a.ca.as_ref().expect("--ca")).expect("reading --ca");
+            let entry = ductus_core::resources::CertificateEntry { ca: Some(ca), ..Default::default() };
+            let certificates = Arc::new(
+                ductus_runtime::tls::Certificates::load(&std::collections::BTreeMap::from([("ca".into(), entry)]))
+                    .expect("the CA"),
+            );
+            let c = ductus_core::resources::SqlServerConnection { ca: Some("ca".into()), ..sql_server(&a) };
+            let target = doctor::Target::Database("bench".into(), ductus_core::resources::Database::Sqlserver(c));
+            let probe = doctor::Probe { what: "bench".into(), target, used_by: Vec::new(), resource: None };
+            let mut ms = Vec::with_capacity(a.count);
+            for _ in 0..a.count {
+                let started = Instant::now();
+                let checks = doctor::check_with(
+                    vec![probe.clone()],
+                    Duration::from_secs(5),
+                    doctor::Mode::Certificates,
+                    &certificates,
+                )
+                .await;
+                ms.push(started.elapsed().as_secs_f64() * 1000.0);
+                assert_eq!(checks[0].outcome, doctor::Outcome::Ok, "{checks:#?}");
+            }
+            report("doctor's certificate check", ms);
+        }
         other => panic!("no mode {other}"),
     }
+}
+
+/// `user:password@host:port` as a resources.yaml `sqlserver` entry: `trust_server_certificate`
+/// without --ca.
+fn sql_server(a: &Args) -> ductus_core::resources::SqlServerConnection {
+    let (credentials, address) = a.target.rsplit_once('@').expect("user:password@host:port");
+    let (user, password) = credentials.split_once(':').expect("user:password");
+    let (host, port) = address.rsplit_once(':').expect("host:port");
+    serde_json::from_value(serde_json::json!({
+        "host": host, "port": port.parse::<u16>().expect("a port"), "database": "master", "user": user,
+        "password": password, "max_connections": 1, "trust_server_certificate": a.ca.is_none(),
+        "encrypt": if a.strict { "strict" } else { "mandatory" },
+    }))
+    .expect("a sqlserver entry")
 }
 
 async fn wait_for_term() {

@@ -103,6 +103,40 @@ fn the_system_s_trusted_certificates_count() {
     assert!(out.contains("✗ database: connecting to PostgreSQL over TLS: the database server's certificate isn't from a CA this server trusts"), "{out}");
 }
 
+/// SQL Server's protection, said before anything connects: `trust_server_certificate` on another
+/// machine is warned about, refused next to `ca`, and `ports` says what each connection will be.
+#[test]
+fn validate_and_ports_say_how_sql_server_is_protected() {
+    let dir = project(&[
+        (
+            "interfaces/adt/interface.yaml",
+            "name: adt\nsource: { mllp: { port: 6661 } }\ndestination: { file: { dir: out } }\n",
+        ),
+        (
+            "resources.yaml",
+            "certificates:\n  hospital-ca: { ca: CA }\ndatabases:\n  billing: { sqlserver: { host: sql1.hospital.org, database: b, user: u, trust_server_certificate: true } }\n  claims: { sqlserver: { host: sql2.hospital.org, database: c, user: u, ca: hospital-ca, encrypt: strict } }\n",
+        ),
+    ]);
+    let (_, out) = ductus(dir.path(), &["validate"]);
+    assert!(
+        out.contains("⚠ database `billing`: `trust_server_certificate: true` doesn't check its certificate"),
+        "{out}"
+    );
+    assert!(!out.contains("`claims`"), "verified: nothing to say: {out}");
+    let (ok, out) = ductus(dir.path(), &["ports"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("TLS, not verified (trust_server_certificate)"), "{out}");
+    assert!(out.contains("TDS 8 strict, TLS verified: hospital-ca trusted"), "{out}");
+
+    std::fs::write(
+        dir.path().join("resources.yaml"),
+        "databases:\n  billing: { sqlserver: { host: h, database: b, user: u, ca: x, trust_server_certificate: true } }\n",
+    )
+    .unwrap();
+    let (ok, out) = ductus(dir.path(), &["validate"]);
+    assert!(!ok && out.contains("so `ca` would never be checked"), "{out}");
+}
+
 #[test]
 fn a_new_project_passes_test_and_validate_as_generated() {
     let parent = tempfile::tempdir().unwrap();

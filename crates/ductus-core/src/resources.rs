@@ -19,7 +19,10 @@
 //!       database: Billing
 //!       user: ductus
 //!       password: ${secret:BILLING_DB_PASSWORD}
-//!       trust_server_certificate: true           # self-signed certificate (trusted network only)
+//!       ca: hospital-ca                          # optional: the CA that issued its certificate
+//!       encrypt: strict                          # optional: TDS 8 (TLS first), for servers that force it
+//!       name_in_certificate: sql1.hospital.org   # optional: when `host` isn't a name on its certificate
+//!                                                # (trust_server_certificate: true checks nothing: labs only)
 //! sftp:
 //!   lab_server:
 //!     host: sftp.lab.example.org
@@ -519,8 +522,20 @@ pub struct SqlServerConnection {
     /// Size of the shared connection pool.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
-    /// Accept the server's TLS certificate without checking it. Many SQL Servers use the
-    /// self-signed certificate they generate at install; set this only on a network you trust.
+    /// The server may also be issued by this CA (a `certificates:` entry), besides those this
+    /// server trusts.
+    #[serde(default)]
+    pub ca: Option<String>,
+    /// `mandatory` (TLS after the PRELOGIN exchange, as every SQL Server client; the default) or
+    /// `strict` (TDS 8: TLS before anything, for servers that force it).
+    #[serde(default)]
+    pub encrypt: Encrypt,
+    /// The name its certificate is checked for, when it isn't `host` (ADO.NET's
+    /// HostNameInCertificate): an availability group listener, an alias or an IP address.
+    #[serde(default)]
+    pub name_in_certificate: Option<String>,
+    /// Accept the server's TLS certificate without checking it (anyone answering at its address
+    /// would be believed). Labs only: name its CA in `ca` instead; warned about.
     #[serde(default)]
     pub trust_server_certificate: bool,
     #[serde(default)]
@@ -533,6 +548,89 @@ pub struct SqlServerConnection {
     /// Company-defined documentation fields (`docs-schema.yaml`).
     #[serde(default)]
     pub custom: crate::docs::Custom,
+}
+
+/// How a SQL Server connection is encrypted. There's no `false` (TLS for the login only, then
+/// queries in the clear: it reads safe and isn't).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Encrypt {
+    /// TLS for the whole session, started after the PRELOGIN exchange (TDS 7.x).
+    #[default]
+    Mandatory,
+    /// TDS 8: TLS before anything (ALPN `tds/8.0`); always verified.
+    Strict,
+}
+
+impl<'de> Deserialize<'de> for Encrypt {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        use serde::de::Error;
+        match serde_yaml_ng::Value::deserialize(d)? {
+            serde_yaml_ng::Value::String(s) if s == "mandatory" => Ok(Encrypt::Mandatory),
+            serde_yaml_ng::Value::String(s) if s == "strict" => Ok(Encrypt::Strict),
+            serde_yaml_ng::Value::Bool(true) => Ok(Encrypt::Mandatory),
+            serde_yaml_ng::Value::Bool(false) => Err(D::Error::custom(
+                "`encrypt: false` isn't offered: SQL Server would encrypt the login only and send queries and results readable. Leave `encrypt` out (TLS throughout) or say `strict`",
+            )),
+            other => Err(D::Error::custom(format!(
+                "`encrypt` is `mandatory` (the default) or `strict` (TDS 8), not `{}`",
+                serde_yaml_ng::to_string(&other).unwrap_or_default().trim()
+            ))),
+        }
+    }
+}
+
+impl SqlServerConnection {
+    /// The server's certificate is checked (no `trust_server_certificate`).
+    pub fn verifies(&self) -> bool {
+        !self.trust_server_certificate
+    }
+
+    /// The name its certificate must be for: `name_in_certificate`, else `host`.
+    pub fn certificate_name(&self) -> &str {
+        self.name_in_certificate.as_deref().unwrap_or(&self.host)
+    }
+
+    /// Its `ca` (SQL Server logins present no client certificate).
+    pub fn connect_tls(&self) -> crate::tls::ConnectTls {
+        crate::tls::ConnectTls::new(&self.ca, &None)
+    }
+
+    /// What its connections will be, before connecting: `TLS, verified`, `TDS 8 strict, TLS
+    /// verified`, `TLS, not verified (trust_server_certificate)`.
+    pub fn expected(&self) -> String {
+        let how = if self.encrypt == Encrypt::Strict { "TDS 8 strict, TLS" } else { "TLS," };
+        let name = match &self.name_in_certificate {
+            Some(n) => format!(" as {n}"),
+            None => String::new(),
+        };
+        if self.verifies() {
+            format!("{how} verified{name}")
+        } else {
+            format!("{how} not verified (trust_server_certificate)")
+        }
+    }
+
+    /// Its TLS for a table (`ductus ports`, Connections): `TLS, verified: hospital-ca trusted`.
+    pub fn tls_summary(&self) -> String {
+        let summary = self.connect_tls().summary();
+        let expected = self.expected();
+        if summary.is_empty() { expected } else { format!("{expected}: {summary}") }
+    }
+
+    /// What's wrong with its TLS settings, if anything (checked when resources.yaml is loaded).
+    fn problem(&self) -> Option<String> {
+        let trusting = "`trust_server_certificate` accepts any certificate";
+        match (&self.ca, &self.name_in_certificate) {
+            _ if !self.trust_server_certificate => None,
+            (Some(_), _) => Some(format!(
+                "{trusting}, so `ca` would never be checked: remove `trust_server_certificate` (with `ca` the server's certificate is verified)"
+            )),
+            (None, Some(_)) => {
+                Some(format!("{trusting}, so `name_in_certificate` would never be checked: remove one of them"))
+            }
+            (None, None) => None,
+        }
+    }
 }
 
 fn default_max_connections() -> u32 {
@@ -560,6 +658,8 @@ impl std::fmt::Debug for SqlServerConnection {
             .field("instance", &self.instance)
             .field("database", &self.database)
             .field("user", &self.user)
+            .field("encrypt", &self.encrypt)
+            .field("verifies", &self.verifies())
             .finish_non_exhaustive()
     }
 }
@@ -605,9 +705,11 @@ impl Resources {
             }
         }
         for (name, db) in &resources.databases {
-            if let Database::Postgres(c) = db
-                && let Some(problem) = c.problem()
-            {
+            let problem = match db {
+                Database::Postgres(c) => c.problem(),
+                Database::Sqlserver(c) => c.problem(),
+            };
+            if let Some(problem) = problem {
                 bail!("in {}: database `{name}`: {problem}", file.display());
             }
         }
@@ -623,6 +725,18 @@ impl Resources {
                 Database::Postgres(c) if !c.mode().verifies() && !crate::pgtls::local(&c.host) => {
                     Some((name.as_str(), c.mode()))
                 }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// SQL Servers on another machine whose certificate the engine doesn't check
+    /// (`trust_server_certificate: true`): for warnings.
+    pub fn unverified_sqlserver(&self) -> Vec<&str> {
+        self.databases
+            .iter()
+            .filter_map(|(name, d)| match d {
+                Database::Sqlserver(c) if !c.verifies() && !crate::pgtls::local(&c.host) => Some(name.as_str()),
                 _ => None,
             })
             .collect()
@@ -883,6 +997,60 @@ mod tests {
         assert!(err.contains("`tls: disable` turns TLS off"), "{err}");
         let err = load("  a: { postgres: { host: h, database: d, user: u, tls: strict } }\n").unwrap_err();
         assert!(err.contains("unknown variant `strict`"), "{err}");
+    }
+
+    #[test]
+    fn sql_server_tls_is_verified_unless_trust_server_certificate_and_says_so() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("resources.yaml");
+        let load = |text: &str| {
+            std::fs::write(&file, format!("databases:\n{text}")).unwrap();
+            Resources::load(dir.path(), &Environment::with_variables("dev", &[])).map_err(|e| format!("{e:#}"))
+        };
+        let r = load(concat!(
+            "  a: { sqlserver: { host: db1, database: d, user: u } }\n",
+            "  b: { sqlserver: { host: db1, database: d, user: u, ca: hospital-ca, encrypt: strict } }\n",
+            "  c: { sqlserver: { host: 10.1.2.3, database: d, user: u, name_in_certificate: sql1.hospital.org } }\n",
+            "  d: { sqlserver: { host: db1, database: d, user: u, trust_server_certificate: true } }\n",
+            "  e: { sqlserver: { host: localhost, database: d, user: u, trust_server_certificate: true } }\n",
+            "  f: { sqlserver: { host: db1, database: d, user: u, encrypt: mandatory } }\n",
+        ))
+        .unwrap();
+        let said = |name: &str| match &r.databases[name] {
+            Database::Sqlserver(c) => (c.encrypt, c.tls_summary(), c.certificate_name().to_string()),
+            _ => unreachable!(),
+        };
+        assert_eq!(said("a"), (Encrypt::Mandatory, "TLS, verified".into(), "db1".into()));
+        assert_eq!(
+            said("b"),
+            (Encrypt::Strict, "TDS 8 strict, TLS verified: hospital-ca trusted".into(), "db1".into())
+        );
+        assert_eq!(
+            said("c"),
+            (Encrypt::Mandatory, "TLS, verified as sql1.hospital.org".into(), "sql1.hospital.org".into())
+        );
+        assert_eq!(said("d").1, "TLS, not verified (trust_server_certificate)");
+        assert_eq!(said("f").0, Encrypt::Mandatory);
+        assert_eq!(r.unverified_sqlserver(), ["d"], "elsewhere and not checked; e is this machine");
+
+        let err = load("  a: { sqlserver: { host: h, database: d, user: u, encrypt: false } }\n").unwrap_err();
+        assert!(err.contains("`encrypt: false` isn't offered"), "{err}");
+        let err = load("  a: { sqlserver: { host: h, database: d, user: u, encrypt: optional } }\n").unwrap_err();
+        assert!(err.contains("`encrypt` is `mandatory` (the default) or `strict` (TDS 8), not `optional`"), "{err}");
+        let err =
+            load("  a: { sqlserver: { host: h, database: d, user: u, ca: x, trust_server_certificate: true } }\n")
+                .unwrap_err();
+        assert!(
+            err.contains(
+                "database `a`: `trust_server_certificate` accepts any certificate, so `ca` would never be checked"
+            ),
+            "{err}"
+        );
+        let err = load(
+            "  a: { sqlserver: { host: h, database: d, user: u, name_in_certificate: n, trust_server_certificate: true } }\n",
+        )
+        .unwrap_err();
+        assert!(err.contains("so `name_in_certificate` would never be checked"), "{err}");
     }
 
     #[test]

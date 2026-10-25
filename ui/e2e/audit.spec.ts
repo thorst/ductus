@@ -138,8 +138,10 @@ test("the audit permission opens the log: who dismissed what, who looked at it, 
   await expect(table).toContainText("Failed sign-in");
   await expect(table).not.toContainText("nobody-has-this-name");
 
-  // The export is what the page lists, as JSON lines.
+  // The export is what the page lists, as JSON lines. Filtered to this message: an export runs
+  // oldest first, 10,000 at a time, and a long-lived dev database holds more dismissals than that.
   await page.getByLabel("What").selectOption("message.dismiss");
+  await page.getByLabel("Message id").fill(String(dismissed));
   await page.getByRole("button", { name: "Filter" }).click();
   const link = page.getByRole("link", { name: /Export these/ });
   const href = (await link.getAttribute("href")) ?? "";
@@ -152,7 +154,7 @@ test("the audit permission opens the log: who dismissed what, who looked at it, 
     .split("\n")
     .map((l) => JSON.parse(l));
   expect(lines.length).toBeGreaterThan(0);
-  expect(lines.every((l) => l.action === "message.dismiss")).toBe(true);
+  expect(lines.every((l) => l.action === "message.dismiss" && l.message === dismissed)).toBe(true);
   expect(lines.some((l) => l.message === dismissed && l.detail.reason === REASON)).toBe(true);
 });
 

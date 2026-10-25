@@ -747,12 +747,13 @@ async fn run(cli: Cli) -> Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             // Doctor's report says what failed; the TLS verifier would log each failure again.
             if matches!(cli.command, Command::Doctor { .. }) {
-                "warn,rustls_platform_verifier=off".into()
+                "warn,rustls_platform_verifier=off,tiberius=error".into()
             } else {
                 // A certificate the platform verifier refuses is logged by it at ERROR every time,
                 // and said again where it matters (a delivery's error, a check's result): the
-                // engine checks certificates every few hours, private CAs included.
-                "info,sqlx=warn,rustls_platform_verifier=off".into()
+                // engine checks certificates every few hours, private CAs included. tiberius warns
+                // at every new connection with trust_server_certificate (the start says it once).
+                "info,sqlx=warn,rustls_platform_verifier=off,tiberius=error".into()
             }
         }))
         .init();

@@ -203,7 +203,7 @@ fn log_to_files() -> Result<tracing_appender::non_blocking::WorkerGuard> {
         .with_writer(writer)
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,sqlx=warn,rustls_platform_verifier=off".into()),
+                .unwrap_or_else(|_| "info,sqlx=warn,rustls_platform_verifier=off,tiberius=error".into()),
         )
         .init();
     // A panic in a service has no console to print to.

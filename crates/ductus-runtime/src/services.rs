@@ -26,19 +26,20 @@ pub(crate) enum Pool {
 pub(crate) type Pools = Arc<HashMap<String, Pool>>;
 
 /// A pool for a database resource; `size` overrides its `max_connections`. `tls`: what its CA
-/// and client certificate name, loaded (Postgres).
-fn make_pool(db: &Database, size: Option<u32>, tls: Option<&PgTls>) -> Pool {
+/// and client certificate name, loaded (SQL Server: only the CA).
+fn make_pool(db: &Database, size: Option<u32>, tls: Option<&DbTls>) -> Pool {
     match db {
         Database::Postgres(c) => {
             let c = DbConnection { max_connections: size.unwrap_or(c.max_connections), ..c.clone() };
             Pool::Postgres(postgres_pool(&c, tls.cloned().unwrap_or_default()))
         }
-        Database::Sqlserver(c) => {
-            Pool::Sqlserver(Box::new(mssql::Pool::new(&ductus_core::resources::SqlServerConnection {
+        Database::Sqlserver(c) => Pool::Sqlserver(Box::new(mssql::Pool::new(
+            &ductus_core::resources::SqlServerConnection {
                 max_connections: size.unwrap_or(c.max_connections),
                 ..c.clone()
-            })))
-        }
+            },
+            tls.and_then(|t| t.ca.as_deref()),
+        ))),
     }
 }
 
@@ -46,8 +47,8 @@ fn make_pool(db: &Database, size: Option<u32>, tls: Option<&PgTls>) -> Pool {
 pub struct SharedServices {
     env: Environment,
     definitions: BTreeMap<String, Database>,
-    /// Postgres resources' CA and client certificate, loaded once (dedicated pools use them too).
-    postgres_tls: HashMap<String, PgTls>,
+    /// Database resources' CA and client certificate, loaded once (dedicated pools use them too).
+    db_tls: HashMap<String, DbTls>,
     databases: HashMap<String, Pool>,
     apis: BTreeMap<String, Api>,
     http: reqwest::Client,
@@ -67,17 +68,18 @@ impl SharedServices {
     ///
     /// Must be called on the engine's main runtime.
     pub fn new(env: Environment, resources: &Resources, certificates: &crate::tls::Certificates) -> Result<Self> {
-        let mut postgres_tls = HashMap::new();
+        let mut db_tls = HashMap::new();
         for (name, db) in &resources.databases {
-            if let Database::Postgres(c) = db {
-                let tls = PgTls::load(c, certificates).map_err(|e| anyhow!("database `{name}`: {e:#}"))?;
-                postgres_tls.insert(name.clone(), tls);
-            }
+            let tls = match db {
+                Database::Postgres(c) => DbTls::load(c, certificates),
+                Database::Sqlserver(c) => DbTls::load_ca(c.ca.as_deref(), certificates),
+            };
+            db_tls.insert(name.clone(), tls.map_err(|e| anyhow!("database `{name}`: {e:#}"))?);
         }
         let databases = resources
             .databases
             .iter()
-            .map(|(name, db)| (name.clone(), make_pool(db, None, postgres_tls.get(name))))
+            .map(|(name, db)| (name.clone(), make_pool(db, None, db_tls.get(name))))
             .collect();
         let mut api_http = BTreeMap::new();
         for (name, api) in resources.apis.iter().filter(|(_, a)| a.tls().is_set()) {
@@ -87,7 +89,7 @@ impl SharedServices {
         Ok(Self {
             env,
             definitions: resources.databases.clone(),
-            postgres_tls,
+            db_tls,
             databases,
             apis: resources.apis.clone(),
             http: http_client(),
@@ -118,7 +120,7 @@ impl SharedServices {
                 .dedicated_pools
                 .iter()
                 .filter_map(|(name, size)| {
-                    let pool = make_pool(self.definitions.get(name)?, Some(*size), self.postgres_tls.get(name));
+                    let pool = make_pool(self.definitions.get(name)?, Some(*size), self.db_tls.get(name));
                     Some((name.clone(), pool))
                 })
                 .collect(),
@@ -244,27 +246,32 @@ async fn http_fetch(client: &reqwest::Client, r: FetchRequest) -> Result<FetchRe
     Ok(FetchResponse { status, headers, body: String::from_utf8_lossy(&body).into_owned() })
 }
 
-/// A Postgres resource's `ca` and `certificate`, loaded: what its connections trust besides the
-/// system's certificates, and present.
+/// A database resource's `ca` and `certificate`, loaded: what its connections trust besides the
+/// system's certificates, and present (Postgres; SQL Server has only the CA).
 #[derive(Clone, Default)]
-pub(crate) struct PgTls {
-    ca: Option<Vec<u8>>,
+pub(crate) struct DbTls {
+    pub(crate) ca: Option<Vec<u8>>,
     certificate: Option<Arc<crate::tls::Pair>>,
 }
 
-impl PgTls {
+impl DbTls {
     /// The names were checked by `ductus_core::tls::check_outbound`; one that didn't load fails
     /// with why.
     pub(crate) fn load(c: &DbConnection, certificates: &crate::tls::Certificates) -> Result<Self> {
-        let ca = c.ca.as_deref().map(|name| certificates.ca_pem(name).map(<[u8]>::to_vec)).transpose()?;
         let certificate = c.certificate.as_deref().map(|name| certificates.pair_or_why(name).cloned()).transpose()?;
-        Ok(Self { ca, certificate })
+        Ok(Self { certificate, ..Self::load_ca(c.ca.as_deref(), certificates)? })
+    }
+
+    /// Only a CA (SQL Server).
+    pub(crate) fn load_ca(ca: Option<&str>, certificates: &crate::tls::Certificates) -> Result<Self> {
+        let ca = ca.map(|name| certificates.ca_pem(name).map(<[u8]>::to_vec)).transpose()?;
+        Ok(Self { ca, certificate: None })
     }
 }
 
 /// How the engine connects to a Postgres resource (also what `ductus doctor` checks): its
 /// `tls:` mode, trusting the system's certificates plus its `ca`, presenting its `certificate`.
-pub(crate) fn postgres_options(c: &DbConnection, tls: &PgTls) -> PgConnectOptions {
+pub(crate) fn postgres_options(c: &DbConnection, tls: &DbTls) -> PgConnectOptions {
     let mode = match c.mode() {
         SslMode::Disable | SslMode::Allow => PgSslMode::Disable,
         SslMode::Prefer => PgSslMode::Prefer,
@@ -294,7 +301,7 @@ fn with_client_certificate(options: PgConnectOptions, pem: &crate::tls::PairPem)
 
 /// The pool copies the client certificate into its options: a renewal from the pair's files is
 /// put there too, so the next connection presents it (open ones keep theirs until they close).
-fn postgres_pool(c: &DbConnection, tls: PgTls) -> PgPool {
+fn postgres_pool(c: &DbConnection, tls: DbTls) -> PgPool {
     let pool = PgPoolOptions::new()
         .max_connections(c.max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))

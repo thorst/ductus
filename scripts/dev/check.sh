@@ -21,7 +21,8 @@ export DUCTUS_TEST_DATABASE_URL=${DUCTUS_TEST_DATABASE_URL:-$DUCTUS_DATABASE_URL
 if [ -z "${DUCTUS_TEST_SQLSERVER:-}" ]; then
   if { docker inspect ductus-mssql || sudo -n docker inspect ductus-mssql; } >/dev/null 2>&1; then
     DUCTUS_TEST_SQLSERVER=$(bash scripts/dev/sqlserver.sh)
-    export DUCTUS_TEST_SQLSERVER
+    DUCTUS_TEST_SQLSERVER_TLS=$(bash scripts/dev/sqlserver.sh dir)
+    export DUCTUS_TEST_SQLSERVER DUCTUS_TEST_SQLSERVER_TLS
   else
     echo "(SQL Server tests skipped: set one up with scripts/dev/sqlserver.sh)"
   fi

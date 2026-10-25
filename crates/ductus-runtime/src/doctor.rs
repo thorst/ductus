@@ -13,7 +13,7 @@
 //! before they expire. `Mode::Certificates` checks only what has a certificate, and logs in to
 //! nothing (what the engine runs on its own every few hours).
 
-use crate::services::PgTls;
+use crate::services::DbTls;
 use crate::tls::{Certificates, Trust};
 use crate::{mssql, services, sftp};
 use chrono::{DateTime, Utc};
@@ -22,7 +22,7 @@ use ductus_core::alerts::{AlertSettings, SmtpTls};
 use ductus_core::config::{Destination, Source};
 use ductus_core::pgtls::{Security, Setting, SslMode, UrlTls};
 use ductus_core::resources::{
-    Api, Database, Kind, LdapSecurity, LdapServer, Resources, SftpServer, SqlServerConnection,
+    Api, Database, Encrypt, Kind, LdapSecurity, LdapServer, Resources, SftpServer, SqlServerConnection,
 };
 use ductus_core::tls::ConnectTls;
 use ductus_script::TRANSIENT;
@@ -161,9 +161,10 @@ pub enum Target {
 }
 
 impl Target {
-    /// Whether the connection has a certificate to read and watch (TLS). A Postgres database's
-    /// only when the engine verifies it (`verify-full` or `verify-ca`): only then does its expiry
-    /// stop the engine connecting. Others with TLS are read and described, not watched.
+    /// Whether the connection has a certificate to read and watch (TLS). A database's only when
+    /// the engine verifies it (Postgres's `verify-full` or `verify-ca`, SQL Server without
+    /// `trust_server_certificate`): only then does its expiry stop the engine connecting. Others
+    /// with TLS are read and described, not watched.
     pub fn has_certificate(&self) -> bool {
         let https = |url: &str| url.trim().to_ascii_lowercase().starts_with("https://");
         match self {
@@ -174,11 +175,13 @@ impl Target {
             Target::Mllp { tls, .. } => tls.is_some(),
             Target::Store(url) => UrlTls::read(url).is_some_and(|u| u.mode.verifies() && !u.socket()),
             Target::Database(_, Database::Postgres(c)) => c.mode().verifies(),
+            Target::Database(_, Database::Sqlserver(c)) => c.verifies(),
             _ => false,
         }
     }
 
-    /// Where its certificate is: the host and port.
+    /// Where its certificate is: the host and port (a SQL Server named instance's port is found
+    /// through the SQL Server Browser when it's checked: `Run::seen_at`).
     pub fn address(&self) -> Option<(String, u16)> {
         match self {
             Target::Api(_, Api { url, .. }) | Target::Http { url, .. } => {
@@ -188,6 +191,9 @@ impl Target {
             Target::Ldap(_, l) => l.address(),
             Target::Store(url) => UrlTls::read(url).filter(|u| !u.socket()).map(|u| (u.host, u.port)),
             Target::Database(_, Database::Postgres(c)) => Some((c.host.clone(), c.port.unwrap_or(5432))),
+            Target::Database(_, Database::Sqlserver(c)) if c.instance.is_none() || c.port.is_some() => {
+                Some((c.host.clone(), c.port.unwrap_or(1433)))
+            }
             _ => None,
         }
     }
@@ -215,6 +221,7 @@ impl Target {
         match self {
             Target::Api(_, api) => api.tls(),
             Target::Ldap(_, l) => ConnectTls::new(&l.ca, &None),
+            Target::Database(_, Database::Sqlserver(c)) => c.connect_tls(),
             Target::Http { tls, .. } | Target::Smtp { trust: tls, .. } | Target::Mllp { tls: Some(tls), .. } => {
                 tls.clone()
             }
@@ -321,6 +328,8 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode, certificates: &Certifi
         trust,
         certificates,
         name_unchecked: false,
+        alpn: None,
+        seen_at: None,
     };
     let endpoint = match &probe.target {
         Target::Store(url) => r.store(url, mode).await,
@@ -330,7 +339,7 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode, certificates: &Certifi
             let Some(address) = r.connectable(&c.host, port).await else { return r.check(probe, endpoint) };
             let tls_ok = !c.mode().tries_tls() || r.postgres_tls(&c.host, address, c.mode(), Setting::Resource).await;
             if tls_ok && mode == Mode::Full {
-                match PgTls::load(c, certificates) {
+                match DbTls::load(c, certificates) {
                     Ok(tls) => {
                         r.postgres_login(&services::postgres_options(c, &tls), c.mode(), Setting::Resource).await;
                     }
@@ -339,7 +348,7 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode, certificates: &Certifi
             }
             endpoint
         }
-        Target::Database(_, Database::Sqlserver(c)) => r.sql_server(c).await,
+        Target::Database(_, Database::Sqlserver(c)) => r.sql_server(c, mode).await,
         Target::Sftp(name, s) => {
             if r.reach(&s.host, s.port).await {
                 r.sftp_login(name, s).await;
@@ -417,13 +426,19 @@ struct Run<'a> {
     certificates: &'a Certificates,
     /// The handshake checks the CA, not the name (Postgres's `verify-ca`).
     name_unchecked: bool,
+    /// The protocol the handshake asks for (ALPN): `tds/8.0` for SQL Server's strict.
+    alpn: Option<&'static [u8]>,
+    /// Where the certificate was read, when the target alone doesn't say (a SQL Server named
+    /// instance's port, from the Browser).
+    seen_at: Option<(String, u16)>,
 }
 
 impl Run<'_> {
     /// The check, from the steps so far: the worst step, and the certificate a handshake read.
     fn check(mut self, probe: Probe, endpoint: String) -> Check {
         let outcome = self.steps.iter().map(|s| s.outcome).max().unwrap_or(Outcome::Ok);
-        let certificate = probe.target.address().filter(|_| probe.target.has_certificate()).map(|(host, port)| {
+        let at = self.seen_at.take().or_else(|| probe.target.address());
+        let certificate = at.filter(|_| probe.target.has_certificate()).map(|(host, port)| {
             let failed = self.steps.iter().find(|s| s.outcome == Outcome::Fail).map(|s| s.detail.clone());
             let seen = self.seen.take().unwrap_or_default();
             SeenCertificate {
@@ -756,20 +771,17 @@ impl Run<'_> {
         Some(connection)
     }
 
-    async fn sql_server(&mut self, c: &SqlServerConnection) -> String {
+    async fn sql_server(&mut self, c: &SqlServerConnection, mode: Mode) -> String {
         let browse = c.instance.is_some() && c.port.is_none();
+        let instance = c.instance.as_deref().unwrap_or("");
         let endpoint = if browse {
-            format!(
-                "{}\\{} SQL Server (port from the SQL Server Browser, UDP 1434)",
-                c.host,
-                c.instance.as_deref().unwrap_or("")
-            )
+            format!("{}\\{instance} SQL Server (port from the SQL Server Browser, UDP 1434)", c.host)
         } else {
             format!("{}:{} SQL Server", c.host, c.port.unwrap_or(1433))
         };
-        if browse {
-            // The Browser answers over UDP, which can't be "connected" to: the login below
-            // asks it for the instance's port and connects there.
+        let address = if browse {
+            // The Browser answers over UDP, which can't be "connected" to: it's asked for the
+            // instance's port, and the TLS check and the login connect there.
             let found = tokio::time::timeout(self.timeout, tokio::net::lookup_host((c.host.as_str(), 1434))).await;
             match found {
                 Ok(Ok(a)) => {
@@ -785,10 +797,46 @@ impl Run<'_> {
                     return endpoint;
                 }
             }
-        } else if !self.reach(&c.host, c.port.unwrap_or(1433)).await {
+            match tokio::time::timeout(self.timeout, mssql::instance_address(c)).await {
+                Ok(Ok(address)) => {
+                    self.step(
+                        "Browser",
+                        Outcome::Ok,
+                        format!("instance {instance} listens on port {}", address.port()),
+                    );
+                    self.seen_at = Some((c.host.clone(), address.port()));
+                    address
+                }
+                Ok(Err(e)) => {
+                    self.step("Browser", Outcome::Fail, format!("instance {instance}: {e}"));
+                    self.advise("Finding a named instance needs the SQL Server Browser (UDP 1434) and then the instance's own TCP port: ask the DBA for that port and set `port:` to skip the Browser.");
+                    return endpoint;
+                }
+                Err(_) => {
+                    self.step(
+                        "Browser",
+                        Outcome::Fail,
+                        format!("no answer from the SQL Server Browser in {}", self.waited()),
+                    );
+                    self.advise("Finding a named instance needs the SQL Server Browser (UDP 1434) and then the instance's own TCP port: ask the DBA for that port and set `port:` to skip the Browser.");
+                    return endpoint;
+                }
+            }
+        } else {
+            let Some(address) = self.connectable(&c.host, c.port.unwrap_or(1433)).await else { return endpoint };
+            address
+        };
+        if !self.tds_tls(c, address).await || mode != Mode::Full {
             return endpoint;
         }
-        let pool = mssql::Pool::new(&SqlServerConnection { max_connections: 1, ..c.clone() });
+        let ca = match DbTls::load_ca(c.ca.as_deref(), self.certificates) {
+            Ok(tls) => tls.ca,
+            Err(e) => {
+                self.step("login", Outcome::Fail, format!("{e:#}"));
+                return endpoint;
+            }
+        };
+        let pool = mssql::Pool::new(&SqlServerConnection { max_connections: 1, ..c.clone() }, ca.as_deref());
         match tokio::time::timeout(self.timeout, pool.query("SELECT @@VERSION AS version", Vec::new())).await {
             Ok(Ok(rows)) => {
                 let version =
@@ -796,7 +844,7 @@ impl Run<'_> {
                 self.step(
                     "login",
                     Outcome::Ok,
-                    format!("as `{}`, database `{}`: {}", c.user, c.database, version.trim()),
+                    format!("as `{}`, database `{}`: {}; {}", c.user, c.database, version.trim(), c.expected()),
                 );
             }
             Ok(Err(e)) => {
@@ -806,14 +854,100 @@ impl Run<'_> {
                     self.advise(format!("The login `{}` was refused: check its password (secret) for this environment, and that SQL Server logins are enabled on the server.", c.user));
                 } else if message.contains("Cannot open database") {
                     self.advise(format!("The login works but can't open `{}`: check the name, and that the login is mapped to that database.", c.database));
-                } else if browse {
-                    self.advise("Finding a named instance needs the SQL Server Browser (UDP 1434) and then the instance's own TCP port: ask the DBA for that port and set `port:` to skip the Browser.");
                 }
                 self.step("login", Outcome::Fail, message);
             }
             Err(_) => self.step("login", Outcome::Fail, format!("no answer in {}", self.waited())),
         }
         endpoint
+    }
+
+    /// SQL Server's TLS by hand, as the engine's connection makes it: with `encrypt: strict` (TDS
+    /// 8) TLS comes first, asking for `tds/8.0`; otherwise a PRELOGIN asking for encryption, then
+    /// the handshake with its records inside PRELOGIN packets. Its certificate is read and judged
+    /// however the connection is set: with `trust_server_certificate` the connection is said to be
+    /// unverified, with what verifying would make of it. False when the connection can't work.
+    async fn tds_tls(&mut self, c: &SqlServerConnection, address: SocketAddr) -> bool {
+        let name = c.certificate_name().to_string();
+        let local = ductus_core::pgtls::local(&c.host);
+        let unverified = if local { Outcome::Ok } else { Outcome::Warn };
+        let advice = self.advice.len();
+        let trusted = if c.encrypt == Encrypt::Strict {
+            self.alpn = Some(TDS8_ALPN);
+            self.tls(&name, address).await
+        } else {
+            match self.prelogin(address).await {
+                Some(tcp) => self.tls_on(&name, Prelogin::new(tcp)).await,
+                None => return false,
+            }
+        };
+        if c.verifies() {
+            for a in &mut self.advice[advice..] {
+                if a.starts_with("Connect with a name the certificate lists") {
+                    a.push_str(" Or set `name_in_certificate` to a name it lists (an availability group listener or alias whose name isn't on it).");
+                }
+            }
+            return trusted;
+        }
+        // The connection checks nothing: what the handshake showed is what verifying would do.
+        let shown = self.steps.pop().map(|s| s.detail).unwrap_or_default();
+        self.advice.truncate(advice);
+        let said = "trust_server_certificate";
+        if trusted {
+            self.step("TLS", unverified, format!("{shown}; not verified by the engine ({said}): verifying would pass"));
+            if !local {
+                self.advise("This server already trusts the database's certificate: remove `trust_server_certificate` to have it checked at every connection.");
+            }
+        } else {
+            self.step("TLS", unverified, format!("not verified ({said}), and verifying would refuse it: {shown}"));
+            if !local {
+                self.advise("To have it checked, name the CA that issued it in `ca` (a `certificates:` entry, or install it on this server) and remove `trust_server_certificate`. SQL Server's own generated certificate can't be verified by anyone: ask the DBA for one from your CA.");
+            }
+        }
+        true
+    }
+
+    /// The PRELOGIN exchange before SQL Server's TLS (TDS 7.x): asks for encryption, reads the
+    /// server's version and whether it agrees. The connection, ready for the handshake.
+    async fn prelogin(&mut self, address: SocketAddr) -> Option<TcpStream> {
+        let exchange = async {
+            let mut tcp = TcpStream::connect(address).await?;
+            tcp.set_nodelay(true)?;
+            tcp.write_all(&PRELOGIN_REQUEST).await?;
+            let answer = read_tds_message(&mut tcp).await?;
+            Ok::<_, std::io::Error>((tcp, answer))
+        };
+        match tokio::time::timeout(self.timeout, exchange).await {
+            Ok(Ok((tcp, answer))) => match prelogin_answer(&answer) {
+                Some((_, ENCRYPT_NOT_SUP)) => {
+                    self.step("TDS", Outcome::Fail, "the server doesn't offer encryption (PRELOGIN: ENCRYPT_NOT_SUP), and the engine connects to SQL Server only over TLS");
+                    self.advise("Ask the DBA to give SQL Server a certificate (SQL Server Configuration Manager, or mssql-conf network.tlscert and network.tlskey on Linux).");
+                    None
+                }
+                Some((version, encryption)) => {
+                    let asked = if encryption == ENCRYPT_REQ { "required by the server" } else { "on" };
+                    self.step("TDS", Outcome::Ok, format!("{version}; encryption {asked}"));
+                    Some(tcp)
+                }
+                None => {
+                    self.step(
+                        "TDS",
+                        Outcome::Fail,
+                        "the answer to PRELOGIN isn't SQL Server's: is this SQL Server's port?",
+                    );
+                    None
+                }
+            },
+            Ok(Err(e)) => {
+                self.step("TDS", Outcome::Fail, format!("PRELOGIN: {e}"));
+                None
+            }
+            Err(_) => {
+                self.step("TDS", Outcome::Fail, format!("no answer to PRELOGIN in {}", self.waited()));
+                self.advise("The port accepts connections but doesn't answer SQL Server's PRELOGIN: is it SQL Server's port, or does the server force TDS 8 (`encrypt: strict`)?");
+                None
+            }
+        }
     }
 
     async fn sftp_login(&mut self, name: &str, server: &SftpServer) {
@@ -892,7 +1026,11 @@ impl Run<'_> {
     /// reporting the server's certificate either way.
     async fn tls(&mut self, host: &str, address: SocketAddr) -> bool {
         match tokio::time::timeout(self.timeout, TcpStream::connect(address)).await {
-            Ok(Ok(tcp)) => self.tls_on(host, tcp).await,
+            Ok(Ok(tcp)) => {
+                // As the engine's connections: the handshake's flights don't wait on delayed ACKs.
+                let _ = tcp.set_nodelay(true);
+                self.tls_on(host, tcp).await
+            }
             Ok(Err(e)) => {
                 self.step("TLS", Outcome::Fail, format!("handshake failed: {e}"));
                 false
@@ -924,7 +1062,10 @@ impl Run<'_> {
                 return false;
             }
         };
-        let config = trust.config_with(Arc::new(verifier));
+        let mut config = trust.config_with(Arc::new(verifier));
+        if let Some(protocol) = self.alpn {
+            config.alpn_protocols = vec![protocol.to_vec()];
+        }
         let Ok(name) = ServerName::try_from(host.to_string()) else {
             self.step("TLS", Outcome::Fail, format!("`{host}` isn't a valid name for TLS"));
             return false;
@@ -944,7 +1085,9 @@ impl Run<'_> {
                 let days = seen.chain_not_after.map(|t| (t - Utc::now()).num_days()).unwrap_or(i64::MAX);
                 // With TLS 1.3 the server judges our client certificate (or its absence) after
                 // the handshake has finished on our side: its refusal arrives with the first read.
-                if let Some(refused) = refused_after(&mut stream, self.timeout.min(REFUSAL_WAIT)).await {
+                // With TLS 1.2 it comes inside the handshake, so there's nothing to wait for.
+                let late = stream.get_ref().1.protocol_version() == Some(rustls::ProtocolVersion::TLSv1_3);
+                if late && let Some(refused) = refused_after(&mut stream, self.timeout.min(REFUSAL_WAIT)).await {
                     seen.error = Some(refused.clone());
                     self.step("TLS", Outcome::Fail, format!("{version}, server trusted; {refused}{client}"));
                     self.advise(match trust.client_pair() {
@@ -1614,6 +1757,201 @@ async fn smtp_reply<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> std::io::R
 /// Postgres's SSLRequest: length 8, then the code 1234 5679 (protocol docs, "SSLSessionEncryption").
 const SSL_REQUEST: [u8; 8] = [0x00, 0x00, 0x00, 0x08, 0x04, 0xd2, 0x16, 0x2f];
 
+/// TDS packet types ([MS-TDS] 2.2.3.1.1): the PRELOGIN request (and the TLS handshake inside it
+/// before TDS 8), and the server's answer.
+const TDS_PRELOGIN: u8 = 0x12;
+const TDS_REPLY: u8 = 0x04;
+/// The last packet of a message (header status).
+const TDS_END_OF_MESSAGE: u8 = 0x01;
+/// The PRELOGIN ENCRYPTION option's answers ([MS-TDS] 2.2.6.5).
+const ENCRYPT_NOT_SUP: u8 = 0x02;
+const ENCRYPT_REQ: u8 = 0x03;
+/// TDS 8's ALPN protocol (`encrypt: strict`).
+const TDS8_ALPN: &[u8] = b"tds/8.0";
+/// The largest TDS packet before the login sets one (SQL Server's default size).
+const TDS_PACKET: usize = 4096;
+
+/// A PRELOGIN request asking for encryption: the header (type 0x12, end of message, length 26),
+/// then the options VERSION (6 bytes at offset 11, zeros: a client's version is informational)
+/// and ENCRYPTION (1 byte at 17: ENCRYPT_ON), and the terminator.
+#[rustfmt::skip]
+const PRELOGIN_REQUEST: [u8; 26] = [
+    TDS_PRELOGIN, TDS_END_OF_MESSAGE, 0x00, 26, 0x00, 0x00, 0x01, 0x00, // header
+    0x00, 0x00, 11, 0x00, 6, // VERSION
+    0x01, 0x00, 17, 0x00, 1,    // ENCRYPTION
+    0xff, // terminator
+    0, 0, 0, 0, 0, 0,    // VERSION's data
+    0x01, // ENCRYPT_ON
+];
+
+/// One TDS message off the wire (its packets' contents, up to the end-of-message one), at most 64 KB.
+async fn read_tds_message<R: AsyncRead + Unpin>(r: &mut R) -> std::io::Result<Vec<u8>> {
+    use tokio::io::AsyncReadExt;
+    let bad = |what: &str| std::io::Error::new(std::io::ErrorKind::InvalidData, what.to_string());
+    let mut message = Vec::new();
+    loop {
+        let mut header = [0u8; 8];
+        r.read_exact(&mut header).await?;
+        let length = usize::from(u16::from_be_bytes([header[2], header[3]]));
+        if header[0] != TDS_REPLY || length < 8 || message.len() + length > 65_536 {
+            return Err(bad("not a SQL Server answer"));
+        }
+        let start = message.len();
+        message.resize(start + length - 8, 0);
+        r.read_exact(&mut message[start..]).await?;
+        if header[1] & TDS_END_OF_MESSAGE != 0 {
+            return Ok(message);
+        }
+    }
+}
+
+/// The server's version (`SQL Server 2025 (17.0.5035)`) and ENCRYPTION answer from a PRELOGIN
+/// answer, or None if it isn't one.
+fn prelogin_answer(answer: &[u8]) -> Option<(String, u8)> {
+    let (mut version, mut encryption) = (None, None);
+    let mut at = 0;
+    while *answer.get(at)? != 0xff {
+        let option = answer.get(at..at + 5)?;
+        let offset = usize::from(u16::from_be_bytes([option[1], option[2]]));
+        let length = usize::from(u16::from_be_bytes([option[3], option[4]]));
+        let data = answer.get(offset..offset + length)?;
+        match option[0] {
+            0x00 if length >= 4 => {
+                let product = match data[0] {
+                    13 => "SQL Server 2016 ",
+                    14 => "SQL Server 2017 ",
+                    15 => "SQL Server 2019 ",
+                    16 => "SQL Server 2022 ",
+                    17 => "SQL Server 2025 ",
+                    _ => "SQL Server ",
+                };
+                let build = u16::from_be_bytes([data[2], data[3]]);
+                version = Some(format!("{product}({}.{}.{build})", data[0], data[1]));
+            }
+            0x01 if length >= 1 => encryption = Some(data[0]),
+            _ => {}
+        }
+        at += 5;
+    }
+    Some((version.unwrap_or_else(|| "SQL Server".into()), encryption?))
+}
+
+/// TLS inside TDS PRELOGIN packets, as SQL Server takes the handshake before TDS 8: what's written
+/// goes out at each flush as one PRELOGIN message (as tiberius sends it), and the server's packets
+/// are read without their headers. Only for the handshake: doctor never logs in on it.
+struct Prelogin<S> {
+    inner: S,
+    /// Written since the last flush.
+    pending: Vec<u8>,
+    /// Framed and not yet sent.
+    out: Vec<u8>,
+    /// The incoming packet header so far, and how much of its packet is left to read.
+    header: [u8; 8],
+    have: usize,
+    left: usize,
+}
+
+impl<S> Prelogin<S> {
+    fn new(inner: S) -> Self {
+        Self { inner, pending: Vec::new(), out: Vec::new(), header: [0; 8], have: 0, left: 0 }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> Prelogin<S> {
+    fn drain(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+        while !self.out.is_empty() {
+            match std::pin::Pin::new(&mut self.inner).poll_write(cx, &self.out) {
+                Poll::Ready(Ok(0)) => return Poll::Ready(Err(std::io::ErrorKind::WriteZero.into())),
+                Poll::Ready(Ok(n)) => drop(self.out.drain(..n)),
+                Poll::Ready(Err(e)) => return Poll::Ready(Err(e)),
+                Poll::Pending => return Poll::Pending,
+            }
+        }
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Prelogin<S> {
+    fn poll_read(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+        buf: &mut tokio::io::ReadBuf<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        use std::task::Poll;
+        let this = self.get_mut();
+        loop {
+            if this.left > 0 {
+                let mut chunk = [0u8; TDS_PACKET];
+                let n = this.left.min(buf.remaining()).min(chunk.len());
+                let mut read = tokio::io::ReadBuf::new(&mut chunk[..n]);
+                match std::pin::Pin::new(&mut this.inner).poll_read(cx, &mut read) {
+                    Poll::Ready(Ok(())) => {
+                        this.left -= read.filled().len();
+                        buf.put_slice(read.filled());
+                        return Poll::Ready(Ok(()));
+                    }
+                    other => return other,
+                }
+            }
+            while this.have < 8 {
+                let mut read = tokio::io::ReadBuf::new(&mut this.header[this.have..]);
+                match std::pin::Pin::new(&mut this.inner).poll_read(cx, &mut read) {
+                    Poll::Ready(Ok(())) if read.filled().is_empty() => return Poll::Ready(Ok(())), // closed
+                    Poll::Ready(Ok(())) => this.have += read.filled().len(),
+                    other => return other,
+                }
+            }
+            this.have = 0;
+            let length = usize::from(u16::from_be_bytes([this.header[2], this.header[3]]));
+            if length < 8 {
+                return Poll::Ready(Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "not a TDS packet")));
+            }
+            this.left = length - 8;
+        }
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Prelogin<S> {
+    fn poll_write(
+        self: std::pin::Pin<&mut Self>,
+        _: &mut std::task::Context<'_>,
+        data: &[u8],
+    ) -> std::task::Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        this.pending.extend_from_slice(data);
+        std::task::Poll::Ready(Ok(data.len()))
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if !this.pending.is_empty() {
+            let pending = std::mem::take(&mut this.pending);
+            let mut chunks = pending.chunks(TDS_PACKET - 8).peekable();
+            while let Some(chunk) = chunks.next() {
+                let status = if chunks.peek().is_none() { TDS_END_OF_MESSAGE } else { 0 };
+                let length = ((chunk.len() + 8) as u16).to_be_bytes();
+                this.out.extend_from_slice(&[TDS_PRELOGIN, status, length[0], length[1], 0, 0, 0, 0]);
+                this.out.extend_from_slice(chunk);
+            }
+        }
+        std::task::ready!(this.drain(cx))?;
+        std::pin::Pin::new(&mut this.inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        std::task::ready!(this.drain(cx))?;
+        std::pin::Pin::new(&mut this.inner).poll_shutdown(cx)
+    }
+}
+
 /// LDAP's StartTLS extended request (RFC 4511 4.14.1), message id 1: SEQUENCE { 1,
 /// [APPLICATION 23] { [0] "1.3.6.1.4.1.1466.20037" } }.
 const STARTTLS_REQUEST: [u8; 31] = [
@@ -1892,6 +2230,12 @@ fn tls_failure(
             "The certificate's start date is in the future: check this server's clock, and the server's certificate.".into(),
         ),
         C::Revoked => ("the certificate was revoked".into(), "The certificate was revoked: its owner must replace it.".into()),
+        // webpki's verdict on an X.509 v1 certificate, which SQL Server generates for itself
+        // (SSL_Self_Signed_Fallback, 2022 and 2025 alike) when none is configured.
+        C::Other(e) if format!("{e:?}").contains("UnsupportedCertVersion") => (
+            "an old X.509 v1 certificate, which can't be verified (SQL Server's own generated one is)".into(),
+            "Ask the server's owner for a certificate from your CA for the name you connect by (for SQL Server: SQL Server Configuration Manager, or mssql-conf network.tlscert and network.tlskey on Linux).".into(),
+        ),
         other => (format!("certificate rejected: {other:?}"), "The server's certificate was rejected; show this to its owner.".into()),
     }
 }
@@ -2384,6 +2728,184 @@ mod tests {
         assert_eq!(step(&check, "login").outcome, Outcome::Fail, "{check:#?}");
         assert!(!step(&check, "login").detail.contains(TRANSIENT), "{check:#?}");
         assert!(check.advice.iter().any(|a| a.contains("was refused")), "{check:#?}");
+    }
+
+    /// The test server's CA as the `certificates:` entry `sql-ca` (and `other-ca`, which issued
+    /// nothing there).
+    fn sql_server_cas() -> Arc<Certificates> {
+        let ca = |file: &str| ductus_core::resources::CertificateEntry {
+            ca: Some(String::from_utf8(crate::mssql::tests::test_tls(file)).unwrap()),
+            ..Default::default()
+        };
+        Arc::new(
+            Certificates::load(&BTreeMap::from([
+                ("sql-ca".to_string(), ca("ca.pem")),
+                ("other-ca".to_string(), ca("other-ca.pem")),
+            ]))
+            .unwrap(),
+        )
+    }
+
+    async fn sql_check(c: SqlServerConnection, mode: Mode) -> Check {
+        let target = Target::Database("billing".into(), Database::Sqlserver(c));
+        check_with(vec![probe(target)], Duration::from_secs(5), mode, &sql_server_cas()).await.remove(0)
+    }
+
+    fn sql(c: &SqlServerConnection, host: &str, ca: Option<&str>) -> SqlServerConnection {
+        SqlServerConnection {
+            host: host.into(),
+            ca: ca.map(str::to_string),
+            trust_server_certificate: false,
+            ..c.clone()
+        }
+    }
+
+    /// Doctor reads SQL Server's certificate through PRELOGIN (TLS records inside TDS packets),
+    /// judges it as the engine's login does, and keeps it when the engine verifies it.
+    #[tokio::test]
+    async fn reads_sql_server_s_certificate_through_prelogin() {
+        let Some(c) = crate::mssql::tests::test_connection() else { return };
+        let check = sql_check(sql(&c, "localhost", Some("sql-ca")), Mode::Full).await;
+        assert_eq!(check.outcome, Outcome::Ok, "{check:#?}");
+        let tds = step(&check, "TDS").detail.clone();
+        assert!(tds.starts_with("SQL Server 20") && tds.contains("encryption on"), "{check:#?}");
+        assert!(step(&check, "TLS").detail.contains(", trusted; certificate for sql1.ductus.test"), "{check:#?}");
+        assert!(step(&check, "login").detail.ends_with("; TLS, verified"), "{check:#?}");
+        let seen = check.certificate.as_ref().expect("watched: the engine verifies it");
+        assert_eq!((seen.host.as_str(), seen.port, seen.trusted), ("localhost", 1433, true), "{check:#?}");
+        assert_eq!(seen.subject.as_deref(), Some("sql1.ductus.test"));
+
+        // Without its CA: refused in words, read anyway (for the alert), and no login tried.
+        let check = sql_check(sql(&c, "localhost", None), Mode::Full).await;
+        assert_eq!(step(&check, "TLS").outcome, Outcome::Fail, "{check:#?}");
+        assert!(step(&check, "TLS").detail.starts_with("not trusted"), "{check:#?}");
+        assert!(check.steps.iter().all(|s| s.name != "login"), "{check:#?}");
+        assert!(check.advice.iter().any(|a| a.contains("Name the issuing CA in `ca`")), "{check:#?}");
+        let seen = check.certificate.as_ref().unwrap();
+        assert!(!seen.trusted && seen.not_after.is_some(), "{check:#?}");
+        let check = sql_check(sql(&c, "localhost", Some("other-ca")), Mode::Full).await;
+        assert!(step(&check, "TLS").detail.starts_with("not trusted"), "{check:#?}");
+
+        // A name it doesn't list; `name_in_certificate` names one it does.
+        let check = sql_check(sql(&c, "localhost", Some("sql-ca")), Mode::Full).await;
+        assert_eq!(check.outcome, Outcome::Ok);
+        #[cfg(target_os = "linux")]
+        {
+            let check = sql_check(sql(&c, "127.0.0.2", Some("sql-ca")), Mode::Full).await;
+            assert!(step(&check, "TLS").detail.contains("not 127.0.0.2"), "{check:#?}");
+            assert!(check.advice.iter().any(|a| a.contains("Or set `name_in_certificate`")), "{check:#?}");
+            let named = SqlServerConnection {
+                name_in_certificate: Some("sql1.ductus.test".into()),
+                ..sql(&c, "127.0.0.2", Some("sql-ca"))
+            };
+            let check = sql_check(named, Mode::Full).await;
+            assert_eq!(check.outcome, Outcome::Ok, "{check:#?}");
+            assert!(step(&check, "login").detail.ends_with("; TLS, verified as sql1.ductus.test"), "{check:#?}");
+        }
+
+        // The engine's own check (certificates mode) logs in to nothing.
+        let check = sql_check(sql(&c, "localhost", Some("sql-ca")), Mode::Certificates).await;
+        assert!(check.steps.iter().all(|s| s.name != "login") && check.certificate.is_some(), "{check:#?}");
+    }
+
+    #[tokio::test]
+    async fn reads_sql_server_s_certificate_over_tds_8_strict() {
+        let Some(c) = crate::mssql::tests::test_connection() else { return };
+        let strict = SqlServerConnection { encrypt: Encrypt::Strict, ..sql(&c, "localhost", Some("sql-ca")) };
+        let check = sql_check(strict, Mode::Full).await;
+        assert_eq!(check.outcome, Outcome::Ok, "{check:#?}");
+        assert!(check.steps.iter().all(|s| s.name != "TDS"), "TLS first: {check:#?}");
+        assert!(step(&check, "TLS").detail.starts_with("TLS 1.3"), "{check:#?}");
+        assert!(step(&check, "login").detail.ends_with("; TDS 8 strict, TLS verified"), "{check:#?}");
+        assert!(check.certificate.is_some());
+    }
+
+    /// `trust_server_certificate`: said to be unverified, with what verifying would make of the
+    /// certificate; not watched (an expired one doesn't stop such a connection).
+    #[tokio::test]
+    async fn says_trust_server_certificate_isn_t_verified_and_doesn_t_watch_it() {
+        let Some(c) = crate::mssql::tests::test_connection() else { return };
+        let check = sql_check(c.clone(), Mode::Full).await;
+        assert_eq!(check.outcome, Outcome::Ok, "localhost: said, not warned: {check:#?}");
+        let tls = &step(&check, "TLS").detail;
+        assert!(
+            tls.starts_with("not verified (trust_server_certificate), and verifying would refuse it: not trusted"),
+            "{check:#?}"
+        );
+        assert!(step(&check, "login").detail.ends_with("; TLS, not verified (trust_server_certificate)"), "{check:#?}");
+        assert!(check.certificate.is_none(), "not watched: {check:#?}");
+        let target = Target::Database("billing".into(), Database::Sqlserver(c));
+        assert!(certificates_only(vec![probe(target)]).is_empty(), "not in the engine's own check");
+    }
+
+    /// What webpki says of SQL Server's own generated certificate (an X.509 v1 one), as seen against
+    /// SQL Server 2022 and 2025 with no certificate configured: in words.
+    #[test]
+    fn words_an_x509_v1_certificate() {
+        #[derive(Debug)]
+        struct UnsupportedCertVersion;
+        impl std::fmt::Display for UnsupportedCertVersion {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{self:?}")
+            }
+        }
+        impl std::error::Error for UnsupportedCertVersion {}
+        let error = rustls::Error::InvalidCertificate(rustls::CertificateError::Other(rustls::OtherError(Arc::new(
+            UnsupportedCertVersion,
+        ))));
+        let io = std::io::Error::other(error.clone());
+        let (detail, advice) = tls_failure("sql1", Some(&error), &io, None);
+        assert_eq!(detail, "an old X.509 v1 certificate, which can't be verified (SQL Server's own generated one is)");
+        assert!(advice.contains("a certificate from your CA"), "{advice}");
+        let tls = crate::mssql::tests::settings("sql1");
+        let said = crate::mssql::refusal(
+            &tiberius::error::Error::Tls(format!(
+                "the server's certificate was rejected during the TLS handshake: {error}. To connect anyway you can: (1) ..."
+            )),
+            &tls,
+        );
+        assert!(said.unwrap().starts_with("the server's certificate is an old X.509 v1 one"));
+    }
+
+    #[test]
+    fn reads_a_prelogin_answer() {
+        // SQL Server 2025's answer: VERSION 17.0.5035, ENCRYPTION on, INSTOPT, THREADID, MARS.
+        let answer = [
+            0x00, 0x00, 0x1a, 0x00, 0x06, 0x01, 0x00, 0x20, 0x00, 0x01, 0x02, 0x00, 0x21, 0x00, 0x01, 0x03, 0x00, 0x22,
+            0x00, 0x00, 0x04, 0x00, 0x22, 0x00, 0x01, 0xff, 0x11, 0x00, 0x13, 0xab, 0x00, 0x00, 0x01, 0x00, 0x00,
+        ];
+        assert_eq!(prelogin_answer(&answer), Some(("SQL Server 2025 (17.0.5035)".into(), 0x01)));
+        assert_eq!(prelogin_answer(&answer[..20]), None, "cut short");
+        assert_eq!(prelogin_answer(&[0xff]), None, "no ENCRYPTION option");
+    }
+
+    /// TLS records go out inside PRELOGIN packets at each flush, and come back without them.
+    #[tokio::test]
+    async fn frames_tls_records_in_prelogin_packets() {
+        use tokio::io::AsyncReadExt;
+        let (ours, mut server) = tokio::io::duplex(65_536);
+        let mut wrapped = Prelogin::new(ours);
+        wrapped.write_all(b"hello ").await.unwrap();
+        wrapped.write_all(&vec![7u8; 5000]).await.unwrap();
+        wrapped.flush().await.unwrap();
+        // 5006 bytes: one full packet (4088 of them) and the rest, marked end of message.
+        let mut first = [0u8; 4096];
+        server.read_exact(&mut first).await.unwrap();
+        assert_eq!(&first[..8], &[TDS_PRELOGIN, 0, 0x10, 0x00, 0, 0, 0, 0]);
+        assert_eq!(&first[8..14], b"hello ");
+        let mut header = [0u8; 8];
+        server.read_exact(&mut header).await.unwrap();
+        assert_eq!(&header[..4], &[TDS_PRELOGIN, TDS_END_OF_MESSAGE, 0x03, 0x9e], "918 + 8 bytes");
+        let mut rest = vec![0u8; 918];
+        server.read_exact(&mut rest).await.unwrap();
+
+        // Two packets from the server read as one stream.
+        server.write_all(&[TDS_PRELOGIN, 0, 0, 11, 0, 0, 1, 0, b'a', b'b', b'c']).await.unwrap();
+        server.write_all(&[TDS_PRELOGIN, 1, 0, 10, 0, 0, 2, 0, b'd', b'e']).await.unwrap();
+        drop(server);
+        let mut read = Vec::new();
+        wrapped.read_to_end(&mut read).await.unwrap();
+        assert_eq!(read, b"abcde");
     }
 
     /// A certificate for `localhost` ending `days` whole days from today (UTC midnight; negative:

@@ -5,13 +5,13 @@
 
 use anyhow::anyhow;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
-use ductus_core::resources::SqlServerConnection;
+use ductus_core::resources::{Encrypt, SqlServerConnection};
 use ductus_script::TRANSIENT;
 use serde_json::{Map, Value};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tiberius::error::Error;
-use tiberius::{AuthMethod, Client, ColumnData, Config, FromSql, Query, SqlBrowser};
+use tiberius::{AuthMethod, Client, ColumnData, Config, EncryptionLevel, FromSql, Query, SqlBrowser};
 use tokio::net::TcpStream;
 use tokio::sync::{Semaphore, SemaphorePermit};
 use tokio_util::compat::{Compat, TokioAsyncWriteCompatExt};
@@ -43,14 +43,24 @@ pub struct Pool {
     config: Config,
     /// Look the port up through the SQL Server Browser (named instance, no fixed port).
     browse: bool,
-    trusts_any_certificate: bool,
+    /// What its TLS refusals are worded with.
+    tls: TlsSettings,
     idle: Mutex<Vec<(Connection, Instant)>>,
     permits: Semaphore,
 }
 
+/// A connection's TLS settings, for wording its refusals.
+#[derive(Clone)]
+pub(crate) struct TlsSettings {
+    name: String,
+    named_ca: bool,
+    strict: bool,
+}
+
 impl Pool {
-    /// Connects lazily, like the Postgres pools: nothing is opened until the first query.
-    pub fn new(c: &SqlServerConnection) -> Self {
+    /// Connects lazily, like the Postgres pools: nothing is opened until the first query. `ca`:
+    /// the PEM of its `ca` (trusted besides the system's certificates).
+    pub fn new(c: &SqlServerConnection, ca: Option<&[u8]>) -> Self {
         let mut config = Config::new();
         config.host(&c.host);
         if let Some(port) = c.port {
@@ -62,13 +72,27 @@ impl Pool {
         config.database(&c.database);
         config.authentication(AuthMethod::sql_server(&c.user, &c.password));
         config.application_name("ductus");
+        config.encryption(match c.encrypt {
+            Encrypt::Mandatory => EncryptionLevel::Required,
+            Encrypt::Strict => EncryptionLevel::Strict,
+        });
+        if let Some(name) = &c.name_in_certificate {
+            config.hostname_in_certificate(name);
+        }
+        // resources.yaml refuses `ca` next to `trust_server_certificate` (tiberius panics on both).
         if c.trust_server_certificate {
             config.trust_cert();
+        } else if let Some(pem) = ca {
+            config.trust_cert_ca_bundle(pem.to_vec());
         }
         Self {
             config,
             browse: c.instance.is_some() && c.port.is_none(),
-            trusts_any_certificate: c.trust_server_certificate,
+            tls: TlsSettings {
+                name: c.certificate_name().to_string(),
+                named_ca: ca.is_some(),
+                strict: c.encrypt == Encrypt::Strict,
+            },
             idle: Mutex::new(Vec::new()),
             permits: Semaphore::new(c.max_connections.max(1) as usize),
         }
@@ -151,11 +175,10 @@ impl Pool {
     /// Temporary failures are marked so the worker retries the message instead of
     /// quarantining it (see `TRANSIENT_CODES`).
     fn classify(&self, e: Error) -> anyhow::Error {
+        if let Some(words) = refusal(&e, &self.tls) {
+            return anyhow!("{TRANSIENT} database unavailable: TLS: {words}");
+        }
         match &e {
-            Error::Tls(_) if !self.trusts_any_certificate => anyhow!(
-                "{TRANSIENT} database unavailable: {e} (if the server uses a self-signed certificate, set \
-                 `trust_server_certificate: true` for it in resources.yaml)"
-            ),
             Error::Io { .. } | Error::Tls(_) | Error::Routing { .. } => {
                 anyhow!("{TRANSIENT} database unavailable: {e}")
             }
@@ -166,6 +189,67 @@ impl Pool {
             _ => anyhow!("database error: {e}"),
         }
     }
+}
+
+/// The address a named instance listens on, from the SQL Server Browser (UDP 1434).
+pub(crate) async fn instance_address(c: &SqlServerConnection) -> Result<std::net::SocketAddr, Error> {
+    let mut config = Config::new();
+    config.host(&c.host);
+    if let Some(instance) = &c.instance {
+        config.instance_name(instance);
+    }
+    Ok(TcpStream::connect_named(&config).await?.peer_addr()?)
+}
+
+/// A refused TLS handshake in plain words, with what to do; None for anything else. tiberius
+/// flattens rustls's error into a string with advice in its own API's terms (`Error::Tls`), so the
+/// verdict is read from rustls's rendered name (tests against a real SQL Server guard each one).
+pub(crate) fn refusal(e: &Error, tls: &TlsSettings) -> Option<String> {
+    let name = &tls.name;
+    let text = match e {
+        Error::Tls(text) => text.as_str(),
+        // A server that doesn't accept TDS 8 strict closes the connection during the handshake.
+        Error::Io { message, .. } if tls.strict && (message.contains("eof") || message.contains("reset")) => {
+            return Some(format!(
+                "the server closed the connection during the TDS 8 strict handshake ({message}): it doesn't accept \
+                 strict, or has no certificate configured for it (SQL Server 2022 on Linux never does). Ask its DBA, \
+                 or leave out `encrypt: strict`"
+            ));
+        }
+        _ => return None,
+    };
+    let ca = if tls.named_ca {
+        "the CA named in `ca` didn't issue it either: ask the DBA which CA did"
+    } else {
+        "name the CA that issued it in `ca` (a `certificates:` entry), or install that CA on this server"
+    };
+    Some(if text.contains("UnsupportedCertVersion") {
+        "the server's certificate is an old X.509 v1 one (as SQL Server's own generated certificate is), which \
+         can't be verified: ask the DBA for a certificate from your CA (mssql-conf network.tlscert, or SQL Server \
+         Configuration Manager)"
+            .to_string()
+    } else if text.contains("UnknownIssuer") {
+        format!(
+            "not trusted: its issuer isn't one this server trusts (self-signed, or a private CA): {ca} (SQL Server's \
+             own generated certificate can't be verified by anyone: it needs one from a CA)"
+        )
+    } else if text.contains("not valid for name") || text.contains("NotValidForName") {
+        format!(
+            "the certificate isn't for {name}: connect by a name it lists, or set `name_in_certificate` to one (an \
+             availability group listener or alias whose name isn't on it)"
+        )
+    } else if text.contains("expired") || text.contains("Expired") {
+        "the server's certificate has expired: its owner must renew it".to_string()
+    } else if text.contains("not valid yet") || text.contains("NotValidYet") {
+        "the server's certificate isn't valid yet: check this server's clock".to_string()
+    } else if text.contains("CaUsedAsEndEntity") {
+        "the server presents a CA's certificate as its own: it needs a server certificate issued by that CA".to_string()
+    } else {
+        // Not a verdict on the certificate (no shared protocol version or cipher, a broken connection):
+        // rustls's words, without tiberius's advice.
+        let first = text.split(". To connect anyway").next().unwrap_or(text);
+        format!("the handshake failed: {first}")
+    })
 }
 
 /// A connection borrowed from the pool. It goes back only through `finish` after a call that
@@ -350,6 +434,9 @@ pub(crate) mod tests {
             user: user.into(),
             password: password.into(),
             max_connections: 1,
+            ca: None,
+            encrypt: Encrypt::Mandatory,
+            name_in_certificate: None,
             trust_server_certificate: true,
             application: None,
             vendor: None,
@@ -359,7 +446,7 @@ pub(crate) mod tests {
     }
 
     fn test_pool(max_connections: u32) -> Option<Pool> {
-        test_connection().map(|c| Pool::new(&SqlServerConnection { max_connections, ..c }))
+        test_connection().map(|c| Pool::new(&SqlServerConnection { max_connections, ..c }, None))
     }
 
     #[tokio::test]
@@ -428,18 +515,94 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn sql_errors_are_permanent_and_outages_are_temporary() {
         let Some(c) = test_connection() else { return };
-        let pool = Pool::new(&c);
+        let pool = Pool::new(&c, None);
         let err = pool.query("SELECT * FROM no_such_table", vec![]).await.unwrap_err().to_string();
         assert!(err.starts_with("database error: Invalid object name") && !err.contains(TRANSIENT), "{err}");
         // The failed call's connection was closed; the next call gets a fresh one.
         assert_eq!(pool.query("SELECT 1 AS ok", vec![]).await.unwrap(), [serde_json::json!({"ok": 1})]);
 
         let wrong = SqlServerConnection { password: "wrong".into(), ..c.clone() };
-        let err = Pool::new(&wrong).query("SELECT 1", vec![]).await.unwrap_err().to_string();
+        let err = Pool::new(&wrong, None).query("SELECT 1", vec![]).await.unwrap_err().to_string();
         assert!(err.contains(TRANSIENT) && err.contains("Login failed"), "{err}");
 
         let down = SqlServerConnection { port: Some(1), ..c };
-        let err = Pool::new(&down).query("SELECT 1", vec![]).await.unwrap_err().to_string();
+        let err = Pool::new(&down, None).query("SELECT 1", vec![]).await.unwrap_err().to_string();
         assert!(err.contains(TRANSIENT), "{err}");
+    }
+
+    /// A connection's TLS settings for wording refusals: verified as `name`, no `ca:`, not strict.
+    pub(crate) fn settings(name: &str) -> TlsSettings {
+        TlsSettings { name: name.into(), named_ca: false, strict: false }
+    }
+
+    /// The test server's TLS folder (`scripts/dev/sqlserver.sh`: its CA, another CA). check.sh and CI
+    /// set DUCTUS_TEST_SQLSERVER_TLS with DUCTUS_TEST_SQLSERVER, so these tests can't be skipped
+    /// silently where the server runs.
+    pub(crate) fn test_tls(file: &str) -> Vec<u8> {
+        let dir = std::env::var("DUCTUS_TEST_SQLSERVER_TLS")
+            .expect("DUCTUS_TEST_SQLSERVER_TLS (scripts/dev/sqlserver.sh dir) goes with DUCTUS_TEST_SQLSERVER");
+        std::fs::read(std::path::Path::new(&dir).join(file)).unwrap_or_else(|e| panic!("{dir}/{file}: {e}"))
+    }
+
+    /// `c` verified against `ca` (a file in the TLS folder), as `name`.
+    fn verified(c: &SqlServerConnection, host: &str, name: Option<&str>, encrypt: Encrypt) -> SqlServerConnection {
+        SqlServerConnection {
+            host: host.into(),
+            trust_server_certificate: false,
+            name_in_certificate: name.map(str::to_string),
+            encrypt,
+            ..c.clone()
+        }
+    }
+
+    async fn login(c: &SqlServerConnection, ca: Option<&str>) -> Result<Vec<Value>, String> {
+        let ca = ca.map(test_tls);
+        Pool::new(c, ca.as_deref()).query("SELECT 1 AS ok", vec![]).await.map_err(|e| e.to_string())
+    }
+
+    #[tokio::test]
+    async fn logs_in_verified_with_its_ca_and_says_why_otherwise() {
+        let Some(c) = test_connection() else { return };
+        let ok = Ok(vec![serde_json::json!({"ok": 1})]);
+        // Verified against the test CA, by the name connected to, or by `name_in_certificate`.
+        assert_eq!(login(&verified(&c, "localhost", None, Encrypt::Mandatory), Some("ca.pem")).await, ok);
+        assert_eq!(login(&verified(&c, "127.0.0.1", None, Encrypt::Mandatory), Some("ca.pem")).await, ok);
+        #[cfg(target_os = "linux")]
+        assert_eq!(
+            login(&verified(&c, "127.0.0.2", Some("sql1.ductus.test"), Encrypt::Mandatory), Some("ca.pem")).await,
+            ok,
+            "an address the certificate doesn't list, checked for the name it does"
+        );
+
+        // Without its CA: not trusted, in words, and temporary (the messages wait).
+        let err = login(&verified(&c, "localhost", None, Encrypt::Mandatory), None).await.unwrap_err();
+        assert!(
+            err.contains(TRANSIENT) && err.contains("TLS: not trusted: its issuer isn't one this server trusts"),
+            "{err}"
+        );
+        assert!(err.contains("name the CA that issued it in `ca`") && !err.contains("Config::"), "{err}");
+        let err = login(&verified(&c, "localhost", None, Encrypt::Mandatory), Some("other-ca.pem")).await.unwrap_err();
+        assert!(err.contains("the CA named in `ca` didn't issue it either"), "{err}");
+
+        // A name the certificate doesn't list.
+        #[cfg(target_os = "linux")]
+        {
+            let err = login(&verified(&c, "127.0.0.2", None, Encrypt::Mandatory), Some("ca.pem")).await.unwrap_err();
+            assert!(err.contains("TLS: the certificate isn't for 127.0.0.2: connect by a name it lists"), "{err}");
+        }
+        let err = login(&verified(&c, "localhost", Some("billing.hospital.org"), Encrypt::Mandatory), Some("ca.pem"))
+            .await
+            .unwrap_err();
+        assert!(err.contains("the certificate isn't for billing.hospital.org"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn logs_in_over_tds_8_strict() {
+        let Some(c) = test_connection() else { return };
+        let strict = verified(&c, "localhost", None, Encrypt::Strict);
+        assert_eq!(login(&strict, Some("ca.pem")).await, Ok(vec![serde_json::json!({"ok": 1})]));
+        // Strict verifies too.
+        let err = login(&strict, None).await.unwrap_err();
+        assert!(err.contains("TLS: not trusted"), "{err}");
     }
 }

@@ -18,6 +18,12 @@
 #      resource over verify-full with `ca:`; the database's certificate in the engine's checks,
 #      /certificates and /ports; its DBA renews it for only 10 days (Check now: on-call told, once
 #      per connection), then for a year (recovered).
+#   7. SQL Server over verified TLS (0.6.4.3), against the test SQL Server (scripts/dev/sqlserver.sh,
+#      a CA of its own; required in CI): `ca:` verified, TDS 8 strict, `name_in_certificate:` for
+#      an address its certificate doesn't list, another CA refused in words, `trust_server_
+#      certificate` on "another machine" warned by validate and the start log and said by doctor;
+#      Check now reads the verified ones' certificates through PRELOGIN and logs in to nothing;
+#      /ports says how each is protected.
 # The certificates are made by `cert-server` (an example, not part of ductus) from a file of days,
 # read at every connection; mail goes to `ductus sink --smtp`.
 set -euo pipefail
@@ -281,5 +287,65 @@ wait_for 40 "[ \"\$(mails)\" -ge $((told + 4)) ]" || fail+=" no-db-recovery"
 grep "^mail " "$P/mail.log" | tail -n 2 | sed 's/^/   | /'
 grep "RECOVERED Certificate of 127.0.0.1:$PGPORT (engine database)" "$P/mail.log" >/dev/null || fail+=" db-recovered"
 grep "ERROR" "$P/run2.log" >/dev/null && fail+=" errors-in-the-log-2"
+"$BIN" token revoke "$OPS_NAME-tls" >/dev/null 2>&1 || true
+kill -INT "$ENGINE" && wait "$ENGINE" || true
+ENGINE=""
+
+echo "== SQL Server over verified TLS: its certificate read through PRELOGIN, and TDS 8 strict"
+if ! SQL=$(bash "$DEV/sqlserver.sh" 2>/dev/null); then
+  [ -n "${CI:-}" ] && fail+=" no-sql-server"
+  echo "   (skipped: no SQL Server here; set one up with scripts/dev/sqlserver.sh)"
+else
+  SQLDIR=$(bash "$DEV/sqlserver.sh" dir)
+  SQLPW=${SQL#*:}
+  SQLPW=${SQLPW%@*}
+  # Another machine as far as the engine knows: its own address (Docker listens on every one).
+  IP=$(hostname -I | awk '{print $1}')
+  login="database: master, user: sa, password: '$SQLPW'"
+  cat >"$P/resources.yaml" <<EOF
+databases:
+  billing:  { sqlserver: { host: localhost, $login, ca: sql-ca } }
+  claims:   { sqlserver: { host: localhost, $login, ca: sql-ca, encrypt: strict } }
+  orders:   { sqlserver: { host: 127.0.0.2, name_in_certificate: sql1.ductus.test, $login, ca: sql-ca } }
+  pharmacy: { sqlserver: { host: localhost, $login, ca: wrong-ca } }
+  lab:      { sqlserver: { host: $IP, $login, trust_server_certificate: true } }
+certificates:
+  certs-demo-mllp: { cert_file: tls/mllp.pem, key_file: tls/mllp.key, owner: infra@hospital.example }
+  sql-ca: { ca_file: $SQLDIR/ca.pem }
+  wrong-ca: { ca_file: $SQLDIR/other-ca.pem }
+EOF
+  out=$("$BIN" validate 2>&1 || true)
+  echo "   validate: $(grep "database \`lab\`" <<<"$out" | cut -c1-110)..."
+  grep "⚠ database \`lab\`: \`trust_server_certificate: true\` doesn't check its certificate" <<<"$out" >/dev/null || fail+=" sql-validate($out)"
+  "$BIN" run >"$P/run3.log" 2>&1 &
+  ENGINE=$!
+  until grep "started interfaces=" "$P/run3.log" 2>/dev/null >/dev/null; do kill -0 $ENGINE || { cat "$P/run3.log"; exit 1; }; sleep 0.2; done
+  echo "   start log: WARN $(grep -o "its certificate isn't checked.*database=\"lab\"" "$P/run3.log" | cut -c1-60)... database=\"lab\""
+  grep "WARN.*its certificate isn't checked.*remove \`trust_server_certificate\`.*database=\"lab\"" "$P/run3.log" >/dev/null || fail+=" sql-start-log"
+  OPS=$("$BIN" token create "$OPS_NAME-sql" --role operator 2>/dev/null)
+  report=$(api POST /doctor '{"mode": "full", "timeout_ms": 5000}')
+  detail() { js "$report" "[s['outcome'] + ' ' + s['detail'] for c in d['checks'] if c['what'] == 'database $1' for s in c['steps'] if s['name'] == '$2'][0]"; }
+  for name in billing claims orders pharmacy lab; do
+    echo "   doctor, $name: $(detail $name TLS | cut -c1-150)"
+  done
+  echo "   doctor, billing: TDS $(detail billing TDS); login $(detail billing login | sed 's/.*; //')"
+  [[ "$(detail billing TDS)" == "ok SQL Server 2025 "*"; encryption on" ]] || fail+=" sql-prelogin"
+  [[ "$(detail billing login)" == "ok "*"; TLS, verified" ]] || fail+=" sql-billing($(detail billing login))"
+  [[ "$(detail claims TLS)" == "ok TLS 1.3"*", trusted; certificate for sql1.ductus.test"* ]] || fail+=" sql-strict-tls"
+  [[ "$(detail claims login)" == "ok "*"; TDS 8 strict, TLS verified" ]] || fail+=" sql-strict($(detail claims login))"
+  [[ "$(detail orders login)" == "ok "*"; TLS, verified as sql1.ductus.test" ]] || fail+=" sql-name($(detail orders login))"
+  [[ "$(detail pharmacy TLS)" == "fail not trusted: its issuer isn't one this server trusts"* ]] || fail+=" sql-wrong-ca"
+  [[ "$(detail lab TLS)" == "warn not verified (trust_server_certificate), and verifying would refuse it"* ]] || fail+=" sql-unverified"
+  report=$(api POST /doctor '{"mode": "certificates"}')
+  SQLS="[c['certificate'] for c in d['checks'] if 'SQL Server' in c['endpoint']]"
+  echo "   Check now: $(js "$report" "', '.join(f\"{c['resource']} {c['host']}:{c['port']} {c['subject']}\" for c in $SQLS)")"
+  [ "$(js "$report" "sorted(c['resource'] for c in $SQLS)")" = "['billing', 'claims', 'orders', 'pharmacy']" ] || fail+=" sql-watched($report)"
+  [ "$(js "$report" "sum(1 for c in d['checks'] if 'SQL Server' in c['endpoint'] for s in c['steps'] if s['name'] == 'login')")" = 0 ] || fail+=" sql-logged-in"
+  ports=$(api GET /ports)
+  echo "   Connections → Connects to: $(js "$ports" "'; '.join(f\"{o['used_by']}: {o['tls']}\" for o in d['connects_to'] if o['protocol'] == 'SQL Server')")"
+  [ "$(js "$ports" "sorted(o['tls'] for o in d['connects_to'] if o['protocol'] == 'SQL Server')")" = "['TDS 8 strict, TLS verified: sql-ca trusted', 'TLS, not verified (trust_server_certificate)', 'TLS, verified as sql1.ductus.test: sql-ca trusted', 'TLS, verified: sql-ca trusted', 'TLS, verified: wrong-ca trusted']" ] || fail+=" sql-ports($ports)"
+  grep "ERROR" "$P/run3.log" >/dev/null && fail+=" errors-in-the-log-3"
+  "$BIN" token revoke "$OPS_NAME-sql" >/dev/null 2>&1 || true
+fi
 
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; tail -n 20 "$P/run.log" "$P/run2.log"; exit 1; fi

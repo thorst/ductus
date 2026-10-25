@@ -27,6 +27,9 @@ env:
   DUCTUS_DATABASE_URL: postgres://ductus:ductus@localhost/ductus
   DUCTUS_TEST_DATABASE_URL: postgres://ductus:ductus@localhost/ductus
   DUCTUS_TEST_SQLSERVER: sa:Ductus-ci-1@localhost:1433
+  # The test SQL Server (scripts/dev/sqlserver.sh): its password, and its folder (its CA).
+  MSSQL_SA_PASSWORD: Ductus-ci-1
+  DUCTUS_TEST_SQLSERVER_TLS: /home/runner/.local/share/ductus-mssql
   # The binary must embed the web UI (without it, build.rs embeds a "build the UI" page).
   DUCTUS_REQUIRE_UI: "1"
   # The packages demo's database container (the same copy as the test job's service).
@@ -56,19 +59,13 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U ductus"
           --health-interval 5s --health-timeout 5s --health-retries 10
-      sqlserver:
-        image: mcr.microsoft.com/mssql/server:2022-latest
-        env:
-          ACCEPT_EULA: "Y"
-          MSSQL_SA_PASSWORD: Ductus-ci-1
-          MSSQL_MEMORY_LIMIT_MB: "3072"
-        ports: ["1433:1433"]
-        options: >-
-          --memory=4g
-          --health-cmd "/opt/mssql-tools18/bin/sqlcmd -C -S localhost -U sa -P Ductus-ci-1 -Q 'SELECT 1' -b -o /dev/null"
-          --health-interval 5s --health-timeout 5s --health-retries 30
     steps:
       - uses: actions/checkout@v7
+      # SQL Server 2025 presenting a test CA's certificate (TLS verified, TDS 8 strict): not a
+      # service, which can't be given files before it starts. Pulled and started while the rest
+      # builds; "Wait for SQL Server" below waits for its logins.
+      - name: Start SQL Server
+        run: nohup bash scripts/dev/sqlserver.sh start >/tmp/sqlserver.log 2>&1 &
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy, rustfmt
@@ -122,6 +119,12 @@ jobs:
             sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq postgresql </dev/null >/dev/null
           fi
           ls -d /usr/lib/postgresql/*/bin
+
+      - name: Wait for SQL Server
+        run: |
+          while pgrep -f "sqlserver.sh start" >/dev/null; do sleep 1; done
+          cat /tmp/sqlserver.log
+          bash scripts/dev/sqlserver.sh >/dev/null
 
       - name: Unit and integration tests
         env:

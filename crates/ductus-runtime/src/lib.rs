@@ -18,7 +18,7 @@ mod ingest;
 pub mod keys;
 pub mod ldap;
 mod limiter;
-mod mssql;
+pub mod mssql;
 pub mod ownership;
 pub mod project;
 pub mod retention;
@@ -162,6 +162,13 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
             database = name,
             tls = mode.label(),
             "its certificate isn't checked: whoever answers at its address is believed (and sees every query); set `tls: verify-full` (with `ca:` for a private CA)"
+        );
+    }
+    for name in resources.unverified_sqlserver() {
+        tracing::warn!(
+            database = name,
+            tls = "trust_server_certificate",
+            "its certificate isn't checked: whoever answers at its address is believed (and sees every query); remove `trust_server_certificate` (with `ca:` for a private CA)"
         );
     }
     let alerts = match alert_settings {
