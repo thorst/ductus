@@ -4,7 +4,7 @@
 //! the engine's start makes). Reads files only: nothing connects anywhere.
 
 use crate::doctor::{Certificate, EXPIRY_WARNING_DAYS, Outcome, Step, judge_chain};
-use crate::tls::{About, Certificates, check_pair};
+use crate::tls::{About, Certificates, check_pair, is_ca};
 use chrono::Utc;
 use rustls::pki_types::{CertificateDer, pem::PemObject};
 
@@ -108,7 +108,7 @@ pub fn show(pem: &[u8], key: Option<Key<'_>>, certificates: &Certificates) -> Sh
     shown.step("issuer", Outcome::Ok, issued(leaf));
     if *leaf_is_ca {
         shown.step("kind", Outcome::Warn, "a CA's certificate (CA:TRUE), not a server's or client's");
-        shown.advice.push("TLS clients that check (Ductus's own connections among them) refuse a CA's certificate as a server's or client's: ask the CA for a server certificate (`openssl req -x509` makes a CA's by default).".into());
+        shown.advice.push("As a server's, a CA's certificate is accepted only by clients that trust this exact certificate (Ductus's own connections do, when it's named in `ca:` or installed as trusted; so do Windows, Java and .NET), and refused when it's only issued by a trusted CA; as a client certificate, our listeners refuse it. Ask the CA for a server certificate (`openssl req -x509` makes a CA's by default).".into());
     }
     let (outcome, until) = until(about);
     shown.step("valid", outcome, format!("{} → {until}", about.not_before.format("%Y-%m-%d")));
@@ -171,11 +171,6 @@ fn until(about: &About) -> (Outcome, String) {
     } else {
         (Outcome::Ok, format!("{date}: {days} days left"))
     }
-}
-
-fn is_ca(der: &[u8]) -> bool {
-    use x509_parser::prelude::*;
-    X509Certificate::from_der(der).is_ok_and(|(_, c)| c.is_ca())
 }
 
 #[cfg(test)]

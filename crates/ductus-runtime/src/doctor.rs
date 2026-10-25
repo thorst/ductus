@@ -328,6 +328,7 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode, certificates: &Certifi
         trust,
         certificates,
         name_unchecked: false,
+        platform_only: matches!(probe.target, Target::Smtp { .. }),
         alpn: None,
         seen_at: None,
     };
@@ -426,6 +427,8 @@ struct Run<'a> {
     certificates: &'a Certificates,
     /// The handshake checks the CA, not the name (Postgres's `verify-ca`).
     name_unchecked: bool,
+    /// The engine's connection verifies with a TLS stack of its own (`tls::Verifier::platform_only`).
+    platform_only: bool,
     /// The protocol the handshake asks for (ALPN): `tds/8.0` for SQL Server's strict.
     alpn: Option<&'static [u8]>,
     /// Where the certificate was read, when the target alone doesn't say (a SQL Server named
@@ -683,6 +686,7 @@ impl Run<'_> {
         };
         let advice = self.advice.len();
         self.name_unchecked = mode == SslMode::VerifyCa;
+        self.platform_only = true;
         let trusted = self.tls_on(host, tcp).await;
         if mode.verifies() {
             if setting == Setting::Url {
@@ -872,6 +876,7 @@ impl Run<'_> {
         let local = ductus_core::pgtls::local(&c.host);
         let unverified = if local { Outcome::Ok } else { Outcome::Warn };
         let advice = self.advice.len();
+        self.platform_only = true;
         let trusted = if c.encrypt == Encrypt::Strict {
             self.alpn = Some(TDS8_ALPN);
             self.tls(&name, address).await
@@ -1056,7 +1061,11 @@ impl Run<'_> {
         };
         let presented = Arc::new(Mutex::new(Vec::new()));
         let verifier = match trust.verifier() {
-            Ok(v) => Recording { inner: v, seen: presented.clone(), name_unchecked: self.name_unchecked },
+            Ok(v) => Recording {
+                inner: if self.platform_only { v.platform_only() } else { v },
+                seen: presented.clone(),
+                name_unchecked: self.name_unchecked,
+            },
             Err(e) => {
                 self.step("TLS", Outcome::Fail, format!("{e:#}"));
                 return false;
@@ -2054,11 +2063,11 @@ fn strip_query(url: &str) -> String {
     url.split(['?', '#']).next().unwrap_or(url).to_string()
 }
 
-/// Verifies like the platform verifier, keeping the certificates the server presented so a
-/// failure can say which certificate it was.
+/// Verifies as the engine does (`tls::Verifier`), keeping the certificates the server presented
+/// so a failure can say which certificate it was.
 #[derive(Debug)]
 struct Recording {
-    inner: rustls_platform_verifier::Verifier,
+    inner: crate::tls::Verifier,
     seen: Arc<Mutex<Vec<Vec<u8>>>>,
     /// A certificate that isn't for the host still passes (Postgres's `verify-ca`).
     name_unchecked: bool,
@@ -2255,6 +2264,10 @@ fn tls_failure(
         C::Other(e) if format!("{e:?}").contains("UnsupportedCertVersion") => (
             "an old X.509 v1 certificate, which can't be verified (SQL Server's own generated one is)".into(),
             "Ask the server's owner for a certificate from your CA for the name you connect by (for SQL Server: SQL Server Configuration Manager, or mssql-conf network.tlscert and network.tlskey on Linux).".into(),
+        ),
+        C::Other(e) if crate::tls::is_ca_as_leaf(e) => (
+            "the server presents a CA's certificate (CA:TRUE) as its own".into(),
+            "Ask the server's owner for a server certificate (`openssl req -x509` makes a CA's by default).".into(),
         ),
         other => (format!("certificate rejected: {other:?}"), "The server's certificate was rejected; show this to its owner.".into()),
     }
@@ -3150,6 +3163,51 @@ mod tests {
         // A name that doesn't load fails the check with why.
         let c = check(mllp(connecting(Some("missing"), None))).await;
         assert!(step(&c, "TLS").detail.contains("no CA named `missing`"), "{c:#?}");
+    }
+
+    /// A receiver presenting a CA's certificate that is itself named in `ca`: trusted, as the
+    /// engine's connection trusts it. Alert mail goes through lettre, whose verifier on Linux
+    /// refuses it: doctor says what that would.
+    #[tokio::test]
+    async fn a_ca_certificate_named_in_ca_is_judged_as_the_connection_would() {
+        let (cert, _, key) = certificate("Lab Receiver", 365, true, None);
+        let entries = BTreeMap::from([(
+            "lab".to_string(),
+            ductus_core::resources::CertificateEntry { ca: Some(cert.pem()), ..Default::default() },
+        )]);
+        let certificates = Arc::new(Certificates::load(&entries).unwrap());
+        let acceptor = tokio_rustls::TlsAcceptor::from(tls_config(&[&cert], &key));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((tcp, _)) = listener.accept().await {
+                let acceptor = acceptor.clone();
+                tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    if let Ok(mut tls) = acceptor.accept(tcp).await {
+                        let _ = tls.read(&mut [0u8; 16]).await;
+                    }
+                });
+            }
+        });
+        let lab = ConnectTls { ca: Some("lab".into()), certificate: None };
+        let certificates = &certificates;
+        let check =
+            |target| async move { check(vec![probe(target)], Duration::from_secs(2), certificates).await.remove(0) };
+
+        let c = check(Target::Mllp { host: "localhost".into(), port, tls: Some(lab.clone()) }).await;
+        assert_eq!(step(&c, "TLS").outcome, Outcome::Ok, "{c:#?}");
+
+        let c = check(Target::Smtp { host: "localhost".into(), port, tls: SmtpTls::Tls, trust: lab }).await;
+        if cfg!(windows) {
+            assert_eq!(step(&c, "TLS").outcome, Outcome::Ok, "Windows's own verdict: {c:#?}");
+        } else {
+            assert!(
+                step(&c, "TLS").detail.starts_with("the server presents a CA's certificate (CA:TRUE) as its own"),
+                "{c:#?}"
+            );
+            assert!(c.advice.iter().any(|a| a.contains("a server certificate")), "{c:#?}");
+        }
     }
 
     #[tokio::test]

@@ -689,13 +689,18 @@ impl Trust {
     }
 
     /// The platform verifier, also trusting the extra roots.
-    pub fn verifier(&self) -> Result<rustls_platform_verifier::Verifier> {
-        let verifier = if self.roots.is_empty() {
+    pub fn verifier(&self) -> Result<Verifier> {
+        let platform = if self.roots.is_empty() {
             rustls_platform_verifier::Verifier::new(provider())
         } else {
             rustls_platform_verifier::Verifier::new_with_extra_roots(self.roots.iter().cloned(), provider())
         };
-        verifier.context("loading this server's trusted certificates")
+        Ok(Verifier {
+            platform: platform.context("loading this server's trusted certificates")?,
+            roots: self.roots.clone(),
+            system: std::sync::OnceLock::new(),
+            pinned: true,
+        })
     }
 
     /// Client settings that check the server with `verifier` (the platform's, or doctor's
@@ -714,6 +719,140 @@ impl Trust {
 
     pub fn config(&self) -> Result<rustls::ClientConfig> {
         Ok(self.config_with(Arc::new(self.verifier()?)))
+    }
+}
+
+/// The platform verifier, made the same on every OS for a receiver presenting a CA's certificate
+/// (CA:TRUE) as its own: accepted when that exact certificate is itself trusted (named in `ca:`,
+/// or installed as trusted on this server), its dates and the host name still checked. Windows's
+/// own check does this already (a trusted root is trusted wherever it appears, as in Java and
+/// .NET); webpki, which the platform verifier is on Linux, refuses every CA:TRUE end entity.
+/// Trusting one exact certificate is at least as strict as trusting a CA. A CA:TRUE certificate
+/// that is only issued by a trusted CA is refused, on Windows too (which would accept it).
+#[derive(Debug)]
+pub struct Verifier {
+    platform: rustls_platform_verifier::Verifier,
+    roots: Vec<CertificateDer<'static>>,
+    /// This server's trusted certificates, read the first time a CA's certificate is presented
+    /// (the platform verifier keeps its own copy, out of reach).
+    system: std::sync::OnceLock<Vec<CertificateDer<'static>>>,
+    /// Whether a trusted CA:TRUE certificate is accepted (see above).
+    pinned: bool,
+}
+
+impl Verifier {
+    /// The platform verifier's verdict alone, as connections with a TLS stack of their own see
+    /// it (alert mail through lettre, Postgres through sqlx, SQL Server through tiberius): for
+    /// doctor, which must say what those would.
+    pub fn platform_only(self) -> Self {
+        Self { pinned: false, ..self }
+    }
+
+    fn trusts_exactly(&self, cert: &CertificateDer<'_>) -> bool {
+        self.roots.iter().any(|r| r.as_ref() == cert.as_ref())
+            || self
+                .system
+                .get_or_init(|| rustls_native_certs::load_native_certs().certs)
+                .iter()
+                .any(|r| r.as_ref() == cert.as_ref())
+    }
+
+    /// The checks webpki would still make of a certificate trusted as it is: the name, the dates.
+    fn trusted_as_is(
+        cert: &CertificateDer<'_>,
+        server_name: &rustls::pki_types::ServerName<'_>,
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<(), rustls::Error> {
+        use rustls::CertificateError as C;
+        use x509_parser::prelude::*;
+        rustls::client::verify_server_name(&rustls::server::ParsedCertificate::try_from(cert)?, server_name)?;
+        let (_, x509) =
+            X509Certificate::from_der(cert).map_err(|_| rustls::Error::InvalidCertificate(C::BadEncoding))?;
+        if not_valid_yet(cert, now) {
+            return Err(rustls::Error::InvalidCertificate(C::NotValidYet));
+        }
+        if now.as_secs() as i64 > x509.validity().not_after.timestamp() {
+            return Err(rustls::Error::InvalidCertificate(C::Expired));
+        }
+        Ok(())
+    }
+}
+
+/// Whether a certificate (DER) is a CA's (CA:TRUE).
+pub(crate) fn is_ca(der: &[u8]) -> bool {
+    use x509_parser::prelude::*;
+    X509Certificate::from_der(der).is_ok_and(|(_, c)| c.is_ca())
+}
+
+fn not_valid_yet(der: &[u8], now: rustls::pki_types::UnixTime) -> bool {
+    use x509_parser::prelude::*;
+    X509Certificate::from_der(der).is_ok_and(|(_, c)| (now.as_secs() as i64) < c.validity().not_before.timestamp())
+}
+
+impl ServerCertVerifier for Verifier {
+    fn verify_server_cert(
+        &self,
+        end_entity: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        server_name: &rustls::pki_types::ServerName<'_>,
+        ocsp_response: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        use rustls::CertificateError as C;
+        let verdict = self.platform.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now);
+        if !self.pinned {
+            return verdict;
+        }
+        match verdict {
+            Err(rustls::Error::InvalidCertificate(C::Other(e)))
+                if is_ca_as_leaf(&e) && self.trusts_exactly(end_entity) =>
+            {
+                Self::trusted_as_is(end_entity, server_name, now)?;
+                Ok(rustls::client::danger::ServerCertVerified::assertion())
+            }
+            // Windows accepts a CA's certificate that a trusted CA issued, which webpki refuses:
+            // refused here too, so both say the same.
+            Ok(_) if is_ca(end_entity) && !self.trusts_exactly(end_entity) => Err(rustls::Error::InvalidCertificate(
+                C::Other(rustls::OtherError(Arc::new(webpki::Error::CaUsedAsEndEntity))),
+            )),
+            // Windows reports a certificate that isn't valid yet as expired.
+            Err(rustls::Error::InvalidCertificate(C::Expired | C::ExpiredContext { .. }))
+                if not_valid_yet(end_entity, now) =>
+            {
+                Err(rustls::Error::InvalidCertificate(C::NotValidYet))
+            }
+            verdict => verdict,
+        }
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.platform.verify_tls12_signature(message, cert, dss)
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.platform.verify_tls13_signature(message, cert, dss)
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.platform.supported_verify_schemes()
+    }
+
+    fn requires_raw_public_keys(&self) -> bool {
+        self.platform.requires_raw_public_keys()
+    }
+
+    fn root_hint_subjects(&self) -> Option<&[rustls::DistinguishedName]> {
+        self.platform.root_hint_subjects()
     }
 }
 
@@ -771,7 +910,7 @@ pub fn outbound_failure(error: &std::io::Error) -> Option<String> {
 }
 
 /// A certificate refused for being a CA's where a server's or client's belongs.
-fn is_ca_as_leaf(e: &rustls::OtherError) -> bool {
+pub(crate) fn is_ca_as_leaf(e: &rustls::OtherError) -> bool {
     matches!(e.0.downcast_ref::<webpki::Error>(), Some(webpki::Error::CaUsedAsEndEntity))
 }
 
@@ -1240,6 +1379,68 @@ mod tests {
     use super::*;
     use ductus_core::tls::Clients;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    /// A CA's certificate trusted as it is must still be for the host and within its dates; with
+    /// `platform_only` (doctor, for connections with a TLS stack of their own) it's the platform's
+    /// verdict, which on Windows already accepts it.
+    #[test]
+    fn a_ca_certificate_trusted_as_it_is_still_has_its_name_and_dates_checked() {
+        use rustls::CertificateError as C;
+        use rustls::pki_types::{ServerName, UnixTime};
+        let day = |d: i64| {
+            use chrono::Datelike;
+            let d = (Utc::now() + chrono::Duration::days(d)).date_naive();
+            rcgen::date_time_ymd(d.year(), d.month() as u8, d.day() as u8)
+        };
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        (params.not_before, params.not_after) = (day(-10), day(30));
+        let cert = params.self_signed(&key).unwrap();
+        let trust = Trust { roots: vec![cert.der().clone()], client: None };
+        let verify = |verifier: &Verifier, host: &str, days: i64| {
+            let at = (Utc::now() + chrono::Duration::days(days)).timestamp() as u64;
+            let name = ServerName::try_from(host.to_string()).unwrap();
+            verifier.verify_server_cert(
+                cert.der(),
+                &[],
+                &name,
+                &[],
+                UnixTime::since_unix_epoch(Duration::from_secs(at)),
+            )
+        };
+        let refused = |r: Result<_, rustls::Error>| match r {
+            Err(rustls::Error::InvalidCertificate(c)) => c,
+            other => panic!("expected a refusal: {other:?}"),
+        };
+
+        let verifier = trust.verifier().unwrap();
+        assert!(verify(&verifier, "localhost", 0).is_ok());
+        assert!(matches!(
+            refused(verify(&verifier, "elsewhere.example", 0)),
+            C::NotValidForName | C::NotValidForNameContext { .. }
+        ));
+        assert!(matches!(refused(verify(&verifier, "localhost", 60)), C::Expired | C::ExpiredContext { .. }));
+        assert!(matches!(refused(verify(&verifier, "localhost", -20)), C::NotValidYet | C::NotValidYetContext { .. }));
+
+        let platform = trust.verifier().unwrap().platform_only();
+        if cfg!(windows) {
+            assert!(verify(&platform, "localhost", 0).is_ok(), "Windows's own verdict");
+        } else {
+            assert!(matches!(refused(verify(&platform, "localhost", 0)), C::Other(e) if is_ca_as_leaf(&e)));
+        }
+
+        // A CA's certificate a trusted CA issued: refused everywhere (Windows alone would take it).
+        let issuer = ca("receiver's CA");
+        let key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        let issued = params.signed_by(&key, &issuer.issuer).unwrap();
+        let trust = Trust { roots: vec![issuer.cert.der().clone()], client: None };
+        let name = ServerName::try_from("localhost").unwrap();
+        let verdict = trust.verifier().unwrap().verify_server_cert(issued.der(), &[], &name, &[], UnixTime::now());
+        assert!(matches!(refused(verdict), C::Other(e) if is_ca_as_leaf(&e)));
+    }
 
     /// A sender's refusals are logged once a minute; our own check's handshake isn't one, and
     /// doesn't use up that minute for a real sender on the same address.

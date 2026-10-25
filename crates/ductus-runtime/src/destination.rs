@@ -301,31 +301,39 @@ mod tests {
         assert_eq!(send_mllp(&certificates, port, Some(connecting(Some("server-ca"), None)), "wait").await, Ok(()));
     }
 
-    /// A lab receiver whose certificate was made as a CA's (`openssl req -x509` does by default),
-    /// trusted by naming it in `ca:`: refused, in words that say so. Except on Windows, whose own
-    /// verifier (the platform verifier hands it the chain) trusts a certificate that is itself a
-    /// trusted root, as Java and .NET do (nuances.md "A CA's certificate isn't a server's").
+    /// A lab receiver whose certificate was made as a CA's (`openssl req -x509` does by default):
+    /// accepted when that exact certificate is named in `ca:`, on every OS (nuances.md "A CA's
+    /// certificate as a server's"); one a trusted CA issued is refused, in words that say so.
     #[tokio::test]
-    async fn a_receiver_presenting_a_ca_certificate_is_refused_in_words() {
+    async fn a_receiver_presenting_a_ca_certificate_is_accepted_only_when_trusted_itself() {
+        let as_ca = |params: &mut rcgen::CertificateParams| {
+            params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        };
         let key = rcgen::KeyPair::generate().unwrap();
         let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
-        params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
-        let cert = params.self_signed(&key).unwrap();
+        as_ca(&mut params);
+        let lab = params.self_signed(&key).unwrap();
+        let issuer = ca("receiver's CA");
+        let issued_key = rcgen::KeyPair::generate().unwrap();
+        let mut params = rcgen::CertificateParams::new(vec!["localhost".to_string()]).unwrap();
+        as_ca(&mut params);
+        let issued = params.signed_by(&issued_key, &issuer.issuer).unwrap();
+        let ca_entry = |pem: String| ductus_core::resources::CertificateEntry { ca: Some(pem), ..Default::default() };
         let entries = std::collections::BTreeMap::from([
-            ("ours".to_string(), crate::tls::testing::entry(&cert.pem(), &key.serialize_pem())),
-            (
-                "server-ca".to_string(),
-                ductus_core::resources::CertificateEntry { ca: Some(cert.pem()), ..Default::default() },
-            ),
+            ("lab".to_string(), crate::tls::testing::entry(&lab.pem(), &key.serialize_pem())),
+            ("lab-itself".to_string(), ca_entry(lab.pem())),
+            ("issued".to_string(), crate::tls::testing::entry(&issued.pem(), &issued_key.serialize_pem())),
+            ("issuer".to_string(), ca_entry(issuer.cert.pem())),
         ]);
         let certificates = Certificates::load(&entries).unwrap();
-        let port = tls_receiver(&certificates, &ListenTls { certificate: "ours".into(), clients: None }).await;
-        let sent = send_mllp(&certificates, port, Some(connecting(Some("server-ca"), None)), "wait").await;
-        if cfg!(windows) {
-            assert_eq!(sent, Ok(()), "Windows trusts the named certificate itself");
-            return;
-        }
-        let err = sent.unwrap_err();
+        let receiver = |name: &str| ListenTls { certificate: name.into(), clients: None };
+
+        let port = tls_receiver(&certificates, &receiver("lab")).await;
+        let sent = send_mllp(&certificates, port, Some(connecting(Some("lab-itself"), None)), "wait").await;
+        assert_eq!(sent, Ok(()), "the named certificate itself is trusted");
+
+        let port = tls_receiver(&certificates, &receiver("issued")).await;
+        let err = send_mllp(&certificates, port, Some(connecting(Some("issuer"), None)), "wait").await.unwrap_err();
         assert!(
             err.starts_with("transient: TLS: the receiver presents a CA's certificate (CA:TRUE) as its own"),
             "{err}"
