@@ -224,6 +224,24 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What:** TypeScript drops `import { x } from "./m.ts"` if `x` is never used, so code that runs when `m.ts` loads won't run.
 - **What to do:** write `import "./m.ts";` when you need a module only for what it does on load.
 
+### Copy what you change, not the whole thing through JSON (level 2)
+- **What:** `JSON.parse(JSON.stringify(x))` builds the whole object twice, as text and again as objects, for every message. It also changes what it copies: dates become strings, `undefined` and functions disappear, a `Map` becomes `{}`.
+- **What to do:** you rarely need a copy: each destination's function already gets the message as received (see "Each destination runs its own function on the original message"), so change it in place. For an object from `db()` or `fetch()`, copy only what you change: `{ ...row, name: row.name.trim() }`.
+
+### One query for many values, not one query per value (level 3)
+- **What:** each `db()` call is a round trip to the database and a step from your code into the engine and back. A lookup inside a loop (one query per OBX, per row of a file) adds one round trip per item, and the transform waits for each in turn.
+- **What to do:** collect the values first and ask once. An array parameter arrives in Postgres as `jsonb`: `db("lab").query("SELECT code, name FROM tests WHERE code IN (SELECT jsonb_array_elements_text($1))", [codes])`, then look the answers up in a `Map`. Lookups that don't depend on each other can also run together (see "In respond mode, calls run one after another unless you await them together").
+
+### Short-lived objects are cheap; what you keep is what costs (level 4)
+- **What:** the JavaScript engine (V8) frees memory by itself, in two ways. Objects made while handling one message and dropped at the end are collected often and quickly. Objects still referenced later (a module-level array or `Map` that keeps growing, results kept "for next time") move to a second area that is collected less often, with longer pauses that delay every interface on that thread, and they count toward `isolates.heap_mb` until the engine restarts.
+- **Why:** this is how V8 works, as Java's and .NET's collectors do. Rust code in the engine has no collector; only your TypeScript does.
+- **What to do:** make what you need inside the transform and let it go. Don't avoid creating objects to "save memory": per-message garbage is the cheap kind. Keep anything that outlives a message bounded (see "Module-level caches live until the engine restarts").
+
+### Loops over thousands of items: give objects one shape (level 4)
+- **What:** V8 makes property access fast by remembering how objects of the same shape (the same properties, added in the same order) are laid out. Objects built in different ways, or with properties added later or `delete`d, take a slower path at the places that read them.
+- **When it matters:** only in code that touches many objects per message: a file of 10,000 rows, a result with hundreds of OBX. A message's handful of objects never notices.
+- **What to do:** build such objects in one place with every property, in the same order (`{ mrn, name, dob }` with `""` for missing ones), and set a property to `""` or `undefined` rather than `delete`.
+
 ## Shared pool (see also [shared-pool.md](shared-pool.md))
 
 ### Interfaces share a global scope (level 2)
