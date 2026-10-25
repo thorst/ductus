@@ -638,7 +638,7 @@ impl Run<'_> {
         let local = ductus_core::pgtls::local(host);
         let unverified = if local { Outcome::Ok } else { Outcome::Warn };
         let asked = async {
-            let mut tcp = TcpStream::connect(address).await?;
+            let mut tcp = ductus_mllp::net::connect(address).await?;
             tcp.write_all(&SSL_REQUEST).await?;
             let mut answer = [0u8; 1];
             tcp.read_exact(&mut answer).await?;
@@ -911,7 +911,7 @@ impl Run<'_> {
     /// server's version and whether it agrees. The connection, ready for the handshake.
     async fn prelogin(&mut self, address: SocketAddr) -> Option<TcpStream> {
         let exchange = async {
-            let mut tcp = TcpStream::connect(address).await?;
+            let mut tcp = ductus_mllp::net::connect(address).await?;
             tcp.set_nodelay(true)?;
             tcp.write_all(&PRELOGIN_REQUEST).await?;
             let answer = read_tds_message(&mut tcp).await?;
@@ -1025,7 +1025,7 @@ impl Run<'_> {
     /// trusted certificates plus the named CA, presenting the named client certificate),
     /// reporting the server's certificate either way.
     async fn tls(&mut self, host: &str, address: SocketAddr) -> bool {
-        match tokio::time::timeout(self.timeout, TcpStream::connect(address)).await {
+        match tokio::time::timeout(self.timeout, ductus_mllp::net::connect(address)).await {
             Ok(Ok(tcp)) => {
                 // As the engine's connections: the handshake's flights don't wait on delayed ACKs.
                 let _ = tcp.set_nodelay(true);
@@ -1134,7 +1134,7 @@ impl Run<'_> {
     /// Never logs in and never sends mail.
     async fn starttls(&mut self, address: SocketAddr) -> Option<TcpStream> {
         let dialogue = async {
-            let mut smtp = tokio::io::BufReader::new(TcpStream::connect(address).await?);
+            let mut smtp = tokio::io::BufReader::new(ductus_mllp::net::connect(address).await?);
             let greeting = smtp_reply(&mut smtp).await?;
             if !greeting.starts_with("220") {
                 return Ok(Err(format!("the server greeted with `{}`", first(&greeting))));
@@ -1217,7 +1217,7 @@ impl Run<'_> {
     /// connection, ready for the handshake. Nothing is bound or searched.
     async fn ldap_starttls(&mut self, address: SocketAddr) -> Option<TcpStream> {
         let dialogue = async {
-            let mut tcp = TcpStream::connect(address).await?;
+            let mut tcp = ductus_mllp::net::connect(address).await?;
             tcp.write_all(&STARTTLS_REQUEST).await?;
             let reply = read_ldap_message(&mut tcp).await?;
             Ok::<_, std::io::Error>((tcp, starttls_result(&reply)))
@@ -1251,7 +1251,7 @@ impl Run<'_> {
     /// A plain SMTP server's greeting (`tls: none`).
     async fn smtp_greeting(&mut self, address: SocketAddr) {
         let greeting = async {
-            let mut smtp = tokio::io::BufReader::new(TcpStream::connect(address).await?);
+            let mut smtp = tokio::io::BufReader::new(ductus_mllp::net::connect(address).await?);
             let reply = smtp_reply(&mut smtp).await?;
             let _ = smtp.get_mut().write_all(b"QUIT\r\n").await;
             Ok::<_, std::io::Error>(reply)
@@ -1298,7 +1298,7 @@ impl Run<'_> {
 
     /// Whether the port is free to listen on. True if it's in use (by a running engine, or not).
     async fn listen(&mut self, host: &str, port: u16) -> bool {
-        match tokio::net::TcpListener::bind((host, port)).await {
+        match bind_only(host, port).await {
             Ok(_) => self.step("port", Outcome::Ok, "free: the engine can listen here"),
             Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
                 self.step("port", Outcome::Warn, "in use: by a running engine, or another program");
@@ -1661,6 +1661,26 @@ async fn commit_times(connection: &mut PgConnection) -> Result<(Duration, String
     }
     times.sort();
     Ok((times[COMMITS / 2], synchronous))
+}
+
+/// Bind `host:port` as the engine's listener would, without listening: nothing can connect
+/// meanwhile. (With a listener, a connection check of the same port running at the same moment
+/// reached doctor itself: on Windows, whose refusals take a second, it did.)
+async fn bind_only(host: &str, port: u16) -> std::io::Result<()> {
+    let mut last = None;
+    for address in tokio::net::lookup_host((host, port)).await? {
+        let socket =
+            if address.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
+        // As tokio's listeners on Unix (a port with connections in TIME_WAIT can be listened on);
+        // on Windows the option would let this bind over a live listener.
+        #[cfg(unix)]
+        socket.set_reuseaddr(true)?;
+        match socket.bind(address) {
+            Ok(()) => return Ok(()),
+            Err(e) => last = Some(e),
+        }
+    }
+    Err(last.unwrap_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "the name has no address")))
 }
 
 /// Why a TCP connection failed, for advice.

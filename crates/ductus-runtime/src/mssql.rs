@@ -157,7 +157,7 @@ impl Pool {
             let tcp = if self.browse && !redirected {
                 TcpStream::connect_named(&config).await?
             } else {
-                TcpStream::connect(config.get_addr()).await?
+                ductus_mllp::net::connect(config.get_addr()).await?
             };
             tcp.set_nodelay(true)?;
             match Client::connect(config.clone(), tcp.compat_write()).await {

@@ -13,6 +13,8 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 pub use tokio_util::sync::CancellationToken;
 
+pub mod net;
+
 pub const START: u8 = 0x0b;
 pub const END: [u8; 2] = [0x1c, 0x0d];
 
@@ -242,17 +244,13 @@ impl Client {
     async fn connect(&mut self) -> io::Result<&mut Box<dyn Stream>> {
         if self.stream.is_none() {
             let tcp = match self.from {
-                None => TcpStream::connect(&self.addr).await?,
+                None => net::connect(&self.addr).await?,
                 Some(local) => {
                     let target = tokio::net::lookup_host(&self.addr)
                         .await?
                         .find(|a| a.is_ipv4() == local.is_ipv4())
                         .ok_or_else(|| io::Error::other(format!("{} has no address of {local}'s kind", self.addr)))?;
-                    let socket = if local.is_ipv4() {
-                        tokio::net::TcpSocket::new_v4()?
-                    } else {
-                        tokio::net::TcpSocket::new_v6()?
-                    };
+                    let socket = net::socket(target)?;
                     socket.bind(SocketAddr::new(local, 0))?;
                     socket.connect(target).await?
                 }

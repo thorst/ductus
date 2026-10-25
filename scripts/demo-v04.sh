@@ -13,8 +13,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
 DB=$DUCTUS_DATABASE_URL
-PGUSER_=${PGUSER_:-ductus}
-PGPASS_=${PGPASS_:-ductus}
 SSHD=${SSHD:-/usr/sbin/sshd}
 SFTP_PORT=${SFTP_PORT:-2222}
 P=$(mktemp -d)
@@ -41,7 +39,7 @@ field() { # json, python expression over d
 [ -x "$SSHD" ] || { echo "FAIL: $SSHD not found (install openssh-server)"; exit 1; }
 
 # ---- two databases: dev uses the engine's own database, prod a separate one
-DEV_DB=$(sed -E 's#.*/([^/?]+).*#\1#' <<<"$DB")
+DEV_DB=$PGDATABASE_
 PROD_DB=ductus_v04_prod
 PROD_URL=$(sed -E "s#/[^/?]+([?]|$)#/$PROD_DB\1#" <<<"$DB")
 psql -q "$DB" -c "TRUNCATE messages, deliveries, dedupe_keys, source_state" -c "DROP DATABASE IF EXISTS $PROD_DB" -c "CREATE DATABASE $PROD_DB"
@@ -100,7 +98,7 @@ env_file prod YORK-MAIN "$PROD_DB" 8482 8492 1s
 cat >resources.yaml <<EOF
 databases:
   patient_db:
-    postgres: { host: localhost, database: "\${DB_NAME}", user: "\${DB_USER}", password: "\${secret:DB_PASSWORD}", max_connections: 4 }
+    postgres: { host: $PGHOST_, port: $PGPORT_, database: "\${DB_NAME}", user: "\${DB_USER}", password: "\${secret:DB_PASSWORD}", max_connections: 4 }
 sftp:
   lab:
     host: 127.0.0.1

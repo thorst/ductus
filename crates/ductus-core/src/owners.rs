@@ -700,23 +700,39 @@ ldap:
         assert_eq!(diff.matches("@@ -").count(), 2, "{diff}");
         assert!(diff.ends_with("+destination: { file: { dir: o }, owner: Bob }\n\\ No newline at end of file\n"));
 
-        // The real check: git applies both (skipped where git isn't installed).
+        // A Windows checkout has CRLF (Git for Windows sets core.autocrlf): the edit and the patch
+        // keep the file's own line endings, the only patch `git apply` takes with autocrlf on or off.
+        let crlf = |s: &str| s.replace('\n', "\r\n");
+        let results = reassign(YAML, "Ann Smith", "Bob Jones").unwrap().0;
+        let (yaml_crlf, far_crlf) = (crlf(YAML), crlf(&far));
+        let results_crlf = reassign(&yaml_crlf, "Ann Smith", "Bob Jones").unwrap().0;
+        let out_crlf = reassign(&far_crlf, "Ann", "Bob").unwrap().0;
+        assert_eq!((&results_crlf, &out_crlf), (&crlf(&results), &crlf(&out)), "CRLF kept");
+        assert!(patch("i.yaml", &far_crlf, &out_crlf).contains("+  owner: Bob\r\n"));
+
+        // The real check: git applies each (skipped where git isn't installed). With autocrlf on,
+        // git writes LF files back as CRLF, so it's only given CRLF files, as a checkout would be.
         let dir = std::env::temp_dir().join(format!("ductus-patch-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("interfaces/results")).unwrap();
-        let results = reassign(YAML, "Ann Smith", "Bob Jones").unwrap().0;
-        for (file, before, after) in
-            [("interfaces/results/interface.yaml", YAML, results.as_str()), ("i.yaml", far.as_str(), out.as_str())]
-        {
+        for (autocrlf, file, before, after) in [
+            ("false", "interfaces/results/interface.yaml", YAML, results.as_str()),
+            ("false", "i.yaml", far.as_str(), out.as_str()),
+            ("false", "crlf.yaml", yaml_crlf.as_str(), results_crlf.as_str()),
+            ("true", "crlf.yaml", yaml_crlf.as_str(), results_crlf.as_str()),
+            ("true", "i.yaml", far_crlf.as_str(), out_crlf.as_str()),
+        ] {
             std::fs::write(dir.join(file), before).unwrap();
             std::fs::write(dir.join("change.patch"), patch(file, before, after)).unwrap();
-            let Ok(status) =
-                std::process::Command::new("git").arg("apply").arg("change.patch").current_dir(&dir).status()
+            let Ok(status) = std::process::Command::new("git")
+                .args(["-c", &format!("core.autocrlf={autocrlf}"), "apply", "change.patch"])
+                .current_dir(&dir)
+                .status()
             else {
                 eprintln!("git not found: patch not applied");
                 break;
             };
-            assert!(status.success(), "git apply failed for {file}");
-            assert_eq!(std::fs::read_to_string(dir.join(file)).unwrap(), after);
+            assert!(status.success(), "git apply failed for {file} (autocrlf {autocrlf})");
+            assert_eq!(std::fs::read_to_string(dir.join(file)).unwrap(), after, "{file} (autocrlf {autocrlf})");
         }
         std::fs::remove_dir_all(&dir).ok();
     }

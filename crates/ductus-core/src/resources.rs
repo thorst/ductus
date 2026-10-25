@@ -70,7 +70,7 @@ use crate::env::Environment;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -88,6 +88,10 @@ pub struct Resources {
     /// Certificates our listeners present (`tls: { certificate: name }`) and CAs (`ca: name`).
     #[serde(default)]
     pub certificates: BTreeMap<String, CertificateEntry>,
+    /// Certificate files written with a root but no drive (Windows only): (entry, as written, read
+    /// from), for validate's warning.
+    #[serde(skip)]
+    pub without_drive: Vec<(String, PathBuf, PathBuf)>,
 }
 
 /// The kinds of things resources.yaml defines.
@@ -189,13 +193,21 @@ impl CertificateEntry {
         )
     }
 
-    /// Relative file names are read from the project folder.
-    fn resolve(&mut self, root: &Path) {
+    /// Relative file names are read from the project folder. On Windows a name with a root but no
+    /// drive (`/etc/ductus/x.key`, written for Linux) is read from the project's drive: those are
+    /// returned as (written, read from), for a warning.
+    fn resolve(&mut self, root: &Path) -> Vec<(PathBuf, PathBuf)> {
+        let mut without_drive = Vec::new();
         for file in [&mut self.cert_file, &mut self.key_file, &mut self.ca_file].into_iter().flatten() {
             if file.is_relative() {
-                *file = root.join(&*file);
+                let read = root.join(&*file);
+                if file.has_root() {
+                    without_drive.push((file.clone(), read.clone()));
+                }
+                *file = read;
             }
         }
+        without_drive
     }
 }
 
@@ -683,7 +695,9 @@ impl Resources {
             if let Some(problem) = c.problem() {
                 bail!("in {}: certificate `{name}`: {problem}", file.display());
             }
-            c.resolve(root);
+            for (written, read) in c.resolve(root) {
+                resources.without_drive.push((name.clone(), written, read));
+            }
         }
         for (name, s) in &resources.sftp {
             if s.password.is_none() && s.private_key.is_none() {
@@ -1177,6 +1191,24 @@ mod tests {
         assert_eq!((r.owner("a"), r.owner("s"), r.owner("none")), (Some("Web Team"), Some("Lab"), None));
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn windows_paths_with_a_drive_or_a_share_are_read_as_written() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("resources.yaml"),
+            "certificates:\n  mllp: { cert_file: 'C:\\certs\\mllp.pem', key_file: '\\\\vault\\certs\\mllp.key' }\n  ca: { ca_file: 'D:/pki/ca.pem' }\n",
+        )
+        .unwrap();
+        let r = Resources::load(dir.path(), &Environment::with_variables("dev", &[])).unwrap();
+        assert_eq!(
+            r.certificates["mllp"].pem(),
+            Some(Pem::Files { cert: Path::new(r"C:\certs\mllp.pem"), key: Path::new(r"\\vault\certs\mllp.key") })
+        );
+        assert_eq!(r.certificates["ca"].pem(), Some(Pem::CaFile(Path::new("D:/pki/ca.pem"))));
+        assert!(r.without_drive.is_empty());
+    }
+
     #[test]
     fn loads_certificates_as_pairs_or_cas() {
         let dir = tempfile::tempdir().unwrap();
@@ -1191,11 +1223,24 @@ mod tests {
         )
         .unwrap();
         let mllp = &r.certificates["mllp"];
+        // Windows: a root without a drive is the project's drive, and validate says so.
+        let drive = &dir.path().to_str().unwrap()[..2];
+        let key = PathBuf::from(if cfg!(windows) {
+            format!("{drive}/etc/ductus/mllp.key")
+        } else {
+            "/etc/ductus/mllp.key".into()
+        });
         assert_eq!(
             mllp.pem(),
-            Some(Pem::Files { cert: &dir.path().join("tls/mllp.pem"), key: Path::new("/etc/ductus/mllp.key") }),
+            Some(Pem::Files { cert: &dir.path().join("tls/mllp.pem"), key: &key }),
             "relative files are read from the project folder"
         );
+        let without_drive: Vec<_> = r.without_drive.iter().map(|(name, written, _)| (name.as_str(), written)).collect();
+        if cfg!(windows) {
+            assert_eq!(without_drive, [("mllp", &PathBuf::from("/etc/ductus/mllp.key"))]);
+        } else {
+            assert!(without_drive.is_empty());
+        }
         assert_eq!(
             [&r.certificates["api"], &r.certificates["ca"], &r.certificates["ca2"]].map(CertificateEntry::kind),
             [CertificateKind::Pair, CertificateKind::Ca, CertificateKind::Ca]

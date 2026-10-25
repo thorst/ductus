@@ -90,7 +90,7 @@ impl TestUsers {
 /// A throwaway Postgres with TLS (`scripts/dev/pgtls.sh`: its own CA and certificates, on
 /// 127.0.0.1 and 127.0.0.2), stopped and deleted when dropped. `start` is None, with a note, when
 /// the Postgres server binaries aren't installed, unless `DUCTUS_TEST_PGTLS=required` (CI), which
-/// makes that a failure.
+/// makes that a failure. Always None on Windows (the script is bash; `bash` there may be WSL's).
 pub struct PgTls {
     pub dir: std::path::PathBuf,
     pub port: u16,
@@ -103,6 +103,10 @@ impl PgTls {
 
     pub fn start() -> Option<Self> {
         use std::time::{SystemTime, UNIX_EPOCH};
+        if cfg!(windows) {
+            eprintln!("(Postgres TLS tests skipped on Windows: scripts/dev/pgtls.sh is bash; Linux CI runs them)");
+            return None;
+        }
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or_default();
         let dir = std::env::temp_dir().join(format!("ductus-pgtls.{}.{nanos}", std::process::id()));
         let port = std::net::TcpListener::bind("127.0.0.1:0").ok()?.local_addr().ok()?.port();

@@ -7,8 +7,6 @@ source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
 DB=$DUCTUS_DATABASE_URL
-PGUSER_=${PGUSER_:-ductus}
-PGPASS_=${PGPASS_:-ductus}
 P=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB
 
@@ -23,8 +21,9 @@ mkdir -p "$P/interfaces/lookup" "$P/environments"
 cat >"$P/environments/dev.yaml" <<EOF
 variables:
   FACILITY: YORK-MAIN
-  DB_HOST: localhost
-  DB_NAME: $(sed -E 's#.*/([^/?]+).*#\1#' <<<"$DB")
+  DB_HOST: $PGHOST_
+  DB_PORT: $PGPORT_
+  DB_NAME: $PGDATABASE_
   DB_USER: $PGUSER_
 EOF
 cat >"$P/resources.yaml" <<'EOF'
@@ -32,6 +31,7 @@ databases:
   patient_db:
     postgres:
       host: ${DB_HOST}
+      port: ${DB_PORT}
       database: ${DB_NAME}
       user: ${DB_USER}
       password: ${secret:DB_PASSWORD}

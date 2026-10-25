@@ -7,6 +7,16 @@
 [ -f "$(dirname "${BASH_SOURCE[0]}")/db.local.sh" ] && source "$(dirname "${BASH_SOURCE[0]}")/db.local.sh"
 export DUCTUS_DATABASE_URL=${DUCTUS_DATABASE_URL:-postgres://ductus:ductus@localhost/ductus_dev}
 
+# The URL's parts, for the demos that configure a database resource on the same server (CI's is
+# `ductus dev`'s: its own port and login): PGUSER_ and PGPASS_ (a login set before wins), PGHOST_,
+# PGPORT_, PGDATABASE_. What the URL leaves out is libpq's default.
+url_parts='^postgres(ql)?://(([^:@/]*)(:([^@/]*))?@)?([^:/?]*)(:([0-9]+))?/([^?]*)'
+if [[ $DUCTUS_DATABASE_URL =~ $url_parts ]]; then
+  export PGUSER_=${PGUSER_:-${BASH_REMATCH[3]:-$(id -un)}} PGPASS_=${PGPASS_:-${BASH_REMATCH[5]}}
+  export PGHOST_=${BASH_REMATCH[6]:-localhost} PGPORT_=${BASH_REMATCH[8]:-5432} PGDATABASE_=${BASH_REMATCH[9]}
+fi
+unset url_parts
+
 # forget_test_users PATTERN...: delete test accounts (LIKE patterns; a plain name matches itself;
 # each must start with test-user-) and what refers to them, in one transaction. Accounts are never
 # deleted in the product, so every test and demo deletes the ones it made, or a long-lived database

@@ -32,6 +32,10 @@ fn free_port() -> u16 {
 
 impl Slapd {
     fn start() -> Option<Self> {
+        if cfg!(windows) {
+            eprintln!("(LDAP tests skipped on Windows: scripts/dev/slapd.sh is bash; Linux CI runs them)");
+            return None;
+        }
         if !Path::new("/usr/sbin/slapd").exists() {
             assert!(
                 std::env::var("DUCTUS_TEST_SLAPD").as_deref() != Ok("required"),

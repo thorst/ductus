@@ -301,8 +301,10 @@ mod tests {
         assert_eq!(send_mllp(&certificates, port, Some(connecting(Some("server-ca"), None)), "wait").await, Ok(()));
     }
 
-    /// A lab receiver whose certificate was made as a CA's (`openssl req -x509` does by default):
-    /// refused, in words that say so.
+    /// A lab receiver whose certificate was made as a CA's (`openssl req -x509` does by default),
+    /// trusted by naming it in `ca:`: refused, in words that say so. Except on Windows, whose own
+    /// verifier (the platform verifier hands it the chain) trusts a certificate that is itself a
+    /// trusted root, as Java and .NET do (nuances.md "A CA's certificate isn't a server's").
     #[tokio::test]
     async fn a_receiver_presenting_a_ca_certificate_is_refused_in_words() {
         let key = rcgen::KeyPair::generate().unwrap();
@@ -318,7 +320,12 @@ mod tests {
         ]);
         let certificates = Certificates::load(&entries).unwrap();
         let port = tls_receiver(&certificates, &ListenTls { certificate: "ours".into(), clients: None }).await;
-        let err = send_mllp(&certificates, port, Some(connecting(Some("server-ca"), None)), "wait").await.unwrap_err();
+        let sent = send_mllp(&certificates, port, Some(connecting(Some("server-ca"), None)), "wait").await;
+        if cfg!(windows) {
+            assert_eq!(sent, Ok(()), "Windows trusts the named certificate itself");
+            return;
+        }
+        let err = sent.unwrap_err();
         assert!(
             err.starts_with("transient: TLS: the receiver presents a CA's certificate (CA:TRUE) as its own"),
             "{err}"

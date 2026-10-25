@@ -310,6 +310,13 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> R
                     r.apis.len()
                 );
             }
+            for (name, written, read) in &r.without_drive {
+                println!(
+                    "⚠ certificate `{name}`: `{}` has no drive letter, so Windows reads it from the project's drive: {}. Write the whole path (C:\\... or \\\\server\\share\\...), or one relative to the project folder",
+                    written.display(),
+                    read.display()
+                );
+            }
             for name in r.insecure_ldap() {
                 println!(
                     "⚠ ldap `{name}`: plain ldap:// (`insecure: true`) sends passwords readable; use ldaps:// or `starttls: true` outside a test directory"

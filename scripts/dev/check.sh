@@ -59,3 +59,11 @@ if grep -qE 'FAILED|panicked|error\[' /tmp/ductus-test.log; then
 fi
 cargo clippy --release --all-targets -q -- -D warnings >/dev/null 2>&1 || { echo "CLIPPY FAILED"; exit 1; }
 echo "ALL CHECKS PASSED"
+
+# Build outputs only grow: cargo never deletes old artifacts (dependency bumps, Rust updates, a
+# worktree built into the same folder). Said here, with what to do over 30 GB.
+size_mb=$(du -sm "$CARGO_TARGET_DIR" 2>/dev/null | cut -f1)
+echo "build outputs: $CARGO_TARGET_DIR $(awk "BEGIN { printf \"%.1f\", ${size_mb:-0} / 1024 }") GB"
+if [ "${size_mb:-0}" -gt $((30 * 1024)) ]; then
+  echo "  over 30 GB: run \`cargo clean\` (the next check.sh builds everything again); in WSL, then compact its disk (CLAUDE.md, \"WSL's disk lives on D:\")"
+fi

@@ -915,7 +915,7 @@ impl Refusals {
 /// Connect to `address` as one of the engine's own checks: the local address is registered
 /// before connecting, so our listeners let it in (`allow:`) and don't log its handshake.
 pub async fn connect_own(address: SocketAddr) -> std::io::Result<TcpStream> {
-    let socket = || if address.is_ipv4() { tokio::net::TcpSocket::new_v4() } else { tokio::net::TcpSocket::new_v6() };
+    let socket = || ductus_mllp::net::socket(address);
     // Our listeners are on this machine: connecting from the listener's own address (loopback
     // for 0.0.0.0) gives a local address known before connecting. Elsewhere that bind fails, and
     // the address is only known once connected (nothing of ours is listening there anyway).
