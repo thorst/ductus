@@ -1845,9 +1845,19 @@ async fn an_interface_runs_on_one_engine_and_a_dead_ones_are_taken_over() {
         v
     });
 
-    // A dies (its lock connection closes): B takes y over at once, no timeout to wait out.
+    // A dies (its lock connection closes): B takes y over as soon as the server has ended A's
+    // session, no timeout to wait out. Closing only sends Terminate: the server frees the lock a
+    // moment later (a claim straight after it was refused once in CI), so give it 2 s.
     lock_a.release().await;
-    assert!(store.claim(&b, std::slice::from_ref(&y)).await.unwrap().is_empty(), "a dead engine's interfaces are free");
+    let mut free = false;
+    for _ in 0..40 {
+        if store.claim(&b, std::slice::from_ref(&y)).await.unwrap().is_empty() {
+            free = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(free, "a dead engine's interfaces are free");
     assert!(store.other_engines(&b).await.unwrap().iter().all(|e| e.instance != a), "a dead engine isn't listed");
     // A refused start leaves no record; a clean stop lets go and says when.
     store.forget_engine(&a).await.unwrap();
