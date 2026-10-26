@@ -328,7 +328,7 @@ async fn run(probe: Probe, timeout: Duration, mode: Mode, certificates: &Certifi
         trust,
         certificates,
         name_unchecked: false,
-        platform_only: matches!(probe.target, Target::Smtp { .. }),
+        stack: if matches!(probe.target, Target::Smtp { .. }) { Stack::Platform } else { Stack::Ours },
         alpn: None,
         seen_at: None,
     };
@@ -427,8 +427,8 @@ struct Run<'a> {
     certificates: &'a Certificates,
     /// The handshake checks the CA, not the name (Postgres's `verify-ca`).
     name_unchecked: bool,
-    /// The engine's connection verifies with a TLS stack of its own (`tls::Verifier::platform_only`).
-    platform_only: bool,
+    /// Whose verdict the engine's connection would get.
+    stack: Stack,
     /// The protocol the handshake asks for (ALPN): `tds/8.0` for SQL Server's strict.
     alpn: Option<&'static [u8]>,
     /// Where the certificate was read, when the target alone doesn't say (a SQL Server named
@@ -686,7 +686,7 @@ impl Run<'_> {
         };
         let advice = self.advice.len();
         self.name_unchecked = mode == SslMode::VerifyCa;
-        self.platform_only = true;
+        self.stack = Stack::Webpki;
         let trusted = self.tls_on(host, tcp).await;
         if mode.verifies() {
             if setting == Setting::Url {
@@ -876,7 +876,7 @@ impl Run<'_> {
         let local = ductus_core::pgtls::local(&c.host);
         let unverified = if local { Outcome::Ok } else { Outcome::Warn };
         let advice = self.advice.len();
-        self.platform_only = true;
+        self.stack = Stack::Webpki;
         let trusted = if c.encrypt == Encrypt::Strict {
             self.alpn = Some(TDS8_ALPN);
             self.tls(&name, address).await
@@ -1060,12 +1060,12 @@ impl Run<'_> {
             }
         };
         let presented = Arc::new(Mutex::new(Vec::new()));
-        let verifier = match trust.verifier() {
-            Ok(v) => Recording {
-                inner: if self.platform_only { v.platform_only() } else { v },
-                seen: presented.clone(),
-                name_unchecked: self.name_unchecked,
-            },
+        let verifier = match trust.verifier().and_then(|v| match self.stack {
+            Stack::Ours => Ok(v),
+            Stack::Platform => Ok(v.platform_only()),
+            Stack::Webpki => v.webpki_only(),
+        }) {
+            Ok(v) => Recording { inner: v, seen: presented.clone(), name_unchecked: self.name_unchecked },
             Err(e) => {
                 self.step("TLS", Outcome::Fail, format!("{e:#}"));
                 return false;
@@ -2061,6 +2061,18 @@ fn round(x: f64) -> String {
 
 fn strip_query(url: &str) -> String {
     url.split(['?', '#']).next().unwrap_or(url).to_string()
+}
+
+/// Which TLS stack the engine's connection to a target verifies with, so doctor's verdict is
+/// that connection's.
+#[derive(Debug, Clone, Copy)]
+enum Stack {
+    /// `tls::Verifier`: MLLP, HTTP, directories.
+    Ours,
+    /// The platform verifier alone: alert mail (lettre).
+    Platform,
+    /// webpki: Postgres (sqlx) and SQL Server (tiberius).
+    Webpki,
 }
 
 /// Verifies as the engine does (`tls::Verifier`), keeping the certificates the server presented

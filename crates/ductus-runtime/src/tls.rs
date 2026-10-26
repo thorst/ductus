@@ -699,7 +699,7 @@ impl Trust {
             platform: platform.context("loading this server's trusted certificates")?,
             roots: self.roots.clone(),
             system: std::sync::OnceLock::new(),
-            pinned: true,
+            judge: Judge::Ours,
         })
     }
 
@@ -736,16 +736,39 @@ pub struct Verifier {
     /// This server's trusted certificates, read the first time a CA's certificate is presented
     /// (the platform verifier keeps its own copy, out of reach).
     system: std::sync::OnceLock<Vec<CertificateDer<'static>>>,
-    /// Whether a trusted CA:TRUE certificate is accepted (see above).
-    pinned: bool,
+    judge: Judge,
+}
+
+/// Whose verdict a `Verifier` gives.
+#[derive(Debug)]
+enum Judge {
+    /// The engine's own connections: the platform's, with a trusted CA:TRUE certificate accepted
+    /// (see above).
+    Ours,
+    /// The platform verifier's alone.
+    Platform,
+    /// webpki's, over the same roots.
+    Webpki(Arc<rustls::client::WebPkiServerVerifier>),
 }
 
 impl Verifier {
-    /// The platform verifier's verdict alone, as connections with a TLS stack of their own see
-    /// it (alert mail through lettre, Postgres through sqlx, SQL Server through tiberius): for
-    /// doctor, which must say what those would.
+    /// The platform verifier's verdict alone, as alert mail sees it (lettre, which verifies with
+    /// the platform verifier and takes no verifier of ours): for doctor, which must say what that
+    /// connection would.
     pub fn platform_only(self) -> Self {
-        Self { pinned: false, ..self }
+        Self { judge: Judge::Platform, ..self }
+    }
+
+    /// webpki's verdict over the same roots (the `ca:`s and the system's), as Postgres (sqlx) and
+    /// SQL Server (tiberius) see it on every OS: for doctor.
+    pub fn webpki_only(self) -> Result<Self> {
+        let mut roots = rustls::RootCertStore::empty();
+        roots.add_parsable_certificates(self.roots.iter().cloned());
+        roots.add_parsable_certificates(rustls_native_certs::load_native_certs().certs);
+        let webpki = rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider())
+            .build()
+            .context("loading this server's trusted certificates")?;
+        Ok(Self { judge: Judge::Webpki(webpki), ..self })
     }
 
     fn trusts_exactly(&self, cert: &CertificateDer<'_>) -> bool {
@@ -799,10 +822,15 @@ impl ServerCertVerifier for Verifier {
         now: rustls::pki_types::UnixTime,
     ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
         use rustls::CertificateError as C;
-        let verdict = self.platform.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now);
-        if !self.pinned {
-            return verdict;
-        }
+        let verdict = match &self.judge {
+            Judge::Webpki(webpki) => {
+                return webpki.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now);
+            }
+            Judge::Platform => {
+                return self.platform.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now);
+            }
+            Judge::Ours => self.platform.verify_server_cert(end_entity, intermediates, server_name, ocsp_response, now),
+        };
         match verdict {
             Err(rustls::Error::InvalidCertificate(C::Other(e)))
                 if is_ca_as_leaf(&e) && self.trusts_exactly(end_entity) =>
@@ -1381,8 +1409,8 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     /// A CA's certificate trusted as it is must still be for the host and within its dates; with
-    /// `platform_only` (doctor, for connections with a TLS stack of their own) it's the platform's
-    /// verdict, which on Windows already accepts it.
+    /// `platform_only` (doctor, for alert mail) it's the platform's verdict, which on Windows
+    /// already accepts it; with `webpki_only` (Postgres, SQL Server) it's refused everywhere.
     #[test]
     fn a_ca_certificate_trusted_as_it_is_still_has_its_name_and_dates_checked() {
         use rustls::CertificateError as C;
@@ -1429,6 +1457,9 @@ mod tests {
         } else {
             assert!(matches!(refused(verify(&platform, "localhost", 0)), C::Other(e) if is_ca_as_leaf(&e)));
         }
+        // webpki's (Postgres and SQL Server): refused on every OS.
+        let webpki = trust.verifier().unwrap().webpki_only().unwrap();
+        assert!(matches!(refused(verify(&webpki, "localhost", 0)), C::Other(e) if is_ca_as_leaf(&e)));
 
         // A CA's certificate a trusted CA issued: refused everywhere (Windows alone would take it).
         let issuer = ca("receiver's CA");
