@@ -21,6 +21,11 @@ param(
     [string] $Done
 )
 $ErrorActionPreference = "Stop"
+# Started from pwsh 7 (CI's steps), Windows PowerShell inherits pwsh's module path and can't load
+# its own modules (ConvertTo-SecureString, LocalAccounts): use the machine's.
+if ($PSVersionTable.PSVersion.Major -le 5) {
+    $env:PSModulePath = [Environment]::GetEnvironmentVariable("PSModulePath", "Machine")
+}
 
 function Instance-Key {
     $names = Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Microsoft SQL Server\Instance Names\SQL" -ErrorAction SilentlyContinue

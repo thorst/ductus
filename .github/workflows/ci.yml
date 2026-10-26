@@ -274,7 +274,9 @@ jobs:
 
       # SQL Server Express with Windows logins (scripts/dev/sqlexpress.ps1), installed in the
       # background while the tests build (~3 min; the build takes longer). Windows PowerShell, not
-      # pwsh: the script uses System.Data.SqlClient and the LocalAccounts module.
+      # pwsh: the script uses System.Data.SqlClient and the LocalAccounts module. In a window of its
+      # own, writing its own log: started with -NoNewWindow it shared this step's console, which
+      # closes when the step ends, and choco's install stalled there.
       - name: SQL Server Express, in the background (Windows logins)
         shell: pwsh
         run: |
@@ -282,8 +284,9 @@ jobs:
           "::add-mask::$pw"
           "DUCTUS_TEST_SQLSERVER_WINDOWS_PASSWORD=$pw" >> $env:GITHUB_ENV
           $log = Join-Path $env:RUNNER_TEMP "sqlexpress.log"
-          Start-Process powershell -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError "$log.err" `
-            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts/dev/sqlexpress.ps1 -Password $pw -Install -Done `"$env:RUNNER_TEMP\sqlexpress.done`""
+          $done = Join-Path $env:RUNNER_TEMP "sqlexpress.done"
+          $script = (Resolve-Path scripts/dev/sqlexpress.ps1).Path
+          Start-Process powershell -WindowStyle Hidden -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command & { & '$script' -Password '$pw' -Install -Done '$done' *> '$log' }"
 
       - name: Web UI (the binary embeds it)
         working-directory: ui
@@ -322,7 +325,7 @@ jobs:
           $done = Join-Path $env:RUNNER_TEMP "sqlexpress.done"
           $log = Join-Path $env:RUNNER_TEMP "sqlexpress.log"
           while (-not (Test-Path $done) -and $sw.Elapsed.TotalMinutes -lt 15) { Start-Sleep 2 }
-          Get-Content $log, "$log.err" -ErrorAction SilentlyContinue
+          Get-Content $log -ErrorAction SilentlyContinue
           "waited $($sw.Elapsed) for it after the build"
           $result = Get-Content $done -ErrorAction SilentlyContinue
           if ($result -ne "ready") { throw "SQL Server Express: $result" }
