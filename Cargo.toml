@@ -7,3 +7,9 @@ version = "0.5.0-dev"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/thorst/ductus"
+
+# tiberius with SSPI Negotiate (Kerberos or NTLM) on Windows and sspi 0.23 for NTLM on Linux (0.18
+# can't resolve next to russh): our fork's branch ductus-0.13, cut from v0.13.0 with only our
+# commits, pinned to one. Offered upstream; dropped when a tiberius release has them.
+[patch.crates-io]
+tiberius = { git = "https://github.com/thorst/tiberius", rev = "94fea3f1491fe85862590fee8ce7cafa647a8e54" }

@@ -17,8 +17,9 @@
 //!       host: billing.hospital.local
 //!       instance: PROD                           # optional named instance
 //!       database: Billing
-//!       user: ductus
-//!       password: ${secret:BILLING_DB_PASSWORD}
+//!       user: ductus                             # a SQL login (`auth: sql`, the default), or
+//!       password: ${secret:BILLING_DB_PASSWORD}  #   `auth: windows`: as the service's own account
+//!                                                #   (Windows), or as `user: 'HOSPITAL\svc'` + password
 //!       ca: hospital-ca                          # optional: the CA that issued its certificate
 //!       encrypt: strict                          # optional: TDS 8 (TLS first), for servers that force it
 //!       name_in_certificate: sql1.hospital.org   # optional: when `host` isn't a name on its certificate
@@ -517,7 +518,7 @@ impl DbConnection {
     }
 }
 
-/// SQL Server, with SQL Server authentication (user and password).
+/// SQL Server, with a SQL login (user and password) or a Windows login.
 #[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SqlServerConnection {
@@ -528,6 +529,12 @@ pub struct SqlServerConnection {
     #[serde(default)]
     pub instance: Option<String>,
     pub database: String,
+    /// `sql` (the default: `user` and `password` are a SQL login) or `windows`.
+    #[serde(default)]
+    pub auth: SqlAuth,
+    /// The login (`auth: sql`), or the Windows account (`HOSPITAL\svc-lab`) with `auth: windows`;
+    /// empty there means the account the engine runs as. Empty is "not given".
+    #[serde(default)]
     pub user: String,
     #[serde(default)]
     pub password: String,
@@ -591,7 +598,76 @@ impl<'de> Deserialize<'de> for Encrypt {
     }
 }
 
+/// How the engine logs in to SQL Server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SqlAuth {
+    /// A SQL Server login: `user` and `password`.
+    #[default]
+    Sql,
+    /// A Windows login: the account the engine runs as (integrated, Windows only), or the named
+    /// `user` with its `password` (on Linux: NTLM).
+    Windows,
+}
+
+/// Who a SQL Server connection logs in as, worked out from its settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Login<'a> {
+    /// A SQL login.
+    Sql(&'a str),
+    /// The account the engine runs as (Windows's SSPI).
+    Integrated,
+    /// A named Windows account.
+    Windows(&'a str),
+}
+
+impl std::fmt::Display for Login<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Login::Sql(user) => write!(f, "SQL login `{user}`"),
+            Login::Integrated => f.write_str("Windows login as the account the engine runs as"),
+            Login::Windows(user) => write!(f, "Windows login `{user}`"),
+        }
+    }
+}
+
 impl SqlServerConnection {
+    /// Who it logs in as.
+    pub fn login(&self) -> Login<'_> {
+        match (self.auth, self.user.is_empty()) {
+            (SqlAuth::Sql, _) => Login::Sql(&self.user),
+            (SqlAuth::Windows, true) => Login::Integrated,
+            (SqlAuth::Windows, false) => Login::Windows(&self.user),
+        }
+    }
+
+    /// Logs in with NTLM from this machine whatever the domain offers: a named Windows account
+    /// from anything but Windows (no Kerberos there yet).
+    pub fn ntlm_only(&self) -> bool {
+        !cfg!(windows) && matches!(self.login(), Login::Windows(_))
+    }
+
+    /// What's wrong with its login settings, if anything (checked when resources.yaml is loaded).
+    fn login_problem(&self) -> Option<String> {
+        match (self.auth, self.user.is_empty(), self.password.is_empty()) {
+            (SqlAuth::Sql, true, _) => Some(
+                "a SQL login needs `user` (and `password`); for a Windows login say `auth: windows`".into(),
+            ),
+            (SqlAuth::Windows, true, false) => {
+                Some("`password` goes with a Windows account in `user` (`HOSPITAL\\svc-lab`)".into())
+            }
+            (SqlAuth::Windows, false, true) => Some(format!(
+                "the Windows account `{}` needs its `password` (from secrets); leave both out to log in as the account the engine runs as{}",
+                self.user,
+                if cfg!(windows) { "" } else { " (Windows only)" }
+            )),
+            (SqlAuth::Windows, true, true) if !cfg!(windows) => Some(
+                "`auth: windows` without `user` logs in as the account the engine runs as, which needs Windows: on Linux name an account (`user: 'HOSPITAL\\svc-lab'` and its `password`: NTLM), or use a SQL login".into(),
+            ),
+            _ => None,
+        }
+    }
+
     /// The server's certificate is checked (no `trust_server_certificate`).
     pub fn verifies(&self) -> bool {
         !self.trust_server_certificate
@@ -631,6 +707,9 @@ impl SqlServerConnection {
 
     /// What's wrong with its TLS settings, if anything (checked when resources.yaml is loaded).
     fn problem(&self) -> Option<String> {
+        if let Some(problem) = self.login_problem() {
+            return Some(problem);
+        }
         let trusting = "`trust_server_certificate` accepts any certificate";
         match (&self.ca, &self.name_in_certificate) {
             _ if !self.trust_server_certificate => None,
@@ -669,6 +748,7 @@ impl std::fmt::Debug for SqlServerConnection {
             .field("port", &self.port)
             .field("instance", &self.instance)
             .field("database", &self.database)
+            .field("auth", &self.auth)
             .field("user", &self.user)
             .field("encrypt", &self.encrypt)
             .field("verifies", &self.verifies())
@@ -751,6 +831,18 @@ impl Resources {
             .iter()
             .filter_map(|(name, d)| match d {
                 Database::Sqlserver(c) if !c.verifies() && !crate::pgtls::local(&c.host) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// SQL Servers this machine logs in to with NTLM only (a named Windows account from Linux):
+    /// for warnings.
+    pub fn ntlm_sqlserver(&self) -> Vec<&str> {
+        self.databases
+            .iter()
+            .filter_map(|(name, d)| match d {
+                Database::Sqlserver(c) if c.ntlm_only() => Some(name.as_str()),
                 _ => None,
             })
             .collect()
@@ -1065,6 +1157,54 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("so `name_in_certificate` would never be checked"), "{err}");
+    }
+
+    #[test]
+    fn sql_server_logins_are_sql_or_windows_and_integrated_needs_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("resources.yaml");
+        let load = |text: &str| {
+            std::fs::write(&file, format!("databases:\n{text}")).unwrap();
+            Resources::load(dir.path(), &Environment::with_variables("dev", &[])).map_err(|e| format!("{e:#}"))
+        };
+        let r = load(concat!(
+            "  a: { sqlserver: { host: h, database: d, user: u, password: p } }\n",
+            "  b: { sqlserver: { host: h, database: d, auth: sql, user: u } }\n",
+            "  c: { sqlserver: { host: h, database: d, auth: windows, user: 'HOSPITAL\\svc-lab', password: p } }\n",
+        ))
+        .unwrap();
+        let login = |name: &str| match &r.databases[name] {
+            Database::Sqlserver(c) => (c.login().to_string(), c.ntlm_only()),
+            _ => unreachable!(),
+        };
+        assert_eq!(login("a"), ("SQL login `u`".into(), false));
+        assert_eq!(login("b").0, "SQL login `u`");
+        assert_eq!(login("c"), ("Windows login `HOSPITAL\\svc-lab`".into(), !cfg!(windows)), "NTLM from Linux");
+        assert_eq!(r.ntlm_sqlserver(), if cfg!(windows) { vec![] } else { vec!["c"] });
+
+        // Integrated: the engine's own account, which only Windows has.
+        let integrated = load("  i: { sqlserver: { host: h, database: d, auth: windows } }\n");
+        if cfg!(windows) {
+            let r = integrated.unwrap();
+            let Database::Sqlserver(c) = &r.databases["i"] else { unreachable!() };
+            assert_eq!(c.login(), Login::Integrated);
+            assert_eq!(c.login().to_string(), "Windows login as the account the engine runs as");
+        } else {
+            let err = integrated.unwrap_err();
+            assert!(
+                err.contains("database `i`: `auth: windows` without `user` logs in as the account the engine runs as, which needs Windows"),
+                "{err}"
+            );
+        }
+
+        let err = load("  a: { sqlserver: { host: h, database: d } }\n").unwrap_err();
+        assert!(err.contains("a SQL login needs `user`"), "{err}");
+        let err = load("  a: { sqlserver: { host: h, database: d, auth: windows, password: p } }\n").unwrap_err();
+        assert!(err.contains("`password` goes with a Windows account in `user`"), "{err}");
+        let err = load("  a: { sqlserver: { host: h, database: d, auth: windows, user: 'H\\svc' } }\n").unwrap_err();
+        assert!(err.contains("the Windows account `H\\svc` needs its `password`"), "{err}");
+        let err = load("  a: { sqlserver: { host: h, database: d, user: u, auth: kerberos } }\n").unwrap_err();
+        assert!(err.contains("unknown variant `kerberos`"), "{err}");
     }
 
     #[test]

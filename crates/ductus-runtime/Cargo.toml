@@ -36,7 +36,9 @@ sha2 = "0.10.9"
 # Already in the tree through tokio: TCP keepalive on accepted connections (`allow::keepalive`).
 socket2 = "0.6.5"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "json", "tls-rustls-aws-lc-rs"] }
-tiberius = { version = "0.13.0", default-features = false, features = ["tds80", "rustls", "chrono", "sql-browser-tokio"] }
+# winauth: Windows logins on Windows through SSPI (Negotiate: Kerberos, else NTLM; our fork, see the
+# workspace's [patch.crates-io]).
+tiberius = { version = "0.13.0", default-features = false, features = ["tds80", "rustls", "chrono", "sql-browser-tokio", "winauth"] }
 tokio = { version = "1.53.2", features = ["full"] }
 tokio-util = { version = "0.7", features = ["compat"] }
 tokio-rustls = "0.26.6"
@@ -45,6 +47,10 @@ url = "2.5.8"
 utoipa = { version = "6.0.0", features = ["chrono"] }
 utoipa-axum = "0.3.0"
 x509-parser = "0.18.1"
+
+[target.'cfg(unix)'.dependencies]
+# A named Windows account from Linux: NTLM in pure Rust (sspi 0.23). Windows has SSPI itself.
+tiberius = { version = "0.13.0", default-features = false, features = ["sspi-rs"] }
 
 [build-dependencies]
 flate2 = "1.1.10"

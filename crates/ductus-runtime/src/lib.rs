@@ -171,6 +171,14 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
             "its certificate isn't checked: whoever answers at its address is believed (and sees every query); remove `trust_server_certificate` (with `ca:` for a private CA)"
         );
     }
+    for name in resources.ntlm_sqlserver() {
+        tracing::warn!(
+            database = name,
+            auth = "windows",
+            "a named Windows account logs in from Linux with NTLM (never Kerberos): Microsoft is retiring NTLM and \
+             some domains block it; a SQL login, or the engine on Windows, avoids it"
+        );
+    }
     let alerts = match alert_settings {
         Some(a) => {
             let wrong: Vec<String> = configs.iter().flat_map(|c| a.check_interface(&c.name, &c.alert)).collect();

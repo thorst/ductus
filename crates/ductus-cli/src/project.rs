@@ -332,6 +332,11 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> R
                     "⚠ database `{name}`: `trust_server_certificate: true` doesn't check its certificate (whoever answers at its address is believed, and sees every query): remove it, with `ca:` for a private CA (SQL Server's own generated certificate can't be verified: ask the DBA for one from your CA)"
                 );
             }
+            for name in r.ntlm_sqlserver() {
+                println!(
+                    "⚠ database `{name}`: a named Windows account logs in from Linux with NTLM, never Kerberos: Microsoft is retiring NTLM and some domains block it (the login is then refused); a SQL login, or the engine on Windows, avoids it"
+                );
+            }
             Some(r)
         }
         Err(e) => {

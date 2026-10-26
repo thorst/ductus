@@ -25,21 +25,24 @@ pub(crate) enum Pool {
 /// Database pools by resource name.
 pub(crate) type Pools = Arc<HashMap<String, Pool>>;
 
-/// A pool for a database resource; `size` overrides its `max_connections`. `tls`: what its CA
-/// and client certificate name, loaded (SQL Server: only the CA).
-fn make_pool(db: &Database, size: Option<u32>, tls: Option<&DbTls>) -> Pool {
+/// A pool for the database resource `name`; `size` overrides its `max_connections`. `tls`: what
+/// its CA and client certificate name, loaded (SQL Server: only the CA).
+fn make_pool(name: &str, db: &Database, size: Option<u32>, tls: Option<&DbTls>) -> Pool {
     match db {
         Database::Postgres(c) => {
             let c = DbConnection { max_connections: size.unwrap_or(c.max_connections), ..c.clone() };
             Pool::Postgres(postgres_pool(&c, tls.cloned().unwrap_or_default()))
         }
-        Database::Sqlserver(c) => Pool::Sqlserver(Box::new(mssql::Pool::new(
-            &ductus_core::resources::SqlServerConnection {
-                max_connections: size.unwrap_or(c.max_connections),
-                ..c.clone()
-            },
-            tls.and_then(|t| t.ca.as_deref()),
-        ))),
+        Database::Sqlserver(c) => Pool::Sqlserver(Box::new(
+            mssql::Pool::new(
+                &ductus_core::resources::SqlServerConnection {
+                    max_connections: size.unwrap_or(c.max_connections),
+                    ..c.clone()
+                },
+                tls.and_then(|t| t.ca.as_deref()),
+            )
+            .said_as(name),
+        )),
     }
 }
 
@@ -79,7 +82,7 @@ impl SharedServices {
         let databases = resources
             .databases
             .iter()
-            .map(|(name, db)| (name.clone(), make_pool(db, None, db_tls.get(name))))
+            .map(|(name, db)| (name.clone(), make_pool(name, db, None, db_tls.get(name))))
             .collect();
         let mut api_http = BTreeMap::new();
         for (name, api) in resources.apis.iter().filter(|(_, a)| a.tls().is_set()) {
@@ -120,7 +123,7 @@ impl SharedServices {
                 .dedicated_pools
                 .iter()
                 .filter_map(|(name, size)| {
-                    let pool = make_pool(self.definitions.get(name)?, Some(*size), self.db_tls.get(name));
+                    let pool = make_pool(name, self.definitions.get(name)?, Some(*size), self.db_tls.get(name));
                     Some((name.clone(), pool))
                 })
                 .collect(),

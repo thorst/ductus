@@ -5,9 +5,10 @@
 
 use anyhow::anyhow;
 use chrono::{DateTime, FixedOffset, NaiveDate, NaiveDateTime, NaiveTime};
-use ductus_core::resources::{Encrypt, SqlServerConnection};
+use ductus_core::resources::{Encrypt, Login, SqlServerConnection};
 use ductus_script::TRANSIENT;
 use serde_json::{Map, Value};
+use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 use tiberius::error::Error;
@@ -34,10 +35,20 @@ const TRANSIENT_CODES: &[u32] = &[
     8645,  // timed out waiting for memory
     4060,  // cannot open database (offline, restoring, failing over, or no access)
     18456, // login failed
+    18452, // Windows login refused by Windows (worded by `windows_refusal`, as 18456 for Windows logins)
     976, 978, 983, // availability group replica not readable / changing role
     40197, 40501, 40613, 49918, 49919, 49920, 4221, 10928, 10929, // Azure SQL: busy or reconfiguring
     233, 10053, 10054, 10060, 64, // connection broken
 ];
+
+/// Who and how a login was made: one statement, any login may run it (`sys.dm_exec_connections`
+/// needs VIEW SERVER PERFORMANCE STATE on 2022; `CONNECTIONPROPERTY` doesn't).
+pub(crate) const WHO_AND_HOW: &str =
+    "SELECT SUSER_SNAME() AS who, CAST(CONNECTIONPROPERTY('auth_scheme') AS nvarchar(40)) AS scheme";
+
+/// Resources whose Windows login has been said in the log, with what was said: once per SQL
+/// Server for the process, whichever of its pools (shared or dedicated) connects first.
+static SAID: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
 
 pub struct Pool {
     config: Config,
@@ -45,8 +56,82 @@ pub struct Pool {
     browse: bool,
     /// What its TLS refusals are worded with.
     tls: TlsSettings,
+    /// What its Windows login refusals and its log line are worded with.
+    login: LoginSettings,
+    /// The resource's name, when its first Windows login is to be said in the log.
+    say_as: Option<String>,
     idle: Mutex<Vec<(Connection, Instant)>>,
     permits: Semaphore,
+}
+
+/// A connection's login, for words: who, where, and whether NTLM is all it can do.
+#[derive(Clone)]
+pub(crate) struct LoginSettings {
+    /// `Login`'s words: "Windows login `HOSPITAL\svc-lab`".
+    said: String,
+    windows: bool,
+    ntlm_only: bool,
+    /// The SPN Kerberos would need: `MSSQLSvc/sql1.hospital.org:1433` (or `:INSTANCE`).
+    spn: String,
+    local: bool,
+}
+
+impl LoginSettings {
+    pub(crate) fn new(c: &SqlServerConnection) -> Self {
+        let at = match (&c.instance, c.port) {
+            (Some(instance), None) => instance.clone(),
+            (_, port) => port.unwrap_or(1433).to_string(),
+        };
+        Self {
+            said: c.login().to_string(),
+            windows: !matches!(c.login(), Login::Sql(_)),
+            ntlm_only: c.ntlm_only(),
+            spn: format!("MSSQLSvc/{}:{at}", c.host),
+            local: ductus_core::pgtls::local(&c.host),
+        }
+    }
+
+    /// How a login went, from `CONNECTIONPROPERTY('auth_scheme')`: `Windows, Kerberos`;
+    /// `Windows, NTLM: ...` with why and what to do; `SQL login`.
+    pub(crate) fn how(&self, scheme: &str) -> String {
+        match scheme.trim().to_ascii_uppercase().as_str() {
+            "KERBEROS" => "Windows, Kerberos".into(),
+            "NTLM" if self.ntlm_only => "Windows, NTLM: from Linux it always is".into(),
+            "NTLM" if self.local => "Windows, NTLM: usual for a SQL Server on this machine".into(),
+            "NTLM" => format!(
+                "Windows, NTLM: no Kerberos, most likely no SPN for {} (ask the DBA to register it; NTLM is being \
+                 retired)",
+                self.spn
+            ),
+            "SQL" => "SQL login".into(),
+            other => other.to_string(),
+        }
+    }
+}
+
+/// A refused Windows login in words: 18452 (Windows didn't accept the account: SQL Server says
+/// "untrusted domain" whatever the cause) or 18456 (accepted, but no way in on SQL Server's side).
+pub(crate) fn windows_refusal(login: &LoginSettings, code: u32) -> String {
+    let account = if login.said.contains("the account the engine runs as") {
+        " (on the network a service's own account, `NT SERVICE\\Ductus`, is the computer account: \
+         DOMAIN\\COMPUTER$)"
+    } else {
+        ""
+    };
+    if code == 18456 {
+        return format!(
+            "SQL Server refused the {}{account}: Windows accepted the account, but SQL Server has no login for it \
+             (CREATE LOGIN ... FROM WINDOWS), or the login is disabled or can't open its default database \
+             (SQL Server error 18456)",
+            login.said
+        );
+    }
+    let ntlm = if login.ntlm_only { "NTLM (all a login from Linux can use) blocked" } else { "NTLM blocked" };
+    format!(
+        "SQL Server refused the {}{account}: a wrong password, an account the server's Windows doesn't know, or \
+         {ntlm} by the domain (SQL Server error 18452 says \"untrusted domain\" for all three)",
+        login.said
+    )
 }
 
 /// A connection's TLS settings, for wording its refusals.
@@ -70,7 +155,15 @@ impl Pool {
             config.instance_name(instance);
         }
         config.database(&c.database);
-        config.authentication(AuthMethod::sql_server(&c.user, &c.password));
+        config.authentication(match c.login() {
+            Login::Sql(user) => AuthMethod::sql_server(user, &c.password),
+            Login::Windows(user) => AuthMethod::windows(user, &c.password),
+            // resources.yaml refuses integrated anywhere but Windows.
+            #[cfg(windows)]
+            Login::Integrated => AuthMethod::Integrated,
+            #[cfg(not(windows))]
+            Login::Integrated => AuthMethod::None,
+        });
         config.application_name("ductus");
         config.encryption(match c.encrypt {
             Encrypt::Mandatory => EncryptionLevel::Required,
@@ -93,9 +186,20 @@ impl Pool {
                 named_ca: ca.is_some(),
                 strict: c.encrypt == Encrypt::Strict,
             },
+            login: LoginSettings::new(c),
+            say_as: None,
             idle: Mutex::new(Vec::new()),
             permits: Semaphore::new(c.max_connections.max(1) as usize),
         }
+    }
+
+    /// Its first Windows login is said in the log as the resource `name`'s (once per resource):
+    /// who the server took it for and how (Kerberos or NTLM). SQL logins aren't: nothing to learn.
+    pub fn said_as(mut self, name: &str) -> Self {
+        if self.login.windows {
+            self.say_as = Some(name.to_string());
+        }
+        self
     }
 
     pub async fn query(&self, sql: &str, params: Vec<Value>) -> anyhow::Result<Vec<Value>> {
@@ -141,7 +245,11 @@ impl Pool {
             };
             let connection = match reused {
                 Some((c, _)) => c,
-                None => self.connect().await.map_err(|e| self.classify(e))?,
+                None => {
+                    let mut c = self.connect().await.map_err(|e| self.classify(e))?;
+                    self.say(&mut c).await;
+                    c
+                }
             };
             Ok(Lease { pool: self, connection: Some(connection), _permit: permit })
         };
@@ -172,6 +280,38 @@ impl Pool {
         }
     }
 
+    /// The first Windows login of this resource, said once: who and how. One statement on the
+    /// new connection (only for Windows logins, once per process); a failure says nothing.
+    async fn say(&self, connection: &mut Connection) {
+        let Some(name) = &self.say_as else { return };
+        {
+            let mut said = SAID.lock().expect("said lock");
+            let said = said.get_or_insert_default();
+            if said.contains_key(name) {
+                return;
+            }
+            said.insert(name.clone(), String::new());
+        }
+        let row = async { connection.simple_query(WHO_AND_HOW).await?.into_row().await }.await;
+        if let Ok(Some(row)) = row {
+            let who: Option<&str> = row.get("who");
+            let scheme: Option<&str> = row.get("scheme");
+            let line = format!(
+                "SQL Server logged us in as {} ({})",
+                who.unwrap_or("?"),
+                self.login.how(scheme.unwrap_or("?"))
+            );
+            tracing::info!(database = name.as_str(), "{line}");
+            SAID.lock().expect("said lock").get_or_insert_default().insert(name.clone(), line);
+        }
+    }
+
+    /// What was said of resource `name`'s first Windows login, if anything (for tests).
+    #[cfg(test)]
+    fn said(name: &str) -> Option<String> {
+        SAID.lock().expect("said lock").as_ref()?.get(name).cloned()
+    }
+
     /// Temporary failures are marked so the worker retries the message instead of
     /// quarantining it (see `TRANSIENT_CODES`).
     fn classify(&self, e: Error) -> anyhow::Error {
@@ -179,8 +319,16 @@ impl Pool {
             return anyhow!("{TRANSIENT} database unavailable: TLS: {words}");
         }
         match &e {
+            Error::Server(t) if t.code() == 18452 || (t.code() == 18456 && self.login.windows) => {
+                anyhow!("{TRANSIENT} database unavailable: {}", windows_refusal(&self.login, t.code()))
+            }
             Error::Io { .. } | Error::Tls(_) | Error::Routing { .. } => {
                 anyhow!("{TRANSIENT} database unavailable: {e}")
+            }
+            // sspi-rs couldn't make the NTLM login (a malformed account name, an answer it can't read).
+            #[cfg(unix)]
+            Error::SspiRs(_) => {
+                anyhow!("{TRANSIENT} database unavailable: the {} couldn't be made: {e}", self.login.said)
             }
             Error::Server(t) if TRANSIENT_CODES.contains(&t.code()) => {
                 anyhow!("{TRANSIENT} database unavailable: {}", t.message())
@@ -422,15 +570,20 @@ pub(crate) mod tests {
     /// Runs against a real SQL Server when DUCTUS_TEST_SQLSERVER is set (`user:password@host:port`;
     /// CI sets it, `scripts/dev/sqlserver.sh` starts one locally).
     pub(crate) fn test_connection() -> Option<SqlServerConnection> {
-        let spec = std::env::var("DUCTUS_TEST_SQLSERVER").ok()?;
+        std::env::var("DUCTUS_TEST_SQLSERVER").ok().map(|spec| test_connection_to(&spec))
+    }
+
+    /// `user:password@host:port` as a connection: master, one connection, not verified.
+    fn test_connection_to(spec: &str) -> SqlServerConnection {
         let (credentials, address) = spec.rsplit_once('@').expect("DUCTUS_TEST_SQLSERVER = user:password@host:port");
         let (user, password) = credentials.split_once(':').expect("user:password");
         let (host, port) = address.split_once(':').unwrap_or((address, "1433"));
-        Some(SqlServerConnection {
+        SqlServerConnection {
             host: host.into(),
             port: Some(port.parse().unwrap()),
             instance: None,
             database: "master".into(),
+            auth: Default::default(),
             user: user.into(),
             password: password.into(),
             max_connections: 1,
@@ -442,7 +595,7 @@ pub(crate) mod tests {
             vendor: None,
             owner: None,
             custom: Default::default(),
-        })
+        }
     }
 
     fn test_pool(max_connections: u32) -> Option<Pool> {
@@ -594,6 +747,175 @@ pub(crate) mod tests {
             .await
             .unwrap_err();
         assert!(err.contains("the certificate isn't for billing.hospital.org"), "{err}");
+    }
+
+    #[test]
+    fn windows_logins_are_said_with_who_and_how() {
+        let c = |host: &str, user: &str| SqlServerConnection {
+            host: host.into(),
+            auth: ductus_core::resources::SqlAuth::Windows,
+            user: user.into(),
+            password: if user.is_empty() { String::new() } else { "p".into() },
+            ..test_connection_to("u:p@x:1433")
+        };
+        let named = LoginSettings::new(&c("sql1.hospital.org", "HOSPITAL\\svc-lab"));
+        assert_eq!(named.how("KERBEROS"), "Windows, Kerberos");
+        assert_eq!(named.how("SQL"), "SQL login");
+        if cfg!(windows) {
+            assert_eq!(
+                named.how("NTLM"),
+                "Windows, NTLM: no Kerberos, most likely no SPN for MSSQLSvc/sql1.hospital.org:1433 (ask the DBA to \
+                 register it; NTLM is being retired)"
+            );
+        } else {
+            assert_eq!(named.how("NTLM"), "Windows, NTLM: from Linux it always is");
+        }
+        let instance = SqlServerConnection { instance: Some("PROD".into()), port: None, ..c("sql1", "H\\svc") };
+        assert!(LoginSettings::new(&instance).spn.ends_with("MSSQLSvc/sql1:PROD"));
+
+        let refused = windows_refusal(&named, 18452);
+        assert!(
+            refused.starts_with("SQL Server refused the Windows login `HOSPITAL\\svc-lab`: a wrong password, an account the server's Windows doesn't know, or NTLM"),
+            "{refused}"
+        );
+        let refused = windows_refusal(&named, 18456);
+        assert!(refused.contains("Windows accepted the account, but SQL Server has no login for it"), "{refused}");
+        #[cfg(windows)]
+        {
+            let integrated = LoginSettings::new(&c("localhost", ""));
+            assert_eq!(integrated.how("NTLM"), "Windows, NTLM: usual for a SQL Server on this machine");
+            assert!(windows_refusal(&integrated, 18456).contains("the computer account: DOMAIN\\COMPUTER$"));
+        }
+    }
+
+    /// A SQL Server with Windows logins (`scripts/dev/sqlexpress.ps1`) when DUCTUS_TEST_SQLSERVER_WINDOWS
+    /// is set: `required` (this machine's, port 1433; CI) or `DOMAIN@host:port` (another machine's:
+    /// the NTLM check from Linux). The script's password is DUCTUS_TEST_SQLSERVER_WINDOWS_PASSWORD.
+    /// Returns its integrated connection (no user) and the accounts' domain.
+    pub(crate) fn windows_test() -> Option<(SqlServerConnection, String)> {
+        let spec = std::env::var("DUCTUS_TEST_SQLSERVER_WINDOWS").ok()?;
+        let (domain, address) = match spec.split_once('@') {
+            Some((domain, address)) => (domain.to_string(), address.to_string()),
+            None => (std::env::var("COMPUTERNAME").expect("COMPUTERNAME (Windows)"), "localhost:1433".into()),
+        };
+        let c = SqlServerConnection {
+            auth: ductus_core::resources::SqlAuth::Windows,
+            user: String::new(),
+            password: String::new(),
+            ..test_connection_to(&format!("u:p@{address}"))
+        };
+        Some((c, domain))
+    }
+
+    /// The test accounts' password (`sqlexpress.ps1 -Password`).
+    pub(crate) fn windows_password() -> String {
+        std::env::var("DUCTUS_TEST_SQLSERVER_WINDOWS_PASSWORD")
+            .expect("DUCTUS_TEST_SQLSERVER_WINDOWS_PASSWORD goes with DUCTUS_TEST_SQLSERVER_WINDOWS")
+    }
+
+    /// `c` as the local account `ductus-sql-<account>` of `domain`.
+    pub(crate) fn as_account(
+        c: &SqlServerConnection,
+        domain: &str,
+        account: &str,
+        password: &str,
+    ) -> SqlServerConnection {
+        SqlServerConnection { user: format!("{domain}\\ductus-sql-{account}"), password: password.into(), ..c.clone() }
+    }
+
+    async fn who_and_how(c: &SqlServerConnection) -> Result<(String, String), String> {
+        let rows = Pool::new(c, None).query(WHO_AND_HOW, vec![]).await.map_err(|e| e.to_string())?;
+        let field = |name: &str| rows[0][name].as_str().unwrap_or_default().to_string();
+        Ok((field("who"), field("scheme")))
+    }
+
+    #[tokio::test]
+    async fn logs_in_as_a_named_windows_account() {
+        let Some((c, domain)) = windows_test() else { return };
+        let named = as_account(&c, &domain, "named", &windows_password());
+        let (who, scheme) = who_and_how(&named).await.unwrap();
+        assert!(who.eq_ignore_ascii_case(&named.user), "{who}");
+        // No domain on the test machines: NTLM, said as such.
+        assert_eq!(scheme, "NTLM");
+        assert!(LoginSettings::new(&named).how(&scheme).starts_with("Windows, NTLM"));
+
+        // The start log says it once per resource, at its first connection (a SQL login: never).
+        let name = format!("named-{}", std::process::id());
+        let pool = Pool::new(&named, None).said_as(&name);
+        pool.query("SELECT 1 AS ok", vec![]).await.unwrap();
+        let said = Pool::said(&name).unwrap();
+        assert!(
+            said.to_lowercase()
+                .starts_with(&format!("sql server logged us in as {} (windows, ntlm", named.user.to_lowercase())),
+            "{said}"
+        );
+        let sql = format!("sql-{}", std::process::id());
+        let sql_login = SqlServerConnection { auth: ductus_core::resources::SqlAuth::Sql, ..named };
+        let _ = Pool::new(&sql_login, None).said_as(&sql).query("SELECT 1", vec![]).await;
+        assert_eq!(Pool::said(&sql), None);
+    }
+
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn logs_in_as_the_account_it_runs_as() {
+        let Some((c, _)) = windows_test() else { return };
+        let (who, scheme) = who_and_how(&c).await.unwrap();
+        let me = format!("{}\\{}", std::env::var("USERDOMAIN").unwrap(), std::env::var("USERNAME").unwrap());
+        assert!(who.eq_ignore_ascii_case(&me), "{who} vs {me}");
+        assert_eq!(scheme, "NTLM");
+    }
+
+    /// A wrong password is 18452 (Windows refused it), an account with no login 18456 (Windows
+    /// accepted it, SQL Server has no login): each worded, both temporary (the messages wait for the
+    /// fix, as for a refused SQL login).
+    #[tokio::test]
+    async fn a_refused_windows_login_is_worded_and_temporary() {
+        let Some((c, domain)) = windows_test() else { return };
+        let password = windows_password();
+        for (account, password, words) in [
+            ("named", "wrong-password", "a wrong password, an account the server's Windows doesn't know"),
+            ("nologin", password.as_str(), "Windows accepted the account, but SQL Server has no login for it"),
+        ] {
+            let refused = as_account(&c, &domain, account, password);
+            let err = who_and_how(&refused).await.unwrap_err();
+            assert!(err.contains(TRANSIENT), "{account}: {err}");
+            assert!(
+                err.contains(&format!(
+                    "SQL Server refused the Windows login `{domain}\\ductus-sql-{account}`: {words}"
+                )),
+                "{account}: {err}"
+            );
+        }
+    }
+
+    /// How long a Windows login takes against a SQL login on the same server (run by hand or by
+    /// CI with `--ignored --nocapture`): each the median of 10 new connections.
+    #[tokio::test]
+    #[ignore]
+    async fn time_a_windows_login_against_a_sql_login() {
+        let Some((c, domain)) = windows_test() else { return };
+        let password = windows_password();
+        let sql = SqlServerConnection {
+            auth: ductus_core::resources::SqlAuth::Sql,
+            user: "ductus_sql".into(),
+            password: password.clone(),
+            ..c.clone()
+        };
+        let mut logins =
+            vec![("SQL login", sql), ("named Windows account", as_account(&c, &domain, "named", &password))];
+        if cfg!(windows) {
+            logins.push(("integrated", c.clone()));
+        }
+        for (what, login) in logins {
+            let mut took = Vec::new();
+            for _ in 0..10 {
+                let started = Instant::now();
+                who_and_how(&login).await.unwrap();
+                took.push(started.elapsed());
+            }
+            took.sort();
+            println!("{what}: median {:?} (min {:?}, max {:?})", took[5], took[0], took[9]);
+        }
     }
 
     #[tokio::test]

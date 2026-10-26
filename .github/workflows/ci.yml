@@ -251,7 +251,8 @@ jobs:
         run: bash scripts/demo-packages.sh
 
   # The Rust tests on Windows (paths, line endings, sockets and file renames behave differently
-  # there), on `ductus dev`'s Postgres, in parallel with the others. Skipped here, each with its
+  # there), on `ductus dev`'s Postgres, in parallel with the others, and SQL Server's Windows logins
+  # against SQL Server Express (DUCTUS_TEST_SQLSERVER_WINDOWS=required). Skipped here, each with its
   # note: the tests that need bash helpers (the TLS Postgres, slapd), the SQL Server-on-Linux tests,
   # and the `allow` tests that send from 127.0.0.2 (Linux only).
   windows-tests:
@@ -271,8 +272,18 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
 
-      # 0.6.5.2: SQL Server Express goes here, installed in the background while the tests build
-      # (~3 min; the build takes longer), for the Windows-login tests.
+      # SQL Server Express with Windows logins (scripts/dev/sqlexpress.ps1), installed in the
+      # background while the tests build (~3 min; the build takes longer). Windows PowerShell, not
+      # pwsh: the script uses System.Data.SqlClient and the LocalAccounts module.
+      - name: SQL Server Express, in the background (Windows logins)
+        shell: pwsh
+        run: |
+          $pw = "Dx-" + [guid]::NewGuid()
+          "::add-mask::$pw"
+          "DUCTUS_TEST_SQLSERVER_WINDOWS_PASSWORD=$pw" >> $env:GITHUB_ENV
+          $log = Join-Path $env:RUNNER_TEMP "sqlexpress.log"
+          Start-Process powershell -NoNewWindow -RedirectStandardOutput $log -RedirectStandardError "$log.err" `
+            -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File scripts/dev/sqlexpress.ps1 -Password $pw -Install -Done `"$env:RUNNER_TEMP\sqlexpress.done`""
 
       - name: Web UI (the binary embeds it)
         working-directory: ui
@@ -304,8 +315,24 @@ jobs:
           "DUCTUS_DATABASE_URL=$($url.Trim())" >> $env:GITHUB_ENV
           "DUCTUS_TEST_DATABASE_URL=$($url.Trim())" >> $env:GITHUB_ENV
 
+      - name: SQL Server Express ready
+        shell: pwsh
+        run: |
+          $sw = [Diagnostics.Stopwatch]::StartNew()
+          $done = Join-Path $env:RUNNER_TEMP "sqlexpress.done"
+          $log = Join-Path $env:RUNNER_TEMP "sqlexpress.log"
+          while (-not (Test-Path $done) -and $sw.Elapsed.TotalMinutes -lt 15) { Start-Sleep 2 }
+          Get-Content $log, "$log.err" -ErrorAction SilentlyContinue
+          "waited $($sw.Elapsed) for it after the build"
+          $result = Get-Content $done -ErrorAction SilentlyContinue
+          if ($result -ne "ready") { throw "SQL Server Express: $result" }
+          "DUCTUS_TEST_SQLSERVER_WINDOWS=required" >> $env:GITHUB_ENV
+
       - name: Unit and integration tests
         run: cargo test --release --locked
+
+      - name: Windows login time vs a SQL login (measured, not judged)
+        run: cargo test --release --locked -p ductus-runtime --lib time_a_windows_login -- --ignored --nocapture
 
   # The Windows build, installer and service, in parallel with the others.
   windows:

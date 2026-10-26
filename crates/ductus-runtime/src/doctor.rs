@@ -841,20 +841,36 @@ impl Run<'_> {
             }
         };
         let pool = mssql::Pool::new(&SqlServerConnection { max_connections: 1, ..c.clone() }, ca.as_deref());
-        match tokio::time::timeout(self.timeout, pool.query("SELECT @@VERSION AS version", Vec::new())).await {
+        let who_and_how = format!("{}, @@VERSION AS version", mssql::WHO_AND_HOW);
+        let login = mssql::LoginSettings::new(c);
+        match tokio::time::timeout(self.timeout, pool.query(&who_and_how, Vec::new())).await {
             Ok(Ok(rows)) => {
-                let version =
-                    rows.first().and_then(|r| r["version"].as_str()).and_then(|v| v.lines().next()).unwrap_or("");
+                let row = rows.first();
+                let field = |name: &str| row.and_then(|r| r[name].as_str()).unwrap_or("?");
+                let version = field("version").lines().next().unwrap_or("");
+                let how = login.how(field("scheme"));
+                // NTLM where Kerberos was possible (Windows, another machine) passes with a warning.
+                let outcome = if how.contains("most likely no SPN") { Outcome::Warn } else { Outcome::Ok };
                 self.step(
                     "login",
-                    Outcome::Ok,
-                    format!("as `{}`, database `{}`: {}; {}", c.user, c.database, version.trim(), c.expected()),
+                    outcome,
+                    format!(
+                        "as {} ({how}), database `{}`: {}; {}",
+                        field("who"),
+                        c.database,
+                        version.trim(),
+                        c.expected()
+                    ),
                 );
             }
             Ok(Err(e)) => {
                 let message =
                     e.to_string().replace(TRANSIENT, "").replace("database unavailable: ", "").trim().to_string();
-                if message.contains("Login failed") {
+                if message.contains("SQL Server has no login for it") {
+                    self.advise("Ask the DBA for a login for this account (CREATE LOGIN [DOMAIN\\name] FROM WINDOWS) and a user in the database, or to enable it. The server's error log has the refusal's own reason.");
+                } else if message.contains("SQL Server refused the Windows login") {
+                    self.advise("Check the password (secret) for this environment and the account's name (DOMAIN\\name), then whether the domain allows NTLM, or get Kerberos working (an SPN for the server). The server's error log has the refusal's own reason.");
+                } else if message.contains("Login failed") {
                     self.advise(format!("The login `{}` was refused: check its password (secret) for this environment, and that SQL Server logins are enabled on the server.", c.user));
                 } else if message.contains("Cannot open database") {
                     self.advise(format!("The login works but can't open `{}`: check the name, and that the login is mapped to that database.", c.database));
@@ -2773,6 +2789,31 @@ mod tests {
         assert_eq!(step(&check, "login").outcome, Outcome::Fail, "{check:#?}");
         assert!(!step(&check, "login").detail.contains(TRANSIENT), "{check:#?}");
         assert!(check.advice.iter().any(|a| a.contains("was refused")), "{check:#?}");
+    }
+
+    /// Doctor's login step says who the server took a Windows login for and how (NTLM here: no
+    /// domain), and a refused one in words with what to check.
+    #[tokio::test]
+    async fn says_who_a_windows_login_is_and_how() {
+        use crate::mssql::tests::{as_account, windows_password, windows_test};
+        let Some((c, domain)) = windows_test() else { return };
+        let named = as_account(&c, &domain, "named", &windows_password());
+        let check = one(Target::Database("billing".into(), Database::Sqlserver(named.clone()))).await;
+        let login = step(&check, "login");
+        assert!(
+            login
+                .detail
+                .to_lowercase()
+                .starts_with(&format!("as {}\\ductus-sql-named (windows, ntlm", domain.to_lowercase())),
+            "{check:#?}"
+        );
+        assert!(login.detail.contains("Microsoft SQL Server"), "{check:#?}");
+
+        let wrong = SqlServerConnection { password: "wrong-password".into(), ..named };
+        let check = one(Target::Database("billing".into(), Database::Sqlserver(wrong))).await;
+        assert_eq!(step(&check, "login").outcome, Outcome::Fail, "{check:#?}");
+        assert!(step(&check, "login").detail.contains("SQL Server refused the Windows login"), "{check:#?}");
+        assert!(check.advice.iter().any(|a| a.contains("whether the domain allows NTLM")), "{check:#?}");
     }
 
     /// The test server's CA as the `certificates:` entry `sql-ca` (and `other-ca`, which issued
