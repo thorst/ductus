@@ -334,8 +334,10 @@ jobs:
       - name: Unit and integration tests
         run: cargo test --release --locked
 
+      # --workspace, not -p ductus-runtime: one package alone resolves its features differently and
+      # rebuilt for 5 min; the workspace's lib tests are what the step above built.
       - name: Windows login time vs a SQL login (measured, not judged)
-        run: cargo test --release --locked -p ductus-runtime --lib time_a_windows_login -- --ignored --nocapture
+        run: cargo test --release --locked --workspace --lib time_a_windows_login -- --ignored --nocapture
 
   # The Windows build, installer and service, in parallel with the others.
   windows:
