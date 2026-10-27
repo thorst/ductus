@@ -1256,11 +1256,13 @@ async fn messages_are_resent_and_corrected_through_the_api() {
         (&"edit".into(), &format!("{name}-operator").into(), &"unit typo".into())
     );
     assert_eq!((&action["previous_status"], &action["copy"]), (&"quarantined".into(), &copy.into()));
-    let made = get(&format!("/messages/{copy}")).await;
-    assert_eq!(
-        (&made["copy_of"], &made["control_id"], &made["status"]),
-        (&c2.into(), &"C2-FIX".into(), &"sent".into())
+    // The receiver has it (its ACK came back); the engine records it as sent a moment later.
+    assert!(
+        eventually(async || get(&format!("/messages/{copy}")).await["status"] == "sent").await,
+        "the copy is recorded as sent"
     );
+    let made = get(&format!("/messages/{copy}")).await;
+    assert_eq!((&made["copy_of"], &made["control_id"]), (&c2.into(), &"C2-FIX".into()));
     assert_eq!(made["deliveries"].as_array().unwrap().len(), 1, "for the lab only: {made}");
     assert_eq!(std::fs::read_dir(&out_dir).unwrap().count(), 3, "the archive isn't sent the copy");
 
