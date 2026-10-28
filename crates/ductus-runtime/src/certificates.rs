@@ -262,6 +262,7 @@ pub async fn run(engine: &Engine, mode: Mode, who: &str, only: &[String], timeou
         host: doctor::hostname(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         seconds: started.elapsed().as_secs_f64(),
+        notes: Vec::new(),
         checks,
     };
     let rows: Vec<CertificateRow> = report

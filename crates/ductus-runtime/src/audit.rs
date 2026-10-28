@@ -44,7 +44,7 @@ pub async fn start(
         Ok(PreviousRun::First) => ("first", None),
         Ok(PreviousRun::Stopped(at)) => ("stopped", Some(at)),
         Ok(PreviousRun::Unclean(at)) => {
-            tracing::warn!(%host, started = %at, "the last run of the engine on this host did not stop cleanly (it was killed, crashed or lost power); messages in hand are processed again, as the delivery guarantee says");
+            tracing::warn!(%host, started = %at, "{}", crate::events::PREVIOUS_RUN_UNCLEAN);
             ("unclean", Some(at))
         }
         Err(e) => {

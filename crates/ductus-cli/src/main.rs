@@ -7,7 +7,6 @@ mod init;
 mod new;
 mod owners;
 mod project;
-#[cfg(windows)]
 mod service;
 mod sinks;
 mod tools;
@@ -330,6 +329,11 @@ enum Command {
         #[command(subcommand)]
         action: CertAction,
     },
+    /// The Windows service (as an administrator).
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Print the REST API's OpenAPI document (the same as `GET /api/v1/openapi.json`, without a
     /// running engine).
     ApiSpec,
@@ -427,6 +431,27 @@ enum Command {
 enum KeyKind {
     Rsa,
     Ecdsa,
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    /// Show the account the service runs as; with NAME, run it as that account: grants it "Log on
+    /// as a service", checks its password, and restarts the service if it was running. NAME is
+    /// `DOMAIN\svc-ductus$` (a gMSA: no password), `DOMAIN\name` or `.\name` (asks for its
+    /// password; give it again after every upgrade), or `NT SERVICE\Ductus` (the default).
+    Account {
+        name: Option<String>,
+        /// Read the password from stdin (one line) instead of asking.
+        #[arg(long, requires = "name")]
+        password_stdin: bool,
+        /// Start the service afterwards even if it was stopped.
+        #[arg(long, requires = "name")]
+        start: bool,
+    },
+    /// The installer's step after installing the service (grants the logon right, sets the
+    /// service's SID type, says when the account needs its password).
+    #[command(hide = true)]
+    Installed,
 }
 
 #[derive(Subcommand)]
@@ -740,6 +765,22 @@ fn main() -> Result<()> {
     tokio::runtime::Builder::new_multi_thread().enable_all().build()?.block_on(run(cli))
 }
 
+#[cfg(windows)]
+fn service_command(action: ServiceAction) -> Result<()> {
+    match action {
+        ServiceAction::Account { name: None, .. } => service::account::show(),
+        ServiceAction::Account { name: Some(name), password_stdin, start } => {
+            service::account::change(&name, password_stdin, start)
+        }
+        ServiceAction::Installed => service::account::installed(),
+    }
+}
+
+#[cfg(not(windows))]
+fn service_command(_: ServiceAction) -> Result<()> {
+    anyhow::bail!("`ductus service` is for the Windows service; on Linux systemd runs the engine (`systemctl`)")
+}
+
 async fn run(cli: Cli) -> Result<()> {
     tracing_subscriber::fmt()
         // Plain text when logging to a file or pipe (no color codes in log files).
@@ -898,6 +939,7 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Cert { action: CertAction::Show { target, key, root, env } } => {
             exit_on_failure(cert::show(&target, key.as_deref(), &root, &env))
         }
+        Command::Service { action } => service_command(action),
         Command::Types { root } => project::types(&root).await,
         Command::ApiSpec => {
             println!("{}", serde_json::to_string_pretty(&ductus_runtime::api::openapi())?);

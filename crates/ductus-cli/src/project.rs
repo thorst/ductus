@@ -337,6 +337,9 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> R
                     "⚠ database `{name}`: a named Windows account logs in from Linux with NTLM, never Kerberos: Microsoft is retiring NTLM and some domains block it (the login is then refused); a SQL login, or the engine on Windows, avoids it"
                 );
             }
+            for note in crate::service::notes(Some(&r), false) {
+                println!("{note}");
+            }
             Some(r)
         }
         Err(e) => {

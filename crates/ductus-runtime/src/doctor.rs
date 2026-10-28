@@ -247,6 +247,9 @@ pub struct Report {
     pub host: String,
     pub version: String,
     pub seconds: f64,
+    /// Lines about this machine said before the checks (on Windows: the service's account).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
     pub checks: Vec<Check>,
 }
 
@@ -270,6 +273,9 @@ impl Report {
             count(Outcome::Warn),
             count(Outcome::Fail)
         );
+        for note in &self.notes {
+            let _ = writeln!(out, "{note}");
+        }
         for c in &self.checks {
             let _ = writeln!(out, "\n{} {}  {}", c.outcome.mark(), c.what, c.endpoint);
             if !c.used_by.is_empty() {

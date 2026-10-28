@@ -61,6 +61,7 @@ pub async fn run(o: Options) -> Result<bool> {
         host: doctor::hostname(),
         version: env!("CARGO_PKG_VERSION").to_string(),
         seconds: started.elapsed().as_secs_f64(),
+        notes: crate::service::notes(Some(&resources), true),
         checks,
     };
     let text = report.to_text();

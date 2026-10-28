@@ -6210,6 +6210,13 @@
           "host": {
             "type": "string"
           },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Lines about this machine said before the checks (on Windows: the service's account)."
+          },
           "seconds": {
             "type": "number",
             "format": "double"

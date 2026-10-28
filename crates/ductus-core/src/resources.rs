@@ -848,6 +848,17 @@ impl Resources {
             .collect()
     }
 
+    /// SQL Servers logged in to as the account the engine runs as (`auth: windows` without `user`).
+    pub fn integrated_sqlserver(&self) -> Vec<&str> {
+        self.databases
+            .iter()
+            .filter_map(|(name, d)| match d {
+                Database::Sqlserver(c) if c.login() == Login::Integrated => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Directories reached without TLS (`insecure: true`), for warnings.
     pub fn insecure_ldap(&self) -> Vec<&str> {
         self.ldap.iter().filter(|(_, l)| l.security() == LdapSecurity::Plain).map(|(n, _)| n.as_str()).collect()

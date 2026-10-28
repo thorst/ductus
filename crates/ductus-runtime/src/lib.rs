@@ -10,6 +10,7 @@ pub mod certificates;
 pub mod control;
 mod destination;
 pub mod doctor;
+pub mod events;
 mod files;
 pub mod gate;
 pub mod health;
@@ -565,7 +566,8 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         pool_threads,
         dedicated_threads = jobs - shared_count,
         took = ?phases.total(),
-        "started"
+        "{}",
+        events::STARTED
     );
     if let Some(started) = options.on_started.take() {
         started();
@@ -606,17 +608,18 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     let mut forced = false;
     tokio::select! {
         finished = tokio::time::timeout(limit, stop) => match finished {
-            Ok(()) => tracing::info!(took = ?started.elapsed(), "stopped"),
+            Ok(()) => tracing::info!(took = ?started.elapsed(), "{}", events::STOPPED),
             Err(_) => {
                 forced = true;
                 tracing::warn!(
-                    "still finishing after {limit:?}; stopping anyway: the messages in hand stay pending and are processed again at the next start (a destination may get one again)"
+                    "{} {limit:?}; stopping anyway: the messages in hand stay pending and are processed again at the next start (a destination may get one again)",
+                    events::STOP_TIMED_OUT
                 )
             }
         },
         signal = stop_signal() => {
             forced = true;
-            tracing::warn!(signal, "asked again: stopping now; the messages in hand are processed again at the next start")
+            tracing::warn!(signal, "{}", events::STOP_CUT_SHORT)
         }
     }
     owner.release(&store).await;

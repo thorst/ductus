@@ -2267,6 +2267,8 @@ export interface components {
             environment: string;
             generated_at: string;
             host: string;
+            /** @description Lines about this machine said before the checks (on Windows: the service's account). */
+            notes?: string[];
             /** Format: double */
             seconds: number;
             version: string;

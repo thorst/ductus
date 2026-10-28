@@ -369,6 +369,9 @@ jobs:
           dotnet tool install --global wix --version 5.0.2
           wix extension add --global WixToolset.Util.wixext/5.0.2
           ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version 0.5.0-ci -Out dist
+          # A second build (its own ProductCode): the demo's upgrades go from one to the other, a
+          # real major upgrade. The same file again would only be a maintenance run.
+          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version 0.5.0-ci -Out dist-upgrade
 
       - name: A Postgres for the service (ductus dev --database-only)
         shell: pwsh
@@ -385,9 +388,9 @@ jobs:
           if (-not $url) { Get-Content $log, "$log.err" -ErrorAction SilentlyContinue; throw "no database" }
           "DEMO_DATABASE_URL=$($url.Trim())" >> $env:GITHUB_ENV
 
-      - name: Installer demo (silent install, service, MLLP round trip, upgrade over it, uninstall)
+      - name: Installer demo (install, service, Event Log, upgrades, a named account, uninstall)
         shell: pwsh
-        run: ./scripts/demo-windows.ps1 -Msi (Get-Item dist/*.msi).FullName -DatabaseUrl $env:DEMO_DATABASE_URL -LogDir "$env:RUNNER_TEMP/demo-logs"
+        run: ./scripts/demo-windows.ps1 -Msi (Get-Item dist/*.msi).FullName -UpgradeMsi (Get-Item dist-upgrade/*.msi).FullName -DatabaseUrl $env:DEMO_DATABASE_URL -LogDir "$env:RUNNER_TEMP/demo-logs"
 
       - uses: actions/upload-artifact@v7
         if: always()

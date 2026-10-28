@@ -9,6 +9,13 @@
     version replace each other: AllowSameVersionUpgrades.
   - Nothing secret is ever an installer property (they end up in the install log). Settings go in
     C:\ProgramData\Ductus\ductus.env, which the installer creates once and never overwrites.
+
+  The service's account: SERVICEACCOUNT (default NT SERVICE\Ductus; a gMSA is DOMAIN\name$). An
+  upgrade without it keeps the account the service has (read from the service before the old
+  version is removed). An account with a password can't be kept across an upgrade (the password
+  can't be read back, and can't be a property): the service is installed with the account, left
+  stopped, and the Event Log says to run `ductus service account NAME`. Which accounts have a
+  password is the rule in ductus-core's service_account.rs: keep both in step.
 -->
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
   <Package Name="Ductus" Manufacturer="Ductus" Version="$(Version)" UpgradeCode="19FF28DC-C511-4D30-8FA3-AFDD57C90468"
@@ -33,6 +40,26 @@
         <FileSearch Id="EnvFileSearch" Name="ductus.env" />
       </DirectorySearch>
     </Property>
+    <!-- Was the service stopped on purpose? (it leaves logs\stopped; an upgrade then doesn't start it) -->
+    <Property Id="STOPPEDMARKER">
+      <DirectorySearch Id="LogDirSearch" Path="[CommonAppDataFolder]Ductus\logs" Depth="0">
+        <FileSearch Id="StoppedMarkerSearch" Name="stopped" />
+      </DirectorySearch>
+    </Property>
+
+    <!-- The account: given, else the one the installed service has, else NT SERVICE\Ductus. -->
+    <Property Id="SERVICEACCOUNT" Secure="yes" />
+    <Property Id="OLDSERVICEACCOUNT">
+      <RegistrySearch Id="OldServiceAccount" Root="HKLM" Key="SYSTEM\CurrentControlSet\Services\Ductus"
+                      Name="ObjectName" Type="raw" Bitness="always64" />
+    </Property>
+    <SetProperty Id="SERVICEACCOUNT" Action="KeepServiceAccount" Value="[OLDSERVICEACCOUNT]" After="AppSearch"
+                 Sequence="both" Condition="NOT SERVICEACCOUNT AND OLDSERVICEACCOUNT" />
+    <SetProperty Id="SERVICEACCOUNT" Action="DefaultServiceAccount" Value="NT SERVICE\Ductus" After="KeepServiceAccount"
+                 Sequence="both" Condition="NOT SERVICEACCOUNT" />
+    <!-- Not one of the computer's own accounts and not a gMSA: it has a password the installer can't give. -->
+    <SetProperty Id="NEEDSPASSWORD" Action="SetNeedsPassword" Value="1" After="DefaultServiceAccount" Sequence="both"
+                 Condition='NOT (SERVICEACCOUNT~="LocalSystem" OR SERVICEACCOUNT~&lt;&lt;"NT AUTHORITY\" OR SERVICEACCOUNT~&lt;&lt;"NT SERVICE\" OR SERVICEACCOUNT&gt;&gt;"$")' />
 
     <ComponentGroup Id="Engine" Directory="INSTALLFOLDER">
       <Component Id="EngineExe" Bitness="always64">
@@ -42,8 +69,11 @@
         <ServiceInstall Id="DuctusService" Name="Ductus" DisplayName="Ductus Integration Engine"
                         Description="Healthcare integration engine (HL7, MLLP, HTTP, files). Settings: C:\ProgramData\Ductus\ductus.env"
                         Type="ownProcess" Start="auto" ErrorControl="normal"
-                        Account="NT SERVICE\Ductus"
+                        Account="[SERVICEACCOUNT]"
                         Arguments="run --service --env-file &quot;[DATADIR]ductus.env&quot;" />
+        <!-- Its text in Event Viewer: the message table built into ductus.exe. -->
+        <util:EventSource Name="Ductus" Log="Application" EventMessageFile="[#DuctusExe]"
+                          SupportsErrors="yes" SupportsWarnings="yes" SupportsInformationals="yes" />
         <!-- A stop is a clean stop (the messages in hand are finished): wait for it. -->
         <ServiceControl Id="StopDuctus" Name="Ductus" Stop="both" Remove="uninstall" Wait="yes" />
         <!-- If it dies, try again after a minute, twice; then leave it for a person. -->
@@ -79,10 +109,12 @@
     <!--
       Started again after an upgrade, when settings exist: the stop for the upgrade shouldn't leave a
       configured engine down. A first install doesn't start it (nothing is configured: it would stop
-      at once for lack of a database).
+      at once for lack of a database). Nor does an upgrade of a service stopped on purpose, or of one
+      whose account needs its password again.
     -->
     <ComponentGroup Id="RestartAfterUpgrade" Directory="INSTALLFOLDER">
-      <Component Id="StartConfigured" Bitness="always64" Condition="WIX_UPGRADE_DETECTED AND ENVFILE">
+      <Component Id="StartConfigured" Bitness="always64"
+                 Condition="WIX_UPGRADE_DETECTED AND ENVFILE AND NOT STOPPEDMARKER AND NOT NEEDSPASSWORD">
         <RegistryValue Root="HKLM" Key="SOFTWARE\Ductus" Name="Upgraded" Type="integer" Value="1" KeyPath="yes" />
         <ServiceControl Id="StartDuctus" Name="Ductus" Start="install" Wait="no" />
       </Component>
@@ -98,9 +130,18 @@
                   ExeCommand="icacls.exe &quot;[DATADIR].&quot; /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F &quot;NT SERVICE\Ductus:(OI)(CI)RX&quot;" />
     <CustomAction Id="LetServiceWriteLogs" Directory="SystemFolder" Execute="deferred" Impersonate="no" Return="check"
                   ExeCommand="icacls.exe &quot;[LOGDIR].&quot; /grant &quot;NT SERVICE\Ductus:(OI)(CI)M&quot;" />
+    <!--
+      ductus.exe's own step once the service exists (`ductus service installed`): its SID type
+      unrestricted, so the permissions above (NT SERVICE\Ductus) hold whatever account runs it; the
+      account's "Log on as a service" right (none needed for the computer's own accounts); and an
+      Event Log warning when the account needs its password.
+    -->
+    <CustomAction Id="ServiceInstalled" FileRef="DuctusExe" ExeCommand="service installed" Execute="deferred"
+                  Impersonate="no" Return="check" />
     <InstallExecuteSequence>
       <Custom Action="LockDataFolder" After="InstallServices" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="LetServiceWriteLogs" After="LockDataFolder" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="ServiceInstalled" After="LetServiceWriteLogs" Condition="NOT REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
     <Feature Id="Main" Title="Ductus" Level="1">

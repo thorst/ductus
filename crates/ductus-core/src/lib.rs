@@ -19,6 +19,7 @@ pub mod resources;
 pub mod retention;
 pub mod schedule;
 pub mod secrets;
+pub mod service_account;
 pub mod settings;
 pub mod tls;
 

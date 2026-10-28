@@ -105,12 +105,22 @@ installer; a code-signing certificate is a later decision.
 | `C:\ProgramData\Ductus\ductus.env` | settings (the variables above; `NAME=value` lines): the installer writes a template once and never overwrites it |
 | `C:\ProgramData\Ductus\project\` | the project (a Git clone) |
 | `C:\ProgramData\Ductus\logs\` | `ductus.<date>.log`, daily, the last 14 kept |
-| service `Ductus` | "Ductus Integration Engine", `ductus.exe run --service --env-file C:\ProgramData\Ductus\ductus.env`, runs as the virtual account `NT SERVICE\Ductus` |
+| service `Ductus` | "Ductus Integration Engine", `ductus.exe run --service --env-file C:\ProgramData\Ductus\ductus.env`, runs as the virtual account `NT SERVICE\Ductus` (or `SERVICEACCOUNT`), its own SID unrestricted |
+| Event Log source `Ductus` | Application log; the text comes from a message table inside `ductus.exe` |
 
 - **Secrets are never installer properties** (they would end up in the install log): the database
   password lives in `ductus.env`. `C:\ProgramData\Ductus` is readable by administrators, SYSTEM and
   the service only; the service has no rights anywhere else. Give it access to what interfaces
   use (a folder a file destination writes to, a share) with `icacls "D:\Out" /grant "NT SERVICE\Ductus:(OI)(CI)M"`.
+- **The account:** `NT SERVICE\Ductus` by default. A gMSA: `msiexec /i ductus.msi /qn
+  SERVICEACCOUNT=HOSPITAL\svc-ductus$` (no password; upgrades keep it). An account with a password:
+  install, then `ductus service account HOSPITAL\svc-ductus --start` (asks for it;
+  `--password-stdin` in scripts), and again after every upgrade (the installer keeps the name,
+  leaves the service stopped and says so in the Event Log, event 1005). The installer and the
+  command grant "Log on as a service"; the service's own SID is in its token whatever the account
+  (`ServiceSidType` unrestricted), so the folder permissions above hold. An upgrade without
+  `SERVICEACCOUNT` keeps the account the service has. Rules and Group Policy: `docs/nuances.md`,
+  "Windows".
 - **Install:** registers the service (automatic start) but doesn't start it: nothing is configured,
   and without a database it would stop at once. After editing `ductus.env`, `Start-Service Ductus`
   (or reboot).
@@ -118,15 +128,21 @@ installer; a code-signing certificate is a later decision.
   and `ductus drain --stop` all stop cleanly, like SIGTERM on Linux. While starting and stopping
   it reports progress, so a long migration or a stop finishing the messages in hand isn't taken
   for a hang. If it fails it restarts after a minute, twice, then waits for a person.
-- **Upgrade:** `msiexec /i` of a newer MSI (or the same version: development builds replace each
-  other; the installer's version is major.minor.patch) stops the service cleanly, replaces the
-  program and, if `ductus.env` exists, starts it again. A service that was stopped on purpose
-  is started too: the installer can't tell. Settings, project and logs are never touched.
-- **Uninstall:** removes the service and the program; keeps `C:\ProgramData\Ductus`.
+- **Upgrade:** `msiexec /i` of a newer MSI (or another build of the same version: development
+  builds replace each other; the installer's version is major.minor.patch) stops the service
+  cleanly, replaces the program and, if `ductus.env` exists, starts it again, unless it was
+  stopped on purpose (a Stop leaves `logs\stopped`, which the installer looks for; the next start
+  removes it) or its account needs its password. Settings, project and logs are never touched.
+  Installing the *same file* again is not an upgrade: Windows Installer only checks the installed
+  product, removing and replacing nothing.
+- **Uninstall:** removes the service, the program and the Event Log source; keeps `C:\ProgramData\Ductus`.
 - `ductus dev` works on Windows too (its own Postgres), from a normal, non-elevated prompt.
-- Test: `scripts/demo-windows.ps1` (elevated; CI's `windows` job runs it on `windows-latest`:
-  silent install, service account and settings, start, health, an MLLP round trip, clean stop,
-  upgrade over a running install, uninstall).
+- Test: `scripts/demo-windows.ps1 -Msi A -UpgradeMsi B` (elevated; two builds of the installer, so
+  each upgrade is a real one; CI's `windows` job runs it on `windows-latest`): silent install,
+  service account, SID type and settings, start, health, an MLLP round trip, the Event Log's text,
+  clean stop, upgrade over a running install, an upgrade leaving a stopped service stopped, a named
+  local account (logon right, process owner, a wrong password refused), an upgrade waiting for its
+  password, uninstall, an install with `SERVICEACCOUNT`.
 - Building on Windows: Rust (MSVC) and the VS Build Tools' C++ workload are enough (V8 comes
   prebuilt). rusty_v8's build script makes a symlink when the target folder and the cargo
   registry are on different drives, which needs Developer Mode or an elevated shell: keep

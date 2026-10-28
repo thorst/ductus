@@ -700,6 +700,6 @@ impl Worker {
 fn ran_away(interface: &str, health: &Health, runaway: &Runaway) {
     tracing::error!(%interface, error = %runaway, "runaway script stopped");
     if let Some(reason) = health.runaway(runaway) {
-        tracing::error!(%interface, %reason, "interface stopped: its messages wait until the code is fixed and the engine restarted");
+        tracing::error!(%interface, %reason, "{}", crate::events::INTERFACE_STOPPED);
     }
 }

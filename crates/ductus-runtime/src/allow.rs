@@ -409,8 +409,8 @@ mod tests {
 
     #[tokio::test]
     async fn names_are_looked_up_on_the_timer_and_only_with_names() {
-        let (resolver, map, calls) = table(&[("epic.local", "10.1.30.22")]);
-        let names = Names::new(["epic.local".to_string()], resolver.clone());
+        let (resolver, map, _) = table(&[("epic.local", "10.1.30.22")]);
+        let names = Names::new(["epic.local".to_string()], resolver);
         names.resolve_all().await;
         map.lock().unwrap().insert("epic.local".into(), vec!["10.1.30.23".parse().unwrap()]);
         let stop = CancellationToken::new();
@@ -424,11 +424,12 @@ mod tests {
         assert!(names.has("epic.local", "10.1.30.23".parse().unwrap()));
         stop.cancel();
 
+        // A resolver of its own: the task above, cancelled, may still be finishing a lookup.
+        let (resolver, _, calls) = table(&[("epic.local", "10.1.30.22")]);
         let none = Names::new(Vec::<String>::new(), resolver);
-        let before = calls.load(Ordering::SeqCst);
         none.start_every(Duration::from_millis(1), CancellationToken::new());
         tokio::time::sleep(Duration::from_millis(30)).await;
-        assert_eq!(calls.load(Ordering::SeqCst), before, "no names, no task, no lookups");
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no names, no task, no lookups");
     }
 
     #[tokio::test]

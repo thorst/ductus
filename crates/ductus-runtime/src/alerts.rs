@@ -523,7 +523,15 @@ pub async fn evaluate(engine: &Engine) -> Result<()> {
         let change = change(engine, a, row, &j, step, now, &people).await?;
         if engine.store.change_alert(row.id, row.rev, &change).await? {
             if let Some(e) = &change.event {
-                tracing::info!(alert = %j.key, kind = e.kind, state = e.state, notifications = e.deliveries.len(), "alert");
+                tracing::info!(
+                    alert = %j.key,
+                    kind = e.kind,
+                    state = e.state,
+                    severity = e.severity.unwrap_or(""),
+                    notifications = e.deliveries.len(),
+                    "{}",
+                    crate::events::ALERT
+                );
             }
             a.wake.notify_one();
         }

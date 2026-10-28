@@ -4,13 +4,19 @@
 //! run`, and turns Stop, Shutdown and Preshutdown into the clean stop a signal asks for on Linux.
 //! While starting or stopping it reports progress, so the manager waits instead of deciding the
 //! service hung (migrations on a big database, or a stop finishing the messages in hand). Logs go
-//! to files, since a service has no console.
+//! to files, since a service has no console, and what Windows tools watch also to the Event Log
+//! (`eventlog.rs`).
+//!
+//! A Stop from the service manager (a person, `Stop-Service`, the installer) leaves a `stopped`
+//! file in the log folder; the next start removes it. An upgrade that finds it leaves the service
+//! stopped: an engine stopped on purpose stays stopped. Windows shutting down leaves none.
 
+use super::eventlog::{self, EventLogLayer};
 use crate::RunArgs;
 use anyhow::{Context, Result};
 use std::ffi::OsString;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -34,7 +40,7 @@ const DONE: u8 = 3;
 
 /// Connect to the service manager and serve until it stops us.
 pub fn run(args: RunArgs) -> Result<()> {
-    let _logs = log_to_files()?;
+    let _logs = log_to_files(context(&args))?;
     *ARGS.lock().unwrap() = Some(args);
     service_dispatcher::start(NAME, ffi_service_main).context(
         "connecting to the service manager: `--service` is for the Windows service itself; \
@@ -56,6 +62,7 @@ fn serve() -> Result<()> {
     let stop = Arc::new(Notify::new());
     let phase = Arc::new(AtomicU8::new(STARTING));
     let checkpoint = Arc::new(AtomicU32::new(0));
+    let reached_running = Arc::new(AtomicBool::new(false));
 
     // The handler runs on a thread of the manager's; it only reports and wakes the engine.
     let handle_cell: Arc<Mutex<Option<ServiceStatusHandle>>> = Arc::default();
@@ -65,6 +72,9 @@ fn serve() -> Result<()> {
             ServiceControl::Stop | ServiceControl::Shutdown | ServiceControl::Preshutdown => {
                 if phase.swap(STOPPING, Ordering::SeqCst) != STOPPING {
                     tracing::info!(?control, "the service manager asked the service to stop");
+                    if control == ServiceControl::Stop {
+                        mark_stopped(true);
+                    }
                     if let Some(h) = *handle.lock().unwrap() {
                         let wait = stop_timeout + Duration::from_secs(15);
                         report(&h, ServiceState::StopPending, &checkpoint, wait, ServiceExitCode::Win32(0));
@@ -79,6 +89,7 @@ fn serve() -> Result<()> {
     };
     let status = service_control_handler::register(NAME, handler).context("registering with the service manager")?;
     *handle_cell.lock().unwrap() = Some(status);
+    mark_stopped(false);
     report(&status, ServiceState::StartPending, &checkpoint, PROGRESS, ServiceExitCode::Win32(0));
 
     let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
@@ -105,8 +116,9 @@ fn serve() -> Result<()> {
     let result = runtime.block_on(async {
         let (root, database_url, mut options) = args.parts()?;
         options.stop_request = Some(stop.clone());
-        let started_phase = phase.clone();
+        let (started_phase, reached) = (phase.clone(), reached_running.clone());
         options.on_started = Some(Box::new(move || {
+            reached.store(true, Ordering::SeqCst);
             // A stop asked for during startup stays a stop.
             if started_phase.compare_exchange(STARTING, RUNNING, Ordering::SeqCst, Ordering::SeqCst).is_ok() {
                 running(&status);
@@ -116,18 +128,21 @@ fn serve() -> Result<()> {
     });
 
     phase.store(DONE, Ordering::SeqCst);
+    let started = reached_running.load(Ordering::SeqCst);
     ticker.abort();
+    // Said once, with the event it is in the Event Log (`eventlog::map`).
+    let failed = if started { eventlog::ENDED_ON_ERROR } else { eventlog::COULD_NOT_START };
     let exit = match &result {
         Ok(()) => ServiceExitCode::Win32(0),
         // A refused start (another engine runs these interfaces; lanes would strand messages):
         // the same code as on Linux. The service's failure actions don't restart it (only a crash
         // does), so it waits for a person, as it should.
         Err(e) if e.is::<ductus_runtime::ownership::Refused>() => {
-            tracing::error!("refusing to run: {e}");
+            tracing::error!(error = %e, "{failed}");
             ServiceExitCode::ServiceSpecific(ductus_runtime::ownership::REFUSED_EXIT as u32)
         }
         Err(e) => {
-            tracing::error!(error = %format!("{e:#}"), "the engine ended on an error");
+            tracing::error!(error = %format!("{e:#}"), "{failed}");
             ServiceExitCode::ServiceSpecific(1)
         }
     };
@@ -182,13 +197,49 @@ fn set(
     }
 }
 
-/// Daily log files in `DUCTUS_LOG_DIR` (default `%ProgramData%\Ductus\logs`), the last 14 kept.
-fn log_to_files() -> Result<tracing_appender::non_blocking::WorkerGuard> {
-    let dir = std::env::var_os("DUCTUS_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| {
-        PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into()))
-            .join("Ductus")
-            .join("logs")
-    });
+/// The log folder: `DUCTUS_LOG_DIR`, default `%ProgramData%\Ductus\logs` (where the installer
+/// looks for the `stopped` marker).
+pub fn log_dir() -> PathBuf {
+    std::env::var_os("DUCTUS_LOG_DIR").map(PathBuf::from).unwrap_or_else(|| super::data_dir().join("logs"))
+}
+
+/// Leave (or remove) the marker that says the service was stopped on purpose.
+fn mark_stopped(stopped: bool) {
+    let marker = log_dir().join(super::STOPPED_MARKER);
+    let result = if stopped {
+        std::fs::write(&marker, format!("stopped by the service manager at {}\n", chrono::Local::now().to_rfc3339()))
+    } else {
+        match std::fs::remove_file(&marker) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            other => other,
+        }
+    };
+    if let Err(e) = result {
+        tracing::warn!(error = %e, marker = %marker.display(), "couldn't update the marker an upgrade reads to keep a stopped service stopped");
+    }
+}
+
+/// What the Event Log's start event says besides the version: where the project and database are.
+fn context(args: &RunArgs) -> String {
+    let database = args.database_url.as_deref().map(without_login).unwrap_or_else(|| "(not set)".into());
+    format!("project: {}\ndatabase: {database}\nenvironment: {}", args.root.display(), args.env)
+}
+
+/// A database URL without its user and password: `postgres://host:5432/db`.
+fn without_login(url: &str) -> String {
+    let url = url.split('?').next().unwrap_or(url);
+    match (url.find("://"), url.rfind('@')) {
+        (Some(scheme), Some(at)) if at > scheme => format!("{}{}", &url[..scheme + 3], &url[at + 1..]),
+        _ => url.to_string(),
+    }
+}
+
+/// Daily log files in the log folder, the last 14 kept; what Windows tools watch also goes to the
+/// Event Log.
+fn log_to_files(context: String) -> Result<tracing_appender::non_blocking::WorkerGuard> {
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
+    let dir = log_dir();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating the log folder {}", dir.display()))?;
     let appender = tracing_appender::rolling::Builder::new()
         .rotation(tracing_appender::rolling::Rotation::DAILY)
@@ -198,15 +249,28 @@ fn log_to_files() -> Result<tracing_appender::non_blocking::WorkerGuard> {
         .build(&dir)
         .with_context(|| format!("opening the log in {}", dir.display()))?;
     let (writer, guard) = tracing_appender::non_blocking(appender);
-    tracing_subscriber::fmt()
-        .with_ansi(false)
-        .with_writer(writer)
-        .with_env_filter(
+    // The filter applies to both: the Event Log only ever sees lines the files have.
+    tracing_subscriber::registry()
+        .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| "info,sqlx=warn,rustls_platform_verifier=off,tiberius=error".into()),
         )
+        .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(writer))
+        .with(EventLogLayer::new(context))
         .init();
     // A panic in a service has no console to print to.
     std::panic::set_hook(Box::new(|info| tracing::error!("{info}")));
     Ok(guard)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn database_urls_are_said_without_their_login() {
+        assert_eq!(
+            super::without_login("postgres://u:secret@db1:5432/ductus?sslmode=verify-full"),
+            "postgres://db1:5432/ductus"
+        );
+        assert_eq!(super::without_login("postgresql://db1/ductus"), "postgresql://db1/ductus");
+    }
 }
