@@ -120,7 +120,11 @@ try {
     $yaml = "$data\project\interfaces\adt-in\interface.yaml"
     (Get-Content $yaml -Raw) -replace 'destination: \{ file: \{ dir: out/adt-in \} \}', 'destination: { mllp: { host: 127.0.0.1, port: 6662 } }' | Set-Content $yaml -Encoding utf8
     Add-Content "$data\ductus.env" "`nDUCTUS_DATABASE_URL=$DatabaseUrl`n# marker kept across the upgrade"
-    $sink = Start-Process $exe -ArgumentList "sink --port 6662" -PassThru -NoNewWindow -RedirectStandardOutput "$work\sink.log" -RedirectStandardError "$work\sink.err"
+    # The receiver and sender run from a copy: an upgrade replaces the installed ductus.exe, and
+    # Restart Manager closes whatever runs it, here with the console it shares with this script.
+    $tools = Join-Path $work "ductus-tools.exe"
+    Copy-Item $exe $tools -Force
+    $sink = Start-Process $tools -ArgumentList "sink --port 6662" -PassThru -NoNewWindow -RedirectStandardOutput "$work\sink.log" -RedirectStandardError "$work\sink.err"
     Start-Service Ductus
     Check "service reaches Running" (Wait-Until { (Get-Service Ductus).Status -eq "Running" })
     Check "health answers" (Wait-Until { Health })
@@ -133,7 +137,7 @@ try {
     Check "and warns that its integrated login is the computer account's" ($validate -match "Windows login to SQL Server \(``billing``\) is the computer account") $validate
 
     Write-Host "== 3. a message round trip over MLLP"
-    & $exe gen --to 127.0.0.1:6661 --count 100 --patients 10 | Out-Null
+    & $tools gen --to 127.0.0.1:6661 --count 100 --patients 10 | Out-Null
     Check "the receiver got all 100" (Wait-Until { (Get-Content "$work\sink.log" -ErrorAction SilentlyContinue | Out-String) -match "unique 100 " } 30)
     Check "the engine wrote its log" ((Engine-Log | Out-String) -match "started interfaces=")
     Check "Event Log: started, in our words (version, project, no password)" (Has-Event 1000 "Ductus .* started\.[\s\S]*project: ")
@@ -157,7 +161,7 @@ try {
     Check "service running after the upgrade" (Wait-Until { (Get-Service Ductus).Status -eq "Running" -and (Health) })
     Check "settings kept" ((Get-Content "$data\ductus.env" -Raw) -match "marker kept across the upgrade")
     Check "project kept" (Test-Path "$data\project\interfaces\adt-in\interface.yaml")
-    & $exe gen --to 127.0.0.1:6661 --count 50 --offset 1000 | Out-Null
+    & $tools gen --to 127.0.0.1:6661 --count 50 --offset 1000 | Out-Null
     Check "still takes messages" (Wait-Until { (Get-Content "$work\sink.log" -ErrorAction SilentlyContinue | Out-String) -match "unique 150 " } 30)
 
     Write-Host "== 6. an upgrade leaves a service stopped on purpose stopped"
@@ -191,7 +195,7 @@ try {
     Check "its process is the account's" ((Process-Owner) -match "\\$account$") (Process-Owner)
     Check "the account may log on as a service" (Has-Logon-Right ".\$account")
     Check "it still reads its settings and project (health)" (Wait-Until { Health })
-    & $exe gen --to 127.0.0.1:6661 --count 50 --offset 2000 | Out-Null
+    & $tools gen --to 127.0.0.1:6661 --count 50 --offset 2000 | Out-Null
     Check "and takes messages" (Wait-Until { (Get-Content "$work\sink.log" -ErrorAction SilentlyContinue | Out-String) -match "unique 200 " } 30)
     Check "Event Log: the change, by whom" (Has-Event 1007 "to: \.\\$account")
     $shown = (Native { & $exe service account }).Out
@@ -208,7 +212,6 @@ try {
     Stop-Service Ductus
 
     Write-Host "== 9. uninstall"
-    # The receiver runs from the installed program: let go of it first, like an administrator would.
     if ($sink -and -not $sink.HasExited) { Stop-Process -Id $sink.Id -Force; $sink.WaitForExit(5000) | Out-Null }
     Check "msiexec /x succeeds" ((Msi @("/x", "`"$installed`"") "uninstall") -in 0, 3010)
     Check "service removed" ($null -eq (Get-Service Ductus -ErrorAction SilentlyContinue))
