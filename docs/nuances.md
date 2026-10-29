@@ -809,6 +809,18 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **Why:** to try an interface without asking anyone for a database. Production needs the DBA's Postgres (backups, monitoring, failover), and a message the engine has acknowledged must survive what the DBA protects against.
 - **What to do:** use `ductus dev` on your own machine; everywhere else set `DUCTUS_DATABASE_URL` and use `ductus run`. Without a download possible, unpack the Postgres binaries yourself and set `DUCTUS_POSTGRES_DIR`. `ductus dev --reset` throws the dev data away.
 
+## Upgrades
+
+### Run `ductus upgrade --check` with the new version before every upgrade (level 1)
+- **What:** the new version's program (the portable archive: `ductus-<version>-linux-x64.tar.gz` or `-windows-x64.zip`, no install needed) reads the database and the project and says what its first start would do: the migrations it applies, with the tables they work through and their size now; the engines on the database, their hosts and versions; the project validated against the database and its tests run with the new SDK and type checker; settings it deprecates. Exit 1 means something would refuse the start or fail the project. It changes nothing, in the database or in the project folder.
+- **Why:** otherwise the first place you learn that a migration builds an index on a 50 GB table, or that a test fails under the new SDK, is the restart itself, in the change window.
+- **What to do:** run it from the unpacked archive on the server (or a workstation that reaches the database) before the change window, with the service's settings: `./ductus upgrade --check --env-file /etc/ductus/ductus.env` (Windows: `C:\ProgramData\Ductus\ductus.env`). A read-only login is enough: `GRANT pg_read_all_data TO ductus_check`. `--json` gives one document to attach to the change ticket.
+
+### A migration marked heavy holds up a table while it runs (level 2)
+- **What:** most migrations add a table or a column and take milliseconds. One that works through a big table row by row (an index built, rows copied) is shown with ⚠, the table and its size: while it runs, the start waits, and storing or sending waits as it says. The version running before keeps working on the new tables afterwards (migrations only add), so rolling back is installing the previous version.
+- **Why:** an index is built in one pass over the table; Postgres holds the table's writes until it's done.
+- **What to do:** plan the window by the size shown; for a large table, time the upgrade on a copy (a restored backup) first. There have been none since v0.5 (0011, the queue index, was the last).
+
 ## Windows
 
 ### The service's account: the default, a gMSA, or a named account (level 2)

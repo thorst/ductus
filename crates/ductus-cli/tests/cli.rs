@@ -2490,3 +2490,81 @@ async fn lanes_that_would_strand_messages_refuse_the_start() {
     let done: Vec<_> = waiting.iter().map(|m| ductus_store::Done::sent(*m, None)).collect();
     store.finish(destination, &done).await.unwrap();
 }
+
+/// `ductus upgrade --check` on a new database, on one a migration behind (the migration and what
+/// it does are listed; ready), with a project whose test fails (exit 1, the failure shown, the same
+/// in `--json`), and on one where an applied migration differs from this build's (exit 1).
+#[tokio::test(flavor = "multi_thread")]
+async fn upgrade_check_reads_the_database_and_the_project() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    ductus_store::Store::connect(&db, 1).await.unwrap(); // the shared database: this build's migrations
+    let parent = tempfile::tempdir().unwrap();
+    let root = parent.path().join("p");
+    assert!(ductus(parent.path(), &["init", "p"]).0);
+    let _ = std::fs::remove_dir_all(root.join(".ductus")); // the check must write nothing there
+    let check = |url: &str, json: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ductus"));
+        command.args(["upgrade", "--check"]).current_dir(&root).env("DUCTUS_DATABASE_URL", url);
+        command.env_remove("DUCTUS_PROJECT").env_remove("DUCTUS_ENV");
+        if json {
+            command.arg("--json");
+        }
+        let out = command.output().unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let last = ductus_store::migrations::embedded().unwrap().pop().unwrap();
+    let listed = format!("✓ {:04} {}", last.version, last.what);
+
+    // A schema of this test's own holds the migrations table (the shared one stays as it is).
+    let schema = ductus_store::testing::TestSchema::new(&db, "upgrade").await.unwrap();
+    let (ok, out) = check(&schema.url_alone(), false);
+    assert!(ok, "{out}");
+    assert!(out.contains("✓ a new database: the first start creates every table"), "{out}");
+    assert!(out.contains("note: engines before 0.6.2 aren't recorded"), "{out}");
+    assert!(out.contains("✓ validate: valid") && out.contains("✓ test: 1 passed, 0 failed"), "{out}");
+
+    schema
+        .run(
+            "CREATE TABLE _sqlx_migrations AS SELECT * FROM public._sqlx_migrations;
+             DELETE FROM _sqlx_migrations WHERE version = (SELECT max(version) FROM _sqlx_migrations)",
+        )
+        .await
+        .unwrap();
+    let (ok, out) = check(&schema.url(), false);
+    assert!(ok, "{out}");
+    assert!(out.contains("✓ migrations: the first start applies 1 "), "{out}");
+    assert!(out.contains(&listed), "{out}");
+    assert!(out.contains("✓ required stops: none") && out.contains("✓ deprecated settings: none used"), "{out}");
+    assert!(out.contains(&format!("ready to upgrade to {}", env!("CARGO_PKG_VERSION"))), "{out}");
+
+    // The new version's SDK fails one of the project's tests.
+    let broken = root.join("interfaces/adt-in/broken.test.ts");
+    std::fs::write(
+        &broken,
+        "import { expect, test } from \"@ductus/sdk\";\n\ntest(\"counts as before\", () => {\n  expect(1 + 1).toBe(3);\n});\n",
+    )
+    .unwrap();
+    let (ok, out) = check(&schema.url(), false);
+    assert!(!ok, "{out}");
+    assert!(out.contains("✗ test: 1 passed, 1 failed") && out.contains("✗ counts as before"), "{out}");
+    assert!(out.contains("1 problem(s): fix them before upgrading"), "{out}");
+    let (ok, out) = check(&schema.url(), true);
+    assert!(!ok);
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    assert_eq!((report["ok"].as_bool(), report["problems"].as_u64()), (Some(false), Some(1)), "{out}");
+    assert_eq!(report["migrations"]["pending"][0]["version"], last.version, "{out}");
+    assert_eq!(report["project"]["test"]["ok"], false, "{out}");
+    assert_eq!(report["project"]["validate"]["ok"], true, "{out}");
+    std::fs::remove_file(&broken).unwrap();
+
+    // An applied migration whose file this build carries differently: the start would refuse.
+    schema.run("UPDATE _sqlx_migrations SET checksum = '\\x00'::bytea WHERE version = 1").await.unwrap();
+    let (ok, out) = check(&schema.url(), false);
+    assert!(!ok, "{out}");
+    assert!(out.contains("✗ migration 0001 (messages) was applied from a different file"), "{out}");
+    schema.forget().await.unwrap();
+    assert!(!root.join(".ductus").exists(), "the check wrote into the project");
+}

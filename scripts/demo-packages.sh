@@ -5,7 +5,8 @@
 #   -> upgrade to a newer package under traffic (restarts, nothing lost, nothing sent twice)
 #   -> systemctl stop (clean, exit 0) -> remove (stopped; settings and project kept).
 # Also installs on plain images of the distributions we claim (no systemd: just the scripts and
-# `ductus --version`). BUILD=0 reuses the packages in dist/.
+# `ductus --version`), and runs the portable archive's `upgrade --check` against a new database
+# and against one with a running engine. BUILD=0 reuses the packages in dist/.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -21,15 +22,20 @@ cleanup
 
 if [ "${BUILD:-1}" = 1 ]; then
   rm -rf "$DIST"
-  for v in 0.5.0-dev.1 0.5.0-dev.2; do # the same binary, two versions: enough to see an upgrade
+  for v in 0.6.0-dev.1 0.6.0-dev.2; do # the same binary, two versions: enough to see an upgrade
     echo "== building the packages ($v)"
     docker build -q --target packages --build-arg VERSION=$v --output "$DIST/$v" . >/dev/null
   done
 fi
-ls "$DIST"/*/ | grep -E '\.(deb|rpm)$' | sed 's/^/   /'
+ls "$DIST"/*/ | grep -E '\.(deb|rpm|tar\.gz)$' | sed 's/^/   /'
 deb() { ls "$DIST/$1"/*.deb; }
 rpm() { ls "$DIST/$1"/*.rpm; }
-echo "   binary: $(du -h "$(deb 0.5.0-dev.1)" | cut -f1) .deb, $(du -h "$(rpm 0.5.0-dev.1)" | cut -f1) .rpm"
+archive() { ls "$DIST/$1"/*.tar.gz; }
+echo "   binary: $(du -h "$(deb 0.6.0-dev.1)" | cut -f1) .deb, $(du -h "$(rpm 0.6.0-dev.1)" | cut -f1) .rpm, $(du -h "$(archive 0.6.0-dev.2)" | cut -f1) .tar.gz"
+# The newer version's archive, unpacked where every container sees it (/dist/unpacked/ductus-*).
+rm -rf "$DIST/unpacked" && mkdir "$DIST/unpacked"
+tar -xzf "$(archive 0.6.0-dev.2)" -C "$DIST/unpacked"
+CHECK=$(cd "$DIST/unpacked" && ls -d ductus-*)/ductus
 
 fail=""
 check() { # check <name> <condition...>
@@ -44,13 +50,13 @@ check() { # check <name> <condition...>
 echo "== installing on plain images (no systemd)"
 for image in ubuntu:22.04 ubuntu:24.04 debian:12 debian:13; do
   out=$(docker run --rm --quiet -v "$DIST:/dist:ro" "$image" sh -c \
-    "dpkg -i /dist/0.5.0-dev.1/*.deb >/dev/null 2>&1; ductus --version; stat -c '%U:%G %a' /etc/ductus/ductus.env" 2>&1 | tr '\n' ' ')
+    "dpkg -i /dist/0.6.0-dev.1/*.deb >/dev/null 2>&1; ductus --version; stat -c '%U:%G %a' /etc/ductus/ductus.env" 2>&1 | tr '\n' ' ')
   echo "   $image: $out"
   check "plain-$image" '[[ "$out" == "ductus "*"root:ductus 640"* ]]'
 done
 for image in quay.io/rockylinux/rockylinux:9 quay.io/rockylinux/rockylinux:8; do
   out=$(docker run --rm --quiet -v "$DIST:/dist:ro" "$image" sh -c \
-    "rpm -i /dist/0.5.0-dev.1/*.rpm >/dev/null 2>&1; ductus --version 2>&1 | head -1" 2>&1 | tr '\n' ' ')
+    "rpm -i /dist/0.6.0-dev.1/*.rpm >/dev/null 2>&1; ductus --version 2>&1 | head -1" 2>&1 | tr '\n' ' ')
   echo "   ${image##*/}: $out"
   # RHEL 8 (glibc 2.28) is reported, not required: the binary needs 2.34.
   [[ "$image" == *:8 ]] || check "plain-${image##*/}" '[[ "$out" == "ductus "* ]]'
@@ -68,6 +74,20 @@ done
 # The example relay, sending to a receiver on the same machine.
 cp -r examples/adt-relay "$WORK/project"
 rm -rf "$WORK/project/.ductus"
+
+echo "== the portable archive: upgrade --check from it, on a plain Ubuntu, against a new database"
+# The project is mounted read-only: the check writes nothing into it.
+out=$(docker run --rm --network "$NET" -v "$DIST:/dist:ro" -v "$WORK/project:/seed:ro" \
+  -e DUCTUS_DATABASE_URL=postgres://ductus:pkg-test@ductus-pkg-db/ductus ubuntu:24.04 sh -c \
+  "ls /dist/unpacked/ductus-*/; /dist/unpacked/$CHECK --version
+   /dist/unpacked/$CHECK upgrade --check --root /seed; echo exit \$?" 2>&1)
+echo "$out" >"$WORK/archive-new.log"
+echo "   $(grep -E '^(ready|[0-9]+ problem)' <<<"$out" || echo "no verdict: see $WORK/archive-new.log")"
+check archive-files 'grep -E "^LICENSE$" <<<"$out" >/dev/null && grep -E "^ductus.service$" <<<"$out" >/dev/null'
+check archive-version 'grep -E "^ductus 0\.6\." <<<"$out" >/dev/null'
+check archive-new-database 'grep "a new database: the first start creates every table" <<<"$out" >/dev/null'
+check archive-project 'grep "✓ validate: valid" <<<"$out" >/dev/null && grep -E "✓ test: [0-9]+ passed, 0 failed" <<<"$out" >/dev/null'
+check archive-ready 'grep "^exit 0$" <<<"$out" >/dev/null'
 
 # systemd test images: the distribution + systemd + curl.
 build_image() { docker build -q -t "$1" - >/dev/null; }
@@ -97,7 +117,7 @@ lifecycle() {
     sleep 0.5
   done
 
-  on "$install /dist/0.5.0-dev.1/*.$ext" >"$WORK/$ext-install.log" 2>&1
+  on "$install /dist/0.6.0-dev.1/*.$ext" >"$WORK/$ext-install.log" 2>&1
   check "$ext-install-message" 'grep "It isn'"'"'t running yet" "$WORK/$ext-install.log" >/dev/null'
   check "$ext-not-started" '[ "$(on "systemctl is-active ductus" || true)" = inactive ]'
   check "$ext-not-enabled" '[ "$(on "systemctl is-enabled ductus" || true)" = disabled ]'
@@ -121,7 +141,7 @@ lifecycle() {
   sleep 1
   local pid_before
   pid_before=$(on "systemctl show -p MainPID --value ductus")
-  on "$upgrade /dist/0.5.0-dev.2/*.$ext" >"$WORK/$ext-upgrade.log" 2>&1
+  on "$upgrade /dist/0.6.0-dev.2/*.$ext" >"$WORK/$ext-upgrade.log" 2>&1
   local pid_after
   pid_after=$(on "systemctl show -p MainPID --value ductus")
   check "$ext-restarted" '[ "$pid_before" != "$pid_after" ] && [ "$pid_after" != 0 ]'
@@ -144,6 +164,16 @@ lifecycle() {
   check "$ext-nothing-twice" 'grep "duplicates 0 |" <<<"$sink" >/dev/null'
   check "$ext-in-order" 'grep "out of order 0 |" <<<"$sink" >/dev/null'
   check "$ext-env-kept" 'on "grep -q pkg-test /etc/ductus/ductus.env"'
+
+  # The archive's check beside the running service, with the service's settings: it sees the
+  # engine, its version, and nothing left to migrate.
+  local verdict
+  verdict=$(on "/dist/unpacked/$CHECK upgrade --check --env-file /etc/ductus/ductus.env; echo exit \$?" 2>&1 || true)
+  echo "$verdict" >"$WORK/$ext-check.log"
+  echo "   upgrade --check beside it: $(grep -E '^✓ .* on .*\(pid' <<<"$verdict" | head -1 | cut -c1-90)"
+  check "$ext-check-engine" 'grep -E "^✓ .* \(pid [0-9]+\): version 0\.6\." <<<"$verdict" >/dev/null'
+  check "$ext-check-migrations" 'grep "✓ migrations: nothing to apply" <<<"$verdict" >/dev/null'
+  check "$ext-check-ready" 'grep "^exit 0$" <<<"$verdict" >/dev/null'
 
   on "systemctl stop ductus"
   local result

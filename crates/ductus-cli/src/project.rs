@@ -78,9 +78,12 @@ pub async fn types(root: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Run each interface's `*.test.ts` files. Returns false if anything failed.
-pub async fn test(root: &Path, env: &str, only: Option<&str>) -> Result<bool> {
-    write_types(root).await?;
+/// Run each interface's `*.test.ts` files. Returns false if anything failed. `read_only` writes no
+/// editor typings (`ductus upgrade --check` runs a newer version's tests on the project as it is).
+pub async fn test(root: &Path, env: &str, only: Option<&str>, read_only: bool) -> Result<bool> {
+    if !read_only {
+        write_types(root).await?;
+    }
     let env = Environment::load(root, env)?;
     let (mut passed, mut failed) = (0, 0);
 
@@ -274,8 +277,8 @@ async fn check_allow<'a>(
 }
 
 /// Check configs, module loading and types. Returns false if anything is wrong.
-pub async fn validate(root: &Path, env: &str, database_url: Option<String>) -> Result<bool> {
-    let types = write_types(root).await?;
+pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read_only: bool) -> Result<bool> {
+    let types = if read_only { Isolate::generate_types().await? } else { write_types(root).await? };
     let mut problems = 0;
     let mut files = BTreeMap::new();
     files.insert(key(&root.join(TYPES_FILE)), types);
@@ -564,6 +567,11 @@ async fn check_database(root: &Path, url: &str, configs: &[&InterfaceConfig]) ->
         Ok(s) if s.local && !s.verified() => println!("✓ database: {s} (on this machine)"),
         Ok(s) => println!("✓ database: {s}"),
         Err(e) => println!("⚠ database: couldn't read how the connection is protected: {e:#}"),
+    }
+    // Before a first install (`ductus upgrade --check` runs this too): no tables to read yet.
+    if !store.has_table("deliveries").await.unwrap_or(false) {
+        println!("✓ database: new (no engine has run on it yet): no messages wait, no retention is applied");
+        return 0;
     }
     let lanes: Vec<Lanes> = configs.iter().filter_map(|c| Lanes::of(c)).collect();
     let names: Vec<String> = lanes.iter().map(|l| l.interface.clone()).collect();

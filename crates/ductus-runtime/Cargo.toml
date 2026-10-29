@@ -11,11 +11,11 @@ axum = "0.8.9"
 bytes = "1.12.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 csv = "1.4.0"
-ductus-core = { version = "0.5.0-dev", path = "../ductus-core" }
-ductus-hl7 = { version = "0.5.0-dev", path = "../ductus-hl7" }
-ductus-mllp = { version = "0.5.0-dev", path = "../ductus-mllp" }
-ductus-script = { version = "0.5.0-dev", path = "../ductus-script" }
-ductus-store = { version = "0.5.0-dev", path = "../ductus-store" }
+ductus-core = { version = "0.6.0-dev", path = "../ductus-core" }
+ductus-hl7 = { version = "0.6.0-dev", path = "../ductus-hl7" }
+ductus-mllp = { version = "0.6.0-dev", path = "../ductus-mllp" }
+ductus-script = { version = "0.6.0-dev", path = "../ductus-script" }
+ductus-store = { version = "0.6.0-dev", path = "../ductus-store" }
 futures-util = "0.3"
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-aws-lc-rs"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "crypto", "pem"] }
@@ -57,6 +57,6 @@ flate2 = "1.1.10"
 
 [dev-dependencies]
 # Its `testing` helpers: the throwaway TLS Postgres (`PgTls`).
-ductus-store = { version = "0.5.0-dev", path = "../ductus-store", features = ["testing"] }
+ductus-store = { version = "0.6.0-dev", path = "../ductus-store", features = ["testing"] }
 serde_yaml_ng = "0.10.0"
 tempfile = "3.27.0"

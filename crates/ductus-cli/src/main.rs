@@ -10,6 +10,7 @@ mod project;
 mod service;
 mod sinks;
 mod tools;
+mod upgrade;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -123,6 +124,9 @@ enum Command {
         interface: Option<String>,
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
+        /// Write nothing into the project (no editor typings): for `ductus upgrade --check`.
+        #[arg(long, hide = true)]
+        read_only: bool,
     },
     /// Check configs, code loading and TypeScript types for an environment (exits 1 on problems).
     Validate {
@@ -132,6 +136,29 @@ enum Command {
         env: String,
         /// Also check the project against this database, reading only: lanes that would strand
         /// waiting messages, retention changes still running or waiting for a confirmation.
+        #[arg(long, env = "DUCTUS_DATABASE_URL")]
+        database_url: Option<String>,
+        /// Write nothing into the project (no editor typings): for `ductus upgrade --check`.
+        #[arg(long, hide = true)]
+        read_only: bool,
+    },
+    /// Before an upgrade, run with the new version's binary (from the portable archive, on the
+    /// server or beside it), reading only: the migrations its start would apply and how big the
+    /// tables they work through are, the engines on the database and their versions, the project
+    /// validated against the database and its tests run with the new SDK, deprecated settings in
+    /// use. Exits 1 on anything that would refuse the start or fail the project. A read-only login
+    /// is enough (`pg_read_all_data`).
+    Upgrade {
+        /// Check, change nothing (the only mode for now).
+        #[arg(long, required = true)]
+        check: bool,
+        /// One JSON document instead of the report.
+        #[arg(long)]
+        json: bool,
+        #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
         #[arg(long, env = "DUCTUS_DATABASE_URL")]
         database_url: Option<String>,
     },
@@ -789,6 +816,9 @@ async fn run(cli: Cli) -> Result<()> {
             // Doctor's report says what failed; the TLS verifier would log each failure again.
             if matches!(cli.command, Command::Doctor { .. }) {
                 "warn,rustls_platform_verifier=off,tiberius=error".into()
+            } else if matches!(cli.command, Command::Upgrade { .. }) {
+                // Its report says what went wrong, and `--json` must be the only thing on stdout.
+                "off".into()
             } else {
                 // A certificate the platform verifier refuses is logged by it at ERROR every time,
                 // and said again where it matters (a delivery's error, a check's result): the
@@ -815,11 +845,15 @@ async fn run(cli: Cli) -> Result<()> {
             };
             dev::run(dev::Options { root, engine, port, reset, yes, database_only }).await
         }
-        Command::Test { root, interface, env } => {
-            exit_on_failure(project::test(&root, &env, interface.as_deref()).await)
+        Command::Test { root, interface, env, read_only } => {
+            exit_on_failure(project::test(&root, &env, interface.as_deref(), read_only).await)
         }
-        Command::Validate { root, env, database_url } => {
-            exit_on_failure(project::validate(&root, &env, database_url).await)
+        Command::Validate { root, env, database_url, read_only } => {
+            exit_on_failure(project::validate(&root, &env, database_url, read_only).await)
+        }
+        Command::Upgrade { check: _, json, root, env, database_url } => {
+            let options = upgrade::Options { root, env, database_url: tools::database_url(database_url)?, json };
+            exit_on_failure(upgrade::check(options).await)
         }
         Command::Init { dir } => init::project(&dir).await,
         Command::New { what: NewCommand::Interface { name, source, format, port, server, root } } => {

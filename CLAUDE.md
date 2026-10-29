@@ -36,7 +36,8 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - Module specifiers must be canonical paths (`file_url` canonicalizes); `..` in paths broke module identity once.
 - TypeScript transpile removes unused imports: tests that check import behavior must *use* the import.
 - **A new migration file needs a rebuild**: `crates/ductus-store/build.rs` makes cargo watch `migrations/` (without it, `sqlx::migrate!` kept the old set and migration 0007 silently didn't apply). Describe new tables/columns in `docs/schema.md`.
-- **sqlx 0.9**: dynamic SQL needs `sqlx::AssertSqlSafe(...)`; migrations must never be edited after they're applied (add a new one).
+- **sqlx 0.9**: dynamic SQL needs `sqlx::AssertSqlSafe(...)`; migrations must never be edited after they're applied (add a new one). Not even a comment: sqlx checksums the whole file and every database that applied it refuses to start.
+- **Every new migration starts with its header (0.6.6.1)**: first line `-- Upgrade: <what it does, for the people running it>`, then `-- Heavy: none` or one `-- Heavy: <table>: <what it does while it runs>` per existing table it works through row by row (an index built, a column filled, rows copied). `ductus upgrade --check` shows it with the table's size; `every_migration_says_what_it_does` (store) fails without it. 0001–0024 are described in `EARLIER` (`ductus_store::migrations`), which never grows. A setting being retired gets a row in `ductus_core::deprecated::DEPRECATED` (kept working until a major version).
 - `serde_yaml_ng`: enums in YAML maps need `with = "serde_yaml_ng::with::singleton_map"` (or `_recursive`).
 - `${...}` in YAML flow style breaks parsing: always load project YAML through `ductus_core::env::parse_yaml` (protects references first).
 - chacha20poly1305 0.11 changed its RNG API: we use `getrandom` directly.
@@ -107,10 +108,11 @@ crates/ductus-core     config, pgtls (libpq's sslmode, a URL's TLS parameters, `
                        documentation fields: docs-schema.yaml, `custom:` values, checks, the snapshot), monitor
                        (`monitor:` expectations and their time rules), hotspots (backlog by lane and worker), about (systems,
                        host/subnet matching), impact, owners (report + in-place reassign), schedule timing, ports,
-                       settings (ductus.yaml)
+                       settings (ductus.yaml), deprecated (settings going away, found in a project)
 crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
-crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations); tls.rs (pg_stat_ssl, refusals in words, `connect_url`); testing.rs (`TestUsers`, `PgTls`); retention.rs (tiers, changes, drops, held area); activity.rs (last activity, pauses);
+crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations; migrations.rs: what each does, applied vs
+                       carried, table sizes for `upgrade --check`); tls.rs (pg_stat_ssl, refusals in words, `connect_url`); testing.rs (`TestUsers`, `PgTls`); retention.rs (tiers, changes, drops, held area); activity.rs (last activity, pauses);
                        actions.rs (resend, edited copies, message_actions, the quarantine list); users.rs (accounts,
                        sign-in bookkeeping, sessions, appearance); api.rs (tokens, sessions, `Principal`, the message browser);
                        audit.rs (the audit log: `Audit`, `By`, reads, trimming); alerts.rs (alert state, events, the outbox);
@@ -143,6 +145,7 @@ crates/ductus-cli      the `ductus` command (init.rs: `init`, a new project; dev
                        admin.rs: `user`, `token`, `drain`, `resume`, `pause`, `retention`, `hotspots`;
                        doctor.rs: runs `doctor` (what to check is runtime's `doctor::plan`); owners.rs: `owners` report and reassign;
                        tools.rs: gen/sink (both `--tls`)/status; sinks.rs: `sink --smtp`/`--http`; cert.rs: `cert request|show|self-signed`;
+                       upgrade.rs: `upgrade --check` (runs `validate`/`test --read-only` as child processes for the report);
                        tests/cli.rs runs the binary on temp projects)
 ui/                    web UI (React + Vite; README.md): src/api (typed client, queries, live updates), src/pages,
                        src/components, src/lib (format, hl7, health, theme, openapi: the API reference's reading of the
@@ -150,7 +153,8 @@ ui/                    web UI (React + Vite; README.md): src/api (typed client, 
 sdk/src                TypeScript SDK (embedded via include_str! in ductus-script/src/loader.rs: add new files there)
 sdk/tests              SDK tests (TypeScript)
 scripts/               demos (end-to-end, PASS/FAIL) and scripts/dev (check.sh, demos.sh)
-Dockerfile, packaging/ the image and the .deb/.rpm from one engine build (packaging/README.md: layout, upgrades);
+Dockerfile, packaging/ the image, the .deb/.rpm and the portable .tar.gz from one engine build (packaging/README.md: layout,
+                       upgrades; packaging/archive/README.md goes in both archives; windows/archive.ps1 makes the zip);
                        demo-docker.sh, demo-packages.sh (systemd in containers) run in CI's `packaging` job
 docs/                  architecture.md, nuances.md, schema.md (every table/column; a store test fails if one
                        isn't described), shared-pool.md

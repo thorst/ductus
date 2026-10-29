@@ -1,7 +1,7 @@
 # The Ductus engine, built once, as a container image and as Linux packages.
 #   docker build -t ductus:dev .                                         the image
-#   docker build --target packages --build-arg VERSION=0.5.0-dev.20261009 --output dist .
-#                                                                        .deb and .rpm into dist/
+#   docker build --target packages --build-arg VERSION=0.6.0-dev.20261028 --output dist .
+#                                              .deb, .rpm and the portable .tar.gz into dist/
 # Development builds until v1.0: the project (interfaces/, ductus.yaml, ...) is mounted at
 # /project, and Postgres runs elsewhere (packaging/docker/compose.yaml). See packaging/README.md.
 
@@ -39,8 +39,18 @@ RUN mkdir /out \
     && nfpm package --config packaging/linux/nfpm.yaml --packager deb --target /out/ \
     && nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target /out/
 
+# The portable archive (ductus-<version>-linux-x64.tar.gz): the same binary, the license, and the
+# unit and settings file as samples; for `ductus upgrade --check` before installing, and servers
+# without a package manager's access.
+FROM debian:trixie-slim AS archive-build
+ARG VERSION=0.0.0-dev
+COPY --from=engine /ductus /a/ductus-${VERSION}/ductus
+COPY LICENSE packaging/archive/README.md packaging/linux/ductus.service packaging/linux/ductus.env /a/ductus-${VERSION}/
+RUN mkdir /out && tar -C /a --owner=0 --group=0 -czf /out/ductus-${VERSION}-linux-x64.tar.gz ductus-${VERSION}
+
 FROM scratch AS packages
 COPY --from=package-build /out/ /
+COPY --from=archive-build /out/ /
 
 # The image (the default target).
 FROM debian:trixie-slim

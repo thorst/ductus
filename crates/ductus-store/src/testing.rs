@@ -50,6 +50,55 @@ impl Store {
     }
 }
 
+/// A schema of one test's own, searched before `public`: tables made in it hide `public`'s of the
+/// same name for connections through [`TestSchema::url`], so a test can show a command an older
+/// database (a migration row removed, say) without changing what other tests share. The test ends
+/// with [`TestSchema::forget`].
+pub struct TestSchema {
+    url: String,
+    name: String,
+    pool: PgPool,
+}
+
+impl TestSchema {
+    pub async fn new(url: &str, prefix: &str) -> Result<Self> {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+        let name = format!("test_{prefix}_{nanos}");
+        let pool = PgPool::connect(&crate::tls::connect_url(url)).await.context("connecting for a test schema")?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {name}"))).execute(&pool).await?;
+        Ok(Self { url: url.to_string(), name, pool })
+    }
+
+    /// The database URL with this schema first in the search path.
+    pub fn url(&self) -> String {
+        self.searching(&format!("{}%2Cpublic", self.name))
+    }
+
+    /// The database URL with only this schema in the search path: the database looks new.
+    pub fn url_alone(&self) -> String {
+        self.searching(&self.name)
+    }
+
+    fn searching(&self, path: &str) -> String {
+        let join = if self.url.contains('?') { '&' } else { '?' };
+        format!("{}{join}options=-c%20search_path%3D{path}", self.url)
+    }
+
+    /// Statements run with this schema first in the search path (several, separated by `;`).
+    pub async fn run(&self, sql: &str) -> Result<()> {
+        let sql = format!("SET search_path = {}, public; {sql}; RESET search_path", self.name);
+        let mut conn = self.pool.acquire().await?;
+        sqlx::raw_sql(sqlx::AssertSqlSafe(sql)).execute(&mut *conn).await.context("running a test's statements")?;
+        Ok(())
+    }
+
+    pub async fn forget(self) -> Result<()> {
+        let drop = format!("DROP SCHEMA {} CASCADE", self.name);
+        sqlx::raw_sql(sqlx::AssertSqlSafe(drop)).execute(&self.pool).await.context("dropping a test schema")?;
+        Ok(())
+    }
+}
+
 /// The accounts one test makes. Name each with [`TestUsers::name`]; an async test ends with
 /// [`TestUsers::forget`]. Dropping the guard deletes them too: that's all a plain `#[test]` needs,
 /// and what catches an async test that failed before `forget` (as best it can: see `Drop`).

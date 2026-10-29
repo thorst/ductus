@@ -38,7 +38,24 @@ cut a stop short.
 An upgrade replaces the binary and restarts the service. The new version updates the database at
 startup; updates only ever add (expand-only migrations), so the previous version still runs on
 the updated database: rolling back is installing the previous package. Zero-downtime upgrades
-(two engines handing over) and `ductus upgrade --check` come later in v0.6.
+on Linux (two engines handing over) come later in v0.6.
+
+Before upgrading, run the new version's `ductus upgrade --check` from its portable archive (below):
+it reads the database and the project, changes nothing, and says what the new version's first
+start would do (migrations, and how big the tables they work through are), which engines run on
+the database and on which versions, whether the project validates and passes its tests with the
+new version, and which settings it deprecates. Exit 1 on anything that would refuse the start.
+
+## Portable archive
+
+`ductus-<version>-linux-x64.tar.gz` (the binary, `LICENSE`, the unit and `ductus.env` as samples)
+and `ductus-<version>-windows-x64.zip` (`ductus.exe`, `LICENSE`): the program without an installer,
+for `upgrade --check` before installing and for servers that can't use the packages. Its
+`README.md` is `packaging/archive/README.md`. The `.tar.gz` comes out of the same Dockerfile build
+as the packages (`--target packages`); the zip from `packaging/windows/archive.ps1 -Binary
+ductus.exe -Version 0.6.0-dev.20261028`. CI builds both, runs each one's `upgrade --check`
+(`demo-packages.sh`, the `windows` job) and keeps them as artifacts; releases attach them from
+0.6.8.
 
 ## Container image
 
@@ -61,7 +78,7 @@ PROJECT=$PWD/examples/adt-relay docker compose -f packaging/docker/compose.yaml 
 ## Linux packages (.deb, .rpm)
 
 ```sh
-docker build --target packages --build-arg VERSION=0.5.0-dev.20261009 --output dist .
+docker build --target packages --build-arg VERSION=0.6.0-dev.20261028 --output dist .
 ```
 
 Built with [nfpm](https://nfpm.goreleaser.com) from `packaging/linux/nfpm.yaml`. One Dockerfile

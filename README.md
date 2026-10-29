@@ -155,6 +155,7 @@ Past that, the limit is PostgreSQL, and mostly its disk: Ductus spends little CP
 | `ductus ports` | Listening ports and routes, outbound hosts (for firewall requests), conflicts |
 | `ductus impact` | Which interfaces a vendor, application or host/subnet touches, how, and who owns them (vendor breach, VPN change) |
 | `ductus doctor` | Check every connection from this server: DNS, TCP, TLS, logins, folders, ports; failures explained; `--report` to hand on |
+| `ductus upgrade --check` | With the new version, before installing it: the migrations its start applies (and how big the tables they work through are), the engines on the database and their versions, the project validated and tested with it; changes nothing |
 | `ductus owners` | Who owns which interface, destination and resource, matched to accounts; `--check`; `reassign` changes owners in place |
 | `ductus secret` | Manage encrypted per-environment secrets |
 | `ductus types` | Write editor typings and `tsconfig.json` for VS Code |

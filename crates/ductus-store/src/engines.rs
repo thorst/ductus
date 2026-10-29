@@ -264,6 +264,11 @@ impl Store {
         .context("reading the other engines")
     }
 
+    /// Every live engine on this database, oldest first, with what it owns.
+    pub async fn live_engines(&self) -> Result<Vec<EngineRow>> {
+        self.other_engines("").await
+    }
+
     /// Delete the records of engines that started more than `keep` ago, stopped or dead, and own
     /// nothing. Returns how many.
     pub async fn trim_engines(&self, keep: Duration) -> Result<u64> {

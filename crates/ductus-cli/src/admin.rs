@@ -648,7 +648,7 @@ pub async fn alerts(remote: Remote) -> Result<()> {
 }
 
 /// Bytes as people read them: `512 KB`, `3.2 GB`.
-fn size(bytes: i64) -> String {
+pub(crate) fn size(bytes: i64) -> String {
     let mut value = bytes as f64;
     for unit in ["bytes", "KB", "MB", "GB"] {
         if value < 1024.0 {

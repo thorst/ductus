@@ -247,8 +247,13 @@ jobs:
       - name: Image (build; compose with Postgres; docker compose stop mid-stream re-sends nothing)
         run: bash scripts/demo-docker.sh
 
-      - name: Linux packages (systemd in containers; install, upgrade under traffic, stop, remove; Ubuntu and Rocky)
+      - name: Linux packages (systemd in containers; install, upgrade under traffic, stop, remove; Ubuntu and Rocky; the portable archive's upgrade --check)
         run: bash scripts/demo-packages.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-archive
+          path: dist/0.6.0-dev.2/*.tar.gz
 
   # The Rust tests on Windows (paths, line endings, sockets and file renames behave differently
   # there), on `ductus dev`'s Postgres, in parallel with the others, and SQL Server's Windows logins
@@ -368,10 +373,14 @@ jobs:
         run: |
           dotnet tool install --global wix --version 5.0.2
           wix extension add --global WixToolset.Util.wixext/5.0.2
-          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version 0.5.0-ci -Out dist
+          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version 0.6.0-ci -Out dist
           # A second build (its own ProductCode): the demo's upgrades go from one to the other, a
           # real major upgrade. The same file again would only be a maintenance run.
-          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version 0.5.0-ci -Out dist-upgrade
+          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version 0.6.0-ci -Out dist-upgrade
+
+      - name: Portable archive (ductus-<version>-windows-x64.zip)
+        shell: pwsh
+        run: ./packaging/windows/archive.ps1 -Binary target/release/ductus.exe -Version 0.6.0-ci -Out dist
 
       - name: A Postgres for the service (ductus dev --database-only)
         shell: pwsh
@@ -392,11 +401,28 @@ jobs:
         shell: pwsh
         run: ./scripts/demo-windows.ps1 -Msi (Get-Item dist/*.msi).FullName -UpgradeMsi (Get-Item dist-upgrade/*.msi).FullName -DatabaseUrl $env:DEMO_DATABASE_URL -LogDir "$env:RUNNER_TEMP/demo-logs"
 
+      # From the zip, as a site would before upgrading: against the database the demo's service
+      # used (migrated, its engine stopped), with the example project.
+      - name: The archive's upgrade --check (unpacked, against the demo's database)
+        shell: pwsh
+        run: |
+          $dir = Join-Path $env:RUNNER_TEMP "archive"
+          Expand-Archive (Get-Item dist/*.zip).FullName $dir
+          Get-ChildItem $dir -Recurse -File | ForEach-Object { $_.FullName }
+          $exe = (Get-ChildItem $dir -Recurse -Filter ductus.exe).FullName
+          & $exe --version
+          $project = Join-Path $env:RUNNER_TEMP "check-project"
+          Copy-Item -Recurse examples/adt-relay $project
+          $env:DUCTUS_DATABASE_URL = $env:DEMO_DATABASE_URL
+          & $exe upgrade --check --root $project
+          if ($LASTEXITCODE -ne 0) { throw "upgrade --check found problems" }
+
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: windows-installer
           path: |
             dist/*.msi
+            dist/*.zip
             ${{ runner.temp }}/demo-logs
           if-no-files-found: ignore

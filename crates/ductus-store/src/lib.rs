@@ -15,6 +15,7 @@ mod certificates;
 mod directory;
 mod docs;
 mod engines;
+pub mod migrations;
 mod retention;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -232,7 +233,7 @@ impl Store {
             .connect(&tls::connect_url(url))
             .await
             .map_err(|e| tls::connect_error(e, url))?;
-        let mut migrator = sqlx::migrate!("./migrations");
+        let mut migrator = migrations::migrator();
         // A newer engine may have applied migrations this binary doesn't know. Migrations are
         // expand-only, so older binaries keep working: that's what makes rollback safe.
         migrator.set_ignore_missing(true);

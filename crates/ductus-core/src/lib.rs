@@ -4,6 +4,7 @@ pub mod about;
 pub mod alerts;
 pub mod allow;
 pub mod config;
+pub mod deprecated;
 pub mod docs;
 pub mod env;
 pub mod format;
