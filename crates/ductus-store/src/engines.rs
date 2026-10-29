@@ -223,6 +223,23 @@ impl Store {
         .context("reading who owns the interfaces")
     }
 
+    /// Which of `interfaces` a live engine other than those in `except` owns (a takeover's check
+    /// before it claims: the engine it takes over from owns them, and may).
+    pub async fn live_owners(&self, interfaces: &[String], except: &[&str]) -> Result<Vec<Owned>> {
+        let except: Vec<String> = except.iter().map(|s| s.to_string()).collect();
+        sqlx::query_as(sqlx::AssertSqlSafe(format!(
+            "SELECT o.interface, e.instance, e.host, e.pid, e.version, e.started_at
+             FROM interface_owners o JOIN engines e ON e.instance = o.instance
+             WHERE o.interface = ANY($1) AND o.instance <> ALL($2) AND {ALIVE}
+             ORDER BY e.started_at, e.instance, o.interface"
+        )))
+        .bind(interfaces)
+        .bind(&except)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading who owns the interfaces")
+    }
+
     /// A clean stop: let go of the interfaces and record when.
     pub async fn release_engine(&self, instance: &str) -> Result<()> {
         let mut tx = self.pool.begin().await.context("releasing interfaces")?;

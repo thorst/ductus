@@ -56,6 +56,10 @@ struct RunArgs {
     /// Run as a Windows service, under the service manager (the installer sets this up).
     #[arg(long)]
     service: bool,
+    /// Take over from the running engine that started this one: its handover (`ductus
+    /// handover`) passes the descriptor. Never by hand.
+    #[arg(long, env = "DUCTUS_TAKEOVER", hide = true)]
+    takeover: Option<i32>,
 }
 
 impl RunArgs {
@@ -68,6 +72,8 @@ impl RunArgs {
             env: self.env,
             api_listen: self.api_listen,
             stop_timeout: self.stop_timeout,
+            control: true,
+            takeover: self.takeover.map(ductus_runtime::handover::Takeover::new).transpose()?,
             ..defaults
         };
         Ok((self.root, tools::database_url(self.database_url)?, options))
@@ -161,6 +167,24 @@ enum Command {
         env: String,
         #[arg(long, env = "DUCTUS_DATABASE_URL")]
         database_url: Option<String>,
+    },
+    /// Hand the running engine over to the binary now on disk and the project as it is now,
+    /// refusing no connection (Linux: the package's `systemctl reload ductus` runs it): an upgrade
+    /// or a project deploy. The new engine starts beside the running one on the same listening
+    /// sockets; once it's ready, the running one stops and lets go. Exit 0 once the new engine
+    /// sends; 1 when it couldn't take over (the running engine goes on: the reason is printed).
+    Handover {
+        /// The running engine's control socket (default: `$RUNTIME_DIRECTORY/control`, which
+        /// systemd sets for the service and its reload, else /run/ductus/control).
+        #[arg(long, env = "DUCTUS_CONTROL")]
+        control: Option<PathBuf>,
+        /// How long the new engine may take to be ready: it migrates the database first.
+        #[arg(long, default_value = "5m", value_parser = parse_duration)]
+        timeout: std::time::Duration,
+        /// Start the new engine with this command's environment rather than the running
+        /// engine's: under systemd, ductus.env as it is now (the unit's reload passes this).
+        #[arg(long)]
+        with_environment: bool,
     },
     /// Create something new in a project.
     New {
@@ -854,6 +878,21 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Upgrade { check: _, json, root, env, database_url } => {
             let options = upgrade::Options { root, env, database_url: tools::database_url(database_url)?, json };
             exit_on_failure(upgrade::check(options).await)
+        }
+        Command::Handover { control, timeout, with_environment } => {
+            use ductus_runtime::handover;
+            let path = control.or_else(handover::control_path).unwrap_or_else(|| "/run/ductus/control".into());
+            let environment = with_environment.then(|| {
+                std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect()
+            });
+            let request = handover::Request { timeout_secs: timeout.as_secs(), environment };
+            let (ok, text) = handover::ask(&path, &request, |line| println!("{line}")).await?;
+            if !ok {
+                eprintln!("error: {text}");
+                std::process::exit(1);
+            }
+            println!("{text}");
+            Ok(())
         }
         Command::Init { dir } => init::project(&dir).await,
         Command::New { what: NewCommand::Interface { name, source, format, port, server, root } } => {

@@ -23,8 +23,18 @@ esac
 if [ -d /run/systemd/system ]; then
   systemctl daemon-reload
   if [ "$upgrade" = 1 ]; then
-    # Running: restart on the new version (it stops cleanly first). Stopped: stays stopped.
-    systemctl try-restart ductus.service
+    if systemctl is-active --quiet ductus.service && [ -S /run/ductus/control ]; then
+      # Running: the new version takes over beside it, nothing refused. If it can't start, the
+      # running version goes on: the package is installed, the engine isn't upgraded yet.
+      if ! systemctl reload ductus.service; then
+        echo "ductus: the new version didn't take over; the running one goes on. Why: journalctl -u ductus" >&2
+        echo "ductus: fix it and run 'systemctl reload ductus' (or 'systemctl restart ductus')." >&2
+      fi
+    else
+      # Running a version without the handover (before 0.6.6.3): restart on the new one (it
+      # stops cleanly first; systemd keeps the listening sockets). Stopped: stays stopped.
+      systemctl try-restart ductus.service
+    fi
     exit 0
   fi
 fi

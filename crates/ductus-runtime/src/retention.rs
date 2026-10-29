@@ -28,6 +28,8 @@ pub struct Managed {
 pub struct Retention {
     store: Store,
     pub interfaces: Vec<Managed>,
+    /// `quarantined: purge` per interface, set by `apply`.
+    purge: Vec<(String, bool)>,
     /// Wakes the change runner (a confirmation came in).
     kick: Arc<Notify>,
     /// Wakes the partition dropper (a change finished: partitions it emptied can go).
@@ -55,42 +57,54 @@ pub struct Configured {
 }
 
 impl Retention {
-    /// Apply every interface's configured retention and start the background work.
-    pub async fn start(store: Store, configured: Vec<Configured>) -> Result<Arc<Self>> {
-        let mut interfaces = Vec::with_capacity(configured.len());
-        let wanted: Vec<(String, Tier)> = configured.iter().map(|c| (c.name.clone(), c.days)).collect();
-        let states = store.apply_retention_all(&wanted).await?;
-        for (c, state) in configured.iter().zip(states) {
-            report(&state, c.days);
+    /// Each interface's tier as stored now (a new interface's: its configured one), changing
+    /// nothing: a takeover stores messages before it may change an interface's rows. `apply`
+    /// applies what's configured.
+    pub async fn new(store: Store, configured: Vec<Configured>) -> Result<Arc<Self>> {
+        let stored: std::collections::HashMap<String, Tier> =
+            store.retention().await?.into_iter().map(|s| (s.interface, s.days)).collect();
+        let interfaces = configured
+            .iter()
+            .map(|c| Managed {
+                name: c.name.clone(),
+                configured: c.days,
+                tier: Arc::new(AtomicI16::new(stored.get(&c.name).copied().unwrap_or(c.days))),
+            })
+            .collect();
+        Ok(Arc::new(Self {
+            store,
+            interfaces,
+            purge: configured.into_iter().map(|c| (c.name, c.purge_quarantined)).collect(),
+            kick: Arc::new(Notify::new()),
+            drop_now: Arc::new(Notify::new()),
+            last_drop: Mutex::new(None),
+        }))
+    }
+
+    /// Apply every interface's configured retention and start the background work (once the
+    /// interfaces are this engine's).
+    pub async fn apply(self: &Arc<Self>) -> Result<()> {
+        let wanted: Vec<(String, Tier)> = self.interfaces.iter().map(|m| (m.name.clone(), m.configured)).collect();
+        let states = self.store.apply_retention_all(&wanted).await?;
+        for (m, state) in self.interfaces.iter().zip(states) {
+            report(&state, m.configured);
             // A change that just began is a decision about patient data worth keeping a record of.
             if state.changing_from.is_some() && Utc::now() - state.changed_at < chrono::TimeDelta::minutes(1) {
                 let detail =
                     serde_json::json!({ "from": state.changing_from, "to": state.days, "waiting": state.waiting });
                 let audit = ductus_store::Audit::new(ductus_store::By::engine(), "retention.change")
-                    .interface(&c.name)
+                    .interface(&m.name)
                     .detail(detail);
-                if let Err(e) = store.record(&audit).await {
-                    tracing::error!(error = %format!("{e:#}"), interface = %c.name, "could not write the audit log (retention change)");
+                if let Err(e) = self.store.record(&audit).await {
+                    tracing::error!(error = %format!("{e:#}"), interface = %m.name, "could not write the audit log (retention change)");
                 }
             }
-            interfaces.push(Managed {
-                name: c.name.clone(),
-                configured: c.days,
-                tier: Arc::new(AtomicI16::new(state.days)),
-            });
+            m.tier.store(state.days, Relaxed);
         }
-        let purge: Vec<(String, bool)> = configured.into_iter().map(|c| (c.name, c.purge_quarantined)).collect();
-        store.set_quarantined(&purge).await?;
-        let retention = Arc::new(Self {
-            store,
-            interfaces,
-            kick: Arc::new(Notify::new()),
-            drop_now: Arc::new(Notify::new()),
-            last_drop: Mutex::new(None),
-        });
-        tokio::spawn(run_changes(Arc::downgrade(&retention)));
-        tokio::spawn(drop_expired(Arc::downgrade(&retention)));
-        Ok(retention)
+        self.store.set_quarantined(&self.purge).await?;
+        tokio::spawn(run_changes(Arc::downgrade(self)));
+        tokio::spawn(drop_expired(Arc::downgrade(self)));
+        Ok(())
     }
 
     pub fn get(&self, interface: &str) -> Option<&Managed> {

@@ -232,6 +232,19 @@ impl Activity {
         Ok(Self { watched_since, pauses, trends, saver: Mutex::new(Some(saver)) })
     }
 
+    /// Read the pauses again: a takeover's, once the engine it took over from let go (a
+    /// destination paused or resumed there meanwhile is so here too).
+    pub async fn refresh_pauses(&self, store: &Store) -> Result<()> {
+        let ids: Vec<DestinationId> = self.pauses.keys().copied().collect();
+        let (_, destinations) = store.activity(&[], &ids).await?;
+        for d in destinations {
+            if let Some(pause) = self.pauses.get(&d.destination_id) {
+                pause.set(d.pause);
+            }
+        }
+        Ok(())
+    }
+
     /// After the engine's stop: wait for the last save.
     pub async fn saved(&self) {
         let saver = self.saver.lock().unwrap_or_else(|p| p.into_inner()).take();

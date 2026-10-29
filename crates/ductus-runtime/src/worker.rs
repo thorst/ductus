@@ -59,10 +59,14 @@ pub struct Job {
     pub stats: Arc<InterfaceStats>,
     /// Whether this engine holds its interfaces now (it waits like a pause while it doesn't).
     pub ownership: Arc<crate::ownership::Ownership>,
-    /// Nothing was waiting for the interface at start (`Store::with_waiting`): its workers skip
+    /// The interfaces with messages waiting when the engine took them (`Store::with_waiting`; a
+    /// takeover knows only once the engine it takes over from let go). Workers of the others skip
     /// their first read and wait for a wake-up (or the idle poll).
-    pub nothing_waiting: bool,
+    pub waiting: Arc<Waiting>,
 }
+
+/// Set once, before the engine holds its interfaces (see `Job::waiting`).
+pub type Waiting = std::sync::OnceLock<std::collections::HashSet<String>>;
 
 /// One destination's shared parts.
 #[derive(Clone)]
@@ -306,8 +310,8 @@ struct Worker {
     stats: Arc<DestinationStats>,
     pause: Arc<Pause>,
     ownership: Arc<crate::ownership::Ownership>,
-    /// Skip the first read (see `Job::nothing_waiting`).
-    idle: bool,
+    /// Whether to skip the first read (see `Job::waiting`); taken at the first.
+    waiting: Option<Arc<Waiting>>,
     /// The engine is stopping: like a pause (a transform or send under way finishes, nothing new
     /// starts), but the worker then saves what it finished and ends.
     stop: CancellationToken,
@@ -360,7 +364,7 @@ impl Worker {
             stats: outlet.stats,
             pause: outlet.pause,
             ownership: job.ownership.clone(),
-            idle: job.nothing_waiting,
+            waiting: Some(job.waiting.clone()),
             stop,
             config,
         }
@@ -372,9 +376,12 @@ impl Worker {
         }
         // A stopped interface's messages stay pending until it's fixed and restarted.
         while self.health.stopped().is_none() && self.hold_while_paused().await {
-            if std::mem::take(&mut self.idle) {
-                // Nothing was waiting at start: a message stored since has woken this worker
-                // (its permit is kept), so reading now would find nothing.
+            // Known by now: the engine holds its interfaces (`hold_while_paused`).
+            if let Some(waiting) = self.waiting.take()
+                && waiting.get().is_some_and(|w| !w.contains(&self.config.name))
+            {
+                // Nothing was waiting when the engine took the interface: a message stored since
+                // has woken this worker (its permit is kept), so reading now would find nothing.
                 tokio::select! {
                     _ = self.wake.get(self.slot, self.index).notified() => {}
                     _ = tokio::time::sleep(IDLE_POLL) => {}

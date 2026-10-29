@@ -1,5 +1,5 @@
 //! The engine's own entries in the audit log (`ductus_store::audit`): each start (and how the
-//! last run on this host ended), each stop, interfaces the runaway guard stops, and the hourly
+//! last run on this host ended), each stop and handover, interfaces the runaway guard stops, and the hourly
 //! job that trims the log and clears copies of payloads from old message actions. What people do
 //! through the API is recorded where they do it (`api/`).
 
@@ -85,6 +85,17 @@ pub async fn start(
 pub async fn stopped(engine: &Engine, why: &str, forced: bool) {
     let detail = json!({ "instance": engine.instance, "why": why, "forced": forced });
     record(engine, Audit::new(By::engine(), "engine.stop").detail(detail)).await;
+}
+
+/// Record that this engine took over from another (`systemctl reload`: an upgrade or a deploy).
+pub async fn handed_over(engine: &Engine, handover: &crate::handover::HandedOver) {
+    let from = &handover.from;
+    let detail = json!({
+        "from": { "version": from.version, "pid": from.pid, "instance": from.instance },
+        "to": { "version": env!("CARGO_PKG_VERSION"), "pid": std::process::id(), "instance": engine.instance },
+        "sending_paused_ms": handover.sending_paused.as_millis() as u64,
+    });
+    record(engine, Audit::new(By::engine(), "engine.handover").detail(detail)).await;
 }
 
 async fn record(engine: &Engine, audit: Audit<'_>) {

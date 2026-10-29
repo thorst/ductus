@@ -114,6 +114,20 @@ pub struct EngineInfo {
     /// Other engines running on this database, oldest first, and the interfaces each runs.
     /// An interface runs on one engine at a time.
     others: Vec<OtherEngine>,
+    /// How this engine took over from the one before it (`systemctl reload`: an upgrade or a
+    /// project deploy); none after a plain start.
+    handover: Option<Handover>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct Handover {
+    /// The version it took over from.
+    from_version: String,
+    from_pid: u32,
+    /// When it held the interfaces.
+    at: DateTime<Utc>,
+    /// From the old engine's stop until this one sent (receiving never stopped).
+    sending_paused_ms: u64,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -173,6 +187,12 @@ async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
                 interfaces: e.interfaces,
             })
             .collect(),
+        handover: engine.handed_over.get().map(|h| Handover {
+            from_version: h.from.version.clone(),
+            from_pid: h.from.pid,
+            at: h.at,
+            sending_paused_ms: h.sending_paused.as_millis() as u64,
+        }),
     }))
 }
 

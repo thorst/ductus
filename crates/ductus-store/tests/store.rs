@@ -1866,6 +1866,42 @@ async fn an_interface_runs_on_one_engine_and_a_dead_ones_are_taken_over() {
     lock_b.release().await;
 }
 
+/// A takeover's check before it claims: interfaces owned by a live engine other than itself and
+/// the one it takes over from; a dead owner's don't count.
+#[tokio::test]
+async fn a_takeover_sees_only_other_live_owners() {
+    let Some(store) = store().await else { return };
+    let (old, new, third) = (unique("engine-old"), unique("engine-new"), unique("engine-third"));
+    let [x, y] = ["x", "y"].map(|n| unique(&format!("taken-{n}")));
+    let lock_old = lock(&store, &old, "host").await;
+    let lock_new = lock(&store, &new, "host").await;
+    let lock_third = lock(&store, &third, "host").await;
+    assert!(store.claim(&old, std::slice::from_ref(&x)).await.unwrap().is_empty());
+    assert!(store.claim(&third, std::slice::from_ref(&y)).await.unwrap().is_empty());
+    let both = [x.clone(), y.clone()];
+    let owned = store.live_owners(&both, &[&new, &old]).await.unwrap();
+    assert_eq!(
+        owned.iter().map(|o| (o.interface.as_str(), o.instance.as_str())).collect::<Vec<_>>(),
+        [(y.as_str(), third.as_str())]
+    );
+    lock_third.release().await;
+    let mut gone = false;
+    for _ in 0..40 {
+        if store.live_owners(&both, &[&new, &old]).await.unwrap().is_empty() {
+            gone = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    assert!(gone, "a dead owner's interfaces are free to claim");
+    for engine in [&old, &new, &third] {
+        store.release_engine(engine).await.unwrap();
+        store.forget_engine(engine).await.unwrap();
+    }
+    lock_old.release().await;
+    lock_new.release().await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn two_engines_claiming_the_same_interfaces_at_once_one_wins() {
     let Some(store) = store().await else { return };

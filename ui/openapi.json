@@ -4435,6 +4435,17 @@
           "environment": {
             "type": "string"
           },
+          "handover": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/Handover",
+                "description": "How this engine took over from the one before it (`systemctl reload`: an upgrade or a\nproject deploy); none after a plain start."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "holds_interfaces": {
             "type": "boolean",
             "description": "False while the engine has lost the database connection that holds its interfaces:\nsending, file pickup and schedules wait until it is back (receiving goes on)."
@@ -4526,6 +4537,37 @@
               "null"
             ],
             "format": "int32",
+            "minimum": 0
+          }
+        }
+      },
+      "Handover": {
+        "type": "object",
+        "required": [
+          "from_version",
+          "from_pid",
+          "at",
+          "sending_paused_ms"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it held the interfaces."
+          },
+          "from_pid": {
+            "type": "integer",
+            "format": "int32",
+            "minimum": 0
+          },
+          "from_version": {
+            "type": "string",
+            "description": "The version it took over from."
+          },
+          "sending_paused_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "From the old engine's stop until this one sent (receiving never stopped).",
             "minimum": 0
           }
         }

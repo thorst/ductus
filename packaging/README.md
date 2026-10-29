@@ -35,12 +35,14 @@ messages, the ones in hand finished and saved, exit code 0 (`docs/nuances.md`, "
 engine"). Service managers are set to wait longer than the engine's own limit, so they never
 cut a stop short.
 
-An upgrade replaces the binary and restarts the service. The new version updates the database at
-startup; updates only ever add (expand-only migrations), so the previous version still runs on
-the updated database: rolling back is installing the previous package. On Linux the service
-refuses no connection through a restart, an upgrade or a crash: systemd keeps the listening
-sockets for the next start (below). Sending without a pause (two engines handing over) comes
-later in v0.6.
+An upgrade replaces the binary; on Linux the package then hands the running engine over to it
+(`systemctl reload ductus`: the new version starts beside the old one on the same listening
+sockets and takes over once it's ready, so receiving never stops and sending pauses for a moment;
+a new version that can't start leaves the old one running). Windows restarts the service. The new
+version updates the database at startup; updates only ever add (expand-only migrations), so the
+previous version still runs on the updated database: rolling back is installing the previous
+package. On Linux a restart or a crash refuses no connection either: systemd keeps the listening
+sockets for the next start (below). The same reload deploys project changes.
 
 Before upgrading, run the new version's `ductus upgrade --check` from its portable archive (below):
 it reads the database and the project, changes nothing, and says what the new version's first
@@ -105,12 +107,16 @@ becomes `0.5.0~dev.20261009`, which sorts before `0.5.0`.
   refused (measured: 0 refused, 0.2–0.3 s longest ACK wait for a restart; 5.4 s after a `kill -9`,
   which waits `RestartSec`). A stop, a failed start and a drain close the ports for real. No start
   timeout (`TimeoutStartSec=infinity`): a start migrates first, which can take long.
-- **Upgrade:** a running service is restarted on the new version (a clean stop first; no
-  connection refused, from the second upgrade with this unit on); a stopped one stays stopped.
+- **Upgrade:** a running service is handed over to the new version (`systemctl reload`:
+  `ExecReload=ductus handover --with-environment`, asking the engine over `/run/ductus/control`;
+  no connection refused, longest ACK wait 0.06–0.07 s for a reload and 0.17–0.22 s for an upgrade under real systemd 255 and 252); one that can't take over leaves the old version
+  running and the install says so. A running version without the handover (before 0.6.6.3) is
+  restarted instead; a stopped one stays stopped.
 - **Remove:** stops and disables the service; keeps the user, the project and the settings.
 - Logs go to the journal (`journalctl -u ductus`).
 - Test: `scripts/demo-packages.sh` (systemd in containers: install, configure, a restart with and
-  without the socket store and a `kill -9` under traffic, upgrade under traffic, stop, remove;
+  without the socket store and a `kill -9` under traffic, a reload under traffic and one with a
+  broken project, upgrade under traffic (a handover), stop, remove;
   Ubuntu 24.04 with systemd 255 and Rocky 9 with 252).
 
 ## Windows (MSI and service)

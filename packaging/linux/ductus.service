@@ -21,6 +21,14 @@ Group=ductus
 EnvironmentFile=/etc/ductus/ductus.env
 WorkingDirectory=/var/lib/ductus
 ExecStart=/usr/bin/ductus run
+# `systemctl reload ductus` hands the engine over to the binary now on disk (an upgrade) and the
+# project as it is now (a deploy), with ductus.env read again: the new engine starts beside the
+# running one on the same listening sockets, and nothing is refused. One that can't start leaves
+# the running one as it was (the reload fails, and `journalctl -u ductus` says why). It asks over
+# /run/ductus/control (the engine's user only). No time limit here: `--timeout` (5 min) is it.
+ExecReload=/usr/bin/ductus handover --with-environment
+RuntimeDirectory=ductus
+RuntimeDirectoryMode=0700
 # The engine stops cleanly on SIGTERM: no new messages, the ones in hand finished and saved,
 # within DUCTUS_STOP_TIMEOUT (30 s). Give it longer than that before systemd kills it.
 KillSignal=SIGTERM

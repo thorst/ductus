@@ -16,6 +16,11 @@
 //!
 //! Respond-mode HTTP interfaces aren't claimed: they have no queue, and several engines behind a
 //! load balancer answering the same requests is a fine way to run them.
+//!
+//! A takeover (`crate::handover`) takes its lock at once but claims only once the engine it takes
+//! over from let go (`Owner::prepare`, then `Owner::claim_now`); until then its workers wait as
+//! after a lost lock. It checks first what a start would refuse, so a takeover that couldn't
+//! start fails while the old engine still runs.
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -63,6 +68,10 @@ impl Default for Ownership {
 }
 
 impl Ownership {
+    fn new(held: bool) -> Self {
+        Self(watch::Sender::new(held))
+    }
+
     pub fn is_held(&self) -> bool {
         *self.0.borrow()
     }
@@ -138,6 +147,65 @@ impl Owner {
         }
         tracing::debug!(interfaces = owner.interfaces.len(), took = ?started.elapsed(), "interfaces claimed");
         Ok(owner)
+    }
+
+    /// A takeover's start: the lock and the engine's record, nothing claimed (the engine it takes
+    /// over from, `from`, still runs them), and `Ownership` not held. Refused as a start would be
+    /// when another live engine runs any of `interfaces`, and when lanes go down (`lowered`).
+    pub async fn prepare(store: &Store, me: Me, interfaces: Vec<String>, from: &str, lanes: &[Lanes]) -> Result<Self> {
+        let lock = store.lock_engine(&me.row(), None).await?;
+        let owner = Self {
+            key: lock.key,
+            lock: tokio::sync::Mutex::new(Some(lock)),
+            interfaces,
+            ownership: Arc::new(Ownership::new(false)),
+            taken: CancellationToken::new(),
+            why: std::sync::Mutex::new(None),
+            me,
+        };
+        let owned = store.live_owners(&owner.interfaces, &[&owner.me.instance, from]).await?;
+        if !owned.is_empty() {
+            let detail = json!({
+                "reason": "owned",
+                "instance": owner.me.instance,
+                "interfaces": owned.iter().map(|o| &o.interface).collect::<Vec<_>>(),
+                "owners": owners_detail(&owned),
+            });
+            return Err(owner.refuse(store, detail, owned_message(&owned)).await);
+        }
+        let names: Vec<String> = lanes.iter().map(|l| l.interface.clone()).collect();
+        let applied: HashMap<String, i32> = store.applied_lanes(&names).await?.into_iter().collect();
+        let lowered = lowered(lanes, &applied);
+        if !lowered.is_empty() {
+            let detail = json!({
+                "reason": "handover_lanes",
+                "instance": owner.me.instance,
+                "lowered": lowered.iter().map(|(i, before, now)| json!({ "interface": i, "before": before, "now": now })).collect::<Vec<_>>(),
+            });
+            return Err(owner.refuse(store, detail, lowered_message(&lowered)).await);
+        }
+        Ok(owner)
+    }
+
+    /// A takeover, once the engine it took over from let go: claim, as a start does (refused only
+    /// if a third engine took one of them meanwhile).
+    pub async fn claim_now(&self, store: &Store) -> Result<()> {
+        let owned = store.claim(&self.me.instance, &self.interfaces).await?;
+        if owned.is_empty() {
+            return Ok(());
+        }
+        let detail = json!({
+            "reason": "owned",
+            "instance": self.me.instance,
+            "interfaces": owned.iter().map(|o| &o.interface).collect::<Vec<_>>(),
+            "owners": owners_detail(&owned),
+        });
+        Err(self.refuse(store, detail, owned_message(&owned)).await)
+    }
+
+    /// The interfaces are this engine's: workers, file pickup and schedules go.
+    pub fn hold(&self) {
+        self.ownership.set(true);
     }
 
     pub fn instance(&self) -> &str {
@@ -426,6 +494,30 @@ fn stranded_message(stranded: &[StrandedLanes]) -> String {
     text
 }
 
+/// Interfaces whose lanes go down from those they last ran with: `(interface, before, now)`.
+pub fn lowered(lanes: &[Lanes], applied: &HashMap<String, i32>) -> Vec<(String, i32, i32)> {
+    lanes
+        .iter()
+        .filter_map(|l| {
+            applied.get(&l.interface).filter(|&&before| l.lanes < before).map(|&b| (l.interface.clone(), b, l.lanes))
+        })
+        .collect()
+}
+
+/// A handover can't lower lanes: the engine taken over from stores into every lane it has until
+/// it lets go, so whether messages wait in the lanes that go can only be known once it stopped.
+fn lowered_message(lowered: &[(String, i32, i32)]) -> String {
+    let mut text = String::from("a handover can't lower an interface's lanes (`ordering`):\n");
+    for (interface, before, now) in lowered {
+        let _ = writeln!(text, "  {interface}: {before} → {now} lane{}", plural(*now as i64));
+    }
+    text.push_str(
+        "The running engine stores into every lane it has until it lets go, so messages could be left in lanes\n\
+         nothing reads. Restart instead (`systemctl restart ductus`): the start checks the lanes that go for waiting messages.",
+    );
+    text
+}
+
 /// The refusal for interfaces owned by live engines, grouped by engine.
 pub fn owned_message(owned: &[Owned]) -> String {
     let mut by_engine: BTreeMap<(DateTime<Utc>, &str), Vec<&Owned>> = BTreeMap::new();
@@ -526,6 +618,19 @@ mod tests {
             "{text}"
         );
         assert!(text.contains("ductus drain --wait"), "{text}");
+    }
+
+    #[test]
+    fn a_handover_refuses_lanes_that_go_down() {
+        let applied: HashMap<String, i32> =
+            [("same".to_string(), 64), ("lower".to_string(), 64), ("unkeyed".to_string(), 8)].into();
+        let wanted =
+            [lanes("same", 64, true), lanes("lower", 32, true), lanes("unkeyed", 1, false), lanes("new", 4, true)];
+        let found = lowered(&wanted, &applied);
+        assert_eq!(found, vec![("lower".to_string(), 64, 32), ("unkeyed".to_string(), 8, 1)]);
+        let text = lowered_message(&found);
+        assert!(text.contains("  lower: 64 → 32 lanes\n  unkeyed: 8 → 1 lane\n"), "{text}");
+        assert!(text.contains("systemctl restart ductus"), "{text}");
     }
 
     #[test]

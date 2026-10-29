@@ -1627,6 +1627,7 @@ export interface components {
         EngineInfo: {
             drain: components["schemas"]["DrainStatus"];
             environment: string;
+            handover?: components["schemas"]["Handover"] | null;
             /**
              * @description False while the engine has lost the database connection that holds its interfaces:
              *     sending, file pickup and schedules wait until it is back (receiving goes on).
@@ -1674,6 +1675,22 @@ export interface components {
             text: string;
             /** Format: int32 */
             worker?: number | null;
+        };
+        Handover: {
+            /**
+             * Format: date-time
+             * @description When it held the interfaces.
+             */
+            at: string;
+            /** Format: int32 */
+            from_pid: number;
+            /** @description The version it took over from. */
+            from_version: string;
+            /**
+             * Format: int64
+             * @description From the old engine's stop until this one sent (receiving never stopped).
+             */
+            sending_paused_ms: number;
         };
         /** @description The first message waiting in a lane: the next one its worker handles. */
         HeadInfo: {

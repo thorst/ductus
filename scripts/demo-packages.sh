@@ -4,7 +4,9 @@
 #   install (not started) -> configure -> enable --now -> messages delivered
 #   -> the gap a sender sees: a restart without systemd's socket store (refused), with it, and a
 #      kill -9 (none refused: systemd keeps the listening sockets)
-#   -> upgrade to a newer package under traffic (restarts, none refused, nothing lost or twice)
+#   -> systemctl reload under traffic (the handover: none refused, nothing lost, twice or out of
+#      order), and a reload with a broken project (refused: the running engine goes on)
+#   -> upgrade to a newer package under traffic (a handover: none refused, nothing lost or twice)
 #   -> systemctl stop (clean, exit 0) -> remove (stopped; settings and project kept).
 # Also installs on plain images of the distributions we claim (no systemd: just the scripts and
 # `ductus --version`), and runs the portable archive's `upgrade --check` against a new database
@@ -191,17 +193,45 @@ lifecycle() {
   check "$ext-crash-none-refused" '[ "$(refused "$sent")" = 0 ]'
   check "$ext-crash-nothing-lost" 'grep "unique 1000 |" <<<"$received" >/dev/null'
 
+  # A reload: the handover (here the same binary and project, as a deploy would be). The new
+  # engine starts on the same sockets; the old one stops once it's ready. systemd follows.
+  mainpid() { on "systemctl show -p MainPID --value ductus"; }
+  handovers() { on "journalctl -u ductus --no-pager -o cat | grep -c 'took over: receiving never stopped'" || true; }
+  local before
+  before=$(mainpid)
+  gap "reload" 400000 "systemctl reload ductus"
+  check "$ext-reload-none-refused" '[ "$(refused "$sent")" = 0 ]'
+  check "$ext-reload-nothing-lost" 'grep "unique 1000 |" <<<"$received" >/dev/null'
+  check "$ext-reload-nothing-twice" 'grep "duplicates 0 |" <<<"$received" >/dev/null'
+  check "$ext-reload-in-order" 'grep "out of order 0 |" <<<"$received" >/dev/null'
+  check "$ext-reload-followed" '[ "$(mainpid)" != "$before" ] && [ "$(on "systemctl is-active ductus")" = active ]'
+  echo "   reload: $(on "journalctl -u ductus --no-pager -o cat | grep -o 'handed over to .*' | tail -1")"
+
+  # A project change that can't start: the reload fails and says why; the running engine goes on.
+  local yaml=/var/lib/ductus/project/interfaces/adt-in/interface.yaml
+  on "cp $yaml /tmp/interface.yaml && echo 'bogus: true' >>$yaml"
+  before=$(mainpid)
+  gap "failed reload" 500000 "systemctl reload ductus 2>/dev/null || touch /tmp/reload-failed"
+  check "$ext-bad-reload-fails" 'on "test -f /tmp/reload-failed"'
+  check "$ext-bad-reload-kept" '[ "$(mainpid)" = "$before" ] && [ "$(on "systemctl is-active ductus")" = active ]'
+  check "$ext-bad-reload-none-refused" '[ "$(refused "$sent")" = 0 ]'
+  check "$ext-bad-reload-nothing-lost" 'grep "unique 1000 |" <<<"$received" >/dev/null'
+  check "$ext-bad-reload-says-why" 'on "journalctl -u ductus --no-pager -o cat | grep \"unknown field .bogus.\" >/dev/null"'
+  on "cp /tmp/interface.yaml $yaml"
+
   # A receiver, then traffic; the upgrade lands a third of the way in.
   on "nohup ductus sink --port 6662 >/tmp/sink.log 2>&1 &"
   on "nohup ductus gen --to 127.0.0.1:6661 --count 3000 --patients 300 --rate 1000 >/tmp/gen.log 2>&1 &"
   sleep 1
-  local pid_before
-  pid_before=$(on "systemctl show -p MainPID --value ductus")
+  local pid_before handed
+  pid_before=$(mainpid)
+  handed=$(handovers)
   on "$upgrade /dist/0.6.0-dev.2/*.$ext" >"$WORK/$ext-upgrade.log" 2>&1
   local pid_after
-  pid_after=$(on "systemctl show -p MainPID --value ductus")
-  check "$ext-restarted" '[ "$pid_before" != "$pid_after" ] && [ "$pid_after" != 0 ]'
-  echo "   upgraded under traffic: $(on "$7") (pid $pid_before -> $pid_after)"
+  pid_after=$(mainpid)
+  check "$ext-upgraded" '[ "$pid_before" != "$pid_after" ] && [ "$pid_after" != 0 ]'
+  check "$ext-upgrade-handed-over" '[ "$(handovers)" -gt "$handed" ]'
+  echo "   upgraded under traffic: $(on "$7") (pid $pid_before -> $pid_after), $(on "journalctl -u ductus --no-pager -o cat | grep -o 'sending paused [0-9.]* m*s' | tail -1")"
   for _ in $(seq 1 100); do
     on "pgrep -f '[d]uctus gen' >/dev/null" || break
     sleep 0.2

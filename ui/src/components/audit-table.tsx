@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import type { Schemas } from "@/api/client";
 import { Table, Td, Th } from "@/components/ui/table";
-import { timestamp } from "@/lib/format";
+import { ms, timestamp } from "@/lib/format";
 
 type Entry = Schemas["AuditEntry"];
 
@@ -39,6 +39,7 @@ export const ACTIONS: Record<string, string> = {
   "alert.test": "Sent a test notification",
   "engine.start": "Engine started",
   "engine.stop": "Engine stopped",
+  "engine.handover": "Engine handed over",
   "engine.refused": "Engine start refused",
   "interface.stopped": "Interface stopped",
   "interface.partitions_raised": "Interface lanes raised with messages waiting",
@@ -57,15 +58,31 @@ function refusal(d: Record<string, unknown>): string {
     const where = stranded.map((s) => `${String(s.interface)} → ${String(s.destination)}: ${String(s.waiting)}`);
     return `messages waiting in lanes it no longer has (${where.join(", ")})`;
   }
+  if (d.reason === "handover_lanes") {
+    const lowered = Array.isArray(d.lowered) ? (d.lowered as Record<string, unknown>[]) : [];
+    const which = lowered.map((l) => `${String(l.interface)}: ${String(l.before)} → ${String(l.now)}`);
+    return `a handover can't lower lanes (${which.join(", ")}): restart instead`;
+  }
   return "";
+}
+
+/** "v0.6.0 (pid 4120) → v0.6.1 (pid 5233) · sending paused 180 ms", from an `engine.handover` detail. */
+function handover(d: Record<string, unknown>): string {
+  const side = (v: unknown) => {
+    const s = (v ?? {}) as Record<string, unknown>;
+    return `v${String(s.version ?? "")} (pid ${String(s.pid ?? "")})`;
+  };
+  const paused = typeof d.sending_paused_ms === "number" ? ` · sending paused ${ms(d.sending_paused_ms)}` : "";
+  return `${side(d.from)} → ${side(d.to)}${paused}`;
 }
 
 const VIA: Record<string, string> = { session: "web UI", token: "API token", cli: "command line", engine: "engine" };
 
 /** The most useful line about an entry: the reason if there is one, else what the detail says. */
-function summary(e: Entry): string {
+export function summary(e: Entry): string {
   const d = (e.detail ?? {}) as Record<string, unknown>;
   if (e.action === "engine.refused") return refusal(d);
+  if (e.action === "engine.handover") return handover(d);
   if (e.action === "interface.partitions_raised") {
     return `${String(d.before)} → ${String(d.now)} lanes with ${String(d.waiting)} waiting`;
   }

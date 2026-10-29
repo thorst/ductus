@@ -23,6 +23,13 @@ export function OverviewPage() {
         {info.data && (
           <>
             {count(info.data.interfaces)} interfaces · up {duration(info.data.uptime_seconds)}
+            {info.data.handover && (
+              <>
+                {" "}
+                · took over from v{info.data.handover.from_version} at {timestamp(info.data.handover.at)} (sending
+                paused {ms(info.data.handover.sending_paused_ms)})
+              </>
+            )}
           </>
         )}
       </PageHeader>

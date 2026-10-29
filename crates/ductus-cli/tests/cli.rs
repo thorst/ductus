@@ -2491,6 +2491,170 @@ async fn lanes_that_would_strand_messages_refuse_the_start() {
     store.finish(destination, &done).await.unwrap();
 }
 
+/// Stops a process this test didn't start itself (an engine a handover started) when dropped.
+#[cfg(target_os = "linux")]
+struct Terminate(u32);
+
+#[cfg(target_os = "linux")]
+impl Terminate {
+    fn alive(&self) -> bool {
+        self.kill(&["-0"])
+    }
+
+    fn kill(&self, how: &[&str]) -> bool {
+        let quiet = std::process::Stdio::null;
+        let status = Command::new("kill").args(how).arg(self.0.to_string()).stderr(quiet()).status();
+        status.is_ok_and(|s| s.success())
+    }
+}
+
+#[cfg(target_os = "linux")]
+impl Drop for Terminate {
+    fn drop(&mut self) {
+        self.kill(&[]);
+        for _ in 0..100 {
+            if !self.alive() {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
+/// The handover (`ductus handover`, which `systemctl reload` runs) under traffic: a new engine
+/// takes over with no connection refused and every message delivered once, in order; `GET
+/// /engine` says how. A project that can't start, and one lowering lanes, are refused: the
+/// running engine goes on and still takes messages.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_handover_refuses_nothing_and_a_failed_one_leaves_the_engine_running() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("handover-test-{nanos}");
+    let (mllp, receiver, api) = (free_port(), free_port(), free_port());
+    let config = |lanes: u32| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\nordering: {{ key: PID-3.1, partitions: {lanes} }}\ndestination: {{ mllp: {{ host: 127.0.0.1, port: {receiver} }} }}\n"
+        )
+    };
+    let file = format!("interfaces/{name}/interface.yaml");
+    let dir = project(&[(file.as_str(), config(8).as_str())]);
+    let yaml = dir.path().join(&file);
+    let control = dir.path().join("control");
+    let control = control.to_str().unwrap();
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let output = |name: &str| std::fs::File::create(dir.path().join(name)).unwrap();
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+
+    let sink = Child(
+        Command::new(bin)
+            .args(["sink", "--port", &receiver.to_string()])
+            .stdout(output("sink.log"))
+            .stderr(output("sink.err"))
+            .spawn()
+            .unwrap(),
+    );
+    let log = dir.path().join("engine.log");
+    let file_log = output("engine.log");
+    let mut old = Child(
+        Command::new(bin)
+            .args(["run", "--root", &dir.path().to_string_lossy(), "--threads", "1"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", control)
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", read("engine.log"));
+    let old_pid = old.0.id();
+
+    // 600 messages at 200/s over two connections; the handover a second in.
+    let sender = Command::new(bin)
+        .args(["gen", "--to", &format!("127.0.0.1:{mllp}"), "--count", "600", "--patients", "60"])
+        .args(["--connections", "2", "--rate", "200"])
+        .stdout(output("gen.log"))
+        .stderr(output("gen.err"))
+        .spawn()
+        .unwrap();
+    let mut sender = Child(sender);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let (ok, out) = ductus(dir.path(), &["handover", "--control", control]);
+    assert!(ok, "{out}\n{}", read("engine.log"));
+    assert!(out.contains("is ready after") && out.contains("receiving never stopped, sending paused"), "{out}");
+    let exited = tokio::task::spawn_blocking(move || old.0.wait()).await.unwrap().unwrap();
+    assert!(exited.success(), "the old engine stops cleanly: {exited}");
+
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let engines = store.live_engines().await.unwrap();
+    let running = engines.iter().find(|e| e.interfaces.contains(&name)).expect("an engine runs it");
+    let new = Terminate(running.pid as u32);
+    assert_ne!(new.0, old_pid);
+
+    sender.0.wait().unwrap();
+    let sent = read("gen.log");
+    assert!(sent.contains("rejected 0, refused 0,"), "{sent}");
+    let mut drained = false;
+    for _ in 0..200 {
+        let waiting = store.waiting_by_interface(std::slice::from_ref(&name)).await.unwrap();
+        if waiting.iter().all(|(_, n)| *n == 0) {
+            drained = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(drained, "everything delivered");
+
+    // How it took over, as the API tells.
+    let token_name = format!("{name}-viewer");
+    let (ok, token) = ductus(dir.path(), &["token", "create", &token_name, "--role", "viewer"]);
+    assert!(ok, "{token}");
+    let token = token.lines().next().unwrap().to_string();
+    let engine: serde_json::Value = reqwest::Client::new()
+        .get(format!("http://127.0.0.1:{api}/api/v1/engine"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
+    assert_eq!(engine["handover"]["from_pid"], old_pid, "{engine}");
+    assert!(engine["handover"]["sending_paused_ms"].as_u64().is_some(), "{engine}");
+
+    // A project that can't start: refused, and the running engine goes on.
+    std::fs::write(&yaml, format!("{}bogus: true\n", config(8))).unwrap();
+    let (ok, out) = ductus(dir.path(), &["handover", "--control", control]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("the new engine can't take over") && out.contains("unknown field `bogus`"), "{out}");
+    assert!(out.contains(&format!("This engine (pid {}", new.0)) && out.contains("goes on."), "{out}");
+    // Lanes going down: a restart's to judge.
+    std::fs::write(&yaml, config(4)).unwrap();
+    let (ok, out) = ductus(dir.path(), &["handover", "--control", control]);
+    assert!(!ok && out.contains("a handover can't lower an interface's lanes"), "{out}");
+    assert!(out.contains(&format!("{name}: 8 → 4 lanes")) && out.contains("systemctl restart ductus"), "{out}");
+    assert!(new.alive());
+    let (ok, out) =
+        ductus(dir.path(), &["gen", "--to", &format!("127.0.0.1:{mllp}"), "--count", "1", "--offset", "1000"]);
+    assert!(ok && out.contains("sent 1 messages") && out.contains("refused 0,"), "still takes messages: {out}");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    drop(new); // SIGTERM: a clean stop
+    // Its summary line comes at Ctrl-C.
+    let _ = Command::new("kill").args(["-INT", &sink.0.id().to_string()]).status();
+    for _ in 0..50 {
+        if read("sink.log").contains("final:") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let received = read("sink.log");
+    assert!(received.contains("| duplicates 0 | out of order 0 |"), "{received}");
+    assert!(received.contains("unique 601 |"), "every message once (and the last one): {received}");
+}
+
 /// `ductus upgrade --check` on a new database, on one a migration behind (the migration and what
 /// it does are listed; ready), with a project whose test fails (exit 1, the failure shown, the same
 /// in `--json`), and on one where an applied migration differs from this build's (exit 1).

@@ -13,6 +13,7 @@ pub mod doctor;
 pub mod events;
 mod files;
 pub mod gate;
+pub mod handover;
 pub mod health;
 mod http;
 mod ingest;
@@ -76,6 +77,10 @@ pub struct EngineOptions {
     pub stop_request: Option<std::sync::Arc<tokio::sync::Notify>>,
     /// Called once when every interface and the API are up (the service reports Running then).
     pub on_started: Option<Box<dyn FnOnce() + Send>>,
+    /// Listen for `ductus handover` (`handover::control_path`): `ductus run` does.
+    pub control: bool,
+    /// Take over from the running engine that started this one (`handover`).
+    pub takeover: Option<Arc<handover::Takeover>>,
 }
 
 impl Default for EngineOptions {
@@ -88,16 +93,26 @@ impl Default for EngineOptions {
             stop_timeout: STOP_TIMEOUT,
             stop_request: None,
             on_started: None,
+            control: false,
+            takeover: None,
         }
     }
 }
 
 /// Start every interface under `root` and run until Ctrl-C or SIGTERM (or until drained, when a
-/// drain asked to stop); then stop cleanly (`stop`).
+/// drain asked to stop, or handed over to a new engine: `handover`); then stop cleanly (`stop`).
 pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Result<()> {
+    handover::remember_executable();
+    systemd::init();
+    let takeover = options.takeover.clone();
     let result = run_engine(root, database_url, options).await;
-    if result.is_err() {
-        // A failed or refused start: senders are refused while it's down, as without systemd.
+    if let Err(e) = &result {
+        // A takeover that failed: the old engine says why (and goes on, if it hadn't let go yet).
+        if let Some(t) = takeover {
+            t.failed(&format!("{e:#}")).await;
+        }
+        // A failed or refused start: senders are refused while it's down, as without systemd
+        // (nothing while a takeover hasn't taken over: the sockets are the old engine's).
         systemd::abandon();
     }
     result
@@ -220,13 +235,25 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     phases.mark("database connected and migrated");
     log_database_security(&store, database_url).await;
     // Before anything is changed for an interface (deliveries reconciled, retention applied,
-    // workers started): it must be this engine's, and its lanes must still reach what waits.
+    // workers started): it must be this engine's, and its lanes must still reach what waits. A
+    // takeover only checks that now, and claims once the engine it takes over from let go.
     let instance = audit::new_instance();
     let me = ownership::Me { instance: instance.clone(), host: audit::host_name(), environment: options.env.clone() };
-    let queued = configs.iter().filter(|c| !c.responds()).map(|c| c.name.clone()).collect();
-    let owner = Arc::new(ownership::Owner::claim(&store, me, queued).await?);
+    let queued: Vec<String> = configs.iter().filter(|c| !c.responds()).map(|c| c.name.clone()).collect();
     let lanes: Vec<_> = configs.iter().filter_map(ownership::Lanes::of).collect();
-    owner.guard_lanes(&store, &lanes).await?;
+    let takeover = options.takeover.clone();
+    let owner = Arc::new(match &takeover {
+        None => {
+            let owner = ownership::Owner::claim(&store, me, queued.clone()).await?;
+            owner.guard_lanes(&store, &lanes).await?;
+            owner
+        }
+        Some(t) => {
+            let from = t.predecessor().await?;
+            tracing::info!(pid = from.pid, version = %from.version, "taking over from the running engine: getting ready beside it");
+            ownership::Owner::prepare(&store, me, queued.clone(), &from.instance, &lanes).await?
+        }
+    });
     phases.mark("interfaces claimed, lanes checked");
     // The company's documentation fields: a broken docs-schema.yaml is for `ductus validate` to report,
     // not a reason to stop the engine. The snapshot is for SQL reports, so it never blocks startup either.
@@ -234,36 +261,18 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         tracing::warn!(error = format!("{e:#}"), "ignoring the documentation fields: run `ductus validate`");
         Default::default()
     });
-    let snapshot: Vec<_> = ductus_core::docs::snapshot(&configs, &resources)
-        .into_iter()
-        .map(|(kind, name, docs)| ductus_store::DocsRow { kind, name, docs: docs.to_string() })
-        .collect();
-    if let Err(e) = store.save_docs_snapshot(&snapshot).await {
-        tracing::warn!(error = format!("{e:#}"), "could not save the documentation snapshot");
-    }
-    // Before any worker starts: stored deliveries must match the destinations configured now.
     let destinations: Vec<(String, String)> =
         configs.iter().flat_map(|c| c.destinations().map(|(name, _)| (c.name.clone(), name.to_string()))).collect();
     let all_ids = store.destination_ids(&destinations).await?;
-    // Interfaces with nothing waiting have nothing to reconcile, and their workers nothing to read
-    // yet (they wait for the first message's wake-up, or the idle poll).
-    let queued: Vec<String> = configs.iter().filter(|c| !c.responds()).map(|c| c.name.clone()).collect();
-    let waiting = store.with_waiting(&queued).await?;
-    let (busy, busy_ids): (Vec<(String, String)>, Vec<_>) =
-        destinations.iter().cloned().zip(all_ids.iter().copied()).filter(|((i, _), _)| waiting.contains(i)).unzip();
-    let changes = if busy.is_empty() {
-        ductus_store::Reconciled::default()
-    } else {
-        store.reconcile(&busy, &busy_ids).await.context("matching stored deliveries to the destinations")?
+    let charge = Charge {
+        snapshot: ductus_core::docs::snapshot(&configs, &resources)
+            .into_iter()
+            .map(|(kind, name, docs)| ductus_store::DocsRow { kind, name, docs: docs.to_string() })
+            .collect(),
+        destinations,
+        ids: all_ids.clone(),
+        queued,
     };
-    let mut ids = all_ids.into_iter();
-    for (interface, count) in &changes.added {
-        tracing::info!(%interface, count, "queued messages in flight for destinations they had no delivery for (new destination, or stored by an older version)");
-    }
-    for (interface, destination, count) in &changes.removed {
-        tracing::warn!(%interface, %destination, count, "destination is no longer in interface.yaml: its pending deliveries were marked filtered");
-    }
-    phases.mark("deliveries reconciled");
     // Each interface's retention, before anything is stored: intake needs the tier.
     let configured: Vec<retention::Configured> = configs
         .iter()
@@ -276,8 +285,14 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         .collect();
     // What the audit log's hourly job needs: how long each interface keeps its messages.
     let retention_days: Vec<(String, i32)> = configured.iter().map(|c| (c.name.clone(), i32::from(c.days))).collect();
-    let retention = retention::Retention::start(store.clone(), configured).await.context("applying retention")?;
-    phases.mark("retention applied");
+    let retention = retention::Retention::new(store.clone(), configured).await.context("reading retention")?;
+    // Which interfaces have messages waiting, known once they're this engine's (`take_charge`).
+    let waiting = Arc::new(worker::Waiting::new());
+    if takeover.is_none() {
+        let _ = waiting.set(take_charge(&store, &charge, &mut phases).await?);
+        settle_in(&store, &charge, &retention, &mut phases).await?;
+    }
+    let mut ids = all_ids.into_iter();
     let (stopped_tx, stopped_rx) = tokio::sync::mpsc::unbounded_channel();
     // Keep dedupe keys a little longer than the longest window that uses them.
     let dedupe_retention = configs.iter().filter_map(|c| c.dedupe.as_ref()).map(|d| d.window).max().unwrap_or_default()
@@ -406,7 +421,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 outlets: outlets.clone(),
                 stats: stats.clone(),
                 ownership: owner.ownership.clone(),
-                nothing_waiting: !waiting.contains(&config.name),
+                waiting: waiting.clone(),
             };
             match config.isolation {
                 Isolation::Shared => {
@@ -495,7 +510,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             Source::Internal => {}    // other interfaces' workers store its messages (routes)
         }
     }
-    http::serve(http_endpoints, stopping.clone()).await?;
+    // HTTP sources stop with the workers, or first in a handover (`receiving`).
+    let receiving = stopping.child_token();
+    let http_servers = http::serve(http_endpoints, receiving.clone()).await?;
     let certificate_changes = certificates.watch(stopping.clone());
     phases.mark("listening");
     let running: Vec<control::Running> = interfaces
@@ -539,12 +556,22 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse
-    // to start (the engine may be all that is left to move messages), but it is an error.
-    audit::start(&engine, stopped_rx, retention_days).await;
-    alerts::start(&engine).await;
-    certificates::start(&engine, certificate_changes).await;
-    ldap::start(&engine);
-    phases.mark("audit log and alerts started");
+    // to start (the engine may be all that is left to move messages), but it is an error. Then
+    // alerts, the engine's own certificate checks and the directory's refresh. All once the
+    // interfaces are this engine's: a takeover's only after it took over (two engines judging
+    // one interface's alerts would tell twice).
+    let mut background = Some(async move |engine: &Arc<control::Engine>| {
+        audit::start(engine, stopped_rx, retention_days).await;
+        alerts::start(engine).await;
+        certificates::start(engine, certificate_changes).await;
+        ldap::start(engine);
+    });
+    if takeover.is_none()
+        && let Some(start) = background.take()
+    {
+        start(&engine).await;
+        phases.mark("audit log and alerts started");
+    }
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
         let admission = admission("the REST API", host, *port, settings.api.allow.as_ref())?;
@@ -552,10 +579,46 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             Some(api::serve(engine.clone(), host, *port, server_tls(&settings.api.tls, HTTP1)?, admission).await?);
     }
     phases.mark("API listening");
+    let status = match interfaces.len() {
+        1 => "running 1 interface".to_string(),
+        n => format!("running {n} interfaces"),
+    };
+    // A takeover: ready, receiving beside the engine it takes over from. Once that one stopped and
+    // let go, take the interfaces as a start does, and send.
+    if let Some(t) = &takeover {
+        t.ready(phases.total()).await?;
+        tracing::info!("ready: receiving beside the engine being taken over, which stops now");
+        let stop_took = t.released().await;
+        let released = std::time::Instant::now();
+        systemd::promote();
+        phases.mark("the old engine let go");
+        owner.claim_now(&store).await?;
+        owner.guard_lanes(&store, &lanes).await?;
+        phases.mark("interfaces claimed, lanes recorded");
+        let _ = waiting.set(take_charge(&store, &charge, &mut phases).await?);
+        engine.activity.refresh_pauses(&store).await.context("reading the pauses")?;
+        owner.hold();
+        let sending_paused = stop_took.unwrap_or_default() + released.elapsed();
+        phases.mark("sending");
+        settle_in(&store, &charge, &engine.retention, &mut phases).await?;
+        if let Some(start) = background.take() {
+            start(&engine).await;
+        }
+        let handed = handover::HandedOver { from: t.predecessor().await?, at: chrono::Utc::now(), sending_paused };
+        tracing::info!(
+            from_pid = handed.from.pid,
+            from_version = %handed.from.version,
+            sending_paused = ?sending_paused,
+            "took over: receiving never stopped"
+        );
+        audit::handed_over(&engine, &handed).await;
+        let _ = engine.handed_over.set(handed);
+        t.running(sending_paused).await;
+    }
     // Messages left pending with nothing pending for them (after a crash, or reconcile's
     // changes): workers don't wait for their overall status, so it's set after the start.
     let settling = store.clone();
-    let busy: Vec<String> = waiting.into_iter().collect();
+    let busy: Vec<String> = waiting.get().map(|w| w.iter().cloned().collect()).unwrap_or_default();
     tokio::spawn(async move {
         if busy.is_empty() {
             return;
@@ -584,10 +647,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         "{}",
         events::STARTED
     );
-    systemd::ready(&match interfaces.len() {
-        1 => "running 1 interface".to_string(),
-        n => format!("running {n} interfaces"),
-    });
+    systemd::ready(&status);
     if let Some(started) = options.on_started.take() {
         started();
     }
@@ -614,18 +674,36 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         }
     };
     owner.watch(store.clone(), stopping.clone());
+    let mut control = handover::Control::listen(options.control);
+    let mut successor = None;
     let why = tokio::select! {
         signal = stop_signal() => signal,
         _ = engine.shutdown.cancelled() => "drained and asked to stop",
         _ = requested => "asked by the service manager",
         _ = owner.taken_over() => "another engine took over its interfaces",
+        next = control.next(&engine) => {
+            successor = Some(next);
+            "handed over to a new engine"
+        }
     };
     let limit = options.stop_timeout;
     tracing::info!(why, limit = ?limit, "stopping: taking no new messages, finishing the ones in hand");
-    // Before the gates close: listeners closing now stay in systemd's store for the next start.
-    systemd::stopping();
+    if successor.is_some() {
+        // The new engine listens on the same sockets: they stay open, and systemd isn't told the
+        // service stops. HTTP sources first, gates still open: a request in flight is answered
+        // here, the next one there (not a 503 from a closed gate).
+        systemd::handing_over();
+        receiving.cancel();
+        let until = tokio::time::Instant::now() + Duration::from_secs(5);
+        for server in http_servers {
+            let _ = tokio::time::timeout_at(until, server).await;
+        }
+    } else {
+        // Before the gates close: listeners closing now stay in systemd's store for the next start.
+        systemd::stopping();
+    }
     let started = std::time::Instant::now();
-    let stop = stop(&engine, &stopping, threads, api_server);
+    let stop = stop(&engine, &stopping, threads);
     let mut forced = false;
     tokio::select! {
         finished = tokio::time::timeout(limit, stop) => match finished {
@@ -643,8 +721,22 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             tracing::warn!(signal, "{}", events::STOP_CUT_SHORT)
         }
     }
+    let stop_took = started.elapsed();
     owner.release(&store).await;
-    audit::stopped(&engine, why, forced).await;
+    // Before the new engine takes over: its start reads how this run ended.
+    let why = match &successor {
+        Some(s) => format!("handed over to pid {} (ductus {})", s.pid(), s.version()),
+        None => why.to_string(),
+    };
+    audit::stopped(&engine, &why, forced).await;
+    if let Some(successor) = successor {
+        successor.released(stop_took).await;
+    }
+    // Answer the API requests in flight (a drain's own, say). Live-update streams never end by
+    // themselves, hence the limit.
+    if let Some(server) = api_server {
+        let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
+    }
     match owner.taken_why() {
         Some(why) => Err(ownership::Refused(why).into()),
         None => Ok(()),
@@ -702,16 +794,74 @@ async fn log_database_security(store: &Store, database_url: &str) {
     }
 }
 
+/// What `take_charge` works on.
+struct Charge {
+    snapshot: Vec<ductus_store::DocsRow>,
+    /// Every destination as `(interface, destination)`, with its id.
+    destinations: Vec<(String, String)>,
+    ids: Vec<ductus_store::DestinationId>,
+    /// The queued interfaces.
+    queued: Vec<String>,
+}
+
+/// What a start changes for its interfaces once they're its own (a takeover's: once the engine
+/// it takes over from let go), before any worker sends: stored deliveries matched to the
+/// destinations configured now. Returns the interfaces with messages waiting.
+async fn take_charge(store: &Store, charge: &Charge, phases: &mut Phases) -> Result<std::collections::HashSet<String>> {
+    // Stored deliveries must match the destinations configured now.
+    // Interfaces with nothing waiting have nothing to reconcile, and their workers nothing to read
+    // yet (they wait for the first message's wake-up, or the idle poll).
+    let waiting = store.with_waiting(&charge.queued).await?;
+    let (busy, busy_ids): (Vec<(String, String)>, Vec<_>) = charge
+        .destinations
+        .iter()
+        .cloned()
+        .zip(charge.ids.iter().copied())
+        .filter(|((i, _), _)| waiting.contains(i))
+        .unzip();
+    let changes = if busy.is_empty() {
+        ductus_store::Reconciled::default()
+    } else {
+        store.reconcile(&busy, &busy_ids).await.context("matching stored deliveries to the destinations")?
+    };
+    for (interface, count) in &changes.added {
+        tracing::info!(%interface, count, "queued messages in flight for destinations they had no delivery for (new destination, or stored by an older version)");
+    }
+    for (interface, destination, count) in &changes.removed {
+        tracing::warn!(%interface, %destination, count, "destination is no longer in interface.yaml: its pending deliveries were marked filtered");
+    }
+    phases.mark("deliveries reconciled");
+    Ok(waiting.into_iter().collect())
+}
+
+/// The rest of what a start changes for its interfaces, which sending needn't wait for (a
+/// takeover sends first): the documentation snapshot, the configured retention applied (a change
+/// runs beside sending anyway; until then messages go to the tier stored, as the engine taken over
+/// from stored them).
+async fn settle_in(
+    store: &Store,
+    charge: &Charge,
+    retention: &Arc<retention::Retention>,
+    phases: &mut Phases,
+) -> Result<()> {
+    if let Err(e) = store.save_docs_snapshot(&charge.snapshot).await {
+        tracing::warn!(error = format!("{e:#}"), "could not save the documentation snapshot");
+    }
+    phases.mark("documentation snapshot saved");
+    retention.apply().await.context("applying retention")?;
+    phases.mark("retention applied");
+    Ok(())
+}
+
 /// Stop in order, so nothing is left half done: close every interface's gate (listeners close,
 /// queued HTTP answers 503, file pickup and schedules wait) and wait for messages being stored,
 /// so each gets its ACK; then the workers finish the message in hand and save their statuses;
-/// then last activity is saved and the API answers what's in flight. What's still pending stays
-/// in the queue for the next start, as in a drain.
+/// then last activity is saved (the API answers what's in flight after: `run_engine`). What's
+/// still pending stays in the queue for the next start, as in a drain.
 async fn stop(
     engine: &control::Engine,
     stopping: &tokio_util::sync::CancellationToken,
     threads: Vec<std::thread::JoinHandle<()>>,
-    api_server: Option<tokio::task::JoinHandle<()>>,
 ) {
     for i in &engine.interfaces {
         i.gate.set_open(false);
@@ -728,11 +878,6 @@ async fn stop(
     })
     .await;
     engine.activity.saved().await;
-    // Answer the requests in flight (a drain's own, say). Live-update streams never end by
-    // themselves, hence the limit.
-    if let Some(server) = api_server {
-        let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
-    }
 }
 
 /// The operating system asking the engine to stop: Ctrl-C, or SIGTERM on Unix (systemd,

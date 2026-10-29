@@ -47,8 +47,13 @@ pub struct Endpoint {
 const RESPOND_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Start one server per (host, port) with every endpoint's route. On `stop` each answers the
-/// requests in flight, then closes (respond-mode workers end once nothing can reach them).
-pub async fn serve(endpoints: Vec<Endpoint>, stop: tokio_util::sync::CancellationToken) -> Result<()> {
+/// requests in flight, then closes (respond-mode workers end once nothing can reach them); the
+/// tasks returned end then.
+pub async fn serve(
+    endpoints: Vec<Endpoint>,
+    stop: tokio_util::sync::CancellationToken,
+) -> Result<Vec<tokio::task::JoinHandle<()>>> {
+    let mut tasks = Vec::new();
     let mut servers: BTreeMap<(String, u16), Vec<Endpoint>> = BTreeMap::new();
     for e in endpoints {
         servers.entry((e.host.clone(), e.port)).or_default().push(e);
@@ -88,13 +93,13 @@ pub async fn serve(endpoints: Vec<Endpoint>, stop: tokio_util::sync::Cancellatio
         let listener = crate::tls::Listener::new(listener, tls, &format!("{protocol} {host}:{port}"), admission)?;
         tracing::info!(%host, port, "listening ({protocol})");
         let stop = stop.clone();
-        tokio::spawn(async move {
+        tasks.push(tokio::spawn(async move {
             if let Err(e) = axum::serve(listener, router).with_graceful_shutdown(stop.cancelled_owned()).await {
                 tracing::error!(error = %e, "HTTP server stopped");
             }
-        });
+        }));
     }
-    Ok(())
+    Ok(tasks)
 }
 
 fn json(status: StatusCode, body: serde_json::Value) -> Response {
