@@ -184,7 +184,9 @@ lifecycle() {
   # status wasn't saved goes again (at least once), so duplicates are reported, not failed.
   local restarts
   restarts=$(on "systemctl show -p NRestarts --value ductus")
-  gap "kill -9" 300000 "systemctl kill -s KILL ductus"
+  # The engine's own process, as a crash would (`systemctl kill` also signals the unit's whole
+  # cgroup, which systemd 252 on CI's runner refused: "Input/output error").
+  gap "kill -9" 300000 'kill -9 "$(systemctl show -p MainPID --value ductus)"'
   check "$ext-crash-restarted" '[ "$(on "systemctl show -p NRestarts --value ductus")" -gt "$restarts" ]'
   check "$ext-crash-none-refused" '[ "$(refused "$sent")" = 0 ]'
   check "$ext-crash-nothing-lost" 'grep "unique 1000 |" <<<"$received" >/dev/null'
