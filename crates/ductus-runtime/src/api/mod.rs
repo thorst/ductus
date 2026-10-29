@@ -131,7 +131,7 @@ pub async fn serve(
 ) -> anyhow::Result<tokio::task::JoinHandle<()>> {
     use anyhow::Context;
     use axum::serve::ListenerExt;
-    let listener = tokio::net::TcpListener::bind((host, port)).await.with_context(|| {
+    let listener = crate::systemd::listen(host, port).await.with_context(|| {
         format!("binding the REST API to {host}:{port} (`api.listen` in ductus.yaml; `off` to run without it)")
     })?;
     let https = tls.is_some();

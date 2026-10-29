@@ -37,8 +37,10 @@ cut a stop short.
 
 An upgrade replaces the binary and restarts the service. The new version updates the database at
 startup; updates only ever add (expand-only migrations), so the previous version still runs on
-the updated database: rolling back is installing the previous package. Zero-downtime upgrades
-on Linux (two engines handing over) come later in v0.6.
+the updated database: rolling back is installing the previous package. On Linux the service
+refuses no connection through a restart, an upgrade or a crash: systemd keeps the listening
+sockets for the next start (below). Sending without a pause (two engines handing over) comes
+later in v0.6.
 
 Before upgrading, run the new version's `ductus upgrade --check` from its portable archive (below):
 it reads the database and the project, changes nothing, and says what the new version's first
@@ -96,12 +98,20 @@ becomes `0.5.0~dev.20261009`, which sorts before `0.5.0`.
 - **Install:** creates the `ductus` user; doesn't start or enable the service (nothing is
   configured yet) and prints the next steps: edit `ductus.env`, clone the project,
   `systemctl enable --now ductus`, `journalctl -u ductus -f`.
-- **Upgrade:** a running service is restarted on the new version (a clean stop first); a stopped
-  one stays stopped.
+- **The service is `Type=notify`:** the engine tells systemd when every interface is up
+  (`systemctl start` waits for it; `systemctl status` shows "running N interfaces") and hands it
+  each listening socket (`FileDescriptorStoreMax=`). systemd keeps them through a restart or a
+  crash and gives them to the next start, so senders wait in the kernel's queue instead of being
+  refused (measured: 0 refused, 0.2–0.3 s longest ACK wait for a restart; 5.4 s after a `kill -9`,
+  which waits `RestartSec`). A stop, a failed start and a drain close the ports for real. No start
+  timeout (`TimeoutStartSec=infinity`): a start migrates first, which can take long.
+- **Upgrade:** a running service is restarted on the new version (a clean stop first; no
+  connection refused, from the second upgrade with this unit on); a stopped one stays stopped.
 - **Remove:** stops and disables the service; keeps the user, the project and the settings.
 - Logs go to the journal (`journalctl -u ductus`).
-- Test: `scripts/demo-packages.sh` (systemd in containers: install, configure, upgrade under
-  traffic, stop, remove; Ubuntu and Rocky).
+- Test: `scripts/demo-packages.sh` (systemd in containers: install, configure, a restart with and
+  without the socket store and a `kill -9` under traffic, upgrade under traffic, stop, remove;
+  Ubuntu 24.04 with systemd 255 and Rocky 9 with 252).
 
 ## Windows (MSI and service)
 

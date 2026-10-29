@@ -83,9 +83,8 @@ pub async fn serve(endpoints: Vec<Endpoint>, stop: tokio_util::sync::Cancellatio
             router = router.route(&path, method_router);
         }
         let protocol = if tls.is_some() { "HTTPS" } else { "HTTP" };
-        let listener = tokio::net::TcpListener::bind((host.as_str(), port))
-            .await
-            .with_context(|| format!("binding {protocol} {host}:{port}"))?;
+        let listener =
+            crate::systemd::listen(&host, port).await.with_context(|| format!("binding {protocol} {host}:{port}"))?;
         let listener = crate::tls::Listener::new(listener, tls, &format!("{protocol} {host}:{port}"), admission)?;
         tracing::info!(%host, port, "listening ({protocol})");
         let stop = stop.clone();

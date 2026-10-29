@@ -16,7 +16,7 @@ use ductus_hl7::{AckCode, Message};
 use ductus_store::{Batch, BatchMessage, DedupeKey, DestinationId, Done, MessageRef, NewMessage, Store};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI16, Ordering::Relaxed};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 
 /// What happened to an accepted message.
 pub enum Accepted {
@@ -320,9 +320,12 @@ pub async fn spawn_mllp(
     let config = intake.config.clone();
     let Source::Mllp { host, port, .. } = &config.source else { return Ok(()) };
     let (host, port) = (host.clone(), *port);
-    let bind = move || {
+    let bind = {
         let host = host.clone();
-        async move { TcpListener::bind((host.as_str(), port)).await.with_context(|| format!("binding {host}:{port}")) }
+        move || {
+            let host = host.clone();
+            async move { crate::systemd::listen(&host, port).await.with_context(|| format!("binding {host}:{port}")) }
+        }
     };
     // The first bind is part of startup: a port in use stops the engine.
     let mut listener = Some(bind().await.with_context(|| format!("interface `{}`", config.name))?);
@@ -378,6 +381,8 @@ pub async fn spawn_mllp(
                     }
                 }
                 _ = intake.gate.closed() => {
+                    // A drain: closed for real (a stop keeps the socket in systemd's store).
+                    crate::systemd::release(&host, port);
                     stop.cancel();
                     let _ = serve.await;
                     tracing::debug!(interface = %name, "MLLP listener closed: not taking new messages");

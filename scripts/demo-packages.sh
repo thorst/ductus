@@ -2,7 +2,9 @@
 # The Linux packages, end to end, on real systemd (a container per distribution, Postgres in a
 # container of its own as on a separate database server):
 #   install (not started) -> configure -> enable --now -> messages delivered
-#   -> upgrade to a newer package under traffic (restarts, nothing lost, nothing sent twice)
+#   -> the gap a sender sees: a restart without systemd's socket store (refused), with it, and a
+#      kill -9 (none refused: systemd keeps the listening sockets)
+#   -> upgrade to a newer package under traffic (restarts, none refused, nothing lost or twice)
 #   -> systemctl stop (clean, exit 0) -> remove (stopped; settings and project kept).
 # Also installs on plain images of the distributions we claim (no systemd: just the scripts and
 # `ductus --version`), and runs the portable archive's `upgrade --check` against a new database
@@ -134,6 +136,58 @@ lifecycle() {
   check "$ext-healthy" '[ $healthy = 1 ]'
   [ $healthy = 1 ] || on "journalctl -u ductus --no-pager | tail -20"
   echo "   configured and started: $(on "journalctl -u ductus --no-pager -o cat | grep -o 'started interfaces=[0-9]*' | tail -1")"
+  # Type=notify: systemd heard READY=1 (`systemctl start` waited for every interface).
+  check "$ext-notify-ready" '[ "$(on "systemctl show -p StatusText --value ductus")" = "running 1 interface" ]'
+
+  # What a sender sees while systemd restarts or kills the engine: 4 kept connections, 200
+  # messages/s, the action 1.5 s in. Sequence numbers from <offset> (the example dedupes MSH-10).
+  gap() { # gap <label> <offset> <action>
+    local label=$1 offset=$2 action=$3 file=${1//[^a-z0-9]/-}
+    on "nohup ductus sink --port 6662 >/tmp/sink-$file.log 2>&1 &"
+    on "nohup ductus gen --to 127.0.0.1:6661 --count 1000 --patients 100 --connections 4 --rate 200 --offset $offset >/tmp/gen-$file.log 2>&1 &"
+    sleep 1.5
+    on "$action"
+    for _ in $(seq 1 300); do
+      on "pgrep -f '[d]uctus gen' >/dev/null" || break # [d]: not this command's own bash
+      sleep 0.2
+    done
+    for _ in $(seq 1 120); do
+      left=$(docker exec ductus-pkg-db psql -U ductus -Atc "SELECT count(*) FROM deliveries WHERE status = 0")
+      [ "$left" = 0 ] && break
+      sleep 0.5
+    done
+    on "pkill -INT -f 'ductus sink'"
+    sleep 0.5
+    sent=$(on "tail -1 /tmp/gen-$file.log")
+    received=$(on "tail -1 /tmp/sink-$file.log")
+    echo "   $label: ${sent#*), } | receiver: ${received#*| }"
+  }
+  refused() { sed -n 's/.*refused \([0-9]*\),.*/\1/p' <<<"$1"; }
+
+  # Before: the same restart without systemd's store (as up to 0.6.6.1). A stop flushes the store.
+  on "mkdir -p /etc/systemd/system/ductus.service.d
+      printf '[Service]\nFileDescriptorStoreMax=0\n' >/etc/systemd/system/ductus.service.d/no-store.conf
+      systemctl daemon-reload && systemctl stop ductus && systemctl start ductus"
+  gap "restart without the store" 100000 "systemctl restart ductus"
+  check "$ext-gap-measured" '[ "$(refused "$sent")" -gt 0 ]' # the measurement sees a gap when there is one
+  on "rm -r /etc/systemd/system/ductus.service.d && systemctl daemon-reload && systemctl stop ductus && systemctl start ductus"
+
+  gap "restart" 200000 "systemctl restart ductus"
+  check "$ext-restart-none-refused" '[ "$(refused "$sent")" = 0 ]'
+  check "$ext-restart-nothing-lost" 'grep "unique 1000 |" <<<"$received" >/dev/null'
+  check "$ext-restart-nothing-twice" 'grep "duplicates 0 |" <<<"$received" >/dev/null'
+  check "$ext-restart-in-order" 'grep "out of order 0 |" <<<"$received" >/dev/null'
+  check "$ext-restart-adopted" 'on "journalctl -u ductus --no-pager -o cat | grep \"systemd kept the listening sockets\" >/dev/null"'
+
+  # A crash: systemd starts it again after RestartSec (5 s); senders wait in the backlog meanwhile.
+  # A message stored whose ACK was lost is sent again and recognized (dedupe); one sent whose
+  # status wasn't saved goes again (at least once), so duplicates are reported, not failed.
+  local restarts
+  restarts=$(on "systemctl show -p NRestarts --value ductus")
+  gap "kill -9" 300000 "systemctl kill -s KILL ductus"
+  check "$ext-crash-restarted" '[ "$(on "systemctl show -p NRestarts --value ductus")" -gt "$restarts" ]'
+  check "$ext-crash-none-refused" '[ "$(refused "$sent")" = 0 ]'
+  check "$ext-crash-nothing-lost" 'grep "unique 1000 |" <<<"$received" >/dev/null'
 
   # A receiver, then traffic; the upgrade lands a third of the way in.
   on "nohup ductus sink --port 6662 >/tmp/sink.log 2>&1 &"
@@ -147,7 +201,7 @@ lifecycle() {
   check "$ext-restarted" '[ "$pid_before" != "$pid_after" ] && [ "$pid_after" != 0 ]'
   echo "   upgraded under traffic: $(on "$7") (pid $pid_before -> $pid_after)"
   for _ in $(seq 1 100); do
-    on "pgrep -f 'ductus gen' >/dev/null" || break
+    on "pgrep -f '[d]uctus gen' >/dev/null" || break
     sleep 0.2
   done
   for _ in $(seq 1 120); do
@@ -163,6 +217,10 @@ lifecycle() {
   check "$ext-nothing-lost" 'grep "unique 3000 |" <<<"$sink" >/dev/null'
   check "$ext-nothing-twice" 'grep "duplicates 0 |" <<<"$sink" >/dev/null'
   check "$ext-in-order" 'grep "out of order 0 |" <<<"$sink" >/dev/null'
+  local sender
+  sender=$(on "tail -1 /tmp/gen.log")
+  echo "   sender: ${sender#*), }"
+  check "$ext-upgrade-none-refused" '[ "$(refused "$sender")" = 0 ]'
   check "$ext-env-kept" 'on "grep -q pkg-test /etc/ductus/ductus.env"'
 
   # The archive's check beside the running service, with the service's settings: it sees the

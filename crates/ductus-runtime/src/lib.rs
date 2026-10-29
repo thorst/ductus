@@ -28,6 +28,7 @@ mod services;
 mod sftp;
 mod split;
 pub mod stats;
+pub mod systemd;
 pub mod tls;
 mod worker;
 
@@ -93,7 +94,16 @@ impl Default for EngineOptions {
 
 /// Start every interface under `root` and run until Ctrl-C or SIGTERM (or until drained, when a
 /// drain asked to stop); then stop cleanly (`stop`).
-pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) -> Result<()> {
+pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Result<()> {
+    let result = run_engine(root, database_url, options).await;
+    if result.is_err() {
+        // A failed or refused start: senders are refused while it's down, as without systemd.
+        systemd::abandon();
+    }
+    result
+}
+
+async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions) -> Result<()> {
     let mut phases = Phases::new();
     let env = Environment::load(root, &options.env)?;
     let configs = load_interfaces(root, &env)?;
@@ -459,6 +469,11 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     }
     names.start(stopping.clone());
 
+    // Sockets systemd kept for addresses no longer configured would hold their ports.
+    let listening = ductus_core::ports::listeners(interfaces.iter().map(|(c, ..)| c.as_ref()));
+    systemd::keep_only(
+        listening.iter().map(|l| (l.host.as_str(), l.port)).chain(api_address.iter().map(|(h, p)| (h.as_str(), *p))),
+    );
     for (config, ..) in &interfaces {
         let intake = || intakes[&config.name].clone();
         match &config.source {
@@ -569,6 +584,10 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
         "{}",
         events::STARTED
     );
+    systemd::ready(&match interfaces.len() {
+        1 => "running 1 interface".to_string(),
+        n => format!("running {n} interfaces"),
+    });
     if let Some(started) = options.on_started.take() {
         started();
     }
@@ -603,6 +622,8 @@ pub async fn run(root: &Path, database_url: &str, mut options: EngineOptions) ->
     };
     let limit = options.stop_timeout;
     tracing::info!(why, limit = ?limit, "stopping: taking no new messages, finishing the ones in hand");
+    // Before the gates close: listeners closing now stay in systemd's store for the next start.
+    systemd::stopping();
     let started = std::time::Instant::now();
     let stop = stop(&engine, &stopping, threads, api_server);
     let mut forced = false;

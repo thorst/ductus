@@ -145,36 +145,48 @@ pub async fn generate(opts: GenOptions) -> Result<()> {
         }
         tasks.push(tokio::spawn(async move { send_lane(client, lane, per_connection_rate, start).await }));
     }
-    let (mut retries, mut rejected) = (0u64, 0u64);
+    let mut total = Sent::default();
     for task in tasks {
-        let (r, j) = task.await?;
-        retries += r;
-        rejected += j;
+        let lane = task.await?;
+        total.retries += lane.retries;
+        total.rejected += lane.rejected;
+        total.refused += lane.refused;
+        total.dropped += lane.dropped;
+        total.longest = total.longest.max(lane.longest);
     }
 
     let secs = start.elapsed().as_secs_f64();
+    let Sent { retries, rejected, refused, dropped, longest } = total;
+    // What a sender saw: connections refused (nothing listening) and dropped (closed or reset
+    // under a message), and the longest a message took from its first try to its ACK.
     println!(
-        "sent {} messages over {connections} connection(s) in {secs:.1}s ({:.0}/s), retries {retries}, rejected {rejected}",
+        "sent {} messages over {connections} connection(s) in {secs:.1}s ({:.0}/s), retries {retries}, rejected {rejected}, refused {refused}, dropped {dropped}, longest wait {} ms",
         opts.count,
-        opts.count as f64 / secs
+        opts.count as f64 / secs,
+        longest.as_millis()
     );
     Ok(())
 }
 
+/// One connection's account of its sending.
+#[derive(Default)]
+struct Sent {
+    retries: u64,
+    rejected: u64,
+    refused: u64,
+    dropped: u64,
+    longest: Duration,
+}
+
 /// Send one connection's messages in order, resending each until it's ACKed.
-/// Returns (retries, rejected).
-async fn send_lane(
-    mut client: ductus_mllp::Client,
-    messages: Vec<(u64, u64)>,
-    rate: f64,
-    start: Instant,
-) -> (u64, u64) {
+async fn send_lane(mut client: ductus_mllp::Client, messages: Vec<(u64, u64)>, rate: f64, start: Instant) -> Sent {
     let interval = (rate > 0.0).then(|| Duration::from_secs_f64(1.0 / rate));
-    let (mut retries, mut rejected) = (0u64, 0u64);
+    let mut sent = Sent::default();
     // Said once each time it changes, so a refused handshake doesn't retry in silence.
     let mut last_error = String::new();
     for (i, (seq, patient)) in messages.into_iter().enumerate() {
         let message = adt(seq, patient);
+        let first_try = Instant::now();
         // A lost ACK means we can't know whether it was stored, so resend.
         loop {
             match client.send(message.as_bytes()).await {
@@ -183,31 +195,46 @@ async fn send_lane(
                     match Message::parse(&ack).map(|a| a.value("MSA-1").to_string()).as_deref() {
                         Ok("AA") => break,
                         Ok("AR") => {
-                            rejected += 1;
+                            sent.rejected += 1;
                             break;
                         }
-                        _ => retries += 1,
+                        _ => sent.retries += 1,
                     }
                 }
                 Err(e) => {
+                    use std::io::ErrorKind::*;
+                    // A connection closed under us is tried again on a new one almost at once, as
+                    // senders do; anything else every 0.5 s.
+                    let pause = match e.kind() {
+                        ConnectionRefused => {
+                            sent.refused += 1;
+                            500
+                        }
+                        ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof => {
+                            sent.dropped += 1;
+                            50
+                        }
+                        _ => 500,
+                    };
                     // The engine's words, with gen's options where they name the engine's.
                     let why = ductus_runtime::tls::outbound_failure(&e)
                         .map(|w| w.replace("`tls.certificate`", "--cert").replace("`tls.ca`", "--ca"))
                         .unwrap_or_else(|| e.to_string());
                     if why != last_error {
-                        eprintln!("sending failed, retrying every 0.5 s: {why}");
+                        eprintln!("sending failed, retrying: {why}");
                         last_error = why;
                     }
-                    retries += 1;
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    sent.retries += 1;
+                    tokio::time::sleep(Duration::from_millis(pause)).await;
                 }
             }
         }
+        sent.longest = sent.longest.max(first_try.elapsed());
         if let Some(interval) = interval {
             tokio::time::sleep_until((start + interval * (i as u32 + 1)).into()).await;
         }
     }
-    (retries, rejected)
+    sent
 }
 
 #[derive(Default)]

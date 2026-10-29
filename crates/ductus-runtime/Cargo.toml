@@ -52,6 +52,10 @@ x509-parser = "0.18.1"
 # A named Windows account from Linux: NTLM in pure Rust (sspi 0.23). Windows has SSPI itself.
 tiberius = { version = "0.13.0", default-features = false, features = ["sspi-rs"] }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+# Already in the tree through tokio: systemd's notify socket with descriptors attached (`systemd.rs`).
+libc = "0.2.190"
+
 [build-dependencies]
 flate2 = "1.1.10"
 

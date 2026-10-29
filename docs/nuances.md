@@ -821,6 +821,21 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **Why:** an index is built in one pass over the table; Postgres holds the table's writes until it's done.
 - **What to do:** plan the window by the size shown; for a large table, time the upgrade on a copy (a restored backup) first. There have been none since v0.5 (0011, the queue index, was the last).
 
+### On Linux a restart refuses no connection: senders wait for it (level 2)
+- **What:** under the package's systemd service, `systemctl restart ductus`, a package upgrade and a crash don't refuse senders. systemd keeps the engine's listening sockets open while it restarts and hands them to the new start; a sender connecting meanwhile waits in the kernel's queue until the engine accepts, then gets its ACK. Each open MLLP connection is closed once by the stop (after its last ACK) and the sender reconnects. Measured with 4 senders at 200 messages/s (Ubuntu 24.04 and Rocky Linux 9): a restart **0 refused, longest wait for an ACK 0.2–0.3 s** (the same restart without systemd's help: 4 refused, 0.6 s), a package upgrade 0 refused, 0.2–0.35 s; a `kill -9` **0 refused, 5.4 s** (systemd waits `RestartSec`, 5 s, before starting it again). Nothing lost, nothing twice, in order.
+- **Why:** a refused connection is what senders alarm on, and some wait a minute or more before they try again; a wait of a second inside one ACK isn't noticed. A start also has to connect and migrate before it can take messages: the queue covers that.
+- **What to do:** nothing; `systemctl status ductus` shows "running N interfaces" once it's up (`systemctl start` and `restart` wait for it now). The first upgrade *to* this version still refuses for a moment (the version before never gave systemd its sockets). A long migration makes senders wait as long: plan it (`upgrade --check`). Outside the package's service (`ductus run` by hand, `ductus dev`) a restart refuses as before.
+
+### A stopped service, a failed start and a drain refuse connections, on purpose (level 2)
+- **What:** `systemctl stop ductus` closes the ports (systemd lets go of the sockets when the service stops); a start that fails (the database unreachable, a broken project, another engine owning the interfaces) gives them up too, so while it fails and systemd retries every 5 s senders are refused; a drain closes its MLLP listeners for real.
+- **Why:** a port that takes connections with no engine behind it would leave senders waiting on ACKs that never come, looking connected. Refused is the honest answer when the engine isn't coming back by itself.
+- **What to do:** watch for refusals at the senders as before; `journalctl -u ductus` says why a start failed.
+
+### Windows and containers: a restart is a short gap (level 2)
+- **What:** on Windows the service manager runs one process, so a restart has a gap: `Restart-Service Ductus` measured 0 refused, a few connections reset and **1.1–1.2 s** longest wait for an ACK (Windows itself retries a refused connection for ~1–2 s, so a short gap shows as a wait); an MSI upgrade had the engine down **3.1–3.5 s** (5 refused, 4 reset, 3.2 s longest wait, nothing lost). `msiexec` itself took 100–165 s on a machine where Group Policy turns Restart Manager off, but the engine kept running until its last few seconds (see the Event Log nuance). A container's restart closes its published ports, so senders are refused until the new one listens.
+- **Why:** passing the listening sockets on Windows needs a resident launcher (planned for v1.0); a new container can't share the old one's ports (Kubernetes rolling upgrades are planned for v1.2).
+- **What to do:** senders resend on their own; for a planned restart, a quiet moment helps. Upgrading Windows: stop the service first where Restart Manager is off, to save the wait.
+
 ## Windows
 
 ### The service's account: the default, a gMSA, or a named account (level 2)

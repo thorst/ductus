@@ -7,7 +7,14 @@ Wants=network-online.target
 After=network-online.target postgresql.service
 
 [Service]
-Type=exec
+# The engine says when every interface is up (`systemctl start` waits for it) and when it stops.
+Type=notify
+NotifyAccess=main
+# A start migrates the database first, which can take long after an upgrade: no limit, as before.
+TimeoutStartSec=infinity
+# systemd keeps the engine's listening sockets while it restarts or after a crash, and hands them
+# to the next start: senders' connections wait for it instead of being refused. One per port.
+FileDescriptorStoreMax=4096
 User=ductus
 Group=ductus
 # DUCTUS_DATABASE_URL, DUCTUS_ENV, DUCTUS_SECRET_KEY, DUCTUS_PROJECT ...: see the file.
@@ -20,6 +27,7 @@ KillSignal=SIGTERM
 KillMode=mixed
 TimeoutStopSec=45
 Restart=on-failure
+# After a crash senders wait this long plus the start (their connections queue; none refused).
 RestartSec=5
 # A drained engine asked to stop (`ductus drain --stop`) exits 0: it stays stopped.
 SuccessExitStatus=0
