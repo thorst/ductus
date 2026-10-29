@@ -26,12 +26,13 @@ pub(crate) enum Pool {
 pub(crate) type Pools = Arc<HashMap<String, Pool>>;
 
 /// A pool for the database resource `name`; `size` overrides its `max_connections`. `tls`: what
-/// its CA and client certificate name, loaded (SQL Server: only the CA).
-fn make_pool(name: &str, db: &Database, size: Option<u32>, tls: Option<&DbTls>) -> Pool {
+/// its CA and client certificate name, loaded (SQL Server: only the CA). `read_only`: Postgres
+/// sessions refuse writes (`ductus replay`).
+fn make_pool(name: &str, db: &Database, size: Option<u32>, tls: Option<&DbTls>, read_only: bool) -> Pool {
     match db {
         Database::Postgres(c) => {
             let c = DbConnection { max_connections: size.unwrap_or(c.max_connections), ..c.clone() };
-            Pool::Postgres(postgres_pool(&c, tls.cloned().unwrap_or_default()))
+            Pool::Postgres(postgres_pool(&c, tls.cloned().unwrap_or_default(), read_only))
         }
         Database::Sqlserver(c) => Pool::Sqlserver(Box::new(
             mssql::Pool::new(
@@ -71,6 +72,25 @@ impl SharedServices {
     ///
     /// Must be called on the engine's main runtime.
     pub fn new(env: Environment, resources: &Resources, certificates: &crate::tls::Certificates) -> Result<Self> {
+        Self::with(env, resources, certificates, false)
+    }
+
+    /// For `ductus replay`: Postgres sessions are read-only (`default_transaction_read_only`), so a
+    /// `db().query` that writes is refused by the server. SQL Server has no such session setting.
+    pub(crate) fn read_only(
+        env: Environment,
+        resources: &Resources,
+        certificates: &crate::tls::Certificates,
+    ) -> Result<Self> {
+        Self::with(env, resources, certificates, true)
+    }
+
+    fn with(
+        env: Environment,
+        resources: &Resources,
+        certificates: &crate::tls::Certificates,
+        read_only: bool,
+    ) -> Result<Self> {
         let mut db_tls = HashMap::new();
         for (name, db) in &resources.databases {
             let tls = match db {
@@ -82,7 +102,7 @@ impl SharedServices {
         let databases = resources
             .databases
             .iter()
-            .map(|(name, db)| (name.clone(), make_pool(name, db, None, db_tls.get(name))))
+            .map(|(name, db)| (name.clone(), make_pool(name, db, None, db_tls.get(name), read_only)))
             .collect();
         let mut api_http = BTreeMap::new();
         for (name, api) in resources.apis.iter().filter(|(_, a)| a.tls().is_set()) {
@@ -123,7 +143,7 @@ impl SharedServices {
                 .dedicated_pools
                 .iter()
                 .filter_map(|(name, size)| {
-                    let pool = make_pool(name, self.definitions.get(name)?, Some(*size), self.db_tls.get(name));
+                    let pool = make_pool(name, self.definitions.get(name)?, Some(*size), self.db_tls.get(name), false);
                     Some((name.clone(), pool))
                 })
                 .collect(),
@@ -304,11 +324,15 @@ fn with_client_certificate(options: PgConnectOptions, pem: &crate::tls::PairPem)
 
 /// The pool copies the client certificate into its options: a renewal from the pair's files is
 /// put there too, so the next connection presents it (open ones keep theirs until they close).
-fn postgres_pool(c: &DbConnection, tls: DbTls) -> PgPool {
+fn postgres_pool(c: &DbConnection, tls: DbTls, read_only: bool) -> PgPool {
+    let mut options = postgres_options(c, &tls);
+    if read_only {
+        options = options.options([("default_transaction_read_only", "on")]);
+    }
     let pool = PgPoolOptions::new()
         .max_connections(c.max_connections)
         .acquire_timeout(std::time::Duration::from_secs(10))
-        .connect_lazy_with(postgres_options(c, &tls));
+        .connect_lazy_with(options);
     if let Some(pair) = &tls.certificate {
         let renewing = pool.clone();
         pair.on_renewal(move |pem| {

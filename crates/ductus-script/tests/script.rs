@@ -207,6 +207,52 @@ export function toBilling(m: Message, meta: Meta) {
 
 const SECOND: Duration = Duration::from_secs(1);
 
+/// A replay's isolate (`pin_clock`): `new Date()` and `Date.now()` give the time it's set to, also
+/// across an await and in top-level code; `Math.random` repeats for the same seed; `new Date(x)`,
+/// `Date.UTC` and `instanceof Date` work as before.
+#[test]
+fn a_pinned_clock_and_seeded_random_repeat_exactly() {
+    let dir = project(&[(
+        "adt/transform.ts",
+        r#"import { db, type Message } from "@ductus/sdk";
+const loaded = Date.now();
+export async function transform(m: Message) {
+  const before = new Date().toISOString();
+  await db("RESOURCE").query("SELECT 1", [1]);
+  const pinned = new Date();
+  m.add("ZCL", [String(loaded), before, pinned.toISOString(), String(Date.now()), String(pinned instanceof Date),
+    new Date(Date.UTC(2020, 0, 2)).toISOString(), String(Math.random()), String(Math.random()), typeof Date()]);
+  return m;
+}"#,
+    )]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host_with(Some(std::rc::Rc::new(FakeServices)));
+    host.pin_clock().unwrap();
+    host.set_clock(1_000.0, 0).unwrap();
+    let module = dir.path().join("adt/transform.ts");
+    let (_, f) = rt.block_on(host.add_functions(&module, &[("transform", DEFAULT_FORMATS)], SECOND)).unwrap();
+    let mut run = |ms: f64, seed: u32| {
+        host.set_clock(ms, seed).unwrap();
+        let out = rt.block_on(host.call_function(f[0], ADT, None)).unwrap().unwrap();
+        out.lines().flat_map(|l| l.split('\r')).find(|s| s.starts_with("ZCL")).unwrap().to_string()
+    };
+    let at = 1_793_016_000_000.0; // 2026-10-26T12:00:00Z
+    let first = run(at, 7);
+    let fields: Vec<&str> = first.split('|').collect();
+    assert_eq!(
+        &fields[1..6],
+        ["1000", "2026-10-26T12:00:00.000Z", "2026-10-26T12:00:00.000Z", "1793016000000", "true"]
+    );
+    assert_eq!(fields[6], "2020-01-02T00:00:00.000Z");
+    assert_ne!(fields[7], fields[8], "a sequence, not one value");
+    assert_eq!(fields[9], "string");
+    assert_eq!(run(at, 7), first, "the same clock and seed: the same output");
+    let other = run(at + 1.0, 8);
+    assert_ne!(other, first);
+    assert_eq!(run(at, 7), first, "and back again");
+}
+
 /// Stand-in for the engine's services: a slow "database", one variable.
 struct FakeServices;
 

@@ -16,6 +16,7 @@ mod directory;
 mod docs;
 mod engines;
 pub mod migrations;
+mod replay;
 mod retention;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -34,6 +35,7 @@ pub use certificates::{CertificateRow, DOCTOR_RUNS_KEPT, DoctorRunRow};
 pub use directory::{DirectoryPerson, DirectoryUpdate};
 pub use docs::DocsRow;
 pub use engines::{EngineLock, EngineRow, NewEngine, Owned, Stranded};
+pub use replay::{Original, Recorded};
 pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};
 pub use users::{Candidate, Lockout, NewUser, SessionRow, User, UserChange, UserSettings};
 

@@ -7,6 +7,7 @@ mod init;
 mod new;
 mod owners;
 mod project;
+mod replay;
 mod service;
 mod sinks;
 mod tools;
@@ -167,6 +168,58 @@ enum Command {
         env: String,
         #[arg(long, env = "DUCTUS_DATABASE_URL")]
         database_url: Option<String>,
+        /// Also replay this much of the latest traffic (`1d`, `12h`) through the new version and
+        /// compare it with the installed one (`ductus replay`).
+        #[arg(long, value_name = "DURATION")]
+        replay: Option<String>,
+    },
+    /// Run a period's messages through this version's code again, sending nothing, and compare what
+    /// each destination's code decides (sent and what, filtered, quarantined) with the installed
+    /// version run beside it, with what was recorded, and with kept outputs (`save_output`): the
+    /// evidence a change board asks for before an upgrade or a code change. Reads only (a read-only
+    /// login or a replica is enough). Exits 1 when anything differs.
+    Replay {
+        #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
+        root: PathBuf,
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+        #[arg(long, env = "DUCTUS_DATABASE_URL")]
+        database_url: Option<String>,
+        /// The period's start: a duration back from its end (`24h`, `7d`) or a time (RFC 3339).
+        #[arg(long, default_value = "24h")]
+        since: String,
+        /// The period's end, a time (RFC 3339); default now.
+        #[arg(long)]
+        until: Option<String>,
+        /// Only this interface (repeat it for more).
+        #[arg(long)]
+        interface: Vec<String>,
+        /// At most this many messages per interface, the first in the period: a sample.
+        #[arg(long)]
+        limit: Option<u64>,
+        /// What it's compared with besides the record: `installed` (the version installed on this
+        /// server, run beside this one: the default), `stored` (kept outputs only), or the path of
+        /// another ductus binary.
+        #[arg(long)]
+        against: Option<String>,
+        /// Compare with another version of the project instead: a folder, or a Git revision of this
+        /// one (`main`, `v12`, `HEAD~1`): the same report for a code change. It runs with this binary
+        /// unless --against names one.
+        #[arg(long)]
+        baseline: Option<String>,
+        /// Also write the report to this file: a page a change board can read and sign (.html), or
+        /// JSON (.json).
+        #[arg(long)]
+        report: Option<PathBuf>,
+        /// The report as JSON on stdout instead of text.
+        #[arg(long)]
+        json: bool,
+        /// Leave field values out of the examples: the report then holds no patient data.
+        #[arg(long)]
+        hide_values: bool,
+        /// Write this version's decisions as JSON lines: what the comparing version reads.
+        #[arg(long, hide = true)]
+        emit: bool,
     },
     /// Hand the running engine over to the binary now on disk and the project as it is now,
     /// refusing no connection (Linux: the package's `systemctl reload ductus` runs it): an upgrade
@@ -840,8 +893,9 @@ async fn run(cli: Cli) -> Result<()> {
             // Doctor's report says what failed; the TLS verifier would log each failure again.
             if matches!(cli.command, Command::Doctor { .. }) {
                 "warn,rustls_platform_verifier=off,tiberius=error".into()
-            } else if matches!(cli.command, Command::Upgrade { .. }) {
-                // Its report says what went wrong, and `--json` must be the only thing on stdout.
+            } else if matches!(cli.command, Command::Upgrade { .. } | Command::Replay { .. }) {
+                // Their reports say what went wrong, and `--json` (or `--emit`'s lines) must be the
+                // only thing on stdout.
                 "off".into()
             } else {
                 // A certificate the platform verifier refuses is logged by it at ERROR every time,
@@ -875,9 +929,48 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Validate { root, env, database_url, read_only } => {
             exit_on_failure(project::validate(&root, &env, database_url, read_only).await)
         }
-        Command::Upgrade { check: _, json, root, env, database_url } => {
-            let options = upgrade::Options { root, env, database_url: tools::database_url(database_url)?, json };
+        Command::Upgrade { check: _, json, root, env, database_url, replay } => {
+            let options =
+                upgrade::Options { root, env, database_url: tools::database_url(database_url)?, json, replay };
             exit_on_failure(upgrade::check(options).await)
+        }
+        Command::Replay {
+            root,
+            env,
+            database_url,
+            since,
+            until,
+            interface,
+            limit,
+            against,
+            baseline,
+            report,
+            json,
+            hide_values,
+            emit,
+        } => {
+            let database_url = tools::database_url(database_url)?;
+            if emit {
+                let (from, to) = replay::period(&since, until.as_deref())?;
+                let options =
+                    ductus_runtime::replay::Options { root, env, database_url, from, to, interfaces: interface, limit };
+                return replay::emit(options).await;
+            }
+            let options = replay::Options {
+                root,
+                env,
+                database_url,
+                since,
+                until,
+                interfaces: interface,
+                limit,
+                against,
+                baseline,
+                report,
+                json,
+                hide_values,
+            };
+            exit_on_failure(replay::run(options).await)
         }
         Command::Handover { control, timeout, with_environment } => {
             use ductus_runtime::handover;

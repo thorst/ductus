@@ -112,7 +112,33 @@ pub struct Isolate {
     /// Each interface's first entry, indexed by `InterfaceId` (the guard's table is indexed the same).
     interfaces: Vec<FunctionId>,
     guard: Guard,
+    /// Sets the pinned clock and the random seed (`pin_clock`), in a replay.
+    clock: Option<v8::Global<v8::Function>>,
 }
+
+/// Replaces `Date` and `Math.random` so that a replay computes what the engine computed then, and
+/// two versions replayed side by side compute alike: `new Date()` and `Date.now()` read a clock the
+/// engine sets, `Math.random` is a seeded generator (mulberry32). `new Date(x)`, `Date.UTC`,
+/// `Date.parse` and `instanceof Date` behave as before. Returns the setter `(ms, seed)`.
+const PIN_CLOCK: &str = r#"(() => {
+  const RealDate = Date;
+  let now = 0, state = 0;
+  function PinnedDate(...args) {
+    if (!new.target) return new RealDate(now).toString();
+    return args.length === 0 ? new RealDate(now) : new RealDate(...args);
+  }
+  Object.setPrototypeOf(PinnedDate, RealDate);
+  PinnedDate.prototype = RealDate.prototype;
+  PinnedDate.now = () => now;
+  Object.defineProperty(globalThis, "Date", { value: PinnedDate, writable: true, configurable: true });
+  Math.random = () => {
+    state = (state + 0x6d2b79f5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), state | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+  return (ms, seed) => { now = ms; state = seed | 0; };
+})()"#;
 
 /// The `Runaway` a guard trip stands for; `known` is the interface when the caller knows it.
 fn runaway(known: Option<InterfaceId>, trip: Trip) -> Runaway {
@@ -144,7 +170,32 @@ impl Isolate {
         let context = runtime.main_context();
         let guard = Guard::new(runtime.v8_isolate(), context, heap_mb);
         runtime.add_near_heap_limit_callback(guard.heap_callback());
-        Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard }
+        Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard, clock: None }
+    }
+
+    /// For a replay: from now on the clock is the one `set_clock` sets (0 until then) and
+    /// `Math.random` is seeded by it. Call it before loading interfaces, so their top-level code
+    /// sees it too.
+    pub fn pin_clock(&mut self) -> Result<()> {
+        let setter =
+            self.runtime.execute_script("ductus:pin-clock", PIN_CLOCK.to_string()).map_err(|e| anyhow!("{e}"))?;
+        deno_core::scope!(scope, &mut self.runtime);
+        let setter = v8::Local::new(scope, setter);
+        let setter = v8::Local::<v8::Function>::try_from(setter).map_err(|_| anyhow!("the clock setter"))?;
+        self.clock = Some(v8::Global::new(scope, setter));
+        Ok(())
+    }
+
+    /// The time `new Date()` and `Date.now()` give (milliseconds since 1970), and the seed of
+    /// `Math.random`'s sequence, until the next call (`pin_clock` first).
+    pub fn set_clock(&mut self, now_ms: f64, seed: u32) -> Result<()> {
+        let setter = self.clock.clone().context("the clock isn't pinned (pin_clock)")?;
+        deno_core::scope!(scope, &mut self.runtime);
+        let setter = v8::Local::new(scope, setter);
+        let receiver = v8::undefined(scope).into();
+        let args = [v8::Number::new(scope, now_ms).into(), v8::Integer::new_from_unsigned(scope, seed).into()];
+        setter.call(scope, receiver, &args).context("setting the clock")?;
+        Ok(())
     }
 
     /// An isolate with a single interface loaded; use `transform`.
@@ -334,6 +385,28 @@ __setFixtures({fixtures_json}, {formats_json});
             }
         })
         .await
+    }
+
+    /// Run a function on a raw message with `meta` to completion, driving the event loop itself (one
+    /// call at a time: a replay). Code that runs away is this call's, wherever it ran.
+    pub async fn call_function(
+        &mut self,
+        function: FunctionId,
+        raw: &str,
+        meta: Option<&str>,
+    ) -> Result<Option<String>> {
+        let interface = self.interface_of(function);
+        let finished = match self.begin_function(function, raw, meta)? {
+            Call::Done(out) => return Ok(out),
+            Call::Pending(pending) => self.drive(pending).await,
+        };
+        match finished {
+            Ok(value) => Ok(self.output(value)),
+            Err(e) => match e.downcast::<Runaway>() {
+                Ok(runaway) => Err(Runaway { interface: runaway.interface.or(Some(interface)), ..runaway }.into()),
+                Err(e) => Err(e),
+            },
+        }
     }
 
     /// Start an interface's (first) function on a raw message; see `begin_function`.

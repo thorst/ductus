@@ -2732,3 +2732,170 @@ async fn upgrade_check_reads_the_database_and_the_project() {
     schema.forget().await.unwrap();
     assert!(!root.join(".ductus").exists(), "the check wrote into the project");
 }
+
+const REPLAYED: &str = r#"import { db, kill, type Message } from "@ductus/sdk";
+
+export function transform(m: Message) {
+  if (m.PID[3][1] === "SKIP") return kill("test patient");
+  m.set("PID-8", "U");
+  return m;
+}
+
+// The time and a random number: a replay pins the clock to the message's arrival and seeds the random.
+export async function toBilling(m: Message) {
+  return { mrn: m.PID[3][1], at: new Date().toISOString(), draw: Math.random() };
+}
+"#;
+
+/// `ductus replay` over traffic an engine recorded: unchanged code is identical with the record and
+/// the kept outputs; a changed field and a changed filter show against an older version of the
+/// project (a folder, or a Git revision), field by field, with the clock and the random pinned on
+/// both sides; a write isn't made and makes the message not comparable; the HTML and JSON reports.
+#[tokio::test(flavor = "multi_thread")]
+async fn replay_compares_a_change_with_the_record_kept_outputs_and_the_version_before() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("replay-test-{nanos}");
+    let port = free_port();
+    let yaml = format!(
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\nscript: transform.ts\ndestinations:\n  lab: {{ file: {{ dir: out/lab }}, save_output: true }}\n  billing: {{ file: {{ dir: out/billing }}, transform: toBilling, output: json }}\n"
+    );
+    let interface = format!("interfaces/{name}");
+    let dir = project(&[
+        (format!("{interface}/interface.yaml").as_str(), yaml.as_str()),
+        (format!("{interface}/transform.ts").as_str(), REPLAYED),
+        (
+            "resources.yaml",
+            "databases:\n  billing: { postgres: { host: 127.0.0.1, port: 1, database: b, user: b, password: b } }\n",
+        ),
+    ]);
+    let root = dir.path().to_string_lossy().to_string();
+
+    let (_engine, log) = start_engine(dir.path(), &db, None, "engine.log");
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
+    let mut sender = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    for (i, mrn) in ["1", "2", "3", "SKIP"].iter().enumerate() {
+        let message =
+            format!("MSH|^~\\&|EPIC|HOSP|LAB|HOSP|20261029120000||ADT^A01|{i}|P|2.5\rPID|1||{mrn}^^^MRN||DOE^JOHN\r");
+        let ack = mllp_exchange(&mut sender, &message).await;
+        assert!(ack.contains("MSA|AA"), "{ack}");
+    }
+    let store = ductus_store::Store::connect_read_only(&db).await.unwrap();
+    let done = eventually(async || {
+        let counts = store.counts().await.unwrap();
+        let mine: Vec<_> = counts.iter().filter(|(i, ..)| *i == name).collect();
+        mine.iter().map(|(_, _, n)| n).sum::<i64>() == 4
+            && mine.iter().all(|(_, s, _)| *s != ductus_store::Status::Pending)
+    });
+    assert!(done.await, "{}", std::fs::read_to_string(&log).unwrap());
+
+    let replay = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["replay", "--root", &root, "--since", "1h"])
+            .args(args)
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env_remove("DUCTUS_PROJECT")
+            .env_remove("DUCTUS_ENV")
+            .output()
+            .unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    // The code as it ran: the record and the kept outputs say the same.
+    let (code, out, err) = replay(&["--against", "stored"]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains("note: outputs compared with kept outputs only (--against stored)"), "{out}");
+    assert!(
+        out.contains("✓ lab: 4 compared, 4 identical") && out.contains("✓ billing: 4 compared, 4 identical"),
+        "{out}"
+    );
+    assert!(err.contains(&format!("{name}: 4 message(s) replayed")), "{err}");
+
+    // A new version of the code: PID-8 changes, MRN 2 is filtered now.
+    let before = tempfile::tempdir().unwrap();
+    for file in ["resources.yaml", &format!("{interface}/interface.yaml"), &format!("{interface}/transform.ts")] {
+        let to = before.path().join(file);
+        std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        std::fs::copy(dir.path().join(file), to).unwrap();
+    }
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(["-c", "core.autocrlf=false", "-c", "user.name=t", "-c", "user.email=t@example.org"])
+            .args(args)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-q", "-m", "as it ran"]);
+    let code_file = dir.path().join(&interface).join("transform.ts");
+    edit(&code_file, "m.set(\"PID-8\", \"U\")", "m.set(\"PID-8\", \"F\")");
+    edit(&code_file, "=== \"SKIP\")", "=== \"SKIP\" || m.PID[3][1] === \"2\")");
+
+    let page = dir.path().join("replay.html");
+    let baseline = before.path().to_string_lossy().to_string();
+    let (code, out, err) = replay(&["--baseline", &baseline, "--report", &page.to_string_lossy()]);
+    assert_eq!(code, Some(1), "{out}{err}");
+    let other = format!("the project at {baseline}");
+    assert!(out.contains(&format!("ductus replay: version {} against {other}", env!("CARGO_PKG_VERSION"))), "{out}");
+    assert!(out.contains("✗ lab: 4 compared, 1 identical, 3 different"), "{out}");
+    assert!(out.contains(&format!("vs {other}: PID-8 differs in 2 message(s) (e.g. message")), "{out}");
+    assert!(out.contains("\"U\" → \"F\""), "{out}");
+    assert!(out.contains(&format!("vs {other}: decision differs in 1 message(s)")), "{out}");
+    assert!(out.contains("\"sent\" → \"filtered (killed: test patient)\""), "{out}");
+    assert!(out.contains("vs the kept output: PID-8 differs in 2"), "{out}");
+    assert!(
+        out.contains("✓ billing: 4 compared, 4 identical"),
+        "the clock and the random were pinned on both sides: {out}"
+    );
+    let html = std::fs::read_to_string(&page).unwrap();
+    assert!(html.contains("<h1>Replay report</h1>") && html.contains("sha256:"), "{html}");
+    assert!(out.contains(&format!("report: {}", page.display())), "{out}");
+
+    // The same against a Git revision of the project, as JSON.
+    let (code, out, err) = replay(&["--baseline", "HEAD", "--json", "--hide-values"]);
+    assert_eq!(code, Some(1), "{out}{err}");
+    let report: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}{err}"));
+    assert_eq!(report["other"]["label"], "the project at HEAD", "{report:#}");
+    let destinations = &report["interfaces"][0]["destinations"];
+    let lab = destinations.as_array().unwrap().iter().find(|d| d["name"] == "lab").unwrap();
+    assert_eq!((lab["identical"].as_u64(), lab["different"].as_u64()), (Some(1), Some(3)), "{report:#}");
+    let pid8 = lab["differences"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|g| g["against"] == "other" && g["what"] == "PID-8")
+        .unwrap();
+    assert_eq!((pid8["count"].as_u64(), pid8["examples"][0]["before"].as_str()), (Some(2), Some("")), "values hidden");
+    assert!(report["checksum"].as_str().unwrap().starts_with("sha256:"));
+
+    // Another binary on the same (changed) project: both versions agree, so what differs from the
+    // record is drift, not this version's doing; it passes.
+    let binary = before.path().join(if cfg!(windows) { "other-ductus.exe" } else { "other-ductus" });
+    std::fs::copy(env!("CARGO_BIN_EXE_ductus"), &binary).unwrap();
+    let (code, out, err) = replay(&["--against", &binary.to_string_lossy()]);
+    assert_eq!(code, Some(0), "{out}{err}");
+    assert!(out.contains(&format!("against version {} ({})", env!("CARGO_PKG_VERSION"), binary.display())), "{out}");
+    assert!(out.contains("⚠ lab: 4 compared, 1 identical, 3 drift"), "{out}");
+    assert!(out.contains("(drift: the other version does the same)"), "{out}");
+
+    // A write isn't made in a replay: those messages can't be compared.
+    edit(
+        &code_file,
+        "export async function toBilling(m: Message) {",
+        "export async function toBilling(m: Message) {\n  await db(\"billing\").execute(\"INSERT INTO charges VALUES ($1)\", [m.PID[3][1]]);",
+    );
+    let (code, out, err) = replay(&["--against", "stored", "--interface", &name]);
+    assert_eq!(code, Some(1), "lab still differs: {out}{err}");
+    assert!(out.contains("⚠ billing: 4 compared, 4 not comparable"), "{out}");
+    assert!(out.contains("writes to database `billing`: not made in a replay"), "{out}");
+    let (code, out, _) = replay(&["--against", "stored", "--interface", "nope"]);
+    assert_eq!(code, Some(1));
+    assert!(out.is_empty());
+}

@@ -318,7 +318,7 @@ struct Worker {
 }
 
 /// What the interface logic decided to do with a message.
-enum Outcome {
+pub(crate) enum Outcome {
     Deliver(String),
     /// Dropped on purpose (`return null` or `kill(reason)`): kept for audit, never delivered.
     Filter(Option<String>),
@@ -327,6 +327,37 @@ enum Outcome {
     Retry(String),
     /// The code ran away and was stopped.
     Runaway(Runaway),
+}
+
+impl Outcome {
+    /// What a destination's function returned, as the decision it stands for (`ductus replay`
+    /// decides with this too). `None`: the destination has no function, the message goes as is.
+    pub(crate) fn of(input: &str, result: Option<Result<Option<String>>>) -> Self {
+        let result = match result {
+            None => return Outcome::Deliver(input.to_string()),
+            Some(result) => result,
+        };
+        match result {
+            Ok(Some(output)) => match output.strip_prefix(ductus_script::KILL) {
+                Some(reason) => Outcome::Filter(Some(format!("killed: {reason}"))),
+                None => Outcome::Deliver(output),
+            },
+            Ok(None) => Outcome::Filter(None),
+            Err(e) => {
+                let error = format!("{e:#}");
+                if let Some(runaway) = e.downcast_ref::<Runaway>() {
+                    Outcome::Runaway(*runaway)
+                } else if let Some((_, reason)) = error.split_once(ductus_script::QUARANTINE) {
+                    // A deliberate quarantine: keep just the reason, not the stack trace.
+                    Outcome::Quarantine(reason.lines().next().unwrap_or("").trim().to_string())
+                } else if error.contains(ductus_script::TRANSIENT) {
+                    Outcome::Retry(format!("transform failed: {}", error.replace(ductus_script::TRANSIENT, "").trim()))
+                } else {
+                    Outcome::Quarantine(format!("transform failed: {error}"))
+                }
+            }
+        }
+    }
 }
 
 impl Worker {
@@ -437,44 +468,15 @@ impl Worker {
     async fn process(&mut self, message: Pending) {
         let reference = message.reference();
         let input = String::from_utf8_lossy(&message.payload);
-        let mut meta = serde_json::json!({
-            "id": message.id,
-            "receivedAt": message.received_at.to_rfc3339(),
-            "destination": &*self.destination,
-        });
-        if let Some(origin) = message.origin {
-            meta["origin"] = origin.into();
-        }
-        let meta = meta.to_string();
+        let meta = meta(reference, &self.destination, message.origin);
         let mut attempts = message.attempts;
         let mut backoff = Duration::from_millis(self.retry.initial_backoff_ms);
         loop {
-            let outcome = match &self.script {
-                None => Outcome::Deliver(input.to_string()),
-                Some(script) => match self.transformed(script, &input, &meta).await {
-                    Ok(Some(output)) => match output.strip_prefix(ductus_script::KILL) {
-                        Some(reason) => Outcome::Filter(Some(format!("killed: {reason}"))),
-                        None => Outcome::Deliver(output),
-                    },
-                    Ok(None) => Outcome::Filter(None),
-                    Err(e) => {
-                        let error = format!("{e:#}");
-                        if let Some(runaway) = e.downcast_ref::<Runaway>() {
-                            Outcome::Runaway(*runaway)
-                        } else if let Some((_, reason)) = error.split_once(ductus_script::QUARANTINE) {
-                            // A deliberate quarantine: keep just the reason, not the stack trace.
-                            Outcome::Quarantine(reason.lines().next().unwrap_or("").trim().to_string())
-                        } else if error.contains(ductus_script::TRANSIENT) {
-                            Outcome::Retry(format!(
-                                "transform failed: {}",
-                                error.replace(ductus_script::TRANSIENT, "").trim()
-                            ))
-                        } else {
-                            Outcome::Quarantine(format!("transform failed: {error}"))
-                        }
-                    }
-                },
+            let result = match &self.script {
+                None => None,
+                Some(script) => Some(self.transformed(script, &input, &meta).await),
             };
+            let outcome = Outcome::of(&input, result);
 
             match &outcome {
                 Outcome::Runaway(runaway) => ran_away(&self.config.name, &self.health, runaway),
@@ -701,6 +703,20 @@ impl Worker {
             tokio::time::sleep(DB_RETRY).await;
         }
     }
+}
+
+/// A destination function's second argument (JSON): the message's id, when it was received, the
+/// destination, and the message it was routed from.
+pub(crate) fn meta(message: MessageRef, destination: &str, origin: Option<i64>) -> String {
+    let mut meta = serde_json::json!({
+        "id": message.id,
+        "receivedAt": message.received_at.to_rfc3339(),
+        "destination": destination,
+    });
+    if let Some(origin) = origin {
+        meta["origin"] = origin.into();
+    }
+    meta.to_string()
 }
 
 /// Record that an interface's code ran away; say so loudly if that stops the interface.

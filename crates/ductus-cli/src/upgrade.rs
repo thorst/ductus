@@ -19,6 +19,8 @@ pub struct Options {
     pub env: String,
     pub database_url: String,
     pub json: bool,
+    /// `--replay 1d`: replay that much of the latest traffic too (`ductus replay`).
+    pub replay: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -135,6 +137,11 @@ pub async fn check(options: Options) -> Result<bool> {
                 .collect();
             report.detail("deprecated", Value::Array(found));
         }
+    }
+
+    if let Some(since) = &options.replay {
+        report.section("replay", &format!("The last {since} replayed through {VERSION} (nothing is sent)"));
+        replay(&options, since, &mut report);
     }
 
     let took = started.elapsed().as_secs_f64();
@@ -335,6 +342,80 @@ fn project(options: &Options, report: &mut Report) {
         results.insert(name.to_string(), json!({ "ok": ok, "output": output }));
     }
     report.detail("project", Value::Object(results));
+}
+
+/// `ductus replay --since <since> --json` as this binary: against the installed version where there
+/// is one, else the record and kept outputs. Its differences are problems; a full report is one
+/// command away.
+fn replay(options: &Options, since: &str, report: &mut Report) {
+    let mut command = Command::new(match std::env::current_exe() {
+        Ok(exe) => exe,
+        Err(e) => return report.add(Level::Problem, format!("replay: {e}"), Vec::new()),
+    });
+    command.args(["replay", "--json", "--since", since, "--root"]).arg(&options.root).args(["--env", &options.env]);
+    command.env("DUCTUS_DATABASE_URL", &options.database_url);
+    let out = match command.output() {
+        Ok(out) => out,
+        Err(e) => return report.add(Level::Problem, format!("couldn't run `ductus replay`: {e}"), Vec::new()),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let Ok(document) = serde_json::from_str::<Value>(&stdout) else {
+        let said = String::from_utf8_lossy(&out.stderr);
+        let last = said.lines().rev().find(|l| !l.trim().is_empty()).unwrap_or("").trim().to_string();
+        return report.add(Level::Problem, format!("replay: {last}"), said.lines().map(str::to_string).collect());
+    };
+    let count = |key: &str| document[key].as_u64().unwrap_or(0);
+    let against = document["other"]["label"].as_str().map_or("the record and kept outputs".to_string(), str::to_string);
+    let notes: Vec<String> = document["notes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|n| n.as_str())
+        .map(|n| format!("note: {n}"))
+        .collect();
+    let mut differences = Vec::new();
+    for interface in document["interfaces"].as_array().into_iter().flatten() {
+        if let Some(why) = interface["skipped"].as_str().filter(|s| s.starts_with("its code")) {
+            differences.push(format!("{}: {why}", interface["name"].as_str().unwrap_or("")));
+        }
+        for destination in interface["destinations"].as_array().into_iter().flatten() {
+            for group in destination["differences"].as_array().into_iter().flatten().filter(|g| g["drift"] != true) {
+                differences.push(format!(
+                    "{} → {}: {} differs in {} message(s) (vs {})",
+                    interface["name"].as_str().unwrap_or(""),
+                    destination["name"].as_str().unwrap_or(""),
+                    group["what"].as_str().unwrap_or(""),
+                    group["count"],
+                    group["against"].as_str().unwrap_or("")
+                ));
+            }
+        }
+    }
+    let summary = format!(
+        "replay against {against}: {} message(s), {} comparison(s), {} identical, {} different",
+        count("messages"),
+        count("compared"),
+        count("identical"),
+        count("different")
+    );
+    if document["ok"] == true {
+        report.add(Level::Ok, summary, notes);
+    } else {
+        differences.push(format!("the page with every difference: ductus replay --since {since} --report replay.html"));
+        report.add(Level::Problem, summary, differences.into_iter().chain(notes).collect());
+    }
+    if count("not_comparable") + count("drift") > 0 {
+        report.add(
+            Level::Warning,
+            format!(
+                "replay: {} not comparable (writes it doesn't make, lookups that failed), {} drift (the installed version does the same)",
+                count("not_comparable"),
+                count("drift")
+            ),
+            Vec::new(),
+        );
+    }
+    report.detail("replay", document);
 }
 
 /// This binary with `args`, the project and environment: (exit 0, stdout and stderr).
