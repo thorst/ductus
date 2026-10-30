@@ -1,0 +1,7 @@
+# An API polled every five minutes.
+name: bed-board
+source: { schedule: { every: "${EVERY}" } }
+script: poll.ts
+format: xml
+output: text
+destination: { file: { dir: out } }

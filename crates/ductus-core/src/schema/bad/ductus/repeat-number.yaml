@@ -1,0 +1,3 @@
+# A duration other than 0 needs its unit: `repeat: 4` could be hours or minutes.
+alerts:
+  repeat: 4

@@ -1,0 +1,6 @@
+# A nightly job: the code runs at 02:00 and what it returns is the message.
+name: nightly-census
+source: { schedule: { cron: "0 2 * * *" } }
+script: census.ts
+format: { csv: }
+destination: { sftp: { server: state, dir: census } }

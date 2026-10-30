@@ -1,0 +1,11 @@
+# The settings `ductus init` writes: the defaults.
+ports:
+  mllp: 6661-6699
+  http: 8080-8099
+retention: 7w
+quarantined: keep
+api:
+  listen: 127.0.0.1:7700
+isolates:
+  heap_mb: 512
+require_about: false

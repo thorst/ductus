@@ -1,0 +1,14 @@
+# A REST lookup: the code answers each request itself; nothing is stored or sent on.
+name: patient-lookup
+source:
+  http:
+    host: 127.0.0.1
+    port: 8080
+    tls: { certificate: ductus-api }
+    allow: [10.1.50.0/24]
+    path: /patients/{mrn}
+    method: GET
+    mode: respond
+script: lookup.ts
+format: json
+output: { csv: { delimiter: "|", header: false } }

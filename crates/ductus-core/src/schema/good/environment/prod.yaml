@@ -1,0 +1,5 @@
+# Variables for one environment: any YAML value, used as ${NAME}.
+variables:
+  PATIENT_DB_HOST: patients.hospital.local
+  EPIC_PORT: 6661
+  STRICT: true

@@ -44,38 +44,66 @@ use std::time::Duration;
 pub const OWNER: &str = "owner";
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AlertSettings {
-    /// The mail server email channels (and owners) are sent through.
+    /// The mail server that email channels (and owners' email) go through. Needed only for
+    /// email; webhooks need none. Default: none. Example: `smtp: { host: smtp.hospital.org,
+    /// from: ductus@hospital.org }`.
     #[serde(default)]
     pub smtp: Option<Smtp>,
-    /// Named places to send to.
+    /// Where alerts can go, by a name rules use in `to:`: each an email list, a chat webhook, or
+    /// both. Send to teams (a mailing list, a chat channel) rather than to one person: people
+    /// change and sleep; a team's list doesn't. `ductus alerts test <channel>` sends a test from
+    /// the command line, no engine needed. Default: none. Example: `channels: { oncall: { email:
+    /// interfaces-oncall@hospital.org }, chat: { webhook: { url: "${secret:CHAT_WEBHOOK}", format:
+    /// teams } } }`.
     #[serde(default)]
     pub channels: BTreeMap<String, Channel>,
-    /// Which states alert, how badly, and to whom: the first rule naming a state wins. A state
-    /// no rule names doesn't alert.
+    /// Which health states alert, how badly, and to whom. Each state is matched by the first
+    /// rule that names it; a state no rule names doesn't alert (`ductus validate` says which).
+    /// Default: none (nothing alerts). Example: `rules: [{ when: [error, stalled, stopped],
+    /// severity: critical, to: [oncall, chat] }, { when: [behind, silent, missed, certificate],
+    /// severity: warning, to: [chat] }]`.
     #[serde(default)]
     pub rules: Vec<Rule>,
-    /// Remind this often while an alert is open and nobody acknowledged it. `0`: never.
+    /// While an alert stays open and nobody has acknowledged it, remind its recipients this
+    /// often; `0` never reminds. Acknowledging (on the Alerts page) stops reminders until it gets
+    /// worse or recovers. Keep it long where a channel pages someone. Default: `4h`. Example:
+    /// `repeat: 1h`.
     #[serde(default = "default_repeat", deserialize_with = "zero_or_duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::ZeroOrDuration"))]
     pub repeat: Duration,
-    /// Tell the same people when it's fine again.
+    /// Tell the people who heard about an alert when it's fine again (after `settle`), so they
+    /// can stand down. Default: `true`. Example: `recovery: false`.
     #[serde(default = "yes")]
     pub recovery: bool,
-    /// Fine for this long before an alert counts as recovered; bad again sooner reopens it.
+    /// How long a state must be fine before its alert counts as over. Bad again sooner, and the
+    /// same alert goes on: a receiver flapping up and down is one alert, not dozens. `0` ends it
+    /// at once. Default: `2m`. Example: `settle: 10m`.
     #[serde(default = "default_settle", deserialize_with = "zero_or_duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::ZeroOrDuration"))]
     pub settle: Duration,
-    /// Hours when some severities wait.
+    /// Hours when notifications of some severities wait until morning (warnings, overnight). A
+    /// warning that comes and goes in the night is never sent, only kept in the history; one
+    /// that turns critical goes at once. Default: none. Example: `quiet: { between:
+    /// "22:00-06:00", severities: [warning] }`.
     #[serde(default)]
     pub quiet: Option<Quiet>,
-    /// A URL called every so often while the engine runs: a service that hears nothing raises
-    /// its own alarm (an engine that is down can't send one).
+    /// A URL the engine calls every `every` while it runs, for a service elsewhere that raises
+    /// its own alarm when the calls stop (healthchecks.io, Better Stack, Uptime Kuma, a
+    /// monitoring tool's push check). An engine that is down, or can't reach its database, can't
+    /// send alerts itself: this is how anyone hears about it. Set it in production. Default:
+    /// none. Example: `heartbeat: { url: "${secret:HEARTBEAT_URL}", every: 5m }`.
     #[serde(default)]
     pub heartbeat: Option<Heartbeat>,
-    /// How long alert history is kept.
+    /// How long alerts' history (what fired, who was told, who acknowledged) is kept, in years
+    /// (`1y`) or any duration. Default: `1y`. Example: `keep: 2y`.
     #[serde(default = "default_keep", deserialize_with = "crate::settings::keep_duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::Keep"))]
     pub keep: Duration,
-    /// When a certificate the engine connects to alerts (`certificate` in a rule).
+    /// When an expiring certificate alerts (`certificate` in a rule): the steps before expiry.
+    /// Default: 30, 14 and 7 days.
     #[serde(default)]
     pub certificates: CertificateSettings,
 }
@@ -83,8 +111,15 @@ pub struct AlertSettings {
 /// `alerts.certificates`: the days before expiry at which a `certificate` alert fires (the first)
 /// and escalates (each later one); an expired certificate is always critical.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CertificateSettings {
+    /// The days before a certificate expires at which its alert is told: it fires at the first
+    /// (with the rule's severity) and is told again at each later one, then as critical once
+    /// expired. No reminders between steps: the steps are the reminders. Counted in whole days,
+    /// from the earliest expiry in the certificate's chain. Pick the first step to leave time for
+    /// your slowest renewal (a vendor's CA, a change board). Default: `[30, 14, 7]`. Example:
+    /// `warn_days: [45, 14, 3]`.
     #[serde(default = "default_warn_days")]
     pub warn_days: Vec<u32>,
 }
@@ -115,9 +150,23 @@ fn yes() -> bool {
     true
 }
 
-/// `0` (off), or a duration.
+/// `0` (off), or a duration. A bare `0` is a number in YAML, so numbers are read too.
 fn zero_or_duration<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<Duration, D::Error> {
-    let text = String::deserialize(d)?;
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Written {
+        Number(u64),
+        Text(String),
+    }
+    let text = match Written::deserialize(d)? {
+        Written::Number(0) => return Ok(Duration::ZERO),
+        Written::Number(n) => {
+            return Err(serde::de::Error::custom(format!(
+                "`{n}`: write a duration with its unit (90s, 15m, 4h), or 0 for never"
+            )));
+        }
+        Written::Text(text) => text,
+    };
     if text.trim() == "0" {
         return Ok(Duration::ZERO);
     }
@@ -126,24 +175,48 @@ fn zero_or_duration<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Resu
 
 /// The mail server.
 #[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Smtp {
+    /// The mail server's host name: your organization's relay or submission server. Its
+    /// certificate must be for this name. Required. Example: `host: smtp.hospital.org`.
     pub host: String,
-    /// Default: 587 with `starttls`, 465 with `tls`, 25 with `none`.
+    /// The mail server's port. Default: `587` with `tls: starttls`, `465` with `tls: tls`, `25`
+    /// with `tls: none`. Example: `port: 2525`.
     #[serde(default)]
     pub port: Option<u16>,
+    /// How the connection is protected:
+    ///
+    /// - `starttls`: a plain connection turned into TLS before anything else (submission, port
+    ///   587); refused if the server can't.
+    /// - `tls`: TLS from the first byte (port 465).
+    /// - `none`: no encryption, for a relay on this machine or its network segment only; mail and
+    ///   any password cross readable.
+    ///
+    /// Default: `starttls`. Example: `tls: tls`.
     #[serde(default)]
     pub tls: SmtpTls,
+    /// The account to log in as, when the server asks for one (most submission servers do; an
+    /// internal relay often doesn't). Goes with `password`. Default: none (no login). Example:
+    /// `username: ductus@hospital.org`.
     #[serde(default)]
     pub username: Option<String>,
+    /// The account's password, from a secret (`${secret:SMTP_PASSWORD}`). Goes with `username`.
+    /// Example: `password: "${secret:SMTP_PASSWORD}"`.
     #[serde(default)]
     pub password: Option<String>,
-    /// The sender address.
+    /// The address notifications come from. Use one your mail server lets this account send as,
+    /// and that recipients' filters let through (ask the mail team to add it to their allow
+    /// list). Required. Example: `from: ductus@hospital.org`.
     pub from: String,
-    /// Also trust this CA for the mail server (a `certificates:` entry in resources.yaml).
+    /// A CA to trust for the mail server besides the ones this server trusts (a `certificates:`
+    /// entry in resources.yaml), for an internal relay with a private CA's certificate. Not with
+    /// `tls: none`. Default: the system's trusted CAs only. Example: `ca: hospital-ca`.
     #[serde(default)]
     pub ca: Option<String>,
-    /// Present this client certificate (a `certificates:` pair).
+    /// A client certificate to present to the mail server (a `certificates:` entry with its key),
+    /// for servers that admit senders by certificate. Not with `tls: none`. Default: none.
+    /// Example: `certificate: ductus-client`.
     #[serde(default)]
     pub certificate: Option<String>,
 }
@@ -171,6 +244,7 @@ impl Smtp {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum SmtpTls {
     /// Plain connection upgraded to TLS (submission, port 587). Refused if the server can't.
@@ -184,25 +258,48 @@ pub enum SmtpTls {
 
 /// A place to send to: email addresses, a webhook, or both.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Channel {
+    /// The address, or addresses, notifications are mailed to: best a team's list
+    /// (`interfaces-oncall@hospital.org`), or a pager's email gateway. Needs `alerts.smtp`.
+    /// Default: none. Example: `email: [interfaces-oncall@hospital.org, lab-it@hospital.org]`.
     #[serde(default, deserialize_with = "one_or_many")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::OneOrMany"))]
     pub email: Vec<String>,
+    /// A chat or incident tool's incoming webhook that notifications are posted to (Teams,
+    /// Slack, or your own tool with `format: json`). Default: none. Example: `webhook: { url:
+    /// "${secret:CHAT_WEBHOOK}", format: teams }`.
     #[serde(default)]
     pub webhook: Option<Webhook>,
 }
 
 #[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Webhook {
-    /// Often holds a secret (chat webhooks are their own password): use `${secret:...}`.
+    /// The webhook's URL. A chat webhook's URL is its own password (anyone with it can post to
+    /// the channel), so keep it in a secret: `${secret:CHAT_WEBHOOK}`. The engine shows only its
+    /// scheme and host anywhere. Required. Example: `url: "${secret:CHAT_WEBHOOK}"`.
     pub url: String,
+    /// What the posted body looks like:
+    ///
+    /// - `json`: Ductus's own JSON, every field, for scripts and incident tools.
+    /// - `slack`: Slack incoming webhooks (also Mattermost and Rocket.Chat).
+    /// - `teams`: Microsoft Teams Workflows webhooks (an Adaptive Card; the old Office 365
+    ///   connectors are being retired).
+    ///
+    /// Default: `json`. Example: `format: teams`.
     #[serde(default)]
     pub format: WebhookFormat,
-    /// Also trust this CA (a `certificates:` entry in resources.yaml).
+    /// A CA to trust for the webhook's server besides the ones this server trusts (a
+    /// `certificates:` entry in resources.yaml), for an internal tool with a private CA's
+    /// certificate. Default: the system's trusted CAs only. Example: `ca: hospital-ca`.
     #[serde(default)]
     pub ca: Option<String>,
-    /// Present this client certificate (a `certificates:` pair).
+    /// A client certificate to present to the webhook's server (a `certificates:` entry with its
+    /// key), for tools that admit callers by certificate. Default: none. Example: `certificate:
+    /// ductus-client`.
     #[serde(default)]
     pub certificate: Option<String>,
 }
@@ -224,6 +321,7 @@ impl Webhook {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum WebhookFormat {
     /// Ductus's own JSON: every field, for scripts and incident tools.
@@ -246,11 +344,32 @@ impl WebhookFormat {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Rule {
+    /// The health states this rule covers:
+    ///
+    /// - `error`: a destination has quarantined messages someone must look at.
+    /// - `stalled`: a destination has had messages waiting for over a minute and sent none
+    ///   (its receiver is down, or a message keeps failing).
+    /// - `behind`: a destination's queue is past its `monitor.behind`.
+    /// - `stopped`: an interface's code was stopped (it ran away or ran out of memory).
+    /// - `silent`: nothing received within `monitor.active_within`.
+    /// - `missed`: nothing received by `monitor.active_by`.
+    /// - `certificate`: a certificate the engine uses or connects to nears expiry, or expired.
+    ///
+    /// A paused destination never alerts: it's paused on purpose. Required. Example: `when:
+    /// [error, stalled, stopped]`.
     pub when: Vec<Condition>,
+    /// How bad these states are: `warning` (worth knowing today; held during quiet hours) or
+    /// `critical` (act now; never held). An alert that goes from warning to critical is told
+    /// again. An expired certificate is always critical. Required. Example: `severity: critical`.
     pub severity: Severity,
-    /// Channel names, and `owner`.
+    /// Who is told: channel names from `channels`, and `owner` (whoever owns the destination or
+    /// its interface: its `owner`, else `about.owner`, mailed at their account's email, an
+    /// `owners:` entry, or the text itself if it's an address). Lead with team channels; add
+    /// `owner` where a person should hear directly. Required. Example: `to: [oncall, chat,
+    /// owner]`.
     pub to: Vec<String>,
 }
 
@@ -258,6 +377,7 @@ pub struct Rule {
 /// interface's (`stopped`, `silent`, `missed`), or a certificate's that is close to expiring or
 /// has expired (`certificate`). A pause is on purpose, so it never alerts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Condition {
     Error,
@@ -324,6 +444,7 @@ impl Condition {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Severity {
     Warning,
@@ -345,10 +466,16 @@ impl Severity {
 
 /// Hours when notifications of some severities wait (critical ones never should).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Quiet {
-    /// Server local time: `"22:00-06:00"`.
+    /// The quiet hours, in the server's local time (mind a server or container that runs on
+    /// UTC): `"22:00-06:00"`. Notifications due in them wait until they end. Required. Example:
+    /// `between: "21:00-07:00"`.
     pub between: Hours,
+    /// Which severities wait during the quiet hours. Keep `critical` out: a critical alert that
+    /// waits until morning wasn't critical. Default: `[warning]`. Example: `severities:
+    /// [warning]`.
     #[serde(default = "warnings")]
     pub severities: Vec<Severity>,
 }
@@ -358,15 +485,26 @@ fn warnings() -> Vec<Severity> {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Heartbeat {
+    /// The URL the engine calls (an HTTP GET) while it runs: the "ping" or "push" URL the
+    /// watching service gives you. It often holds a secret: `${secret:HEARTBEAT_URL}`. Use a
+    /// service that doesn't run on the engine's server, or it goes down with it. Required.
+    /// Example: `url: "${secret:HEARTBEAT_URL}"`.
     pub url: String,
+    /// How often it's called. Set the watching service's grace period to about twice this.
+    /// Default: `5m`. Example: `every: 1m`.
     #[serde(default = "default_heartbeat", deserialize_with = "crate::config::duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::Duration"))]
     pub every: Duration,
-    /// Also trust this CA (a `certificates:` entry in resources.yaml).
+    /// A CA to trust for the heartbeat's server besides the ones this server trusts (a
+    /// `certificates:` entry in resources.yaml). Default: the system's trusted CAs only. Example:
+    /// `ca: hospital-ca`.
     #[serde(default)]
     pub ca: Option<String>,
-    /// Present this client certificate (a `certificates:` pair).
+    /// A client certificate to present to the heartbeat's server (a `certificates:` entry with
+    /// its key). Default: none. Example: `certificate: ductus-client`.
     #[serde(default)]
     pub certificate: Option<String>,
 }
@@ -377,9 +515,14 @@ fn default_heartbeat() -> Duration {
 
 /// An owner that isn't a user (`owners:` in ductus.yaml): a team's mailing list.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct OwnerContact {
+    /// The address, or addresses, that reach this owner: a team's mailing list. Alert rules with
+    /// `to: owner` mail it for the interfaces and destinations this owner owns. Default: none.
+    /// Example: `email: lab-systems@hospital.org`.
     #[serde(default, deserialize_with = "one_or_many")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::OneOrMany"))]
     pub email: Vec<String>,
 }
 
@@ -528,12 +671,18 @@ impl AlertSettings {
 
 /// `alert:` in interface.yaml.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AlertOptions {
-    /// More recipients (channel names or `owner`) for this interface's alerts, on top of the rule's.
+    /// More recipients for this interface's alerts, on top of the matching rule's: channel names
+    /// from `alerts.channels` in ductus.yaml, or `owner` (whoever owns the interface or the
+    /// destination). For a team that wants to hear about its own feeds only. Default: none.
+    /// Example: `to: [lab-team]`.
     #[serde(default)]
     pub to: Vec<String>,
-    /// Send nothing about this interface (a test interface); its alerts still show in the UI.
+    /// Send no notifications about this interface: for a test or half-built interface. Its alerts
+    /// still open and show in the web UI, so nothing is hidden from people who look. Default:
+    /// `false`. Example: `mute: true`.
     #[serde(default)]
     pub mute: bool,
 }

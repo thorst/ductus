@@ -19,4 +19,8 @@ serde_yaml_ng = "0.10.0"
 url = "2.5.8"
 
 [dev-dependencies]
+# The configuration files' JSON Schemas are made from the config types by a test (`schema.rs`): the
+# binary carries the committed text, never schemars.
+jsonschema = { version = "0.60.2", default-features = false }
+schemars = "1.2.3"
 tempfile = "3.27.0"

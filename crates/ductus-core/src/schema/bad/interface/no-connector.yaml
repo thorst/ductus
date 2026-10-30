@@ -1,0 +1,4 @@
+# Options without a connector say nowhere to send.
+name: adt-in
+source: { mllp: { port: 6661 } }
+destination: { transform: toLab }

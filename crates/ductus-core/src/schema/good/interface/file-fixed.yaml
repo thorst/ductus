@@ -1,0 +1,21 @@
+# A mainframe's fixed-length file, one message per record, sent on as a fixed-length file too.
+name: charges-in
+source:
+  file:
+    dir: /data/inbound/charges
+    pattern: "CHG_*.txt"
+    poll: 30s
+    marker: .done
+    after: move
+    archive_dir: /data/archive/charges
+    split: records
+format:
+  fixed:
+    fields:
+      - { name: mrn, width: 10 }
+      - { name: amount, width: 10, align: right, pad: "0" }
+      - { name: code, start: 41, width: 8, align: left, pad: " " }
+    trim: true
+destination:
+  file: { dir: out }
+  output: { fixed: { fields: [{ name: mrn, width: 10 }], trim: false } }

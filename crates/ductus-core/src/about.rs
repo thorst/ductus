@@ -15,31 +15,49 @@ use serde::Deserialize;
 use std::net::IpAddr;
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct About {
+    /// What the interface does, in a sentence someone on call understands: shown in the web UI,
+    /// `ductus impact` and alerts. Example: `description: ADT from Epic to the Sunquest lab`.
     #[serde(default)]
     pub description: Option<String>,
-    /// Who to call about it: a team or a person.
+    /// Who to ask about the interface: a person or a team, best written as an email address
+    /// (`lab-it@hospital.org`), which matches their account and survives a change of name. An
+    /// owner that names an account shows as that person in the web UI (and their "Mine" list);
+    /// alert rules with `to: owner` mail them. `ductus owners` lists who owns what. Default:
+    /// none. Example: `owner: lab-it@hospital.org`.
     #[serde(default)]
     pub owner: Option<String>,
-    /// The system that sends (or, for an HTTP source in respond mode, calls).
+    /// The system that sends (for an HTTP source in `respond` mode: the one that calls).
+    /// Example: `from: { application: Epic, vendor: Epic Systems, hosts: [10.20.30.0/24] }`.
     #[serde(default)]
     pub from: Origin,
-    /// The system messages go to. A destination's own `application`/`vendor` take precedence.
+    /// The system messages go to. A destination's own `application` and `vendor` take
+    /// precedence for that destination. Example: `to: { application: Sunquest Lab, vendor:
+    /// Sunquest }`.
     #[serde(default)]
     pub to: System,
 }
 
 /// The sending side: its system, and where its connections come from.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Origin {
+    /// The sending application, as people name it. `ductus impact Epic` finds every interface
+    /// that names it here or as a receiver. Example: `application: Epic`.
     #[serde(default)]
     pub application: Option<String>,
+    /// The sending application's vendor: `ductus impact` by vendor answers "what does this
+    /// vendor's breach or VPN change touch?". Example: `vendor: Epic Systems`.
     #[serde(default)]
     pub vendor: Option<String>,
-    /// Addresses senders connect from: IPs, subnets (`10.20.30.0/24`) or host names. The engine
-    /// can't know these from the config (it only knows its own listening port).
+    /// Where the sender's connections come from: addresses, subnets (`10.20.30.0/24`) or host
+    /// names. The engine can't learn these from the configuration, so a network change (a new
+    /// subnet, a firewall move) can only be traced to interfaces that say. `ductus validate`
+    /// warns when an `allow:` list doesn't cover them. Default: none. Example: `hosts:
+    /// [10.20.30.0/24, epic-bridge01.hospital.org]`.
     #[serde(default)]
     pub hosts: Vec<String>,
 }
@@ -52,10 +70,15 @@ impl Origin {
 
 /// An application and its vendor; either may be unknown.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct System {
+    /// The application, as people name it. `ductus impact` finds interfaces by it. Example:
+    /// `application: Sunquest Lab`.
     #[serde(default)]
     pub application: Option<String>,
+    /// The application's vendor. `ductus impact` finds interfaces by it. Example: `vendor:
+    /// Sunquest`.
     #[serde(default)]
     pub vendor: Option<String>,
 }

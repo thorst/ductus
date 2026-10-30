@@ -1,0 +1,2 @@
+# The doctor's modes are `certificates` and `full`.
+doctor: { mode: logins }

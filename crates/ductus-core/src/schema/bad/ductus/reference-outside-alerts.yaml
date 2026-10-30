@@ -1,0 +1,2 @@
+# Only `alerts:` is read per environment: elsewhere `${...}` is text, not a number.
+isolates: { heap_mb: "${HEAP}" }

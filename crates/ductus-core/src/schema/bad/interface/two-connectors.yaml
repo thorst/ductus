@@ -1,0 +1,4 @@
+# A destination has exactly one connector.
+name: adt-in
+source: { mllp: { port: 6661 } }
+destination: { mllp: { host: lab, port: 7001 }, file: { dir: out } }

@@ -46,6 +46,62 @@ pub const MESSAGES: &[(u32, &str)] = &[
     (ERROR, "Ductus logged an error.%n%n%1"),
 ];
 
+/// Each event for the reference page (`ductus reference`): its level in the Event Log, and when
+/// it's written and what to do, for whoever watches the log (SCOM, Splunk, a person).
+pub const ABOUT: &[(u32, &str, &str)] = &[
+    (
+        STARTED,
+        "Information",
+        "The engine started and is taking messages: its version, and the start's details (interfaces, where the API listens).",
+    ),
+    (
+        STOPPED,
+        "Information",
+        "The service stopped cleanly (a stop, a shutdown, or a drain that ended with a stop): every message in hand was finished first.",
+    ),
+    (
+        STOPPED_FORCED,
+        "Warning",
+        "The service stopped before finishing the messages in hand (the stop timeout passed, or a second stop came). Nothing is lost: they're pending and are processed again at the next start, so a destination may get one twice. If it recurs, look at what was slow (a receiver timing out) in the log files.",
+    ),
+    (
+        START_FAILED,
+        "Error",
+        "The engine couldn't start, and the service stays stopped: the text says why (the database can't be reached, the project has an error, a certificate can't be used, another engine runs some of these interfaces). Fix the cause and start the service.",
+    ),
+    (
+        PREVIOUS_RUN_UNCLEAN,
+        "Warning",
+        "The previous run didn't stop cleanly (killed, crashed, or the machine lost power). The messages it had in hand are processed again; the previous run's last lines are in the log files.",
+    ),
+    (
+        NEEDS_PASSWORD,
+        "Warning",
+        "The service runs as an account with a password, which an install or upgrade can't keep, so it was left stopped. Run `ductus service account <account> --start` as an administrator and type the password; a gMSA needs none of this.",
+    ),
+    (ENDED_ON_ERROR, "Error", "The engine stopped on an error while running: the text says which."),
+    (
+        ACCOUNT_CHANGED,
+        "Information",
+        "The service's account was changed with `ductus service account`: from which, to which, and by whom.",
+    ),
+    (
+        INTERFACE_STOPPED,
+        "Error",
+        "An interface's code was stopped: it ran past its `timeout` three times in a row, or out of memory. Its messages wait; fix the code, deploy it and restart the service.",
+    ),
+    (
+        CRITICAL_ALERT,
+        "Error",
+        "A critical alert fired or escalated (the alert channels are told too), for tools that watch the Event Log.",
+    ),
+    (
+        ERROR,
+        "Error",
+        "Any other error the engine logged, at most once a minute for each kind of message and what it's about; the log files have every line.",
+    ),
+];
+
 /// The table as a MESSAGETABLE resource's data (`MESSAGE_RESOURCE_DATA`): blocks of consecutive
 /// IDs, then each message as UTF-16 ending in CRLF and a NUL, padded to four bytes.
 pub fn message_table(messages: &[(u32, &str)]) -> Vec<u8> {

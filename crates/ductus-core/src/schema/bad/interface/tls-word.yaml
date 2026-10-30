@@ -1,0 +1,4 @@
+# `tls` on a destination is true, false, or { ca, certificate }.
+name: adt-in
+source: { mllp: { port: 6661 } }
+destination: { mllp: { host: lab, port: 7001, tls: always } }

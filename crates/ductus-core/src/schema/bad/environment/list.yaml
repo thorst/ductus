@@ -1,0 +1,2 @@
+# Variables are a map of names to values, not a list.
+variables: [PATIENT_DB_HOST, EPIC_PORT]

@@ -1,0 +1,3 @@
+# A rule's severity is `warning` or `critical`.
+alerts:
+  rules: [{ when: [error], severity: urgent, to: [oncall] }]

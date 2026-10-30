@@ -37,52 +37,121 @@ use std::path::Path;
 
 pub const FILE: &str = "ductus.yaml";
 
+/// `ductus.yaml`: the project's settings, for every interface in it and the engine that runs
+/// them: how long messages are kept, the REST API and web UI, how people sign in, the audit log,
+/// alerts, and the engine's own connection checks.
+///
+/// The file sits at the top of the project and is optional: every setting has a default, which
+/// `ductus init` writes out for the main ones. Only `alerts:` may use the environment's
+/// `${NAME}` and `${secret:NAME}`; everything else is read as written.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Settings {
+    /// The port ranges `ductus new interface` picks a free port from for a new interface's
+    /// listener (each interface's own port is in its interface.yaml). Set them to the ranges
+    /// your firewall team opened, so new interfaces land inside. Default: MLLP `6661-6699`, HTTP
+    /// `8080-8099`. Example: `ports: { mllp: 7000-7099 }`.
     #[serde(default)]
     pub ports: PortRanges,
+    /// Limits of the JavaScript engine that runs interface code (`heap_mb`). Default: `heap_mb:
+    /// 512`.
     #[serde(default)]
     pub isolates: Isolates,
-    /// Interfaces must name the application or vendor on each side (`about:`), so `ductus
-    /// impact` is never missing one: `ductus validate` reports gaps as problems, not warnings.
+    /// Make `ductus validate` fail (not only warn) when an interface doesn't name the application
+    /// or vendor on each side in `about:`, so `ductus impact` never misses one. Turn it on once
+    /// the existing interfaces are documented, and every new one must be. Default: `false`.
+    /// Example: `require_about: true`.
     #[serde(default)]
     pub require_about: bool,
+    /// The REST API and the web UI: where they listen, HTTPS, and who may connect. Default:
+    /// `127.0.0.1:7700`, plain HTTP, this machine only.
     #[serde(default)]
     pub api: ApiSettings,
-    /// How long messages are kept, for interfaces whose interface.yaml doesn't say.
+    /// How long messages are kept, for every interface whose interface.yaml has no `retention`:
+    /// `1w`, `3w` or `7w` (or the same in days: `7d`, `21d`, `49d`).
+    ///
+    /// Only these three, on purpose: each is a set of partitions of the message tables, and old
+    /// messages go by dropping a whole partition at once, which costs nothing however busy the
+    /// feed (deleting rows one by one would slow the busiest tables). A message is kept at least
+    /// its window and is gone within a day (`1w`) or a week (`3w`, `7w`) after it. Messages still
+    /// waiting for a destination, and quarantined ones (see `quarantined`), are never deleted:
+    /// past the window they move to the held area until they're delivered or resolved.
+    ///
+    /// Pick the window that covers how far back you look into problems; longer history belongs
+    /// in the source system or an archive. Shortening it later deletes messages, so it waits for
+    /// `ductus retention confirm <interface>`. Default: `7w`. Example: `retention: 3w`.
     #[serde(default)]
     pub retention: crate::Retention,
-    /// Quarantined messages past the retention: `keep` (until resolved) or `purge`, for
-    /// interfaces whose interface.yaml doesn't say.
+    /// What happens to quarantined messages once the retention window has passed, for every
+    /// interface whose interface.yaml doesn't say: `keep` them in the held area until someone
+    /// resends, corrects or dismisses them, or `purge` them with the rest.
+    ///
+    /// In most engines unresolved quarantines pile up for years; here they're kept until a
+    /// person decides, with no second time limit. Watch them with `ductus retention` and the
+    /// `ductus_held_messages` metric. `purge` suits feeds whose senders resend anyway. Default:
+    /// `keep`. Example: `quarantined: purge`.
     #[serde(default)]
     pub quarantined: crate::Quarantined,
-    /// How people sign in to the API and the web UI.
+    /// How people sign in to the web UI and the API: sessions, passwords, lockout, API tokens,
+    /// and a directory (Active Directory, OpenLDAP). Local accounts are made with `ductus user`
+    /// on the server. Default: local accounts and tokens, with the session and password rules
+    /// below.
     #[serde(default)]
     pub auth: AuthSettings,
-    /// The audit log: how long it is kept, and whether reading a payload is logged.
+    /// The audit log of who did what (sign-ins, resends, edits, pauses, account changes, payload
+    /// reads): how long it's kept and whether reading a message's payload is logged. Default:
+    /// kept 6 years, payload reads logged.
     #[serde(default)]
     pub audit: AuditSettings,
-    /// Alerts (`crate::alerts`), as written: they may reference the environment's variables and
-    /// secrets, so they are read per environment (`Settings::alerts`).
+    /// Where notifications go and when: a mail server, channels (email lists, chat webhooks), and
+    /// rules saying which health states alert, how badly and to whom. The engine judges every
+    /// interface and destination every 15 seconds and tells people once, then reminds, and says
+    /// when it's fine again.
+    ///
+    /// The only section that may use `${NAME}` and `${secret:NAME}`, read for the environment the
+    /// engine runs in (webhook URLs and mail passwords are secrets). Default: no alerts (states
+    /// show in the web UI only). Example: `alerts: { channels: { oncall: { email:
+    /// oncall@hospital.org } }, rules: [{ when: [error, stalled], severity: critical, to: [oncall]
+    /// }] }`.
     #[serde(default)]
+    #[cfg_attr(test, schemars(with = "Option<crate::alerts::AlertSettings>"))]
     alerts: Option<serde_yaml_ng::Value>,
-    /// Owners that aren't users, and where alerts for them go (a team's mailing list).
+    /// Owners that aren't accounts here, by the name interfaces give in `about.owner`, with the
+    /// address that reaches them: a team's mailing list (`"Lab Systems": { email:
+    /// lab-systems@hospital.org }`). Alert rules with `to: owner` mail it. Owners who are
+    /// accounts (best written as their email) need no entry. Default: none.
     #[serde(default)]
     pub owners: std::collections::BTreeMap<String, crate::alerts::OwnerContact>,
-    /// Connection checks the engine runs by itself (certificate expiry, by default).
+    /// Connection checks the engine runs by itself, as `ductus doctor` would: by default every
+    /// six hours, only as far as each server's certificate (nothing logs in), so expiring
+    /// certificates alert 30, 14 and 7 days ahead. Default: `schedule: 6h`, `mode: certificates`.
     #[serde(default)]
     pub doctor: DoctorSettings,
 }
 
 /// `doctor:` in ductus.yaml: the engine's own connection checks.
 #[derive(Debug, Clone, Copy, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DoctorSettings {
-    /// How often: a duration (at least 1m), or `off`. The first run is a minute after the engine
-    /// starts (plus up to a minute at random, so engines started together don't check together).
+    /// How often the engine checks its connections: a duration of at least `1m`, or `off`. The
+    /// first check is a minute or two after the engine starts (at random, so engines started
+    /// together don't check together). Each check takes well under a second for a handful of
+    /// servers. Turn it off only if something else watches every certificate the engine
+    /// connects to. Default: `6h`. Example: `schedule: 1h`.
     #[serde(default = "default_doctor_schedule", deserialize_with = "off_or_duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::OffOrDuration"))]
     pub schedule: Option<std::time::Duration>,
+    /// What a check covers:
+    ///
+    /// - `certificates`: DNS, TCP and the TLS handshake of every connection with a certificate.
+    ///   Nothing logs in, so no service account's log fills up and none is ever locked out.
+    /// - `full`: everything `ductus doctor` checks, logins included (databases, SFTP, the
+    ///   directory), so a changed password is noticed before a message needs it.
+    ///
+    /// Use `full` where the servers' owners agree to a login every `schedule`. Default:
+    /// `certificates`. Example: `mode: full`.
     #[serde(default)]
     pub mode: DoctorMode,
 }
@@ -99,6 +168,7 @@ fn default_doctor_schedule() -> Option<std::time::Duration> {
 
 /// What a check covers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, serde::Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum DoctorMode {
     /// DNS, TCP and the TLS handshake of every connection with a certificate: nothing logs in,
@@ -131,19 +201,28 @@ fn off_or_duration<'de, D: serde::Deserializer<'de>>(
 
 /// The audit log (`audit:` in ductus.yaml).
 #[derive(Debug, Clone, Copy, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AuditSettings {
-    /// How long audit rows (and the record of message actions) are kept, at least a year: `6y`
-    /// (the usual HIPAA documentation period; ask your compliance office for yours), or `2190d`.
+    /// How long audit rows, and the record of what was done to messages, are kept: at least a
+    /// year, in years (`6y`, 365 days each) or any duration (`2190d`). Older rows are deleted
+    /// hourly. Six years is the usual HIPAA documentation period; ask your compliance office for
+    /// yours. The log is the record of who did what, so it can't be shorter than a year.
+    /// Default: `6y`. Example: `keep: 7y`.
     #[serde(default = "default_keep", deserialize_with = "keep_duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::Keep"))]
     pub keep: std::time::Duration,
-    /// Log who reads a message payload. Reading is allowed only to those with the `payloads`
-    /// permission whatever this says.
+    /// Log who reads a message's payload (in the web UI or through the API), before it's shown:
+    /// with patient data, who looked matters as much as who changed. Turn it off only where
+    /// messages hold no personal data. Reading needs the `payloads` permission either way.
+    /// Default: `true`. Example: `payload_reads: false`.
     #[serde(default = "yes")]
     pub payload_reads: bool,
-    /// One person reading the same message again within this long is one row (a screen that
-    /// reloads itself would write a row each time). `0s`: every read is a row.
+    /// One person reading the same message again within this long counts as one read, one row
+    /// (a page that reloads itself would otherwise write a row each time). `0s` writes a row for
+    /// every read. Default: `10m`. Example: `payload_read_window: 0s`.
     #[serde(default = "default_read_window", deserialize_with = "crate::config::duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::Duration"))]
     pub payload_read_window: std::time::Duration,
 }
 
@@ -178,22 +257,38 @@ pub(crate) fn keep_duration<'de, D: serde::Deserializer<'de>>(
 
 /// Sign-in for people (`auth:` in ductus.yaml).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct AuthSettings {
+    /// How long a browser session lasts: `idle` (unused) and `max` (in all). Default: 12 hours
+    /// idle, 7 days at most.
     #[serde(default)]
     pub session: SessionSettings,
+    /// What a local account's password must be (`min_length`). Directory accounts follow the
+    /// directory's rules. Default: at least 12 characters.
     #[serde(default)]
     pub password: PasswordSettings,
+    /// How many wrong passwords lock a username, and for how long. Default: 5 within 15 minutes
+    /// lock it for 15 minutes.
     #[serde(default)]
     pub lockout: LockoutSettings,
-    /// The sign-in page also accepts an API token. Turn it off once everyone has an account
-    /// (`ductus user` on the server always works).
+    /// Whether the sign-in page also takes an API token instead of a username and password: how
+    /// the first people get in before accounts exist. Turn it off once everyone has an account;
+    /// `ductus user` on the server always works. Default: `true`. Example: `token_sign_in:
+    /// false`.
     #[serde(default = "yes")]
     pub token_sign_in: bool,
-    /// Users may make API tokens of their own (never above their own role).
+    /// Whether people may make API tokens of their own (for scripts, under Account in the web
+    /// UI). A person's token can do no more than they can, and stops when their account is
+    /// disabled. Turn it off to keep tokens to the ones admins make. Default: `true`. Example:
+    /// `user_tokens: false`.
     #[serde(default = "yes")]
     pub user_tokens: bool,
-    /// Sign-in with a directory (Active Directory, OpenLDAP), besides local accounts.
+    /// Sign-in with a directory (Active Directory, OpenLDAP), beside local accounts: which `ldap:`
+    /// entry in resources.yaml, where people are, and which groups give which role. People in
+    /// none of the groups can't sign in. Default: local accounts only. Example: `ldap: {
+    /// resource: corp-ad, user_base: "OU=Staff,DC=hospital,DC=org", groups: { admin:
+    /// "CN=Ductus Admins,OU=Groups,DC=hospital,DC=org" } }`.
     #[serde(default)]
     pub ldap: Option<crate::ldap::LdapAuth>,
 }
@@ -217,13 +312,19 @@ fn yes() -> bool {
 
 /// How long a browser session lasts.
 #[derive(Debug, Clone, Copy, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SessionSettings {
-    /// Ends after this long unused (a shift, with room to spare).
+    /// A session ends after this long unused, and the person signs in again: a shift, with room
+    /// to spare, so an analyst isn't signed out mid-task. Shorten it where screens are shared or
+    /// left unlocked. No longer than `max`. Default: `12h`. Example: `idle: 30m`.
     #[serde(default = "default_idle", deserialize_with = "crate::config::duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::Duration"))]
     pub idle: std::time::Duration,
-    /// Ends this long after sign-in, however it is used.
+    /// A session ends this long after sign-in however much it's used, so a stolen session
+    /// cookie doesn't last forever. Default: `7d`. Example: `max: 1d`.
     #[serde(default = "default_max", deserialize_with = "crate::config::duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::Duration"))]
     pub max: std::time::Duration,
 }
 
@@ -242,9 +343,14 @@ fn default_max() -> std::time::Duration {
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PasswordSettings {
-    /// The shortest password accepted (never below 8).
+    /// The shortest password a local account may have, at least 8. Length matters more than
+    /// mixing kinds of characters, so there's no rule for those (a few ordinary words together
+    /// work well); a password can't contain the username, be one character repeated, or be one
+    /// of the most common ones. Applies to new passwords; existing ones keep working. Default:
+    /// `12`. Example: `min_length: 16`.
     #[serde(default = "default_min_length")]
     pub min_length: usize,
 }
@@ -262,13 +368,22 @@ fn default_min_length() -> usize {
 /// Wrong passwords for one username: after `attempts` within `window`, sign-in as that user is
 /// refused for `for`.
 #[derive(Debug, Clone, Copy, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LockoutSettings {
+    /// How many wrong passwords for one username, within `window`, lock it, at least 1. It
+    /// slows anyone guessing; a person who forgot waits `for`, or an admin unlocks them (`ductus
+    /// user unlock`). Directory accounts count here and in the directory. Default: `5`.
+    /// Example: `attempts: 10`.
     #[serde(default = "default_attempts")]
     pub attempts: u32,
+    /// How far back wrong passwords are counted. Default: `15m`. Example: `window: 1h`.
     #[serde(default = "default_window", deserialize_with = "crate::config::duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::Duration"))]
     pub window: std::time::Duration,
+    /// How long a locked username stays locked. Default: `15m`. Example: `for: 30m`.
     #[serde(rename = "for", default = "default_window", deserialize_with = "crate::config::duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::Duration"))]
     pub lock_for: std::time::Duration,
 }
 
@@ -288,18 +403,32 @@ fn default_window() -> std::time::Duration {
 
 /// The REST API the engine serves (`/api/v1`).
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ApiSettings {
-    /// `host:port`, or `off`. Defaults to this machine only: opening it to the network is a
-    /// choice (every call still needs a token).
+    /// Where the REST API and the web UI listen, as `host:port`, or `off` to run without them
+    /// (then `ductus status --token`, `drain`, `pause` and the web UI can't reach this engine).
+    ///
+    /// The default listens on this machine only, so opening it to the network is a choice you
+    /// make. For people to use the web UI from their own computers, listen on the server's
+    /// address (or `0.0.0.0` for all of them) and add `tls` (the UI's sign-in needs HTTPS
+    /// anywhere but on the server itself) and `allow`. Every call needs a token or a signed-in
+    /// person either way. `ductus run --api-listen` (or `DUCTUS_API_LISTEN`) overrides it for
+    /// one engine. Default: `127.0.0.1:7700`. Example: `listen: 0.0.0.0:7700`.
     #[serde(default = "default_api_listen")]
     pub listen: String,
-    /// HTTPS only, with this `certificates:` entry (needed for the web UI anywhere but this
-    /// machine: its session cookie is `Secure`).
+    /// HTTPS only, presenting the `certificate` named here (a `certificates:` entry in
+    /// resources.yaml); with `clients`, callers must present a certificate too. Needed for the
+    /// web UI anywhere but on the server itself (its sign-in cookie is only sent over HTTPS), and
+    /// for tokens not to cross the network readable; the start warns without it when `listen`
+    /// isn't this machine only. Default: plain HTTP. Example: `tls: { certificate: ductus-api }`.
     #[serde(default)]
     pub tls: Option<crate::tls::ListenTls>,
-    /// Only these addresses, subnets and host names may connect (default: anyone who can reach
-    /// `listen`). List 127.0.0.1 too, or commands on this machine (`ductus status`) are refused.
+    /// Who may connect: addresses, subnets and host names (the operators' and developers'
+    /// networks, the monitoring server). Anyone else is disconnected before anything is read.
+    /// List `127.0.0.1` too, or commands run on the server itself (`ductus status --token`,
+    /// `drain`) are refused. Default: anyone who can reach `listen`. Example: `allow: [127.0.0.1,
+    /// 10.1.50.0/24]`.
     #[serde(default)]
     pub allow: Option<crate::allow::Allow>,
 }
@@ -339,10 +468,23 @@ impl ApiSettings {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Isolates {
-    /// Heap limit of each V8 isolate, in MB. Interface code that fills it is stopped (the
-    /// process keeps running). Every pool thread and every dedicated worker has one isolate.
+    /// The memory limit, in MB, of each isolate: one copy of the JavaScript engine (V8) that runs
+    /// interface code. At least `64`.
+    ///
+    /// Every thread of the shared pool has an isolate (one thread per CPU core, or `--threads`),
+    /// and so does every worker of an `isolation: dedicated` interface, so the code can use up
+    /// to about `heap_mb` × (threads + dedicated workers) in all: size the server with that.
+    /// Code that fills its isolate is stopped, its message quarantined and its interface stopped
+    /// until a restart; the engine and every other interface keep running. In the shared pool
+    /// the limit is shared by every interface on the thread, so the one that runs out isn't
+    /// always the one that filled it (a cache in another interface that only grows).
+    ///
+    /// Raise it for code that holds a lot on purpose (a large lookup table loaded once), or give
+    /// that interface `isolation: dedicated`; lower it on a small server with many cores.
+    /// Default: `512`. Example: `isolates: { heap_mb: 1024 }`.
     #[serde(default = "default_heap_mb")]
     pub heap_mb: usize,
 }
@@ -358,10 +500,15 @@ fn default_heap_mb() -> usize {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct PortRanges {
+    /// The range a new MLLP interface's port is picked from, as `first-last`. Default:
+    /// `6661-6699`. Example: `mllp: 7000-7099`.
     #[serde(default = "default_mllp")]
     pub mllp: PortRange,
+    /// The range a new HTTP interface's port is picked from, as `first-last` (HTTP interfaces can
+    /// also share one port). Default: `8080-8099`. Example: `http: 9080-9099`.
     #[serde(default = "default_http")]
     pub http: PortRange,
 }

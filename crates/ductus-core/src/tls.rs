@@ -38,10 +38,17 @@ use serde::Deserialize;
 /// TLS on a connection the engine makes: whom it trusts besides the platform, and the client
 /// certificate it presents. Both name `certificates:` entries (a CA, and a pair).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ConnectTls {
+    /// A CA to trust for this receiver besides the ones this server trusts: a `certificates:`
+    /// entry in resources.yaml holding the CA's certificate, for a receiver whose certificate
+    /// comes from a private CA. Default: the system's trusted CAs only. Example: `ca: hie-ca`.
     #[serde(default)]
     pub ca: Option<String>,
+    /// The client certificate to present, for receivers that ask for one (mutual TLS): a
+    /// `certificates:` entry with its key. Renewing its files takes effect without a restart.
+    /// Default: none. Example: `certificate: ductus-client`.
     #[serde(default)]
     pub certificate: Option<String>,
 }
@@ -171,11 +178,20 @@ pub fn check_outbound(connections: &[(String, ConnectTls)], resources: &Resource
 
 /// `tls:` on a listener.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct ListenTls {
-    /// The `certificates:` entry (resources.yaml) this listener presents.
+    /// The certificate this listener presents: a `certificates:` entry in resources.yaml with
+    /// the certificate and its key, for the name senders connect to. A certificate the engine
+    /// can't use (expired, its key doesn't match) stops the start with the reason; renewed files
+    /// are picked up within a minute, without a restart. Required. Example: `certificate:
+    /// ductus-mllp`.
     pub certificate: String,
-    /// Ask senders for a certificate, and refuse those without one these allow.
+    /// Ask senders for a certificate of their own, and refuse any connection without one that
+    /// `ca` issued and, with `subjects`, that names an allowed system. A client certificate says
+    /// which system is connecting, beside `allow:`'s where from. Default: no client
+    /// certificates asked for. Example: `clients: { ca: hospital-ca, subjects:
+    /// ["CN=*.lab.hospital.org"] }`.
     #[serde(default)]
     pub clients: Option<Clients>,
 }
@@ -193,11 +209,19 @@ impl ListenTls {
 
 /// Which client certificates a listener takes.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Clients {
-    /// The `certificates:` entry with the CA that issues them.
+    /// The CA that issues senders' certificates: a `certificates:` entry holding the CA's
+    /// certificate (`ca` or `ca_file`). Only certificates it issued are taken. Required. Example:
+    /// `ca: hospital-ca`.
     pub ca: String,
-    /// Subject patterns; a certificate matching any one is taken. Empty: any the CA issued.
+    /// Which of that CA's certificates are taken: a certificate matching any one pattern. A
+    /// pattern is `ATTR=value` parts separated by commas, all of which must match, with `*` and
+    /// `?` wildcards and case ignored: `CN`, `O`, `OU`, `C`, `L`, `ST`, `DC`, or `DNS` for the
+    /// certificate's DNS names. Needed when the CA issues certificates to more than your senders
+    /// (a hospital-wide CA). Default: any certificate the CA issued. Example: `subjects:
+    /// ["CN=bridges*.hospital.org", "O=Quest, OU=Lab"]`.
     #[serde(default)]
     pub subjects: Vec<String>,
 }

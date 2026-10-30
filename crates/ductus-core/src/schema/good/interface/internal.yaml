@@ -1,0 +1,4 @@
+# Fed only by routes from other interfaces (`destination: { interface: adt-enterprise }`).
+name: adt-enterprise
+source: internal
+destination: { mllp: { host: enterprise-engine.hospital.local, port: 6700 } }

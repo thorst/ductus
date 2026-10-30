@@ -74,19 +74,49 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+/// `resources.yaml`: what many interfaces share, each defined once by a name: databases, SFTP
+/// servers, HTTP APIs, directories for signing in, and certificates.
+///
+/// Interfaces and their code refer to them by name (`db("patient_db")`, `api("empi")`, `server:
+/// lab_server`), so no address or credential is ever written in an interface or its code, and
+/// each environment fills in its own with `${NAME}` and `${secret:NAME}`. `ductus doctor` checks
+/// every entry from the server, and `ductus impact` finds the interfaces behind each one.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Resources {
-    #[serde(default, with = "serde_yaml_ng::with::singleton_map_recursive")]
+    /// Databases the interfaces' code queries with `db("<name>")`: each a `postgres` or a
+    /// `sqlserver` entry, by a name you choose. The engine keeps a pool of connections to each
+    /// and logs in with the entry's credentials, so code never sees them. Default: none.
+    /// Example: `databases: { patient_db: { postgres: { host: db1, database: patients, user:
+    /// ductus, password: "${secret:PATIENT_DB_PASSWORD}" } } }`.
+    #[serde(default, deserialize_with = "serde_yaml_ng::with::singleton_map_recursive::deserialize")]
+    #[cfg_attr(test, schemars(with = "BTreeMap<String, Database>"))]
     pub databases: BTreeMap<String, Database>,
+    /// SFTP servers that `sftp` sources read from and `sftp` destinations write to (`server:
+    /// <name>`), with their login and host key. Default: none. Example: `sftp: { lab_server: {
+    /// host: sftp.lab.example.org, user: hospital, private_key: "${secret:LAB_SFTP_KEY}",
+    /// host_key: "SHA256:…" } }`.
     #[serde(default)]
     pub sftp: BTreeMap<String, SftpServer>,
+    /// HTTP APIs the code calls with `api("<name>")` and `http` destinations send through (`api:
+    /// <name>`): a base URL, headers such as the token, a timeout and TLS, set once per
+    /// environment. Default: none. Example: `apis: { empi: { url: "https://empi.hospital.local/api/v2",
+    /// headers: { Authorization: "Bearer ${secret:EMPI_TOKEN}" } } }`.
     #[serde(default)]
     pub apis: BTreeMap<String, Api>,
-    /// Directories people sign in with (`auth.ldap` in ductus.yaml names one).
+    /// Directories (Active Directory, OpenLDAP) people sign in to the web UI with: `auth.ldap` in
+    /// ductus.yaml names the one to use and how its groups map to roles. Default: none. Example:
+    /// `ldap: { corp-ad: { url: "ldaps://dc1.hospital.org", bind_dn: "CN=svc-ductus,OU=Service,DC=hospital,DC=org",
+    /// bind_password: "${secret:LDAP_BIND_PASSWORD}" } }`.
     #[serde(default)]
     pub ldap: BTreeMap<String, LdapServer>,
-    /// Certificates our listeners present (`tls: { certificate: name }`) and CAs (`ca: name`).
+    /// Certificates the engine presents (`tls: { certificate: <name> }` on listeners and the API,
+    /// `certificate: <name>` on connections it makes), and CAs it trusts or checks clients against
+    /// (`ca: <name>`). Each entry is a certificate with its key (from files or secrets) or a CA
+    /// alone. Their expiry is watched and alerts at 30, 14 and 7 days. Default: none. Example:
+    /// `certificates: { ductus-mllp: { cert_file: /etc/ductus/tls/mllp.pem, key_file:
+    /// /etc/ductus/tls/mllp.key } }`.
     #[serde(default)]
     pub certificates: BTreeMap<String, CertificateEntry>,
     /// Certificate files written with a root but no drive (Windows only): (entry, as written, read
@@ -122,31 +152,62 @@ impl Kind {
 /// A `certificates:` entry: a certificate with its private key (from files, which are re-read
 /// when they change, or PEM text from secrets), or a CA alone.
 #[derive(Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CertificateEntry {
-    /// PEM file: the certificate first, then its intermediates. Relative to the project folder.
+    /// A PEM file with the certificate to present, followed by the intermediate certificates that
+    /// issued it (not the root): the "full chain" a CA sends. Goes with `key_file`.
+    ///
+    /// The engine reads both files at start (a certificate it can't use stops the start, saying
+    /// why) and again whenever they change, checked every minute: to renew, replace both files,
+    /// with no restart. Senders that don't have the intermediates can't check a certificate
+    /// without them, so leave none out. A relative path is read from the project folder; on
+    /// Windows, write the drive. To keep the PEM in a secret instead, use `cert` and `key`.
+    /// Example: `cert_file: /etc/ductus/tls/mllp.pem`.
     #[serde(default)]
     pub cert_file: Option<std::path::PathBuf>,
+    /// The PEM file with the certificate's private key, unencrypted, readable by the account the
+    /// engine runs as and nobody else (`chmod 600`, or the service's account only on Windows).
+    /// Goes with `cert_file`, renewed with it. `ductus cert request` makes one with its CSR.
+    /// Example: `key_file: /etc/ductus/tls/mllp.key`.
     #[serde(default)]
     pub key_file: Option<std::path::PathBuf>,
-    /// PEM text (usually `${secret:...}`).
+    /// The certificate (then its intermediates) as PEM text, usually from a secret
+    /// (`${secret:MLLP_CERT}`), for servers where certificates live in a vault rather than in
+    /// files. Goes with `key`. Read at start only: a renewal needs a restart, unlike files.
+    /// Example: `cert: "${secret:MLLP_CERT}"`.
     #[serde(default)]
     pub cert: Option<String>,
+    /// The private key as PEM text, from a secret (`${secret:MLLP_KEY}`). Goes with `cert`.
+    /// Example: `key: "${secret:MLLP_KEY}"`.
     #[serde(default)]
     pub key: Option<String>,
-    /// A CA's certificates as PEM text, or in a file: an entry with only this is a CA.
+    /// A CA's certificate (or several) as PEM text, often from a secret. An entry with only this
+    /// is a CA: what `ca: <name>` trusts for a server the engine connects to, and what `clients:
+    /// { ca: <name> }` checks senders' certificates against. Example: `ca: "${secret:HOSPITAL_CA}"`.
     #[serde(default)]
     pub ca: Option<String>,
+    /// A CA's certificate (or several) in a PEM file; the same as `ca`, read from a file
+    /// (relative to the project folder unless written whole). Example: `ca_file:
+    /// /etc/ductus/tls/hospital-ca.pem`.
     #[serde(default)]
     pub ca_file: Option<std::path::PathBuf>,
+    /// The application the certificate belongs to, for `ductus impact`. Default: none. Example:
+    /// `application: Ductus MLLP listener`.
     #[serde(default)]
     pub application: Option<String>,
+    /// The vendor the certificate belongs to (the CA's, for a CA entry), for `ductus impact`.
+    /// Default: none. Example: `vendor: DigiCert`.
     #[serde(default)]
     pub vendor: Option<String>,
-    /// Who renews it (expiry alerts with `to: owner` reach them).
+    /// Who renews this certificate, best as an email address: alert rules with `to: owner` mail
+    /// them as it nears expiry, and the web UI shows them on its row. Default: the owner of the
+    /// one interface that uses it, if just one does. Example: `owner: infrastructure@hospital.org`.
     #[serde(default)]
     pub owner: Option<String>,
-    /// Company-defined documentation fields (`docs-schema.yaml`).
+    /// Your company's documentation fields for this entry (those whose `applies_to` in
+    /// `docs-schema.yaml` includes `resource`). Default: none. Example: `custom: { ticket:
+    /// CHG-1234 }`.
     #[serde(default)]
     pub custom: crate::docs::Custom,
 }
@@ -226,37 +287,62 @@ impl std::fmt::Debug for CertificateEntry {
 
 /// An LDAP directory (Active Directory, OpenLDAP) people sign in with.
 #[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LdapServer {
-    /// `ldaps://host[:636]`, or `ldap://host[:389]` with `starttls: true`.
+    /// The directory server: `ldaps://host` (TLS from the start, port 636 unless given) or
+    /// `ldap://host` (port 389) with `starttls: true`. For Active Directory, a domain
+    /// controller's name or the domain's (`ldaps://hospital.org` reaches any of them, through
+    /// DNS). Its certificate must be for this name. Required. Example: `url:
+    /// "ldaps://dc1.hospital.org"`.
     pub url: String,
-    /// Upgrade an `ldap://` connection to TLS before anything is sent (StartTLS).
+    /// With an `ldap://` URL: turn the connection into TLS (StartTLS) before anything else is
+    /// sent, for directories that don't offer ldaps://. Refused if the server can't. Default:
+    /// `false`. Example: `starttls: true`.
     #[serde(default)]
     pub starttls: bool,
-    /// Allow plain `ldap://` without TLS: passwords cross the network readable. Test
-    /// directories only; validate and the engine warn about it.
+    /// Allow plain `ldap://` with no TLS at all: people's passwords then cross the network
+    /// readable to anyone in between. Only for a test directory on this machine; `ductus
+    /// validate` and the engine's start warn about it. Default: `false`. Example: `insecure:
+    /// true`.
     #[serde(default)]
     pub insecure: bool,
-    /// The service account that finds users and reads their groups. Without it, the directory is
-    /// searched anonymously (Active Directory refuses that).
+    /// The service account the engine binds as to find people and read their groups, as a DN.
+    /// Give it read access to people and groups and nothing else. Without it the directory is
+    /// searched anonymously, which Active Directory refuses. Default: none. Example: `bind_dn:
+    /// "CN=svc-ductus,OU=Service Accounts,DC=hospital,DC=org"`.
     #[serde(default)]
     pub bind_dn: Option<String>,
+    /// The service account's password: always from a secret (`${secret:LDAP_BIND_PASSWORD}`).
+    /// When it expires, sign-ins through the directory fail (local accounts still work), so give
+    /// the account a password that doesn't expire, or note when it does. Example: `bind_password:
+    /// "${secret:LDAP_BIND_PASSWORD}"`.
     #[serde(default)]
     pub bind_password: Option<String>,
-    /// A CA to trust for this directory besides the system's (a `certificates:` entry): the
-    /// hospital's own, when this server doesn't have it installed.
+    /// A CA to trust for this directory besides the ones this server trusts (a `certificates:`
+    /// entry), for a domain CA this server doesn't have installed (common on Linux; Windows
+    /// servers in the domain usually have it). Default: the system's trusted CAs only. Example:
+    /// `ca: hospital-ca`.
     #[serde(default)]
     pub ca: Option<String>,
-    /// How long connecting, binding or one search may take (default 10s).
+    /// How long connecting, binding or one search may take before a sign-in gives up (and says
+    /// the directory can't be reached). Default: `10s`. Example: `timeout: 5s`.
     #[serde(default, deserialize_with = "crate::config::duration_opt")]
+    #[cfg_attr(test, schemars(with = "Option<crate::schema::shapes::Duration>"))]
     pub timeout: Option<Duration>,
+    /// The application the directory is, for `ductus impact`. Default: none. Example:
+    /// `application: Active Directory`.
     #[serde(default)]
     pub application: Option<String>,
+    /// The directory's vendor, for `ductus impact`. Default: none. Example: `vendor: Microsoft`.
     #[serde(default)]
     pub vendor: Option<String>,
+    /// Who looks after the directory, best as an email address (its certificate's expiry alerts
+    /// reach them with `to: owner`). Default: none. Example: `owner: directory@hospital.org`.
     #[serde(default)]
     pub owner: Option<String>,
-    /// Company-defined documentation fields (`docs-schema.yaml`).
+    /// Your company's documentation fields for this entry (`applies_to: [resource]` in
+    /// `docs-schema.yaml`). Default: none. Example: `custom: { ticket: CHG-1234 }`.
     #[serde(default)]
     pub custom: crate::docs::Custom,
 }
@@ -330,32 +416,49 @@ impl std::fmt::Debug for LdapServer {
 /// An HTTP API used through `api(name)` in code and `http: { api: name }` destinations. The
 /// engine adds the URL and headers, so tokens never pass through interface code.
 #[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Api {
-    /// Base URL; paths in code and destinations go under it.
+    /// The API's base URL, `https://` (or `http://` on a trusted network): paths in code
+    /// (`api("empi").get("/patients/1")`) and `path` on destinations go under it. Usually from
+    /// the environment (`${EMPI_URL}`), since test and production differ. Required. Example:
+    /// `url: "https://empi.hospital.local/api/v2"`.
     pub url: String,
-    /// Sent with every request (e.g. `Authorization: "Bearer ${secret:TOKEN}"`). Headers the
-    /// code or destination sets itself win.
+    /// Headers sent with every request, typically the credential: `Authorization: "Bearer
+    /// ${secret:EMPI_TOKEN}"`, or an API key header. A header the code or a destination sets
+    /// itself replaces the one here. Tokens stay out of interface code and differ per
+    /// environment. Default: none. Example: `headers: { Authorization: "Bearer
+    /// ${secret:EMPI_TOKEN}" }`.
     #[serde(default)]
     pub headers: BTreeMap<String, String>,
-    /// Default for calls that don't set their own (default 30s from code, 10s for destinations).
+    /// How long one request may take, for calls and destinations that don't set their own; a
+    /// call past it fails as a temporary error, so its message waits and is tried again.
+    /// Default: `30s` for calls from code, `10s` for destinations. Example: `timeout: 10s`.
     #[serde(default, deserialize_with = "crate::config::duration_opt")]
+    #[cfg_attr(test, schemars(with = "Option<crate::schema::shapes::Duration>"))]
     pub timeout: Option<Duration>,
-    /// Its server may also be issued by this CA (a `certificates:` entry), besides those the
-    /// platform trusts.
+    /// A CA to trust for this API's server besides the ones this server trusts (a
+    /// `certificates:` entry), for an API whose certificate comes from a private CA. Default:
+    /// the system's trusted CAs only. Example: `ca: hospital-ca`.
     #[serde(default)]
     pub ca: Option<String>,
-    /// Presented as the client certificate (mTLS; a `certificates:` pair).
+    /// The client certificate to present to this API (a `certificates:` entry with its key), for
+    /// APIs that ask for one (mutual TLS). Default: none. Example: `certificate: ductus-client`.
     #[serde(default)]
     pub certificate: Option<String>,
+    /// The application behind the API, for `ductus impact`. Default: none. Example:
+    /// `application: EMPI`.
     #[serde(default)]
     pub application: Option<String>,
+    /// The API's vendor, for `ductus impact`. Default: none. Example: `vendor: Rhapsody`.
     #[serde(default)]
     pub vendor: Option<String>,
-    /// Who to call about it.
+    /// Who to ask about this API, best as an email address (its certificate's expiry alerts
+    /// reach them with `to: owner`). Default: none. Example: `owner: empi-team@hospital.org`.
     #[serde(default)]
     pub owner: Option<String>,
-    /// Company-defined documentation fields (`docs-schema.yaml`).
+    /// Your company's documentation fields for this entry (`applies_to: [resource]` in
+    /// `docs-schema.yaml`). Default: none. Example: `custom: { contract: MSA-2024-17 }`.
     #[serde(default)]
     pub custom: crate::docs::Custom,
 }
@@ -394,32 +497,57 @@ impl std::fmt::Debug for Api {
 
 /// An SFTP server used by `sftp` sources and destinations.
 #[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SftpServer {
+    /// The SFTP server's host name or address. Required. Example: `host: sftp.lab.example.org`.
     pub host: String,
+    /// The server's SSH port. Default: `22`. Example: `port: 2222`.
     #[serde(default = "default_sftp_port")]
     pub port: u16,
+    /// The account to log in as, given by the server's owner. Required. Example: `user:
+    /// hospital`.
     pub user: String,
+    /// The account's password, from a secret (`${secret:LAB_SFTP_PASSWORD}`). Give this or
+    /// `private_key`; a key is better where the server takes one (nothing reusable crosses the
+    /// network). Example: `password: "${secret:LAB_SFTP_PASSWORD}"`.
     #[serde(default)]
     pub password: Option<String>,
-    /// OpenSSH private key text (keep it in a secret: `${secret:NAME}`).
+    /// The private key to log in with, as OpenSSH key text from a secret
+    /// (`${secret:LAB_SFTP_KEY}`); the server's owner adds its public half to the account.
+    /// `ssh-keygen -t ed25519` makes a pair. Example: `private_key: "${secret:LAB_SFTP_KEY}"`.
     #[serde(default)]
     pub private_key: Option<String>,
+    /// The passphrase of an encrypted `private_key`, from a secret. Default: none (an unencrypted
+    /// key, protected by the secrets file). Example: `passphrase: "${secret:LAB_SFTP_PASSPHRASE}"`.
     #[serde(default)]
     pub passphrase: Option<String>,
-    /// The server's host key fingerprint, `SHA256:...`, so a spoofed server is refused. If it's
-    /// missing, connecting fails with the fingerprint to check and paste in. `any` turns the
-    /// check off (test servers only).
+    /// The server's host key fingerprint, as `SHA256:…` (what `ssh-keygen -lf` prints for the key
+    /// file), so a server pretending to be this one is refused before any password or key is
+    /// sent to it.
+    ///
+    /// Leave it out the first time: connecting then fails, and the error gives the fingerprint
+    /// the server presented, to check with the server's administrator and paste in. When the
+    /// server's key changes (a rebuilt server, another host behind the name), connections fail
+    /// until it's updated: on purpose, since that's what an impostor looks like too. `any` turns
+    /// the check off, for a test server on your own machine only. No default. Example:
+    /// `host_key: "SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8"`.
     #[serde(default)]
     pub host_key: Option<String>,
+    /// The application behind the server, for `ductus impact`. Default: none. Example:
+    /// `application: Quest Lab Results`.
     #[serde(default)]
     pub application: Option<String>,
+    /// The server's vendor (often the partner whose server it is), for `ductus impact`: "what
+    /// does Quest's outage touch?". Default: none. Example: `vendor: Quest`.
     #[serde(default)]
     pub vendor: Option<String>,
-    /// Who to call about it.
+    /// Who to ask about this server, best as an email address. Default: none. Example: `owner:
+    /// lab-it@hospital.org`.
     #[serde(default)]
     pub owner: Option<String>,
-    /// Company-defined documentation fields (`docs-schema.yaml`).
+    /// Your company's documentation fields for this entry (`applies_to: [resource]` in
+    /// `docs-schema.yaml`). Default: none. Example: `custom: { contract: QUEST-2025 }`.
     #[serde(default)]
     pub custom: crate::docs::Custom,
 }
@@ -441,46 +569,95 @@ fn default_sftp_port() -> u16 {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum Database {
+    /// A PostgreSQL database. Example: `postgres: { host: db1.hospital.local, database:
+    /// patients, user: ductus, password: "${secret:PATIENT_DB_PASSWORD}", tls: verify-full }`.
     Postgres(DbConnection),
+    /// A Microsoft SQL Server database, with a SQL login or a Windows one. Always over TLS, its
+    /// certificate checked. Example: `sqlserver: { host: billing.hospital.local, database:
+    /// Billing, user: ductus, password: "${secret:BILLING_DB_PASSWORD}" }`.
     Sqlserver(SqlServerConnection),
 }
 
 #[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DbConnection {
+    /// The database server's host name or address. With `tls: verify-full`, its certificate
+    /// must be for this name. Usually from the environment (`${PATIENT_DB_HOST}`). Required.
+    /// Example: `host: db1.hospital.local`.
     pub host: String,
-    /// Default: 5432.
+    /// The server's port. Default: `5432`. Example: `port: 5433`.
     pub port: Option<u16>,
+    /// The database to connect to on that server. Required. Example: `database: patients`.
     pub database: String,
+    /// The login. Give it only what the interfaces' queries need (often read-only on a few
+    /// tables or views). Required. Example: `user: ductus`.
     pub user: String,
+    /// The login's password, from a secret (`${secret:PATIENT_DB_PASSWORD}`). A wrong one makes
+    /// messages wait and retry rather than quarantine, since fixing it fixes them all. Default:
+    /// none (for `certificate` or trust logins). Example: `password:
+    /// "${secret:PATIENT_DB_PASSWORD}"`.
     #[serde(default)]
     pub password: String,
-    /// Size of the shared connection pool.
+    /// The most connections the engine opens to this database, shared by every interface's
+    /// `db("<name>")` calls, opened as they're needed.
+    ///
+    /// A call that finds them all busy waits up to 10 seconds for one, then fails as a temporary
+    /// error: its message waits and is tried again, nothing is quarantined. Raise it when calls
+    /// queue for a connection while the database itself is quick, up to what the database's own
+    /// limit and its DBA allow for every engine that connects (each engine has its own pool).
+    /// Don't raise it to cure slow queries: more of the same slow query at once makes the
+    /// database slower. An interface with `isolation: dedicated` can have connections of its own
+    /// instead (`dedicated_pools`), so one busy interface can't take them all. Default: `5`.
+    /// Example: `max_connections: 10`.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
-    /// libpq's `sslmode`: `disable`, `prefer` (TLS when offered, not verified: libpq's default),
-    /// `require` (not verified), `verify-ca` or `verify-full`. Default: `verify-full` when `ca`
-    /// is given, else `prefer` (`mode()`).
+    /// How the connection is protected, with the names and meanings of libpq's `sslmode`, as
+    /// DBAs write them:
+    ///
+    /// - `disable`: no TLS.
+    /// - `prefer`: TLS when the server offers it, its certificate not checked (anyone answering
+    ///   at that address is believed).
+    /// - `require`: TLS or no connection, the certificate not checked.
+    /// - `verify-ca`: TLS, the certificate issued by a trusted CA; the name in it not checked.
+    /// - `verify-full`: TLS, a trusted CA's certificate for `host`. The only one that stops a
+    ///   server pretending to be this one.
+    ///
+    /// Use `verify-full` for any database on another machine (cloud Postgres requires TLS),
+    /// with `ca` for a private CA. The engine's start, `ductus validate` and `ductus doctor` say
+    /// how each connection is protected. Default: `verify-full` when `ca` is given, else
+    /// `prefer`. Example: `tls: verify-full`.
     #[serde(default)]
     pub tls: Option<crate::pgtls::SslMode>,
-    /// The server may also be issued by this CA (a `certificates:` entry), besides those this
-    /// server trusts.
+    /// A CA to trust for this server besides the ones this server trusts (a `certificates:`
+    /// entry), for a database whose certificate comes from a private CA. Naming one means
+    /// `tls: verify-full` unless `tls` says otherwise. Default: the system's trusted CAs only.
+    /// Example: `ca: hospital-ca`.
     #[serde(default)]
     pub ca: Option<String>,
-    /// Log in with this client certificate (a `certificates:` pair; Postgres's `cert` login in
-    /// pg_hba.conf, or presented alongside the password).
+    /// A client certificate to present (a `certificates:` entry with its key): for a login by
+    /// certificate (`cert` in the server's pg_hba.conf), or alongside the password where the DBA
+    /// asks for both. A renewed certificate is used by new connections without a restart.
+    /// Default: none. Example: `certificate: ductus-db`.
     #[serde(default)]
     pub certificate: Option<String>,
+    /// The application whose database this is, for `ductus impact`. Default: none. Example:
+    /// `application: Patient index`.
     #[serde(default)]
     pub application: Option<String>,
+    /// The database's (or application's) vendor, for `ductus impact`. Default: none. Example:
+    /// `vendor: In-house`.
     #[serde(default)]
     pub vendor: Option<String>,
-    /// Who to call about it.
+    /// Who to ask about this database, best as an email address (its certificate's expiry
+    /// alerts reach them with `to: owner`). Default: none. Example: `owner: dba@hospital.org`.
     #[serde(default)]
     pub owner: Option<String>,
-    /// Company-defined documentation fields (`docs-schema.yaml`).
+    /// Your company's documentation fields for this entry (`applies_to: [resource]` in
+    /// `docs-schema.yaml`). Default: none. Example: `custom: { ticket: CHG-1234 }`.
     #[serde(default)]
     pub custom: crate::docs::Custom,
 }
@@ -520,51 +697,95 @@ impl DbConnection {
 
 /// SQL Server, with a SQL login (user and password) or a Windows login.
 #[derive(Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct SqlServerConnection {
+    /// The SQL Server's host name or address (without `\INSTANCE`: that goes in `instance`). Its
+    /// certificate must be for this name, unless `name_in_certificate` says another. Required.
+    /// Example: `host: billing.hospital.local`.
     pub host: String,
-    /// Default: 1433, or looked up through the SQL Server Browser when `instance` is set.
+    /// The server's port. Default: `1433`, or, with `instance`, the port the SQL Server Browser
+    /// gives for it (UDP 1434: the firewall must let that through too). Example: `port: 1435`.
     pub port: Option<u16>,
-    /// Named instance (`host\INSTANCE` in SQL Server tools), e.g. `SQLEXPRESS`.
+    /// A named instance, as SQL Server tools write `host\INSTANCE`: `SQLEXPRESS`, `PROD`. Its port
+    /// is asked of the SQL Server Browser, unless `port` is given. Default: the default instance.
+    /// Example: `instance: PROD`.
     #[serde(default)]
     pub instance: Option<String>,
+    /// The database to use on that server. Required. Example: `database: Billing`.
     pub database: String,
-    /// `sql` (the default: `user` and `password` are a SQL login) or `windows`.
+    /// How the engine logs in:
+    ///
+    /// - `sql`: a SQL Server login, `user` and `password`.
+    /// - `windows`: a Windows login. Without `user`, as the account the engine runs as (the
+    ///   Windows service's account; Windows only, Kerberos where the domain allows it); with
+    ///   `user` and `password`, as that domain account (from Linux this is NTLM, which some
+    ///   servers refuse: Extended Protection set to Required).
+    ///
+    /// Use `windows` where the DBA allows only Windows logins; on Windows prefer the service's
+    /// own account (a gMSA), which has no password to keep. Default: `sql`. Example: `auth:
+    /// windows`.
     #[serde(default)]
     pub auth: SqlAuth,
-    /// The login (`auth: sql`), or the Windows account (`HOSPITAL\svc-lab`) with `auth: windows`;
-    /// empty there means the account the engine runs as. Empty is "not given".
+    /// The login: a SQL login's name with `auth: sql`, or a domain account (`HOSPITAL\svc-lab`)
+    /// with `auth: windows`, where leaving it out means the account the engine runs as. Give
+    /// it only what the queries need. Example: `user: ductus`.
     #[serde(default)]
     pub user: String,
+    /// The login's password, from a secret (`${secret:BILLING_DB_PASSWORD}`). Not with `auth:
+    /// windows` and no `user`. Example: `password: "${secret:BILLING_DB_PASSWORD}"`.
     #[serde(default)]
     pub password: String,
-    /// Size of the shared connection pool.
+    /// The most connections the engine opens to this database, shared by every interface's
+    /// `db("<name>")` calls, opened as they're needed. A call that finds them all busy waits for
+    /// one, then fails as a temporary error (the message waits and is tried again). Raise it
+    /// when calls queue while the server is quick, within what its DBA allows for every engine.
+    /// Default: `5`. Example: `max_connections: 10`.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
-    /// The server may also be issued by this CA (a `certificates:` entry), besides those this
-    /// server trusts.
+    /// A CA to trust for this server besides the ones this server trusts (a `certificates:`
+    /// entry), for a SQL Server whose certificate comes from a private CA (common: the domain's
+    /// CA, or a certificate the DBA made). Default: the system's trusted CAs only. Example: `ca:
+    /// hospital-ca`.
     #[serde(default)]
     pub ca: Option<String>,
-    /// `mandatory` (TLS after the PRELOGIN exchange, as every SQL Server client; the default) or
-    /// `strict` (TDS 8: TLS before anything, for servers that force it).
+    /// How the connection is encrypted, always with the server's certificate checked:
+    ///
+    /// - `mandatory`: TLS for the whole session, begun after SQL Server's first exchange, as
+    ///   every SQL Server client does it.
+    /// - `strict`: TDS 8, TLS before anything else, for servers set to force it (SQL Server 2022
+    ///   and later; 2022 on Linux refuses it).
+    ///
+    /// There's no `false`: SQL Server would encrypt the login only and send queries and results
+    /// readable. Default: `mandatory`. Example: `encrypt: strict`.
     #[serde(default)]
     pub encrypt: Encrypt,
-    /// The name its certificate is checked for, when it isn't `host` (ADO.NET's
-    /// HostNameInCertificate): an availability group listener, an alias or an IP address.
+    /// The name the server's certificate is checked for, when it isn't `host`: connecting to an
+    /// availability group listener, an alias or an address whose certificate names the server
+    /// itself (ADO.NET's HostNameInCertificate). Default: `host`. Example: `name_in_certificate:
+    /// sql1.hospital.org`.
     #[serde(default)]
     pub name_in_certificate: Option<String>,
-    /// Accept the server's TLS certificate without checking it (anyone answering at its address
-    /// would be believed). Labs only: name its CA in `ca` instead; warned about.
+    /// Accept the server's certificate without checking it: anyone answering at its address would
+    /// be believed, and could read the credentials and data. For a lab server only; the start and
+    /// `ductus validate` warn about it on another machine. For a server with a private CA, name the
+    /// CA in `ca` instead. Not with `ca` or `name_in_certificate`. Default: `false`. Example:
+    /// `trust_server_certificate: true`.
     #[serde(default)]
     pub trust_server_certificate: bool,
+    /// The application whose database this is, for `ductus impact`. Default: none. Example:
+    /// `application: Billing`.
     #[serde(default)]
     pub application: Option<String>,
+    /// The application's vendor, for `ductus impact`. Default: none. Example: `vendor: Cerner`.
     #[serde(default)]
     pub vendor: Option<String>,
-    /// Who to call about it.
+    /// Who to ask about this database, best as an email address (its certificate's expiry
+    /// alerts reach them with `to: owner`). Default: none. Example: `owner: dba@hospital.org`.
     #[serde(default)]
     pub owner: Option<String>,
-    /// Company-defined documentation fields (`docs-schema.yaml`).
+    /// Your company's documentation fields for this entry (`applies_to: [resource]` in
+    /// `docs-schema.yaml`). Default: none. Example: `custom: { ticket: CHG-1234 }`.
     #[serde(default)]
     pub custom: crate::docs::Custom,
 }
@@ -600,6 +821,7 @@ impl<'de> Deserialize<'de> for Encrypt {
 
 /// How the engine logs in to SQL Server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum SqlAuth {
     /// A SQL Server login: `user` and `password`.

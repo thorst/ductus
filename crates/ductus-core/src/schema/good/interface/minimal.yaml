@@ -1,0 +1,4 @@
+# The least an interface needs: a name, a source and a destination.
+name: adt-in
+source: { mllp: { port: 6661 } }
+destination: { file: { dir: out } }

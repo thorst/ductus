@@ -1,0 +1,3 @@
+# An SFTP server needs its host.
+sftp:
+  quest: { user: hospital, host_key: any }

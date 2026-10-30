@@ -29,11 +29,16 @@ pub enum Format {
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct CsvOptions {
+    /// The one character between fields: `,`, `|`, `;` or a tab (`"\t"`). Quote it in YAML.
+    /// Default: `","`. Example: `delimiter: "|"`.
     #[serde(default = "comma")]
     pub delimiter: char,
-    /// First line holds column names (records become objects); otherwise records are arrays.
+    /// Whether the first line holds the column names. With it, each record is an object by
+    /// column name (`row.mrn`) and keys name columns; without it, each record is a list of
+    /// fields and keys are column numbers from 1. Default: `true`. Example: `header: false`.
     #[serde(default = "yes")]
     pub header: bool,
 }
@@ -64,6 +69,7 @@ pub struct FixedField {
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Align {
     #[default]
@@ -72,22 +78,38 @@ pub enum Align {
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
-struct FixedLayoutConfig {
+pub(crate) struct FixedLayoutConfig {
+    /// The record's fields, in order, each with its `name` and `width`: what the code sees as the
+    /// record's properties, and what's written back in the same columns. At least one.
+    /// Example: `fields: [{ name: mrn, width: 10 }, { name: last_name, width: 20 }]`.
     fields: Vec<FixedFieldConfig>,
+    /// Remove the padding around each field's value when reading (`"SMITH     "` reads as
+    /// `"SMITH"`). Turn it off where spaces are part of the value. Default: `true`. Example:
+    /// `trim: false`.
     #[serde(default = "yes")]
     trim: bool,
 }
 
 #[derive(Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 struct FixedFieldConfig {
+    /// The field's name, as the code reads it (`record.mrn`) and as keys name it. Required.
+    /// Example: `name: mrn`.
     name: String,
+    /// How many characters the field takes, at least 1. Required. Example: `width: 10`.
     width: usize,
-    /// 1-based column where the field starts. Default: right after the previous field.
+    /// The column the field starts at, counting from 1, for layouts with gaps or fields out of
+    /// order. Default: right after the previous field (1 for the first). Example: `start: 41`.
     start: Option<usize>,
+    /// When writing: `left` pads after the value (names), `right` before it (amounts, numbers).
+    /// Default: `left`. Example: `align: right`.
     #[serde(default)]
     align: Align,
+    /// When writing: the character that fills the field's unused width. Default: a space.
+    /// Example: `pad: "0"` (amounts as `0000012.50`).
     #[serde(default = "space")]
     pad: char,
 }

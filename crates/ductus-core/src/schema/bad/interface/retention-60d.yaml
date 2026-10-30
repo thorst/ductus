@@ -1,0 +1,5 @@
+# Retention is 1w, 3w or 7w.
+name: adt-in
+source: { mllp: { port: 6661 } }
+destination: { file: { dir: out } }
+retention: 60d

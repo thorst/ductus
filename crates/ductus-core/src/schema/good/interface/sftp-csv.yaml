@@ -1,0 +1,6 @@
+# Lab results as CSV on a partner's SFTP server, one message per row, to JSON for an API.
+name: quest-results
+source: { sftp: { server: quest, dir: outbound, pattern: "*.csv", after: delete, split: records } }
+format: csv
+output: json
+destination: { http: { api: results } }

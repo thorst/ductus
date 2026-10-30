@@ -30,6 +30,7 @@ const RESERVED: &[&str] =
     &["name", "description", "owner", "from", "to", "application", "vendor", "hosts", "custom", "about"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum FieldType {
     Text,
@@ -42,6 +43,7 @@ pub enum FieldType {
 
 /// Where a field applies.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Level {
     Interface,
@@ -60,25 +62,67 @@ impl Level {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Field {
+    /// What the value is:
+    ///
+    /// - `text`: any text (quote numbers and yes/no, or YAML reads them as such).
+    /// - `enum`: one of `values`.
+    /// - `date`: a date, written `2026-10-30`.
+    /// - `url`: an `http(s)://` address, shown as a link.
+    /// - `person`: who, as text: best an email address.
+    /// - `list`: several texts (each one of `values`, if given).
+    ///
+    /// Required. Example: `type: enum`.
     #[serde(rename = "type")]
     pub kind: FieldType,
-    /// The allowed values of an `enum` (or of each item of a `list`).
+    /// The values an `enum` may take (and each item of a `list`, if given), matched exactly,
+    /// case included. Quote ones YAML would read otherwise (`"yes"`, `"no"`). Default: none.
+    /// Example: `values: ["yes", "no", n/a]`.
     #[serde(default)]
     pub values: Vec<String>,
+    /// Every interface (destination, resource) the field applies to must have a value: `ductus
+    /// validate` reports each one missing. The engine starts anyway. Default: `false`. Example:
+    /// `required: true`.
     #[serde(default)]
     pub required: bool,
+    /// Where the field may be given: `interface`, `destination` and/or `resource` (a
+    /// resources.yaml entry). Default: `[interface]`. Example: `applies_to: [interface,
+    /// resource]`.
     #[serde(default = "default_applies_to")]
     pub applies_to: Vec<Level>,
+    /// The name the web UI shows instead of the key. Default: the key. Example: `label: BAA
+    /// signed`.
     #[serde(default)]
     pub label: Option<String>,
+    /// A hint shown under the field in the web UI: what it's for, or where to find the value.
+    /// Default: none. Example: `help: Business associate agreement, from the contracts office`.
     #[serde(default)]
     pub help: Option<String>,
 }
 
 fn default_applies_to() -> Vec<Level> {
     vec![Level::Interface]
+}
+
+/// `docs-schema.yaml`: the documentation fields your company keeps about its interfaces,
+/// destinations and resources, beyond what Ductus asks for (a BAA reference, a change ticket,
+/// a runbook link, the analyst). Values go in `custom:` beside each one; `ductus validate`
+/// checks them, and the web UI shows and filters by them. The engine itself ignores them.
+///
+/// The file sits at the top of the project and is optional: without it there are no fields.
+#[derive(Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SchemaFile {
+    /// The fields, by the key `custom:` uses, in the order the web UI shows them. Keys are your
+    /// choice, except names Ductus uses beside `custom` (`name`, `owner`, `vendor`, …). Default:
+    /// none. Example: `fields: { baa_signed: { type: enum, values: ["yes", "no"], required: true
+    /// } }`.
+    #[serde(default)]
+    #[cfg_attr(test, schemars(with = "BTreeMap<String, Field>"))]
+    fields: serde_yaml_ng::Mapping,
 }
 
 /// A declared field with its key.
@@ -113,13 +157,7 @@ impl Schema {
     }
 
     pub fn parse(text: &str) -> Result<Self> {
-        #[derive(Deserialize)]
-        #[serde(deny_unknown_fields)]
-        struct File {
-            #[serde(default)]
-            fields: serde_yaml_ng::Mapping,
-        }
-        let file: File = serde_yaml_ng::from_str(text)?;
+        let file: SchemaFile = serde_yaml_ng::from_str(text)?;
         let mut fields = Vec::new();
         for (key, value) in file.fields {
             let key = key.as_str().context("a field name must be text")?.to_string();

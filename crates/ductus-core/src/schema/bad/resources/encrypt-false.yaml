@@ -1,0 +1,3 @@
+# `encrypt: false` would send queries and results readable: it isn't offered.
+databases:
+  billing: { sqlserver: { host: sql1, database: Billing, user: ductus, encrypt: false } }

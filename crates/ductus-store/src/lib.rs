@@ -30,7 +30,7 @@ pub use api::{
     Browse, LaneRow, MessageRow, PERMISSIONS, Principal, QueueCount, Role, SESSION_PREFIX, SessionFor, SessionLimits,
     TOKEN_PREFIX, Token, clean_permissions,
 };
-pub use audit::{Audit, AuditFilter, AuditRow, By, PreviousRun};
+pub use audit::{ACTIONS as AUDIT_ACTIONS, Audit, AuditFilter, AuditRow, By, PreviousRun};
 pub use certificates::{CertificateRow, DOCTOR_RUNS_KEPT, DoctorRunRow};
 pub use directory::{DirectoryAccount, DirectoryPerson, DirectoryUpdate};
 pub use docs::DocsRow;

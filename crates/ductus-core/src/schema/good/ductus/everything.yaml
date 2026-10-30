@@ -1,0 +1,64 @@
+# Every setting. Only `alerts:` is read per environment, so only it uses references.
+ports: { mllp: 7000-7099, http: 9080-9099 }
+isolates: { heap_mb: 1024 }
+require_about: true
+api:
+  listen: 0.0.0.0:7700
+  tls:
+    certificate: ductus-api
+    clients: { ca: hospital-ca, subjects: ["OU=Interface Team"] }
+  allow: [127.0.0.1, 10.1.50.0/24]
+retention: 3w
+quarantined: purge
+auth:
+  session: { idle: 30m, max: 1d }
+  password: { min_length: 16 }
+  lockout: { attempts: 10, window: 1h, for: 30m }
+  token_sign_in: false
+  user_tokens: false
+  ldap:
+    resource: corp-ad
+    user_base: "OU=Staff,DC=hospital,DC=org"
+    user_filter: "(sAMAccountName={username})"
+    attributes: { display_name: displayName, email: mail, username: sAMAccountName, id: auto }
+    groups:
+      admin: "CN=Ductus Admins,OU=Groups,DC=hospital,DC=org"
+      operator:
+        - "CN=Interface Team,OU=Groups,DC=hospital,DC=org"
+        - "CN=Lab IT,OU=Groups,DC=hospital,DC=org"
+      viewer: "CN=Help Desk,OU=Groups,DC=hospital,DC=org"
+      permissions:
+        payloads: "CN=Ductus PHI,OU=Groups,DC=hospital,DC=org"
+        audit: "CN=Ductus Auditors,OU=Groups,DC=hospital,DC=org"
+    nested: true
+    group_base: "OU=Groups,DC=hospital,DC=org"
+    refresh: 5m
+audit: { keep: 7y, payload_reads: true, payload_read_window: 0s }
+alerts:
+  smtp:
+    host: ${HOST}
+    port: ${PORT}
+    tls: starttls
+    username: ductus@hospital.org
+    password: "${secret:SMTP_PASSWORD}"
+    from: ductus@hospital.org
+    ca: hospital-ca
+    certificate: ductus-client
+  channels:
+    oncall: { email: [interfaces-oncall@hospital.org, lab-it@hospital.org] }
+    chat:
+      email: interfaces@hospital.org
+      webhook: { url: "https://hooks.example.org/T000/B000", format: teams, ca: hospital-ca, certificate: ductus-client }
+  rules:
+    - { when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }
+    - { when: [behind, silent, missed, certificate], severity: warning, to: [chat, owner] }
+  repeat: 1h
+  recovery: ${STRICT}
+  settle: 10m
+  quiet: { between: "22:00-06:00", severities: [warning] }
+  heartbeat: { url: "https://hc.example.org/ping/abc", every: 1m, ca: hospital-ca, certificate: ductus-client }
+  keep: 2y
+  certificates: { warn_days: [45, 14, 3] }
+owners:
+  "Lab Systems": { email: lab-systems@hospital.org }
+doctor: { schedule: 1h, mode: full }

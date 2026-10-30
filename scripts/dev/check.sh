@@ -50,6 +50,9 @@ if ! "$CARGO_TARGET_DIR/release/ductus" api-spec | cmp -s - ui/openapi.json; the
   echo "The API changed: updated ui/openapi.json and ui/src/api/schema.d.ts. Run check.sh again."
   exit 1
 fi
+# The docs' reference pages come from the binary (commands, API, settings, metrics...): written
+# in place, so the diff shows what a change did to them (the CLI test fails on stale ones).
+"$CARGO_TARGET_DIR/release/ductus" reference docs >/dev/null
 echo "== clippy"; cargo clippy --release --all-targets -- -D warnings 2>&1 | grep -E '^(warning|error)|-->' || true
 echo "== test"
 if cargo test --release -q 2>&1 | tee /tmp/ductus-test.log | grep -E 'test result: ok\. [1-9]|FAILED|panicked'; then :; fi

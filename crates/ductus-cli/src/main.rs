@@ -7,6 +7,7 @@ mod init;
 mod new;
 mod owners;
 mod project;
+mod reference;
 mod replay;
 mod service;
 mod sinks;
@@ -35,6 +36,7 @@ struct RunArgs {
     /// Project folder containing `interfaces/`.
     #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
     root: PathBuf,
+    /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
     #[arg(long, env = "DUCTUS_DATABASE_URL")]
     database_url: Option<String>,
     /// Threads in the shared worker pool (default: one per CPU core).
@@ -86,6 +88,7 @@ enum Command {
     /// Start a new project: settings, environments, resources and a first interface, ready for
     /// `ductus test`. The folder must be empty (a fresh Git clone is fine).
     Init {
+        /// The folder to make the project in (made if missing).
         #[arg(default_value = ".")]
         dir: PathBuf,
     },
@@ -107,6 +110,7 @@ enum Command {
         /// Where the REST API listens (`host:port`, or `off`).
         #[arg(long, env = "DUCTUS_API_LISTEN")]
         api_listen: Option<String>,
+        /// On Ctrl-C, how long to finish the messages in hand before exiting anyway.
         #[arg(long, env = "DUCTUS_STOP_TIMEOUT", default_value = "30s", value_parser = parse_duration)]
         stop_timeout: std::time::Duration,
         /// Postgres's port (default: the one kept from the last run, else a free one).
@@ -124,11 +128,13 @@ enum Command {
     },
     /// Run each interface's `*.test.ts` files.
     Test {
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
         /// Only this interface.
         #[arg(long)]
         interface: Option<String>,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
         /// Write nothing into the project (no editor typings): for `ductus upgrade --check`.
@@ -137,8 +143,10 @@ enum Command {
     },
     /// Check configs, code loading and TypeScript types for an environment (exits 1 on problems).
     Validate {
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
         /// Also check the project against this database, reading only: lanes that would strand
@@ -162,10 +170,13 @@ enum Command {
         /// One JSON document instead of the report.
         #[arg(long)]
         json: bool,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
+        /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
         #[arg(long, env = "DUCTUS_DATABASE_URL")]
         database_url: Option<String>,
         /// Also replay this much of the latest traffic (`1d`, `12h`) through the new version and
@@ -179,10 +190,13 @@ enum Command {
     /// evidence a change board asks for before an upgrade or a code change. Reads only (a read-only
     /// login or a replica is enough). Exits 1 when anything differs.
     Replay {
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
+        /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
         #[arg(long, env = "DUCTUS_DATABASE_URL")]
         database_url: Option<String>,
         /// The period's start: a duration back from its end (`24h`, `7d`) or a time (RFC 3339).
@@ -247,8 +261,10 @@ enum Command {
     /// List the ports and HTTP routes a project listens on, the hosts it connects to, and port
     /// conflicts, for an environment (exits 1 on conflicts).
     Ports {
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
@@ -269,8 +285,10 @@ enum Command {
         /// Look host names up in DNS, so names in the config match addresses (and the other way round).
         #[arg(long)]
         resolve: bool,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
@@ -288,10 +306,13 @@ enum Command {
         /// Also save the report (for a network team or vendor): JSON if the name ends in .json.
         #[arg(long)]
         report: Option<PathBuf>,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
+        /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
         #[arg(long, env = "DUCTUS_DATABASE_URL")]
         database_url: Option<String>,
     },
@@ -301,10 +322,13 @@ enum Command {
         /// Only what's missing.
         #[arg(long)]
         missing: bool,
+        /// As JSON, for a report or another tool.
         #[arg(long)]
         json: bool,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
@@ -320,8 +344,10 @@ enum Command {
         /// several accounts. Needs the database.
         #[arg(long)]
         check: bool,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
         /// Where the accounts are (without it, owners aren't matched to them).
@@ -335,6 +361,7 @@ enum Command {
     User {
         #[command(subcommand)]
         action: UserAction,
+        /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
         #[arg(long, env = "DUCTUS_DATABASE_URL", global = true)]
         database_url: Option<String>,
         /// The project folder (its ductus.yaml sets the password rules).
@@ -347,6 +374,7 @@ enum Command {
     Token {
         #[command(subcommand)]
         action: TokenAction,
+        /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
         #[arg(long, env = "DUCTUS_DATABASE_URL", global = true)]
         database_url: Option<String>,
     },
@@ -354,6 +382,7 @@ enum Command {
     Audit {
         #[command(subcommand)]
         action: AuditAction,
+        /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
         #[arg(long, env = "DUCTUS_DATABASE_URL", global = true)]
         database_url: Option<String>,
     },
@@ -384,6 +413,7 @@ enum Command {
     /// [destination]`; messages keep queueing. Act first, explain after: the reason is optional,
     /// and running it again with --reason adds one. Through the running engine's REST API.
     Pause {
+        /// The interface whose destination to pause.
         interface: String,
         /// Which destination (needed when the interface has several).
         destination: Option<String>,
@@ -441,15 +471,30 @@ enum Command {
     /// Print the REST API's OpenAPI document (the same as `GET /api/v1/openapi.json`, without a
     /// running engine).
     ApiSpec,
-    /// Write editor typings (.ductus/types) and tsconfig.json for VS Code.
+    /// Write what an editor needs to help with the project, for the version installed: the SDK's
+    /// typings (.ductus/types) and a tsconfig.json for the interfaces' code, and the configuration
+    /// files' schemas (.ductus/schema) with VS Code's settings pointing at them, for completion,
+    /// descriptions on hover and mistakes underlined in interface.yaml, resources.yaml and
+    /// ductus.yaml. `ductus test` and `validate` do it too; run it after an upgrade.
     Types {
+        /// Project folder.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+    /// Write the docs site's reference pages (`DOCS/reference`) from this binary: the command line,
+    /// the REST API, every setting, Event Log IDs, metrics and audit actions. For the docs, not
+    /// for users.
+    #[command(hide = true)]
+    Reference {
+        /// The docs folder (with SUMMARY.md, whose reference part is rewritten).
+        #[arg(default_value = "docs")]
+        docs: PathBuf,
     },
     /// Show message counts by interface and status (from the database, also while the engine is
     /// down); with a token, also each interface's and destination's health from the running
     /// engine (silent, behind, stalled, paused, catching up...).
     Status {
+        /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
         #[arg(long, env = "DUCTUS_DATABASE_URL")]
         database_url: Option<String>,
         #[command(flatten)]
@@ -457,8 +502,10 @@ enum Command {
     },
     /// Send synthetic ADT messages over MLLP.
     Gen {
+        /// The MLLP listener to send to, `host:port`.
         #[arg(long, default_value = "127.0.0.1:6661")]
         to: String,
+        /// How many messages to send.
         #[arg(long, default_value_t = 1000)]
         count: u64,
         /// Distinct patients (MRNs) to spread messages across.
@@ -487,6 +534,7 @@ enum Command {
         /// Present this client certificate (PEM, ours first), with --key.
         #[arg(long, requires = "key")]
         cert: Option<PathBuf>,
+        /// The client certificate's private key (PEM).
         #[arg(long, requires = "cert")]
         key: Option<PathBuf>,
         /// Connect from this address of this machine (127.0.0.2 on Linux, say), to try a
@@ -498,6 +546,7 @@ enum Command {
     /// --http, a mail server or web server that accepts everything and prints it instead (to see
     /// what alerts send without a real one).
     Sink {
+        /// The MLLP port to listen on (127.0.0.1).
         #[arg(long, default_value_t = 6662)]
         port: u16,
         /// Be an SMTP server on this port: print each mail (and keep it in --dir).
@@ -520,6 +569,7 @@ enum Command {
         /// The certificate to present (PEM, ours first, then intermediates).
         #[arg(long, requires_all = ["tls", "key"])]
         cert: Option<PathBuf>,
+        /// The certificate's private key (PEM).
         #[arg(long, requires_all = ["tls", "cert"])]
         key: Option<PathBuf>,
         /// Ask senders for a client certificate this CA (PEM) issued; others are refused.
@@ -544,6 +594,7 @@ enum ServiceAction {
     /// `DOMAIN\svc-ductus$` (a gMSA: no password), `DOMAIN\name` or `.\name` (asks for its
     /// password; give it again after every upgrade), or `NT SERVICE\Ductus` (the default).
     Account {
+        /// The account: `DOMAIN\name`, a gMSA (`DOMAIN\name$`), or none to show the current one.
         name: Option<String>,
         /// Read the password from stdin (one line) instead of asking.
         #[arg(long, requires = "name")]
@@ -588,8 +639,10 @@ enum CertAction {
         /// The key to check (default: the .key file beside a .pem, or the entry's key).
         #[arg(long)]
         key: Option<PathBuf>,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
@@ -612,9 +665,12 @@ enum CertAction {
 enum AlertsAction {
     /// Send a test notification to a channel now, from ductus.yaml in this environment.
     Test {
+        /// A channel's name under `alerts.channels` in ductus.yaml.
         channel: String,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
@@ -628,6 +684,7 @@ enum NewCommand {
     Interface {
         /// Folder name and interface name, e.g. adt-to-lab.
         name: String,
+        /// Where its messages come from.
         #[arg(long, value_enum, default_value = "mllp")]
         source: new::SourceKind,
         /// Default: hl7 (json for http and schedule).
@@ -639,6 +696,7 @@ enum NewCommand {
         /// SFTP server from resources.yaml (needed when there are several).
         #[arg(long)]
         server: Option<String>,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
     },
@@ -666,8 +724,10 @@ enum OwnersAction {
         /// Show what would change without writing.
         #[arg(long)]
         dry_run: bool,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
@@ -686,7 +746,10 @@ struct ApiArgs {
 #[derive(Subcommand)]
 enum RetentionAction {
     /// Apply an interface's shorter retention: it deletes the messages past it (operator token).
-    Confirm { interface: String },
+    Confirm {
+        /// The interface whose shorter retention to apply.
+        interface: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -706,6 +769,7 @@ enum AuditAction {
         /// An action (`message.dismiss`) or a group (`message`, `user`, `session`).
         #[arg(long)]
         action: Option<String>,
+        /// Only what concerns this interface.
         #[arg(long)]
         interface: Option<String>,
         /// A message id.
@@ -734,19 +798,25 @@ enum TokenAction {
         revoked: bool,
     },
     /// Revoke a token: it stops working at once.
-    Revoke { name: String },
+    Revoke {
+        /// The token's name, as `ductus token list` shows it.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]
 enum UserAction {
     /// Make an account. The password is asked for twice (or read from stdin with --password-stdin).
     Create {
+        /// The name they sign in with.
         username: String,
         /// viewer, operator or admin.
         #[arg(long, default_value = "viewer")]
         role: String,
+        /// Their name as others see it (in the web UI and the audit log).
         #[arg(long)]
         display_name: Option<String>,
+        /// Their email address: how owner texts (`about.owner`) and alerts reach them.
         #[arg(long)]
         email: Option<String>,
         /// Beyond the role: `payloads`, `audit`. Repeat for both.
@@ -763,7 +833,9 @@ enum UserAction {
     List,
     /// Change a user's role and permissions (all of them are set to what is given).
     Set {
+        /// The account's sign-in name.
         username: String,
+        /// The new role: viewer, operator or admin (none given: leave it).
         #[arg(long)]
         role: Option<String>,
         /// The permissions the user has afterwards (none given: leave them as they are).
@@ -772,16 +844,27 @@ enum UserAction {
     },
     /// Give a user a new temporary password (they must change it at their next sign-in).
     Password {
+        /// The account's sign-in name.
         username: String,
+        /// Read the password from stdin (one line) instead of asking.
         #[arg(long)]
         password_stdin: bool,
     },
     /// Stop a user signing in; their sessions and tokens stop at once.
-    Disable { username: String },
+    Disable {
+        /// The account's sign-in name.
+        username: String,
+    },
     /// Let a disabled user sign in again.
-    Enable { username: String },
+    Enable {
+        /// The account's sign-in name.
+        username: String,
+    },
     /// Let a user locked out by wrong passwords try again.
-    Unlock { username: String },
+    Unlock {
+        /// The account's sign-in name.
+        username: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -790,17 +873,23 @@ enum SecretAction {
     Init,
     /// Create or update a secret. The value is read from stdin if not given.
     Set {
+        /// The secret's name, as config files use it: `${secret:NAME}`.
         name: String,
+        /// The value (read from stdin when not given, which keeps it out of the shell's history).
         value: Option<String>,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
     /// List secret names (never values).
     List {
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+        /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
@@ -1107,6 +1196,7 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Service { action } => service_command(action),
         Command::Types { root } => project::types(&root).await,
+        Command::Reference { docs } => reference::write(&docs),
         Command::ApiSpec => {
             println!("{}", serde_json::to_string_pretty(&ductus_runtime::api::openapi())?);
             Ok(())

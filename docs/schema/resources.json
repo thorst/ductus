@@ -1,0 +1,849 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "resources.yaml",
+  "description": "`resources.yaml`: what many interfaces share, each defined once by a name: databases, SFTP servers, HTTP APIs, directories for signing in, and certificates.\n\nInterfaces and their code refer to them by name (`db(\"patient_db\")`, `api(\"empi\")`, `server: lab_server`), so no address or credential is ever written in an interface or its code, and each environment fills in its own with `${NAME}` and `${secret:NAME}`. `ductus doctor` checks every entry from the server, and `ductus impact` finds the interfaces behind each one.",
+  "type": "object",
+  "properties": {
+    "databases": {
+      "description": "Databases the interfaces' code queries with `db(\"<name>\")`: each a `postgres` or a `sqlserver` entry, by a name you choose. The engine keeps a pool of connections to each and logs in with the entry's credentials, so code never sees them. Default: none. Example: `databases: { patient_db: { postgres: { host: db1, database: patients, user: ductus, password: \"${secret:PATIENT_DB_PASSWORD}\" } } }`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/Database"
+      },
+      "markdownDescription": "Databases the interfaces' code queries with `db(\"<name>\")`: each a `postgres` or a `sqlserver` entry, by a name you choose. The engine keeps a pool of connections to each and logs in with the entry's credentials, so code never sees them. Default: none. Example: `databases: { patient_db: { postgres: { host: db1, database: patients, user: ductus, password: \"${secret:PATIENT_DB_PASSWORD}\" } } }`."
+    },
+    "sftp": {
+      "description": "SFTP servers that `sftp` sources read from and `sftp` destinations write to (`server: <name>`), with their login and host key. Default: none. Example: `sftp: { lab_server: { host: sftp.lab.example.org, user: hospital, private_key: \"${secret:LAB_SFTP_KEY}\", host_key: \"SHA256:…\" } }`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/SftpServer"
+      },
+      "markdownDescription": "SFTP servers that `sftp` sources read from and `sftp` destinations write to (`server: <name>`), with their login and host key. Default: none. Example: `sftp: { lab_server: { host: sftp.lab.example.org, user: hospital, private_key: \"${secret:LAB_SFTP_KEY}\", host_key: \"SHA256:…\" } }`."
+    },
+    "apis": {
+      "description": "HTTP APIs the code calls with `api(\"<name>\")` and `http` destinations send through (`api: <name>`): a base URL, headers such as the token, a timeout and TLS, set once per environment. Default: none. Example: `apis: { empi: { url: \"https://empi.hospital.local/api/v2\", headers: { Authorization: \"Bearer ${secret:EMPI_TOKEN}\" } } }`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/Api"
+      },
+      "markdownDescription": "HTTP APIs the code calls with `api(\"<name>\")` and `http` destinations send through (`api: <name>`): a base URL, headers such as the token, a timeout and TLS, set once per environment. Default: none. Example: `apis: { empi: { url: \"https://empi.hospital.local/api/v2\", headers: { Authorization: \"Bearer ${secret:EMPI_TOKEN}\" } } }`."
+    },
+    "ldap": {
+      "description": "Directories (Active Directory, OpenLDAP) people sign in to the web UI with: `auth.ldap` in ductus.yaml names the one to use and how its groups map to roles. Default: none. Example: `ldap: { corp-ad: { url: \"ldaps://dc1.hospital.org\", bind_dn: \"CN=svc-ductus,OU=Service,DC=hospital,DC=org\", bind_password: \"${secret:LDAP_BIND_PASSWORD}\" } }`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/LdapServer"
+      },
+      "markdownDescription": "Directories (Active Directory, OpenLDAP) people sign in to the web UI with: `auth.ldap` in ductus.yaml names the one to use and how its groups map to roles. Default: none. Example: `ldap: { corp-ad: { url: \"ldaps://dc1.hospital.org\", bind_dn: \"CN=svc-ductus,OU=Service,DC=hospital,DC=org\", bind_password: \"${secret:LDAP_BIND_PASSWORD}\" } }`."
+    },
+    "certificates": {
+      "description": "Certificates the engine presents (`tls: { certificate: <name> }` on listeners and the API, `certificate: <name>` on connections it makes), and CAs it trusts or checks clients against (`ca: <name>`). Each entry is a certificate with its key (from files or secrets) or a CA alone. Their expiry is watched and alerts at 30, 14 and 7 days. Default: none. Example: `certificates: { ductus-mllp: { cert_file: /etc/ductus/tls/mllp.pem, key_file: /etc/ductus/tls/mllp.key } }`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/CertificateEntry"
+      },
+      "markdownDescription": "Certificates the engine presents (`tls: { certificate: <name> }` on listeners and the API, `certificate: <name>` on connections it makes), and CAs it trusts or checks clients against (`ca: <name>`). Each entry is a certificate with its key (from files or secrets) or a CA alone. Their expiry is watched and alerts at 30, 14 and 7 days. Default: none. Example: `certificates: { ductus-mllp: { cert_file: /etc/ductus/tls/mllp.pem, key_file: /etc/ductus/tls/mllp.key } }`."
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Database": {
+      "oneOf": [
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "postgres": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/DbConnection"
+                }
+              ],
+              "description": "A PostgreSQL database. Example: `postgres: { host: db1.hospital.local, database: patients, user: ductus, password: \"${secret:PATIENT_DB_PASSWORD}\", tls: verify-full }`.",
+              "markdownDescription": "A PostgreSQL database. Example: `postgres: { host: db1.hospital.local, database: patients, user: ductus, password: \"${secret:PATIENT_DB_PASSWORD}\", tls: verify-full }`."
+            }
+          },
+          "required": [
+            "postgres"
+          ]
+        },
+        {
+          "additionalProperties": false,
+          "type": "object",
+          "properties": {
+            "sqlserver": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/SqlServerConnection"
+                }
+              ],
+              "description": "A Microsoft SQL Server database, with a SQL login or a Windows one. Always over TLS, its certificate checked. Example: `sqlserver: { host: billing.hospital.local, database: Billing, user: ductus, password: \"${secret:BILLING_DB_PASSWORD}\" }`.",
+              "markdownDescription": "A Microsoft SQL Server database, with a SQL login or a Windows one. Always over TLS, its certificate checked. Example: `sqlserver: { host: billing.hospital.local, database: Billing, user: ductus, password: \"${secret:BILLING_DB_PASSWORD}\" }`."
+            }
+          },
+          "required": [
+            "sqlserver"
+          ]
+        }
+      ]
+    },
+    "DbConnection": {
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The database server's host name or address. With `tls: verify-full`, its certificate must be for this name. Usually from the environment (`${PATIENT_DB_HOST}`). Required. Example: `host: db1.hospital.local`.",
+          "type": "string",
+          "markdownDescription": "The database server's host name or address. With `tls: verify-full`, its certificate must be for this name. Usually from the environment (`${PATIENT_DB_HOST}`). Required. Example: `host: db1.hospital.local`."
+        },
+        "port": {
+          "description": "The server's port. Default: `5432`. Example: `port: 5433`.",
+          "anyOf": [
+            {
+              "maximum": 65535,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "The server's port. Default: `5432`. Example: `port: 5433`."
+        },
+        "database": {
+          "description": "The database to connect to on that server. Required. Example: `database: patients`.",
+          "type": "string",
+          "markdownDescription": "The database to connect to on that server. Required. Example: `database: patients`."
+        },
+        "user": {
+          "description": "The login. Give it only what the interfaces' queries need (often read-only on a few tables or views). Required. Example: `user: ductus`.",
+          "type": "string",
+          "markdownDescription": "The login. Give it only what the interfaces' queries need (often read-only on a few tables or views). Required. Example: `user: ductus`."
+        },
+        "password": {
+          "description": "The login's password, from a secret (`${secret:PATIENT_DB_PASSWORD}`). A wrong one makes messages wait and retry rather than quarantine, since fixing it fixes them all. Default: none (for `certificate` or trust logins). Example: `password: \"${secret:PATIENT_DB_PASSWORD}\"`.",
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The login's password, from a secret (`${secret:PATIENT_DB_PASSWORD}`). A wrong one makes messages wait and retry rather than quarantine, since fixing it fixes them all. Default: none (for `certificate` or trust logins). Example: `password: \"${secret:PATIENT_DB_PASSWORD}\"`."
+        },
+        "max_connections": {
+          "description": "The most connections the engine opens to this database, shared by every interface's `db(\"<name>\")` calls, opened as they're needed.\n\nA call that finds them all busy waits up to 10 seconds for one, then fails as a temporary error: its message waits and is tried again, nothing is quarantined. Raise it when calls queue for a connection while the database itself is quick, up to what the database's own limit and its DBA allow for every engine that connects (each engine has its own pool). Don't raise it to cure slow queries: more of the same slow query at once makes the database slower. An interface with `isolation: dedicated` can have connections of its own instead (`dedicated_pools`), so one busy interface can't take them all. Default: `5`. Example: `max_connections: 10`.",
+          "default": 5,
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer",
+              "format": "uint32"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "The most connections the engine opens to this database, shared by every interface's `db(\"<name>\")` calls, opened as they're needed.\n\nA call that finds them all busy waits up to 10 seconds for one, then fails as a temporary error: its message waits and is tried again, nothing is quarantined. Raise it when calls queue for a connection while the database itself is quick, up to what the database's own limit and its DBA allow for every engine that connects (each engine has its own pool). Don't raise it to cure slow queries: more of the same slow query at once makes the database slower. An interface with `isolation: dedicated` can have connections of its own instead (`dedicated_pools`), so one busy interface can't take them all. Default: `5`. Example: `max_connections: 10`."
+        },
+        "tls": {
+          "description": "How the connection is protected, with the names and meanings of libpq's `sslmode`, as DBAs write them:\n\n- `disable`: no TLS.\n- `prefer`: TLS when the server offers it, its certificate not checked (anyone answering at that address is believed).\n- `require`: TLS or no connection, the certificate not checked.\n- `verify-ca`: TLS, the certificate issued by a trusted CA; the name in it not checked.\n- `verify-full`: TLS, a trusted CA's certificate for `host`. The only one that stops a server pretending to be this one.\n\nUse `verify-full` for any database on another machine (cloud Postgres requires TLS), with `ca` for a private CA. The engine's start, `ductus validate` and `ductus doctor` say how each connection is protected. Default: `verify-full` when `ca` is given, else `prefer`. Example: `tls: verify-full`.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/SslMode"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "markdownDescription": "How the connection is protected, with the names and meanings of libpq's `sslmode`, as DBAs write them:\n\n- `disable`: no TLS.\n- `prefer`: TLS when the server offers it, its certificate not checked (anyone answering at that address is believed).\n- `require`: TLS or no connection, the certificate not checked.\n- `verify-ca`: TLS, the certificate issued by a trusted CA; the name in it not checked.\n- `verify-full`: TLS, a trusted CA's certificate for `host`. The only one that stops a server pretending to be this one.\n\nUse `verify-full` for any database on another machine (cloud Postgres requires TLS), with `ca` for a private CA. The engine's start, `ductus validate` and `ductus doctor` say how each connection is protected. Default: `verify-full` when `ca` is given, else `prefer`. Example: `tls: verify-full`."
+        },
+        "ca": {
+          "description": "A CA to trust for this server besides the ones this server trusts (a `certificates:` entry), for a database whose certificate comes from a private CA. Naming one means `tls: verify-full` unless `tls` says otherwise. Default: the system's trusted CAs only. Example: `ca: hospital-ca`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A CA to trust for this server besides the ones this server trusts (a `certificates:` entry), for a database whose certificate comes from a private CA. Naming one means `tls: verify-full` unless `tls` says otherwise. Default: the system's trusted CAs only. Example: `ca: hospital-ca`."
+        },
+        "certificate": {
+          "description": "A client certificate to present (a `certificates:` entry with its key): for a login by certificate (`cert` in the server's pg_hba.conf), or alongside the password where the DBA asks for both. A renewed certificate is used by new connections without a restart. Default: none. Example: `certificate: ductus-db`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A client certificate to present (a `certificates:` entry with its key): for a login by certificate (`cert` in the server's pg_hba.conf), or alongside the password where the DBA asks for both. A renewed certificate is used by new connections without a restart. Default: none. Example: `certificate: ductus-db`."
+        },
+        "application": {
+          "description": "The application whose database this is, for `ductus impact`. Default: none. Example: `application: Patient index`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The application whose database this is, for `ductus impact`. Default: none. Example: `application: Patient index`."
+        },
+        "vendor": {
+          "description": "The database's (or application's) vendor, for `ductus impact`. Default: none. Example: `vendor: In-house`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The database's (or application's) vendor, for `ductus impact`. Default: none. Example: `vendor: In-house`."
+        },
+        "owner": {
+          "description": "Who to ask about this database, best as an email address (its certificate's expiry alerts reach them with `to: owner`). Default: none. Example: `owner: dba@hospital.org`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Who to ask about this database, best as an email address (its certificate's expiry alerts reach them with `to: owner`). Default: none. Example: `owner: dba@hospital.org`."
+        },
+        "custom": {
+          "description": "Your company's documentation fields for this entry (`applies_to: [resource]` in `docs-schema.yaml`). Default: none. Example: `custom: { ticket: CHG-1234 }`.",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {},
+          "markdownDescription": "Your company's documentation fields for this entry (`applies_to: [resource]` in `docs-schema.yaml`). Default: none. Example: `custom: { ticket: CHG-1234 }`."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "database",
+        "user"
+      ]
+    },
+    "SslMode": {
+      "description": "libpq's `sslmode`.",
+      "anyOf": [
+        {
+          "oneOf": [
+            {
+              "description": "No TLS.",
+              "type": "string",
+              "const": "disable",
+              "markdownDescription": "No TLS."
+            },
+            {
+              "description": "TLS when the server offers it, its certificate not checked (libpq's default).",
+              "type": "string",
+              "const": "prefer",
+              "markdownDescription": "TLS when the server offers it, its certificate not checked (libpq's default)."
+            },
+            {
+              "description": "TLS or no connection, the certificate not checked.",
+              "type": "string",
+              "const": "require",
+              "markdownDescription": "TLS or no connection, the certificate not checked."
+            },
+            {
+              "description": "TLS, the certificate issued by a trusted CA; the name in it not checked.",
+              "type": "string",
+              "const": "verify-ca",
+              "markdownDescription": "TLS, the certificate issued by a trusted CA; the name in it not checked."
+            },
+            {
+              "description": "TLS, a trusted CA's certificate for the host connected to.",
+              "type": "string",
+              "const": "verify-full",
+              "markdownDescription": "TLS, a trusted CA's certificate for the host connected to."
+            }
+          ]
+        },
+        {
+          "type": "string",
+          "pattern": "^\\$\\{[^}]+\\}$"
+        }
+      ],
+      "markdownDescription": "libpq's `sslmode`."
+    },
+    "SqlServerConnection": {
+      "description": "SQL Server, with a SQL login (user and password) or a Windows login.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The SQL Server's host name or address (without `\\INSTANCE`: that goes in `instance`). Its certificate must be for this name, unless `name_in_certificate` says another. Required. Example: `host: billing.hospital.local`.",
+          "type": "string",
+          "markdownDescription": "The SQL Server's host name or address (without `\\INSTANCE`: that goes in `instance`). Its certificate must be for this name, unless `name_in_certificate` says another. Required. Example: `host: billing.hospital.local`."
+        },
+        "port": {
+          "description": "The server's port. Default: `1433`, or, with `instance`, the port the SQL Server Browser gives for it (UDP 1434: the firewall must let that through too). Example: `port: 1435`.",
+          "anyOf": [
+            {
+              "maximum": 65535,
+              "type": [
+                "integer",
+                "null"
+              ],
+              "format": "uint16",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "The server's port. Default: `1433`, or, with `instance`, the port the SQL Server Browser gives for it (UDP 1434: the firewall must let that through too). Example: `port: 1435`."
+        },
+        "instance": {
+          "description": "A named instance, as SQL Server tools write `host\\INSTANCE`: `SQLEXPRESS`, `PROD`. Its port is asked of the SQL Server Browser, unless `port` is given. Default: the default instance. Example: `instance: PROD`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A named instance, as SQL Server tools write `host\\INSTANCE`: `SQLEXPRESS`, `PROD`. Its port is asked of the SQL Server Browser, unless `port` is given. Default: the default instance. Example: `instance: PROD`."
+        },
+        "database": {
+          "description": "The database to use on that server. Required. Example: `database: Billing`.",
+          "type": "string",
+          "markdownDescription": "The database to use on that server. Required. Example: `database: Billing`."
+        },
+        "auth": {
+          "description": "How the engine logs in:\n\n- `sql`: a SQL Server login, `user` and `password`.\n- `windows`: a Windows login. Without `user`, as the account the engine runs as (the Windows service's account; Windows only, Kerberos where the domain allows it); with `user` and `password`, as that domain account (from Linux this is NTLM, which some servers refuse: Extended Protection set to Required).\n\nUse `windows` where the DBA allows only Windows logins; on Windows prefer the service's own account (a gMSA), which has no password to keep. Default: `sql`. Example: `auth: windows`.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/SqlAuth"
+            }
+          ],
+          "markdownDescription": "How the engine logs in:\n\n- `sql`: a SQL Server login, `user` and `password`.\n- `windows`: a Windows login. Without `user`, as the account the engine runs as (the Windows service's account; Windows only, Kerberos where the domain allows it); with `user` and `password`, as that domain account (from Linux this is NTLM, which some servers refuse: Extended Protection set to Required).\n\nUse `windows` where the DBA allows only Windows logins; on Windows prefer the service's own account (a gMSA), which has no password to keep. Default: `sql`. Example: `auth: windows`."
+        },
+        "user": {
+          "description": "The login: a SQL login's name with `auth: sql`, or a domain account (`HOSPITAL\\svc-lab`) with `auth: windows`, where leaving it out means the account the engine runs as. Give it only what the queries need. Example: `user: ductus`.",
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The login: a SQL login's name with `auth: sql`, or a domain account (`HOSPITAL\\svc-lab`) with `auth: windows`, where leaving it out means the account the engine runs as. Give it only what the queries need. Example: `user: ductus`."
+        },
+        "password": {
+          "description": "The login's password, from a secret (`${secret:BILLING_DB_PASSWORD}`). Not with `auth: windows` and no `user`. Example: `password: \"${secret:BILLING_DB_PASSWORD}\"`.",
+          "type": "string",
+          "default": "",
+          "markdownDescription": "The login's password, from a secret (`${secret:BILLING_DB_PASSWORD}`). Not with `auth: windows` and no `user`. Example: `password: \"${secret:BILLING_DB_PASSWORD}\"`."
+        },
+        "max_connections": {
+          "description": "The most connections the engine opens to this database, shared by every interface's `db(\"<name>\")` calls, opened as they're needed. A call that finds them all busy waits for one, then fails as a temporary error (the message waits and is tried again). Raise it when calls queue while the server is quick, within what its DBA allows for every engine. Default: `5`. Example: `max_connections: 10`.",
+          "default": 5,
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer",
+              "format": "uint32"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "The most connections the engine opens to this database, shared by every interface's `db(\"<name>\")` calls, opened as they're needed. A call that finds them all busy waits for one, then fails as a temporary error (the message waits and is tried again). Raise it when calls queue while the server is quick, within what its DBA allows for every engine. Default: `5`. Example: `max_connections: 10`."
+        },
+        "ca": {
+          "description": "A CA to trust for this server besides the ones this server trusts (a `certificates:` entry), for a SQL Server whose certificate comes from a private CA (common: the domain's CA, or a certificate the DBA made). Default: the system's trusted CAs only. Example: `ca: hospital-ca`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A CA to trust for this server besides the ones this server trusts (a `certificates:` entry), for a SQL Server whose certificate comes from a private CA (common: the domain's CA, or a certificate the DBA made). Default: the system's trusted CAs only. Example: `ca: hospital-ca`."
+        },
+        "encrypt": {
+          "description": "How the connection is encrypted, always with the server's certificate checked:\n\n- `mandatory`: TLS for the whole session, begun after SQL Server's first exchange, as every SQL Server client does it.\n- `strict`: TDS 8, TLS before anything else, for servers set to force it (SQL Server 2022 and later; 2022 on Linux refuses it).\n\nThere's no `false`: SQL Server would encrypt the login only and send queries and results readable. Default: `mandatory`. Example: `encrypt: strict`.",
+          "x-type": "mandatory or strict",
+          "anyOf": [
+            {
+              "enum": [
+                "mandatory",
+                "strict",
+                true
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "How the connection is encrypted, always with the server's certificate checked:\n\n- `mandatory`: TLS for the whole session, begun after SQL Server's first exchange, as every SQL Server client does it.\n- `strict`: TDS 8, TLS before anything else, for servers set to force it (SQL Server 2022 and later; 2022 on Linux refuses it).\n\nThere's no `false`: SQL Server would encrypt the login only and send queries and results readable. Default: `mandatory`. Example: `encrypt: strict`."
+        },
+        "name_in_certificate": {
+          "description": "The name the server's certificate is checked for, when it isn't `host`: connecting to an availability group listener, an alias or an address whose certificate names the server itself (ADO.NET's HostNameInCertificate). Default: `host`. Example: `name_in_certificate: sql1.hospital.org`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The name the server's certificate is checked for, when it isn't `host`: connecting to an availability group listener, an alias or an address whose certificate names the server itself (ADO.NET's HostNameInCertificate). Default: `host`. Example: `name_in_certificate: sql1.hospital.org`."
+        },
+        "trust_server_certificate": {
+          "description": "Accept the server's certificate without checking it: anyone answering at its address would be believed, and could read the credentials and data. For a lab server only; the start and `ductus validate` warn about it on another machine. For a server with a private CA, name the CA in `ca` instead. Not with `ca` or `name_in_certificate`. Default: `false`. Example: `trust_server_certificate: true`.",
+          "default": false,
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "Accept the server's certificate without checking it: anyone answering at its address would be believed, and could read the credentials and data. For a lab server only; the start and `ductus validate` warn about it on another machine. For a server with a private CA, name the CA in `ca` instead. Not with `ca` or `name_in_certificate`. Default: `false`. Example: `trust_server_certificate: true`."
+        },
+        "application": {
+          "description": "The application whose database this is, for `ductus impact`. Default: none. Example: `application: Billing`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The application whose database this is, for `ductus impact`. Default: none. Example: `application: Billing`."
+        },
+        "vendor": {
+          "description": "The application's vendor, for `ductus impact`. Default: none. Example: `vendor: Cerner`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The application's vendor, for `ductus impact`. Default: none. Example: `vendor: Cerner`."
+        },
+        "owner": {
+          "description": "Who to ask about this database, best as an email address (its certificate's expiry alerts reach them with `to: owner`). Default: none. Example: `owner: dba@hospital.org`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Who to ask about this database, best as an email address (its certificate's expiry alerts reach them with `to: owner`). Default: none. Example: `owner: dba@hospital.org`."
+        },
+        "custom": {
+          "description": "Your company's documentation fields for this entry (`applies_to: [resource]` in `docs-schema.yaml`). Default: none. Example: `custom: { ticket: CHG-1234 }`.",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {},
+          "markdownDescription": "Your company's documentation fields for this entry (`applies_to: [resource]` in `docs-schema.yaml`). Default: none. Example: `custom: { ticket: CHG-1234 }`."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "database"
+      ],
+      "markdownDescription": "SQL Server, with a SQL login (user and password) or a Windows login."
+    },
+    "SqlAuth": {
+      "description": "How the engine logs in to SQL Server.",
+      "anyOf": [
+        {
+          "oneOf": [
+            {
+              "description": "A SQL Server login: `user` and `password`.",
+              "type": "string",
+              "const": "sql",
+              "markdownDescription": "A SQL Server login: `user` and `password`."
+            },
+            {
+              "description": "A Windows login: the account the engine runs as (integrated, Windows only), or the named `user` with its `password` (on Linux: NTLM).",
+              "type": "string",
+              "const": "windows",
+              "markdownDescription": "A Windows login: the account the engine runs as (integrated, Windows only), or the named `user` with its `password` (on Linux: NTLM)."
+            }
+          ]
+        },
+        {
+          "type": "string",
+          "pattern": "^\\$\\{[^}]+\\}$"
+        }
+      ],
+      "markdownDescription": "How the engine logs in to SQL Server."
+    },
+    "SftpServer": {
+      "description": "An SFTP server used by `sftp` sources and destinations.",
+      "type": "object",
+      "properties": {
+        "host": {
+          "description": "The SFTP server's host name or address. Required. Example: `host: sftp.lab.example.org`.",
+          "type": "string",
+          "markdownDescription": "The SFTP server's host name or address. Required. Example: `host: sftp.lab.example.org`."
+        },
+        "port": {
+          "description": "The server's SSH port. Default: `22`. Example: `port: 2222`.",
+          "default": 22,
+          "anyOf": [
+            {
+              "maximum": 65535,
+              "type": "integer",
+              "format": "uint16",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "The server's SSH port. Default: `22`. Example: `port: 2222`."
+        },
+        "user": {
+          "description": "The account to log in as, given by the server's owner. Required. Example: `user: hospital`.",
+          "type": "string",
+          "markdownDescription": "The account to log in as, given by the server's owner. Required. Example: `user: hospital`."
+        },
+        "password": {
+          "description": "The account's password, from a secret (`${secret:LAB_SFTP_PASSWORD}`). Give this or `private_key`; a key is better where the server takes one (nothing reusable crosses the network). Example: `password: \"${secret:LAB_SFTP_PASSWORD}\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The account's password, from a secret (`${secret:LAB_SFTP_PASSWORD}`). Give this or `private_key`; a key is better where the server takes one (nothing reusable crosses the network). Example: `password: \"${secret:LAB_SFTP_PASSWORD}\"`."
+        },
+        "private_key": {
+          "description": "The private key to log in with, as OpenSSH key text from a secret (`${secret:LAB_SFTP_KEY}`); the server's owner adds its public half to the account. `ssh-keygen -t ed25519` makes a pair. Example: `private_key: \"${secret:LAB_SFTP_KEY}\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The private key to log in with, as OpenSSH key text from a secret (`${secret:LAB_SFTP_KEY}`); the server's owner adds its public half to the account. `ssh-keygen -t ed25519` makes a pair. Example: `private_key: \"${secret:LAB_SFTP_KEY}\"`."
+        },
+        "passphrase": {
+          "description": "The passphrase of an encrypted `private_key`, from a secret. Default: none (an unencrypted key, protected by the secrets file). Example: `passphrase: \"${secret:LAB_SFTP_PASSPHRASE}\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The passphrase of an encrypted `private_key`, from a secret. Default: none (an unencrypted key, protected by the secrets file). Example: `passphrase: \"${secret:LAB_SFTP_PASSPHRASE}\"`."
+        },
+        "host_key": {
+          "description": "The server's host key fingerprint, as `SHA256:…` (what `ssh-keygen -lf` prints for the key file), so a server pretending to be this one is refused before any password or key is sent to it.\n\nLeave it out the first time: connecting then fails, and the error gives the fingerprint the server presented, to check with the server's administrator and paste in. When the server's key changes (a rebuilt server, another host behind the name), connections fail until it's updated: on purpose, since that's what an impostor looks like too. `any` turns the check off, for a test server on your own machine only. No default. Example: `host_key: \"SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The server's host key fingerprint, as `SHA256:…` (what `ssh-keygen -lf` prints for the key file), so a server pretending to be this one is refused before any password or key is sent to it.\n\nLeave it out the first time: connecting then fails, and the error gives the fingerprint the server presented, to check with the server's administrator and paste in. When the server's key changes (a rebuilt server, another host behind the name), connections fail until it's updated: on purpose, since that's what an impostor looks like too. `any` turns the check off, for a test server on your own machine only. No default. Example: `host_key: \"SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8\"`."
+        },
+        "application": {
+          "description": "The application behind the server, for `ductus impact`. Default: none. Example: `application: Quest Lab Results`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The application behind the server, for `ductus impact`. Default: none. Example: `application: Quest Lab Results`."
+        },
+        "vendor": {
+          "description": "The server's vendor (often the partner whose server it is), for `ductus impact`: \"what does Quest's outage touch?\". Default: none. Example: `vendor: Quest`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The server's vendor (often the partner whose server it is), for `ductus impact`: \"what does Quest's outage touch?\". Default: none. Example: `vendor: Quest`."
+        },
+        "owner": {
+          "description": "Who to ask about this server, best as an email address. Default: none. Example: `owner: lab-it@hospital.org`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Who to ask about this server, best as an email address. Default: none. Example: `owner: lab-it@hospital.org`."
+        },
+        "custom": {
+          "description": "Your company's documentation fields for this entry (`applies_to: [resource]` in `docs-schema.yaml`). Default: none. Example: `custom: { contract: QUEST-2025 }`.",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {},
+          "markdownDescription": "Your company's documentation fields for this entry (`applies_to: [resource]` in `docs-schema.yaml`). Default: none. Example: `custom: { contract: QUEST-2025 }`."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "host",
+        "user"
+      ],
+      "markdownDescription": "An SFTP server used by `sftp` sources and destinations."
+    },
+    "Api": {
+      "description": "An HTTP API used through `api(name)` in code and `http: { api: name }` destinations. The engine adds the URL and headers, so tokens never pass through interface code.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "The API's base URL, `https://` (or `http://` on a trusted network): paths in code (`api(\"empi\").get(\"/patients/1\")`) and `path` on destinations go under it. Usually from the environment (`${EMPI_URL}`), since test and production differ. Required. Example: `url: \"https://empi.hospital.local/api/v2\"`.",
+          "type": "string",
+          "markdownDescription": "The API's base URL, `https://` (or `http://` on a trusted network): paths in code (`api(\"empi\").get(\"/patients/1\")`) and `path` on destinations go under it. Usually from the environment (`${EMPI_URL}`), since test and production differ. Required. Example: `url: \"https://empi.hospital.local/api/v2\"`."
+        },
+        "headers": {
+          "description": "Headers sent with every request, typically the credential: `Authorization: \"Bearer ${secret:EMPI_TOKEN}\"`, or an API key header. A header the code or a destination sets itself replaces the one here. Tokens stay out of interface code and differ per environment. Default: none. Example: `headers: { Authorization: \"Bearer ${secret:EMPI_TOKEN}\" }`.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "markdownDescription": "Headers sent with every request, typically the credential: `Authorization: \"Bearer ${secret:EMPI_TOKEN}\"`, or an API key header. A header the code or a destination sets itself replaces the one here. Tokens stay out of interface code and differ per environment. Default: none. Example: `headers: { Authorization: \"Bearer ${secret:EMPI_TOKEN}\" }`."
+        },
+        "timeout": {
+          "description": "How long one request may take, for calls and destinations that don't set their own; a call past it fails as a temporary error, so its message waits and is tried again. Default: `30s` for calls from code, `10s` for destinations. Example: `timeout: 10s`.",
+          "x-type": "duration",
+          "markdownDescription": "How long one request may take, for calls and destinations that don't set their own; a call past it fails as a temporary error, so its message waits and is tried again. Default: `30s` for calls from code, `10s` for destinations. Example: `timeout: 10s`.",
+          "anyOf": [
+            {
+              "pattern": "^\\s*[0-9]+\\s*(ms|s|m|h|d)\\s*$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ]
+        },
+        "ca": {
+          "description": "A CA to trust for this API's server besides the ones this server trusts (a `certificates:` entry), for an API whose certificate comes from a private CA. Default: the system's trusted CAs only. Example: `ca: hospital-ca`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A CA to trust for this API's server besides the ones this server trusts (a `certificates:` entry), for an API whose certificate comes from a private CA. Default: the system's trusted CAs only. Example: `ca: hospital-ca`."
+        },
+        "certificate": {
+          "description": "The client certificate to present to this API (a `certificates:` entry with its key), for APIs that ask for one (mutual TLS). Default: none. Example: `certificate: ductus-client`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The client certificate to present to this API (a `certificates:` entry with its key), for APIs that ask for one (mutual TLS). Default: none. Example: `certificate: ductus-client`."
+        },
+        "application": {
+          "description": "The application behind the API, for `ductus impact`. Default: none. Example: `application: EMPI`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The application behind the API, for `ductus impact`. Default: none. Example: `application: EMPI`."
+        },
+        "vendor": {
+          "description": "The API's vendor, for `ductus impact`. Default: none. Example: `vendor: Rhapsody`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The API's vendor, for `ductus impact`. Default: none. Example: `vendor: Rhapsody`."
+        },
+        "owner": {
+          "description": "Who to ask about this API, best as an email address (its certificate's expiry alerts reach them with `to: owner`). Default: none. Example: `owner: empi-team@hospital.org`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Who to ask about this API, best as an email address (its certificate's expiry alerts reach them with `to: owner`). Default: none. Example: `owner: empi-team@hospital.org`."
+        },
+        "custom": {
+          "description": "Your company's documentation fields for this entry (`applies_to: [resource]` in `docs-schema.yaml`). Default: none. Example: `custom: { contract: MSA-2024-17 }`.",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {},
+          "markdownDescription": "Your company's documentation fields for this entry (`applies_to: [resource]` in `docs-schema.yaml`). Default: none. Example: `custom: { contract: MSA-2024-17 }`."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ],
+      "markdownDescription": "An HTTP API used through `api(name)` in code and `http: { api: name }` destinations. The engine adds the URL and headers, so tokens never pass through interface code."
+    },
+    "LdapServer": {
+      "description": "An LDAP directory (Active Directory, OpenLDAP) people sign in with.",
+      "type": "object",
+      "properties": {
+        "url": {
+          "description": "The directory server: `ldaps://host` (TLS from the start, port 636 unless given) or `ldap://host` (port 389) with `starttls: true`. For Active Directory, a domain controller's name or the domain's (`ldaps://hospital.org` reaches any of them, through DNS). Its certificate must be for this name. Required. Example: `url: \"ldaps://dc1.hospital.org\"`.",
+          "type": "string",
+          "markdownDescription": "The directory server: `ldaps://host` (TLS from the start, port 636 unless given) or `ldap://host` (port 389) with `starttls: true`. For Active Directory, a domain controller's name or the domain's (`ldaps://hospital.org` reaches any of them, through DNS). Its certificate must be for this name. Required. Example: `url: \"ldaps://dc1.hospital.org\"`."
+        },
+        "starttls": {
+          "description": "With an `ldap://` URL: turn the connection into TLS (StartTLS) before anything else is sent, for directories that don't offer ldaps://. Refused if the server can't. Default: `false`. Example: `starttls: true`.",
+          "default": false,
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "With an `ldap://` URL: turn the connection into TLS (StartTLS) before anything else is sent, for directories that don't offer ldaps://. Refused if the server can't. Default: `false`. Example: `starttls: true`."
+        },
+        "insecure": {
+          "description": "Allow plain `ldap://` with no TLS at all: people's passwords then cross the network readable to anyone in between. Only for a test directory on this machine; `ductus validate` and the engine's start warn about it. Default: `false`. Example: `insecure: true`.",
+          "default": false,
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "Allow plain `ldap://` with no TLS at all: people's passwords then cross the network readable to anyone in between. Only for a test directory on this machine; `ductus validate` and the engine's start warn about it. Default: `false`. Example: `insecure: true`."
+        },
+        "bind_dn": {
+          "description": "The service account the engine binds as to find people and read their groups, as a DN. Give it read access to people and groups and nothing else. Without it the directory is searched anonymously, which Active Directory refuses. Default: none. Example: `bind_dn: \"CN=svc-ductus,OU=Service Accounts,DC=hospital,DC=org\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The service account the engine binds as to find people and read their groups, as a DN. Give it read access to people and groups and nothing else. Without it the directory is searched anonymously, which Active Directory refuses. Default: none. Example: `bind_dn: \"CN=svc-ductus,OU=Service Accounts,DC=hospital,DC=org\"`."
+        },
+        "bind_password": {
+          "description": "The service account's password: always from a secret (`${secret:LDAP_BIND_PASSWORD}`). When it expires, sign-ins through the directory fail (local accounts still work), so give the account a password that doesn't expire, or note when it does. Example: `bind_password: \"${secret:LDAP_BIND_PASSWORD}\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The service account's password: always from a secret (`${secret:LDAP_BIND_PASSWORD}`). When it expires, sign-ins through the directory fail (local accounts still work), so give the account a password that doesn't expire, or note when it does. Example: `bind_password: \"${secret:LDAP_BIND_PASSWORD}\"`."
+        },
+        "ca": {
+          "description": "A CA to trust for this directory besides the ones this server trusts (a `certificates:` entry), for a domain CA this server doesn't have installed (common on Linux; Windows servers in the domain usually have it). Default: the system's trusted CAs only. Example: `ca: hospital-ca`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A CA to trust for this directory besides the ones this server trusts (a `certificates:` entry), for a domain CA this server doesn't have installed (common on Linux; Windows servers in the domain usually have it). Default: the system's trusted CAs only. Example: `ca: hospital-ca`."
+        },
+        "timeout": {
+          "description": "How long connecting, binding or one search may take before a sign-in gives up (and says the directory can't be reached). Default: `10s`. Example: `timeout: 5s`.",
+          "x-type": "duration",
+          "markdownDescription": "How long connecting, binding or one search may take before a sign-in gives up (and says the directory can't be reached). Default: `10s`. Example: `timeout: 5s`.",
+          "anyOf": [
+            {
+              "pattern": "^\\s*[0-9]+\\s*(ms|s|m|h|d)\\s*$",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ]
+        },
+        "application": {
+          "description": "The application the directory is, for `ductus impact`. Default: none. Example: `application: Active Directory`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The application the directory is, for `ductus impact`. Default: none. Example: `application: Active Directory`."
+        },
+        "vendor": {
+          "description": "The directory's vendor, for `ductus impact`. Default: none. Example: `vendor: Microsoft`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The directory's vendor, for `ductus impact`. Default: none. Example: `vendor: Microsoft`."
+        },
+        "owner": {
+          "description": "Who looks after the directory, best as an email address (its certificate's expiry alerts reach them with `to: owner`). Default: none. Example: `owner: directory@hospital.org`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Who looks after the directory, best as an email address (its certificate's expiry alerts reach them with `to: owner`). Default: none. Example: `owner: directory@hospital.org`."
+        },
+        "custom": {
+          "description": "Your company's documentation fields for this entry (`applies_to: [resource]` in `docs-schema.yaml`). Default: none. Example: `custom: { ticket: CHG-1234 }`.",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {},
+          "markdownDescription": "Your company's documentation fields for this entry (`applies_to: [resource]` in `docs-schema.yaml`). Default: none. Example: `custom: { ticket: CHG-1234 }`."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "url"
+      ],
+      "markdownDescription": "An LDAP directory (Active Directory, OpenLDAP) people sign in with."
+    },
+    "CertificateEntry": {
+      "description": "A `certificates:` entry: a certificate with its private key (from files, which are re-read when they change, or PEM text from secrets), or a CA alone.",
+      "type": "object",
+      "properties": {
+        "cert_file": {
+          "description": "A PEM file with the certificate to present, followed by the intermediate certificates that issued it (not the root): the \"full chain\" a CA sends. Goes with `key_file`.\n\nThe engine reads both files at start (a certificate it can't use stops the start, saying why) and again whenever they change, checked every minute: to renew, replace both files, with no restart. Senders that don't have the intermediates can't check a certificate without them, so leave none out. A relative path is read from the project folder; on Windows, write the drive. To keep the PEM in a secret instead, use `cert` and `key`. Example: `cert_file: /etc/ductus/tls/mllp.pem`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A PEM file with the certificate to present, followed by the intermediate certificates that issued it (not the root): the \"full chain\" a CA sends. Goes with `key_file`.\n\nThe engine reads both files at start (a certificate it can't use stops the start, saying why) and again whenever they change, checked every minute: to renew, replace both files, with no restart. Senders that don't have the intermediates can't check a certificate without them, so leave none out. A relative path is read from the project folder; on Windows, write the drive. To keep the PEM in a secret instead, use `cert` and `key`. Example: `cert_file: /etc/ductus/tls/mllp.pem`."
+        },
+        "key_file": {
+          "description": "The PEM file with the certificate's private key, unencrypted, readable by the account the engine runs as and nobody else (`chmod 600`, or the service's account only on Windows). Goes with `cert_file`, renewed with it. `ductus cert request` makes one with its CSR. Example: `key_file: /etc/ductus/tls/mllp.key`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The PEM file with the certificate's private key, unencrypted, readable by the account the engine runs as and nobody else (`chmod 600`, or the service's account only on Windows). Goes with `cert_file`, renewed with it. `ductus cert request` makes one with its CSR. Example: `key_file: /etc/ductus/tls/mllp.key`."
+        },
+        "cert": {
+          "description": "The certificate (then its intermediates) as PEM text, usually from a secret (`${secret:MLLP_CERT}`), for servers where certificates live in a vault rather than in files. Goes with `key`. Read at start only: a renewal needs a restart, unlike files. Example: `cert: \"${secret:MLLP_CERT}\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The certificate (then its intermediates) as PEM text, usually from a secret (`${secret:MLLP_CERT}`), for servers where certificates live in a vault rather than in files. Goes with `key`. Read at start only: a renewal needs a restart, unlike files. Example: `cert: \"${secret:MLLP_CERT}\"`."
+        },
+        "key": {
+          "description": "The private key as PEM text, from a secret (`${secret:MLLP_KEY}`). Goes with `cert`. Example: `key: \"${secret:MLLP_KEY}\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The private key as PEM text, from a secret (`${secret:MLLP_KEY}`). Goes with `cert`. Example: `key: \"${secret:MLLP_KEY}\"`."
+        },
+        "ca": {
+          "description": "A CA's certificate (or several) as PEM text, often from a secret. An entry with only this is a CA: what `ca: <name>` trusts for a server the engine connects to, and what `clients: { ca: <name> }` checks senders' certificates against. Example: `ca: \"${secret:HOSPITAL_CA}\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A CA's certificate (or several) as PEM text, often from a secret. An entry with only this is a CA: what `ca: <name>` trusts for a server the engine connects to, and what `clients: { ca: <name> }` checks senders' certificates against. Example: `ca: \"${secret:HOSPITAL_CA}\"`."
+        },
+        "ca_file": {
+          "description": "A CA's certificate (or several) in a PEM file; the same as `ca`, read from a file (relative to the project folder unless written whole). Example: `ca_file: /etc/ductus/tls/hospital-ca.pem`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A CA's certificate (or several) in a PEM file; the same as `ca`, read from a file (relative to the project folder unless written whole). Example: `ca_file: /etc/ductus/tls/hospital-ca.pem`."
+        },
+        "application": {
+          "description": "The application the certificate belongs to, for `ductus impact`. Default: none. Example: `application: Ductus MLLP listener`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The application the certificate belongs to, for `ductus impact`. Default: none. Example: `application: Ductus MLLP listener`."
+        },
+        "vendor": {
+          "description": "The vendor the certificate belongs to (the CA's, for a CA entry), for `ductus impact`. Default: none. Example: `vendor: DigiCert`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The vendor the certificate belongs to (the CA's, for a CA entry), for `ductus impact`. Default: none. Example: `vendor: DigiCert`."
+        },
+        "owner": {
+          "description": "Who renews this certificate, best as an email address: alert rules with `to: owner` mail them as it nears expiry, and the web UI shows them on its row. Default: the owner of the one interface that uses it, if just one does. Example: `owner: infrastructure@hospital.org`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Who renews this certificate, best as an email address: alert rules with `to: owner` mail them as it nears expiry, and the web UI shows them on its row. Default: the owner of the one interface that uses it, if just one does. Example: `owner: infrastructure@hospital.org`."
+        },
+        "custom": {
+          "description": "Your company's documentation fields for this entry (those whose `applies_to` in `docs-schema.yaml` includes `resource`). Default: none. Example: `custom: { ticket: CHG-1234 }`.",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {},
+          "markdownDescription": "Your company's documentation fields for this entry (those whose `applies_to` in `docs-schema.yaml` includes `resource`). Default: none. Example: `custom: { ticket: CHG-1234 }`."
+        }
+      },
+      "additionalProperties": false,
+      "markdownDescription": "A `certificates:` entry: a certificate with its private key (from files, which are re-read when they change, or PEM text from secrets), or a CA alone."
+    }
+  },
+  "markdownDescription": "`resources.yaml`: what many interfaces share, each defined once by a name: databases, SFTP servers, HTTP APIs, directories for signing in, and certificates.\n\nInterfaces and their code refer to them by name (`db(\"patient_db\")`, `api(\"empi\")`, `server: lab_server`), so no address or credential is ever written in an interface or its code, and each environment fills in its own with `${NAME}` and `${secret:NAME}`. `ductus doctor` checks every entry from the server, and `ductus impact` finds the interfaces behind each one."
+}

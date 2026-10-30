@@ -1,0 +1,14 @@
+# A company's documentation fields, one of each type.
+fields:
+  baa_signed:
+    type: enum
+    values: ["yes", "no", n/a]
+    required: true
+    applies_to: [interface, resource]
+    label: BAA signed
+    help: Business associate agreement
+  runbook: { type: url }
+  go_live: { type: date }
+  analyst: { type: person, applies_to: [interface, destination] }
+  notes: { type: text }
+  tags: { type: list, values: [adt, lab, billing] }

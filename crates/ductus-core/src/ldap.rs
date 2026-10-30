@@ -28,50 +28,80 @@ use std::time::Duration;
 
 /// `auth.ldap` in ductus.yaml.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LdapAuth {
-    /// The `ldap:` entry in resources.yaml to use.
+    /// The directory to use: the name of an `ldap:` entry in resources.yaml (its address, TLS and
+    /// service account). Required. Example: `resource: corp-ad`.
     pub resource: String,
-    /// Where people are searched for (the whole subtree).
+    /// Where people are searched for, as a DN: the whole subtree under it. Narrow it to the
+    /// branch your staff are in, so service accounts and contacts can't sign in by accident.
+    /// Required. Example: `user_base: "OU=Staff,DC=hospital,DC=org"`.
     pub user_base: String,
-    /// How a person is found; `{username}` is what they typed, escaped (RFC 4515), so it can't
-    /// change the filter.
+    /// How a person is found from the name they type: an LDAP filter where `{username}` stands
+    /// for it, escaped so it can't change the filter. More than one entry found is refused.
+    /// `(sAMAccountName={username})` is Active Directory's sign-in name; OpenLDAP and FreeIPA use
+    /// `(uid={username})`; `(|(sAMAccountName={username})(mail={username}))` takes either.
+    /// Default: `(sAMAccountName={username})`. Example: `user_filter: "(uid={username})"`.
     #[serde(default = "default_user_filter")]
     pub user_filter: String,
+    /// Which of the person's attributes hold their name, email, sign-in name and lasting id.
+    /// The defaults suit Active Directory. Default: `displayName`, `mail`, the filter's
+    /// attribute, and `auto` for the id.
     #[serde(default)]
     pub attributes: LdapAttributes,
+    /// Which directory groups give which role (`admin`, `operator`, `viewer`) and which add a
+    /// permission (`permissions.payloads`, `permissions.audit`). The highest role a person's
+    /// groups give wins; a person in none can't sign in. At least one role group. Required.
+    /// Example: `groups: { operator: "CN=Interface Team,OU=Groups,DC=hospital,DC=org" }`.
     pub groups: LdapGroups,
-    /// Members of groups inside the configured groups count too. Active Directory answers this
-    /// itself (its transitive-membership rule); other directories are walked, at most
-    /// `NESTING_LIMIT` levels deep.
+    /// Count members of groups inside the configured groups too (a department group placed in
+    /// "Ductus Operators"). Active Directory answers this itself; other directories are walked
+    /// group by group, at most 8 levels deep. Default: `false` (direct members only). Example:
+    /// `nested: true`.
     #[serde(default)]
     pub nested: bool,
-    /// Where groups are searched for when nested groups are walked (not Active Directory):
-    /// default, the directory's own naming context.
+    /// Where groups are searched for when nested groups are walked (not Active Directory, which
+    /// answers by itself), as a DN. Default: the directory's own top (its naming context).
+    /// Example: `group_base: "ou=groups,dc=example,dc=org"`.
     #[serde(default)]
     pub group_base: Option<String>,
-    /// How often the groups and account state of people with a session or token are read again
-    /// (at least 1m). Someone removed from the groups, disabled or deleted in the directory loses
-    /// access within this long.
+    /// How often the engine asks the directory again about everyone with a session or a token,
+    /// and about directory people who own something (at least `1m`). Someone removed from the
+    /// groups, disabled or deleted there loses access within this long, sessions and tokens
+    /// alike; a renamed person keeps their account. Shorter means quicker revocation and more
+    /// directory searches. Default: `15m`. Example: `refresh: 5m`.
     #[serde(default = "default_refresh", deserialize_with = "crate::config::duration")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::Duration"))]
     pub refresh: Duration,
 }
 
 /// Which directory attributes hold a person's name, email, sign-in name and id.
 #[derive(Debug, Clone, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LdapAttributes {
+    /// The attribute with the person's name as others see it in the web UI and the audit log.
+    /// Default: `displayName`. Example: `display_name: cn`.
     #[serde(default = "default_display_name")]
     pub display_name: String,
+    /// The attribute with the person's email address: shown in the web UI, matched against owner
+    /// texts (`about.owner: anna@hospital.org`), and used to find owners in the directory before
+    /// their first sign-in. Default: `mail`. Example: `email: userPrincipalName`.
     #[serde(default = "default_email")]
     pub email: String,
-    /// The sign-in name, so a refresh sees it change: default, the attribute `user_filter`
-    /// matches `{username}` against first (`sAMAccountName` for the default filter).
+    /// The attribute with the sign-in name, so a refresh notices it change and renames the
+    /// account. Needed only when `user_filter` doesn't match `{username}` against one attribute
+    /// plainly (`ductus validate` warns then). Default: the attribute the filter first matches
+    /// `{username}` against (`sAMAccountName` for the default filter). Example: `username: uid`.
     #[serde(default)]
     pub username: Option<String>,
-    /// What tells one person from another through any rename: `auto` (the default: Active
-    /// Directory's `objectGUID`, else `entryUUID`, RFC 4530), another attribute's name, or `none`
-    /// (by sign-in name only: a renamed and a reused name can't be told apart).
+    /// The attribute that tells one person from another through any rename: `auto` (Active
+    /// Directory's `objectGUID`, else the standard `entryUUID`), another attribute's name
+    /// (`nsUniqueId`), or `none`. With an id, a renamed person keeps their account, and a sign-in
+    /// name given to someone new gets a new account instead of the old one's role and history.
+    /// `none` matches by sign-in name only, so those two can't be told apart (validate warns).
+    /// Default: `auto`. Example: `id: nsUniqueId`.
     #[serde(default = "default_id")]
     pub id: String,
 }
@@ -169,25 +199,49 @@ pub fn id_attribute(stored: &str) -> &str {
 
 /// Groups (their DNs; one or a list each) → role and permissions.
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LdapGroups {
+    /// The group (a DN), or groups, whose members are admins: everything operators can do, plus
+    /// accounts, tokens and every permission. Write several one per line in a YAML list, not as
+    /// `[a, b]` (DNs have commas). Default: none. Example: `admin: "CN=Ductus Admins,OU=Groups,DC=hospital,DC=org"`.
     #[serde(default, deserialize_with = "one_or_many")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::OneOrMany"))]
     pub admin: Vec<String>,
+    /// The group or groups whose members are operators: what viewers can do, plus resend, edit,
+    /// dismiss, pause, drain and run connection checks. Default: none. Example: `operator:
+    /// "CN=Interface Team,OU=Groups,DC=hospital,DC=org"`.
     #[serde(default, deserialize_with = "one_or_many")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::OneOrMany"))]
     pub operator: Vec<String>,
+    /// The group or groups whose members are viewers: they see interfaces, health, queues and
+    /// messages' details, but change nothing (and see payloads only with `payloads`). Default:
+    /// none. Example: `viewer: "CN=Help Desk,OU=Groups,DC=hospital,DC=org"`.
     #[serde(default, deserialize_with = "one_or_many")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::OneOrMany"))]
     pub viewer: Vec<String>,
+    /// Groups that add a permission on top of the role: `payloads` (read message contents,
+    /// usually patient data) and `audit` (read the audit log). Admins have both anyway. Default:
+    /// none.
     #[serde(default)]
     pub permissions: LdapPermissionGroups,
 }
 
 /// Groups that add a permission to the role (`payloads`, `audit`).
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct LdapPermissionGroups {
+    /// The group or groups whose members may read message payloads (and edit them, as
+    /// operators): the people who need to see patient data to do their work. Every read is in
+    /// the audit log. Default: none. Example: `payloads: "CN=Ductus PHI,OU=Groups,DC=hospital,DC=org"`.
     #[serde(default, deserialize_with = "one_or_many")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::OneOrMany"))]
     pub payloads: Vec<String>,
+    /// The group or groups whose members may read and export the audit log: compliance and
+    /// security staff. Default: none. Example: `audit: "CN=Ductus Auditors,OU=Groups,DC=hospital,DC=org"`.
     #[serde(default, deserialize_with = "one_or_many")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::OneOrMany"))]
     pub audit: Vec<String>,
 }
 

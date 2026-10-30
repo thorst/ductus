@@ -19,6 +19,7 @@ pub mod ports;
 pub mod resources;
 pub mod retention;
 pub mod schedule;
+pub mod schema;
 pub mod secrets;
 pub mod service_account;
 pub mod settings;

@@ -1,0 +1,24 @@
+# The docs site: an mdBook made from this folder (`mdbook build docs`, or `mdbook serve docs` to
+# read it locally at http://localhost:3000). Pages are listed in SUMMARY.md; the reference pages
+# are written by `ductus reference docs`. Tools: scripts/dev/docs-tools.sh. Checked on every
+# change by .github/workflows/docs.yml (and check.sh, when the tools are installed).
+
+[book]
+title = "Ductus"
+description = "Ductus, a code-first integration engine: install, configure, write interfaces, operate, upgrade, and every setting, command and API operation."
+authors = ["The Ductus project"]
+language = "en"
+src = "."
+
+[build]
+build-dir = "../target/book"
+create-missing = false
+
+[output.html]
+git-repository-url = "https://github.com/thorst/ductus"
+edit-url-template = "https://github.com/thorst/ductus/edit/main/docs/{path}"
+no-section-label = true
+
+[output.html.search]
+limit-results = 30
+use-boolean-and = true

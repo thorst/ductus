@@ -1,0 +1,87 @@
+# Every kind of resource with every setting.
+databases:
+  patient_db:
+    postgres:
+      host: ${HOST}
+      port: 5433
+      database: patients
+      user: ductus
+      password: "${secret:PATIENT_DB_PASSWORD}"
+      max_connections: ${POOL}
+      tls: ${TLS}
+      ca: hospital-ca
+      certificate: ductus-db
+      application: Patient index
+      vendor: In-house
+      owner: dba@hospital.org
+      custom: { ticket: CHG-1234 }
+  billing_db:
+    sqlserver:
+      host: billing.hospital.local
+      port: 1435
+      instance: PROD
+      database: Billing
+      auth: windows
+      user: 'HOSPITAL\svc-ductus'
+      password: "${secret:BILLING_DB_PASSWORD}"
+      max_connections: 10
+      ca: hospital-ca
+      encrypt: strict
+      name_in_certificate: sql1.hospital.org
+      trust_server_certificate: false
+      application: Billing
+      vendor: Cerner
+      owner: dba@hospital.org
+      custom: { ticket: CHG-1235 }
+sftp:
+  quest:
+    host: sftp.quest.example.com
+    port: 2222
+    user: hospital
+    password: "${secret:QUEST_PASSWORD}"
+    private_key: "${secret:QUEST_KEY}"
+    passphrase: "${secret:QUEST_PASSPHRASE}"
+    host_key: "SHA256:nThbg6kXUpJWGl7E1IGOCspRomTxdCARLviKw6E5SY8"
+    application: Quest Lab Results
+    vendor: Quest
+    owner: lab-it@hospital.org
+    custom: { contract: QUEST-2025 }
+apis:
+  empi:
+    url: "https://empi.hospital.local/api/v2"
+    headers: { Authorization: "Bearer ${secret:EMPI_TOKEN}" }
+    timeout: 10s
+    ca: hospital-ca
+    certificate: ductus-client
+    application: EMPI
+    vendor: Rhapsody
+    owner: empi-team@hospital.org
+    custom: { contract: MSA-2024-17 }
+ldap:
+  corp-ad:
+    url: "ldaps://dc1.hospital.org"
+    starttls: false
+    insecure: false
+    bind_dn: "CN=svc-ductus,OU=Service Accounts,DC=hospital,DC=org"
+    bind_password: "${secret:LDAP_BIND_PASSWORD}"
+    ca: hospital-ca
+    timeout: 5s
+    application: Active Directory
+    vendor: Microsoft
+    owner: directory@hospital.org
+    custom: { ticket: CHG-1236 }
+certificates:
+  ductus-mllp:
+    cert_file: /etc/ductus/tls/mllp.pem
+    key_file: /etc/ductus/tls/mllp.key
+    application: Ductus MLLP listener
+    vendor: DigiCert
+    owner: infrastructure@hospital.org
+    custom: { ticket: CHG-1237 }
+  ductus-api:
+    cert: "${secret:API_CERT}"
+    key: "${secret:API_KEY}"
+  hospital-ca:
+    ca: "${secret:HOSPITAL_CA}"
+  partner-ca:
+    ca_file: /etc/ductus/tls/partner-ca.pem

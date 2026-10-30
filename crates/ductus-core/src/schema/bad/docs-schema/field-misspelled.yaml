@@ -1,0 +1,3 @@
+# `applies` isn't a field setting (`applies_to` is).
+fields:
+  baa_signed: { type: text, applies: [interface] }

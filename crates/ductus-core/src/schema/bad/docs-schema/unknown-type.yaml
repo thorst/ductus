@@ -1,0 +1,3 @@
+# `number` isn't a field type.
+fields:
+  cost_center: { type: number }

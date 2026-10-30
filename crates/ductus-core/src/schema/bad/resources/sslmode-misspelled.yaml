@@ -1,0 +1,3 @@
+# `verify` isn't one of libpq's sslmodes (`verify-full` is).
+databases:
+  patient_db: { postgres: { host: db1, database: patients, user: ductus, tls: verify } }

@@ -1,0 +1,5 @@
+# Durations are written 500ms, 90s, 15m, 24h or 7d.
+name: adt-in
+source: { mllp: { port: 6661 } }
+destination: { file: { dir: out } }
+timeout: 5 seconds

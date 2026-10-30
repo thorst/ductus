@@ -19,6 +19,7 @@ use std::path::PathBuf;
 
 /// libpq's `sslmode`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "kebab-case")]
 pub enum SslMode {
     /// No TLS.

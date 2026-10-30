@@ -1,0 +1,4 @@
+# A misspelled setting (`destinaton`) is refused, not ignored.
+name: adt-in
+source: { mllp: { port: 6661 } }
+destinaton: { file: { dir: out } }

@@ -103,6 +103,80 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
         .split_for_parts()
 }
 
+/// Who may call what, in one place. Every operation in the API document has a row (and the other
+/// way round: a test), so an endpoint can't ship without someone deciding its access, and the
+/// reference pages (`ductus reference`) say it: `public` needs nothing, `signed` any signed-in
+/// caller (a person or a token), `user` a person signed in with a password, `operator` and
+/// `admin` that role at least, `audit` the `audit` permission (admins have it). Behaviour is
+/// covered by the tests that call the engine (`cargo test -p ductus --test cli`, `demo-ui.sh`).
+pub const ACCESS: &[(&str, &str, &str)] = &[
+    ("GET", "/health", "public"),
+    ("POST", "/session", "public"),
+    ("DELETE", "/session", "public"),
+    ("GET", "/session", "signed"),
+    ("GET", "/engine", "signed"),
+    ("GET", "/events", "signed"),
+    ("GET", "/metrics", "signed"),
+    ("GET", "/interfaces", "signed"),
+    ("GET", "/interfaces/{name}", "signed"),
+    ("GET", "/interfaces/{name}/messages", "signed"),
+    ("GET", "/messages/{id}", "signed"),
+    ("GET", "/quarantine", "signed"),
+    ("GET", "/hotspots", "signed"),
+    ("GET", "/impact", "signed"),
+    ("GET", "/ports", "signed"),
+    ("GET", "/owners", "signed"),
+    ("GET", "/owners/people", "signed"),
+    ("POST", "/owners/reassign/preview", "signed"),
+    ("GET", "/docs", "signed"),
+    ("GET", "/retention", "signed"),
+    ("GET", "/drain", "signed"),
+    ("POST", "/drain", "operator"),
+    ("DELETE", "/drain", "operator"),
+    ("POST", "/doctor", "operator"),
+    ("GET", "/doctor/runs", "operator"),
+    ("GET", "/doctor/runs/{id}", "operator"),
+    ("GET", "/certificates", "signed"),
+    ("POST", "/interfaces/{name}/destinations/{destination}/pause", "operator"),
+    ("DELETE", "/interfaces/{name}/destinations/{destination}/pause", "operator"),
+    ("POST", "/messages/{id}/resend", "operator"),
+    ("POST", "/messages/resend", "operator"),
+    ("POST", "/messages/{id}/edit", "operator"),
+    ("POST", "/messages/{id}/dismiss", "operator"),
+    ("POST", "/messages/dismiss", "operator"),
+    ("GET", "/alerts", "signed"),
+    ("GET", "/alerts/{id}", "signed"),
+    ("POST", "/alerts/{id}/ack", "operator"),
+    ("POST", "/alerts/{id}/silence", "operator"),
+    ("DELETE", "/alerts/{id}/silence", "operator"),
+    ("GET", "/alerts/channels", "operator"),
+    ("POST", "/alerts/channels/{name}/test", "operator"),
+    ("GET", "/audit", "audit"),
+    ("GET", "/me/activity", "user"),
+    ("POST", "/retention/{name}/confirm", "operator"),
+    ("GET", "/me", "user"),
+    ("PATCH", "/me", "user"),
+    ("POST", "/me/password", "user"),
+    ("GET", "/me/sessions", "user"),
+    ("DELETE", "/me/sessions", "user"),
+    ("DELETE", "/me/sessions/{id}", "user"),
+    ("GET", "/me/settings", "user"),
+    ("PUT", "/me/settings", "user"),
+    ("GET", "/me/tokens", "user"),
+    ("POST", "/me/tokens", "user"),
+    ("DELETE", "/me/tokens/{name}", "user"),
+    ("GET", "/tokens", "admin"),
+    ("POST", "/tokens", "admin"),
+    ("DELETE", "/tokens/{name}", "admin"),
+    ("GET", "/users", "admin"),
+    ("POST", "/users", "admin"),
+    ("PATCH", "/users/{id}", "admin"),
+    ("POST", "/users/{id}/password", "admin"),
+    ("POST", "/users/{id}/unlock", "admin"),
+];
+
+pub use metrics::{METRICS, Metric};
+
 /// The OpenAPI document, without an engine (`ductus api-spec`: the web UI's types are made
 /// from it).
 pub fn openapi() -> utoipa::openapi::OpenApi {
@@ -376,77 +450,7 @@ mod tests {
         assert!(checked > 10, "only {checked} parameters found: did the document's shape change?");
     }
 
-    /// Who may call what, in one place. Every operation in the API document has a row (and the
-    /// other way round), so an endpoint can't ship without someone deciding its access:
-    /// `public` needs nothing, `signed` any signed-in caller (user or token), `user` a person
-    /// signed in with a password, `operator` and `admin` that role at least, `audit` the `audit`
-    /// permission (admins have it). Behaviour is covered
-    /// by the tests that call the engine (`cargo test -p ductus --test cli`, `demo-ui.sh`).
-    const ACCESS: &[(&str, &str, &str)] = &[
-        ("GET", "/health", "public"),
-        ("POST", "/session", "public"),
-        ("DELETE", "/session", "public"),
-        ("GET", "/session", "signed"),
-        ("GET", "/engine", "signed"),
-        ("GET", "/events", "signed"),
-        ("GET", "/metrics", "signed"),
-        ("GET", "/interfaces", "signed"),
-        ("GET", "/interfaces/{name}", "signed"),
-        ("GET", "/interfaces/{name}/messages", "signed"),
-        ("GET", "/messages/{id}", "signed"),
-        ("GET", "/quarantine", "signed"),
-        ("GET", "/hotspots", "signed"),
-        ("GET", "/impact", "signed"),
-        ("GET", "/ports", "signed"),
-        ("GET", "/owners", "signed"),
-        ("GET", "/owners/people", "signed"),
-        ("POST", "/owners/reassign/preview", "signed"),
-        ("GET", "/docs", "signed"),
-        ("GET", "/retention", "signed"),
-        ("GET", "/drain", "signed"),
-        ("POST", "/drain", "operator"),
-        ("DELETE", "/drain", "operator"),
-        ("POST", "/doctor", "operator"),
-        ("GET", "/doctor/runs", "operator"),
-        ("GET", "/doctor/runs/{id}", "operator"),
-        ("GET", "/certificates", "signed"),
-        ("POST", "/interfaces/{name}/destinations/{destination}/pause", "operator"),
-        ("DELETE", "/interfaces/{name}/destinations/{destination}/pause", "operator"),
-        ("POST", "/messages/{id}/resend", "operator"),
-        ("POST", "/messages/resend", "operator"),
-        ("POST", "/messages/{id}/edit", "operator"),
-        ("POST", "/messages/{id}/dismiss", "operator"),
-        ("POST", "/messages/dismiss", "operator"),
-        ("GET", "/alerts", "signed"),
-        ("GET", "/alerts/{id}", "signed"),
-        ("POST", "/alerts/{id}/ack", "operator"),
-        ("POST", "/alerts/{id}/silence", "operator"),
-        ("DELETE", "/alerts/{id}/silence", "operator"),
-        ("GET", "/alerts/channels", "operator"),
-        ("POST", "/alerts/channels/{name}/test", "operator"),
-        ("GET", "/audit", "audit"),
-        ("GET", "/me/activity", "user"),
-        ("POST", "/retention/{name}/confirm", "operator"),
-        ("GET", "/me", "user"),
-        ("PATCH", "/me", "user"),
-        ("POST", "/me/password", "user"),
-        ("GET", "/me/sessions", "user"),
-        ("DELETE", "/me/sessions", "user"),
-        ("DELETE", "/me/sessions/{id}", "user"),
-        ("GET", "/me/settings", "user"),
-        ("PUT", "/me/settings", "user"),
-        ("GET", "/me/tokens", "user"),
-        ("POST", "/me/tokens", "user"),
-        ("DELETE", "/me/tokens/{name}", "user"),
-        ("GET", "/tokens", "admin"),
-        ("POST", "/tokens", "admin"),
-        ("DELETE", "/tokens/{name}", "admin"),
-        ("GET", "/users", "admin"),
-        ("POST", "/users", "admin"),
-        ("PATCH", "/users/{id}", "admin"),
-        ("POST", "/users/{id}/password", "admin"),
-        ("POST", "/users/{id}/unlock", "admin"),
-    ];
+    use super::ACCESS;
 
     #[test]
     fn every_operation_has_a_decided_access() {

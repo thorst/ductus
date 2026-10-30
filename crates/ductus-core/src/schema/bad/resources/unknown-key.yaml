@@ -1,0 +1,3 @@
+# `database:` (singular) isn't a section.
+database:
+  patient_db: { postgres: { host: db1, database: patients, user: ductus } }

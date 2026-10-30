@@ -1,0 +1,78 @@
+# An MLLP interface with every interface-level setting, and destinations of every kind with
+# every destination setting. Values from the environment (${PORT}) are fine where a number is
+# expected: they're filled in before the engine reads the file.
+name: adt-epic
+source:
+  mllp:
+    host: 0.0.0.0
+    port: ${PORT}
+    tls:
+      certificate: ductus-mllp
+      clients: { ca: hospital-ca, subjects: ["CN=bridges*.hospital.org", "O=Quest, OU=Lab"] }
+    allow: [10.1.20.0/24, 10.1.30.15, epic-bridge01.hospital.org]
+script: transform.ts
+format: hl7
+output: hl7
+ordering: { key: PID-3.1, partitions: 128 }
+isolation: dedicated
+workers: 8
+dedicated_pools: { patient_db: 4 }
+durability: relaxed
+destinations:
+  lab:
+    mllp:
+      host: ${HOST}
+      port: 7001
+      timeout_ms: 30000
+      ack: wait
+      on_reject: retry
+      tls: { ca: hie-ca, certificate: ductus-client }
+    transform: toLab
+    output: hl7
+    retry: { max_attempts: 10, initial_backoff_ms: 5000, max_backoff_ms: 300000 }
+    rate_limit: { per_minute: 600, mode: average, burst: 20, over_limit: wait }
+    save_output: ${STRICT}
+    application: Sunquest Lab
+    vendor: Sunquest
+    owner: lab-it@hospital.org
+    monitor: { behind: { messages: 500, age: 10m } }
+    custom: { analyst: ana@hospital.org }
+  device:
+    mllp: { host: monitor.icu.local, port: 7002, ack: none, tls: true }
+  archive:
+    file: { dir: /data/archive/adt }
+  quest:
+    sftp: { server: quest, dir: inbound/adt }
+  billing:
+    http:
+      api: billing
+      path: /charges
+      method: PUT
+      headers: { X-Facility: north }
+      timeout_ms: 30000
+  partner:
+    http:
+      url: "https://partner.example.org/adt"
+      ca: partner-ca
+      certificate: ductus-client
+  enterprise:
+    interface: adt-enterprise
+retry: { max_attempts: 50 }
+dedupe: { keys: [MSH-10], window: 7d }
+rate_limit: { per_minute: 6000, mode: hard, over_limit: drop }
+timeout: 500ms
+about:
+  description: ADT from Epic to the lab and billing
+  owner: interfaces@hospital.org
+  from: { application: Epic, vendor: Epic Systems, hosts: [10.20.30.0/24, epic-bridge01.hospital.org] }
+  to: { application: Sunquest Lab, vendor: Sunquest }
+retention: 3w
+quarantined: keep
+monitor:
+  active_within: 30m
+  between: "06:00-22:00"
+  active_by: "Mon-Fri 07:00"
+  from: "18:00"
+  behind: { messages: 1000, age: 15m }
+alert: { to: [lab-team, owner], mute: false }
+custom: { baa_signed: "yes", runbook: "https://wiki.hospital.org/adt" }

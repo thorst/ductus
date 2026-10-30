@@ -1,0 +1,102 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "docs-schema.yaml",
+  "description": "`docs-schema.yaml`: the documentation fields your company keeps about its interfaces, destinations and resources, beyond what Ductus asks for (a BAA reference, a change ticket, a runbook link, the analyst). Values go in `custom:` beside each one; `ductus validate` checks them, and the web UI shows and filters by them. The engine itself ignores them.\n\nThe file sits at the top of the project and is optional: without it there are no fields.",
+  "type": "object",
+  "properties": {
+    "fields": {
+      "description": "The fields, by the key `custom:` uses, in the order the web UI shows them. Keys are your choice, except names Ductus uses beside `custom` (`name`, `owner`, `vendor`, …). Default: none. Example: `fields: { baa_signed: { type: enum, values: [\"yes\", \"no\"], required: true } }`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/Field"
+      },
+      "default": {},
+      "markdownDescription": "The fields, by the key `custom:` uses, in the order the web UI shows them. Keys are your choice, except names Ductus uses beside `custom` (`name`, `owner`, `vendor`, …). Default: none. Example: `fields: { baa_signed: { type: enum, values: [\"yes\", \"no\"], required: true } }`."
+    }
+  },
+  "additionalProperties": false,
+  "definitions": {
+    "Field": {
+      "type": "object",
+      "properties": {
+        "type": {
+          "description": "What the value is:\n\n- `text`: any text (quote numbers and yes/no, or YAML reads them as such).\n- `enum`: one of `values`.\n- `date`: a date, written `2026-10-30`.\n- `url`: an `http(s)://` address, shown as a link.\n- `person`: who, as text: best an email address.\n- `list`: several texts (each one of `values`, if given).\n\nRequired. Example: `type: enum`.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/FieldType"
+            }
+          ],
+          "markdownDescription": "What the value is:\n\n- `text`: any text (quote numbers and yes/no, or YAML reads them as such).\n- `enum`: one of `values`.\n- `date`: a date, written `2026-10-30`.\n- `url`: an `http(s)://` address, shown as a link.\n- `person`: who, as text: best an email address.\n- `list`: several texts (each one of `values`, if given).\n\nRequired. Example: `type: enum`."
+        },
+        "values": {
+          "description": "The values an `enum` may take (and each item of a `list`, if given), matched exactly, case included. Quote ones YAML would read otherwise (`\"yes\"`, `\"no\"`). Default: none. Example: `values: [\"yes\", \"no\", n/a]`.",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "The values an `enum` may take (and each item of a `list`, if given), matched exactly, case included. Quote ones YAML would read otherwise (`\"yes\"`, `\"no\"`). Default: none. Example: `values: [\"yes\", \"no\", n/a]`."
+        },
+        "required": {
+          "description": "Every interface (destination, resource) the field applies to must have a value: `ductus validate` reports each one missing. The engine starts anyway. Default: `false`. Example: `required: true`.",
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Every interface (destination, resource) the field applies to must have a value: `ductus validate` reports each one missing. The engine starts anyway. Default: `false`. Example: `required: true`."
+        },
+        "applies_to": {
+          "description": "Where the field may be given: `interface`, `destination` and/or `resource` (a resources.yaml entry). Default: `[interface]`. Example: `applies_to: [interface, resource]`.",
+          "type": "array",
+          "items": {
+            "$ref": "#/definitions/Level"
+          },
+          "default": [
+            "interface"
+          ],
+          "markdownDescription": "Where the field may be given: `interface`, `destination` and/or `resource` (a resources.yaml entry). Default: `[interface]`. Example: `applies_to: [interface, resource]`."
+        },
+        "label": {
+          "description": "The name the web UI shows instead of the key. Default: the key. Example: `label: BAA signed`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The name the web UI shows instead of the key. Default: the key. Example: `label: BAA signed`."
+        },
+        "help": {
+          "description": "A hint shown under the field in the web UI: what it's for, or where to find the value. Default: none. Example: `help: Business associate agreement, from the contracts office`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A hint shown under the field in the web UI: what it's for, or where to find the value. Default: none. Example: `help: Business associate agreement, from the contracts office`."
+        }
+      },
+      "additionalProperties": false,
+      "required": [
+        "type"
+      ]
+    },
+    "FieldType": {
+      "type": "string",
+      "enum": [
+        "text",
+        "enum",
+        "date",
+        "url",
+        "person",
+        "list"
+      ]
+    },
+    "Level": {
+      "description": "Where a field applies.",
+      "type": "string",
+      "enum": [
+        "interface",
+        "destination",
+        "resource"
+      ],
+      "markdownDescription": "Where a field applies."
+    }
+  },
+  "markdownDescription": "`docs-schema.yaml`: the documentation fields your company keeps about its interfaces, destinations and resources, beyond what Ductus asks for (a BAA reference, a change ticket, a runbook link, the analyst). Values go in `custom:` beside each one; `ductus validate` checks them, and the web UI shows and filters by them. The engine itself ignores them.\n\nThe file sits at the top of the project and is optional: without it there are no fields."
+}

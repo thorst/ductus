@@ -1,0 +1,5 @@
+# `behind` needs at least one message.
+name: adt-in
+source: { mllp: { port: 6661 } }
+destination: { file: { dir: out } }
+monitor: { behind: 0 }

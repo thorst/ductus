@@ -66,6 +66,7 @@ impl std::fmt::Display for Retention {
 /// until someone resolves them: a quarantined message is a question nobody has answered yet.
 /// `purge`: they go with the regular messages when their partition expires (no second limit).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase")]
 pub enum Quarantined {
     #[default]

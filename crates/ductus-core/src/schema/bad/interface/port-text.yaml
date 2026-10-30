@@ -1,0 +1,4 @@
+# A port is a number.
+name: adt-in
+source: { mllp: { port: six-six-six-one } }
+destination: { file: { dir: out } }

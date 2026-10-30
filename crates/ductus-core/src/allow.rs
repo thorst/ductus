@@ -16,6 +16,7 @@ use std::net::IpAddr;
 
 /// An `allow:` list as written.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(transparent)]
 pub struct Allow(pub Vec<String>);
 

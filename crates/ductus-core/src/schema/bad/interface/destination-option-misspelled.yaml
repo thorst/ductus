@@ -1,0 +1,5 @@
+# `save_outputs` isn't a destination setting (`save_output` is).
+name: adt-in
+source: { mllp: { port: 6661 } }
+destinations:
+  lab: { mllp: { host: lab, port: 7001 }, save_outputs: true }

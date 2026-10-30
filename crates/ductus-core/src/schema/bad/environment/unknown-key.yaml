@@ -1,0 +1,2 @@
+# Variables go under `variables:`, not at the top.
+PATIENT_DB_HOST: patients.hospital.local

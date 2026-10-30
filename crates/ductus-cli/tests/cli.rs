@@ -32,6 +32,44 @@ fn without_a_database(dir: &Path, args: &[&str]) -> (bool, String) {
     (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }
 
+/// The docs' reference pages are made by `ductus reference docs` and committed: a change to a
+/// command, an API operation, a setting, an Event Log ID, a metric or an audit action that isn't
+/// written into them fails here.
+#[test]
+fn the_reference_pages_are_current() {
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::copy(docs.join("SUMMARY.md"), dir.path().join("SUMMARY.md")).unwrap();
+    let (ok, out) = ductus(dir.path(), &["reference", dir.path().to_str().unwrap()]);
+    assert!(ok, "{out}");
+    let read = |p: &Path| std::fs::read_to_string(p).unwrap().replace("\r\n", "\n");
+    let mut stale = Vec::new();
+    if read(&dir.path().join("SUMMARY.md")) != read(&docs.join("SUMMARY.md")) {
+        stale.push("SUMMARY.md".to_string());
+    }
+    fn files(root: &Path, at: &Path, out: &mut Vec<std::path::PathBuf>) {
+        for e in std::fs::read_dir(at).unwrap() {
+            let p = e.unwrap().path();
+            if p.is_dir() { files(root, &p, out) } else { out.push(p.strip_prefix(root).unwrap().to_path_buf()) }
+        }
+    }
+    let (mut made, mut committed) = (Vec::new(), Vec::new());
+    files(&dir.path().join("reference"), &dir.path().join("reference"), &mut made);
+    files(&docs.join("reference"), &docs.join("reference"), &mut committed);
+    committed.retain(|p| p != Path::new("libraries.md")); // scripts/dev/dependencies.sh's
+    made.sort();
+    committed.sort();
+    if made != committed {
+        stale.push(format!("the pages differ: made {made:?}, committed {committed:?}"));
+    }
+    for page in made.iter().filter(|p| committed.contains(p)) {
+        if read(&dir.path().join("reference").join(page)) != read(&docs.join("reference").join(page)) {
+            stale.push(format!("reference/{}", page.display()));
+        }
+    }
+    assert!(stale.is_empty(), "run `ductus reference docs` (check.sh does): stale {stale:?}");
+}
+
 #[test]
 fn there_is_no_default_database() {
     let dir = tempfile::tempdir().unwrap();

@@ -19,35 +19,56 @@ use serde::Deserialize;
 use std::time::Duration;
 
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Monitor {
-    /// Something must be received at least this often, e.g. `30m`.
+    /// Something must be received at least this often (at least `1m`): longer than this with
+    /// nothing, and the interface is *silent*. For feeds that never stop in normal operation,
+    /// such as ADT from the EHR: set it a little above the longest normal gap, so a dead sender
+    /// is noticed before the users call. Only receiving counts, not delivering. Default: none.
+    /// Example: `active_within: 30m`.
     #[serde(default, deserialize_with = "crate::config::duration_opt")]
+    #[cfg_attr(test, schemars(with = "Option<crate::schema::shapes::Duration>"))]
     pub active_within: Option<Duration>,
-    /// `active_within` applies only between these times: `"06:00-22:00"` (or overnight,
-    /// `"22:00-06:00"`). The quiet time starts counting when the hours start, so a feed that
-    /// sleeps at night isn't "silent" at 06:01.
+    /// The hours `active_within` applies, in the server's local time: `"06:00-22:00"`, or across
+    /// midnight, `"22:00-06:00"`. The quiet time is counted from when the hours start, so a feed
+    /// that sleeps at night isn't silent at 06:01. Only with `active_within`. Default: all day.
+    /// Example: `between: "06:00-22:00"`.
     #[serde(default)]
     pub between: Option<Hours>,
-    /// Something must be received by then: `"09:00"` (every day), `"Mon 09:00"`, `"Mon-Fri
-    /// 09:00"`, or a cron expression. Only receiving counts, not delivering.
+    /// Something must be received by this time, or the interface has *missed* its deadline: for
+    /// feeds that come once a day or week (a nightly file, a Monday batch). `"09:00"` every day,
+    /// `"Mon 09:00"`, `"Mon-Fri 09:00"`, `"Mon,Thu 09:00"`, or a five-field cron expression, in
+    /// the server's local time. Only receiving counts. Default: none. Example: `active_by:
+    /// "Mon-Fri 07:00"`.
     #[serde(default)]
     pub active_by: Option<At>,
-    /// With `active_by`: what counts is received after the last `from` before the deadline
-    /// (`"18:00"`: the evening before; `"Fri 18:00"`). Default: midnight of the deadline's day,
-    /// so yesterday's late file can't hide today's missing one.
+    /// With `active_by`: when the window for each deadline opens. Only what arrives after it
+    /// counts, so yesterday's late file can't hide today's missing one. `"18:00"` opens it the
+    /// evening before; `"Fri 18:00"` the Friday before. Default: midnight of the deadline's day.
+    /// Example: `from: "18:00"`.
     #[serde(default)]
     pub from: Option<At>,
-    /// When a destination's queue is behind: by messages waiting, by the age of the oldest
-    /// waiting one, or both (either trips it). Destinations can set their own.
+    /// When a destination's queue counts as *behind*: `500` (that many messages waiting), `10m`
+    /// (the oldest has waited that long), or `{ messages: 500, age: 10m }` (either one).
+    ///
+    /// A count alone misses an overnight stall when little arrives; an age alone misses a daytime
+    /// pile-up that still moves, so give both for busy feeds. Set it at what the receiving
+    /// department would call late. A destination can set its own. Default: none (a destination
+    /// that stops sending still shows as *stalled* after a minute). Example: `behind: { messages:
+    /// 1000, age: 15m }`.
     #[serde(default)]
     pub behind: Option<Behind>,
 }
 
 /// A destination's own expectations (`monitor:` on the destination).
 #[derive(Debug, Clone, Default, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct DestinationMonitor {
+    /// When this destination's queue counts as behind, in place of the interface's
+    /// `monitor.behind`: `500`, `10m`, or `{ messages: 500, age: 10m }`. Default: the
+    /// interface's. Example: `behind: 2h`.
     #[serde(default)]
     pub behind: Option<Behind>,
 }

@@ -1,0 +1,5 @@
+# `edi` isn't a format.
+name: adt-in
+source: { file: { dir: in } }
+format: edi
+destination: { file: { dir: out } }

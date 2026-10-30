@@ -1,0 +1,4 @@
+# `repeat: 0` means never remind, written as YAML reads it: a number (it was refused before 0.6.8.1).
+alerts:
+  repeat: 0
+  settle: "0"

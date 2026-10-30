@@ -59,7 +59,8 @@ fn relative(root: &Path, file: &str) -> String {
     file.strip_prefix(&root).map(|r| r.trim_start_matches('/').to_string()).unwrap_or_else(|| file.to_string())
 }
 
-/// Write the SDK typings and (if missing) a tsconfig.json, so VS Code gets IntelliSense and hover docs.
+/// Write the SDK typings and (if missing) a tsconfig.json, so VS Code gets IntelliSense and hover
+/// docs in interface code; and the configuration files' schemas, for the same in the YAML files.
 pub async fn write_types(root: &Path) -> Result<String> {
     let types = Isolate::generate_types().await?;
     let path = root.join(TYPES_FILE);
@@ -69,13 +70,111 @@ pub async fn write_types(root: &Path) -> Result<String> {
     if !tsconfig.exists() {
         std::fs::write(&tsconfig, TSCONFIG)?;
     }
+    write_schemas(root)?;
     Ok(types)
 }
 
 pub async fn types(root: &Path) -> Result<()> {
     write_types(root).await?;
     println!("wrote {} (and tsconfig.json if it was missing)", root.join(TYPES_FILE).display());
+    println!("wrote {} (the configuration files' schemas)", root.join(SCHEMA_DIR).display());
+    match vscode_schemas(root)? {
+        Mapped::Written | Mapped::Already => println!("{VSCODE} maps them to the YAML files"),
+        Mapped::Elsewhere(keys) => {
+            println!("{VSCODE} already maps {} to other schemas: left as it is", keys.join(", "))
+        }
+        Mapped::Unreadable => println!(
+            "{VSCODE} isn't plain JSON (comments?), so it wasn't changed: for completion in the YAML files, add\n  \"yaml.schemas\": {}",
+            serde_json::to_string_pretty(&schema_mapping()).unwrap_or_default().replace('\n', "\n  ")
+        ),
+    }
     Ok(())
+}
+
+/// Where the configuration files' schemas go in a project.
+const SCHEMA_DIR: &str = ".ductus/schema";
+const VSCODE: &str = ".vscode/settings.json";
+
+/// The schemas the installed version reads by, for editors (the binary carries them).
+fn write_schemas(root: &Path) -> Result<()> {
+    let dir = root.join(SCHEMA_DIR);
+    std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
+    for schema in &ductus_core::schema::SCHEMAS {
+        let file = dir.join(schema.name);
+        std::fs::write(&file, schema.text).with_context(|| format!("writing {}", file.display()))?;
+    }
+    vscode_schemas(root).map(|_| ())
+}
+
+/// VS Code's `yaml.schemas` for the project: each schema file to the files it describes.
+fn schema_mapping() -> serde_json::Value {
+    let mapping: serde_json::Map<String, serde_json::Value> = ductus_core::schema::SCHEMAS
+        .iter()
+        .map(|s| (format!("./{SCHEMA_DIR}/{}", s.name), serde_json::json!(s.files)))
+        .collect();
+    serde_json::Value::Object(mapping)
+}
+
+/// What became of VS Code's settings.
+enum Mapped {
+    Written,
+    Already,
+    /// The project's settings map these file patterns to schemas of their own.
+    Elsewhere(Vec<String>),
+    /// Not plain JSON (VS Code allows comments): not touched.
+    Unreadable,
+}
+
+/// Point VS Code's YAML extension at the schemas: `yaml.schemas` in `.vscode/settings.json`,
+/// added to what's there, never replacing a mapping the project made for the same files.
+fn vscode_schemas(root: &Path) -> Result<Mapped> {
+    let path = root.join(VSCODE);
+    let ours = schema_mapping();
+    let mut settings = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(serde_json::Value::Object(settings)) => settings,
+            _ => return Ok(Mapped::Unreadable),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let existing = settings.entry("yaml.schemas").or_insert_with(|| serde_json::json!({}));
+    let Some(existing) = existing.as_object_mut() else { return Ok(Mapped::Unreadable) };
+    let patterns_of = |v: &serde_json::Value| -> Vec<String> {
+        match v {
+            serde_json::Value::String(s) => vec![s.clone()],
+            serde_json::Value::Array(a) => a.iter().filter_map(|p| p.as_str().map(String::from)).collect(),
+            _ => Vec::new(),
+        }
+    };
+    let (mut changed, mut elsewhere) = (false, Vec::new());
+    for (key, patterns) in ours.as_object().expect("a map") {
+        if existing.get(key) == Some(patterns) {
+            continue;
+        }
+        let taken: Vec<String> = existing
+            .iter()
+            .filter(|(k, _)| *k != key)
+            .flat_map(|(_, v)| patterns_of(v))
+            .filter(|p| patterns_of(patterns).contains(p))
+            .collect();
+        if taken.is_empty() {
+            existing.insert(key.clone(), patterns.clone());
+            changed = true;
+        } else {
+            elsewhere.extend(taken);
+        }
+    }
+    if changed {
+        std::fs::create_dir_all(path.parent().expect("a folder"))?;
+        let text = serde_json::to_string_pretty(&serde_json::Value::Object(settings))? + "\n";
+        std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    }
+    Ok(match (changed, elsewhere.is_empty()) {
+        (_, false) => Mapped::Elsewhere(elsewhere),
+        (true, true) => Mapped::Written,
+        (false, true) => Mapped::Already,
+    })
 }
 
 /// Run each interface's `*.test.ts` files. Returns false if anything failed. `read_only` writes no
