@@ -2659,6 +2659,30 @@ async fn directory_accounts_follow_the_directory() {
     assert_eq!((candidate.source.as_str(), candidate.password_hash), ("ldap", None), "no password kept here");
     let (_, update) = store.save_directory_user(&name, &viewer, &audit()).await.unwrap();
     assert_eq!(update, DirectoryUpdate::Unchanged);
+    // A refresh's check of an account the directory says nothing new about writes nothing; the
+    // round notes the time for all it asked about at once.
+    let checked = |id: i32| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+                "SELECT directory_checked_at FROM users WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    let before = checked(user.id).await;
+    let (same, update) = store.check_directory_user(&name, &viewer, &audit()).await.unwrap();
+    assert_eq!((same.id, update), (user.id, DirectoryUpdate::Unchanged));
+    assert_eq!(checked(user.id).await, before, "nothing written");
+    store.directory_checked(&[user.id]).await.unwrap();
+    assert!(checked(user.id).await > before);
+    let moved = DirectoryPerson { email: "anna.smith@h.org".into(), ..viewer.clone() };
+    let (changed, update) = store.check_directory_user(&name, &moved, &audit()).await.unwrap();
+    assert_eq!((update, changed.email.as_str()), (DirectoryUpdate::Changed, "anna.smith@h.org"), "a change is saved");
+    store.save_directory_user(&name, &viewer, &audit()).await.unwrap();
 
     let operator = DirectoryPerson { role: Role::Operator, permissions: vec!["payloads".into()], ..viewer.clone() };
     let (user, update) = store.save_directory_user(&name.to_uppercase(), &operator, &audit()).await.unwrap();
@@ -2691,7 +2715,14 @@ async fn directory_accounts_follow_the_directory() {
     assert!(store.authenticate(&token).await.unwrap().is_some(), "the token works again");
     assert_eq!(
         actions(name.clone()).await,
-        ["user.create", "user.directory_change", "user.directory_refused", "user.directory_change"]
+        [
+            "user.create",
+            "user.directory_change", // the email, and back
+            "user.directory_change",
+            "user.directory_change", // operator
+            "user.directory_refused",
+            "user.directory_change"
+        ]
     );
 
     // A local account's name is never taken over, and local accounts are never checked.
@@ -2826,6 +2857,57 @@ async fn directory_ids_follow_the_person_and_former_names_are_kept() {
     };
     assert_eq!(theirs(local.id), ["display_name Vic Local"]);
     assert_eq!(theirs(anna.id).len(), 3);
+    people.forget().await.unwrap();
+}
+
+/// Two engines making one person's account at once (0.6.7.3: an owner's at both engines' first
+/// refresh round, or one new person signing in on two engines): one makes it, the others find it
+/// and bring it up to date. Before, the second insert failed on the unique name.
+#[tokio::test]
+async fn two_engines_making_one_directory_account_at_once_both_succeed() {
+    use ductus_store::{DirectoryPerson, DirectoryUpdate};
+    let Some(store) = store().await else { return };
+    let url = std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap();
+    let other = Store::connect(&url, 4).await.unwrap();
+    let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let people = people();
+    let audit = || ductus_store::Audit {
+        detail: Some(serde_json::json!({ "reason": "owner" })),
+        ..ductus_store::Audit::new(ductus_store::By::engine(), "user.create")
+    };
+    for round in 0..6 {
+        let name = people.name("test-user-race");
+        // With an id and without one (a directory that gives none): found by id, or by name.
+        let id = (round % 2 == 0).then(|| format!("entryUUID:race-{name}"));
+        let person = DirectoryPerson {
+            display_name: "Rae Race".into(),
+            email: "rae@h.org".into(),
+            role: Role::Operator,
+            permissions: vec![],
+            username: Some(name.clone()),
+            directory_id: id.clone(),
+        };
+        let (a, b) = (audit(), audit());
+        let save = |s: &'static str, store: &Store| {
+            let (name, person, a) = (&name, &person, &a);
+            let store = store.clone();
+            async move { store.save_directory_user(name, person, a).await.map_err(|e| format!("{s}: {e:#}")) }
+        };
+        let (w, x, y, z) = tokio::join!(save("1", &store), save("2", &other), save("3", &store), save("4", &other));
+        let saved: Vec<_> = [w, x, y, z].into_iter().map(|r| r.expect("every save succeeds")).collect();
+        assert!(saved.iter().all(|(u, _)| u.id == saved[0].0.id), "one account, round {round}");
+        let made = saved.iter().filter(|(_, update)| *update == DirectoryUpdate::Created).count();
+        assert_eq!(made, 1, "made once, round {round}");
+        let (user, _) = other.save_directory_user(&name, &person, &b).await.unwrap();
+        assert_eq!((user.id, user.directory_id), (saved[0].0.id, id));
+        let detail: Option<String> =
+            sqlx::query_scalar("SELECT detail::text FROM audit_log WHERE action = 'user.create' AND subject = $1")
+                .bind(&name)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(detail.as_deref().is_some_and(|d| d.contains(r#""reason": "owner""#)), "{detail:?}");
+    }
     people.forget().await.unwrap();
 }
 

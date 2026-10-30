@@ -6918,7 +6918,8 @@
           "must_change_password",
           "disabled",
           "created_at",
-          "directory_refused"
+          "directory_refused",
+          "made_for_owner"
         ],
         "properties": {
           "created_at": {
@@ -6964,6 +6965,10 @@
             ],
             "format": "date-time",
             "description": "Refused after too many wrong passwords, until then."
+          },
+          "made_for_owner": {
+            "type": "boolean",
+            "description": "A directory account the engine made because an owner text names them, before their first\nsign-in (directory accounts are otherwise made at one)."
           },
           "must_change_password": {
             "type": "boolean",

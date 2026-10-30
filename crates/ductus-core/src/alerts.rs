@@ -554,8 +554,8 @@ pub use crate::owners::Person;
 /// An owner's email addresses: the account the owner text names (`owners::find`: username,
 /// email or display name, ignoring case; not a disabled one, nor one of several), else the
 /// `owners:` directory, else an account that had the text before (at its email now), else the
-/// text itself if it is an address. `None`: nobody to send to (the rule's other recipients still
-/// hear).
+/// text itself if it is an address, unless it names a disabled account (someone who left: their
+/// old mailbox gets nothing). `None`: nobody to send to (the rule's other recipients still hear).
 pub fn owner_addresses(
     owner: &str,
     people: &[Person],
@@ -582,7 +582,11 @@ pub fn owner_addresses(
     {
         return Some(contact.email.clone());
     }
-    account().or_else(|| is_address(owner).then(|| vec![owner.to_string()]))
+    match found.person() {
+        // Someone who left (disabled here, refused by the directory): not their old mailbox either.
+        Some(p) if p.disabled => None,
+        _ => account().or_else(|| is_address(owner).then(|| vec![owner.to_string()])),
+    }
 }
 
 /// The key of an interface's own alert.
@@ -1084,6 +1088,7 @@ rules:
         assert_eq!(find("someone@example.org").unwrap(), ["someone@example.org"]);
         assert_eq!(find("Bo"), None, "a user without an email");
         assert_eq!(find("Cy Gone"), None, "a disabled account");
+        assert_eq!(find("cy@example.org"), None, "someone who left: not their old mailbox either");
         assert_eq!(find("same name"), None, "two accounts: no guess");
         assert_eq!(find("eve").unwrap(), ["eve@example.org"]);
         assert_eq!(find("Radiology"), None);

@@ -2545,6 +2545,11 @@ export interface components {
              * @description Refused after too many wrong passwords, until then.
              */
             locked_until?: string | null;
+            /**
+             * @description A directory account the engine made because an owner text names them, before their first
+             *     sign-in (directory accounts are otherwise made at one).
+             */
+            made_for_owner: boolean;
             /** @description An admin chose the password; the next sign-in can only change it. */
             must_change_password: boolean;
             /** @description `payloads`, `audit` (admins have both whatever is listed). */

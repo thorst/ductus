@@ -45,11 +45,17 @@ pub struct UserInfo {
     /// A directory account the directory refused at its last check (no group, disabled or gone
     /// there): it can't sign in or act until the directory says yes again.
     pub directory_refused: bool,
+    /// A directory account the engine made because an owner text names them, before their first
+    /// sign-in (directory accounts are otherwise made at one).
+    pub made_for_owner: bool,
 }
 
 impl From<User> for UserInfo {
     fn from(u: User) -> Self {
+        // Directory accounts are made at a sign-in, or by the engine for an owner (0.6.7.3).
+        let made_for_owner = u.source != "local" && u.last_sign_in_at.is_none();
         Self {
+            made_for_owner,
             id: u.id,
             username: u.username,
             display_name: u.display_name,

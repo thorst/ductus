@@ -6,6 +6,7 @@
 //! filter (`ductus_core::ldap`) and verified with the first pilot.
 
 use ductus_core::ldap::{Access, DirectoryRole, LdapAuth};
+use ductus_core::owners::{self, Reach};
 use ductus_core::resources::{CertificateEntry, LdapServer, Resources};
 use ductus_runtime::doctor::{self, Mode, Probe, Target};
 use ductus_runtime::ldap::{self, Directory, Person, Verdict};
@@ -424,6 +425,89 @@ async fn a_renamed_person_keeps_their_account() {
     forget().await.unwrap();
 }
 
+/// What an owner text reaches now, and where its alerts go.
+async fn reach_of(store: &Store, owner: &str) -> (Reach, Option<Vec<String>>) {
+    let accounts = store.accounts().await.unwrap();
+    let people = ductus_runtime::alerts::people(&accounts.users, &accounts.former);
+    let teams = Default::default();
+    (owners::reach(owner, &people, &teams), ductus_core::alerts::owner_addresses(owner, &people, &teams))
+}
+
+/// Owners in the directory (0.6.7.3), before anyone signs in: an owner email of a person in a
+/// Ductus group gets their account at the first round (made by the engine, for ownership, never
+/// signed in); one in no group gets none and a warning, once; an address nobody there has stays an
+/// address. Their account is checked at every round though it has no session: a rename is seen,
+/// and once deleted there it is refused, so the owner shows as `disabled` and no mail goes to the
+/// dead mailbox. A new directory account with the same email (a new entry: it can't be linked to
+/// the old one) is made at the next round and wins.
+#[tokio::test]
+async fn owners_get_their_directory_account_before_their_first_sign_in() {
+    const ADA: &str = "test-user-ada";
+    const ADA2: &str = "test-user-ada2";
+    let _one = ONE_DIRECTORY.lock().await;
+    let Some(slapd) = Slapd::start() else { return };
+    let Some(store) = store().await else { return };
+    let names = [ADA, ADA2, "test-user-nobody"].map(String::from);
+    let forget = || store.forget_test_users(&names);
+    forget().await.unwrap();
+    let d = slapd.directory("plain", false);
+    let since = chrono::Utc::now();
+    let unknown = format!("someone-{}@example.org", std::process::id());
+    let texts = ["ada@example.org", "noah@example.org", unknown.as_str(), "Lab team"];
+    let mut round = ldap::Round::new(texts.map(String::from), Default::default());
+    let account = |name: &'static str| {
+        let store = &store;
+        async move { store.accounts().await.unwrap().users.into_iter().find(|u| u.username == name) }
+    };
+
+    let r = round.run(&store, &d).await.unwrap();
+    assert_eq!((r.made, r.failed), (1, 0), "{r:?}");
+    let ada = account(ADA).await.expect("made at the first round");
+    assert_eq!((ada.source.as_str(), ada.role, ada.email.as_str()), ("ldap", Role::Admin, "ada@example.org"));
+    assert!(ada.last_sign_in_at.is_none() && ada.directory_id.is_some(), "{ada:?}");
+    let filter =
+        ductus_store::AuditFilter { action: Some("user.create"), from: Some(since), limit: 100, ..Default::default() };
+    let made = store.audit_log(&filter).await.unwrap().into_iter().find(|a| a.subject.as_deref() == Some(ADA)).unwrap();
+    assert_eq!(made.actor_name, "engine");
+    assert!(made.detail.as_deref().unwrap_or("").contains(r#""reason": "owner""#), "{:?}", made.detail);
+    assert_eq!(
+        reach_of(&store, "ada@example.org").await,
+        (Reach::User(ADA.into()), Some(vec!["ada@example.org".into()]))
+    );
+
+    // In no Ductus group: no account, a warning once; an address nobody there has: as it was.
+    assert!(account("test-user-nobody").await.is_none());
+    assert_eq!(reach_of(&store, "noah@example.org").await.0, Reach::Address);
+    assert_eq!(round.warned().collect::<Vec<_>>(), ["noah@example.org"]);
+    assert_eq!(reach_of(&store, &unknown).await.0, Reach::Address);
+
+    // Checked at every round with no session: a rename is seen; nothing is made twice or warned again.
+    let mut admin = slapd.admin().await;
+    let dn = format!("uid={ADA},{PEOPLE}");
+    admin.modify(&dn, vec![ldap3::Mod::Replace("cn", HashSet::from(["Ada King"]))]).await.unwrap().success().unwrap();
+    let r = round.run(&store, &d).await.unwrap();
+    assert_eq!((r.made, r.changed), (0, 1), "{r:?}");
+    assert_eq!(account(ADA).await.unwrap().display_name, "Ada King");
+    assert_eq!(round.warned().count(), 1);
+
+    // Deleted there: refused at the next round; the owner reads as disabled, and gets no mail.
+    admin.delete(&dn).await.unwrap().success().unwrap();
+    let r = round.run(&store, &d).await.unwrap();
+    assert_eq!((r.refused, r.made), (1, 0), "{r:?}");
+    assert_eq!(reach_of(&store, "ada@example.org").await, (Reach::Disabled(ADA.into()), None));
+
+    // A new directory account for her with the same email: made at the next round, and it wins.
+    add_person(&mut admin, ADA2, "Ada King", "ada@example.org", "ada2-password").await;
+    let r = round.run(&store, &d).await.unwrap();
+    assert_eq!(r.made, 1, "{r:?}");
+    assert_eq!(
+        reach_of(&store, "ada@example.org").await,
+        (Reach::User(ADA2.into()), Some(vec!["ada@example.org".into()]))
+    );
+    assert_eq!(account(ADA2).await.unwrap().role, Role::Operator);
+    forget().await.unwrap();
+}
+
 /// What a refresh round costs (0.6.7.1): 0, 20 and 200 directory accounts with a token, checked
 /// by name (as before) and by entryUUID, and the whole round with the store's saves. Run by hand:
 /// `cargo test --release -p ductus-runtime --test ldap -- --ignored --nocapture refresh_round`.
@@ -478,6 +562,61 @@ async fn measure_a_refresh_round() {
             median(round_t)
         );
     }
+    store.forget_test_users(&pattern).await.unwrap();
+}
+
+/// What owners add to a refresh round (0.6.7.3): 0, 20 and 200 owner emails whose directory
+/// accounts the round made (then checked by id, with their groups, every round: none has a session
+/// or token), and 200 owner emails nobody in the directory has (one search each, every round). Run
+/// by hand: `cargo test --release -p ductus-runtime --test ldap -- --ignored --nocapture owners_round`.
+#[tokio::test]
+#[ignore]
+async fn measure_an_owners_round() {
+    let _one = ONE_DIRECTORY.lock().await;
+    let Some(slapd) = Slapd::start() else { return };
+    let Some(store) = store().await else { return };
+    let pattern = ["test-user-bench-%".to_string()];
+    store.forget_test_users(&pattern).await.unwrap();
+    let d = slapd.directory("plain", false);
+    let mut admin = slapd.admin().await;
+    let names: Vec<String> = (0..200).map(|i| format!("test-user-bench-{i:03}")).collect();
+    for n in &names {
+        add_person(&mut admin, n, &format!("Bench {n}"), &format!("{n}@example.org"), "bench-password").await;
+    }
+    let median = |mut t: Vec<f64>| {
+        t.sort_by(f64::total_cmp);
+        t[t.len() / 2]
+    };
+    let ms = |t: std::time::Instant| t.elapsed().as_secs_f64() * 1000.0;
+    for n in [0usize, 20, 200] {
+        let emails = names[..n].iter().map(|n| format!("{n}@example.org"));
+        let mut round = ldap::Round::new(emails, Default::default());
+        let t = std::time::Instant::now();
+        let first = round.run(&store, &d).await.unwrap();
+        let first_ms = ms(t);
+        let mut rounds = vec![];
+        for _ in 0..5 {
+            let t = std::time::Instant::now();
+            let r = round.run(&store, &d).await.unwrap();
+            rounds.push(ms(t));
+            assert_eq!((r.made, r.failed), (0, 0));
+            assert!(r.checked >= n, "{r:?}");
+        }
+        println!(
+            "{n:>3} owner accounts: the first round (made {}) {first_ms:.1} ms; a round after {:.1} ms (median of 5)",
+            first.made,
+            median(rounds)
+        );
+    }
+    let unknown = (0..200).map(|i| format!("nobody-{i:03}-{}@example.org", std::process::id()));
+    let mut round = ldap::Round::new(unknown, Default::default());
+    let mut rounds = vec![];
+    for _ in 0..5 {
+        let t = std::time::Instant::now();
+        assert_eq!(round.run(&store, &d).await.unwrap().made, 0);
+        rounds.push(ms(t));
+    }
+    println!("200 owner emails nobody has: a round {:.1} ms (median of 5)", median(rounds));
     store.forget_test_users(&pattern).await.unwrap();
 }
 

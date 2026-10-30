@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 # v0.5 demo: people sign in with the hospital's directory (here a throwaway OpenLDAP,
 # scripts/dev/slapd.sh; real Active Directory is verified with the first pilot).
+#   0. Owners before anyone signs in: the engine's first refresh round, right after the start, makes
+#      the account of the owner nina@example.org (in a Ductus group, through a nested one), never
+#      signed in; noah@example.org, in no Ductus group, gets none and one warning.
 #   1. Directory people sign in through the same POST /session as local accounts: their account is
 #      made at the first sign-in, role and permissions from their groups (nested groups count).
 #   2. A wrong password, a name nobody has and an attempt to inject `*` all get the same answer;
@@ -75,7 +78,7 @@ ldap:
     url: ldaps://127.0.0.1:$LDAPS_PORT
     bind_dn: cn=ductus-svc,ou=service,dc=example,dc=org
     bind_password: svc-password
-    owner: Directory Services
+    owner: noah@example.org
     application: Example Directory
     ca: directory-ca
 certificates:
@@ -83,6 +86,7 @@ certificates:
 EOF
 cat >"$P/interfaces/ldap-demo/interface.yaml" <<'EOF'
 name: ldap-demo
+about: { owner: nina@example.org }
 source: { mllp: { port: 6737 } }
 script: transform.ts
 destination: { file: { dir: out } }
@@ -127,6 +131,18 @@ wait_for() { # seconds condition
   done
 }
 
+echo "== owners before anyone signs in (the first refresh round, right after the start)"
+wait_for 30 'grep "directory users checked" "$P/run.log" >/dev/null' || fail+=" no-first-round"
+grep "directory users checked" "$P/run.log" | sed -n 1p | sed 's/.*INFO /   /'
+made=$(q "SELECT source || ' ' || (last_sign_in_at IS NULL) || ' ' || display_name FROM users WHERE username = 'test-user-nested'")
+echo "   nina@example.org: $made"
+[ "$made" = "ldap true Nina Nested" ] || fail+=" owner-account($made)"
+reason=$(q "SELECT actor_name || ' ' || (detail->>'reason') FROM audit_log WHERE action = 'user.create' AND subject = 'test-user-nested' AND at >= '$START'")
+[ "$reason" = "engine owner" ] || fail+=" owner-audit($reason)"
+[ -z "$(q "SELECT id FROM users WHERE username = 'test-user-nobody'")" ] || fail+=" no-group-account"
+grep "noah@example.org" "$P/run.log" | grep "in no Ductus group" >/dev/null || fail+=" no-group-warning"
+grep "noah@example.org" "$P/run.log" | grep "in no Ductus group" | sed 's/.*WARN /   /'
+
 echo "== directory people sign in (accounts made at the first sign-in)"
 for who in ada olaf anna nested; do
   code=$(signin "test-user-$who" "test-user-$who-password")
@@ -137,6 +153,9 @@ as test-user-ada /session >/dev/null
 [ "$(js "d['role'], sorted(d['permissions'])")" = "admin ['audit', 'payloads']" ] || fail+=" ada($(cat "$P/answer"))"
 as test-user-nested /session >/dev/null
 [ "$(js "d['role']")" = operator ] || fail+=" nested-groups"
+# Nina's first sign-in is her account the engine made: one account, signed in now.
+[ "$(q "SELECT count(*) || ' ' || bool_and(last_sign_in_at IS NOT NULL) FROM users WHERE username LIKE 'test-user-nested%'")" = "1 true" ] ||
+  fail+=" owner-signs-in"
 as test-user-anna /session >/dev/null
 [ "$(js "d['role'], d['kind']")" = "viewer user" ] || fail+=" anna"
 row=$(q "SELECT source || ' ' || display_name || ' ' || email FROM users WHERE username = 'test-user-anna'")
@@ -270,6 +289,10 @@ echo "   audit: $actions"
 signins=$(q "SELECT count(*) FROM audit_log WHERE action = 'session.sign_in' AND detail->>'with' = 'ldap' AND actor_name LIKE 'test-user-%'
   AND at >= '$START'")
 [ "$signins" -ge 5 ] || fail+=" sign-in-rows($signins)"
+
+# Several rounds ran (refresh: 1m): the owner in no group was warned about once.
+warned=$(grep "noah@example.org" "$P/run.log" | grep -c "in no Ductus group" || true)
+[ "$warned" = 1 ] || fail+=" warned-$warned-times"
 
 kill -INT "$ENGINE"
 wait "$ENGINE" || true

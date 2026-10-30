@@ -2465,6 +2465,56 @@ async fn an_interface_runs_on_one_engine_at_a_time() {
     assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
 }
 
+/// A directory that is down never delays a start (0.6.7.3: the first refresh round runs right after
+/// the start, in the background). Here one that takes connections and never answers, the worse
+/// kind: the start is as quick as one without `auth.ldap`, and the round gives up after the
+/// directory's timeout, logged, while the engine runs.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_directory_that_is_down_never_delays_the_start() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    // Connections land in its backlog; nothing ever answers them.
+    let silent = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = silent.local_addr().unwrap().port();
+    let make = |name: &str, ldap: bool| {
+        // An owner email that reaches nobody: the round has someone to look up, so it connects.
+        let interface = format!(
+            "name: {name}\nabout: {{ owner: owner-{nanos}@example.org }}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestination: {{ file: {{ dir: out }} }}\n",
+            free_port()
+        );
+        let mut files = vec![(format!("interfaces/{name}/interface.yaml"), interface)];
+        if ldap {
+            files.push((
+                "ductus.yaml".into(),
+                "auth:\n  ldap:\n    resource: corp\n    user_base: ou=people,dc=example,dc=org\n    user_filter: (uid={username})\n    groups: { viewer: 'cn=v,ou=groups,dc=example,dc=org' }\n".into(),
+            ));
+            files.push((
+                "resources.yaml".into(),
+                format!("ldap:\n  corp: {{ url: 'ldap://127.0.0.1:{port}', insecure: true, timeout: 8s }}\n"),
+            ));
+        }
+        let files: Vec<(&str, &str)> = files.iter().map(|(p, c)| (p.as_str(), c.as_str())).collect();
+        project(&files)
+    };
+    let without = make(&format!("dir-down-plain-{nanos}"), false);
+    let with = make(&format!("dir-down-ldap-{nanos}"), true);
+    let start = |dir: &Path, log: &str| {
+        let t = std::time::Instant::now();
+        let (child, path) = start_engine(dir, &db, None, log);
+        assert!(wait_for_log(&path, "started interfaces=", 60), "{}", std::fs::read_to_string(&path).unwrap());
+        (child, path, t.elapsed())
+    };
+    let (_plain, _, plain) = start(without.path(), "plain.log");
+    let (_down, log, down) = start(with.path(), "down.log");
+    println!("started in {plain:?} without auth.ldap, {down:?} with the directory down");
+    assert!(down < std::time::Duration::from_secs(5), "the start waited for the directory: {down:?}");
+    assert!(down < plain + std::time::Duration::from_secs(2), "{down:?} vs {plain:?}");
+    let text = std::fs::read_to_string(&log).unwrap();
+    assert!(!text.contains("couldn't reach the directory"), "the round is still waiting for it: {text}");
+    assert!(wait_for_log(&log, "couldn't reach the directory", 30), "{}", std::fs::read_to_string(&log).unwrap());
+    drop(silent);
+}
+
 /// The lanes guard: lowering `ordering.partitions` (or removing `ordering.key`) with messages
 /// waiting in lanes it no longer has refuses the start, and `ductus validate` says so first;
 /// keeping them starts; raising them with messages waiting starts with a warning.

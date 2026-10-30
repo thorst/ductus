@@ -64,46 +64,73 @@ impl Store {
     /// An account holding the name with *another* id was someone else's: it is renamed
     /// `<name>#<account id>` and refused (its sessions end, its tokens stay dead), and the person
     /// gets an account of their own. Every change of name or email keeps the old value
-    /// (`user_names`). Refuses a name a local account holds.
+    /// (`user_names`). Refuses a name a local account holds. A new account's `user.create` row
+    /// takes `audit.detail`'s fields too (the engine's `"reason": "owner"`).
+    ///
+    /// Two engines (or two sign-ins) making the same person's account at once: the one that
+    /// commits second hits the unique name or id, and is retried once, finding the account.
     pub async fn save_directory_user(
         &self,
         username: &str,
         person: &DirectoryPerson,
         audit: &Audit<'_>,
     ) -> Result<(User, DirectoryUpdate)> {
+        match self.save_directory_user_once(username, person, audit).await {
+            Err(e) if unique_violation(&e) => self.save_directory_user_once(username, person, audit).await,
+            saved => saved,
+        }
+    }
+
+    /// `save_directory_user` for a refresh: an account the directory says nothing new about is
+    /// read and left as it is, with no lock and nothing written (no commit to wait for); the round
+    /// notes everyone it asked about at once (`directory_checked`). Anything new is saved as a
+    /// sign-in's would be.
+    pub async fn check_directory_user(
+        &self,
+        username: &str,
+        person: &DirectoryPerson,
+        audit: &Audit<'_>,
+    ) -> Result<(User, DirectoryUpdate)> {
         let permissions = clean_permissions(&person.permissions)?;
-        let typed = username.trim();
-        let name = person.username.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(typed);
-        let id = person.directory_id.as_deref();
+        let (name, typed, id) = names(username, person);
+        let found =
+            candidates(name, typed, id, false).fetch_all(&self.pool).await.context("checking the directory account")?;
+        let (account, holder) = resolve(&found, name, typed, id);
+        if let Some(old) = account
+            && holder.is_none_or(|h| h.id == old.id)
+            && old.source == "ldap"
+            && unchanged(old, name, person, &permissions, id)
+        {
+            return Ok((old.clone(), DirectoryUpdate::Unchanged));
+        }
+        self.save_directory_user(username, person, audit).await
+    }
+
+    /// The directory was asked about these accounts just now (one statement for a whole round).
+    pub async fn directory_checked(&self, ids: &[i32]) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        sqlx::query("UPDATE users SET directory_checked_at = now() WHERE id = ANY($1) AND source = 'ldap'")
+            .bind(ids)
+            .execute(&self.pool)
+            .await
+            .context("noting when the directory was asked")?;
+        Ok(())
+    }
+
+    async fn save_directory_user_once(
+        &self,
+        username: &str,
+        person: &DirectoryPerson,
+        audit: &Audit<'_>,
+    ) -> Result<(User, DirectoryUpdate)> {
+        let permissions = clean_permissions(&person.permissions)?;
+        let (name, typed, id) = names(username, person);
         let mut tx = self.pool.begin().await.context("saving the directory account")?;
-        // Everyone this could be, locked in id order: two sign-ins at once take them the same way.
-        let found = sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(format!(
-            "SELECT {USER_COLUMNS} FROM users
-             WHERE lower(username) IN (lower($1), lower($2)) OR directory_id = $3
-             ORDER BY id FOR UPDATE"
-        )))
-        .bind(name)
-        .bind(typed)
-        .bind(id)
-        .fetch_all(&mut *tx)
-        .await
-        .context("saving the directory account")?;
-        let named = |n: &str| found.iter().find(|u| u.username.to_lowercase() == n.to_lowercase());
-        // Not known by an id that says who it is: a local account, or a directory one without an id
-        // (made before ids were kept) or with one from another attribute.
-        let unproven = |u: &User| match (&u.directory_id, id) {
-            (Some(theirs), Some(ours)) => !same_attribute(theirs, ours),
-            _ => true,
-        };
-        let holder = named(name);
-        let account = match id {
-            None => holder,
-            Some(id) => found
-                .iter()
-                .find(|u| u.directory_id.as_deref() == Some(id))
-                .or(holder.filter(|u| unproven(u)))
-                .or(named(typed).filter(|u| u.source == "ldap" && u.directory_id.is_none())),
-        };
+        let found =
+            candidates(name, typed, id, true).fetch_all(&mut *tx).await.context("saving the directory account")?;
+        let (account, holder) = resolve(&found, name, typed, id);
         if let Some(local) = account.into_iter().chain(holder).find(|u| u.source != "ldap") {
             bail!("`{}` is a {} account, not a directory one", local.username, local.source);
         }
@@ -125,8 +152,12 @@ impl Store {
                 .fetch_one(&mut *tx)
                 .await
                 .context("making the directory account")?;
-                let detail =
+                let mut detail =
                     serde_json::json!({ "role": user.role.label(), "permissions": user.permissions, "source": "ldap" });
+                if let (Some(serde_json::Value::Object(extra)), Some(fields)) = (&audit.detail, detail.as_object_mut())
+                {
+                    fields.extend(extra.clone());
+                }
                 let row = Audit {
                     action: "user.create",
                     subject: Some(&user.username),
@@ -224,18 +255,84 @@ impl Store {
     }
 }
 
-/// Refuse account `id` in `tx` (see `refuse_directory_user`). True if it newly was.
+/// The sign-in name the account takes (the directory's spelling, else what was typed), what was
+/// typed, and the directory id.
+fn names<'a>(username: &'a str, person: &'a DirectoryPerson) -> (&'a str, &'a str, Option<&'a str>) {
+    let typed = username.trim();
+    let name = person.username.as_deref().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(typed);
+    (name, typed, person.directory_id.as_deref())
+}
+
+/// Everyone the person could be: by either name, or by id. `lock`: in id order, so two sign-ins
+/// at once take them the same way.
+fn candidates<'a>(
+    name: &'a str,
+    typed: &'a str,
+    id: Option<&'a str>,
+    lock: bool,
+) -> sqlx::query::QueryAs<'a, Postgres, User, sqlx::postgres::PgArguments> {
+    let lock = if lock { "FOR UPDATE" } else { "" };
+    sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(format!(
+        "SELECT {USER_COLUMNS} FROM users
+         WHERE lower(username) IN (lower($1), lower($2)) OR directory_id = $3
+         ORDER BY id {lock}"
+    )))
+    .bind(name)
+    .bind(typed)
+    .bind(id)
+}
+
+/// Of the candidates: the person's account, if they have one, and the account holding the name.
+/// With an id, the account is the one with that id, else the name's holder when it isn't known by
+/// an id that says who it is (a local account, or a directory one without an id, made before ids
+/// were kept, or with one from another attribute).
+fn resolve<'u>(found: &'u [User], name: &str, typed: &str, id: Option<&str>) -> (Option<&'u User>, Option<&'u User>) {
+    let named = |n: &str| found.iter().find(|u| u.username.to_lowercase() == n.to_lowercase());
+    let unproven = |u: &User| match (&u.directory_id, id) {
+        (Some(theirs), Some(ours)) => !same_attribute(theirs, ours),
+        _ => true,
+    };
+    let holder = named(name);
+    let account = match id {
+        None => holder,
+        Some(id) => found
+            .iter()
+            .find(|u| u.directory_id.as_deref() == Some(id))
+            .or(holder.filter(|u| unproven(u)))
+            .or(named(typed).filter(|u| u.source == "ldap" && u.directory_id.is_none())),
+    };
+    (account, holder)
+}
+
+/// Whether saving `person` would change nothing of `old` (its name, as saving would spell it).
+fn unchanged(old: &User, name: &str, person: &DirectoryPerson, permissions: &[String], id: Option<&str>) -> bool {
+    old.username.to_lowercase() == name.to_lowercase()
+        && old.display_name == person.display_name.trim()
+        && old.email == person.email.trim()
+        && old.role == person.role
+        && old.permissions == permissions
+        && id.is_none_or(|i| old.directory_id.as_deref() == Some(i))
+        && old.directory_refused_at.is_none()
+}
+
+/// A unique index refused the write (`users_username`, `users_directory_id`): someone else saved
+/// the same person in between.
+fn unique_violation(e: &anyhow::Error) -> bool {
+    matches!(e.downcast_ref::<sqlx::Error>(), Some(sqlx::Error::Database(d)) if d.is_unique_violation())
+}
+
+/// Refuse account `id` in `tx` (see `refuse_directory_user`). True if it newly was. One refused
+/// already isn't written again (a refresh round notes when it was asked, `directory_checked`).
 async fn refuse(tx: &mut Transaction<'_, Postgres>, id: i32, reason: &str, audit: &Audit<'_>) -> Result<bool> {
     let newly: Option<String> = sqlx::query_scalar(
-        "UPDATE users SET directory_refused_at = COALESCE(directory_refused_at, now()), directory_checked_at = now()
-         WHERE id = $1 AND source = 'ldap'
-         RETURNING CASE WHEN directory_refused_at = now() THEN username END",
+        "UPDATE users SET directory_refused_at = now(), directory_checked_at = now()
+         WHERE id = $1 AND source = 'ldap' AND directory_refused_at IS NULL
+         RETURNING username",
     )
     .bind(id)
     .fetch_optional(&mut **tx)
     .await
-    .context("ending the directory account's access")?
-    .flatten();
+    .context("ending the directory account's access")?;
     sqlx::query("DELETE FROM api_sessions WHERE user_id = $1")
         .bind(id)
         .execute(&mut **tx)

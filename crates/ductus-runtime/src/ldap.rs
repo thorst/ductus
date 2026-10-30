@@ -12,12 +12,14 @@
 use crate::control::Engine;
 use crate::tls::{Certificates, Trust};
 use anyhow::{Context, Result, bail};
+use ductus_core::alerts::{OwnerContact, is_address};
 use ductus_core::ldap::{self, Access, DirectoryId, IdSource, IdValue, LdapAuth};
+use ductus_core::owners::{self, Reach};
 use ductus_core::resources::{LdapSecurity, LdapServer, Resources};
 use ductus_core::tls::ConnectTls;
 use ductus_store::{Audit, By, DirectoryAccount, DirectoryPerson, Role, Store};
 use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -157,6 +159,12 @@ impl Directory {
     /// when the directory can't be reached; one account's failure is its own.
     pub async fn check_all(&self, accounts: &[DirectoryAccount]) -> Result<Vec<Result<Verdict>>> {
         let mut conn = self.connect().await?;
+        let out = self.check_on(&mut conn, accounts).await;
+        conn.close().await;
+        Ok(out)
+    }
+
+    async fn check_on(&self, conn: &mut Conn, accounts: &[DirectoryAccount]) -> Vec<Result<Verdict>> {
         let mut out = Vec::with_capacity(accounts.len());
         for account in accounts {
             let verdict = async {
@@ -168,13 +176,28 @@ impl Directory {
                 if self.disabled(&entry) {
                     return Ok(Verdict::Disabled);
                 }
-                self.verdict(&mut conn, entry).await
+                self.verdict(conn, entry).await
             }
             .await;
             out.push(verdict);
         }
-        conn.close().await;
-        Ok(out)
+        out
+    }
+
+    /// Who has this email address in the directory (`attributes.email`, the value escaped), and
+    /// what the directory says about them: one entry, or how many there are (none, or several:
+    /// nobody is picked).
+    async fn by_email(&self, conn: &mut Conn, email: &str) -> Result<Result<Verdict, usize>> {
+        let filter = format!("({}={})", self.auth.attributes.email, ldap::escape(email.trim()));
+        let mut found = conn.search(&self.auth.user_base, Scope::Subtree, &filter, self.person_attributes()).await?;
+        if found.len() != 1 {
+            return Ok(Err(found.len()));
+        }
+        let entry = found.pop().expect("one");
+        if self.disabled(&entry) {
+            return Ok(Ok(Verdict::Disabled));
+        }
+        Ok(Ok(self.verdict(conn, entry).await?))
     }
 
     fn disabled(&self, entry: &SearchEntry) -> bool {
@@ -431,21 +454,204 @@ pub async fn signed_in(
 /// Read again what the directory says about everyone with a session or token (`refresh`), by
 /// their directory id where it's known: changes are saved (a renamed sign-in name renames the
 /// account), refusals end access. When the directory can't be reached nothing changes (sessions
-/// run on to their own end: an outage mustn't sign everyone out).
+/// run on to their own end: an outage mustn't sign everyone out). A round without owners: see
+/// `Round` for the engine's.
 pub async fn refresh(store: &Store, directory: &Directory) -> Result<Refreshed> {
-    let people = store.directory_users_to_check().await?;
-    let mut done = Refreshed::default();
-    if people.is_empty() {
-        return Ok(done);
+    Round::default().run(store, directory).await
+}
+
+/// One engine's refresh rounds: the people with a session or token, and the owners its project
+/// names (interfaces, destinations, resources.yaml). Owners' directory accounts are checked like
+/// the signed-in ones (someone who left is refused, so they show as `disabled`; a rename is seen
+/// within `refresh`); owner emails that reach nobody, and owners that name a disabled account, are
+/// looked up by the email attribute, and the one person with that email in a Ductus role group
+/// gets their account before their first sign-in.
+#[derive(Default)]
+pub struct Round {
+    /// The owner texts, each once.
+    owners: Vec<String>,
+    teams: BTreeMap<String, OwnerContact>,
+    /// Owner texts already warned about in this run (lowercase): once each.
+    said: HashSet<String>,
+}
+
+impl Round {
+    pub fn new(owners: impl IntoIterator<Item = String>, teams: BTreeMap<String, OwnerContact>) -> Self {
+        let mut owners: Vec<String> =
+            owners.into_iter().map(|o| o.trim().to_string()).filter(|o| !o.is_empty()).collect();
+        owners.sort_by_key(|o| o.to_lowercase());
+        owners.dedup_by(|x, y| owners::same(x, y));
+        Self { owners, teams, said: HashSet::new() }
     }
-    let verdicts = directory.check_all(&people).await?;
+
+    /// The engine's owners and teams.
+    pub fn of(engine: &Engine) -> Self {
+        let configs = engine.interfaces.iter().map(|i| i.config.as_ref());
+        let owned = owners::owned(configs, &engine.resources).into_iter().map(|o| o.owner);
+        Self::new(owned, engine.teams.clone())
+    }
+
+    /// One round, on one connection. Fails only when the directory can't be reached.
+    pub async fn run(&mut self, store: &Store, directory: &Directory) -> Result<Refreshed> {
+        let mut accounts = if self.owners.is_empty() { Default::default() } else { store.accounts().await? };
+        let mut checking = store.directory_users_to_check().await?;
+        for owner in self.owner_accounts(&accounts) {
+            if !checking.iter().any(|a| a.id == owner.id) {
+                checking.push(owner);
+            }
+        }
+        let mut done = Refreshed::default();
+        if checking.is_empty() && self.lookups(&accounts).is_empty() {
+            return Ok(done); // nothing to ask: no connection
+        }
+        let mut conn = directory.connect().await?;
+        let verdicts = directory.check_on(&mut conn, &checking).await;
+        save_verdicts(store, &checking, verdicts, &mut done).await;
+        if !self.owners.is_empty() {
+            if done.changed + done.refused > 0 {
+                accounts = store.accounts().await?; // a refusal just now may make an owner one to look up
+            }
+            self.make_owners(store, directory, &mut conn, &accounts, &mut done).await;
+        }
+        conn.close().await;
+        Ok(done)
+    }
+
+    fn reaches(&self, accounts: &ductus_store::Accounts) -> Vec<(String, Reach)> {
+        let people = crate::alerts::people(&accounts.users, &accounts.former);
+        self.owners.iter().map(|o| (o.clone(), owners::reach(o, &people, &self.teams))).collect()
+    }
+
+    /// The directory accounts owner texts reach (disabled ones too: refused by the directory, they
+    /// come back when it says yes again), except accounts disabled here.
+    fn owner_accounts(&self, accounts: &ductus_store::Accounts) -> Vec<DirectoryAccount> {
+        let mut out: Vec<DirectoryAccount> = Vec::new();
+        for (_, reach) in self.reaches(accounts) {
+            let (Reach::User(u) | Reach::Renamed { user: u, .. } | Reach::Reused { user: u, .. } | Reach::Disabled(u)) =
+                reach
+            else {
+                continue;
+            };
+            let Some(user) = accounts.users.iter().find(|a| a.username == u) else { continue };
+            if user.source == "ldap" && user.disabled_at.is_none() && !out.iter().any(|a| a.id == user.id) {
+                let (id, username, directory_id) = (user.id, user.username.clone(), user.directory_id.clone());
+                out.push(DirectoryAccount { id, username, directory_id });
+            }
+        }
+        out
+    }
+
+    /// The owner texts to look up, with the email to look up: an email address that reaches
+    /// nobody (it's mailed as it is), and a text that names a disabled account (its own email
+    /// when it is one, else the account's).
+    fn lookups(&self, accounts: &ductus_store::Accounts) -> Vec<(String, String)> {
+        let mut out: Vec<(String, String)> = Vec::new();
+        for (owner, reach) in self.reaches(accounts) {
+            let email = match &reach {
+                Reach::Address => owner.clone(),
+                Reach::Disabled(_) if is_address(&owner) => owner.clone(),
+                Reach::Disabled(u) => match accounts.users.iter().find(|a| &a.username == u) {
+                    Some(a) if is_address(&a.email) => a.email.clone(),
+                    _ => continue,
+                },
+                _ => continue,
+            };
+            if !out.iter().any(|(_, e)| owners::same(e, &email)) {
+                out.push((owner, email));
+            }
+        }
+        out
+    }
+
+    async fn make_owners(
+        &mut self,
+        store: &Store,
+        directory: &Directory,
+        conn: &mut Conn,
+        accounts: &ductus_store::Accounts,
+        done: &mut Refreshed,
+    ) {
+        for (owner, email) in self.lookups(accounts) {
+            let mailed = is_address(&owner);
+            let found = match directory.by_email(conn, &email).await {
+                Ok(found) => found,
+                Err(e) => {
+                    tracing::warn!(%owner, error = %format!("{e:#}"), "couldn't look an owner up in the directory; trying at the next refresh");
+                    done.failed += 1;
+                    continue;
+                }
+            };
+            let person = match found {
+                Ok(Verdict::Allowed(person)) => person,
+                Ok(Verdict::NoGroup) if mailed => {
+                    self.say(&owner, "this owner is in the directory but in no Ductus group, so no account is made: add them to one (alerts go to the address itself until then)");
+                    continue;
+                }
+                Ok(Verdict::NoGroup) => {
+                    self.say(&owner, &format!("this owner is in the directory but in no Ductus group: add them to one, or write their email ({email})"));
+                    continue;
+                }
+                Err(n) if n > 1 => {
+                    self.say(&owner, &format!("{n} entries in the directory have the email {email}: no account is made for this owner (write the one meant by their email, and give the others their own)"));
+                    continue;
+                }
+                // Nobody there with that email (alerts go to it as an address), or disabled there.
+                _ => continue,
+            };
+            // The same person as an account disabled here: an admin's decision stands.
+            let id = person.id.as_ref().map(DirectoryId::to_string);
+            if accounts.users.iter().any(|u| u.disabled_at.is_some() && id.is_some() && u.directory_id == id) {
+                continue;
+            }
+            let Some(username) = person.username.clone() else {
+                self.say(&owner, "this owner is in the directory, but their sign-in name can't be read (name it in auth.ldap.attributes.username), so no account is made before their first sign-in");
+                continue;
+            };
+            let audit = Audit {
+                detail: Some(serde_json::json!({ "reason": "owner" })),
+                ..Audit::new(By::engine(), "user.create")
+            };
+            match store.save_directory_user(&username, &person.for_store(), &audit).await {
+                Ok((user, ductus_store::DirectoryUpdate::Created)) => {
+                    tracing::info!(%owner, user = %user.username, "made the directory account of an owner who hasn't signed in yet");
+                    done.made += 1;
+                }
+                Ok((_, ductus_store::DirectoryUpdate::Changed)) => done.changed += 1,
+                Ok(_) => {}
+                Err(e) => self.say(&owner, &format!("this owner's directory account can't be made: {e:#}")),
+            }
+        }
+    }
+
+    /// The owner texts warned about so far in this run (lowercase).
+    pub fn warned(&self) -> impl Iterator<Item = &str> {
+        self.said.iter().map(String::as_str)
+    }
+
+    /// Warn about an owner text, once per run.
+    fn say(&mut self, owner: &str, what: &str) {
+        if self.said.insert(owner.to_lowercase()) {
+            tracing::warn!(%owner, "{what}");
+        }
+    }
+}
+
+/// Save what the directory said about each account: changes, refusals. What says nothing new is
+/// written once for all: when it was asked.
+async fn save_verdicts(
+    store: &Store,
+    people: &[DirectoryAccount],
+    verdicts: Vec<Result<Verdict>>,
+    done: &mut Refreshed,
+) {
     let by = By::engine();
+    let mut asked = Vec::new();
     for (account, verdict) in people.iter().zip(verdicts) {
         let name = &account.username;
         let saved = match verdict {
             Ok(Verdict::Allowed(person)) => {
                 let audit = Audit::new(by, "user.directory_change");
-                store.save_directory_user(name, &person.for_store(), &audit).await.map(|(user, update)| {
+                store.check_directory_user(name, &person.for_store(), &audit).await.map(|(user, update)| {
                     if user.username != *name {
                         tracing::info!(user = %name, now = %user.username, "a directory user's sign-in name changed there: the account is renamed");
                     }
@@ -458,7 +664,7 @@ pub async fn refresh(store: &Store, directory: &Directory) -> Result<Refreshed> 
                 let audit = Audit::new(by, "user.directory_refused");
                 store.refuse_directory_user(account.id, refused.reason(), &audit).await.map(|newly| {
                     if newly {
-                        tracing::warn!(user = %name, reason = refused.reason(), "the directory refused a signed-in user: their sessions ended");
+                        tracing::warn!(user = %name, reason = refused.reason(), "the directory refused a user: their sessions ended");
                         done.refused += 1;
                     }
                 })
@@ -466,14 +672,19 @@ pub async fn refresh(store: &Store, directory: &Directory) -> Result<Refreshed> 
             Err(e) => Err(e),
         };
         match saved {
-            Ok(()) => done.checked += 1,
+            Ok(()) => {
+                done.checked += 1;
+                asked.push(account.id);
+            }
             Err(e) => {
                 tracing::warn!(user = %name, error = %format!("{e:#}"), "couldn't check a user in the directory; trying at the next refresh");
                 done.failed += 1;
             }
         }
     }
-    Ok(done)
+    if let Err(e) = store.directory_checked(&asked).await {
+        tracing::warn!(error = %format!("{e:#}"), "couldn't note when the directory was asked about its users");
+    }
 }
 
 /// What a refresh round did.
@@ -482,32 +693,42 @@ pub struct Refreshed {
     pub checked: usize,
     pub changed: usize,
     pub refused: usize,
+    /// Owners' accounts made before their first sign-in.
+    pub made: usize,
     pub failed: usize,
 }
 
-/// Start the refresh rounds (with the engine; nothing if `auth.ldap` isn't configured).
+/// Start the refresh rounds (with the engine; nothing if `auth.ldap` isn't configured): the first
+/// at once, in the background (a directory that is down never delays a start), then every
+/// `refresh`.
 pub fn start(engine: &Arc<Engine>) {
     let Some(directory) = engine.directory.clone() else { return };
+    let mut round = Round::of(engine);
     let every = directory.auth.refresh;
+    // The store, not the engine: a round waiting on a directory that's down holds nothing of it.
+    let store = engine.store.clone();
     let weak = Arc::downgrade(engine);
     tokio::spawn(async move {
         loop {
-            tokio::time::sleep(every).await;
-            let Some(engine) = weak.upgrade() else { return };
-            match refresh(&engine.store, &directory).await {
-                Ok(r) if r.checked + r.failed > 0 => tracing::info!(
+            if weak.strong_count() == 0 {
+                return;
+            }
+            match round.run(&store, &directory).await {
+                Ok(r) if r.checked + r.made + r.failed > 0 => tracing::info!(
                     checked = r.checked,
                     changed = r.changed,
                     refused = r.refused,
+                    made = r.made,
                     failed = r.failed,
                     "directory users checked"
                 ),
                 Ok(_) => {}
                 Err(e) => tracing::warn!(
                     error = %format!("{e:#}"),
-                    "couldn't reach the directory to check signed-in users; their sessions continue, trying again at the next refresh"
+                    "couldn't reach the directory to check its users; sessions continue, trying again at the next refresh"
                 ),
             }
+            tokio::time::sleep(every).await;
         }
     });
 }

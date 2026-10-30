@@ -22,7 +22,8 @@
 # certificate (`gen --tls` presents one), shown on its page, in the "Ours" group and the Ports card. The directory (a throwaway OpenLDAP, scripts/dev/slapd.sh): a directory
 # person signs in, their account and the Users page show what the directory decides, read-only.
 # Owners: that person owns adt's archive, so their Interfaces page opens on "Mine", and the Owners
-# page says which owners are people with an account and which reach nobody.
+# page says which owners are people with an account and which reach nobody; another directory
+# person owns a resource and never signs in: the engine made her account ("Never signed in").
 # Screenshots: ui/test-results/.
 #
 # Needs Node and the UI's packages (cd ui && npm ci), Playwright's Chromium
@@ -70,7 +71,8 @@ apis:
   # Owners by former names (0.6.7.2): Rita was renamed (renamed); Rex's name is someone else's now (reused).
   payer: { url: "https://localhost:7463/", owner: Rita Lab, custom: { baa_signed: n/a } }
   hie: { url: "https://localhost:7464/", owner: Rex Night, custom: { baa_signed: n/a } }
-  legacy-portal: { url: "https://localhost:7465/", custom: { baa_signed: n/a } }
+  # An owner in the directory who never signs in (0.6.7.3): the engine makes her account (Anna Smith).
+  legacy-portal: { url: "https://localhost:7465/", owner: anna@example.org, custom: { baa_signed: n/a } }
   fax-gateway: { url: "https://localhost:7469/", custom: { baa_signed: n/a } }
 # The directory people sign in with: plain LDAP (a test directory), so no certificate row.
 ldap:

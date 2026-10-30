@@ -105,6 +105,25 @@ test("on the Users page a directory account is read-only and can still be disabl
   await expect(row).toContainText("Active");
 });
 
+// demo-ui.sh's legacy-portal is owned by anna@example.org, the directory's Anna Smith (a viewer
+// there), who never signs in here: the engine made her account at its first refresh round.
+test("an owner in the directory has an account before their first sign-in", async ({ page }) => {
+  await signInAs(page, admin, "/users");
+  const row = page.getByRole("table", { name: "Users" }).getByRole("row", { name: /test-user-anna\b/ });
+  await expect(row).toContainText("Directory account, made because they own something");
+  await expect(row).toContainText("Never signed in");
+  await expect(row).toContainText("Anna Smith · anna@example.org");
+  await expect(row).toContainText("viewer");
+  await page.screenshot({ path: "test-results/directory-owner-account.png", fullPage: true });
+
+  await page.goto("/owners");
+  const anna = page
+    .getByRole("region", { name: "Owners", exact: true })
+    .getByRole("listitem", { name: "anna@example.org" });
+  await expect(anna).toContainText("Anna Smith (test-user-anna)");
+  await expect(anna).toContainText("api legacy-portal");
+});
+
 test("the directory account screens pass axe in every theme", async ({ browser }) => {
   test.setTimeout(120_000);
   const contexts = [];

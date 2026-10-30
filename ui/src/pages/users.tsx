@@ -24,7 +24,8 @@ export function UsersPage() {
     <>
       <PageHeader title="Users">
         Who signs in, and what each may do. Accounts are disabled, never deleted: the record of what they did names
-        them. Directory accounts are made at their first sign-in; their role, name and email come from the directory.
+        them. Directory accounts are made at their first sign-in, or before it when they own something; their role, name
+        and email come from the directory.
       </PageHeader>
       {isAdmin ? <Users /> : <p className="text-sm text-muted">Managing users needs an admin.</p>}
     </>
@@ -80,6 +81,7 @@ function Users() {
                           <span className="inline-flex items-center gap-1">
                             <Network aria-hidden className="size-3" />
                             Directory account
+                            {u.made_for_owner && <>, made because they own something</>}
                             {u.directory_checked_at && <>, checked {ago(u.directory_checked_at)}</>}
                           </span>
                         ) : (
@@ -96,7 +98,7 @@ function Users() {
                     <Td>
                       <State user={u} />
                     </Td>
-                    <Td>{u.last_sign_in_at ? ago(u.last_sign_in_at) : "never"}</Td>
+                    <Td>{u.last_sign_in_at ? ago(u.last_sign_in_at) : "Never signed in"}</Td>
                     <Td>
                       <div className="flex flex-wrap gap-1">
                         {/* A directory account's role, name and email are the directory's: nothing to edit here. */}
