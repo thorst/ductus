@@ -1,7 +1,7 @@
 import { useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { CircleAlert, Download, Eye, UserCheck } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { CircleAlert, Download, Eye, PencilLine, UserCheck } from "lucide-react";
+import { useRef, useState, type FormEvent } from "react";
 import { previewReassign } from "@/api/actions";
 import { ApiError, type Schemas } from "@/api/client";
 import { ownerPeople, owners } from "@/api/queries";
@@ -27,19 +27,79 @@ export function OwnersPage() {
         Who owns each interface (<code>about.owner</code>), destinations someone else owns, and resources.yaml entries;
         and whether each owner is a person with an account.
       </PageHeader>
-      <Loaded query={query}>
-        {(groups) => (
-          <div className="grid items-start gap-6 xl:grid-cols-[1fr_1fr]">
-            <Groups groups={groups} />
-            <Reassign groups={groups} />
-          </div>
-        )}
-      </Loaded>
+      <Loaded query={query}>{(groups) => <OwnersAndMove groups={groups} />}</Loaded>
     </>
   );
 }
 
-function Groups({ groups }: { groups: Schemas["OwnerGroup"][] }) {
+function OwnersAndMove({ groups }: { groups: Schemas["OwnerGroup"][] }) {
+  const move = useMove(groups);
+  return (
+    <div className="grid items-start gap-6 xl:grid-cols-[1fr_1fr]">
+      <Groups groups={groups} onUpdate={move.update} />
+      <Reassign groups={groups} move={move} />
+    </div>
+  );
+}
+
+/**
+ * What to do about an owner that reaches someone but should be written as their email. The line
+ * above it (`OwnerReach`) already says renamed or reused, so only the action; the API's `advice`
+ * (the CLI's whole sentence) otherwise.
+ */
+function todo(g: Schemas["OwnerGroup"]): string {
+  const text = g.advice ?? "";
+  if (g.reach === "renamed" && g.suggest) return `Write their email: ${g.suggest}`;
+  if (g.reach === "reused" && g.was) {
+    return `Alerts reach them. If ${g.was.whose} was meant, write that person's email instead.`;
+  }
+  return text.charAt(0).toUpperCase() + text.slice(1);
+}
+
+/** The move's form and preview, kept here so an owner's "Update" can fill it in and preview it. */
+function useMove(groups: Schemas["OwnerGroup"][]) {
+  const card = useRef<HTMLElement>(null);
+  const [from, setFrom] = useState(groups.find((g) => g.owner)?.owner ?? "");
+  const [to, setTo] = useState("");
+  // Things left out (all move by default): splitting one person's work between two. Keys are
+  // `i:<interface>` and `r:<resource>`.
+  const [leftOut, setLeftOut] = useState<Set<string>>(new Set());
+  const [preview, setPreview] = useState<Schemas["ReassignPreview"] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const run = async (from: string, to: string, interfaces: string[], resources: string[]) => {
+    setBusy(true);
+    setError(null);
+    try {
+      setPreview(await previewReassign(from, to.trim(), interfaces, resources));
+    } catch (err) {
+      setPreview(null);
+      setError(err instanceof ApiError ? err.message : "The engine didn't answer.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  // An owner's "Update": everything of theirs moves to what it suggests, previewed at once.
+  const update = (owner: string, suggested: string) => {
+    setFrom(owner);
+    setTo(suggested);
+    setLeftOut(new Set());
+    card.current?.scrollIntoView({ block: "nearest" });
+    void run(owner, suggested, [], []);
+  };
+
+  return { card, from, setFrom, to, setTo, leftOut, setLeftOut, preview, setPreview, error, busy, run, update };
+}
+
+function Groups({
+  groups,
+  onUpdate,
+}: {
+  groups: Schemas["OwnerGroup"][];
+  onUpdate: (from: string, to: string) => void;
+}) {
   const lost = groups.filter(unreachable).length;
   return (
     <Card aria-label="Owners">
@@ -58,6 +118,25 @@ function Groups({ groups }: { groups: Schemas["OwnerGroup"][] }) {
               <span className="font-normal text-muted">({count(g.owns.length + g.resources.length)})</span>
             </h2>
             {g.owner && <OwnerReach group={g} className="mt-0.5 text-sm" />}
+            {g.owner && g.advice && (
+              <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-sm">
+                <span className="inline-flex items-start gap-1.5">
+                  <CircleAlert aria-hidden className="mt-0.5 size-3.5 shrink-0 text-warn" />
+                  <span>{todo(g)}</span>
+                </span>
+                {g.suggest && (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    aria-label={`Update ${g.owner} to ${g.suggest}`}
+                    onClick={() => onUpdate(g.owner ?? "", g.suggest ?? "")}
+                  >
+                    <PencilLine aria-hidden />
+                    Update
+                  </Button>
+                )}
+              </p>
+            )}
             <ul className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-sm">
               {g.owns.map((o) => (
                 <li key={`${o.interface}/${o.destination ?? ""}`}>
@@ -85,50 +164,31 @@ function Groups({ groups }: { groups: Schemas["OwnerGroup"][] }) {
   );
 }
 
-function Reassign({ groups }: { groups: Schemas["OwnerGroup"][] }) {
+function Reassign({ groups, move }: { groups: Schemas["OwnerGroup"][]; move: ReturnType<typeof useMove> }) {
   const named = groups.filter((g) => g.owner);
-  const [from, setFrom] = useState(named[0]?.owner ?? "");
-  const [to, setTo] = useState("");
+  const { card, from, setFrom, to, setTo, leftOut, setLeftOut, preview, setPreview, error, busy, run } = move;
   const { data: people } = useQuery(ownerPeople);
-  // Things left out (all move by default): splitting one person's work between two. Keys are
-  // `i:<interface>` and `r:<resource>`.
-  const [leftOut, setLeftOut] = useState<Set<string>>(new Set());
-  const [preview, setPreview] = useState<Schemas["ReassignPreview"] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState(false);
   const group = named.find((g) => g.owner === from);
   const theirs = [
     ...[...new Set(group?.owns.map((o) => o.interface) ?? [])].map((i) => ({ key: `i:${i}`, name: i, label: i })),
     ...(group?.resources ?? []).map((r) => ({ key: `r:${r.name}`, name: r.name, label: `${r.kind} ${r.name}` })),
   ];
   const moving = theirs.filter((t) => !leftOut.has(t.key));
-  // Offered as the new owner: a display name when it names one person only, else the email.
-  const names = (people ?? []).map((p) => p.display_name ?? p.username);
-  const targets = (people ?? []).map((p) => {
-    const name = p.display_name ?? p.username;
-    const value =
-      names.filter((n) => n.toLowerCase() === name.toLowerCase()).length > 1 ? (p.email ?? p.username) : name;
-    return { value, label: [p.username, p.email].filter(Boolean).join(" · ") };
-  });
+  // Offered as the new owner: the email (owners are written as emails), else the username.
+  const targets = (people ?? []).map((p) => ({
+    value: p.email ?? p.username,
+    label: [p.display_name, p.username].filter(Boolean).join(" · "),
+  }));
 
-  const submit = async (e: FormEvent) => {
+  const submit = (e: FormEvent) => {
     e.preventDefault();
-    setBusy(true);
-    setError(null);
-    try {
-      const some = leftOut.size > 0;
-      const only = (kind: string) => (some ? moving.filter((t) => t.key.startsWith(kind)).map((t) => t.name) : []);
-      setPreview(await previewReassign(from, to.trim(), only("i:"), only("r:")));
-    } catch (err) {
-      setPreview(null);
-      setError(err instanceof ApiError ? err.message : "The engine didn't answer.");
-    } finally {
-      setBusy(false);
-    }
+    const some = leftOut.size > 0;
+    const only = (kind: string) => (some ? moving.filter((t) => t.key.startsWith(kind)).map((t) => t.name) : []);
+    void run(from, to, only("i:"), only("r:"));
   };
 
   return (
-    <Card aria-label="Move ownership">
+    <Card aria-label="Move ownership" ref={card}>
       <CardHeader>
         <CardTitle>Move ownership</CardTitle>
       </CardHeader>

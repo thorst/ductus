@@ -62,6 +62,23 @@ pub struct FormerName {
     pub until: DateTime<Utc>,
 }
 
+/// A former name with its account.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct UserName {
+    pub user_id: i32,
+    pub kind: String,
+    pub value: String,
+    pub until: DateTime<Utc>,
+}
+
+/// Every account and every name each had before: what owner texts are matched against.
+#[derive(Debug, Clone, Default)]
+pub struct Accounts {
+    pub users: Vec<User>,
+    /// Oldest first.
+    pub former: Vec<UserName>,
+}
+
 /// A new account.
 #[derive(Debug, Clone)]
 pub struct NewUser<'a> {
@@ -176,6 +193,16 @@ impl Store {
     pub async fn users(&self) -> Result<Vec<User>> {
         let sql = format!("SELECT {USER_COLUMNS} FROM users ORDER BY lower(username)");
         sqlx::query_as::<_, User>(sqlx::AssertSqlSafe(sql)).fetch_all(&self.pool).await.context("reading users")
+    }
+
+    /// All users and their former names (owners are matched against both).
+    pub async fn accounts(&self) -> Result<Accounts> {
+        let users = self.users().await?;
+        let former = sqlx::query_as::<_, UserName>("SELECT user_id, kind, value, until FROM user_names ORDER BY id")
+            .fetch_all(&self.pool)
+            .await
+            .context("reading former names")?;
+        Ok(Accounts { users, former })
     }
 
     pub async fn user(&self, id: i32) -> Result<Option<User>> {

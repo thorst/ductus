@@ -2817,6 +2817,15 @@ async fn directory_ids_follow_the_person_and_former_names_are_kept() {
         [("display_name".to_string(), "Vic Local".to_string())],
         "only what changed"
     );
+
+    // What owners are matched against: every account with its former names, each with its own.
+    let accounts = store.accounts().await.unwrap();
+    assert!(accounts.users.iter().any(|u| u.id == local.id));
+    let theirs = |id: i32| -> Vec<String> {
+        accounts.former.iter().filter(|n| n.user_id == id).map(|n| format!("{} {}", n.kind, n.value)).collect()
+    };
+    assert_eq!(theirs(local.id), ["display_name Vic Local"]);
+    assert_eq!(theirs(anna.id).len(), 3);
     people.forget().await.unwrap();
 }
 

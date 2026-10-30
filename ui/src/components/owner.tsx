@@ -1,6 +1,13 @@
-import { CircleAlert, Mail, UserCheck, Users } from "lucide-react";
+import { ArrowLeftRight, CircleAlert, Mail, UserCheck, UserPen, Users } from "lucide-react";
 import type { Schemas } from "@/api/client";
 import { cn } from "@/lib/utils";
+
+const KIND: Record<string, string> = { username: "username", email: "email", display_name: "display name" };
+
+/** `display name until 2026-03-02`. */
+function until(was: Schemas["OwnerWas"]): string {
+  return `${KIND[was.kind] ?? was.kind} until ${was.until.slice(0, 10)}`;
+}
 
 type Group = Schemas["OwnerGroup"];
 
@@ -27,21 +34,45 @@ export function OwnerReach({ group, className }: { group: Group; className?: str
   const p = group.person;
   const name = p?.display_name ?? p?.username;
   const line = "inline-flex flex-wrap items-center gap-x-1.5 gap-y-0.5";
+  const person = (
+    <>
+      <span>
+        {name}
+        {p?.display_name && <span className="text-muted"> ({p.username})</span>}
+        {group.you && <span className="font-semibold"> · you</span>}
+      </span>
+      {p?.email && (
+        <a href={`mailto:${p.email}`} className="text-xs">
+          {p.email}
+        </a>
+      )}
+    </>
+  );
+  const was = group.was;
   switch (group.reach) {
     case "user":
       return (
         <span className={cn(line, className)}>
           <UserCheck aria-hidden className="size-3.5 shrink-0" />
-          <span>
-            {name}
-            {p?.display_name && <span className="text-muted"> ({p.username})</span>}
-            {group.you && <span className="font-semibold"> · you</span>}
+          {person}
+        </span>
+      );
+    case "renamed":
+      return (
+        <span className={cn(line, className)}>
+          <UserPen aria-hidden className="size-3.5 shrink-0" />
+          {person}
+          <span className="text-warn">renamed: this was their {was ? until(was) : "name before"}</span>
+        </span>
+      );
+    case "reused":
+      return (
+        <span className={cn(line, className)}>
+          <ArrowLeftRight aria-hidden className="size-3.5 shrink-0" />
+          {person}
+          <span className="text-warn">
+            has this name now; it was {was ? `${was.whose}'s ${until(was)}` : "someone else's before"}
           </span>
-          {p?.email && (
-            <a href={`mailto:${p.email}`} className="text-xs">
-              {p.email}
-            </a>
-          )}
         </span>
       );
     case "team":

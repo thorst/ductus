@@ -527,8 +527,12 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read
                     problems += 1;
                     println!("✗ {problem}");
                 }
+                // With the database, owners are matched to accounts below.
+                let accounts_known = database_url.as_deref().is_some_and(|u| !u.trim().is_empty());
                 for owner in
                     unreachable_owners(&alerts, &settings.owners, &resources.clone().unwrap_or_default(), configs())
+                        .into_iter()
+                        .filter(|_| !accounts_known)
                 {
                     println!(
                         "⚠ owner `{owner}`: not in `owners:` in ductus.yaml and not an email address: its alerts reach someone only if a user has that name and an email (the engine checks at start)"
@@ -542,7 +546,10 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read
     // change. Without one, say what wasn't checked.
     let configs: Vec<&InterfaceConfig> = configs().collect();
     match database_url.filter(|u| !u.trim().is_empty()) {
-        Some(url) => problems += check_database(root, &url, &configs).await,
+        Some(url) => {
+            let teams = ductus_core::settings::Settings::load(root).map(|s| s.owners).unwrap_or_default();
+            problems += check_database(root, &url, &configs, &resources.clone().unwrap_or_default(), &teams).await
+        }
         None => println!(
             "note: not checked against a database (set DUCTUS_DATABASE_URL): lanes that would strand waiting messages, retention changes"
         ),
@@ -573,7 +580,13 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read
 /// there, before deploying it): the lanes guard the engine runs at start, and retention changes
 /// running, waiting for a confirmation, or that the next start would begin. Returns the problems
 /// (what would refuse the start), after printing everything.
-async fn check_database(root: &Path, url: &str, configs: &[&InterfaceConfig]) -> usize {
+async fn check_database(
+    root: &Path,
+    url: &str,
+    configs: &[&InterfaceConfig],
+    resources: &ductus_core::Resources,
+    teams: &BTreeMap<String, ductus_core::alerts::OwnerContact>,
+) -> usize {
     use ductus_runtime::ownership::{Lanes, check_lanes, stranded_lines};
     use std::collections::HashMap;
     let store = match ductus_store::Store::connect_read_only(url).await {
@@ -596,6 +609,7 @@ async fn check_database(root: &Path, url: &str, configs: &[&InterfaceConfig]) ->
         println!("✓ database: new (no engine has run on it yet): no messages wait, no retention is applied");
         return 0;
     }
+    check_owners(&store, configs, resources, teams).await;
     let lanes: Vec<Lanes> = configs.iter().filter_map(|c| Lanes::of(c)).collect();
     let names: Vec<String> = lanes.iter().map(|l| l.interface.clone()).collect();
     let recorded = store.has_table("interface_applied").await.unwrap_or(false);
@@ -677,6 +691,41 @@ async fn check_database(root: &Path, url: &str, configs: &[&InterfaceConfig]) ->
         }
     }
     problems
+}
+
+/// Owners matched to the accounts in the database, as `ductus owners` does: warnings only (an
+/// owner never makes a project invalid; `ductus owners --check` is the gate).
+async fn check_owners(
+    store: &ductus_store::Store,
+    configs: &[&InterfaceConfig],
+    resources: &ductus_core::Resources,
+    teams: &BTreeMap<String, ductus_core::alerts::OwnerContact>,
+) {
+    use ductus_core::owners::{self, Reach};
+    let accounts = match store.accounts().await {
+        Ok(a) => a,
+        Err(e) => return println!("⚠ owners: couldn't read the accounts: {e:#}"),
+    };
+    let people = ductus_runtime::alerts::people(&accounts.users, &accounts.former);
+    for (owner, _) in owners::by_owner(owners::owned(configs.iter().copied(), resources)) {
+        if owner.is_empty() {
+            continue;
+        }
+        let reach = owners::reach(&owner, &people, teams);
+        let line = match (&reach, owners::advice(&owner, &reach, &people)) {
+            (_, Some(advice)) => match advice.to {
+                Some(to) => format!("{}: `{}`", advice.text, owners::fix(&owner, &to)),
+                None => advice.text,
+            },
+            (Reach::Disabled(u), None) => format!("the account {u} is disabled: move what they own"),
+            (Reach::Several(n), None) => format!("names {n} accounts: write the email of the one meant"),
+            (Reach::Nobody, None) => {
+                "not an account, a team in `owners:` or an email address: write their email, or add the team to `owners:` in ductus.yaml".into()
+            }
+            _ => continue,
+        };
+        println!("⚠ owner `{owner}`: {line}");
+    }
 }
 
 /// Owners that alerts sent to `owner` can't reach from what's in the project (users live in the

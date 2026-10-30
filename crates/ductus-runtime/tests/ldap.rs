@@ -404,6 +404,21 @@ async fn a_renamed_person_keeps_their_account() {
     let former: Vec<String> = store.former_names(account.id).await.unwrap().into_iter().map(|n| n.value).collect();
     assert_eq!(former, [ANNA, "Anna Smith", "anna@example.org"]);
 
+    // Owners written with her old names still reach her (0.6.7.2): renamed, and alerts go to her
+    // address now.
+    let accounts = store.accounts().await.unwrap();
+    let people = ductus_runtime::alerts::people(&accounts.users, &accounts.former);
+    let teams = Default::default();
+    for owner in [ANNA, "anna@example.org"] {
+        let reach = ductus_core::owners::reach(owner, &people, &teams);
+        assert!(
+            matches!(&reach, ductus_core::owners::Reach::Renamed { user, .. } if user == ANNA_J),
+            "{owner}: {reach:?}"
+        );
+        let to = ductus_core::alerts::owner_addresses(owner, &people, &teams);
+        assert_eq!(to, Some(vec!["anna.jones@example.org".to_string()]), "{owner}");
+    }
+
     let again = allowed(d.sign_in(ANNA_J, "test-user-anna-password").await.unwrap());
     assert_eq!(ldap::signed_in(&store, ANNA_J, &again, None).await.unwrap().id, account.id, "one account");
     forget().await.unwrap();

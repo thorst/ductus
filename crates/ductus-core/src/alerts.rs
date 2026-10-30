@@ -10,12 +10,13 @@
 //!   smtp: { host: smtp.hospital.org, port: 587, tls: starttls, username: ductus,
 //!           password: "${secret:SMTP_PASSWORD}", from: ductus@hospital.org,
 //!           ca: hospital-ca }   # optional, as `certificate:` (mTLS): `certificates:` names in resources.yaml
-//!   channels:
+//!   channels:                                # teams' lists and chats: who alerts go to
 //!     oncall: { email: [interfaces-oncall@hospital.org] }
 //!     chat:   { webhook: { url: "${secret:CHAT_WEBHOOK}", format: slack } }   # slack | teams | json
-//!   rules:                                   # first match wins; `owner` = who owns it
-//!     - { when: [error, stalled, stopped], severity: critical, to: [oncall, chat, owner] }
-//!     - { when: [behind, silent, missed],  severity: warning,  to: [chat, owner] }
+//!   rules:                                   # first match wins
+//!     - { when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }
+//!     - { when: [behind, silent, missed],  severity: warning,  to: [chat] }
+//!     # `owner` in `to:` also mails whoever owns the interface (optional; teams usually suffice)
 //!   repeat: 4h          # remind while still bad and not acknowledged (0 = never)
 //!   recovery: true      # say when it's fine again
 //!   settle: 2m          # fine for this long before it counts as recovered
@@ -552,30 +553,36 @@ pub use crate::owners::Person;
 
 /// An owner's email addresses: the account the owner text names (`owners::find`: username,
 /// email or display name, ignoring case; not a disabled one, nor one of several), else the
-/// `owners:` directory, else the text itself if it is an address. `None`: nobody to send to (the
-/// rule's other recipients still hear).
+/// `owners:` directory, else an account that had the text before (at its email now), else the
+/// text itself if it is an address. `None`: nobody to send to (the rule's other recipients still
+/// hear).
 pub fn owner_addresses(
     owner: &str,
     people: &[Person],
     directory: &BTreeMap<String, OwnerContact>,
 ) -> Option<Vec<String>> {
+    use crate::owners::Found;
     let owner = owner.trim();
     if owner.is_empty() {
         return None;
     }
     let same = |a: &str| a.trim().eq_ignore_ascii_case(owner);
-    if let crate::owners::Found::One(p) = crate::owners::find(owner, people)
-        && !p.disabled
-        && let Some(email) = p.email
+    let found = crate::owners::find(owner, people);
+    let account = || match found.person() {
+        Some(p) if !p.disabled => p.email.map(|e| vec![e.to_string()]),
+        _ => None,
+    };
+    if !matches!(found, Found::Renamed { .. })
+        && let Some(addresses) = account()
     {
-        return Some(vec![email.to_string()]);
+        return Some(addresses);
     }
     if let Some((_, contact)) = directory.iter().find(|(name, _)| same(name))
         && !contact.email.is_empty()
     {
         return Some(contact.email.clone());
     }
-    is_address(owner).then(|| vec![owner.to_string()])
+    account().or_else(|| is_address(owner).then(|| vec![owner.to_string()]))
 }
 
 /// The key of an interface's own alert.
@@ -1045,14 +1052,28 @@ rules:
 
     #[test]
     fn finds_an_owner_s_address() {
-        let person = |username, display_name, email, disabled| Person { username, display_name, email, disabled };
-        let people = [
+        use crate::owners::{Former, Level};
+        let person = |username, display_name, email, disabled| Person {
+            username,
+            display_name,
+            email,
+            disabled,
+            former: Vec::new(),
+        };
+        let mut people = [
             person("anna", Some("Anna Lee"), Some("anna@example.org"), false),
             person("bo", Some("Bo"), None, false),
             person("cy", Some("Cy Gone"), Some("cy@example.org"), true),
             person("dee", Some("Same Name"), Some("dee@example.org"), false),
             person("eve", Some("Same Name"), Some("eve@example.org"), false),
         ];
+        // Anna was Anna Smith at another address; "Lab Systems" was once Dee's display name too.
+        let until = Utc.with_ymd_and_hms(2026, 3, 2, 0, 0, 0).unwrap();
+        people[0].former = vec![
+            Former { kind: Level::DisplayName, value: "Anna Smith", until },
+            Former { kind: Level::Email, value: "anna@old.example.org", until },
+        ];
+        people[3].former = vec![Former { kind: Level::DisplayName, value: "Lab Systems", until }];
         let mut directory = BTreeMap::new();
         directory.insert("Lab Systems".to_string(), OwnerContact { email: vec!["lab@example.org".into()] });
         let find = |owner: &str| owner_addresses(owner, &people, &directory);
@@ -1067,6 +1088,9 @@ rules:
         assert_eq!(find("eve").unwrap(), ["eve@example.org"]);
         assert_eq!(find("Radiology"), None);
         assert_eq!(find(""), None);
+        assert_eq!(find("anna smith").unwrap(), ["anna@example.org"], "renamed: their email now");
+        assert_eq!(find("anna@old.example.org").unwrap(), ["anna@example.org"], "not the old address");
+        assert_eq!(find("Lab Systems").unwrap(), ["lab@example.org"], "a team beats a former name");
     }
 
     fn t(minutes: i64) -> DateTime<Utc> {

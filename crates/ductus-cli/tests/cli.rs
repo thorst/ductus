@@ -300,7 +300,9 @@ fn validate_checks_the_resources_code_names() {
     let (ok, out) = ductus(dir.path(), &["validate"]);
     assert!(ok, "{out}");
     assert!(out.contains("✓ resources: 1 database(s), 1 SFTP server(s), 2 API(s)"), "{out}");
-    assert!(!out.contains('⚠'), "every side names its system: {out}");
+    // (Owners are warned only with a database: their texts aren't emails or teams.)
+    let warned: Vec<&str> = out.lines().filter(|l| l.starts_with('⚠') && !l.starts_with("⚠ owner `")).collect();
+    assert!(warned.is_empty(), "every side names its system: {out}");
 
     // A typo in a shared library: reported once, where it is, with the names that exist.
     let lib = dir.path().join("lib/lookups.ts");
@@ -622,7 +624,12 @@ fn owners_are_matched_to_accounts() {
 
     let (ok, out) = run(&["owners"], "");
     assert!(ok, "without --check it only reports: {out}");
-    assert!(out.contains(&format!("✓ {olaf_name} (1): user {olaf} ({olaf_name}, {email})\n  a")), "{out}");
+    assert!(
+        out.contains(&format!(
+            "⚠ {olaf_name} (1): user {olaf} ({olaf_name}, {email})\n  write their email: {email}\n  fix: ductus owners reassign --from '{olaf_name}' --to {email}\n  a"
+        )),
+        "a display name works, but should be the email: {out}"
+    );
     assert!(
         out.contains(&format!("✗ {gone_name} (2): account {gone} ({gone_name}) is disabled\n  b\n  api portal")),
         "{out}"
@@ -640,6 +647,42 @@ fn owners_are_matched_to_accounts() {
     let (ok, out) = run(&["owners", "--check"], "");
     assert!(ok, "{out}");
     assert!(out.contains(&format!("✓ {email} (2): user {olaf}")), "{out}");
+    assert!(out.contains("1 owner(s) reach their person but should be written as their email"), "{out}");
+
+    // Olaf is renamed (an admin's edit, as the API makes it): his old display name still reaches
+    // him, with the fix; a warning, so --check passes.
+    let renamed = format!("Olaf N {nanos}");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let store = rt.block_on(ductus_store::Store::connect(&db, 1)).unwrap();
+    let account = rt.block_on(store.user_by_name(&olaf)).unwrap().unwrap();
+    let audit = ductus_store::Audit::new(ductus_store::By::cli("test"), "test");
+    let change = ductus_store::UserChange { display_name: Some(renamed.clone()), ..Default::default() };
+    rt.block_on(store.update_user(account.id, &change, &audit)).unwrap();
+    let (ok, out) = run(&["owners", "--check"], "");
+    assert!(ok, "renamed is a warning: {out}");
+    let today = chrono::Utc::now().format("%Y-%m-%d");
+    assert!(
+        out.contains(&format!(
+            "⚠ {olaf_name} (1): user {olaf} ({renamed}, {email}), by a name they had before\n  renamed: {olaf}'s display name until {today} (now {renamed}): write their email: {email}\n  fix: ductus owners reassign --from '{olaf_name}' --to {email}"
+        )),
+        "{out}"
+    );
+
+    // Someone else is given the old name now: it's theirs (one rule), flagged as reused.
+    let other = people.name("test-user-other");
+    let (ok, out) = run(
+        &["user", "create", &other, "--display-name", &olaf_name, "--email", "other@example.org", "--password-stdin"],
+        password,
+    );
+    assert!(ok, "{out}");
+    let (ok, out) = run(&["owners", "--check"], "");
+    assert!(ok, "reused is a warning: {out}");
+    assert!(
+        out.contains(&format!(
+            "⚠ {olaf_name} (1): user {other} ({olaf_name}, other@example.org) (the name was {olaf}'s before)\n  reused: {other} has it now; it was {olaf}'s display name until {today}: alerts reach {other}; write the email of the one meant (other@example.org now, {email} before)\n  fix: ductus owners reassign --from '{olaf_name}' --to other@example.org"
+        )),
+        "{out}"
+    );
 }
 
 #[test]
@@ -1850,7 +1893,14 @@ fn validate_checks_alerts_and_a_channel_can_be_tested() {
     assert!(ok, "{out}");
     assert!(out.contains("✓ alerts: 1 channel(s), 1 rule(s)"), "{out}");
     assert!(out.contains("⚠ alerts: no rule names behind, stopped, silent, missed"), "{out}");
-    assert!(out.contains("⚠ owner `Integration team`: not in `owners:`"), "{out}");
+    // Without a database it can only say the text isn't a team or an address; with one (check.sh
+    // and CI set it) it's matched to the accounts, as `ductus owners` does.
+    let said = if std::env::var("DUCTUS_DATABASE_URL").is_ok_and(|u| !u.trim().is_empty()) {
+        "⚠ owner `Integration team`: not an account, a team in `owners:` or an email address: write their email"
+    } else {
+        "⚠ owner `Integration team`: not in `owners:`"
+    };
+    assert!(out.contains(said), "{out}");
     assert!(!out.contains("owner `Lab team`"), "it is in `owners:`: {out}");
 
     edit(&root.join("interfaces/results/interface.yaml"), "source:", "alert: { to: [pager] }\nsource:");

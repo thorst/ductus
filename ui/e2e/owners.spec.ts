@@ -65,13 +65,17 @@ test("the Owners page says who has an account, and the interface page too", asyn
   const move = page.getByRole("region", { name: "Move ownership" });
   await move.locator("select").selectOption("Directory Services");
   const to = move.getByRole("combobox", { name: "To" });
-  await to.fill("Olaf Night");
+  await to.fill("olaf@example.org");
   await move.getByRole("button", { name: "Preview" }).click();
   const preview = page.getByRole("region", { name: "Preview" });
   await expect(preview).toContainText("1 owner value in 1 file would change.");
   await expect(preview).toContainText("resources.yaml");
   await expect(preview).toContainText("The new owner is Olaf Night (olaf@example.org), who has an account.");
-  await expect(preview).toContainText("ductus owners reassign --from 'Directory Services' --to 'Olaf Night'");
+  await expect(preview).toContainText("ductus owners reassign --from 'Directory Services' --to olaf@example.org");
+  // A display name works, but owners are written as emails: said with the email.
+  await to.fill("Olaf Night");
+  await move.getByRole("button", { name: "Preview" }).click();
+  await expect(preview.getByRole("alert")).toContainText("`Olaf Night`: write their email: olaf@example.org");
   // Someone who isn't an account: said before anyone applies it.
   await to.fill("Night shift");
   await move.getByRole("button", { name: "Preview" }).click();
@@ -80,6 +84,48 @@ test("the Owners page says who has an account, and the interface page too", asyn
   await page.goto("/interfaces/adt");
   await expect(page.getByText("ADT team")).toBeVisible();
   await expect(page.getByText("Not a user, not a team in owners:")).toBeVisible();
+});
+
+// demo-ui.sh's resources: payer is owned by "Rita Lab", whom an admin renamed "Rita Lab-Jones";
+// hie by "Rex Night", which the first Rex had before a second Rex was given it.
+test("owners by a former name: renamed and reused, each with an Update", async ({ page }) => {
+  await signIn(page, "/owners");
+  const owners = page.getByRole("region", { name: "Owners", exact: true });
+  const today = new Date().toISOString().slice(0, 10);
+
+  const rita = owners.getByRole("listitem", { name: "Rita Lab" });
+  await expect(rita).toContainText("Rita Lab-Jones");
+  await expect(rita).toContainText(`renamed: this was their display name until ${today}`);
+  await expect(rita.getByRole("link", { name: "rita@example.org" })).toBeVisible();
+  await expect(rita).toContainText("Write their email: rita@example.org");
+  await expect(rita).toContainText("api payer");
+
+  const rex = owners.getByRole("listitem", { name: "Rex Night" });
+  await expect(rex.getByRole("link", { name: "rex@example.org" })).toBeVisible();
+  await expect(rex).toContainText(
+    `has this name now; it was ${process.env.DUCTUS_PEOPLE_PREFIX}rex-old's display name until ${today}`,
+  );
+  await expect(rex).toContainText(
+    `Alerts reach them. If ${process.env.DUCTUS_PEOPLE_PREFIX}rex-old was meant, write that person's email instead.`,
+  );
+  // Warnings, not failures: the banner counts only owners that reach nobody.
+  // (ADT team, Orders team, Finance, Directory Services: not Rita nor Rex.)
+  await expect(owners.getByRole("status")).toContainText("4 owners reach nobody");
+  await page.screenshot({ path: "test-results/owners-renamed.png", fullPage: true });
+
+  // Update: the move, filled in and previewed.
+  await rita.getByRole("button", { name: "Update Rita Lab to rita@example.org" }).click();
+  const move = page.getByRole("region", { name: "Move ownership" });
+  await expect(move.locator("select")).toHaveValue("Rita Lab");
+  await expect(move.getByRole("combobox", { name: "To" })).toHaveValue("rita@example.org");
+  const preview = page.getByRole("region", { name: "Preview" });
+  await expect(preview).toContainText("1 owner value in 1 file would change.");
+  await expect(preview).toContainText("owner: rita@example.org");
+  await expect(preview).toContainText("The new owner is Rita Lab-Jones (rita@example.org), who has an account.");
+
+  await rex.getByRole("button", { name: "Update Rex Night to rex@example.org" }).click();
+  await expect(move.locator("select")).toHaveValue("Rex Night");
+  await expect(preview).toContainText("ductus owners reassign --from 'Rex Night' --to rex@example.org");
 });
 
 test("the owners screens pass axe in every theme and fit a phone", async ({ browser }) => {

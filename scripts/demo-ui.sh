@@ -67,8 +67,9 @@ apis:
   empi: { url: "http://127.0.0.1:7794/api/v1", application: EMPI, custom: { baa_signed: "yes" } }
   pharmacy: { url: "https://localhost:7461/", custom: { baa_signed: n/a } }
   radiology: { url: "https://localhost:7462/", custom: { baa_signed: n/a } }
-  payer: { url: "https://localhost:7463/", custom: { baa_signed: n/a } }
-  hie: { url: "https://localhost:7464/", custom: { baa_signed: n/a } }
+  # Owners by former names (0.6.7.2): Rita was renamed (renamed); Rex's name is someone else's now (reused).
+  payer: { url: "https://localhost:7463/", owner: Rita Lab, custom: { baa_signed: n/a } }
+  hie: { url: "https://localhost:7464/", owner: Rex Night, custom: { baa_signed: n/a } }
   legacy-portal: { url: "https://localhost:7465/", custom: { baa_signed: n/a } }
   fax-gateway: { url: "https://localhost:7469/", custom: { baa_signed: n/a } }
 # The directory people sign in with: plain LDAP (a test directory), so no certificate row.
@@ -217,6 +218,19 @@ PASSWORD="correct horse staple"
 "$BIN" user create "${PEOPLE_PREFIX}viewer" --role viewer --password-stdin <<<"$PASSWORD" >/dev/null
 # May read the audit log, and nothing else beyond a viewer (no payloads).
 "$BIN" user create "${PEOPLE_PREFIX}auditor" --role viewer --permission audit --password-stdin <<<"$PASSWORD" >/dev/null
+# Renamed and reused owners (0.6.7.2): an admin renames Rita and the first Rex (the API keeps
+# their old names); a second Rex is then given "Rex Night".
+rename() {
+  local id
+  id=$(psql -tA "$DB" -c "SELECT id FROM users WHERE username = '$1'")
+  curl -sf -X PATCH -H "Authorization: Bearer $ADMIN" -H 'X-Ductus: 1' -H 'Content-Type: application/json' \
+    -d "{\"display_name\": \"$2\"}" "$DUCTUS_API_URL/api/v1/users/$id" >/dev/null
+}
+"$BIN" user create "${PEOPLE_PREFIX}rita" --display-name "Rita Lab" --email rita@example.org --password-stdin <<<"$PASSWORD" >/dev/null
+rename "${PEOPLE_PREFIX}rita" "Rita Lab-Jones"
+"$BIN" user create "${PEOPLE_PREFIX}rex-old" --display-name "Rex Night" --email rex.old@example.org --password-stdin <<<"$PASSWORD" >/dev/null
+rename "${PEOPLE_PREFIX}rex-old" "Rex Knight"
+"$BIN" user create "${PEOPLE_PREFIX}rex" --display-name "Rex Night" --email rex@example.org --password-stdin <<<"$PASSWORD" >/dev/null
 
 echo "== another engine on this database, and this project started twice"
 # A second project (another server's interfaces, say) shares the database: fine, and each engine

@@ -9,6 +9,7 @@ use crate::about::given;
 use crate::alerts::{OwnerContact, is_address};
 use crate::resources::{Kind, Resources};
 use anyhow::{Result, bail};
+use chrono::{DateTime, Utc};
 use serde_yaml_ng::Value;
 use std::collections::BTreeMap;
 
@@ -93,6 +94,72 @@ pub struct Person<'a> {
     pub email: Option<&'a str>,
     /// Disabled here, or refused by the directory.
     pub disabled: bool,
+    /// What it was called before (`user_names`; none for changes made before 0.6.7).
+    pub former: Vec<Former<'a>>,
+}
+
+impl<'a> Person<'a> {
+    fn now(&self, level: Level) -> Option<&'a str> {
+        match level {
+            Level::Username => Some(self.username),
+            Level::Email => self.email,
+            Level::DisplayName => self.display_name,
+        }
+    }
+
+    /// The latest time it had `owner` as its `level`, if it did.
+    fn had(&self, level: Level, owner: &str) -> Option<&Former<'a>> {
+        self.former.iter().filter(|f| f.kind == level && same(f.value, owner)).max_by_key(|f| f.until)
+    }
+}
+
+/// The ways an owner text names an account, in the order they're tried.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Username,
+    Email,
+    DisplayName,
+}
+
+impl Level {
+    const ALL: [Level; 3] = [Level::Username, Level::Email, Level::DisplayName];
+
+    /// As `user_names.kind` says it.
+    pub fn parse(kind: &str) -> Option<Level> {
+        match kind {
+            "username" => Some(Level::Username),
+            "email" => Some(Level::Email),
+            "display_name" => Some(Level::DisplayName),
+            _ => None,
+        }
+    }
+
+    /// As the API says it: `username`, `email`, `display_name`.
+    pub fn label(self) -> &'static str {
+        match self {
+            Level::Username => "username",
+            Level::Email => "email",
+            Level::DisplayName => "display_name",
+        }
+    }
+
+    /// In words.
+    pub fn said(self) -> &'static str {
+        match self {
+            Level::Username => "username",
+            Level::Email => "email",
+            Level::DisplayName => "display name",
+        }
+    }
+}
+
+/// A name an account had before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Former<'a> {
+    pub kind: Level,
+    pub value: &'a str,
+    /// When it stopped being its name.
+    pub until: DateTime<Utc>,
 }
 
 /// Which account an owner text names.
@@ -100,31 +167,85 @@ pub struct Person<'a> {
 pub enum Found<'p, 'a> {
     /// Exactly one account.
     One(&'p Person<'a>),
+    /// Nobody has the text now; this account had it.
+    Renamed {
+        person: &'p Person<'a>,
+        was: Former<'a>,
+    },
+    /// This account has the text now; `before`, another, had it until then.
+    Reused {
+        person: &'p Person<'a>,
+        before: &'p Person<'a>,
+        was: Former<'a>,
+    },
     /// Several accounts at the same level (two people with one display name): none is chosen.
     Several(usize),
     None,
 }
 
+impl<'p, 'a> Found<'p, 'a> {
+    /// The account the text reaches, if one.
+    pub fn person(&self) -> Option<&'p Person<'a>> {
+        match *self {
+            Found::One(person) | Found::Renamed { person, .. } | Found::Reused { person, .. } => Some(person),
+            Found::Several(_) | Found::None => None,
+        }
+    }
+}
+
 /// The account an owner text names, ignoring case and surrounding spaces: a username first, then
 /// an email address, then a display name. The first of those levels that matches anyone decides;
-/// two matches there name nobody (a guess would send someone else's alerts to the wrong person).
+/// there one enabled account wins over any number of disabled ones (a person given a new account
+/// keeps their email), two enabled ones name nobody (a guess would send someone else's alerts to
+/// the wrong person), and only disabled ones name the first. When no account has the text now,
+/// the names accounts had before are tried the same way (`Renamed`); a former name never takes a
+/// text from the account that has it now, which is only flagged (`Reused`).
 pub fn find<'p, 'a>(owner: &str, people: &'p [Person<'a>]) -> Found<'p, 'a> {
     let owner = owner.trim();
     if owner.is_empty() {
         return Found::None;
     }
-    let same = |a: Option<&str>| a.is_some_and(|a| a.trim().eq_ignore_ascii_case(owner));
-    let levels: [&dyn Fn(&Person) -> bool; 3] =
-        [&|p| same(Some(p.username)), &|p| same(p.email), &|p| same(p.display_name)];
-    for level in levels {
-        let hits: Vec<&Person> = people.iter().filter(|p| level(p)).collect();
-        match hits.len() {
-            0 => continue,
-            1 => return Found::One(hits[0]),
-            n => return Found::Several(n),
+    for level in Level::ALL {
+        let hits: Vec<&Person> = people.iter().filter(|p| p.now(level).is_some_and(|n| same(n, owner))).collect();
+        match pick(&hits) {
+            None => continue,
+            Some(Err(n)) => return Found::Several(n),
+            Some(Ok(person)) => {
+                let before = people
+                    .iter()
+                    .filter(|q| !std::ptr::eq(*q, person))
+                    .filter_map(|q| q.had(level, owner).map(|f| (q, *f)))
+                    .max_by_key(|(_, f)| f.until);
+                return match before {
+                    Some((before, was)) => Found::Reused { person, before, was },
+                    None => Found::One(person),
+                };
+            }
+        }
+    }
+    for level in Level::ALL {
+        let hits: Vec<&Person> = people.iter().filter(|p| p.had(level, owner).is_some()).collect();
+        match pick(&hits) {
+            None => continue,
+            Some(Err(n)) => return Found::Several(n),
+            Some(Ok(person)) => {
+                let was = *person.had(level, owner).expect("picked for it");
+                return Found::Renamed { person, was };
+            }
         }
     }
     Found::None
+}
+
+/// One level's matches: the one enabled account, else how many enabled ones, else the first
+/// disabled one; None when nothing matched.
+fn pick<'p, 'a>(hits: &[&'p Person<'a>]) -> Option<Result<&'p Person<'a>, usize>> {
+    let enabled: Vec<&Person> = hits.iter().copied().filter(|p| !p.disabled).collect();
+    match enabled.len() {
+        0 => hits.first().map(|p| Ok(*p)),
+        1 => Some(Ok(enabled[0])),
+        n => Some(Err(n)),
+    }
 }
 
 /// Who an owner is, for reports and `ductus owners --check`.
@@ -132,6 +253,10 @@ pub fn find<'p, 'a>(owner: &str, people: &'p [Person<'a>]) -> Found<'p, 'a> {
 pub enum Reach {
     /// An account (its username).
     User(String),
+    /// An account, by a name it had before (nobody has it now).
+    Renamed { user: String, was: Was },
+    /// An account that has the name now, which another account had before.
+    Reused { user: String, was: Was },
     /// An account that is disabled (or refused by the directory): someone who left, probably.
     Disabled(String),
     /// Names several accounts.
@@ -144,22 +269,114 @@ pub enum Reach {
     Nobody,
 }
 
-impl Reach {
-    /// Whether `ductus owners --check` accepts it.
-    pub fn ok(&self) -> bool {
-        matches!(self, Reach::User(_) | Reach::Team | Reach::Address)
+/// A former name an owner text matched: which, whose (a username) and until when.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Was {
+    pub kind: Level,
+    pub value: String,
+    pub whose: String,
+    pub until: DateTime<Utc>,
+}
+
+impl Was {
+    fn of(whose: &Person, was: &Former) -> Was {
+        Was { kind: was.kind, value: was.value.into(), whose: whose.username.into(), until: was.until }
     }
 }
 
-/// What an owner text is: an account, else a team in `owners:`, else an address.
+impl Reach {
+    /// Whether `ductus owners --check` accepts it (renamed and reused are warnings: alerts still
+    /// reach a person).
+    pub fn ok(&self) -> bool {
+        matches!(self, Reach::User(_) | Reach::Renamed { .. } | Reach::Reused { .. } | Reach::Team | Reach::Address)
+    }
+}
+
+/// What an owner text is: an account, else a team in `owners:`, else an account by a former name,
+/// else an address.
 pub fn reach(owner: &str, people: &[Person], teams: &BTreeMap<String, OwnerContact>) -> Reach {
+    let team = || teams.keys().any(|t| same(t, owner));
     match find(owner, people) {
-        Found::One(p) if p.disabled => Reach::Disabled(p.username.into()),
+        Found::Renamed { .. } if team() => Reach::Team,
+        found if found.person().is_some_and(|p| p.disabled) => {
+            Reach::Disabled(found.person().map(|p| p.username.into()).unwrap_or_default())
+        }
         Found::One(p) => Reach::User(p.username.into()),
+        Found::Renamed { person, was } => Reach::Renamed { user: person.username.into(), was: Was::of(person, &was) },
+        Found::Reused { person, before, was } => {
+            Reach::Reused { user: person.username.into(), was: Was::of(before, &was) }
+        }
         Found::Several(n) => Reach::Several(n),
-        Found::None if teams.keys().any(|t| same(t, owner)) => Reach::Team,
+        Found::None if team() => Reach::Team,
         Found::None if is_address(owner) => Reach::Address,
         Found::None => Reach::Nobody,
+    }
+}
+
+/// A better way to write an owner that works (⚠): `text` says why, `to` is what to write instead
+/// (the account's email), when there is one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Advice {
+    pub text: String,
+    pub to: Option<String>,
+}
+
+/// What to say about an owner that reaches someone but should be written otherwise: a former name
+/// (renamed), a name someone else had before (reused), or an account's name or username rather
+/// than its email. None for emails, teams, addresses and owners that reach nobody (`Reach::ok`
+/// says those).
+pub fn advice(owner: &str, reach: &Reach, people: &[Person]) -> Option<Advice> {
+    let account = |u: &str| people.iter().find(|p| p.username == u);
+    let email = |u: &str| account(u).and_then(|p| p.email).map(str::to_string);
+    let date = |w: &Was| w.until.format("%Y-%m-%d").to_string();
+    match reach {
+        Reach::Renamed { user, was } => {
+            let now = account(user).and_then(|p| p.display_name.or(p.email)).unwrap_or(user);
+            let to = email(user).or_else(|| Some(user.clone()));
+            let write = match email(user) {
+                Some(e) => format!("write their email: {e}"),
+                None => format!("write their username: {user}"),
+            };
+            Some(Advice {
+                text: format!("renamed: {user}'s {} until {} (now {now}): {write}", was.kind.said(), date(was)),
+                to,
+            })
+        }
+        Reach::Reused { user, was } => {
+            let emails: Vec<String> = [(email(user), "now"), (email(&was.whose), "before")]
+                .into_iter()
+                .filter_map(|(e, when)| e.map(|e| format!("{e} {when}")))
+                .collect();
+            let which = if emails.is_empty() { String::new() } else { format!(" ({})", emails.join(", ")) };
+            Some(Advice {
+                text: format!(
+                    "reused: {user} has it now; it was {}'s {} until {}: alerts reach {user}; write the email of the one meant{which}",
+                    was.whose,
+                    was.kind.said(),
+                    date(was)
+                ),
+                to: email(user),
+            })
+        }
+        Reach::User(user) if !is_address(owner) => Some(match email(user) {
+            Some(e) => Advice { text: format!("write their email: {e}"), to: Some(e) },
+            None => Advice { text: format!("write their email address (the account {user} has none)"), to: None },
+        }),
+        _ => None,
+    }
+}
+
+/// The command that moves `owner`'s things to `to`, quoted for a shell.
+pub fn fix(owner: &str, to: &str) -> String {
+    format!("ductus owners reassign --from {} --to {}", shell(owner.trim()), shell(to.trim()))
+}
+
+/// Quoted for a POSIX shell when it needs it: `'Ann Smith'`, `'O'"'"'Brien'`.
+pub fn shell(s: &str) -> String {
+    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./@".contains(c)) {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\"'\"'"))
     }
 }
 
@@ -174,9 +391,14 @@ pub fn by_owner(items: Vec<Owned>) -> Vec<(String, Vec<Owned>)> {
     groups.into_values().collect()
 }
 
-/// Owner names match ignoring case and surrounding spaces.
+/// Owner names match ignoring case and surrounding spaces. Compared a character at a time, with
+/// nothing allocated: matching owners compares every owner with every account's names.
 pub fn same(a: &str, b: &str) -> bool {
-    a.trim().to_lowercase() == b.trim().to_lowercase()
+    let (a, b) = (a.trim(), b.trim());
+    if a.is_ascii() && b.is_ascii() {
+        return a.eq_ignore_ascii_case(b);
+    }
+    a.chars().flat_map(char::to_lowercase).eq(b.chars().flat_map(char::to_lowercase))
 }
 
 /// One `owner:` line changed.
@@ -571,6 +793,7 @@ ldap:
             display_name: Some(display_name),
             email: Some(email),
             disabled,
+            former: Vec::new(),
         };
         vec![
             p("anna", "Anna Smith", "anna@h.org", false),
@@ -585,11 +808,7 @@ ldap:
     #[test]
     fn owners_name_accounts_by_username_then_email_then_display_name() {
         let people = people();
-        let user = |owner: &str| match find(owner, &people) {
-            Found::One(p) => p.username.to_string(),
-            Found::Several(n) => format!("{n} people"),
-            Found::None => "nobody".into(),
-        };
+        let user = |owner: &str| who(owner, &people);
         assert_eq!(user("  ANNA "), "anna");
         assert_eq!(user("A.Smith@H.org"), "asmith2", "an email names its account");
         assert_eq!(user("olaf night"), "Olaf Night", "a username before a display name");
@@ -608,6 +827,142 @@ ldap:
         assert_eq!(reach("Night shift"), Reach::Nobody);
         assert!(Reach::Team.ok() && Reach::Address.ok() && !Reach::Disabled("bob".into()).ok());
         assert!(!Reach::Several(2).ok() && !Reach::Nobody.ok());
+    }
+
+    fn at(day: u32) -> DateTime<Utc> {
+        use chrono::TimeZone;
+        Utc.with_ymd_and_hms(2026, 3, day, 12, 0, 0).unwrap()
+    }
+
+    fn former(kind: Level, value: &'static str, day: u32) -> Former<'static> {
+        Former { kind, value, until: at(day) }
+    }
+
+    /// Who `find` picks, in words: `olaf`, `renamed olaf (display name 'Olaf Night')`,
+    /// `reused anna (was olaf's)`, `2 people`, `nobody`.
+    fn who(owner: &str, people: &[Person]) -> String {
+        match find(owner, people) {
+            Found::One(p) => p.username.to_string(),
+            Found::Renamed { person, was } => {
+                format!("renamed {} ({} '{}')", person.username, was.kind.said(), was.value)
+            }
+            Found::Reused { person, before, .. } => format!("reused {} (was {}'s)", person.username, before.username),
+            Found::Several(n) => format!("{n} people"),
+            Found::None => "nobody".into(),
+        }
+    }
+
+    #[test]
+    fn a_former_name_reaches_its_account_when_nobody_has_it_now() {
+        let mut people = people();
+        // Olaf was "Olaf Nightingale" with another address until 2 March.
+        people[2].former =
+            vec![former(Level::DisplayName, "Olaf Nightingale", 2), former(Level::Email, "olaf@old.h.org", 2)];
+        assert_eq!(who(" olaf nightingale", &people), "renamed olaf (display name 'Olaf Nightingale')");
+        assert_eq!(who("OLAF@old.h.org", &people), "renamed olaf (email 'olaf@old.h.org')");
+        assert_eq!(who("olaf@h.org", &people), "olaf", "the current names first");
+
+        let reach = reach("Olaf Nightingale", &people, &BTreeMap::new());
+        let Reach::Renamed { user, was } = &reach else { panic!("{reach:?}") };
+        assert_eq!((user.as_str(), was.whose.as_str(), was.value.as_str()), ("olaf", "olaf", "Olaf Nightingale"));
+        assert_eq!(was.until, at(2));
+        assert!(reach.ok(), "a warning, never a failure");
+
+        // A former username (a sign-in name changed in the directory) too.
+        people[2].former.push(former(Level::Username, "onight", 5));
+        assert_eq!(who("onight", &people), "renamed olaf (username 'onight')");
+    }
+
+    #[test]
+    fn a_name_someone_has_now_is_theirs_even_if_another_had_it_before() {
+        let mut people = people();
+        // Bob was olaf@h.org until 1 March; Olaf has it now. And Bob was once "Anna Smith".
+        people[3].disabled = false;
+        people[3].former = vec![former(Level::Email, "olaf@h.org", 1), former(Level::DisplayName, "Olaf Night", 1)];
+        assert_eq!(who("olaf@h.org", &people), "reused olaf (was bob's)", "the current holder wins, flagged");
+        let reach = reach("olaf@h.org", &people, &BTreeMap::new());
+        let Reach::Reused { user, was } = &reach else { panic!("{reach:?}") };
+        assert_eq!((user.as_str(), was.whose.as_str(), was.kind), ("olaf", "bob", Level::Email));
+        assert!(reach.ok());
+
+        // A current match at an earlier level beats a former one at that level or any later.
+        assert_eq!(who("Olaf Night", &people), "Olaf Night", "a username now beats a display name before");
+        // The account's own former value isn't someone else's.
+        people[2].former = vec![former(Level::Email, "olaf@h.org", 3)];
+        assert_eq!(who("olaf@h.org", &people), "reused olaf (was bob's)");
+        people[3].former.clear();
+        assert_eq!(who("olaf@h.org", &people), "olaf", "only Olaf himself had it: nothing to flag");
+    }
+
+    #[test]
+    fn two_accounts_with_one_former_name_name_nobody() {
+        let mut people = people();
+        people[2].former = vec![former(Level::DisplayName, "Night Shift Lead", 1)];
+        people[3].disabled = false;
+        people[3].former = vec![former(Level::DisplayName, "Night Shift Lead", 4)];
+        assert_eq!(who("night shift lead", &people), "2 people");
+        assert_eq!(reach("night shift lead", &people, &BTreeMap::new()), Reach::Several(2));
+        // One of them disabled: the enabled one is the one meant.
+        people[3].disabled = true;
+        assert_eq!(who("night shift lead", &people), "renamed olaf (display name 'Night Shift Lead')");
+        // A team by that name wins over an account's old name.
+        let teams: BTreeMap<String, OwnerContact> =
+            [("Night Shift Lead".to_string(), OwnerContact { email: vec!["nights@h.org".into()] })].into();
+        assert_eq!(reach("Night Shift Lead", &people, &teams), Reach::Team);
+    }
+
+    #[test]
+    fn an_enabled_account_beats_disabled_ones_at_one_level() {
+        let mut people = people();
+        // The same person given a new account with the same address; the old one refused.
+        let p = |username, display_name, email, disabled| Person {
+            username,
+            display_name: Some(display_name),
+            email: Some(email),
+            disabled,
+            former: Vec::new(),
+        };
+        people.push(p("olaf-old", "Olaf Night", "olaf@h.org", true));
+        people.push(p("olaf-older", "Olaf Night", "olaf@h.org", true));
+        assert_eq!(who("olaf@h.org", &people), "olaf", "one enabled beats any number disabled");
+        assert_eq!(reach("olaf@h.org", &people, &BTreeMap::new()), Reach::User("olaf".into()));
+        people[2].disabled = true;
+        assert_eq!(reach("olaf@h.org", &people, &BTreeMap::new()), Reach::Disabled("olaf".into()), "only disabled");
+        people[2].disabled = false;
+        people.push(p("olaf2", "Olaf Two", "olaf@h.org", false));
+        assert_eq!(reach("olaf@h.org", &people, &BTreeMap::new()), Reach::Several(2), "two enabled");
+    }
+
+    #[test]
+    fn owners_that_aren_t_email_addresses_are_told_to_be() {
+        let mut people = people();
+        people[2].former = vec![former(Level::DisplayName, "Olaf Nightingale", 2)];
+        people[3].disabled = false;
+        people[3].former = vec![former(Level::Email, "anna@h.org", 1)];
+        let teams: BTreeMap<String, OwnerContact> =
+            [("Lab Systems".to_string(), OwnerContact { email: vec!["lab@h.org".into()] })].into();
+        let advise = |owner: &str| advice(owner, &reach(owner, &people, &teams), &people);
+
+        let a = advise("anna").unwrap();
+        assert_eq!(a.to.as_deref(), Some("anna@h.org"));
+        assert_eq!(a.text, "write their email: anna@h.org");
+        let a = advise("Olaf Nightingale").unwrap();
+        assert_eq!(a.to.as_deref(), Some("olaf@h.org"));
+        assert!(a.text.starts_with("renamed: olaf's display name until 2026-03-02"), "{}", a.text);
+        let a = advise("anna@h.org").unwrap();
+        assert_eq!(a.to.as_deref(), Some("anna@h.org"), "the one alerts reach now");
+        assert!(a.text.starts_with("reused: anna has it now; it was bob's email until 2026-03-01"), "{}", a.text);
+        assert!(advise("olaf@h.org").is_none(), "an account's email: nothing to say");
+        assert!(advise("lab systems").is_none() && advise("oncall@h.org").is_none(), "teams and addresses");
+        assert!(advise("Night shift").is_none(), "nobody is a failure, said elsewhere");
+        people[0].email = None;
+        let a = advice("anna", &Reach::User("anna".into()), &people).unwrap();
+        assert_eq!((a.text.as_str(), a.to), ("write their email address (the account anna has none)", None));
+        assert_eq!(
+            fix("Olaf's team", "olaf@h.org"),
+            "ductus owners reassign --from 'Olaf'\"'\"'s team' --to olaf@h.org",
+            "quoted for a shell"
+        );
     }
 
     #[test]

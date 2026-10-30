@@ -722,7 +722,7 @@ export interface paths {
         /**
          * Who owns which interface (`about.owner`), destination (`owner` on one someone else owns) and
          *     resources.yaml entry, and whether each owner is an account (username, email or display name,
-         *     ignoring case), a team in `owners:`, or nobody the engine knows.
+         *     ignoring case, or one it had before), a team in `owners:`, or nobody the engine knows.
          */
         get: operations["owners"];
         put?: never;
@@ -2100,20 +2100,31 @@ export interface components {
             name: string;
         };
         OwnerGroup: {
+            /**
+             * @description How the owner should be written instead, when it reaches someone but isn't written as
+             *     their email (renamed, reused, a username or display name), in words.
+             */
+            advice?: string | null;
             /** @description Absent for what nobody owns (listed last). */
             owner?: string | null;
             /** @description Interfaces, and destinations owned by someone other than their interface's owner. */
             owns: components["schemas"]["Owned"][];
             person?: components["schemas"]["OwnerPerson"] | null;
             /**
-             * @description Who the owner is: `user` (an account, in `person`), `disabled` (an account that is
-             *     disabled or refused by the directory, in `person`), `several` (names more than one
-             *     account: none is chosen), `team` (in `owners:` in ductus.yaml), `address` (an email
-             *     address, not an account) or `nobody`. Absent for the unowned.
+             * @description Who the owner is: `user` (an account, in `person`), `renamed` (an account by a name it had
+             *     before, which nobody has now: in `person`, the former name in `was`), `reused` (the
+             *     account that has the name now, in `person`; another had it before, in `was`), `disabled`
+             *     (an account that is disabled or refused by the directory, in `person`), `several` (names
+             *     more than one account: none is chosen), `team` (in `owners:` in ductus.yaml), `address`
+             *     (an email address, not an account) or `nobody`. Absent for the unowned. `renamed` and
+             *     `reused` still reach `person` (alerts too); `disabled`, `several` and `nobody` reach no one.
              */
             reach?: string | null;
             /** @description resources.yaml entries with this `owner`. */
             resources: components["schemas"]["OwnedResource"][];
+            /** @description What to write instead (the account's email), for the move's `to`. */
+            suggest?: string | null;
+            was?: components["schemas"]["OwnerWas"] | null;
             /** @description The owner is the caller (or the person whose token calls). */
             you: boolean;
         };
@@ -2132,6 +2143,19 @@ export interface components {
              */
             addresses: string[];
             owner: string;
+        };
+        /** @description A name an account had before. */
+        OwnerWas: {
+            /** @description `username`, `email` or `display_name`. */
+            kind: string;
+            /**
+             * Format: date-time
+             * @description When it stopped being theirs.
+             */
+            until: string;
+            value: string;
+            /** @description The account that had it (its username now). */
+            whose: string;
         };
         PasswordChange: {
             /** @description The password you have now. */

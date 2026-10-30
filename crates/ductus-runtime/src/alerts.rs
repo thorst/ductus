@@ -395,8 +395,8 @@ async fn warn_unreachable_owners(engine: &Engine, a: &Alerts) {
     {
         return;
     }
-    let users = engine.store.users().await.unwrap_or_default();
-    let people = people(&users);
+    let accounts = engine.store.accounts().await.unwrap_or_default();
+    let people = people(&accounts.users, &accounts.former);
     let configs = engine.interfaces.iter().map(|i| i.config.as_ref());
     let mut owners: Vec<String> =
         ductus_core::owners::owned(configs, &engine.resources).into_iter().map(|o| o.owner).collect();
@@ -405,14 +405,30 @@ async fn warn_unreachable_owners(engine: &Engine, a: &Alerts) {
     for owner in owners.iter().filter(|o| !o.is_empty()) {
         if alerts::owner_addresses(owner, &people, &a.owners).is_none() {
             tracing::warn!(%owner, "alerts for this owner reach nobody: no user with that name and an email, not in `owners:` in ductus.yaml, and not an email address");
+            continue;
+        }
+        let reach = ductus_core::owners::reach(owner, &people, &a.owners);
+        if let (ductus_core::owners::Reach::Renamed { user, .. }, Some(advice)) =
+            (&reach, ductus_core::owners::advice(owner, &reach, &people))
+        {
+            let fix = advice.to.map(|to| ductus_core::owners::fix(owner, &to)).unwrap_or_default();
+            tracing::warn!(%owner, %user, %fix, "alerts for this owner reach the account that had this name before: {}", advice.text);
         }
     }
 }
 
-/// The accounts as owners see them (disabled ones too: they still name someone, who gets nothing).
-pub(crate) fn people(users: &[ductus_store::User]) -> Vec<Person<'_>> {
+/// The accounts as owners see them (disabled ones too: they still name someone, who gets nothing),
+/// with the names each had before (`former`: pass none where only current names matter).
+pub fn people<'a>(users: &'a [ductus_store::User], former: &'a [ductus_store::UserName]) -> Vec<Person<'a>> {
+    use ductus_core::owners::{Former, Level};
     fn some(s: &str) -> Option<&str> {
         (!s.trim().is_empty()).then_some(s)
+    }
+    let mut by_user: HashMap<i32, Vec<Former>> = HashMap::new();
+    for name in former {
+        if let Some(kind) = Level::parse(&name.kind) {
+            by_user.entry(name.user_id).or_default().push(Former { kind, value: &name.value, until: name.until });
+        }
     }
     users
         .iter()
@@ -421,6 +437,7 @@ pub(crate) fn people(users: &[ductus_store::User]) -> Vec<Person<'_>> {
             display_name: some(&u.display_name),
             email: some(&u.email),
             disabled: u.disabled_at.is_some() || u.directory_refused_at.is_some(),
+            former: by_user.remove(&u.id).unwrap_or_default(),
         })
         .collect()
 }
@@ -497,7 +514,7 @@ pub async fn evaluate(engine: &Engine) -> Result<()> {
     judged.extend(judge_certificates(engine, a, now).await?);
     let rows: HashMap<String, AlertRow> =
         engine.store.alerts().await?.into_iter().map(|r| (r.key.clone(), r)).collect();
-    let mut users = None;
+    let mut accounts = None;
     for j in judged {
         let Some(row) = rows.get(&j.key) else { continue }; // made at start; a new one at the next start
         let stored = stored(row);
@@ -516,10 +533,10 @@ pub async fn evaluate(engine: &Engine) -> Result<()> {
             continue;
         }
         let needs_people = matches!(step, Step::Fire | Step::Escalate | Step::Remind | Step::Recover);
-        if needs_people && users.is_none() {
-            users = Some(engine.store.users().await.unwrap_or_default());
+        if needs_people && accounts.is_none() {
+            accounts = Some(engine.store.accounts().await.unwrap_or_default());
         }
-        let people = people(users.as_deref().unwrap_or_default());
+        let people = accounts.as_ref().map(|a| people(&a.users, &a.former)).unwrap_or_default();
         let change = change(engine, a, row, &j, step, now, &people).await?;
         if engine.store.change_alert(row.id, row.rev, &change).await? {
             if let Some(e) = &change.event {
@@ -804,7 +821,13 @@ channels:
   hook: { webhook: { url: 'http://127.0.0.1:9/h', format: teams } }
 rules: [{ when: [error], severity: critical, to: [both, hook, owner] }]",
         );
-        let anna = [Person { username: "anna", display_name: None, email: Some("anna@example.org"), disabled: false }];
+        let anna = [Person {
+            username: "anna",
+            display_name: None,
+            email: Some("anna@example.org"),
+            disabled: false,
+            former: Vec::new(),
+        }];
         assert_eq!(
             a.channels(&["both", "hook", OWNER, "hook"], "Lab", &anna),
             ["both/email", "both/webhook", "hook", "email:lab@example.org"]

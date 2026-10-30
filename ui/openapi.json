@@ -2022,7 +2022,7 @@
         "tags": [
           "reports"
         ],
-        "summary": "Who owns which interface (`about.owner`), destination (`owner` on one someone else owns) and\nresources.yaml entry, and whether each owner is an account (username, email or display name,\nignoring case), a team in `owners:`, or nobody the engine knows.",
+        "summary": "Who owns which interface (`about.owner`), destination (`owner` on one someone else owns) and\nresources.yaml entry, and whether each owner is an account (username, email or display name,\nignoring case, or one it had before), a team in `owners:`, or nobody the engine knows.",
         "operationId": "owners",
         "responses": {
           "200": {
@@ -5693,6 +5693,13 @@
           "resources"
         ],
         "properties": {
+          "advice": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How the owner should be written instead, when it reaches someone but isn't written as\ntheir email (renamed, reused, a username or display name), in words."
+          },
           "owner": {
             "type": [
               "string",
@@ -5722,7 +5729,7 @@
               "string",
               "null"
             ],
-            "description": "Who the owner is: `user` (an account, in `person`), `disabled` (an account that is\ndisabled or refused by the directory, in `person`), `several` (names more than one\naccount: none is chosen), `team` (in `owners:` in ductus.yaml), `address` (an email\naddress, not an account) or `nobody`. Absent for the unowned."
+            "description": "Who the owner is: `user` (an account, in `person`), `renamed` (an account by a name it had\nbefore, which nobody has now: in `person`, the former name in `was`), `reused` (the\naccount that has the name now, in `person`; another had it before, in `was`), `disabled`\n(an account that is disabled or refused by the directory, in `person`), `several` (names\nmore than one account: none is chosen), `team` (in `owners:` in ductus.yaml), `address`\n(an email address, not an account) or `nobody`. Absent for the unowned. `renamed` and\n`reused` still reach `person` (alerts too); `disabled`, `several` and `nobody` reach no one."
           },
           "resources": {
             "type": "array",
@@ -5730,6 +5737,24 @@
               "$ref": "#/components/schemas/OwnedResource"
             },
             "description": "resources.yaml entries with this `owner`."
+          },
+          "suggest": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "What to write instead (the account's email), for the move's `to`."
+          },
+          "was": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/OwnerWas",
+                "description": "For `renamed` and `reused`: the former name the owner text matched."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "you": {
             "type": "boolean",
@@ -5782,6 +5807,34 @@
           },
           "owner": {
             "type": "string"
+          }
+        }
+      },
+      "OwnerWas": {
+        "type": "object",
+        "description": "A name an account had before.",
+        "required": [
+          "kind",
+          "value",
+          "whose",
+          "until"
+        ],
+        "properties": {
+          "kind": {
+            "type": "string",
+            "description": "`username`, `email` or `display_name`."
+          },
+          "until": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it stopped being theirs."
+          },
+          "value": {
+            "type": "string"
+          },
+          "whose": {
+            "type": "string",
+            "description": "The account that had it (its username now)."
           }
         }
       },

@@ -217,12 +217,22 @@ async fn impact_report(engine: Eng, _caller: Caller, Query(p): Query<ImpactParam
 pub struct OwnerGroup {
     /// Absent for what nobody owns (listed last).
     owner: Option<String>,
-    /// Who the owner is: `user` (an account, in `person`), `disabled` (an account that is
-    /// disabled or refused by the directory, in `person`), `several` (names more than one
-    /// account: none is chosen), `team` (in `owners:` in ductus.yaml), `address` (an email
-    /// address, not an account) or `nobody`. Absent for the unowned.
+    /// Who the owner is: `user` (an account, in `person`), `renamed` (an account by a name it had
+    /// before, which nobody has now: in `person`, the former name in `was`), `reused` (the
+    /// account that has the name now, in `person`; another had it before, in `was`), `disabled`
+    /// (an account that is disabled or refused by the directory, in `person`), `several` (names
+    /// more than one account: none is chosen), `team` (in `owners:` in ductus.yaml), `address`
+    /// (an email address, not an account) or `nobody`. Absent for the unowned. `renamed` and
+    /// `reused` still reach `person` (alerts too); `disabled`, `several` and `nobody` reach no one.
     reach: Option<String>,
     person: Option<OwnerPerson>,
+    /// For `renamed` and `reused`: the former name the owner text matched.
+    was: Option<OwnerWas>,
+    /// How the owner should be written instead, when it reaches someone but isn't written as
+    /// their email (renamed, reused, a username or display name), in words.
+    advice: Option<String>,
+    /// What to write instead (the account's email), for the move's `to`.
+    suggest: Option<String>,
     /// The owner is the caller (or the person whose token calls).
     you: bool,
     /// Interfaces, and destinations owned by someone other than their interface's owner.
@@ -255,6 +265,24 @@ pub struct OwnerPerson {
     disabled: bool,
 }
 
+/// A name an account had before.
+#[derive(Serialize, ToSchema)]
+pub struct OwnerWas {
+    /// `username`, `email` or `display_name`.
+    kind: String,
+    value: String,
+    /// The account that had it (its username now).
+    whose: String,
+    /// When it stopped being theirs.
+    until: chrono::DateTime<chrono::Utc>,
+}
+
+impl From<&ductus_core::owners::Was> for OwnerWas {
+    fn from(w: &ductus_core::owners::Was) -> Self {
+        Self { kind: w.kind.label().into(), value: w.value.clone(), whose: w.whose.clone(), until: w.until }
+    }
+}
+
 impl From<&ductus_core::owners::Person<'_>> for OwnerPerson {
     fn from(p: &ductus_core::owners::Person) -> Self {
         Self {
@@ -270,6 +298,8 @@ fn reach_label(reach: &ductus_core::owners::Reach) -> &'static str {
     use ductus_core::owners::Reach;
     match reach {
         Reach::User(_) => "user",
+        Reach::Renamed { .. } => "renamed",
+        Reach::Reused { .. } => "reused",
         Reach::Disabled(_) => "disabled",
         Reach::Several(_) => "several",
         Reach::Team => "team",
@@ -280,22 +310,28 @@ fn reach_label(reach: &ductus_core::owners::Reach) -> &'static str {
 
 /// Who owns which interface (`about.owner`), destination (`owner` on one someone else owns) and
 /// resources.yaml entry, and whether each owner is an account (username, email or display name,
-/// ignoring case), a team in `owners:`, or nobody the engine knows.
+/// ignoring case, or one it had before), a team in `owners:`, or nobody the engine knows.
 #[utoipa::path(get, path = "/owners", tag = "reports", responses((status = 200, body = Vec<OwnerGroup>)))]
 async fn owners(engine: Eng, caller: Caller) -> ApiResult<Vec<OwnerGroup>> {
-    use ductus_core::owners::{self, Found, What};
-    let users = engine.store.users().await?;
-    let people = crate::alerts::people(&users);
-    let me = caller.who.user_id.and_then(|id| users.iter().find(|u| u.id == id)).map(|u| u.username.as_str());
+    use ductus_core::owners::{self, Reach, What};
+    let accounts = engine.store.accounts().await?;
+    let people = crate::alerts::people(&accounts.users, &accounts.former);
+    let me = caller.who.user_id.and_then(|id| accounts.users.iter().find(|u| u.id == id)).map(|u| u.username.as_str());
     let items = owners::owned(engine.interfaces.iter().map(|i| &*i.config), &engine.resources);
     Ok(Json(
         owners::by_owner(items)
             .into_iter()
             .map(|(owner, items)| {
-                let person = match owners::find(&owner, &people) {
-                    Found::One(p) => Some(p),
+                let reach = (!owner.is_empty()).then(|| owners::reach(&owner, &people, &engine.teams));
+                let person = match &reach {
+                    Some(Reach::Team) | None => None,
+                    Some(_) => owners::find(&owner, &people).person(),
+                };
+                let was = match &reach {
+                    Some(Reach::Renamed { was, .. } | Reach::Reused { was, .. }) => Some(was.into()),
                     _ => None,
                 };
+                let advice = reach.as_ref().and_then(|r| owners::advice(&owner, r, &people));
                 let (mut owns, mut resources) = (Vec::new(), Vec::new());
                 for item in items {
                     match item.what {
@@ -309,10 +345,12 @@ async fn owners(engine: Eng, caller: Caller) -> ApiResult<Vec<OwnerGroup>> {
                     }
                 }
                 OwnerGroup {
-                    reach: (!owner.is_empty())
-                        .then(|| reach_label(&owners::reach(&owner, &people, &engine.teams)).to_string()),
+                    reach: reach.as_ref().map(|r| reach_label(r).to_string()),
                     you: me.is_some() && person.map(|p| p.username) == me,
                     person: person.map(Into::into),
+                    was,
+                    suggest: advice.as_ref().and_then(|a| a.to.clone()),
+                    advice: advice.map(|a| a.text),
                     owner: (!owner.is_empty()).then_some(owner),
                     owns,
                     resources,
@@ -330,7 +368,7 @@ async fn owners(engine: Eng, caller: Caller) -> ApiResult<Vec<OwnerGroup>> {
 async fn owner_people(engine: Eng, _caller: Caller) -> ApiResult<Vec<OwnerPerson>> {
     let users = engine.store.users().await?;
     let mut people: Vec<OwnerPerson> =
-        crate::alerts::people(&users).iter().filter(|p| !p.disabled).map(Into::into).collect();
+        crate::alerts::people(&users, &[]).iter().filter(|p| !p.disabled).map(Into::into).collect();
     people.sort_by_key(|p| p.display_name.as_deref().unwrap_or(&p.username).to_lowercase());
     Ok(Json(people))
 }
@@ -426,16 +464,19 @@ async fn reassign_preview(
     if request.from.trim().is_empty() {
         return Err(ApiError::bad_request("say whose interfaces move (`from`)"));
     }
-    let users = engine.store.users().await?;
-    let people = crate::alerts::people(&users);
+    let accounts = engine.store.accounts().await?;
+    let people = crate::alerts::people(&accounts.users, &accounts.former);
     let reach = owners::reach(&request.to, &people, &engine.teams);
-    let to_person = match owners::find(&request.to, &people) {
-        owners::Found::One(p) => Some(p.into()),
-        _ => None,
+    let to_person = match &reach {
+        Reach::Team => None,
+        _ => owners::find(&request.to, &people).person().map(Into::into),
     };
     let to = request.to.trim();
     let warning = match &reach {
-        Reach::User(_) | Reach::Team => None,
+        Reach::Team => None,
+        Reach::User(_) | Reach::Renamed { .. } | Reach::Reused { .. } => {
+            owners::advice(to, &reach, &people).map(|a| format!("`{to}`: {}", a.text))
+        }
         Reach::Disabled(u) => Some(format!("`{to}` is the account {u}, which is disabled")),
         Reach::Several(n) => Some(format!("`{to}` names {n} accounts: use a username or an email address")),
         Reach::Address => Some(format!("`{to}` isn't an account (alerts still reach the address)")),
@@ -522,14 +563,10 @@ async fn reassign_preview(
         let only: String = request
             .interfaces
             .iter()
-            .map(|n| format!(" --interface {}", shell_quote(n)))
-            .chain(request.resources.iter().map(|n| format!(" --resource {}", shell_quote(n))))
+            .map(|n| format!(" --interface {}", owners::shell(n)))
+            .chain(request.resources.iter().map(|n| format!(" --resource {}", owners::shell(n))))
             .collect();
-        preview.command = format!(
-            "ductus owners reassign --from {} --to {}{only}",
-            shell_quote(request.from.trim()),
-            shell_quote(request.to.trim())
-        );
+        preview.command = format!("{}{only}", owners::fix(&request.from, &request.to));
     }
     Ok(Json(preview))
 }
@@ -539,15 +576,6 @@ fn resource_exists(resources: &ductus_core::Resources, name: &str) -> bool {
     [Kind::Database, Kind::Api, Kind::Sftp, Kind::Ldap, Kind::Certificate]
         .into_iter()
         .any(|k| resources.contains(k, name))
-}
-
-/// Quoted for a POSIX shell when it needs it: `'Ann Smith'`, `'O'"'"'Brien'`.
-fn shell_quote(s: &str) -> String {
-    if !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || "-_./@".contains(c)) {
-        s.to_string()
-    } else {
-        format!("'{}'", s.replace('\'', "'\"'\"'"))
-    }
 }
 
 #[derive(Deserialize, ToSchema, Default)]

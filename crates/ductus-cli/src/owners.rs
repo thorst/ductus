@@ -16,25 +16,15 @@ pub async fn report(root: &Path, env: &str, database_url: Option<String>, check:
     let interfaces = interface_dirs(root, &environment)?;
     let resources = Resources::load(root, &environment)?;
     let settings = ductus_core::settings::Settings::load(root)?;
-    let users = match database_url.filter(|u| !u.trim().is_empty()) {
+    let accounts = match database_url.filter(|u| !u.trim().is_empty()) {
         Some(url) => {
             let store = Store::connect_read_only(&url).await.context("reading the accounts")?;
-            Some(store.users().await?)
+            Some(store.accounts().await?)
         }
         None if check => return Err(crate::tools::database_url(None).unwrap_err()),
         None => None,
     };
-    let people: Option<Vec<Person>> = users.as_ref().map(|users| {
-        users
-            .iter()
-            .map(|u| Person {
-                username: &u.username,
-                display_name: Some(u.display_name.as_str()).filter(|s| !s.trim().is_empty()),
-                email: Some(u.email.as_str()).filter(|s| !s.trim().is_empty()),
-                disabled: u.disabled_at.is_some() || u.directory_refused_at.is_some(),
-            })
-            .collect()
-    });
+    let people: Option<Vec<Person>> = accounts.as_ref().map(|a| ductus_runtime::alerts::people(&a.users, &a.former));
 
     let mut complete = true;
     for i in &interfaces {
@@ -49,7 +39,7 @@ pub async fn report(root: &Path, env: &str, database_url: Option<String>, check:
         println!("no interfaces");
         return Ok(complete);
     }
-    let (mut unowned, mut problems) = (0, 0);
+    let (mut unowned, mut problems, mut warnings) = (0, 0, 0);
     for (n, (owner, items)) in groups.iter().enumerate() {
         if n > 0 {
             println!();
@@ -59,10 +49,25 @@ pub async fn report(root: &Path, env: &str, database_url: Option<String>, check:
             println!("no owner ({})", items.len());
         } else if let Some(people) = &people {
             let reach = owners::reach(owner, people, &settings.owners);
-            if !reach.ok() {
-                problems += 1;
+            let advice = owners::advice(owner, &reach, people);
+            let mark = match (reach.ok(), &advice) {
+                (false, _) => {
+                    problems += 1;
+                    "✗"
+                }
+                (true, Some(_)) => {
+                    warnings += 1;
+                    "⚠"
+                }
+                (true, None) => "✓",
+            };
+            println!("{mark} {owner} ({}): {}", items.len(), said(&reach, people));
+            if let Some(advice) = advice {
+                println!("  {}", advice.text);
+                if let Some(to) = &advice.to {
+                    println!("  fix: {}", owners::fix(owner, to));
+                }
             }
-            println!("{} {owner} ({}): {}", if reach.ok() { "✓" } else { "✗" }, items.len(), said(&reach, people));
         } else {
             println!("{owner} ({})", items.len());
         }
@@ -75,10 +80,17 @@ pub async fn report(root: &Path, env: &str, database_url: Option<String>, check:
     }
     if people.is_none() {
         println!("\nnote: owners aren't matched to accounts without the database (set DUCTUS_DATABASE_URL)");
-    } else if problems > 0 {
-        println!(
-            "\n{problems} owner(s) reach nobody or the wrong person: make them an account's username or email, add them to `owners:` in ductus.yaml, or move their things with `ductus owners reassign`"
-        );
+    } else {
+        if problems > 0 {
+            println!(
+                "\n{problems} owner(s) reach nobody or the wrong person: make them an account's email, add them to `owners:` in ductus.yaml, or move their things with `ductus owners reassign`"
+            );
+        }
+        if warnings > 0 {
+            println!(
+                "\n{warnings} owner(s) reach their person but should be written as their email (⚠ above; `--check` passes): run the fix shown"
+            );
+        }
     }
     Ok(complete && !(check && problems > 0))
 }
@@ -92,6 +104,8 @@ fn said(reach: &Reach, people: &[Person]) -> String {
     };
     match reach {
         Reach::User(u) => format!("user {}", who(u)),
+        Reach::Renamed { user, .. } => format!("user {}, by a name they had before", who(user)),
+        Reach::Reused { user, was } => format!("user {} (the name was {}'s before)", who(user), was.whose),
         Reach::Disabled(u) => format!("account {} is disabled", who(u)),
         Reach::Several(n) => format!("names {n} accounts; use a username or an email address"),
         Reach::Team => "team (`owners:` in ductus.yaml)".into(),

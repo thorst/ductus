@@ -398,8 +398,8 @@ async fn channels(engine: Eng, caller: Caller) -> ApiResult<ChannelsOverview> {
     let mut owners = Vec::new();
     let mut owner_notifications = None;
     if to_owner {
-        let users = engine.store.users().await?;
-        let people = crate::alerts::people(&users);
+        let accounts = engine.store.accounts().await?;
+        let people = crate::alerts::people(&accounts.users, &accounts.former);
         let configs = engine.interfaces.iter().map(|i| i.config.as_ref());
         for (owner, _) in ductus_core::owners::by_owner(ductus_core::owners::owned(configs, &engine.resources)) {
             if owner.is_empty() {
