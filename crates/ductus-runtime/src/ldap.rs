@@ -12,10 +12,10 @@
 use crate::control::Engine;
 use crate::tls::{Certificates, Trust};
 use anyhow::{Context, Result, bail};
-use ductus_core::ldap::{self, Access, LdapAuth};
+use ductus_core::ldap::{self, Access, DirectoryId, IdSource, IdValue, LdapAuth};
 use ductus_core::resources::{LdapSecurity, LdapServer, Resources};
 use ductus_core::tls::ConnectTls;
-use ductus_store::{Audit, By, DirectoryPerson, Role};
+use ductus_store::{Audit, By, DirectoryAccount, DirectoryPerson, Role, Store};
 use ldap3::{Ldap, LdapConnAsync, LdapConnSettings, Scope, SearchEntry};
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -62,6 +62,10 @@ pub struct Person {
     pub display_name: String,
     pub email: String,
     pub access: Access,
+    /// Their sign-in name as the directory spells it (`username_attribute`), if read.
+    pub username: Option<String>,
+    /// Their id there (`attributes.id`), if the directory gives one.
+    pub id: Option<DirectoryId>,
 }
 
 impl Person {
@@ -72,8 +76,16 @@ impl Person {
             email: self.email.clone(),
             role: Role::try_from(self.access.role as i16).expect("directory roles are the store's"),
             permissions: self.access.permissions.clone(),
+            username: self.username.clone(),
+            directory_id: self.id.as_ref().map(DirectoryId::to_string),
         }
     }
+}
+
+/// An entry the directory found, and the id it has there (for a refusal: is it the same person?).
+pub struct SignIn {
+    pub verdict: Verdict,
+    pub id: Option<DirectoryId>,
 }
 
 /// A configured directory: how to reach it and how to read it.
@@ -107,38 +119,52 @@ impl Directory {
     /// Check a sign-in: find the person, bind as them with `password`, read their groups.
     /// Errors mean the directory couldn't be asked (down, refused the service account, timed out).
     pub async fn sign_in(&self, username: &str, password: &str) -> Result<Verdict> {
+        Ok(self.sign_in_found(username, password).await?.verdict)
+    }
+
+    /// `sign_in`, with the id of the entry found (none when nobody was).
+    pub async fn sign_in_found(&self, username: &str, password: &str) -> Result<SignIn> {
         // An empty password is an "unauthenticated bind", which many directories accept: it
         // would sign anyone in.
         if password.is_empty() {
-            return Ok(Verdict::WrongPassword);
+            return Ok(SignIn { verdict: Verdict::WrongPassword, id: None });
         }
         let mut conn = self.connect().await?;
-        let verdict = async {
-            let Some(entry) = conn.find(self, username).await? else { return Ok(Verdict::Unknown) };
+        let found = async {
+            let Some(entry) = conn.find(self, &self.auth.filter_for(username), username).await? else {
+                return Ok(SignIn { verdict: Verdict::Unknown, id: None });
+            };
+            let id = self.id_of(&entry);
             if self.disabled(&entry) {
-                return Ok(Verdict::Disabled);
+                return Ok(SignIn { verdict: Verdict::Disabled, id });
             }
             match conn.step(conn.ldap.clone().simple_bind(&entry.dn, password)).await? {
                 r if r.rc == 0 => {}
-                r if r.rc == INVALID_CREDENTIALS => return Ok(Verdict::WrongPassword),
+                r if r.rc == INVALID_CREDENTIALS => return Ok(SignIn { verdict: Verdict::WrongPassword, id }),
                 r => bail!("binding as the user was refused: {r}"),
             }
             conn.bind_service(&self.server).await?; // read the groups as the service account, not as them
-            self.verdict(&mut conn, entry).await
+            Ok(SignIn { verdict: self.verdict(&mut conn, entry).await?, id })
         }
         .await;
         conn.close().await;
-        verdict
+        found
     }
 
-    /// What the directory says about each of `usernames` now (refresh): one connection for all.
-    /// The whole call fails when the directory can't be reached; one name's failure is its own.
-    pub async fn check_all(&self, usernames: &[String]) -> Result<Vec<Result<Verdict>>> {
+    /// What the directory says about each account now (refresh): one connection for all. An
+    /// account whose directory id is known is looked up by it (a renamed person is still found,
+    /// and a new person given their old name isn't them); others by name. The whole call fails
+    /// when the directory can't be reached; one account's failure is its own.
+    pub async fn check_all(&self, accounts: &[DirectoryAccount]) -> Result<Vec<Result<Verdict>>> {
         let mut conn = self.connect().await?;
-        let mut out = Vec::with_capacity(usernames.len());
-        for name in usernames {
+        let mut out = Vec::with_capacity(accounts.len());
+        for account in accounts {
             let verdict = async {
-                let Some(entry) = conn.find(self, name).await? else { return Ok(Verdict::Unknown) };
+                let found = match account.directory_id.as_deref().and_then(|id| self.searchable(id)) {
+                    Some(id) => conn.find(self, &id.filter(), &account.username).await?,
+                    None => conn.find(self, &self.auth.filter_for(&account.username), &account.username).await?,
+                };
+                let Some(entry) = found else { return Ok(Verdict::Unknown) };
                 if self.disabled(&entry) {
                     return Ok(Verdict::Disabled);
                 }
@@ -155,12 +181,59 @@ impl Directory {
         ldap::ad_disabled(first(entry, "userAccountControl"))
     }
 
+    /// The attributes a search for a person reads.
+    fn person_attributes(&self) -> Vec<&str> {
+        let a = &self.auth.attributes;
+        let mut attrs = vec![a.display_name.as_str(), a.email.as_str(), "userAccountControl"];
+        attrs.extend(self.auth.username_attribute());
+        match a.id_source() {
+            IdSource::Auto => attrs.extend([ldap::OBJECT_GUID, ldap::ENTRY_UUID]),
+            IdSource::Named(id) => attrs.push(id),
+            IdSource::None => {}
+        }
+        attrs
+    }
+
+    /// The entry's id, as `attributes.id` says to read it.
+    fn id_of(&self, entry: &SearchEntry) -> Option<DirectoryId> {
+        let id = match self.auth.attributes.id_source() {
+            IdSource::None => return None,
+            IdSource::Named(attribute) => value_of(entry, attribute),
+            IdSource::Auto => value_of(entry, ldap::OBJECT_GUID).or_else(|| value_of(entry, ldap::ENTRY_UUID)),
+        };
+        if id.is_none() && !NO_ID_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                directory = %self.name,
+                id = %self.auth.attributes.id,
+                "the directory gives no id for its people (auth.ldap.attributes.id): a renamed sign-in name and one given to someone new can't be told apart; name the attribute that has one"
+            );
+        }
+        id
+    }
+
+    /// A stored id this directory's settings can look up (one read from another attribute before
+    /// `attributes.id` changed can't: the account is found by name, and takes the new id).
+    fn searchable(&self, stored: &str) -> Option<DirectoryId> {
+        let id = DirectoryId::parse(stored)?;
+        let usable = match self.auth.attributes.id_source() {
+            IdSource::None => false,
+            IdSource::Named(a) => id.attribute.eq_ignore_ascii_case(a),
+            IdSource::Auto => {
+                [ldap::OBJECT_GUID, ldap::ENTRY_UUID].iter().any(|a| id.attribute.eq_ignore_ascii_case(a))
+            }
+        };
+        usable.then_some(id)
+    }
+
     async fn verdict(&self, conn: &mut Conn, entry: SearchEntry) -> Result<Verdict> {
         let groups = conn.groups(self, &entry.dn).await?;
         let Some(access) = self.auth.groups.access(&groups) else { return Ok(Verdict::NoGroup) };
+        let a = &self.auth.attributes;
         Ok(Verdict::Allowed(Person {
-            display_name: first(&entry, &self.auth.attributes.display_name).unwrap_or("").to_string(),
-            email: first(&entry, &self.auth.attributes.email).unwrap_or("").to_string(),
+            display_name: first(&entry, &a.display_name).unwrap_or("").to_string(),
+            email: first(&entry, &a.email).unwrap_or("").to_string(),
+            username: self.auth.username_attribute().and_then(|u| first(&entry, u)).map(str::to_string),
+            id: self.id_of(&entry),
             dn: entry.dn,
             access,
         }))
@@ -234,12 +307,10 @@ impl Conn {
         Ok(entries.into_iter().map(SearchEntry::construct).collect())
     }
 
-    /// The person `username` names (None if nobody, or more than one: a filter that matches two
-    /// people must not pick one).
-    async fn find(&self, d: &Directory, username: &str) -> Result<Option<SearchEntry>> {
-        let a = &d.auth.attributes;
-        let attrs = vec![a.display_name.as_str(), a.email.as_str(), "userAccountControl"];
-        let mut found = self.search(&d.auth.user_base, Scope::Subtree, &d.auth.filter_for(username), attrs).await?;
+    /// The person `filter` finds (looking for `username`): None if nobody, or more than one (a
+    /// filter that matches two people must not pick one).
+    async fn find(&self, d: &Directory, filter: &str, username: &str) -> Result<Option<SearchEntry>> {
+        let mut found = self.search(&d.auth.user_base, Scope::Subtree, filter, d.person_attributes()).await?;
         if found.len() > 1 {
             tracing::warn!(
                 user = username,
@@ -320,36 +391,82 @@ fn first<'a>(entry: &'a SearchEntry, attribute: &str) -> Option<&'a str> {
     entry.attrs.iter().find(|(k, _)| k.eq_ignore_ascii_case(attribute)).and_then(|(_, v)| v.first()).map(String::as_str)
 }
 
-/// Read again what the directory says about everyone with a session or token (`refresh`):
-/// changes are saved, refusals end access. When the directory can't be reached nothing changes
-/// (sessions run on to their own end: an outage mustn't sign everyone out).
-pub async fn refresh(engine: &Engine, directory: &Directory) -> Result<Refreshed> {
-    let people = engine.store.directory_users_to_check().await?;
+/// Said once per process: a directory that gives no id.
+static NO_ID_WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// An id attribute's value. `objectGUID` is 16 bytes whatever they look like (ldap3 files values
+/// that happen to be UTF-8 as text); another attribute is text unless it came back as bytes.
+fn value_of(entry: &SearchEntry, attribute: &str) -> Option<DirectoryId> {
+    let named = |k: &String| k.eq_ignore_ascii_case(attribute);
+    let bytes = entry.bin_attrs.iter().find(|(k, _)| named(k)).and_then(|(_, v)| v.first()).cloned();
+    let value = match (bytes, first(entry, attribute)) {
+        (Some(b), _) => IdValue::Bytes(b),
+        (None, Some(t)) if attribute.eq_ignore_ascii_case(ldap::OBJECT_GUID) => IdValue::Bytes(t.as_bytes().to_vec()),
+        (None, Some(t)) if !t.trim().is_empty() => IdValue::Text(t.to_string()),
+        _ => return None,
+    };
+    let attribute = if attribute.eq_ignore_ascii_case(ldap::OBJECT_GUID) {
+        ldap::OBJECT_GUID
+    } else if attribute.eq_ignore_ascii_case(ldap::ENTRY_UUID) {
+        ldap::ENTRY_UUID
+    } else {
+        attribute
+    };
+    Some(DirectoryId { attribute: attribute.to_string(), value })
+}
+
+/// The account of someone the directory just let in (`username`: what they typed), made or
+/// brought up to date from what it says (role, permissions, name, email).
+pub async fn signed_in(
+    store: &Store,
+    username: &str,
+    person: &Person,
+    ip: Option<std::net::IpAddr>,
+) -> Result<ductus_store::User> {
+    let by = By { kind: "system", id: None, user_id: None, name: "directory", via: "session", ip };
+    let audit = Audit::new(by, "user.directory_change");
+    Ok(store.save_directory_user(username, &person.for_store(), &audit).await?.0)
+}
+
+/// Read again what the directory says about everyone with a session or token (`refresh`), by
+/// their directory id where it's known: changes are saved (a renamed sign-in name renames the
+/// account), refusals end access. When the directory can't be reached nothing changes (sessions
+/// run on to their own end: an outage mustn't sign everyone out).
+pub async fn refresh(store: &Store, directory: &Directory) -> Result<Refreshed> {
+    let people = store.directory_users_to_check().await?;
     let mut done = Refreshed::default();
     if people.is_empty() {
         return Ok(done);
     }
-    let names: Vec<String> = people.iter().map(|(_, n)| n.clone()).collect();
-    let verdicts = directory.check_all(&names).await?;
+    let verdicts = directory.check_all(&people).await?;
     let by = By::engine();
-    for ((id, name), verdict) in people.iter().zip(verdicts) {
-        match verdict {
+    for (account, verdict) in people.iter().zip(verdicts) {
+        let name = &account.username;
+        let saved = match verdict {
             Ok(Verdict::Allowed(person)) => {
                 let audit = Audit::new(by, "user.directory_change");
-                let (_, update) = engine.store.save_directory_user(name, &person.for_store(), &audit).await?;
-                done.checked += 1;
-                if update != ductus_store::DirectoryUpdate::Unchanged {
-                    done.changed += 1;
-                }
+                store.save_directory_user(name, &person.for_store(), &audit).await.map(|(user, update)| {
+                    if user.username != *name {
+                        tracing::info!(user = %name, now = %user.username, "a directory user's sign-in name changed there: the account is renamed");
+                    }
+                    if update != ductus_store::DirectoryUpdate::Unchanged {
+                        done.changed += 1;
+                    }
+                })
             }
             Ok(refused) => {
                 let audit = Audit::new(by, "user.directory_refused");
-                if engine.store.refuse_directory_user(*id, refused.reason(), &audit).await? {
-                    tracing::warn!(user = %name, reason = refused.reason(), "the directory refused a signed-in user: their sessions ended");
-                    done.refused += 1;
-                }
-                done.checked += 1;
+                store.refuse_directory_user(account.id, refused.reason(), &audit).await.map(|newly| {
+                    if newly {
+                        tracing::warn!(user = %name, reason = refused.reason(), "the directory refused a signed-in user: their sessions ended");
+                        done.refused += 1;
+                    }
+                })
             }
+            Err(e) => Err(e),
+        };
+        match saved {
+            Ok(()) => done.checked += 1,
             Err(e) => {
                 tracing::warn!(user = %name, error = %format!("{e:#}"), "couldn't check a user in the directory; trying at the next refresh");
                 done.failed += 1;
@@ -377,7 +494,7 @@ pub fn start(engine: &Arc<Engine>) {
         loop {
             tokio::time::sleep(every).await;
             let Some(engine) = weak.upgrade() else { return };
-            match refresh(&engine, &directory).await {
+            match refresh(&engine.store, &directory).await {
                 Ok(r) if r.checked + r.failed > 0 => tracing::info!(
                     checked = r.checked,
                     changed = r.changed,

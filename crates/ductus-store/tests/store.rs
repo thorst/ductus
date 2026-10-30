@@ -2638,6 +2638,8 @@ async fn directory_accounts_follow_the_directory() {
         email: "anna@h.org".into(),
         role: Role::Viewer,
         permissions: vec![],
+        username: None,
+        directory_id: None,
     };
     let actions = |name: String| {
         let pool = pool.clone();
@@ -2671,7 +2673,7 @@ async fn directory_accounts_follow_the_directory() {
     let (_, token) =
         store.create_token(&unique("test-user-dirtoken"), Role::Operator, &[], Some(user.id), &quiet()).await.unwrap();
     let to_check = store.directory_users_to_check().await.unwrap();
-    assert!(to_check.iter().any(|(id, n)| *id == user.id && *n == name), "has a session: checked at refresh");
+    assert!(to_check.iter().any(|a| a.id == user.id && a.username == name), "has a session: checked at refresh");
     let refused = || ductus_store::Audit::new(ductus_store::By::engine(), "user.directory_refused");
     assert!(store.refuse_directory_user(user.id, "in no Ductus group", &refused()).await.unwrap());
     assert!(!store.refuse_directory_user(user.id, "in no Ductus group", &refused()).await.unwrap(), "already refused");
@@ -2679,7 +2681,7 @@ async fn directory_accounts_follow_the_directory() {
     assert!(store.authenticate(&token).await.unwrap().is_none(), "the token stops");
     assert!(store.user(user.id).await.unwrap().unwrap().directory_refused_at.is_some());
     assert!(
-        store.directory_users_to_check().await.unwrap().iter().any(|(id, _)| *id == user.id),
+        store.directory_users_to_check().await.unwrap().iter().any(|a| a.id == user.id),
         "still checked: it has a token, which comes back if the directory says yes"
     );
 
@@ -2699,7 +2701,7 @@ async fn directory_accounts_follow_the_directory() {
     assert!(!store.refuse_directory_user(local.id, "x", &refused()).await.unwrap());
     assert!(store.user(local.id).await.unwrap().unwrap().directory_refused_at.is_none());
     store.create_session(SessionFor::User(local.id), limits, &quiet()).await.unwrap();
-    assert!(!store.directory_users_to_check().await.unwrap().iter().any(|(id, _)| *id == local.id));
+    assert!(!store.directory_users_to_check().await.unwrap().iter().any(|a| a.id == local.id));
 
     // The accounts go with `people`; their audit rows too, which the checks above read by name.
     for id in [user.id, local.id] {
@@ -2709,6 +2711,112 @@ async fn directory_accounts_follow_the_directory() {
             .await
             .unwrap();
     }
+    people.forget().await.unwrap();
+}
+
+/// A directory account is its person (0.6.7.1): found by directory id, renamed when the
+/// directory's sign-in name changes, given its id at the first check when it had none; a name the
+/// directory gives someone new gets them a new account, while the earlier one moves aside
+/// (`<name>#<id>`), refused with its tokens. Every change of name or email keeps the old value,
+/// in the change's transaction (a refused change keeps nothing).
+#[tokio::test]
+async fn directory_ids_follow_the_person_and_former_names_are_kept() {
+    use ductus_store::{DirectoryPerson, DirectoryUpdate, FormerName, UserChange};
+    let Some(store) = store().await else { return };
+    let people = people();
+    let audit = || ductus_store::Audit::new(ductus_store::By::engine(), "user.directory_change");
+    let (first, renamed, legacy) =
+        (people.name("test-user-dirid"), people.name("test-user-dirid-renamed"), people.name("test-user-dirid-old"));
+    let uuid = |n: u32| format!("entryUUID:{}-{n}", std::process::id());
+    let person = |name: &str, id: Option<String>| DirectoryPerson {
+        display_name: "Anna Smith".into(),
+        email: "anna@h.org".into(),
+        role: Role::Viewer,
+        permissions: vec![],
+        username: Some(name.to_string()),
+        directory_id: id,
+    };
+    let kinds = |names: Vec<FormerName>| names.into_iter().map(|n| (n.kind, n.value)).collect::<Vec<_>>();
+
+    let (anna, update) = store.save_directory_user(&first, &person(&first, Some(uuid(1))), &audit()).await.unwrap();
+    assert_eq!((update, anna.directory_id.clone()), (DirectoryUpdate::Created, Some(uuid(1))));
+
+    // Married: a new sign-in name, display name and email. Found by id at the refresh (by her old
+    // name), and at her next sign-in by her new one: one account.
+    let married = DirectoryPerson {
+        display_name: "Anna Jones".into(),
+        email: "anna.jones@h.org".into(),
+        ..person(&renamed, Some(uuid(1)))
+    };
+    let (user, update) = store.save_directory_user(&first, &married, &audit()).await.unwrap();
+    assert_eq!((user.id, user.username.as_str(), update), (anna.id, renamed.as_str(), DirectoryUpdate::Changed));
+    let (user, update) = store.save_directory_user(&renamed, &married, &audit()).await.unwrap();
+    assert_eq!((user.id, update), (anna.id, DirectoryUpdate::Unchanged));
+    assert_eq!(
+        kinds(store.former_names(anna.id).await.unwrap()),
+        [
+            ("username".to_string(), first.clone()),
+            ("display_name".to_string(), "Anna Smith".to_string()),
+            ("email".to_string(), "anna@h.org".to_string())
+        ]
+    );
+
+    // An account from before ids were kept is found by name and takes its id.
+    let (old, _) = store.save_directory_user(&legacy, &person(&legacy, None), &audit()).await.unwrap();
+    assert_eq!(old.directory_id, None);
+    let (user, update) = store.save_directory_user(&legacy, &person(&legacy, Some(uuid(2))), &audit()).await.unwrap();
+    assert_eq!((user.id, user.directory_id, update), (old.id, Some(uuid(2)), DirectoryUpdate::Unchanged));
+
+    // Her old sign-in name given to someone new (another id): a fresh account; hers is untouched.
+    let (newcomer, update) = store.save_directory_user(&first, &person(&first, Some(uuid(3))), &audit()).await.unwrap();
+    assert_eq!(update, DirectoryUpdate::Created);
+    assert_ne!(newcomer.id, anna.id);
+    assert_eq!(store.user(anna.id).await.unwrap().unwrap().username, renamed);
+
+    // Now the newcomer leaves and the name goes to a third person, before any refresh: the
+    // newcomer's account moves aside, refused, its token with it.
+    let (_, token) = store
+        .create_token(&unique("test-user-dirid-token"), Role::Viewer, &[], Some(newcomer.id), &quiet())
+        .await
+        .unwrap();
+    assert!(store.authenticate(&token).await.unwrap().is_some());
+    let (third, update) = store.save_directory_user(&first, &person(&first, Some(uuid(4))), &audit()).await.unwrap();
+    assert_eq!(
+        (update, third.username.as_str(), third.directory_refused_at),
+        (DirectoryUpdate::Created, first.as_str(), None)
+    );
+    let aside = store.user(newcomer.id).await.unwrap().unwrap();
+    assert_eq!(aside.username, format!("{first}#{}", newcomer.id));
+    assert!(aside.directory_refused_at.is_some());
+    assert!(store.authenticate(&token).await.unwrap().is_none(), "the earlier person's token stays dead");
+    assert_eq!(kinds(store.former_names(newcomer.id).await.unwrap()), [("username".to_string(), first.clone())]);
+    // The earlier person seen again (under their id) gets their account back, under its new name.
+    let (back, _) =
+        store.save_directory_user(&aside.username, &person(&aside.username, Some(uuid(3))), &audit()).await.unwrap();
+    assert_eq!((back.id, back.directory_refused_at), (newcomer.id, None));
+
+    // A name a local account holds is never taken, by a rename either; nothing is kept then.
+    let local = make_user(&store, &people, Role::Viewer, &[]).await;
+    let err = store.save_directory_user(&renamed, &person(&local.username, Some(uuid(1))), &audit()).await.unwrap_err();
+    assert!(err.to_string().contains("is a local account"), "{err}");
+    assert_eq!(store.former_names(anna.id).await.unwrap().len(), 3, "the refused change kept nothing");
+    assert_eq!(store.user(anna.id).await.unwrap().unwrap().username, renamed);
+
+    // An admin's edit keeps the old values too (an empty one is nothing to remember).
+    let change = |name: &str, email: &str| UserChange {
+        display_name: Some(name.into()),
+        email: Some(email.into()),
+        ..Default::default()
+    };
+    store.update_user(local.id, &change("Vic Local", "vic@h.org"), &quiet()).await.unwrap();
+    assert_eq!(store.former_names(local.id).await.unwrap(), [], "it had none");
+    store.update_user(local.id, &change("Vic Jones", "vic@h.org"), &quiet()).await.unwrap();
+    store.update_user(local.id, &change("Vic Jones", "vic@h.org"), &quiet()).await.unwrap();
+    assert_eq!(
+        kinds(store.former_names(local.id).await.unwrap()),
+        [("display_name".to_string(), "Vic Local".to_string())],
+        "only what changed"
+    );
     people.forget().await.unwrap();
 }
 

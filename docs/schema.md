@@ -128,9 +128,25 @@ People who sign in (`ductus user create`, or `POST /api/v1/users`). Passwords ar
 | `directory_checked_at` | timestamptz | `ldap` accounts: when the directory was last asked about them (each sign-in, and every `auth.ldap.refresh` while they have a session or a token). |
 | `directory_refused_at` | timestamptz | `ldap` accounts: when the directory said no (in no Ductus group, disabled or deleted there). The account can't act (sessions ended, tokens stopped), like a disabled one, until a directory check says yes again; separate from `disabled_at`, which is an admin's decision here. |
 
-Directory accounts (`source = 'ldap'`) are made at their first sign-in; their role, permissions, display name and email are the directory's, rewritten at every sign-in and refresh (migration 0022 added the two `directory_` columns).
+| `directory_id` | text | `ldap` accounts: the person's id in the directory, `<attribute>:<value>` (`entryUUID:…`, or `objectGUID:hex:…` for Active Directory's 16 bytes; `auth.ldap.attributes.id`). Set at the first sign-in or refresh that reads it (null before 0.6.7.1, and with `id: none`). A refresh looks the person up by it. |
 
-Indexes: primary key `id`; unique `users_username (lower(username))`.
+Directory accounts (`source = 'ldap'`) are made at their first sign-in; their role, permissions, display name and email are the directory's, rewritten at every sign-in and refresh (migration 0022 added the two `directory_` columns). An account is the directory's *person* once its `directory_id` is known (0.6.7.1, migration 0025): when the directory renames their sign-in name, `username` takes the new one; when it gives a departed person's sign-in name to someone new, the earlier account is renamed `<name>#<id>` (its own `id`) and refused, so its tokens stay dead, and the new person gets an account of their own.
+
+Indexes: primary key `id`; unique `users_username (lower(username))`; unique `users_directory_id (directory_id) WHERE directory_id IS NOT NULL`.
+
+## `user_names`
+
+What an account was called before (0.6.7.1, migration 0025): every change of its username, display name or email (an admin's edit, the directory's at a sign-in or refresh, a name moved aside) keeps the old value here, in the same transaction as the change. Kept as long as the account. Empty old values aren't kept.
+
+| column | type | |
+|---|---|---|
+| `id` | bigint | Identity. |
+| `user_id` | integer | `users.id` (deleted with it). |
+| `kind` | text | `username`, `email` or `display_name`. |
+| `value` | text | The value it had. |
+| `until` | timestamptz | When it changed. |
+
+Indexes: primary key `id`; `user_names_value (lower(value))`; `user_names_user (user_id)`.
 
 ## `user_settings`
 

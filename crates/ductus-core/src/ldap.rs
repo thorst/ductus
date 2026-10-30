@@ -9,7 +9,7 @@
 //!     resource: corp-ad                          # an `ldap:` entry in resources.yaml
 //!     user_base: OU=Staff,DC=hospital,DC=org
 //!     user_filter: (sAMAccountName={username})   # the default; OpenLDAP: (uid={username})
-//!     attributes: { display_name: displayName, email: mail }
+//!     attributes: { display_name: displayName, email: mail }   # id: auto (objectGUID, else entryUUID)
 //!     groups:                                    # highest role wins; no role group = may not sign in
 //!       admin:    CN=Ductus Admins,OU=Groups,DC=hospital,DC=org
 //!       operator: CN=Ductus Operators,OU=Groups,DC=hospital,DC=org
@@ -57,7 +57,7 @@ pub struct LdapAuth {
     pub refresh: Duration,
 }
 
-/// Which directory attributes hold a person's name and email.
+/// Which directory attributes hold a person's name, email, sign-in name and id.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct LdapAttributes {
@@ -65,12 +65,106 @@ pub struct LdapAttributes {
     pub display_name: String,
     #[serde(default = "default_email")]
     pub email: String,
+    /// The sign-in name, so a refresh sees it change: default, the attribute `user_filter`
+    /// matches `{username}` against first (`sAMAccountName` for the default filter).
+    #[serde(default)]
+    pub username: Option<String>,
+    /// What tells one person from another through any rename: `auto` (the default: Active
+    /// Directory's `objectGUID`, else `entryUUID`, RFC 4530), another attribute's name, or `none`
+    /// (by sign-in name only: a renamed and a reused name can't be told apart).
+    #[serde(default = "default_id")]
+    pub id: String,
 }
 
 impl Default for LdapAttributes {
     fn default() -> Self {
-        Self { display_name: default_display_name(), email: default_email() }
+        Self { display_name: default_display_name(), email: default_email(), username: None, id: default_id() }
     }
+}
+
+/// Where a person's directory id comes from (`attributes.id`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdSource<'a> {
+    /// `objectGUID` when the entry has one (Active Directory), else `entryUUID`.
+    Auto,
+    Named(&'a str),
+    None,
+}
+
+impl LdapAttributes {
+    pub fn id_source(&self) -> IdSource<'_> {
+        match self.id.trim() {
+            a if a.eq_ignore_ascii_case("auto") => IdSource::Auto,
+            a if a.eq_ignore_ascii_case("none") => IdSource::None,
+            a => IdSource::Named(a),
+        }
+    }
+}
+
+/// OpenLDAP's (and 389 Directory Server's, FreeIPA's) id of an entry, RFC 4530.
+pub const ENTRY_UUID: &str = "entryUUID";
+/// Active Directory's id of an object: 16 bytes.
+pub const OBJECT_GUID: &str = "objectGUID";
+
+/// A person's id in the directory, kept as `users.directory_id`: `<attribute>:<value>`, or
+/// `<attribute>:hex:<hex>` for a binary one (`objectGUID`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DirectoryId {
+    pub attribute: String,
+    pub value: IdValue,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdValue {
+    Text(String),
+    Bytes(Vec<u8>),
+}
+
+impl DirectoryId {
+    /// The filter that finds this entry (the value escaped; each byte of a binary one as `\xx`).
+    pub fn filter(&self) -> String {
+        match &self.value {
+            IdValue::Text(v) => format!("({}={})", self.attribute, escape(v)),
+            IdValue::Bytes(b) => {
+                let bytes: String = b.iter().map(|x| format!("\\{x:02x}")).collect();
+                format!("({}={bytes})", self.attribute)
+            }
+        }
+    }
+
+    /// Read back what `Display` wrote.
+    pub fn parse(s: &str) -> Option<Self> {
+        let (attribute, rest) = s.split_once(':')?;
+        let value = match rest.strip_prefix("hex:") {
+            Some(hex) if hex.len() % 2 == 0 => IdValue::Bytes(
+                (0..hex.len())
+                    .step_by(2)
+                    .map(|i| u8::from_str_radix(&hex[i..i + 2], 16))
+                    .collect::<Result<_, _>>()
+                    .ok()?,
+            ),
+            Some(_) => return None,
+            None => IdValue::Text(rest.to_string()),
+        };
+        (!attribute.is_empty()).then(|| Self { attribute: attribute.to_string(), value })
+    }
+}
+
+impl std::fmt::Display for DirectoryId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.value {
+            IdValue::Text(v) => write!(f, "{}:{v}", self.attribute),
+            IdValue::Bytes(b) => {
+                write!(f, "{}:hex:", self.attribute)?;
+                b.iter().try_for_each(|x| write!(f, "{x:02x}"))
+            }
+        }
+    }
+}
+
+/// The attribute a stored id (`users.directory_id`) was read from, as written there.
+pub fn id_attribute(stored: &str) -> &str {
+    stored.split_once(':').map_or(stored, |(a, _)| a)
 }
 
 /// Groups (their DNs; one or a list each) → role and permissions.
@@ -107,6 +201,10 @@ fn default_display_name() -> String {
 
 fn default_email() -> String {
     "mail".into()
+}
+
+fn default_id() -> String {
+    "auto".into()
 }
 
 fn default_refresh() -> Duration {
@@ -189,12 +287,35 @@ impl LdapAuth {
         if self.refresh < Duration::from_secs(60) {
             bail!("`refresh` must be at least 1m");
         }
+        // These go into search filters as written: an attribute's name, nothing else.
+        let a = &self.attributes;
+        let named = [("attributes.username", a.username.as_deref()), ("attributes.id", Some(a.id.as_str()))];
+        for (key, value) in named {
+            if let Some(v) = value.map(str::trim)
+                && (v.is_empty() || !v.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+            {
+                bail!("`{key}` must be an attribute's name (like objectGUID), not `{v}`");
+            }
+        }
         Ok(())
     }
 
     /// The filter that finds `username`.
     pub fn filter_for(&self, username: &str) -> String {
         self.user_filter.replace(USERNAME, &escape(username))
+    }
+
+    /// The attribute holding the sign-in name: `attributes.username`, else the one `user_filter`
+    /// first matches `{username}` against (`(uid={username})` → `uid`). None when the filter
+    /// matches it some other way (a refresh then can't see the name change).
+    pub fn username_attribute(&self) -> Option<&str> {
+        if let Some(a) = self.attributes.username.as_deref().map(str::trim).filter(|a| !a.is_empty()) {
+            return Some(a);
+        }
+        let at = self.user_filter.find(&format!("={USERNAME})"))?;
+        let attribute = &self.user_filter[self.user_filter[..at].rfind('(')? + 1..at];
+        let plain = !attribute.is_empty() && attribute.chars().all(|c| c.is_ascii_alphanumeric() || c == '-');
+        plain.then_some(attribute)
     }
 }
 
@@ -427,6 +548,39 @@ mod tests {
         assert!(err(format!("{BASE}groups: {{ viewer: 'CN=V,DC=h' }}\nrefresh: 30s\n")).contains("at least 1m"));
         assert!(err(format!("{BASE}groups: {{ viewer: 'CN=V,DC=h' }}\nsurprise: 1\n")).contains("unknown field"));
         assert!(balanced("(&(a=\\29)(b=c))"), "an escaped parenthesis doesn't count");
+    }
+
+    #[test]
+    fn the_sign_in_attribute_comes_from_the_filter_unless_named() {
+        let a = auth(&format!("{BASE}groups: {{ viewer: 'CN=V,DC=h' }}\n")).unwrap();
+        assert_eq!((a.username_attribute(), a.attributes.id_source()), (Some("sAMAccountName"), IdSource::Auto));
+        let with = |rest: &str| auth(&format!("{BASE}groups: {{ viewer: 'CN=V,DC=h' }}\n{rest}"));
+        let a = with("user_filter: (&(objectClass=person)(|(uid={username})(mail={username})))\n").unwrap();
+        assert_eq!(a.username_attribute(), Some("uid"), "the first one");
+        let a = with("user_filter: (|(cn=*{username}*))\n").unwrap();
+        assert_eq!(a.username_attribute(), None, "not a plain match");
+        let a = with("user_filter: (|(cn=*{username}*))\nattributes: { username: uid, id: nsUniqueId }\n").unwrap();
+        assert_eq!((a.username_attribute(), a.attributes.id_source()), (Some("uid"), IdSource::Named("nsUniqueId")));
+        assert_eq!(with("attributes: { id: None }\n").unwrap().attributes.id_source(), IdSource::None);
+        let err = format!("{:#}", with("attributes: { id: 'x)(uid=*' }\n").unwrap_err());
+        assert!(err.contains("`attributes.id` must be an attribute's name"), "{err}");
+        assert!(with("attributes: { username: '' }\n").is_err());
+    }
+
+    #[test]
+    fn directory_ids_are_kept_and_searched_for() {
+        let uuid = DirectoryId { attribute: ENTRY_UUID.into(), value: IdValue::Text("6f1c-a*".into()) };
+        assert_eq!(uuid.to_string(), "entryUUID:6f1c-a*");
+        assert_eq!(uuid.filter(), "(entryUUID=6f1c-a\\2a)", "escaped like any value");
+        let guid = DirectoryId { attribute: OBJECT_GUID.into(), value: IdValue::Bytes(vec![0x00, 0xff, 0x2a, 0x10]) };
+        assert_eq!(guid.to_string(), "objectGUID:hex:00ff2a10");
+        assert_eq!(guid.filter(), "(objectGUID=\\00\\ff\\2a\\10)", "every byte escaped (AD's way)");
+        for id in [&uuid, &guid] {
+            assert_eq!(DirectoryId::parse(&id.to_string()).as_ref(), Some(id));
+        }
+        assert_eq!(id_attribute("objectGUID:hex:00ff"), "objectGUID");
+        assert_eq!(DirectoryId::parse("objectGUID:hex:0"), None);
+        assert_eq!(DirectoryId::parse("no-colon"), None);
     }
 
     #[test]

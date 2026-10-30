@@ -32,12 +32,12 @@ pub use api::{
 };
 pub use audit::{Audit, AuditFilter, AuditRow, By, PreviousRun};
 pub use certificates::{CertificateRow, DOCTOR_RUNS_KEPT, DoctorRunRow};
-pub use directory::{DirectoryPerson, DirectoryUpdate};
+pub use directory::{DirectoryAccount, DirectoryPerson, DirectoryUpdate};
 pub use docs::DocsRow;
 pub use engines::{EngineLock, EngineRow, NewEngine, Owned, Stranded};
 pub use replay::{Original, Recorded};
 pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};
-pub use users::{Candidate, Lockout, NewUser, SessionRow, User, UserChange, UserSettings};
+pub use users::{Candidate, FormerName, Lockout, NewUser, SessionRow, User, UserChange, UserSettings};
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};

@@ -26,7 +26,7 @@ forget_test_users() {
   local p list=""
   for p in "$@"; do
     case $p in
-      test-user-*) list+="${list:+,}'$p'" ;;
+      test-user-*) list+="${list:+,}'$p','$p#%'" ;; # and the account a reused name moved aside
       *) echo "forget_test_users: $p isn't a test account's name" >&2; return 1 ;;
     esac
   done

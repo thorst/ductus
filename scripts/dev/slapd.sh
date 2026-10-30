@@ -21,6 +21,8 @@
 #   uid=test-user-nobody                  in no group
 #   cn=admin,dc=example,dc=org            the directory's own admin (password admin-password),
 #                                         for tests that change groups
+# Every entry has an entryUUID (slapadd makes them); the refint overlay keeps `member` up to date
+# when a person is renamed (modrdn) or deleted.
 set -euo pipefail
 cmd=${1:?start|stop}
 DIR=${2:?directory}
@@ -58,6 +60,7 @@ include /etc/ldap/schema/inetorgperson.schema
 include /etc/ldap/schema/nis.schema
 modulepath /usr/lib/ldap
 moduleload back_mdb
+moduleload refint
 pidfile $DIR/slapd.pid
 TLSCACertificateFile $DIR/ca.pem
 TLSCertificateFile $DIR/server.pem
@@ -68,6 +71,10 @@ suffix "dc=example,dc=org"
 rootdn "cn=admin,dc=example,dc=org"
 rootpw admin-password
 directory $DIR/data
+# Group membership follows a renamed or deleted person, as Active Directory's links do by
+# themselves (without it a modrdn leaves the old DN in every group).
+overlay refint
+refint_attributes member uniqueMember
 access to attrs=userPassword by self write by anonymous auth by * none
 access to * by * read
 EOF

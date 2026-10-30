@@ -225,7 +225,7 @@ async fn user_sign_in(
     let candidate = match (candidate, &engine.directory) {
         (Some(c), _) if c.source == "local" => c,
         (candidate, Some(directory)) => {
-            return directory_sign_in(engine, directory, candidate.map(|c| c.id), username, password, ip).await;
+            return directory_sign_in(engine, directory, candidate, username, password, ip).await;
         }
         (Some(c), None) => {
             waste_time(password).await;
@@ -282,17 +282,18 @@ async fn locked(
     ))
 }
 
-/// A sign-in the directory decides (`known`: the account, if this name signed in before). The
-/// account is made or brought up to date from the directory (role, permissions, name, email).
+/// A sign-in the directory decides (`candidate`: the account with this name, if there is one).
+/// The account is made or brought up to date from the directory (role, permissions, name, email).
 async fn directory_sign_in(
     engine: &Shared,
     directory: &crate::ldap::Directory,
-    known: Option<i32>,
+    candidate: Option<ductus_store::Candidate>,
     username: &str,
     password: String,
     ip: Option<IpAddr>,
 ) -> Result<ductus_store::User, ApiError> {
     use crate::ldap::Verdict;
+    let known = candidate.as_ref().map(|c| c.id);
     let wrong = || ApiError::new(StatusCode::UNAUTHORIZED, WRONG);
     let failed = |reason: &str| {
         let by = match known {
@@ -301,8 +302,8 @@ async fn directory_sign_in(
         };
         Audit::new(by, "session.failed").failed().detail(serde_json::json!({ "with": "ldap", "reason": reason }))
     };
-    let verdict = match directory.sign_in(username, &password).await {
-        Ok(v) => v,
+    let (verdict, found) = match directory.sign_in_found(username, &password).await {
+        Ok(s) => (s.verdict, s.id),
         Err(e) => {
             tracing::error!(directory = %directory.name, error = %format!("{e:#}"), "sign-in: the directory can't be asked");
             engine.store.record(&failed("the directory can't be reached")).await?;
@@ -314,9 +315,7 @@ async fn directory_sign_in(
     };
     match verdict {
         Verdict::Allowed(person) => {
-            let by = By { kind: "system", id: None, user_id: None, name: "directory", via: "session", ip };
-            let audit = Audit::new(by, "user.directory_change");
-            let (user, _) = engine.store.save_directory_user(username, &person.for_store(), &audit).await?;
+            let user = crate::ldap::signed_in(&engine.store, username, &person, ip).await?;
             if user.disabled_at.is_some() {
                 engine.store.record(&failed("account disabled")).await?;
                 return Err(wrong());
@@ -344,7 +343,15 @@ async fn directory_sign_in(
         }
         refused => {
             engine.store.record(&failed(refused.reason())).await?;
-            if let Some(id) = known {
+            // The account with this name is refused only when the entry found is its person: one
+            // known by its directory id may be renamed there (the refresh finds it by id), and
+            // the name may be someone else's now.
+            let same_person = |c: &ductus_store::Candidate| match (&c.directory_id, &found) {
+                (None, _) => true,
+                (Some(theirs), Some(entry)) => *theirs == entry.to_string(),
+                (Some(_), None) => false,
+            };
+            if let Some(id) = candidate.as_ref().filter(|c| same_person(c)).map(|c| c.id) {
                 let by = By { kind: "system", id: None, user_id: None, name: "directory", via: "session", ip };
                 engine
                     .store

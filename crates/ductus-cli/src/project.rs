@@ -201,6 +201,24 @@ fn check_tls<'a>(
     problems
 }
 
+/// What `validate` warns about directory sign-in: settings under which a renamed person and a
+/// new person given a departed one's name can't be told apart.
+fn directory_warnings(auth: &ductus_core::ldap::LdapAuth) -> Vec<String> {
+    let mut out = Vec::new();
+    if auth.attributes.id_source() == ductus_core::ldap::IdSource::None {
+        out.push(
+            "auth.ldap.attributes.id is `none`: accounts are known by sign-in name only, so a person renamed in the directory gets a second account and someone given a departed person's name gets theirs (tokens included, if not revoked); leave it out (objectGUID or entryUUID) or name the attribute that has an id".to_string(),
+        );
+    }
+    if auth.attributes.username.is_none() && auth.username_attribute().is_none() {
+        out.push(format!(
+            "auth.ldap.user_filter `{}` doesn't match {{username}} against one attribute: a refresh can't see a sign-in name change; set attributes.username",
+            auth.user_filter
+        ));
+    }
+    out
+}
+
 /// What `validate` says about `allow:` lists: a summary, names that don't resolve from here,
 /// senders `about.from.hosts` names that the list would refuse, and an API list that leaves
 /// out this machine. Warnings only: DNS seen from here may not be the engine's.
@@ -459,7 +477,12 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read
             .and_then(|a| r.ldap.get(&a.resource))
             .is_some_and(|l| ductus_runtime::ldap::trust(l, &certificates).is_err());
         match ductus_runtime::ldap::Directory::new(settings.auth.ldap.as_ref(), r, &certificates) {
-            Ok(Some(d)) => println!("✓ sign-in with directory `{}` ({})", d.name, d.server.url),
+            Ok(Some(d)) => {
+                println!("✓ sign-in with directory `{}` ({})", d.name, d.server.url);
+                for line in directory_warnings(&d.auth) {
+                    println!("⚠ {line}");
+                }
+            }
             Ok(None) => {}
             Err(_) if ca_reported => {}
             Err(e) => {
@@ -1007,4 +1030,32 @@ async fn load_functions(config: &ductus_core::InterfaceConfig, script: &Path) ->
 
 pub(crate) fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ductus_core::ldap::{LdapAttributes, LdapAuth};
+
+    #[test]
+    fn validate_warns_when_renamed_and_reused_names_cant_be_told_apart() {
+        let auth = |filter: &str, attributes: LdapAttributes| LdapAuth {
+            resource: "corp".into(),
+            user_base: "dc=h".into(),
+            user_filter: filter.into(),
+            attributes,
+            groups: Default::default(),
+            nested: false,
+            group_base: None,
+            refresh: std::time::Duration::from_secs(900),
+        };
+        assert!(directory_warnings(&auth("(uid={username})", LdapAttributes::default())).is_empty());
+        let none = LdapAttributes { id: "none".into(), ..Default::default() };
+        let w = directory_warnings(&auth("(uid={username})", none));
+        assert!(w.len() == 1 && w[0].contains("gets a second account"), "{w:?}");
+        let w = directory_warnings(&auth("(|(cn=*{username}*))", LdapAttributes::default()));
+        assert!(w.len() == 1 && w[0].contains("set attributes.username"), "{w:?}");
+        let named = LdapAttributes { username: Some("uid".into()), ..Default::default() };
+        assert!(directory_warnings(&auth("(|(cn=*{username}*))", named)).is_empty());
+    }
 }

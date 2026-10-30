@@ -30,11 +30,37 @@ pub struct User {
     /// A directory account the directory refused (no Ductus group, disabled or gone there): it
     /// can't act until a check says yes again.
     pub directory_refused_at: Option<DateTime<Utc>>,
+    /// A directory account: its person's id there (`<attribute>:<value>`), once a check read it.
+    pub directory_id: Option<String>,
 }
 
 pub(crate) const USER_COLUMNS: &str =
     "id, username, display_name, email, role, permissions, source, must_change_password,
-    disabled_at, locked_until, created_at, last_sign_in_at, directory_checked_at, directory_refused_at";
+    disabled_at, locked_until, created_at, last_sign_in_at, directory_checked_at, directory_refused_at, directory_id";
+
+/// Keep what an account was called before a change (`kind`: `username`, `email` or
+/// `display_name`), in the change's transaction. An empty value is nothing to remember.
+pub(crate) async fn keep_former(conn: &mut sqlx::PgConnection, user_id: i32, kind: &str, value: &str) -> Result<()> {
+    if value.trim().is_empty() {
+        return Ok(());
+    }
+    sqlx::query("INSERT INTO user_names (user_id, kind, value) VALUES ($1, $2, $3)")
+        .bind(user_id)
+        .bind(kind)
+        .bind(value)
+        .execute(conn)
+        .await
+        .context("keeping the former name")?;
+    Ok(())
+}
+
+/// A name, email or display name an account had before.
+#[derive(Debug, Clone, PartialEq, Eq, sqlx::FromRow)]
+pub struct FormerName {
+    pub kind: String,
+    pub value: String,
+    pub until: DateTime<Utc>,
+}
 
 /// A new account.
 #[derive(Debug, Clone)]
@@ -68,6 +94,8 @@ pub struct Candidate {
     pub source: String,
     pub disabled_at: Option<DateTime<Utc>>,
     pub locked_until: Option<DateTime<Utc>>,
+    /// A directory account's id there, if known.
+    pub directory_id: Option<String>,
 }
 
 /// One of a user's sessions, for them to see and end.
@@ -179,6 +207,12 @@ impl Store {
             .await
             .context("updating user")?
             .rows_affected();
+        let old: Option<(String, String)> =
+            sqlx::query_as("SELECT display_name, email FROM users WHERE id = $1 FOR UPDATE")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await
+                .context("updating user")?;
         let sql = format!(
             "UPDATE users SET
                  display_name = COALESCE($2, display_name),
@@ -207,6 +241,14 @@ impl Store {
         if before > 0 && admins == 0 {
             bail!("that would leave no admin who can sign in: make another user an admin first");
         }
+        if let Some((display_name, email)) = old {
+            if display_name != user.display_name {
+                keep_former(&mut tx, id, "display_name", &display_name).await?;
+            }
+            if email != user.email {
+                keep_former(&mut tx, id, "email", &email).await?;
+            }
+        }
         if user.disabled_at.is_some() {
             sqlx::query("DELETE FROM api_sessions WHERE user_id = $1")
                 .bind(id)
@@ -223,10 +265,20 @@ impl Store {
         Ok(user)
     }
 
+    /// What account `id` was called before, oldest first.
+    pub async fn former_names(&self, id: i32) -> Result<Vec<FormerName>> {
+        sqlx::query_as::<_, FormerName>("SELECT kind, value, until FROM user_names WHERE user_id = $1 ORDER BY id")
+            .bind(id)
+            .fetch_all(&self.pool)
+            .await
+            .context("reading former names")
+    }
+
     /// What a sign-in as `username` needs (None: nobody has that name).
     pub async fn candidate(&self, username: &str) -> Result<Option<Candidate>> {
         sqlx::query_as::<_, Candidate>(
-            "SELECT id, password_hash, source, disabled_at, locked_until FROM users WHERE lower(username) = lower($1)",
+            "SELECT id, password_hash, source, disabled_at, locked_until, directory_id FROM users
+             WHERE lower(username) = lower($1)",
         )
         .bind(username.trim())
         .fetch_optional(&self.pool)

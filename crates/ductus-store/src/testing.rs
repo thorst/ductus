@@ -24,16 +24,18 @@ const FORGET: [&str; 6] = [
 
 /// Delete test accounts and what refers to them, in one transaction. `patterns` are `LIKE`
 /// patterns (a plain name matches itself), each starting with `test-user-`: nothing else is ever
-/// deleted. Returns how many accounts went.
+/// deleted. Each also takes the accounts it named that a reused directory name moved aside
+/// (`<name>#<id>`). Returns how many accounts went.
 pub async fn forget_test_users(pool: &PgPool, patterns: &[String]) -> Result<u64> {
     if let Some(p) = patterns.iter().find(|p| !p.starts_with("test-user-")) {
         bail!("{p:?} isn't a test account's name: only test-user-* accounts are deleted");
     }
+    let patterns: Vec<String> = patterns.iter().flat_map(|p| [p.clone(), format!("{p}#%")]).collect();
     let mut tx = pool.begin().await.context("forgetting test accounts")?;
     let mut gone = 0;
     for sql in FORGET {
         gone = sqlx::query(sql)
-            .bind(patterns)
+            .bind(&patterns)
             .execute(&mut *tx)
             .await
             .context("forgetting test accounts")?

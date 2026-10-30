@@ -8,7 +8,11 @@
 #   3. The directory's certificate (ldaps:// with a private CA: `ca:` names a `certificates:` entry) is in the certificate table.
 #   4. Removed from the group: the next refresh (1m here) ends the session, logged; put back,
 #      they sign in again.
-#   5. The directory goes down: directory people can't sign in (503, said plainly), sessions
+#   5. Renamed in the directory (a modrdn of the sign-in name): the refresh finds them by
+#      entryUUID and renames the account; the new name signs in to the same account.
+#   6. A departed person's name given to someone new: a new account; the earlier one is moved
+#      aside (`<name>#<id>`) and refused, its session ended.
+#   7. The directory goes down: directory people can't sign in (503, said plainly), sessions
 #      already open keep working, and the local break-glass admin still signs in.
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -24,10 +28,11 @@ API=http://127.0.0.1:7798
 LDAP_PORT=3390 LDAPS_PORT=6637
 q() { psql -tA "$DB" -c "$1"; }
 fail=""
-PEOPLE="'test-user-ada','test-user-olaf','test-user-anna','test-user-nested','test-user-nobody','test-user-breakglass'"
+PEOPLE="'test-user-ada','test-user-olaf','test-user-olafn','test-user-anna','test-user-nested','test-user-nobody','test-user-breakglass'"
 # At the start (what a killed run left) and at the end.
 forget() {
-  forget_test_users test-user-ada test-user-olaf test-user-anna test-user-nested test-user-nobody test-user-breakglass
+  forget_test_users test-user-ada test-user-olaf test-user-olafn test-user-anna test-user-nested test-user-nobody \
+    test-user-breakglass
   psql -q "$DB" -c "DELETE FROM certificate_status WHERE resource = 'corp-directory'"
 }
 forget
@@ -187,6 +192,66 @@ code=$(signin test-user-anna test-user-anna-password)
 echo "   put back, anna signs in again: $code"
 [ "$code" = 200 ] || fail+=" back($code)"
 [ -z "$(q "SELECT directory_refused_at FROM users WHERE username = 'test-user-anna'")" ] || fail+=" still-refused"
+
+ldap_admin() { # ldapmodify as the directory's admin, the LDIF on stdin
+  ldapmodify -x -H "ldap://127.0.0.1:$LDAP_PORT" -D cn=admin,dc=example,dc=org -w admin-password >/dev/null
+}
+olaf_id=$(q "SELECT id FROM users WHERE username = 'test-user-olaf'")
+anna_id=$(q "SELECT id FROM users WHERE username = 'test-user-anna'")
+
+echo "== renamed in the directory (test-user-olaf → test-user-olafn): one account"
+ldap_admin <<'EOF'
+dn: uid=test-user-olaf,ou=people,dc=example,dc=org
+changetype: modrdn
+newrdn: uid=test-user-olafn
+deleteoldrdn: 1
+EOF
+code=$(signin test-user-olaf test-user-olaf-password)
+[ "$code" = 401 ] || fail+=" old-name($code)"
+[ "$(as test-user-olaf /session)" = 200 ] || fail+=" old-name-ended-the-session"
+started=$SECONDS
+wait_for 90 '[ "$(q "SELECT username FROM users WHERE id = $olaf_id")" = test-user-olafn ]' || fail+=" not-renamed"
+echo "   the refresh renamed the account $((SECONDS - started)) s after the change (refresh: 1m)"
+as test-user-olaf /session >/dev/null
+echo "   his session from before: $(js "d['name']")"
+[ "$(js "d['name']")" = test-user-olafn ] || fail+=" renamed-session($(cat "$P/answer"))"
+code=$(signin test-user-olafn test-user-olaf-password)
+accounts=$(q "SELECT count(*) FROM users WHERE username LIKE 'test-user-olaf%'")
+echo "   test-user-olafn signs in: $code; accounts for him: $accounts"
+[ "$code:$accounts" = "200:1" ] || fail+=" renamed-sign-in($code $accounts)"
+renamed=$(q "SELECT detail->'username' FROM audit_log WHERE action = 'user.directory_change' AND subject = 'test-user-olafn' AND at >= '$START'")
+echo "   audit: $renamed"
+[ "$renamed" = '["test-user-olaf", "test-user-olafn"]' ] || fail+=" renamed-row($renamed)"
+[ "$(q "SELECT value FROM user_names WHERE user_id = $olaf_id AND kind = 'username'")" = test-user-olaf ] || fail+=" former-name"
+
+echo "== test-user-anna leaves, and a new Anna gets her name: a new account; the old one stays out"
+cp "$P/test-user-anna.cookie" "$P/earlier-anna.cookie"
+ldapdelete -x -H "ldap://127.0.0.1:$LDAP_PORT" -D cn=admin,dc=example,dc=org -w admin-password \
+  uid=test-user-anna,ou=people,dc=example,dc=org
+ldap_admin <<'EOF'
+dn: uid=test-user-anna,ou=people,dc=example,dc=org
+changetype: add
+objectClass: inetOrgPerson
+uid: test-user-anna
+cn: Anna Newcomer
+sn: Newcomer
+mail: anna.newcomer@example.org
+userPassword: new-anna-password
+
+dn: cn=ductus-viewers,ou=groups,dc=example,dc=org
+changetype: modify
+add: member
+member: uid=test-user-anna,ou=people,dc=example,dc=org
+EOF
+code=$(signin test-user-anna new-anna-password)
+new_id=$(q "SELECT id FROM users WHERE username = 'test-user-anna'")
+echo "   the new Anna signs in: $code, account $new_id (the earlier one was $anna_id)"
+[ "$code" = 200 ] && [ "$new_id" != "$anna_id" ] || fail+=" reused($code $new_id)"
+earlier=$(curl -s -o /dev/null -w '%{http_code}' -H "Cookie: ductus_session=$(cat "$P/earlier-anna.cookie")" "$API/api/v1/session")
+aside=$(q "SELECT username || ' ' || (directory_refused_at IS NOT NULL) FROM users WHERE id = $anna_id")
+echo "   the earlier Anna's session: $earlier; her account: $aside"
+[ "$earlier" = 401 ] || fail+=" earlier-session($earlier)"
+[ "$aside" = "test-user-anna#$anna_id true" ] || fail+=" aside($aside)"
 
 echo "== the directory goes down"
 bash "$REPO/scripts/dev/slapd.sh" stop "$L"
