@@ -1,6 +1,6 @@
 # Prometheus metrics
 
-`GET /api/v1/metrics` serves these in Prometheus's text format, for Prometheus, Grafana Agent, Datadog or anything else that scrapes it. It needs a token like every other call: in Prometheus's scrape configuration, `metrics_path: /api/v1/metrics` and `authorization: { credentials: dux_â€¦ }` (a viewer token: `ductus token create prometheus --role viewer`).
+`GET /api/v1/metrics` serves these in Prometheus's text format, for Prometheus, Grafana Agent, Datadog or anything else that scrapes it. It needs a token like every other call: in Prometheus's scrape configuration, `metrics_path: /api/v1/metrics` and `authorization: { credentials: dux_… }` (a viewer token: `ductus token create prometheus --role viewer`).
 
 Counters and histograms count from when the engine started (`rate()` and `increase()` handle restarts); queue sizes are read from the database at each scrape. Each destination adds a series per family, so very many destinations mean many series.
 

@@ -68,7 +68,7 @@ HTTPS only, presenting the `certificate` named here (a `certificates:` entry in 
 
 ### `api.tls.certificate`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The certificate this listener presents: a `certificates:` entry in resources.yaml with the certificate and its key, for the name senders connect to. A certificate the engine can't use (expired, its key doesn't match) stops the start with the reason; renewed files are picked up within a minute, without a restart. Required. Example: `certificate: ductus-mllp`.
 
@@ -80,7 +80,7 @@ Ask senders for a certificate of their own, and refuse any connection without on
 
 ### `api.tls.clients.ca`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The CA that issues senders' certificates: a `certificates:` entry holding the CA's certificate (`ca` or `ca_file`). Only certificates it issued are taken. Required. Example: `ca: hospital-ca`.
 
@@ -194,13 +194,13 @@ Sign-in with a directory (Active Directory, OpenLDAP), beside local accounts: wh
 
 ### `auth.ldap.resource`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The directory to use: the name of an `ldap:` entry in resources.yaml (its address, TLS and service account). Required. Example: `resource: corp-ad`.
 
 ### `auth.ldap.user_base`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 Where people are searched for, as a DN: the whole subtree under it. Narrow it to the branch your staff are in, so service accounts and contacts can't sign in by accident. Required. Example: `user_base: "OU=Staff,DC=hospital,DC=org"`.
 
@@ -242,7 +242,7 @@ The attribute that tells one person from another through any rename: `auto` (Act
 
 ### `auth.ldap.groups`
 
-**Type:** settings, below Â· **Required**
+**Type:** settings, below · **Required**
 
 Which directory groups give which role (`admin`, `operator`, `viewer`) and which add a permission (`permissions.payloads`, `permissions.audit`). The highest role a person's groups give wins; a person in none can't sign in. At least one role group. Required. Example: `groups: { operator: "CN=Interface Team,OU=Groups,DC=hospital,DC=org" }`.
 
@@ -340,7 +340,7 @@ The mail server that email channels (and owners' email) go through. Needed only 
 
 ### `alerts.smtp.host`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The mail server's host name: your organization's relay or submission server. Its certificate must be for this name. Required. Example: `host: smtp.hospital.org`.
 
@@ -376,7 +376,7 @@ The account's password, from a secret (`${secret:SMTP_PASSWORD}`). Goes with `us
 
 ### `alerts.smtp.from`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The address notifications come from. Use one your mail server lets this account send as, and that recipients' filters let through (ask the mail team to add it to their allow list). Required. Example: `from: ductus@hospital.org`.
 
@@ -412,7 +412,7 @@ A chat or incident tool's incoming webhook that notifications are posted to (Tea
 
 ### `alerts.channels.<name>.webhook.url`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The webhook's URL. A chat webhook's URL is its own password (anyone with it can post to the channel), so keep it in a secret: `${secret:CHAT_WEBHOOK}`. The engine shows only its scheme and host anywhere. Required. Example: `url: "${secret:CHAT_WEBHOOK}"`.
 
@@ -448,7 +448,7 @@ Which health states alert, how badly, and to whom. Each state is matched by the 
 
 ### `alerts.rules.when`
 
-**Type:** list of `error`, `stalled`, `behind`, `stopped`, `silent`, `missed`, `certificate` Â· **Required**
+**Type:** list of `error`, `stalled`, `behind`, `stopped`, `silent`, `missed`, `certificate` · **Required**
 
 The health states this rule covers:
 
@@ -464,13 +464,13 @@ A paused destination never alerts: it's paused on purpose. Required. Example: `w
 
 ### `alerts.rules.severity`
 
-**Type:** `warning`, `critical` Â· **Required**
+**Type:** `warning`, `critical` · **Required**
 
 How bad these states are: `warning` (worth knowing today; held during quiet hours) or `critical` (act now; never held). An alert that goes from warning to critical is told again. An expired certificate is always critical. Required. Example: `severity: critical`.
 
 ### `alerts.rules.to`
 
-**Type:** list of text Â· **Required**
+**Type:** list of text · **Required**
 
 Who is told: channel names from `channels`, and `owner` (whoever owns the destination or its interface: its `owner`, else `about.owner`, mailed at their account's email, an `owners:` entry, or the text itself if it's an address). Lead with team channels; add `owner` where a person should hear directly. Required. Example: `to: [oncall, chat, owner]`.
 
@@ -500,7 +500,7 @@ Hours when notifications of some severities wait until morning (warnings, overni
 
 ### `alerts.quiet.between`
 
-**Type:** hours (06:00-22:00) Â· **Required**
+**Type:** hours (06:00-22:00) · **Required**
 
 The quiet hours, in the server's local time (mind a server or container that runs on UTC): `"22:00-06:00"`. Notifications due in them wait until they end. Required. Example: `between: "21:00-07:00"`.
 
@@ -518,7 +518,7 @@ A URL the engine calls every `every` while it runs, for a service elsewhere that
 
 ### `alerts.heartbeat.url`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The URL the engine calls (an HTTP GET) while it runs: the "ping" or "push" URL the watching service gives you. It often holds a secret: `${secret:HEARTBEAT_URL}`. Use a service that doesn't run on the engine's server, or it goes down with it. Required. Example: `url: "${secret:HEARTBEAT_URL}"`.
 

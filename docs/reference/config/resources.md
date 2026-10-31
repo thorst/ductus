@@ -20,7 +20,7 @@ A PostgreSQL database. Example: `postgres: { host: db1.hospital.local, database:
 
 ### `databases.<name>.postgres.host`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The database server's host name or address. With `tls: verify-full`, its certificate must be for this name. Usually from the environment (`${PATIENT_DB_HOST}`). Required. Example: `host: db1.hospital.local`.
 
@@ -32,13 +32,13 @@ The server's port. Default: `5432`. Example: `port: 5433`.
 
 ### `databases.<name>.postgres.database`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The database to connect to on that server. Required. Example: `database: patients`.
 
 ### `databases.<name>.postgres.user`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The login. Give it only what the interfaces' queries need (often read-only on a few tables or views). Required. Example: `user: ductus`.
 
@@ -114,7 +114,7 @@ A Microsoft SQL Server database, with a SQL login or a Windows one. Always over 
 
 ### `databases.<name>.sqlserver.host`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The SQL Server's host name or address (without `\INSTANCE`: that goes in `instance`). Its certificate must be for this name, unless `name_in_certificate` says another. Required. Example: `host: billing.hospital.local`.
 
@@ -132,7 +132,7 @@ A named instance, as SQL Server tools write `host\INSTANCE`: `SQLEXPRESS`, `PROD
 
 ### `databases.<name>.sqlserver.database`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The database to use on that server. Required. Example: `database: Billing`.
 
@@ -226,7 +226,7 @@ SFTP servers that `sftp` sources read from and `sftp` destinations write to (`se
 
 ### `sftp.<name>.host`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The SFTP server's host name or address. Required. Example: `host: sftp.lab.example.org`.
 
@@ -238,7 +238,7 @@ The server's SSH port. Default: `22`. Example: `port: 2222`.
 
 ### `sftp.<name>.user`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The account to log in as, given by the server's owner. Required. Example: `user: hospital`.
 
@@ -300,7 +300,7 @@ HTTP APIs the code calls with `api("<name>")` and `http` destinations send throu
 
 ### `apis.<name>.url`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The API's base URL, `https://` (or `http://` on a trusted network): paths in code (`api("empi").get("/patients/1")`) and `path` on destinations go under it. Usually from the environment (`${EMPI_URL}`), since test and production differ. Required. Example: `url: "https://empi.hospital.local/api/v2"`.
 
@@ -360,7 +360,7 @@ Directories (Active Directory, OpenLDAP) people sign in to the web UI with: `aut
 
 ### `ldap.<name>.url`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The directory server: `ldaps://host` (TLS from the start, port 636 unless given) or `ldap://host` (port 389) with `starttls: true`. For Active Directory, a domain controller's name or the domain's (`ldaps://hospital.org` reaches any of them, through DNS). Its certificate must be for this name. Required. Example: `url: "ldaps://dc1.hospital.org"`.
 

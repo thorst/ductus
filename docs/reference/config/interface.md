@@ -8,7 +8,7 @@ Schema for editors: `docs/schema/interface.json` (written into a project by `duc
 
 ### `name`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The interface's name, as the database, the web UI, logs, alerts and routes (`destination: { interface: <name> }`) know it. Use the folder's name, as `ductus new interface` does, and keep it short and stable: lower-case words joined by `-`.
 
@@ -16,7 +16,7 @@ Messages are stored under the name, so a renamed interface is a new one: the old
 
 ### `source`
 
-**Type:** settings, below, or text Â· **Required**
+**Type:** settings, below, or text · **Required**
 
 Where messages come from: exactly one of `mllp`, `http`, `file`, `sftp`, `schedule` or `internal`, each with its own settings. Required. Example: `source: { mllp: { port: 6661 } }`.
 
@@ -34,7 +34,7 @@ The address to listen on: `0.0.0.0` (every IPv4 address of the server), `::` (ev
 
 ### `source.mllp.port`
 
-**Type:** number Â· **Required**
+**Type:** number · **Required**
 
 The port senders connect to. Each MLLP source needs a port of its own; `ductus new interface` picks a free one from `ports.mllp` in ductus.yaml, and `ductus validate` reports two interfaces on one port. Required. Example: `port: 6661`.
 
@@ -46,7 +46,7 @@ Accept only TLS on this port: the engine presents the `certificate` named here, 
 
 ### `source.mllp.tls.certificate`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The certificate this listener presents: a `certificates:` entry in resources.yaml with the certificate and its key, for the name senders connect to. A certificate the engine can't use (expired, its key doesn't match) stops the start with the reason; renewed files are picked up within a minute, without a restart. Required. Example: `certificate: ductus-mllp`.
 
@@ -58,7 +58,7 @@ Ask senders for a certificate of their own, and refuse any connection without on
 
 ### `source.mllp.tls.clients.ca`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The CA that issues senders' certificates: a `certificates:` entry holding the CA's certificate (`ca` or `ca_file`). Only certificates it issued are taken. Required. Example: `ca: hospital-ca`.
 
@@ -88,7 +88,7 @@ The address to listen on: `0.0.0.0` (every IPv4 address of the server), `::` (ev
 
 ### `source.http.port`
 
-**Type:** number Â· **Required**
+**Type:** number · **Required**
 
 The port to listen on. HTTP interfaces may share one (each with its own path); `ductus new interface` picks a free one from `ports.http` in ductus.yaml. Required. Example: `port: 8080`.
 
@@ -108,7 +108,7 @@ Who may connect: addresses, subnets and host names, as for MLLP. Checked before 
 
 ### `source.http.path`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The path requests come to, starting with `/`. `{name}` parts match one path segment and are given to the code (`/patients/{mrn}` takes `/patients/12345`). Two interfaces on one port can't have the same method and path. Required. Example: `path: /patients/{mrn}`.
 
@@ -141,7 +141,7 @@ The SFTP server to read from: an `sftp:` entry in resources.yaml, which holds it
 
 ### `source.file.dir`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The folder to watch. A local folder is relative to the interface's folder unless written whole (`/data/inbound/lab`, or on Windows `D:\inbound\lab`, in single quotes); an SFTP folder is relative to the folder the login starts in. Only files directly in it are read, not subfolders. Required. Example: `dir: inbound`.
 
@@ -252,19 +252,19 @@ Fixed-length records: each field at a set column and width, listed in `fields`. 
 
 ### `format.fixed.fields`
 
-**Type:** list of settings, below Â· **Required**
+**Type:** list of settings, below · **Required**
 
 The record's fields, in order, each with its `name` and `width`: what the code sees as the record's properties, and what's written back in the same columns. At least one. Example: `fields: [{ name: mrn, width: 10 }, { name: last_name, width: 20 }]`.
 
 ### `format.fixed.fields.name`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The field's name, as the code reads it (`record.mrn`) and as keys name it. Required. Example: `name: mrn`.
 
 ### `format.fixed.fields.width`
 
-**Type:** number Â· **Required**
+**Type:** number · **Required**
 
 How many characters the field takes, at least 1. Required. Example: `width: 10`.
 
@@ -424,7 +424,7 @@ The longest wait between tries, in milliseconds: how soon after a receiver comes
 
 ### `destination.rate_limit.per_minute`
 
-**Type:** number Â· **Required**
+**Type:** number · **Required**
 
 How many messages a minute the destination may be sent, at least 1: what the receiver (or its vendor's quota) allows. Required. Example: `per_minute: 600` (10 a second).
 
@@ -509,13 +509,13 @@ Send each message over MLLP to a receiver (a lab system, another interface engin
 
 ### `destination.mllp.host`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The receiver's host name or address. With `tls`, its certificate must be for this name. Required. Example: `host: lab.hospital.org`.
 
 ### `destination.mllp.port`
 
-**Type:** number Â· **Required**
+**Type:** number · **Required**
 
 The receiver's port. Required. Example: `port: 7001`.
 
@@ -566,7 +566,7 @@ Write each message as a file in a folder of this server (or a share it mounts), 
 
 ### `destination.file.dir`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The folder to write to, made if missing. Relative to the interface's folder unless written whole. Required. Example: `dir: /data/outbound/lab`.
 
@@ -578,13 +578,13 @@ Write each message as a file on an SFTP server, named like the `file` destinatio
 
 ### `destination.sftp.server`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The SFTP server: an `sftp:` entry in resources.yaml, which holds its address and login. Required. Example: `server: lab_server`.
 
 ### `destination.sftp.dir`
 
-**Type:** text Â· **Required**
+**Type:** text · **Required**
 
 The folder on the server to write to, relative to the folder the login starts in unless written whole. Required. Example: `dir: inbound/adt`.
 
@@ -710,7 +710,7 @@ The most messages a minute each destination is sent, for receivers that can't ta
 
 ### `rate_limit.per_minute`
 
-**Type:** number Â· **Required**
+**Type:** number · **Required**
 
 How many messages a minute the destination may be sent, at least 1: what the receiver (or its vendor's quota) allows. Required. Example: `per_minute: 600` (10 a second).
 

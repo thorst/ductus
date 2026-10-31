@@ -364,6 +364,11 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 ### Cron uses the server's local time; missed runs collapse to one (level 3)
 - **What:** after downtime, a schedule runs once, not once per missed time. A run is skipped if the previous run's message is still pending.
 
+### On Linux the service can write only `/var/lib/ductus` until you add a folder (level 2)
+- **What:** the package's systemd unit makes the whole file system read-only to the engine except `/var/lib/ductus` (`ProtectSystem=strict`, `ReadWritePaths=/var/lib/ductus`), and hides home folders (`ProtectHome=yes`). A file destination writing to `/data/outbound`, or a file source moving what it read to an archive outside that folder, fails with "Read-only file system" (the message waits and is tried again, as for any temporary failure). The same interface works under `ductus run` in a terminal, which has no sandbox.
+- **Why:** one interface with a wrong path shouldn't be able to write anywhere on the server.
+- **What to do:** add the folders interfaces use: `sudo systemctl edit ductus`, then `[Service]` and `ReadWritePaths=/data/outbound /data/inbound`, then `sudo systemctl restart ductus` (a unit change needs a restart, not a reload). Give the `ductus` user the folders' permissions too (`chown` or a group). Windows has the same idea with its own means: see "The Windows service can only touch what you give it".
+
 ## Operations: drain mode and the REST API
 
 ### A start logs one line, not one per listener (level 2)
@@ -829,6 +834,11 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **Why:** to try an interface without asking anyone for a database. Production needs the DBA's Postgres (backups, monitoring, failover), and a message the engine has acknowledged must survive what the DBA protects against.
 - **What to do:** use `ductus dev` on your own machine; everywhere else set `DUCTUS_DATABASE_URL` and use `ductus run`. Without a download possible, unpack the Postgres binaries yourself and set `DUCTUS_POSTGRES_DIR`. `ductus dev --reset` throws the dev data away.
 
+### Your editor's help is the installed version's: run `ductus types` after an upgrade (level 1)
+- **What:** completion, descriptions on hover and underlined mistakes in interface.yaml, resources.yaml and ductus.yaml come from the JSON Schemas `ductus types` writes into `.ductus/schema/` (with the SDK's typings in `.ductus/types/`), and those come from the `ductus` that wrote them. After an upgrade, a new setting is underlined as unknown and its description is missing until they're written again; on a laptop with an older `ductus` than the servers, the editor describes the older one. `ductus test` and `ductus validate` write them too.
+- **Why:** the schemas are made from the engine's own types, so they say exactly what that version accepts, offline (an air-gapped site can't fetch them from a website), with no second copy to drift.
+- **What to do:** run `ductus types` (or `test`) after installing a new version; keep developers' `ductus` at the version the servers run. `.ductus/` isn't committed, so each machine writes its own.
+
 ## Upgrades
 
 ### Run `ductus upgrade --check` with the new version before every upgrade (level 1)
@@ -907,6 +917,11 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **What to do:** senders resend on their own; for a planned restart, a quiet moment helps. Upgrading Windows: stop the service first where Restart Manager is off, to save the wait.
 
 ## Windows
+
+### The installer isn't signed yet: SmartScreen says "unknown publisher" (level 1)
+- **What:** before v1.0 the MSI and `ductus.exe` carry no code-signing (Authenticode) signature. Run from a download, Windows SmartScreen shows "Windows protected your PC" and "unknown publisher"; some endpoint protection blocks unsigned installers outright. A silent install (`msiexec /i … /qn`) from a deployment tool doesn't show the dialog, but the file is the same.
+- **Why:** a code-signing certificate is a v1.0 step; until then the builds are development builds.
+- **What to do:** check the file before running it: its SHA-256 (`Get-FileHash ductus-0.6.0-x64.msi`) against the release's published checksums, and where GitHub attests the build, `gh attestation verify ductus-0.6.0-x64.msi -R thorst/ductus`. Then "More info" → "Run anyway", or `Unblock-File` it first. Ask your endpoint team to allow it by hash rather than by publisher.
 
 ### The service's account: the default, a gMSA, or a named account (level 2)
 - **What:** the installer runs the service as `NT SERVICE\Ductus` (a virtual account: no password, and on the network it is the computer, `HOSPITAL\SERVER01$`). `msiexec /i ductus.msi SERVICEACCOUNT=HOSPITAL\svc-ductus$` installs it as a group managed service account (gMSA) instead: Windows keeps its password, so nothing secret is ever typed, and upgrades keep it. An account with a password (`HOSPITAL\svc-ductus`, or `.\name` on this computer) works too, but the installer can't take its password (installer properties end up in the install log): give it with `ductus service account 'HOSPITAL\svc-ductus'` (it asks; `--password-stdin` for scripts). `ductus service account` with no name says who the service runs as.

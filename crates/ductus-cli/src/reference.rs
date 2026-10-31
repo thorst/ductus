@@ -54,7 +54,7 @@ pub fn write(docs: &Path) -> Result<()> {
     if summary.is_file() {
         let text = std::fs::read_to_string(&summary).with_context(|| format!("reading {}", summary.display()))?;
         let (Some(start), Some(end)) = (text.find(BEGIN), text.find(END)) else {
-            bail!("{} has no reference block (`{BEGIN}` â€¦ `{END}`)", summary.display());
+            bail!("{} has no reference block (`{BEGIN}` … `{END}`)", summary.display());
         };
         let mut contents = String::new();
         for page in &pages {
@@ -543,12 +543,27 @@ run `ductus types` again after an upgrade. They're also in the repository, `docs
             s.name,
             s.files.join("`, `")
         );
-        let mut settings = Settings { root: &schema, seen: BTreeMap::new(), out: String::new() };
-        settings.children(&schema, "");
+        let settings = Settings::of(&schema);
         text.push_str(&settings.out);
         pages.push(Page::new(&format!("config/{}.md", page_name(s.name)), s.title, 2, text));
     }
     Ok(pages)
+}
+
+/// The settings a guide must explain, by page (`interface`) and heading (`source.mllp`): each
+/// file's top-level settings and their connectors (`source.mllp`, `databases.<name>.postgres`,
+/// `format.csv`). A test holds the guides to it, so no setting is only in the reference.
+#[cfg(test)]
+fn subjects() -> Result<Vec<(&'static str, String)>> {
+    let mut out = Vec::new();
+    for s in &ductus_core::schema::SCHEMAS {
+        let schema: Value = serde_json::from_str(s.text)?;
+        let settings = Settings::of(&schema);
+        for path in settings.subjects {
+            out.push((page_name(s.name), path));
+        }
+    }
+    Ok(out)
 }
 
 fn page_name(schema: &str) -> &str {
@@ -560,6 +575,8 @@ struct Settings<'a> {
     root: &'a Value,
     /// Definitions already described, and where.
     seen: BTreeMap<String, String>,
+    /// The top-level settings and their connectors, in the order described (`subjects`).
+    subjects: Vec<String>,
     out: String,
 }
 
@@ -644,7 +661,14 @@ fn setting_type(root: &Value, node: &Value) -> String {
     }
 }
 
-impl Settings<'_> {
+impl<'a> Settings<'a> {
+    /// A whole file's settings, described.
+    fn of(schema: &'a Value) -> Self {
+        let mut settings = Settings { root: schema, seen: BTreeMap::new(), subjects: Vec::new(), out: String::new() };
+        settings.children(schema, "");
+        settings
+    }
+
     /// Describe the settings under `node` (its properties, those of its branches, a map's values).
     fn children(&mut self, node: &Value, path: &str) {
         let root = self.root;
@@ -653,23 +677,34 @@ impl Settings<'_> {
         let required: BTreeSet<String> =
             node["required"].as_array().into_iter().flatten().filter_map(|v| v.as_str().map(String::from)).collect();
         let mut done = BTreeSet::new();
-        let mut properties: Vec<(String, Value, bool)> = Vec::new();
+        // (key, schema, required, a connector: the one key a branch requires, `{ mllp: … }`, with
+        // or without the options every branch shares beside it, as a destination's)
+        let mut properties: Vec<(String, Value, bool, bool)> = Vec::new();
         if let Some(props) = node["properties"].as_object() {
             for (k, v) in props {
-                properties.push((k.clone(), v.clone(), required.contains(k)));
+                properties.push((k.clone(), v.clone(), required.contains(k), false));
             }
         }
         for branch in branches(&node) {
             let (branch, _) = resolve(root, branch);
             if let Some(props) = branch["properties"].as_object() {
+                let connector = match branch["required"].as_array().map(Vec::as_slice) {
+                    Some([only]) => only.as_str(),
+                    _ => None,
+                };
                 for (k, v) in props {
-                    properties.push((k.clone(), v.clone(), false));
+                    properties.push((k.clone(), v.clone(), false, connector == Some(k.as_str())));
                 }
             }
         }
-        for (key, value, required) in properties {
+        // A file's own settings, and the connectors of those (not of their settings in turn).
+        let top = path.replace(".<name>", "").split('.').filter(|p| !p.is_empty()).count();
+        for (key, value, required, connector) in properties {
             if done.insert(key.clone()) {
                 let path = if path.is_empty() { key } else { format!("{path}.{key}") };
+                if top == 0 || connector && top == 1 {
+                    self.subjects.push(path.clone());
+                }
                 self.setting(&path, &value, required);
             }
         }
@@ -695,7 +730,7 @@ impl Settings<'_> {
         if required {
             facts.push("**Required**".into());
         }
-        let _ = writeln!(self.out, "{}\n", facts.join(" Â· "));
+        let _ = writeln!(self.out, "{}\n", facts.join(" · "));
         let (resolved, definition) = resolve(root, node);
         let description = node["description"].as_str().or(resolved["description"].as_str()).unwrap_or_default();
         if !description.is_empty() {
@@ -749,9 +784,9 @@ are in the journal (`journalctl -u ductus`).
     );
     for (id, level, about) in ABOUT {
         let message = MESSAGES.iter().find(|(m, _)| m == id).map_or("", |(_, t)| t);
-        let message = message.replace("%n", "\n").replace("%1", "â€¦").replace("%2", "â€¦");
+        let message = message.replace("%n", "\n").replace("%1", "…").replace("%2", "…");
         let first = message.lines().next().unwrap_or_default();
-        let _ = writeln!(text, "## {id} Â· {level}\n\n{about}\n\n> {first}\n");
+        let _ = writeln!(text, "## {id} · {level}\n\n{about}\n\n> {first}\n");
     }
     Page::new("event-log.md", "Event Log IDs", 1, text)
 }
@@ -763,7 +798,7 @@ fn metrics() -> Page {
 `GET /api/v1/metrics` serves these in Prometheus's text format, for Prometheus, Grafana Agent, \
 Datadog or anything else that scrapes it. It needs a token like every other call: in \
 Prometheus's scrape configuration, `metrics_path: /api/v1/metrics` and `authorization: { \
-credentials: dux_â€¦ }` (a viewer token: `ductus token create prometheus --role viewer`).
+credentials: dux_… }` (a viewer token: `ductus token create prometheus --role viewer`).
 
 Counters and histograms count from when the engine started (`rate()` and `increase()` handle \
 restarts); queue sizes are read from the database at each scrape. Each destination adds a series \
@@ -824,5 +859,88 @@ mod tests {
         let mut missing = Vec::new();
         walk(&root, "ductus", &mut missing);
         assert!(missing.is_empty(), "{} without help:\n{}", missing.len(), missing.join("\n"));
+    }
+
+    fn docs() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs")
+    }
+
+    /// Every page of the book, as (path under docs/, text).
+    fn pages() -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        let mut todo = vec![docs()];
+        while let Some(dir) = todo.pop() {
+            for entry in std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()) {
+                if entry.is_dir() {
+                    todo.push(entry);
+                } else if entry.extension().is_some_and(|e| e == "md") {
+                    let name = entry.strip_prefix(docs()).unwrap().to_string_lossy().replace('\\', "/");
+                    out.push((name, std::fs::read_to_string(&entry).unwrap()));
+                }
+            }
+        }
+        out.sort();
+        out
+    }
+
+    /// The pages that explain (the guides): not the reference, the nuances, the architecture or
+    /// the database's description, which list rather than explain.
+    fn guide(page: &str) -> bool {
+        const NOT: [&str; 6] =
+            ["SUMMARY.md", "STYLE.md", "nuances.md", "architecture.md", "schema.md", "shared-pool.md"];
+        !page.starts_with("reference/") && !NOT.contains(&page)
+    }
+
+    /// The `#anchor`s of reference/config/<page>.md that a page links to, as (page, anchor).
+    fn config_links(text: &str) -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for target in text.split("](").skip(1).filter_map(|rest| rest.split(')').next()) {
+            let Some((file, anchor)) = target.split_once('#') else { continue };
+            if let Some(page) = file.rsplit_once("reference/config/").and_then(|(_, p)| p.strip_suffix(".md")) {
+                out.push((page.to_string(), anchor.to_string()));
+            }
+        }
+        out
+    }
+
+    /// No orphan setting: every top-level setting of each configuration file, and each of their
+    /// connectors, is linked from a guide that explains it, not only listed in the reference.
+    #[test]
+    fn every_setting_is_explained_in_a_guide() {
+        let linked: std::collections::BTreeSet<(String, String)> =
+            pages().iter().filter(|(p, _)| guide(p)).flat_map(|(_, t)| config_links(t)).collect();
+        let subjects = super::subjects().unwrap();
+        // Top-level settings and connectors alike, or the walk has stopped seeing one kind.
+        for expected in ["retention", "source.mllp", "destination.http", "databases.<name>.postgres", "format.csv"] {
+            assert!(subjects.iter().any(|(_, p)| p == expected), "`{expected}` isn't among the settings to explain");
+        }
+        let mut orphans = Vec::new();
+        for (page, path) in subjects {
+            let anchor = super::anchor(&format!("`{path}`"));
+            if !linked.contains(&(page.to_string(), anchor.clone())) {
+                orphans.push(format!("{page}.md: `{path}` (link it as reference/config/{page}.md#{anchor})"));
+            }
+        }
+        assert!(
+            orphans.is_empty(),
+            "{} settings no guide explains: explain each where it belongs and link it (docs/STYLE.md):\n{}",
+            orphans.len(),
+            orphans.join("\n")
+        );
+    }
+
+    /// Text decoded twice (UTF-8 read as Windows-1252 and saved again) shows as `Â·` and `â€¦`:
+    /// it reached the reference pages once from a source file.
+    #[test]
+    fn no_page_has_mangled_characters() {
+        let mut found = Vec::new();
+        for (page, text) in pages() {
+            for (n, line) in text.lines().enumerate() {
+                if ["Â", "â€", "\u{FFFD}"].iter().any(|bad| line.contains(bad)) {
+                    found.push(format!("{page}:{}: {line}", n + 1));
+                }
+            }
+        }
+        assert!(found.is_empty(), "mangled characters:\n{}", found.join("\n"));
     }
 }

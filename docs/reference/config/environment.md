@@ -2,7 +2,7 @@
 
 `environments/<name>.yaml`: one environment's values (`dev.yaml`, `test.yaml`, `prod.yaml`). The engine reads the one it's started with (`--env prod`, or `DUCTUS_ENV`), and every `${NAME}` in interface.yaml, resources.yaml and ductus.yaml's `alerts:` takes its value from here. The same project then runs anywhere, with only this file differing.
 
-Secrets (passwords, tokens, keys) don't go here: they're in `secrets/<name>.json`, encrypted (`ductus secret set NAME`), and written `${secret:NAME}`. `ductus validate` checks every environment, so a variable missing from one is found before it's deployed.
+Secrets (passwords, tokens, keys) don't go here: they're in `secrets/<name>.json`, encrypted (`ductus secret set NAME`), and written `${secret:NAME}`. `ductus validate --env <name>` checks one environment: run it for each before deploying there, and a variable missing from it is found then, not at the engine's start.
 
 Schema for editors: `docs/schema/environment.json` (written into a project by `ductus types`). Files: `environments/*.yaml`.
 

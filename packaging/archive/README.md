@@ -37,6 +37,7 @@ its user and its folders, and upgrade in place. Without them (Linux):
 ```sh
 sudo install -m 0755 ductus /usr/bin/ductus
 sudo useradd --system --home-dir /var/lib/ductus --create-home --shell /usr/sbin/nologin ductus
+sudo install -d -m 0755 /etc/ductus
 sudo install -m 0640 -g ductus ductus.env /etc/ductus/ductus.env   # then edit it
 sudo install -m 0644 ductus.service /usr/lib/systemd/system/ductus.service
 sudo systemctl daemon-reload && sudo systemctl enable --now ductus

@@ -31,8 +31,9 @@ pub struct Environment {
 /// from here. The same project then runs anywhere, with only this file differing.
 ///
 /// Secrets (passwords, tokens, keys) don't go here: they're in `secrets/<name>.json`,
-/// encrypted (`ductus secret set NAME`), and written `${secret:NAME}`. `ductus validate` checks
-/// every environment, so a variable missing from one is found before it's deployed.
+/// encrypted (`ductus secret set NAME`), and written `${secret:NAME}`. `ductus validate --env
+/// <name>` checks one environment: run it for each before deploying there, and a variable
+/// missing from it is found then, not at the engine's start.
 #[derive(serde::Deserialize, Default)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -44,7 +45,7 @@ pub(crate) struct EnvironmentFile {
     /// EPIC_PORT: 6661 }`.
     #[serde(default)]
     #[cfg_attr(test, schemars(with = "BTreeMap<String, serde_json::Value>"))]
-    variables: BTreeMap<String, Value>,
+    pub(crate) variables: BTreeMap<String, Value>,
 }
 
 impl Environment {
@@ -174,8 +175,8 @@ enum Ref {
 
 // `${` and `}` are YAML flow syntax (`{ port: ${PORT} }` wouldn't parse), so before parsing,
 // references are rewritten with private-use characters that YAML treats as plain text.
-const OPEN: char = '\u{E000}';
-const CLOSE: char = '\u{E001}';
+pub(crate) const OPEN: char = '\u{E000}';
+pub(crate) const CLOSE: char = '\u{E001}';
 const LITERAL: char = '\u{E002}';
 
 /// Parse YAML text that may contain `${...}` references (in any position, quoted or not).

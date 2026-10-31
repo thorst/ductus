@@ -96,7 +96,8 @@ Give an interface its own threads and isolate when it:
 - uses third-party code you can't vouch for.
 
 ```yaml
-# interface.yaml
+# interface.yaml, in part
+ordering: { key: PID-3.1 }   # lanes for the workers to share
 isolation: dedicated
 workers: 8
 ```

@@ -14,7 +14,7 @@ The fields, by the key `custom:` uses, in the order the web UI shows them. Keys 
 
 ### `fields.<name>.type`
 
-**Type:** `text`, `enum`, `date`, `url`, `person`, `list` Â· **Required**
+**Type:** `text`, `enum`, `date`, `url`, `person`, `list` · **Required**
 
 What the value is:
 

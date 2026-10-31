@@ -147,7 +147,7 @@ them), tests and sample messages.
 | | |
 |---|---|
 | `ductus test` | run every interface's tests |
-| `ductus validate` | check types, config and ports, for every environment |
+| `ductus validate` | check types, config and ports, for an environment (`--env prod`; `dev` by default) |
 | `ductus new interface <name> --source mllp\|http\|file\|sftp\|schedule` | add an interface |
 | `ductus dev` | run them all with a Postgres of its own (nothing to install; data in `.ductus/postgres`) |
 | `ductus run` | run them all against your Postgres (needs `DUCTUS_DATABASE_URL`; on another machine add `?sslmode=verify-full`, and `&sslrootcert=/path/ca.pem` for a private CA) |

@@ -2,6 +2,36 @@
 
 [Introduction](introduction.md)
 
+# Get started
+
+- [Choosing Linux or Windows](choosing-linux-or-windows.md)
+- [Install](install/index.md)
+  - [Linux packages](install/linux.md)
+  - [Windows installer](install/windows.md)
+  - [The portable archive](install/archive.md)
+  - [Docker](install/docker.md)
+  - [On your laptop: ductus dev](install/dev.md)
+  - [PostgreSQL](install/postgres.md)
+- [Ports and firewalls](ports.md)
+- [Your first interface](first-interface.md)
+
+# Configure
+
+- [The project](configure/index.md)
+  - [Environments, variables and secrets](configure/environments.md)
+  - [ductus.yaml: the project's settings](configure/ductus-yaml.md)
+  - [resources.yaml: what interfaces share](configure/resources.md)
+  - [interface.yaml: an interface](configure/interface.md)
+    - [Sources and formats](configure/sources.md)
+    - [Destinations](configure/destinations.md)
+    - [Delivery: order, retries, limits](configure/delivery.md)
+    - [Keeping and watching](configure/keeping-and-watching.md)
+    - [About and owners](configure/about.md)
+  - [TLS and certificates](configure/tls.md)
+  - [People: users, tokens, the directory](configure/people.md)
+  - [Alerts and owners](configure/alerts.md)
+  - [Documentation fields](configure/documentation-fields.md)
+
 # How Ductus works
 
 - [Architecture](architecture.md)

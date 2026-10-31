@@ -346,9 +346,8 @@ fn with_secrets(text: &str) -> String {
 
 /// What the engine says about a file's shape (Ok, or why not): the same reading as at start, up to
 /// the checks that need other files (a script, a certificate) or other settings.
-fn engine(kind: &str, text: &str) -> Result<(), String> {
+fn engine(kind: &str, text: &str, env: &crate::Environment) -> Result<(), String> {
     let text = &with_secrets(text);
-    let env = environment();
     let substituted = || -> anyhow::Result<serde_yaml_ng::Value> {
         let mut value = crate::env::parse_yaml(text)?;
         env.substitute(&mut value)?;
@@ -396,11 +395,12 @@ fn the_schemas_agree_with_the_engine() {
     for (name, schema) in generated() {
         let kind = kind_of(name);
         let validator = jsonschema::draft7::new(&schema).unwrap_or_else(|e| panic!("{name}: {e}"));
+        let env = environment();
         for (file, text) in cases(kind, "good") {
             if let Err(e) = schema_says(&validator, &text) {
                 problems.push(format!("good/{kind}/{file}: the schema refuses it: {e}"));
             }
-            if let Err(e) = engine(kind, &text) {
+            if let Err(e) = engine(kind, &text, &env) {
                 problems.push(format!("good/{kind}/{file}: the engine refuses it: {e}"));
             }
         }
@@ -408,7 +408,7 @@ fn the_schemas_agree_with_the_engine() {
             if schema_says(&validator, &text).is_ok() {
                 problems.push(format!("bad/{kind}/{file}: the schema takes it"));
             }
-            if engine(kind, &text).is_ok() {
+            if engine(kind, &text, &env).is_ok() {
                 problems.push(format!("bad/{kind}/{file}: the engine takes it"));
             }
         }
@@ -510,4 +510,183 @@ fn the_good_files_use_every_setting() {
         }
     }
     assert!(problems.is_empty(), "\n{}", problems.join("\n"));
+}
+
+/// A fenced `yaml` block in a guide.
+struct Example {
+    /// Where it is: `configure/tls.md:42`.
+    at: String,
+    /// The file its first line names (`# resources.yaml`), as written.
+    file: String,
+    /// Which configuration file that is (`resources`), if it's one of ours.
+    kind: Option<&'static str>,
+    /// `, in part`: some of the file's top-level settings, not the whole file.
+    part: bool,
+    text: String,
+}
+
+/// Which configuration file a name in an example's first line is.
+fn kind_of_file(file: &str) -> Option<&'static str> {
+    let name = file.rsplit(['/', '\\']).next().unwrap_or(file);
+    match name {
+        "interface.yaml" => Some("interface"),
+        "resources.yaml" => Some("resources"),
+        "ductus.yaml" => Some("ductus"),
+        "docs-schema.yaml" => Some("docs-schema"),
+        _ if file.starts_with("environments/") && name.ends_with(".yaml") => Some("environment"),
+        _ => None,
+    }
+}
+
+/// Every YAML example in the guides (every page under docs/ but the generated reference): each
+/// starts with a comment naming its file (`docs/STYLE.md`), or it's a problem.
+fn guide_examples(problems: &mut Vec<String>) -> Vec<Example> {
+    let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+    let mut pages = Vec::new();
+    let mut todo = vec![docs.clone()];
+    while let Some(dir) = todo.pop() {
+        for entry in std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()) {
+            if entry.is_dir() && entry.file_name().is_some_and(|n| n != "reference" && n != "schema") {
+                todo.push(entry);
+            } else if entry.extension().is_some_and(|e| e == "md") {
+                pages.push(entry);
+            }
+        }
+    }
+    pages.sort();
+    let mut examples = Vec::new();
+    for page in pages {
+        let name = page.strip_prefix(&docs).unwrap().to_string_lossy().replace('\\', "/");
+        let text = std::fs::read_to_string(&page).unwrap();
+        let mut lines = text.lines().enumerate();
+        while let Some((n, line)) = lines.next() {
+            let fence = line.trim_start();
+            if !(fence.starts_with("```yaml") || fence.starts_with("```yml")) {
+                continue;
+            }
+            let indent = line.len() - fence.len();
+            let body: Vec<&str> = lines
+                .by_ref()
+                .map(|(_, l)| l)
+                .take_while(|l| l.trim_start() != "```")
+                .map(|l| l.get(indent..).unwrap_or(l.trim_start()))
+                .collect();
+            let at = format!("{name}:{}", n + 1);
+            let first = body.first().copied().unwrap_or_default();
+            let Some(said) = first.strip_prefix("# ") else {
+                problems.push(format!("{at}: start the example with the file it belongs to (`# resources.yaml`)"));
+                continue;
+            };
+            let (file, part) = match said.split_once(", in part") {
+                Some((file, _)) => (file.trim(), true),
+                None => (said.split_whitespace().next().unwrap_or_default(), false),
+            };
+            if !file.ends_with(".yaml") && !file.ends_with(".yml") {
+                problems.push(format!("{at}: start the example with the file it belongs to, not `{first}`"));
+                continue;
+            }
+            examples.push(Example {
+                at,
+                file: file.to_string(),
+                kind: kind_of_file(file),
+                part,
+                text: body.join("\n"),
+            });
+        }
+    }
+    examples
+}
+
+/// YAML read as the engine reads it (`${...}` anywhere), with the references written out again
+/// as text, as the schema expects them.
+fn read_example(text: &str) -> Result<serde_yaml_ng::Value, String> {
+    fn restore(value: &mut serde_yaml_ng::Value) {
+        use serde_yaml_ng::Value as V;
+        match value {
+            V::String(s) => *s = s.replace(crate::env::OPEN, "${").replace(crate::env::CLOSE, "}"),
+            V::Sequence(items) => items.iter_mut().for_each(restore),
+            V::Mapping(map) => map.iter_mut().for_each(|(_, v)| restore(v)),
+            V::Tagged(t) => restore(&mut t.value),
+            _ => {}
+        }
+    }
+    let mut value = crate::env::parse_yaml(text).map_err(|e| format!("{e:#}"))?;
+    restore(&mut value);
+    Ok(value)
+}
+
+/// An example of some of a file's settings, made a whole file: what the file needs besides them
+/// (an interface's name, source and destination).
+fn whole(kind: &str, part: serde_yaml_ng::Value) -> Result<serde_yaml_ng::Value, String> {
+    use serde_yaml_ng::Value as V;
+    let V::Mapping(part) = part else { return Err("an example `in part` must be settings (`key: value`)".into()) };
+    let mut base = match kind {
+        "interface" => serde_yaml_ng::from_str::<serde_yaml_ng::Mapping>(
+            "name: example\nsource: { mllp: { port: 6661 } }\ndestination: { file: { dir: out } }",
+        )
+        .unwrap(),
+        _ => serde_yaml_ng::Mapping::new(),
+    };
+    if part.contains_key("destinations") {
+        base.remove("destination");
+    }
+    for (k, v) in part {
+        base.insert(k, v);
+    }
+    Ok(V::Mapping(base))
+}
+
+/// The variables the guides' examples use: those their `environments/*.yaml` examples give,
+/// with the agreement test's.
+fn guide_environment(examples: &[Example]) -> crate::Environment {
+    let mut variables: Vec<(String, String)> = Vec::new();
+    for e in examples.iter().filter(|e| e.kind == Some("environment")) {
+        let Ok(file) = serde_yaml_ng::from_str::<crate::env::EnvironmentFile>(&e.text) else { continue };
+        for (name, value) in file.variables {
+            let text = match value {
+                serde_yaml_ng::Value::String(s) => s,
+                other => serde_yaml_ng::to_string(&other).unwrap_or_default().trim().to_string(),
+            };
+            variables.push((name, text));
+        }
+    }
+    for (name, value) in [("PORT", "6661"), ("HOST", "lab.example.org"), ("POOL", "8"), ("STRICT", "true")] {
+        variables.push((name.into(), value.into()));
+    }
+    let pairs: Vec<(&str, &str)> = variables.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    crate::Environment::with_variables("docs", &pairs)
+}
+
+/// The guides' YAML is what the engine takes: every example of a configuration file passes the
+/// schema and the engine's reading, as a file in `good/` must (`docs/STYLE.md`, "Examples").
+#[test]
+fn every_yaml_example_in_the_guides_is_valid() {
+    let mut problems = Vec::new();
+    let examples = guide_examples(&mut problems);
+    let env = guide_environment(&examples);
+    let schemas = generated();
+    let mut checked = 0;
+    for e in &examples {
+        let Some(kind) = e.kind else { continue };
+        let (_, schema) = schemas.iter().find(|(name, _)| kind_of(name) == kind).unwrap();
+        let validator = jsonschema::draft7::new(schema).unwrap();
+        let value = match read_example(&e.text).and_then(|v| if e.part { whole(kind, v) } else { Ok(v) }) {
+            Ok(v) => v,
+            Err(why) => {
+                problems.push(format!("{}: {}: isn't YAML the engine reads: {why}", e.at, e.file));
+                continue;
+            }
+        };
+        let json = serde_json::to_value(&value).unwrap();
+        if let Some(why) = validator.iter_errors(&json).next() {
+            problems.push(format!("{}: {}: the schema refuses it: {why} at {}", e.at, e.file, why.instance_path()));
+        }
+        let text = serde_yaml_ng::to_string(&value).unwrap();
+        if let Err(why) = engine(kind, &text, &env) {
+            problems.push(format!("{}: {}: the engine refuses it: {why}", e.at, e.file));
+        }
+        checked += 1;
+    }
+    assert!(problems.is_empty(), "{} examples to fix:\n{}", problems.len(), problems.join("\n"));
+    assert!(checked >= 40, "only {checked} examples found: is the guides' folder where the test looks?");
 }
