@@ -131,7 +131,8 @@ export interface TestResult {
 }
 
 const tests: TestCase[] = [];
-let fixtures: Record<string, string> = {};
+/** null until `ductus test` hands them over, which is after the test files have loaded. */
+let fixtures: Record<string, string> | null = null;
 let inputFormat: FormatSpec = { kind: "hl7" };
 
 /** Register a test. */
@@ -141,6 +142,9 @@ export function test(name: string, fn: () => unknown): void {
 
 /** Contents of a file in the interface's `fixtures/` folder. */
 export function fixture(name: string): string {
+  if (fixtures === null) {
+    throw new Error(`fixture "${name}" read when the test file loads: fixtures can be read only inside a test (in test(...) or a function it calls)`);
+  }
   const content = fixtures[name];
   if (content === undefined) {
     const available = Object.keys(fixtures).sort().join(", ") || "none";

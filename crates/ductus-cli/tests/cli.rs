@@ -212,6 +212,86 @@ fn a_new_project_passes_test_and_validate_as_generated() {
     assert!(!ok && out.contains("isn't empty"), "{out}");
 }
 
+/// Copy a folder into another, recursively.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap().map(|e| e.unwrap()) {
+        let path = entry.path();
+        if path.is_dir() {
+            copy_dir(&path, &to.join(entry.file_name()));
+        } else {
+            std::fs::copy(&path, to.join(entry.file_name())).unwrap();
+        }
+    }
+}
+
+/// The code on the docs' "Write interfaces" pages is `examples/guides`' (the CLI crate's
+/// `the_guides_code_is_the_example_projects` checks the pages against its files), so the project
+/// must pass its own tests and `validate`, as the pages say it does.
+#[test]
+fn the_guides_example_project_passes_its_tests_and_validate() {
+    let source = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/guides");
+    let dir = tempfile::tempdir().unwrap();
+    copy_dir(&source, dir.path());
+    let (ok, out) = ductus(dir.path(), &["test"]);
+    assert!(ok && out.contains(" passed, 0 failed"), "{out}");
+
+    // Its resources name secrets: give them values, as `ductus secret set` would for a real one.
+    let run = |args: &[&str], key: &str, stdin: &str| {
+        use std::io::Write;
+        let mut child = Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(args)
+            .current_dir(dir.path())
+            .env("DUCTUS_SECRET_KEY", key)
+            .env_remove("DUCTUS_DATABASE_URL")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        child.stdin.take().unwrap().write_all(stdin.as_bytes()).unwrap();
+        let out = child.wait_with_output().unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let (ok, key) = run(&["secret", "init"], "", "");
+    assert!(ok, "{key}");
+    let key = key.lines().next().unwrap().trim().to_string();
+    for name in ["BILLING_TOKEN", "EMPI_TOKEN", "FHIR_TOKEN", "PROVIDER_DB_PASSWORD"] {
+        let (ok, out) = run(&["secret", "set", name], &key, "a-test-value\n");
+        assert!(ok, "{out}");
+    }
+    let (ok, out) = run(&["validate"], &key, "");
+    assert!(ok && out.contains("valid"), "{out}");
+    assert!(!out.contains('⚠'), "the guides' examples are written to pass without warnings: {out}");
+}
+
+/// A test file that reads a fixture as it loads (outside `test(...)`) is told why it can't,
+/// instead of "not found (available: none)".
+#[test]
+fn a_fixture_read_as_the_test_file_loads_says_to_read_it_in_a_test() {
+    let dir = project(&[
+        (
+            "interfaces/a/interface.yaml",
+            "name: a\nsource: { mllp: { port: 6661 } }\nscript: t.ts\ndestination: { file: { dir: out } }\n",
+        ),
+        (
+            "interfaces/a/t.ts",
+            "import type { Message } from \"@ductus/sdk\";\nexport function transform(m: Message) { return m; }\n",
+        ),
+        ("interfaces/a/fixtures/one.hl7", "MSH|^~\\&|A|B|C|D|20260101||ADT^A01|1|P|2.5\r"),
+        (
+            "interfaces/a/t.test.ts",
+            "import { hl7, test, expect } from \"@ductus/sdk\";\nconst msg = hl7(\"one.hl7\");\ntest(\"x\", () => expect(msg.MSH[9][1]).toBe(\"ADT\"));\n",
+        ),
+    ]);
+    let (ok, out) = ductus(dir.path(), &["test"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("fixtures can be read only inside a test"), "{out}");
+}
+
 #[test]
 fn generated_interfaces_pass_test_and_validate_as_generated() {
     let dir = project(&[

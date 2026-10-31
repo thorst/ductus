@@ -77,6 +77,14 @@ destination: { file: { dir: out } }
 - YAML that isn't a Ductus file (Docker Compose, a CI workflow) names its file too
   (`# compose.yaml`), and isn't checked.
 
+**TypeScript examples are the guides' example project's.** Every fenced `ts` block on the
+"Write interfaces" pages (`docs/write/`) starts with the path of a file in `examples/guides`
+(`// interfaces/adt-in/route.ts`, or `// lib/codes.ts, in part` for a piece) and is in that file
+word for word; a `ts` block elsewhere in the guides that names such a path is checked too
+(`the_guides_code_is_the_example_projects`, CLI crate). The project's own `ductus test` and
+`ductus validate` run in the CLI tests (`the_guides_example_project_passes_its_tests_and_validate`),
+so a page's code has run. To show new code, add it to the project with a test, then quote it.
+
 **Commands are real.** Every command on a page has been run, and its output, where shown, is
 what it printed (trimmed with `…`, never made up). Measurements name what was measured, on what,
 and link to where it's recorded (`architecture.md`, a nuance); they're never worded as limits

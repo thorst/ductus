@@ -1,0 +1,10 @@
+name: orders-xml
+about:
+  description: Home-care equipment orders from the clinic portal, for the supplier
+  owner: integration-team
+  from: { application: Clinic portal }
+  to: { application: Equipment supplier }
+source: { http: { port: 8080, path: /orders } }
+format: xml
+script: orders.ts
+destination: { file: { dir: out } }

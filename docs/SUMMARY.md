@@ -32,6 +32,28 @@
   - [Alerts and owners](configure/alerts.md)
   - [Documentation fields](configure/documentation-fields.md)
 
+# Write interfaces
+
+- [How interface code works](write/index.md)
+  - [Routes and filters](write/routes-and-filters.md)
+  - [Transforms: mappings first, then code](write/transforms.md)
+  - [Formats: HL7 v2, FHIR, X12, CSV, JSON, XML](write/formats.md)
+  - [Lookups and code tables](write/lookups.md)
+  - [Testing with fixtures](write/testing.md)
+
+# Operate
+
+- [Running Ductus day to day](operate/index.md)
+  - [The console (web UI)](operate/console.md)
+  - [The CLI day to day](operate/cli.md)
+  - [The message store and search](operate/messages.md)
+  - [Resend, replay and correct](operate/resend.md)
+  - [Monitoring and metrics](operate/monitoring.md)
+  - [Logs](operate/logs.md)
+  - [Alerts in practice](operate/alerts.md)
+  - [High availability and lanes](operate/high-availability.md)
+  - [Retention and storage](operate/retention.md)
+
 # How Ductus works
 
 - [Architecture](architecture.md)

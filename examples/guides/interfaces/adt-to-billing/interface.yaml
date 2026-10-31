@@ -1,0 +1,11 @@
+name: adt-to-billing
+about:
+  description: Admissions and discharges from adt-in, as JSON encounters for the billing system
+  owner: revenue-cycle-team
+  to: { application: Billing, vendor: Experian }
+source: internal                    # messages come only from another interface's route
+script: billing.ts
+ordering: { key: PID-3.1 }
+output: json
+destination:
+  http: { api: billing, path: /encounters }

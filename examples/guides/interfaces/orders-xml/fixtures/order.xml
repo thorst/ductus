@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Order id="PO-1001">
+  <Patient>
+    <Identifiers><MRN>123456</MRN></Identifiers>
+    <Name>SMITH, ANNA</Name>
+    <SSN>000-00-0000</SSN>
+  </Patient>
+  <Items>
+    <Item sku="WC-200">Wheelchair</Item>
+    <Item sku="CU-17">Cushion</Item>
+  </Items>
+</Order>

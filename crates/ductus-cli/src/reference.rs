@@ -929,6 +929,57 @@ mod tests {
         );
     }
 
+    /// The fenced blocks of `lang` in a page, each as its lines joined with `\n`.
+    fn fenced(text: &str, lang: &str) -> Vec<String> {
+        let (mut blocks, mut open): (Vec<String>, Option<Vec<&str>>) = (Vec::new(), None);
+        for line in text.lines() {
+            match open.as_mut() {
+                None if line.trim_end() == format!("```{lang}") => open = Some(Vec::new()),
+                Some(lines) if line.trim_end() == "```" => {
+                    blocks.push(lines.join("\n"));
+                    open = None;
+                }
+                Some(lines) => lines.push(line),
+                None => {}
+            }
+        }
+        blocks
+    }
+
+    /// The code on the "Write interfaces" pages is the guides' example project's: every TypeScript
+    /// block there starts with the path of a file in `examples/guides` (`// lib/codes.ts`, with
+    /// `, in part` for a piece of it) and is in that file as written. A TypeScript block on any
+    /// other guide page that names such a path is checked the same way. The project's own tests
+    /// and `validate` run in the CLI tests (`the_guides_example_project_passes_its_tests_and_validate`),
+    /// so every example on those pages has run.
+    #[test]
+    fn the_guides_code_is_the_example_projects() {
+        let project = docs().join("../examples/guides");
+        let (mut checked, mut wrong) = (0, Vec::new());
+        for (page, text) in pages().iter().filter(|(p, _)| guide(p)) {
+            for block in fenced(&text.replace("\r\n", "\n"), "ts") {
+                let (first, body) = block.split_once('\n').unwrap_or((&block, ""));
+                let path = first.strip_prefix("// ").map(|p| p.strip_suffix(", in part").unwrap_or(p));
+                let Some(path) = path.filter(|p| p.starts_with("interfaces/") || p.starts_with("lib/")) else {
+                    if page.starts_with("write/") {
+                        wrong.push(format!("{page}: a block that doesn't start with its file's path: {first}"));
+                    }
+                    continue;
+                };
+                checked += 1;
+                match std::fs::read_to_string(project.join(path)) {
+                    Err(_) => wrong.push(format!("{page}: `{path}` isn't a file of examples/guides")),
+                    Ok(file) if !file.replace("\r\n", "\n").contains(body) => {
+                        wrong.push(format!("{page}: the block from `{path}` isn't in that file as written"))
+                    }
+                    Ok(_) => {}
+                }
+            }
+        }
+        assert!(checked >= 20, "only {checked} blocks checked: has the way they're marked changed?");
+        assert!(wrong.is_empty(), "{} blocks disagree with examples/guides:\n{}", wrong.len(), wrong.join("\n"));
+    }
+
     /// Text decoded twice (UTF-8 read as Windows-1252 and saved again) shows as `Â·` and `â€¦`:
     /// it reached the reference pages once from a source file.
     #[test]

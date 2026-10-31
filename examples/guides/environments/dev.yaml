@@ -1,0 +1,8 @@
+# Variables for `--env dev` (the default): everything on this machine.
+variables:
+  LAB_HOST: 127.0.0.1
+  LAB_PORT: 6670
+  PROVIDER_DB_HOST: localhost
+  BILLING_URL: http://127.0.0.1:8090/billing
+  FHIR_URL: http://127.0.0.1:8090/fhir
+  EMPI_URL: http://127.0.0.1:8090/empi

@@ -707,8 +707,9 @@ export async function transform(msg: Message) {
     );
     files.insert(
         "/p/lib/lookups.ts".to_string(),
+        // `toString` is no resource function, though `"toString" in {}` is true.
         r#"import { api, type Message } from "@ductus/sdk";
-export async function lookup(msg: Message) { await api("provider_api").get("/p"); return msg; }"#
+export async function lookup(msg: Message) { await api("provider_api").get("/p"); msg.toString(); return msg; }"#
             .to_string(),
     );
     // Its own `db` isn't the SDK's; and a test file isn't imported by the interface.

@@ -1,0 +1,12 @@
+name: results-to-fhir
+about:
+  description: Lab results as FHIR R4 Observations, posted to the FHIR server as one transaction each
+  owner: integration-team
+  from: { application: Lab system }
+  to: { application: FHIR server }
+source: { mllp: { port: 6662 } }
+script: to-fhir.ts
+ordering: { key: PID-3.1 }
+output: json
+destination:
+  http: { api: fhir, path: / }      # a transaction Bundle is posted to the server's base URL

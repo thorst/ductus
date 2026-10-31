@@ -1,0 +1,12 @@
+name: census-in
+about:
+  description: The bed board's nightly census file, each row an ADT A08 for the EHR
+  owner: integration-team
+  from: { application: Bed board }
+  to: { application: EHR, vendor: Epic }
+source:
+  file: { dir: inbound, pattern: "census_*.csv", split: records }   # each row is a message
+format: csv
+script: census.ts
+output: hl7
+destination: { file: { dir: out } }

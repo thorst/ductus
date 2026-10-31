@@ -1,0 +1,18 @@
+# What the interfaces share, by name. Each environment fills in where they are.
+databases:
+  provider_db:
+    postgres:
+      host: ${PROVIDER_DB_HOST}
+      database: providers
+      user: ductus
+      password: ${secret:PROVIDER_DB_PASSWORD}
+apis:
+  billing:
+    url: ${BILLING_URL}
+    headers: { Authorization: "Bearer ${secret:BILLING_TOKEN}" }
+  empi:
+    url: ${EMPI_URL}
+    headers: { Authorization: "Bearer ${secret:EMPI_TOKEN}" }
+  fhir:
+    url: ${FHIR_URL}
+    headers: { Authorization: "Bearer ${secret:FHIR_TOKEN}" }

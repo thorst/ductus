@@ -242,6 +242,18 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - **When it matters:** only in code that touches many objects per message: a file of 10,000 rows, a result with hundreds of OBX. A message's handful of objects never notices.
 - **What to do:** build such objects in one place with every property, in the same order (`{ mrn, name, dob }` with `""` for missing ones), and set a property to `""` or `undefined` rather than `delete`.
 
+### Fixtures can be read only inside a test (level 1)
+- **What:** `fixture()`, `hl7()` and `input()` work inside `test(...)` (or a function a test calls), not at the top of a test file: `ductus test` hands the interface's fixtures over after the test files have loaded. Read at the top, they fail with "fixture "x" read when the test file loads: fixtures can be read only inside a test".
+- **What to do:** read fixtures in each test, or write a small function (`const row = (n) => parseCsv(fixture("census.csv"))[n]`) and call it from the tests.
+
+### With `split: records`, `input()` gives a fixture's first record (level 2)
+- **What:** on an interface whose file source has `split: records`, the engine gives `transform` one record per message, and `input("file.csv")` in a test does the same: it parses the fixture as the interface's format and returns its **first** record, not the list. A test that indexes `input(...)[1]` gets `undefined`.
+- **What to do:** keep one record per fixture file, or parse a file of several yourself and pick one: `parseCsv(fixture("census_20261031.csv"))[1]` (`parseFixed` for fixed-width).
+
+### A quoted number in an environment file is text (level 1)
+- **What:** a setting that's only a reference keeps the variable's type, so `port: ${LAB_PORT}` with `LAB_PORT: "6670"` in `environments/dev.yaml` is the text "6670", and the interface is refused: "invalid type: string "6670", expected u16". `LAB_PORT: 6670` is the number.
+- **What to do:** write numbers in environment files without quotes. Quote only what YAML would otherwise read wrongly (a value starting with `*`, `&`, `{` or `[`; `yes`/`no` meant as text; a time like `07:00`).
+
 ## Shared pool (see also [shared-pool.md](shared-pool.md))
 
 ### Interfaces share a global scope (level 2)
@@ -454,6 +466,15 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
   - *a lane no worker reads*: `ordering.partitions` was lowered while messages waited (see "Change `ordering.partitions` only with an empty queue").
 - **Why:** a backlog in an ordered queue sits behind one message per worker. The count alone says *that* it's stuck, not *which* patient to look at.
 - **What to do:** for a blocked message, check its last error and the message (`GET /api/v1/messages/{id}`); fix the data or the receiver, or set `retry.max_attempts` so it's quarantined and the others go on (resending a single message comes with step 7). For a receiver that's down, call the vendor; `ductus pause` stops the retries meanwhile. A hot key under a few hundred messages clears by itself; one that stays hot every day is a feed to discuss with the sender (a batch load sent as one patient's updates?). Lanes with fewer than 100 waiting are never called hot: a flowing queue always has some.
+
+### A receiver that's back can stay stalled for up to a minute (level 2)
+- **What:** while a receiver is down, the wait between tries of the first waiting message doubles (1 s, 2 s, 4 s…) up to `retry.max_backoff_ms`, 60 s by default. When the receiver comes back, nothing is sent until that message's next try, so the destination can show *stalled* (and its alert stay open) for up to a minute after the receiver is up; then the backlog drains in order. Seen in a probe: the receiver back 8 s, still stalled, attempt 7 waiting its 60 s.
+- **Why:** trying a receiver that's down every second for an hour helps nobody and fills its logs; doubling finds it again within one wait.
+- **What to do:** nothing, usually. Where a receiver's comebacks must be noticed sooner, lower `max_backoff_ms` on that destination (`retry: { max_backoff_ms: 10000 }`).
+
+### There's no search by message content yet (level 1)
+- **What:** the console and the API list an interface's messages by status and time, a page at a time, and open one by its id. Finding "every message for MRN 123456 last Tuesday" isn't there: a search by patient and date is planned with long-term storage (v1.3).
+- **What to do:** each message keeps its ordering key's value (the MRN, for `ordering.key: PID-3.1`) and MSH-10 in their own columns, so a read-only database login can find ids with `WHERE interface = … AND received_at` in a range `AND ordering_key = …` (the time range keeps Postgres to that day's partitions). Such a query bypasses the payload-read audit: give that login to the people your privacy officer would let read every message, and select ids, not payloads ([the message store](operate/messages.md#searching-by-content-not-yet)).
 
 ## Alerts
 

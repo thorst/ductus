@@ -1,0 +1,11 @@
+name: remits-in
+about:
+  description: The payer's 835 remittance files, as one CSV row per claim for the billing office
+  owner: revenue-cycle-team
+  from: { application: Clearinghouse }
+  to: { application: Billing office }
+source: { file: { dir: inbound, pattern: "*.835" } }
+format: text                        # X12 has no format of its own yet: read it as text
+script: remits.ts
+output: csv
+destination: { file: { dir: out } }

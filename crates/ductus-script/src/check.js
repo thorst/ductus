@@ -104,7 +104,8 @@ function sdkResourceFunction(checker, call) {
   let symbol = checker.getSymbolAtLocation(unwrap(call.expression));
   if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
   const decl = symbol?.declarations?.[0];
-  if (!decl || !(symbol.name in RESOURCE_FUNCTIONS)) return undefined;
+  // Own keys only: `"toString" in RESOURCE_FUNCTIONS` is true, and the SDK declares `toString`s.
+  if (!decl || !Object.hasOwn(RESOURCE_FUNCTIONS, symbol.name)) return undefined;
   let parent = decl.parent;
   while (parent && !ts.isModuleDeclaration(parent)) parent = parent.parent;
   return parent && ts.isStringLiteral(parent.name) && parent.name.text === "@ductus/sdk" ? symbol.name : undefined;

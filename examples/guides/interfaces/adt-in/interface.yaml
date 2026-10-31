@@ -1,0 +1,17 @@
+name: adt-in
+about:
+  description: ADT from the EHR, to the lab system and to billing
+  owner: integration-team
+  from: { application: EHR, vendor: Epic }
+source: { mllp: { port: 6661 } }
+script: route.ts
+ordering: { key: PID-3.1 }          # one patient's messages stay in order
+dedupe: { keys: [MSH-10], window: 24h }
+destinations:
+  lab:
+    mllp: { host: ${LAB_HOST}, port: ${LAB_PORT} }
+    transform: toLab
+    application: Lab system
+  billing:
+    interface: adt-to-billing       # a route: into that interface's queue
+    transform: toBilling
