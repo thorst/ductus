@@ -70,6 +70,24 @@ fn the_reference_pages_are_current() {
     assert!(stale.is_empty(), "run `ductus reference docs` (check.sh does): stale {stale:?}");
 }
 
+/// The libraries page (docs/reference/libraries.md) is made by `scripts/dev/dependencies.sh` from
+/// Cargo.lock and the web UI's lock file, and records their checksums: a dependency added, bumped
+/// or dropped fails here until the page is made again, so each release lists what it contains.
+#[test]
+fn the_libraries_page_is_current() {
+    use sha2::Digest;
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let page = std::fs::read_to_string(repo.join("docs/reference/libraries.md")).unwrap();
+    let made_from = page.lines().find_map(|l| l.strip_prefix("<!-- made from: ")).unwrap_or_default();
+    // Hashed as Git checks them out (.gitattributes: LF everywhere), so Windows agrees with Linux.
+    let sha = |file: &str| {
+        let text = std::fs::read_to_string(repo.join(file)).unwrap().replace("\r\n", "\n");
+        sha2::Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect::<String>()
+    };
+    let now = format!("Cargo.lock {} ui/package-lock.json {} -->", sha("Cargo.lock"), sha("ui/package-lock.json"));
+    assert_eq!(made_from, now, "a lock file changed: run `bash scripts/dev/dependencies.sh` and commit the page");
+}
+
 #[test]
 fn there_is_no_default_database() {
     let dir = tempfile::tempdir().unwrap();

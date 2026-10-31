@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # The gates every change must pass before commit (CI runs the same):
 #   web UI (format, types, lint, tests, build) -> format -> build (incl. the ductus binary, with
-#   the UI embedded) -> the API document the UI is typed from is current -> clippy -D warnings
+#   the UI embedded) -> the API document the UI is typed from is current -> the docs' reference
+#   pages, the docs site and its links (when mdBook and lychee are installed) -> clippy -D warnings
 #   -> all tests.
 #
 # Needs Node 24 for the UI (in WSL: a per-user install in ~/.local/node is picked up).
@@ -53,6 +54,16 @@ fi
 # The docs' reference pages come from the binary (commands, API, settings, metrics...): written
 # in place, so the diff shows what a change did to them (the CLI test fails on stale ones).
 "$CARGO_TARGET_DIR/release/ductus" reference docs >/dev/null
+# The docs site builds and every link inside it lands, anchors included (docs.yml runs the same).
+# Only when mdBook and lychee are installed: scripts/dev/docs-tools.sh puts them in ~/.local/bin.
+export PATH="$HOME/.local/bin:$PATH"
+if command -v mdbook >/dev/null && command -v lychee >/dev/null; then
+  echo "== docs"
+  bash scripts/dev/docs-check.sh >/tmp/ductus-docs.log 2>&1 || { cat /tmp/ductus-docs.log; echo "DOCS CHECK FAILED"; exit 1; }
+  grep -E 'Total' /tmp/ductus-docs.log || true
+else
+  echo "(docs check skipped: mdBook and lychee aren't installed; bash scripts/dev/docs-tools.sh installs them)"
+fi
 echo "== clippy"; cargo clippy --release --all-targets -- -D warnings 2>&1 | grep -E '^(warning|error)|-->' || true
 echo "== test"
 if cargo test --release -q 2>&1 | tee /tmp/ductus-test.log | grep -E 'test result: ok\. [1-9]|FAILED|panicked'; then :; fi
