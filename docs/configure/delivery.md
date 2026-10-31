@@ -23,15 +23,15 @@ ordering:
   other, and different values move independently, in 64 lanes by default
   ([`partitions`](../reference/config/interface.md#ordering)). One patient's failing message then
   holds up only its own lane, not everyone
-  ([nuance](../nuances.md#order-is-per-key-and-one-stuck-message-holds-up-its-key-level-3)).
+  ([nuance](../nuances/ordering.md#order-is-per-key-and-one-stuck-message-holds-up-its-key-level-3)).
 - **Choose the narrowest key correctness allows**: by patient for ADT (`PID-3.1`), by order for
   results (`ORC-2`). A message whose field is empty goes to the empty value's lane.
 - **More workers help only with a key**: with one lane, one worker does everything
-  ([nuance](../nuances.md#without-an-ordering-key-more-workers-dont-help-level-3)).
+  ([nuance](../nuances/ordering.md#without-an-ordering-key-more-workers-dont-help-level-3)).
 - **Set `partitions` before the interface carries traffic.** Lowering it with messages waiting is
   refused at start (they'd be in lanes no worker reads); raising it can reorder a patient's
   waiting and new messages until the backlog drains. `ductus drain --wait` first
-  ([nuance](../nuances.md#change-orderingpartitions-only-with-an-empty-queue-level-4)).
+  ([nuance](../nuances/ordering.md#change-orderingpartitions-only-with-an-empty-queue-level-4)).
 
 ## Failures: `retry`
 
@@ -49,7 +49,7 @@ retry:
 
 - **Forever is the default** because a receiver that comes back should get every message it
   missed, in order, with nobody resending by hand
-  ([nuance](../nuances.md#temporary-failures-retry-forever-by-default-level-3)).
+  ([nuance](../nuances/ordering.md#temporary-failures-retry-forever-by-default-level-3)).
 - **Set `max_attempts`** where a person looking beats waiting: a receiver that refuses some
   messages for good with errors that look temporary. A message being retried holds up its lane.
 - `max_backoff_ms` is how soon after a receiver comes back its messages start moving, at worst.
@@ -75,7 +75,13 @@ when the receiver can't tolerate repeats and the sender is known to resend. Most
 already ignore a repeated MSH-10, so it's often not needed. Choose keys a resend repeats and a
 new message never does; cover the longest a sender may take to resend (after a weekend, `7d`).
 Dedupe stops repeats from the sender; delivery itself is at least once, so the receiver may still
-see one message twice after a crash ([nuance](../nuances.md#a-message-can-be-delivered-twice-level-3)).
+see one message twice after a crash ([nuance](../nuances/delivery.md#a-message-can-be-delivered-twice-level-3)).
+
+`dedupe` protects the receiver of *this* interface. When your code writes to another system
+(`db().execute`, an API `POST`), a "done" marker in a table of yours can't make that write happen
+exactly once: the two writes can't share a transaction. Make the write itself idempotent (an
+upsert keyed on the message's control id, an idempotency key header)
+([nuance](../nuances/delivery.md#a-done-marker-cant-prevent-duplicates-level-5)).
 
 ## Speed: `rate_limit`
 
@@ -108,7 +114,7 @@ HTTP 202) waits for the message to be on the database's disk.
   at 2.4 ms a flush). The cost: if the **database server** crashes or loses power, the last
   fraction of a second of acknowledged messages is lost, and senders won't resend them. An engine
   crash loses nothing in either mode
-  ([nuance](../nuances.md#durability-relaxed-can-lose-the-last-fraction-of-a-second-level-4)).
+  ([nuance](../nuances/ordering.md#durability-relaxed-can-lose-the-last-fraction-of-a-second-level-4)).
 
 **Use `relaxed` only** where one connection's peak is more than the disk allows and a lost message
 can be recovered another way (a resend from the source, a nightly reconciliation). Try a faster
@@ -135,11 +141,11 @@ dedicated_pools: { patient_db: 4 }
 - **[`dedicated_pools`](../reference/config/interface.md#dedicated_pools)** (dedicated only):
   connections of its own to resources.yaml databases, so a busy interface can't take every
   connection of the shared pool from the others, nor theirs from it
-  ([nuance](../nuances.md#dedicated-connection-pools-only-for-dedicated-interfaces-level-4)).
+  ([nuance](../nuances/databases-and-apis.md#dedicated-connection-pools-only-for-dedicated-interfaces-level-4)).
 - **When:** a busy interface that needs more than one worker (with a key, so there are lanes to
   share), code that computes for seconds on purpose, or code you don't trust yet: its load and
   its runaways then touch no other interface
-  ([shared pool](../nuances.md#neighbours-wait-while-runaway-code-runs-level-4)).
+  ([shared pool](../nuances/runaway.md#neighbours-wait-while-runaway-code-runs-level-4)).
 - **The cost:** each worker is a thread and up to `isolates.heap_mb` of memory
   ([memory](ductus-yaml.md#memory-for-interface-code)).
 

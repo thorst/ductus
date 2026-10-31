@@ -12,9 +12,9 @@ places, all set up the same way, with certificates named once in resources.yaml:
 **Use TLS** wherever messages cross a network you don't own, and for the API and web UI whenever
 they're reachable from another machine. It costs nothing you'll see on an MLLP feed: ingest
 measured the same with and without, about 1 ms per new connection, ~23 kB of memory per open one
-([measured](../nuances.md#what-tls-costs-level-4)). Listeners speak TLS 1.2 and 1.3 only, and
+([measured](../nuances/tls-listening.md#what-tls-costs-level-4)). Listeners speak TLS 1.2 and 1.3 only, and
 every connection prefers a post-quantum key exchange where the other side offers one
-([nuance](../nuances.md#post-quantum-key-exchange-on-by-default-never-in-the-way-level-3)).
+([nuance](../nuances/tls-listening.md#post-quantum-key-exchange-on-by-default-never-in-the-way-level-3)).
 
 ## Certificates in resources.yaml
 
@@ -41,7 +41,7 @@ certificates:
   client certificate. `cert_file` holds the certificate first, then the intermediate
   certificates that issued it (not the root): the "full chain" a CA sends. Java and .NET senders
   don't fetch a missing intermediate, and refuse the connection
-  ([nuance](../nuances.md#give-the-whole-chain-in-cert_file-level-3)).
+  ([nuance](../nuances/tls-listening.md#give-the-whole-chain-in-cert_file-level-3)).
 - **The key** is unencrypted PEM, readable by the engine's account and nobody else
   (`chmod 600`, owned by `ductus`; on Windows, the service's account only).
 - **A CA** (`ca_file`, or `ca` as text) is trusted for a connection that names it, or checks
@@ -49,12 +49,12 @@ certificates:
 - **From a vault** instead of files: `cert` and `key` as PEM text, usually `${secret:…}`. Read at
   start only, so a renewal needs a restart, unlike files.
 - **Paths**: relative to the project folder unless written whole; on Windows, write the drive
-  ([nuance](../nuances.md#certificate-files-write-the-drive-level-1)). Keep the files outside the
+  ([nuance](../nuances/windows.md#certificate-files-write-the-drive-level-1)). Keep the files outside the
   project on a server (`/etc/ductus/tls`, readable by the `ductus` group), with the path in the
   environment (`${TLS_DIR}`), so keys never go near Git.
 - **Checked before anything runs**: every entry is loaded at start, before the database. A
   missing file, a key that isn't the certificate's, or an expired certificate stops the start with
-  the entry and the reason ([nuance](../nuances.md#a-certificate-the-engine-cant-use-stops-the-start-with-the-reason-level-2)).
+  the entry and the reason ([nuance](../nuances/tls-listening.md#a-certificate-the-engine-cant-use-stops-the-start-with-the-reason-level-2)).
   `ductus validate` checks the same, with each certificate's names and days left.
 
 ## Getting a certificate from your CA
@@ -68,7 +68,7 @@ writes a new private key (`mllp.key`, readable only by you, never overwritten) a
 the `.key`) to the hospital's CA, put what comes back in `mllp.pem` (yours first, then the
 intermediates), and check it. The key is RSA 2048, which every CA takes (`--key ecdsa` for
 P-256); one certificate serves as both a server's and a client's
-([nuance](../nuances.md#a-certificate-from-the-hospitals-ca-request-then-show-level-2)).
+([nuance](../nuances/tls-listening.md#a-certificate-from-the-hospitals-ca-request-then-show-level-2)).
 
 ```sh
 ductus cert show /etc/ductus/tls/mllp.pem      # or the entry's name: ductus cert show ductus-mllp
@@ -125,15 +125,20 @@ source:
   and, with `subjects`, naming an allowed system: `CN`, `O`, `OU`… parts with `*` and `?`
   wildcards, or `DNS=` for a certificate's DNS names. **Keep `subjects` narrow**: without it, every
   certificate that CA ever issued (often every machine in the hospital) is let in
-  ([nuance](../nuances.md#a-client-certificate-says-which-system-sent-not-who-level-3)).
+  ([nuance](../nuances/tls-listening.md#a-client-certificate-says-which-system-sent-not-who-level-3)).
 - **Senders on plain MLLP can't connect** once it's on, so agree on a date with them. One that
   tries gets its connection closed, no ACK; the engine's log says why, once a minute per sender
-  ([nuance](../nuances.md#a-refused-handshake-is-logged-once-a-minute-per-sender-level-3)).
+  ([nuance](../nuances/tls-listening.md#a-refused-handshake-is-logged-once-a-minute-per-sender-level-3)).
 - **Senders on TLS 1.0 or 1.1** can't connect at all
-  ([nuance](../nuances.md#senders-on-tls-10-or-11-cant-connect-level-3)).
+  ([nuance](../nuances/tls-listening.md#senders-on-tls-10-or-11-cant-connect-level-3)).
 - HTTP interfaces sharing a port share its `tls`.
 - `allow:` beside it says where senders may connect from; client certificates say which system
   they are. Use both where it matters ([who may connect](sources.md#who-may-connect-allow)).
+
+To see the chain a listener really serves, run the full checks (Connections → Run the checks):
+the engine connects to each of its TLS listeners and judges what it gets, a missing
+intermediate included. It can't know which name senders connect by, so a certificate without
+that name shows only at a sender ([nuance](../nuances/certificates.md#doctor-reads-the-chain-our-listeners-serve-but-not-the-name-senders-use-level-3)).
 
 ### The web UI and the API
 
@@ -148,7 +153,7 @@ api:
 **Needed as soon as the API is reachable from another machine**: the web UI's sign-in cookie is
 only sent over HTTPS (without `tls`, signing in from another computer doesn't work at all), and
 tokens and passwords would cross the network readable. The start and `ductus validate` warn about
-an API on the network without it ([nuance](../nuances.md#the-api-on-the-network-needs-tls-level-1)).
+an API on the network without it ([nuance](../nuances/tls-listening.md#the-api-on-the-network-needs-tls-level-1)).
 Browsers that have seen it over HTTPS won't try plain HTTP to it again for a year (HSTS).
 `clients:` works here too, for an API only certain systems may call.
 
@@ -169,12 +174,12 @@ destination:
 
 - **`tls: true`** on an MLLP destination: TLS, trusting this server's CAs. **`ca:`** also trusts
   a `certificates:` CA, for that connection only, so a partner's CA isn't trusted by everything
-  on the server ([nuance](../nuances.md#a-private-ca-is-trusted-only-where-you-name-it-level-2)).
+  on the server ([nuance](../nuances/tls-connecting.md#a-private-ca-is-trusted-only-where-you-name-it-level-2)).
   Ask the receiver's team for the CA that issued their certificate, not their certificate itself
   (which changes at every renewal).
 - **`certificate:`** presents a pair as the engine's client certificate (mutual TLS). Tell the
   receiver's team its subject and the CA that issued it
-  ([nuance](../nuances.md#our-client-certificate-tell-the-receiver-what-to-expect-level-2)).
+  ([nuance](../nuances/tls-connecting.md#our-client-certificate-tell-the-receiver-what-to-expect-level-2)).
 - **Connect by the name on their certificate**: one for `lab.hospital.org` is refused at
   `10.1.2.3` unless it lists that address.
 - **The same `ca:` and `certificate:`** go on an `apis:` entry (which `api()` and `http`
@@ -183,9 +188,14 @@ destination:
   directory.
 - **A refused handshake is a temporary error**: the message waits and is tried again, with the
   reason on the destination ("TLS: the receiver wants a client certificate")
-  ([nuance](../nuances.md#a-refused-handshake-is-a-temporary-error-the-message-waits-level-2)).
+  ([nuance](../nuances/tls-connecting.md#a-refused-handshake-is-a-temporary-error-the-message-waits-level-2)).
 - `ductus doctor --interface orders-to-lab` makes the engine's own handshake, with the same
-  settings, before you deploy ([nuance](../nuances.md#doctor-makes-the-engines-handshake-level-3)).
+  settings, before you deploy ([nuance](../nuances/tls-connecting.md#doctor-makes-the-engines-handshake-level-3)).
+
+An HTTP destination that goes through an `apis:` entry (`http: { api: billing }`) uses that
+entry's `ca` and `certificate`; on the destination itself they're only for one with its own
+https `url`, and `validate` refuses them elsewhere
+([nuance](../nuances/tls-connecting.md#an-http-destination-through-an-api-uses-the-apis-tls-level-2)).
 
 ## Renewing
 
@@ -194,13 +204,27 @@ minute (one task for the whole engine, comparing their contents). A new pair tha
 for new connections from then on; connections already open keep theirs until they close. A new
 pair that doesn't load (half copied, a new certificate with the old key, expired) is logged once
 as an error, and the engine keeps presenting the pair it had: **a bad renewal never takes a
-listener down** ([nuance](../nuances.md#renewing-replace-both-files-no-restart-level-2)). After
+listener down** ([nuance](../nuances/tls-listening.md#renewing-replace-both-files-no-restart-level-2)). After
 writing them, look for `certificate renewed` in the log within a minute, or the "Ours" group on
 the web UI's Connections page.
 
 **You'll be told in time.** Every certificate the engine presents or checks is watched: an alert
 at 30, 14 and 7 days before it expires, to its `owner` with `to: owner`, and critical once expired
-([alerts](alerts.md); [nuance](../nuances.md#a-certificate-alert-is-told-at-30-14-and-7-days-and-when-it-expires-level-2)).
+([alerts](alerts.md); [nuance](../nuances/certificates.md#a-certificate-alert-is-told-at-30-14-and-7-days-and-when-it-expires-level-2)).
+
+**What's watched, and how the days are counted.** Every TLS connection the project makes:
+HTTPS APIs and destinations, MLLP with `tls:`, the directory, Postgres and SQL Server when
+verified, mail and webhooks ([the list](../nuances/certificates.md#what-has-a-certificate-the-engine-watches-level-3)). The countdown
+runs to the earliest expiry in the chain, intermediates included, in whole days
+([nuance](../nuances/certificates.md#the-earliest-expiry-in-the-chain-counts-in-whole-days-level-2)). A check that can't connect shows the error and
+keeps the dates it last read ([nuance](../nuances/certificates.md#a-check-that-cant-connect-keeps-the-last-dates-level-2)); behind a
+load balancer that ends TLS, it's the balancer's certificate you see
+([nuance](../nuances/certificates.md#behind-a-load-balancer-you-see-the-balancers-certificate-level-3)). The engine's own pairs count down from their
+files, with no connection made ([nuance](../nuances/certificates.md#our-certificates-count-down-like-the-rest-with-no-check-level-2)), and
+renewed files that can't be used show on the pair's row, not as an alert: the pair in use still
+counts down ([nuance](../nuances/certificates.md#a-renewal-that-cant-be-used-shows-on-its-row-not-as-an-alert-level-2)). A refused certificate is
+said once, in the check's result and the delivery's error, not logged as an error at every check
+([nuance](../nuances/certificates.md#a-refused-certificate-is-said-once-not-logged-as-an-error-each-time-level-4)).
 
 **By hand** (a CA without automation, such as AD CS's web enrollment): a new request under another
 name, signed, checked, then copied over the files in use:
@@ -248,8 +272,12 @@ Certificates from secrets (`cert`/`key`) and CAs change with a deploy and a rest
 | "the receiver wants a client certificate" | The receiver asks for mutual TLS | Name a pair in `certificate:` |
 | "chain incomplete" (`cert show`, doctor) | `cert_file` lacks the intermediates | Append them after yours |
 | "no TLS version or cipher in common" | A sender on TLS 1.0/1.1 | Upgrade the sender, or a TLS proxy for it alone |
-| A receiver's certificate "presents a CA's certificate (CA:TRUE) as its own" | A lab receiver made with `openssl req -x509` | Name that exact certificate in `ca:` ([nuance](../nuances.md#a-cas-certificate-as-a-servers-level-3)) |
+| A receiver's certificate "presents a CA's certificate (CA:TRUE) as its own" | A lab receiver made with `openssl req -x509` | Name that exact certificate in `ca:` ([nuance](../nuances/tls-listening.md#a-cas-certificate-as-a-servers-level-3)) |
 | "timed out waiting for ACK" right after turning `tls:` on | The receiver's port speaks plain MLLP | Ask which port is TLS |
+
+To try a TLS listener or receiver before the real systems are ready, `ductus gen --tls` plays the
+sender and `ductus sink --tls` the receiver, checking certificates as the engine does and saying
+why a handshake fails ([nuance](../nuances/tls-listening.md#testing-tls-without-the-real-systems-level-1)).
 
 `ductus doctor` checks every TLS connection the project makes, from the server, and names the
 step that fails.

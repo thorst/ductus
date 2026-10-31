@@ -82,14 +82,14 @@ with `transform:`). `ductus validate` type-checks it, and the engine loads it at
   the message or the answer.
 - What the code returns decides: a message to send, `null` to filter it (kept, with the reason),
   or a thrown error to quarantine it for a person
-  ([nuance](../nuances.md#return-null-filters-throwing-quarantines-level-1)).
+  ([nuance](../nuances/transforms.md#return-null-filters-throwing-quarantines-level-1)).
 
 [`timeout`](../reference/config/interface.md#timeout) is the longest the code may run for one
 message without pausing (time waiting on `db()`, `fetch()` or `api()` doesn't count), from `10ms`
 to `10m`; default `5s`. It's the guard against code that never ends, such as a loop an unusual
 message never lets finish: past it, the code is stopped, its message quarantined, and the
 interface carries on; three in a row stop the interface until the engine restarts
-([nuance](../nuances.md#a-runaway-message-is-quarantined-three-in-a-row-stop-the-interface-level-2)).
+([nuance](../nuances/runaway.md#a-runaway-message-is-quarantined-three-in-a-row-stop-the-interface-level-2)).
 **Set it close to what the code needs**: `500ms` is plenty for most HL7 transforms. Interfaces in
 the shared pool wait while code on their thread runs, so a generous limit lets one runaway hold
 them all up that long; code that computes for seconds on purpose belongs in

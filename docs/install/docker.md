@@ -8,7 +8,7 @@ never root. The project is mounted read-only at `/project`.
 **Don't** use it for production before v1.0: the image is a development build, it isn't
 published to a registry yet (you build it), and a container's restart refuses senders for a
 moment, where the Linux package's service refuses none
-([nuance](../nuances.md#windows-and-containers-a-restart-is-a-short-gap-level-2)). From v1.0,
+([nuance](../nuances/upgrades.md#windows-and-containers-a-restart-is-a-short-gap-level-2)). From v1.0,
 production images will be built `FROM` the engine's image with the project inside: one image per
 release of your interfaces. Kubernetes, with rolling upgrades, is planned for v1.2.
 
@@ -66,7 +66,7 @@ services:
 - **Give a stop time.** Docker waits 10 s by default before it kills a container; a clean stop
   can need up to `DUCTUS_STOP_TIMEOUT` (30 s). `stop_grace_period: 45s` (or
   `docker stop --time 45`) lets the engine finish the messages in hand
-  ([what finishes](../nuances.md#stopping-the-engine-what-finishes-and-what-waits-level-2)).
+  ([what finishes](../nuances/delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2)).
 - **The project is read-only**: interfaces change through Git and a new container, never inside
   a running one. A file destination needs a volume of its own, writable by uid 10001.
 - **The database** in the Compose file is for trying it out. For anything that matters, point

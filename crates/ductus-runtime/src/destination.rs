@@ -302,7 +302,7 @@ mod tests {
     }
 
     /// A lab receiver whose certificate was made as a CA's (`openssl req -x509` does by default):
-    /// accepted when that exact certificate is named in `ca:`, on every OS (nuances.md "A CA's
+    /// accepted when that exact certificate is named in `ca:`, on every OS (docs/nuances/tls-listening.md "A CA's
     /// certificate as a server's"); one a trusted CA issued is refused, in words that say so.
     #[tokio::test]
     async fn a_receiver_presenting_a_ca_certificate_is_accepted_only_when_trusted_itself() {

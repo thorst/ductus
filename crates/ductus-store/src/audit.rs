@@ -133,7 +133,7 @@ impl<'a> By<'a> {
 #[derive(Debug, Clone)]
 pub struct Audit<'a> {
     pub by: By<'a>,
-    /// `message.payload.read`, `user.create`, ... (see `docs/nuances.md`).
+    /// `message.payload.read`, `user.create`, ... (see `docs/nuances/people.md`).
     pub action: &'a str,
     pub subject: Option<&'a str>,
     pub interface: Option<&'a str>,

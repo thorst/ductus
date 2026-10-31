@@ -58,7 +58,7 @@ format: json
 - **`mode: respond`**: the code runs on the request and its result is the response, at once.
   **Nothing is stored or queued**, there's no destination, and if something fails the caller
   gets an error status and decides whether to try again
-  ([nuance](../nuances.md#respond-mode-http-requests-arent-stored-level-3)). For REST APIs and
+  ([nuance](../nuances/ordering.md#respond-mode-http-requests-arent-stored-level-3)). For REST APIs and
   lookups that other systems call and wait on:
 
   ```yaml
@@ -72,10 +72,10 @@ format: json
 
   `{mrn}` matches one path segment and is given to the code. In respond mode, calls the code
   makes one after another add up; `await` them together where you can
-  ([nuance](../nuances.md#in-respond-mode-calls-run-one-after-another-unless-you-await-them-together-level-2)).
+  ([nuance](../nuances/monitoring.md#in-respond-mode-calls-run-one-after-another-unless-you-await-them-together-level-2)).
 - **Several HTTP interfaces can share a port**, each with its own path (two can't have the same
   method and path). They're one server then, so they must have the same `tls` and `allow`
-  ([nuance](../nuances.md#http-interfaces-on-one-port-share-its-tls-level-2)).
+  ([nuance](../nuances/tls-listening.md#http-interfaces-on-one-port-share-its-tls-level-2)).
 
 ## Files and SFTP
 
@@ -105,10 +105,10 @@ resources.yaml with the address and login ([SFTP servers](resources.md#sftp-serv
 - **A file is read once it stops changing**: its size and time the same at two looks in a row,
   `poll` apart (default `10s`), so a file still being written is never read half done. Expect it
   one to two polls after its writer finishes
-  ([nuance](../nuances.md#a-file-is-picked-up-one-poll-after-it-stops-changing-level-3)). A writer
+  ([nuance](../nuances/files.md#a-file-is-picked-up-one-poll-after-it-stops-changing-level-3)). A writer
   that says when it's done (a `.done` file beside it) can use `marker: .done` instead.
 - **Files keep their order**, oldest first, one at a time: if one fails, later ones wait
-  ([nuance](../nuances.md#one-file-at-a-time-oldest-first-a-failure-stops-the-rest-level-3)).
+  ([nuance](../nuances/files.md#one-file-at-a-time-oldest-first-a-failure-stops-the-rest-level-3)).
 - **`split: records`** makes each record a message (an HL7 batch at each MSH, CSV at each row
   with the header kept, fixed-length and text at each line), read as a stream, so a file of any
   size works; after a stop it carries on from the last record stored. Without it, a file is one
@@ -117,9 +117,9 @@ resources.yaml with the address and login ([SFTP servers](resources.md#sftp-serv
   `delete`, once everything in the file is stored. The engine never deletes what it moved: clean
   the archive yourself.
 - **The service must be allowed to move them**: on Linux, add the folders to the unit
-  ([nuance](../nuances.md#on-linux-the-service-can-write-only-varlibductus-until-you-add-a-folder-level-2));
+  ([nuance](../nuances/files.md#on-linux-the-service-can-write-only-varlibductus-until-you-add-a-folder-level-2));
   on Windows, grant the service's account
-  ([nuance](../nuances.md#the-windows-service-can-only-touch-what-you-give-it-level-2)).
+  ([nuance](../nuances/windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2)).
 - A relative `dir` is relative to the interface's folder.
 
 ## Schedules
@@ -137,7 +137,7 @@ No input: the code runs on the timer and what it returns becomes the message. `e
 at start, then at that interval (for polling); `cron` runs at the times a five-field expression
 gives (for a time of day). A run is skipped while the previous one's message is still waiting,
 and runs missed while the engine was down are made up by one run, not one per missed time
-([nuance](../nuances.md#cron-uses-the-servers-local-time-missed-runs-collapse-to-one-level-3)).
+([nuance](../nuances/files.md#cron-uses-the-servers-local-time-missed-runs-collapse-to-one-level-3)).
 
 ## Internal: from another interface
 
@@ -170,14 +170,20 @@ minute per address. **Without it, anyone who can reach the port may connect.**
 
 - **Why**: it names the sending system, which "allow one connection only" (a habit from other
   engines) never did; a sender may open several connections, and its reconnect after a blip
-  isn't refused ([nuance](../nuances.md#an-allow-list-says-who-which-one-connection-only-never-did-level-2)).
+  isn't refused ([nuance](../nuances/allow.md#an-allow-list-says-who-which-one-connection-only-never-did-level-2)).
 - **Keep the firewall rules too**: each catches the other's mistakes
-  ([nuance](../nuances.md#its-defence-in-depth-next-to-the-firewall-level-2)).
+  ([nuance](../nuances/allow.md#its-defence-in-depth-next-to-the-firewall-level-2)).
 - **List** the sender's addresses or subnet, its failover and DR hosts, and anything that relays
   for it. Host names are looked up at start and every 5 minutes, never per connection
-  ([nuance](../nuances.md#host-names-are-looked-up-at-start-and-every-5-minutes-level-3)). Behind
+  ([nuance](../nuances/allow.md#host-names-are-looked-up-at-start-and-every-5-minutes-level-3)). Behind
   a proxy or load balancer, the address seen is the proxy's.
 - `ductus validate` warns when `about.from.hosts` names a sender the list would refuse.
+- **HTTP interfaces on one port share one list**: it's checked before the request is read, so
+  before its path is known; `validate` refuses a port whose interfaces disagree
+  ([nuance](../nuances/allow.md#http-interfaces-on-one-port-share-its-allow-level-2)).
+- **A sender that vanished** (a pulled cable, a paused virtual machine) is noticed in about 30
+  seconds: every accepted connection has TCP keepalive on, so its lane isn't held by a dead
+  connection for the operating system's two hours ([nuance](../nuances/allow.md#dead-connections-are-noticed-in-about-30-seconds-level-3)).
 
 ## Formats
 

@@ -10,7 +10,7 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - **Every change ships with tests.** Unit tests next to the code; DB tests in `crates/ductus-store/tests`; script/SDK tests in `crates/ductus-script/tests` and `sdk/tests/*.test.ts` (run inside the real engine); end-to-end in `scripts/demo-*.sh` (each ends with PASS/FAIL and runs in CI); the web UI's in `ui/src/**/*.test.ts` (Vitest) and `ui/e2e` (Playwright in a real browser against a real engine, run by `scripts/demo-ui.sh`).
 - **Before every commit:** `scripts/dev/check.sh` must end with `ALL CHECKS PASSED` (the web UI's format/types/lint/tests/build, fmt, build incl. the binary, the API document the UI is typed from, clippy `-D warnings`, all tests). For runtime or UI changes also run `scripts/dev/demos.sh`.
 - Commits: `git commit -s` (DCO), message explains what and why, ends with the Co-Authored-By trailer. Push to `main` (solo project, CI on every push).
-- **Nuances get documented, not hidden.** Any behaviour that could surprise an interface developer (limits, failure semantics, things that run twice) goes into `docs/nuances.md` in the same commit, with what/why/what to do and a level (1 foundations … 5 expert; these become the certification tracks).
+- **Nuances get documented, not hidden.** Any behaviour that could surprise an interface developer (limits, failure semantics, things that run twice) goes into its section's page in `docs/nuances/` in the same commit, linked from the guide page it affects (`every_nuance_is_linked_from_a_guide`),, with what/why/what to do and a level (1 foundations … 5 expert; these become the certification tracks).
 - **Docs change in the same commit as the behaviour** (0.6.8.2). A change to a setting, command, API operation or anything someone could notice updates its doc comment (the reference), the guide page that explains it (`docs/install/`, `docs/configure/`, the top-level pages) and, when it could surprise, a nuance. A page left saying the old thing is a bug like a failing test. The bar and the rules are `docs/STYLE.md`: what, why, when not, default, example; YAML examples start with `# <file>` (`, in part` for some settings) and are checked against the schema and the engine (`every_yaml_example_in_the_guides_is_valid`, ductus-core); every top-level setting and connector is linked from a guide (`every_setting_is_explained_in_a_guide`, CLI crate, names the link to write); commands shown were run, outputs are what they printed.
 - Keep `../ductus-enterprise/planning/` current: decisions in `decisions.md`, progress in `roadmap.md` and `STATUS.md`.
 
@@ -168,7 +168,7 @@ scripts/               demos (end-to-end, PASS/FAIL) and scripts/dev (check.sh, 
 Dockerfile, packaging/ the image, the .deb/.rpm and the portable .tar.gz from one engine build (packaging/README.md: layout,
                        upgrades; packaging/archive/README.md goes in both archives; windows/archive.ps1 makes the zip);
                        demo-docker.sh, demo-packages.sh (systemd in containers) run in CI's `packaging` job
-docs/                  architecture.md, nuances.md, schema.md (every table/column; a store test fails if one
+docs/                  architecture.md, nuances/ (one page per subject, index.md by level), schema.md (every table/column; a store test fails if one
                        isn't described), shared-pool.md
 examples/adt-relay     example project
 examples/guides        the docs' "Write interfaces" project (routes, mappings, FHIR, X12, CSV, XML, lookups, tests)

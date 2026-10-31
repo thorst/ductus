@@ -59,11 +59,11 @@ INFO ductus_runtime: stopped took=2.217222ms
 | `draining` / `drained` | a drain started and finished | |
 | `stopping … why=` / `stopped took=` | a clean stop, and why it stopped | a stop you didn't make |
 
-A **start logs one line, not one per listener** ([nuance](../nuances.md#a-start-logs-one-line-not-one-per-listener-level-2));
+A **start logs one line, not one per listener** ([nuance](../nuances/drain-and-api.md#a-start-logs-one-line-not-one-per-listener-level-2));
 problems with one interface are their own lines. Things that could repeat many times a second
 are said **once a minute** per sender or kind instead: a refused TLS handshake
-([nuance](../nuances.md#a-refused-handshake-is-logged-once-a-minute-per-sender-level-3)), a
-connection refused by `allow:` ([nuance](../nuances.md#refusals-are-logged-once-a-minute-per-listener-and-address-level-3)),
+([nuance](../nuances/tls-listening.md#a-refused-handshake-is-logged-once-a-minute-per-sender-level-3)), a
+connection refused by `allow:` ([nuance](../nuances/allow.md#refusals-are-logged-once-a-minute-per-listener-and-address-level-3)),
 so a misconfigured sender can't flood the log.
 
 ## When a sender says "connection refused"
@@ -71,7 +71,7 @@ so a misconfigured sender can't flood the log.
 The engine logs every refusal it makes, with the reason. If there's no line for the sender's
 address, the engine never saw the connection: a firewall between, the wrong port, or the engine
 not running (a stopped service, a drain, and a failed start close the ports on purpose:
-[nuance](../nuances.md#a-stopped-service-a-failed-start-and-a-drain-refuse-connections-on-purpose-level-2)).
+[nuance](../nuances/upgrades.md#a-stopped-service-a-failed-start-and-a-drain-refuse-connections-on-purpose-level-2)).
 `ductus ports` lists what the project listens on, and `ductus doctor` checks the ports from the
 server.
 

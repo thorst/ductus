@@ -31,7 +31,7 @@ It is for development: production uses the DBA's Postgres through `DUCTUS_DATABA
 ## Stopping and upgrading
 
 A stop (SIGTERM from systemd or Docker, Ctrl-C, or `ductus drain --stop`) is clean: no new
-messages, the ones in hand finished and saved, exit code 0 (`docs/nuances.md`, "Stopping the
+messages, the ones in hand finished and saved, exit code 0 (`docs/nuances/delivery.md`, "Stopping the
 engine"). Service managers are set to wait longer than the engine's own limit, so they never
 cut a stop short.
 
@@ -41,7 +41,7 @@ sockets and takes over once it's ready, so receiving never stops and sending pau
 a new version that can't start leaves the old one running). Windows restarts the service. The new
 version updates the database at startup; updates only ever add (expand-only migrations), so the
 previous version still runs on the updated database: rolling back is installing the previous
-package. On Linux a restart or a crash refuses no connection either: systemd keeps the listening
+package (on Windows, uninstall first: the MSI refuses to install an older version over a newer one). On Linux a restart or a crash refuses no connection either: systemd keeps the listening
 sockets for the next start (below). The same reload deploys project changes.
 
 Before upgrading, run the new version's `ductus upgrade --check` from its portable archive (below):
@@ -152,7 +152,7 @@ installer; a code-signing certificate is a later decision.
   leaves the service stopped and says so in the Event Log, event 1005). The installer and the
   command grant "Log on as a service"; the service's own SID is in its token whatever the account
   (`ServiceSidType` unrestricted), so the folder permissions above hold. An upgrade without
-  `SERVICEACCOUNT` keeps the account the service has. Rules and Group Policy: `docs/nuances.md`,
+  `SERVICEACCOUNT` keeps the account the service has. Rules and Group Policy: `docs/nuances/windows.md`,
   "Windows".
 - **Install:** registers the service (automatic start) but doesn't start it: nothing is configured,
   and without a database it would stop at once. After editing `ductus.env`, `Start-Service Ductus`

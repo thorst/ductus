@@ -64,11 +64,11 @@ A test's messages are files in the interface's `fixtures/` folder:
   quirks), which is what the test needs.
 - **Fixtures can be read only inside a test**, not when the test file loads: put
   `hl7("a01.hl7")` inside `test(...)`, or in a function the test calls
-  ([nuance](../nuances.md#fixtures-can-be-read-only-inside-a-test-level-1)).
+  ([nuance](../nuances/transforms.md#fixtures-can-be-read-only-inside-a-test-level-1)).
 - **With `split: records`**, `input()` gives the fixture's **first** record, as the engine gives
   `transform` one record per message. For a file of several rows, parse it yourself and pick:
   `parseCsv(fixture("census_20261031.csv"))[1]`
-  ([nuance](../nuances.md#with-split-records-input-gives-a-fixtures-first-record-level-2)).
+  ([nuance](../nuances/transforms.md#with-split-records-input-gives-a-fixtures-first-record-level-2)).
 - **Change a fixture in the test** for a variation instead of keeping a file per case:
 
 ```ts

@@ -51,7 +51,7 @@ sudo systemctl restart ductus
 ```
 
 Without that the interface's messages fail with "Read-only file system", and wait to be tried
-again ([nuance](../nuances.md#on-linux-the-service-can-write-only-varlibductus-until-you-add-a-folder-level-2)).
+again ([nuance](../nuances/files.md#on-linux-the-service-can-write-only-varlibductus-until-you-add-a-folder-level-2)).
 A folder for a source needs the same when the source moves or deletes what it read (the default,
 `after: move`). A port below 1024 (an MLLP port of 104, say) needs a capability too; the unit
 says which two lines to add with `systemctl edit`.
@@ -109,13 +109,13 @@ journalctl -u ductus -f                # the log; "started interfaces=12 …" wh
   ready). A start migrates the database first, so after an upgrade it can take longer; there's no
   time limit.
 - **A stop is clean**: no new connections, the messages in hand finished and saved, exit 0
-  ([what finishes](../nuances.md#stopping-the-engine-what-finishes-and-what-waits-level-2)).
+  ([what finishes](../nuances/delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2)).
   systemd waits 45 s, longer than the engine's own limit (`DUCTUS_STOP_TIMEOUT`, 30 s).
 - **A restart or a crash refuses no connection**: systemd keeps the listening sockets and hands
   them to the next start; senders wait in the queue (0.2–0.3 s for a restart, ~5 s after a
-  crash: [measured](../nuances.md#on-linux-a-restart-refuses-no-connection-senders-wait-for-it-level-2)).
+  crash: [measured](../nuances/upgrades.md#on-linux-a-restart-refuses-no-connection-senders-wait-for-it-level-2)).
   A stop, a failed start and a drain do close the ports, on purpose
-  ([why](../nuances.md#a-stopped-service-a-failed-start-and-a-drain-refuse-connections-on-purpose-level-2)).
+  ([why](../nuances/upgrades.md#a-stopped-service-a-failed-start-and-a-drain-refuse-connections-on-purpose-level-2)).
 - **A refused start isn't retried.** Exit code 3 means another engine runs some of these
   interfaces on the same database, or a change to an interface's lanes would strand waiting
   messages. Trying again changes neither, so systemd doesn't (`RestartPreventExitStatus=3`): the
@@ -128,7 +128,7 @@ journalctl -u ductus -f                # the log; "started interfaces=12 …" wh
 **Project changes** (new code, a new interface): pull the project, then reload. The new project
 starts beside the running engine and takes over once it's ready; nothing is refused, and a
 project that can't start leaves the running one serving
-([deploying](../nuances.md#deploying-project-changes-systemctl-reload-level-1)):
+([deploying](../nuances/upgrades.md#deploying-project-changes-systemctl-reload-level-1)):
 
 ```sh
 sudo -u ductus git -C /var/lib/ductus/project pull
@@ -140,7 +140,7 @@ sudo systemctl reload ductus
 [portable archive](archive.md#before-an-upgrade) first, then install the new package the same
 way as the first. The package hands the running engine over to the new version
 (`systemctl reload` again: 0 refused, sending paused for a moment:
-[measured](../nuances.md#systemctl-reload-hands-over-receiving-never-stops-sending-pauses-briefly-level-2)).
+[measured](../nuances/upgrades.md#systemctl-reload-hands-over-receiving-never-stops-sending-pauses-briefly-level-2)).
 A new version that can't start leaves the old one running, and the install says so. Rolling back
 is installing the previous package: the database changes a version makes only ever add, so the
 version before runs on them.

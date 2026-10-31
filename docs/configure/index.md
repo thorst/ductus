@@ -56,7 +56,7 @@ mistake stops the start with the file and what's wrong: a typo in a setting's na
 every file refuses keys it doesn't know. The engine doesn't read its configuration again while it
 runs (only certificate files, every minute, so a renewal needs no restart); a change takes effect
 at the next start, or with `systemctl reload ductus` on Linux
-([deploying](../nuances.md#deploying-project-changes-systemctl-reload-level-1)).
+([deploying](../nuances/upgrades.md#deploying-project-changes-systemctl-reload-level-1)).
 
 `ductus validate` reads it the same way without starting anything, for an environment
 (`--env prod`), and also type-checks every interface's code with the TypeScript compiler built

@@ -70,6 +70,10 @@ destination: { mllp: { host: ${LAB_HOST}, port: ${LAB_PORT} } }
 environment uses the same one, is clearer written out), and never for secrets: environment
 files are plain text in Git.
 
+**A number in quotes is text.** `LAB_PORT: "6670"` makes `port: ${LAB_PORT}` the text "6670",
+which the interface refuses ("invalid type: string"); write `LAB_PORT: 6670`
+([nuance](../nuances/transforms.md#a-quoted-number-in-an-environment-file-is-text-level-1)).
+
 ## Secrets
 
 Secrets are encrypted, one value at a time, in `secrets/<env>.json`, and **committed to Git**

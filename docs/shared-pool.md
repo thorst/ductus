@@ -85,7 +85,7 @@ Interfaces on one thread take turns, so code that never pauses would hold up all
 - **Memory:** each isolate has a heap limit (`isolates.heap_mb` in `ductus.yaml`, default 512). Code that fills it is stopped and its message quarantined; the process keeps running.
 - **Stopped interface:** three timeouts in a row, or one heap overflow, stop the interface. New messages are still received and stored; they wait (pending) until the code is fixed and the engine restarted. The log says `interface stopped` with the reason.
 
-A loop in a shared library file, resumed after an `await`, can't be traced to one interface (no interface file is on the stack): every transform running on that thread is retried. Keep heavy work in the interface's own files, or give the interface its own isolate. All of these, and more, are in [nuances.md](nuances.md).
+A loop in a shared library file, resumed after an `await`, can't be traced to one interface (no interface file is on the stack): every transform running on that thread is retried. Keep heavy work in the interface's own files, or give the interface its own isolate. All of these, and more, are in [the nuances](nuances/index.md).
 
 ## When to use a dedicated isolate
 

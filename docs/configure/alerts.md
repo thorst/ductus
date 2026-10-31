@@ -40,7 +40,7 @@ A **channel** is a name rules send to: an email list, a chat webhook, or both.
 - **Webhooks**: `format: teams` (a Microsoft Teams Workflows webhook), `slack` (also Mattermost,
   Rocket.Chat), or `json` (every field, for your own incident tool). A webhook's URL is its own
   password, so keep it in a secret
-  ([nuance](../nuances.md#webhook-urls-are-secrets-level-2)).
+  ([nuance](../nuances/alerts.md#webhook-urls-are-secrets-level-2)).
 - **Try one** without an engine: `ductus alerts test oncall` sends a test notification now.
 
 ## Rules: what alerts, and how badly
@@ -62,7 +62,7 @@ which.
 `behind`, `silent` and `missed` need an interface's [`monitor`](keeping-and-watching.md#whats-expected-monitor)
 settings: nothing is expected until you say so. **A paused destination never alerts** (it's paused
 on purpose), and an alert that's open when someone pauses stays open, quietly, until it's resumed
-([nuance](../nuances.md#a-pause-never-alerts-and-holds-an-alert-open-level-2)).
+([nuance](../nuances/alerts.md#a-pause-never-alerts-and-holds-an-alert-open-level-2)).
 
 - **`warning`**: worth knowing today; held during quiet hours. **`critical`**: act now; never
   held. A warning that becomes critical is told again. On Windows a critical alert is also in the
@@ -70,13 +70,13 @@ on purpose), and an alert that's open when someone pauses stays open, quietly, u
 - **`repeat`** (default `4h`): while an alert is open and unacknowledged, its recipients are
   reminded this often; `0` never. **Acknowledging** it on the Alerts page stops the reminders until
   it gets worse or recovers. Acknowledging isn't fixing, and silencing isn't pausing
-  ([nuance](../nuances.md#silencing-is-not-pausing-and-acknowledging-is-not-fixing-level-1)).
+  ([nuance](../nuances/alerts.md#silencing-is-not-pausing-and-acknowledging-is-not-fixing-level-1)).
 - **`settle`** (default `2m`): how long a state must be fine before its alert is over, so a
   receiver flapping up and down is one alert, not dozens. **`recovery`** (default on) tells the
   recipients when it is.
 - **`quiet`**: hours when warnings wait until morning; one that comes and goes in the night is
   never sent, only kept in the history. Keep `critical` out of `severities`
-  ([nuance](../nuances.md#quiet-hours-hold-warnings-until-morning-critical-ones-never-wait-level-2)).
+  ([nuance](../nuances/alerts.md#quiet-hours-hold-warnings-until-morning-critical-ones-never-wait-level-2)).
   The hours are the server's local time.
 - **`certificates.warn_days`** (default `[30, 14, 7]`): the steps before a certificate expires.
   Make the first long enough for your slowest renewal (a vendor's CA, a change board).
@@ -85,7 +85,7 @@ on purpose), and an alert that's open when someone pauses stays open, quietly, u
 
 `to: owner` in a rule, or an interface's [`alert.to`](keeping-and-watching.md#who-hears-alert),
 also tells whoever owns the interface or destination: its `owner`, else `about.owner`
-([nuance](../nuances.md#who-owner-is-level-2)). An owner who is an account is mailed at the
+([nuance](../nuances/alerts.md#who-owner-is-level-2)). An owner who is an account is mailed at the
 account's email; one written as an address is mailed at it; a team without an account gets its
 address from [`owners`](../reference/config/ductus.md#owners):
 
@@ -107,17 +107,17 @@ every `every` (default 5 minutes) while the engine runs, for a service **elsewhe
 its own alarm when the calls stop: healthchecks.io, Better Stack, Uptime Kuma, or a monitoring
 tool's push check. Set its grace period to about twice `every`. **Set it in production**: it's the
 only way anyone hears that the engine is gone
-([nuance](../nuances.md#an-engine-that-is-down-sends-nothing-use-the-heartbeat-level-2)).
+([nuance](../nuances/alerts.md#an-engine-that-is-down-sends-nothing-use-the-heartbeat-level-2)).
 
 ## What to know
 
 - **Notifications are sent at least once**: through an outbox in the database, retried until the
   channel takes them. A failing channel shows on the Alerts page, not as another alert
-  ([nuance](../nuances.md#notifications-are-sent-at-least-once-and-a-failing-channel-only-shows-in-the-ui-level-3)).
+  ([nuance](../nuances/alerts.md#notifications-are-sent-at-least-once-and-a-failing-channel-only-shows-in-the-ui-level-3)).
 - **After a start**, states the engine hasn't watched for a minute yet don't alert, so a restart
-  doesn't page everyone ([nuance](../nuances.md#a-restart-doesnt-alert-on-what-it-hasnt-watched-yet-level-3)).
+  doesn't page everyone ([nuance](../nuances/alerts.md#a-restart-doesnt-alert-on-what-it-hasnt-watched-yet-level-3)).
 - **It costs little**: 35 ms a round at 1,001 interfaces, measured
-  ([nuance](../nuances.md#judging-alerts-costs-little-and-runs-all-the-time-level-4)).
+  ([nuance](../nuances/alerts.md#judging-alerts-costs-little-and-runs-all-the-time-level-4)).
 - **History** (what fired, who was told, who acknowledged) is kept a year (`alerts.keep`).
 - An interface can add recipients (`alert: { to: [...] }`) or be muted (`alert: { mute: true }`):
   [keeping and watching](keeping-and-watching.md#who-hears-alert).

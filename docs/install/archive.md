@@ -37,7 +37,7 @@ first start would do: the database changes it makes (and how big the tables they
 are now), which engines run on the database and on which versions, whether the project
 validates and passes its tests with the new version, and which settings it deprecates. It exits
 1 on anything that would refuse the start or fail the project; `--json` gives one document to
-attach to a change ticket ([nuance](../nuances.md#run-ductus-upgrade---check-with-the-new-version-before-every-upgrade-level-1)).
+attach to a change ticket ([nuance](../nuances/upgrades.md#run-ductus-upgrade---check-with-the-new-version-before-every-upgrade-level-1)).
 
 A read-only database login is enough, and safer for a program you're trying out:
 
@@ -50,7 +50,7 @@ Then `DUCTUS_DATABASE_URL=postgres://ductus_check:…@db1.hospital.org/ductus?ss
 in place of `--env-file` (keep `--env prod` and the secrets key, which the check needs to read
 the project as the engine does). The same login suits `ductus replay`, which runs a day's
 traffic through the new version and compares
-([nuance](../nuances.md#ductus-replay-shows-what-a-change-would-do-to-real-traffic-before-you-make-it-level-1)).
+([nuance](../nuances/upgrades.md#ductus-replay-shows-what-a-change-would-do-to-real-traffic-before-you-make-it-level-1)).
 
 ## Installing from the archive
 

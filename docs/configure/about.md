@@ -24,7 +24,7 @@ about:
   for a vendor's outage or breach, `ductus impact --host 10.20.30.0/24` for a network change, with how
   each interface is affected (it sends to them, receives from them, queries their database) and
   who owns it. It knows only what's named
-  ([nuance](../nuances.md#ductus-impact-only-knows-whats-named-level-2)): the application and
+  ([nuance](../nuances/impact.md#ductus-impact-only-knows-whats-named-level-2)): the application and
   vendor on each side, the hosts senders connect from, and the same on resources.yaml entries.
 - **On call**, the web UI shows the description and owner on the interface's page, and alert
   rules can send to the owner: the person woken at 3 a.m. knows what broke and who to call.
@@ -45,7 +45,7 @@ survives a change of name, where a name might match two people or nobody.
 - **A person with an account** shows as that person in the web UI, and their Interfaces page
   opens on what they own ("Mine"). With a directory, people who own something get their account
   before they first sign in, when they're in a Ductus group
-  ([nuance](../nuances.md#directory-owners-get-their-account-when-theyre-in-a-ductus-group-level-2)).
+  ([nuance](../nuances/people.md#directory-owners-get-their-account-when-theyre-in-a-ductus-group-level-2)).
 - **A team without an account** is reached through `owners:` in ductus.yaml, by the name the
   interfaces give:
 
@@ -58,7 +58,7 @@ survives a change of name, where a name might match two people or nobody.
 
 - **A destination with another owner** (its code or its receiver is another team's) says so on
   the destination: `owner: billing-it@hospital.org`. Otherwise a destination's owner is its
-  interface's ([nuance](../nuances.md#a-destinations-owner-is-its-interfaces-unless-it-says-otherwise-level-1)).
+  interface's ([nuance](../nuances/impact.md#a-destinations-owner-is-its-interfaces-unless-it-says-otherwise-level-1)).
 - **resources.yaml entries** have an `owner` too: who renews a certificate, who looks after a
   database.
 
@@ -68,7 +68,15 @@ which owners are people with an account, and `--check` fails on an owner that re
 (run it in CI). When someone leaves, `ductus owners reassign --from old@hospital.org --to
 new@hospital.org` moves everything they owned, in interface.yaml and resources.yaml alike: a
 change to commit, like any other
-([nuance](../nuances.md#moving-an-owner-moves-their-resourcesyaml-entries-too-level-2)).
+([nuance](../nuances/impact.md#moving-an-owner-moves-their-resourcesyaml-entries-too-level-2)).
+
+- **An owner is a person** when the text names exactly one account (by username, email or
+  display name); two accounts at one level name nobody, and the Owners page says so
+  ([nuance](../nuances/impact.md#an-owner-is-a-person-when-the-text-names-exactly-one-account-level-1)).
+- **Operators who own something** start on their own interfaces in the console ("Mine")
+  ([nuance](../nuances/impact.md#operators-start-on-their-own-interfaces-level-1)).
+- **Moving ownership** in the console makes a preview of the change to commit to the project,
+  not a change: the project in Git stays the truth ([nuance](../nuances/impact.md#moving-ownership-in-the-web-ui-is-a-preview-not-a-change-level-1)).
 
 ## Your own fields
 

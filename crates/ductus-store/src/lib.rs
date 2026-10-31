@@ -232,11 +232,7 @@ impl Store {
     /// libpq's (`sslmode`, `sslrootcert`, `sslcert`, `sslkey`; `prefer` by default), trusting the
     /// system's certificates plus `sslrootcert`; a refusal says why in words.
     pub async fn connect(url: &str, max_connections: u32) -> Result<Self> {
-        let pool = PgPoolOptions::new()
-            .max_connections(max_connections)
-            .connect(&tls::connect_url(url))
-            .await
-            .map_err(|e| tls::connect_error(e, url))?;
+        let pool = tls::connect_pool(url, PgPoolOptions::new().max_connections(max_connections)).await?;
         let mut migrator = migrations::migrator();
         // A newer engine may have applied migrations this binary doesn't know. Migrations are
         // expand-only, so older binaries keep working: that's what makes rollback safe.
@@ -261,11 +257,7 @@ impl Store {
     /// read (`ductus validate`, `ductus owners`), which may run with a newer binary than the
     /// engines on that database, before it is deployed.
     pub async fn connect_read_only(url: &str) -> Result<Self> {
-        let pool = PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&tls::connect_url(url))
-            .await
-            .map_err(|e| tls::connect_error(e, url))?;
+        let pool = tls::connect_pool(url, PgPoolOptions::new().max_connections(2)).await?;
         Ok(Self { pool })
     }
 

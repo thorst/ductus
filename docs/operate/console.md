@@ -11,14 +11,14 @@ console in a browser.
 - **From people's desks** it needs the API on the network, which means TLS: `api.listen:
   0.0.0.0:7700` with `api.tls` (the browser's sign-in cookie is only sent over https, or to
   localhost) and an `allow:` list of the networks your team works from
-  ([nuance](../nuances.md#the-ui-works-over-https-or-at-localhost-on-the-engines-own-server-level-4),
+  ([nuance](../nuances/web-ui.md#the-ui-works-over-https-or-at-localhost-on-the-engines-own-server-level-4),
   [the API on the network](../configure/ductus-yaml.md#the-web-ui-and-the-api)).
 - **Signing in** is with a username and password (local accounts, or the directory with
   `auth.ldap`), or with an API token ([people](../configure/people.md)). What you see and may do
   follows your role: **viewer** reads; **operator** also pauses, resends, edits, dismisses,
   drains and runs connection checks; **admin** also manages users and tokens. Reading message
   **payloads** is a permission of its own (`payloads`), and so is the **audit** log (`audit`):
-  a role alone doesn't give them ([nuance](../nuances.md#reading-payloads-is-a-permission-not-part-of-a-role-level-4)).
+  a role alone doesn't give them ([nuance](../nuances/people.md#reading-payloads-is-a-permission-not-part-of-a-role-level-4)).
 - **Live**: the header shows "Live" while the console gets the engine's updates as they happen;
   "Offline" means it lost the engine (stopped, or the network), and it reconnects by itself.
 
@@ -31,7 +31,7 @@ The menu has three groups: the day to day first, then reports, then the engine i
 The engine at a glance: what needs attention (the worst first), open alerts, certificates
 expiring, and other engines sharing the database. Start a shift here. "Cut off from the database"
 across the top means the engine lost its database connection: it's still receiving, and sending
-waits until it's back ([nuance](../nuances.md#losing-the-database-connection-pauses-sending-not-receiving-level-3)).
+waits until it's back ([nuance](../nuances/engines.md#losing-the-database-connection-pauses-sending-not-receiving-level-3)).
 
 ### Interfaces
 
@@ -56,7 +56,7 @@ What was received and what each destination did with it:
 
 - **Payload**: the message as received, with each HL7 field's path shown as you point at it
   (`PID-3.1`). Needs the `payloads` permission, and opening it is logged *before* it's shown
-  ([nuance](../nuances.md#payload-reads-are-logged-before-they-are-shown-level-3)).
+  ([nuance](../nuances/people.md#payload-reads-are-logged-before-they-are-shown-level-3)).
 - **Destinations**: per destination, its status, attempts, error and when it was sent, and what
   it was sent (recomputed by running its code again, unless it has `save_output: true`).
   **Resend** (a quarantined delivery), **Replay** (a sent or filtered one), **Dismiss**.
@@ -112,6 +112,12 @@ this message", "every worker blocked: the receiver is down")
 
 Your role and permissions, your password (local accounts), **My activity** (your own audit
 rows), and the appearance: light, dark, high contrast, or your own colors.
+
+The theme and colors are saved with your account, so they follow you to any browser
+([nuance](../nuances/people.md#theme-and-colors-follow-the-account-level-1)); a palette of your own may be hard to read, and the
+check warns but never stops you ([nuance](../nuances/web-ui.md#your-own-colors-can-be-unreadable-on-purpose-level-1)). A session acts as whoever
+signed in, ends after 12 hours unused or 7 days, and at once when the account is disabled
+([nuance](../nuances/web-ui.md#a-console-session-acts-as-whoever-signed-in-level-2)).
 
 ## What the console can't do
 

@@ -8,7 +8,7 @@ link and anchor).
 
 A change to a setting, a command, an API operation or a behaviour someone could notice ships
 with its docs **in the same commit**: the setting's doc comment (it is the reference text), the
-guide page that explains it, and a nuance when it could surprise someone (`nuances.md`, with a
+guide page that explains it, and a nuance when it could surprise someone (a page in `nuances/`, with a
 level). A commit that changes what Ductus does and leaves a page saying the old thing is a bug,
 the same as a failing test. The tests below catch some of it; the rest is review.
 
@@ -32,7 +32,7 @@ say when not to use something, find out before you write it.
 |---|---|---|---|
 | Guide | `install/`, `configure/`, the top-level pages | hand | Explains a task start to finish, and why each step is there. Links to the reference for every setting it names. |
 | Reference | `reference/` | `ductus reference docs` (from the code) | Lists everything: every command, API operation, setting, Event Log ID, metric and audit action. Never edit by hand: edit the doc comment or the help text it comes from. |
-| Nuance | `nuances.md` | hand | What could surprise you, why it is so, what to do; a level 1–5. Guides link to nuances rather than copy them. |
+| Nuance | `nuances/` | hand | What could surprise you, why it is so, what to do; a level 1–5. One page per subject; `nuances/index.md` lists them all by level. Guides link to nuances rather than copy them. |
 | Architecture | `architecture.md`, `schema.md` | hand | How it works inside, and every table and column. |
 
 ## Settings: the doc comment is the reference

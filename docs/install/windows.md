@@ -13,7 +13,9 @@ machine ([`ductus dev`](dev.md) needs no installer and no administrator).
 > a download. Check the file before you run it: its SHA-256 against the release's `SHA256SUMS`
 > (`Get-FileHash ductus-0.6.0-x64.msi`), and that GitHub built it from the tagged source
 > (`gh attestation verify ductus-0.6.0-x64.msi -R thorst/ductus`). Then "More info" → "Run
-> anyway", or unblock it first (`Unblock-File`).
+> anyway", or unblock it first (`Unblock-File`). Signing comes with v1.0
+> ([nuance](../nuances/windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1)).
+
 
 ## Install
 
@@ -48,22 +50,22 @@ holds the database password. Keep it that way.
 
 The account is what SQL Server, file shares and anything else on the network see when the
 engine logs in with Windows. Three choices
-([nuance](../nuances.md#the-services-account-the-default-a-gmsa-or-a-named-account-level-2)):
+([nuance](../nuances/windows.md#the-services-account-the-default-a-gmsa-or-a-named-account-level-2)):
 
 | Account | How | When |
 |---|---|---|
 | `NT SERVICE\Ductus` (the default) | Nothing to do. A virtual account: no password; on the network it is the computer (`HOSPITAL\SERVER01$`). | The engine logs in to nothing with Windows, or a DBA grants the computer's account. |
 | A gMSA (group managed service account) | `msiexec /i ductus-0.6.0-x64.msi /qn SERVICEACCOUNT=HOSPITAL\svc-ductus$` | The engine needs its own identity on the network (a SQL Server Windows login, a share). Windows keeps the password; upgrades keep the account. **The best choice when you need one.** |
-| An account with a password | Install, then `ductus service account HOSPITAL\svc-ductus --start` (it asks for the password; `--password-stdin` in scripts) | Only where a gMSA isn't possible: **after every upgrade** the service waits for the password again ([why](../nuances.md#an-upgrade-cant-keep-an-accounts-password-the-service-waits-for-it-level-2)). |
+| An account with a password | Install, then `ductus service account HOSPITAL\svc-ductus --start` (it asks for the password; `--password-stdin` in scripts) | Only where a gMSA isn't possible: **after every upgrade** the service waits for the password again ([why](../nuances/windows.md#an-upgrade-cant-keep-an-accounts-password-the-service-waits-for-it-level-2)). |
 
 The installer (and `ductus service account`) grants the account "Log on as a service". Where
 Group Policy manages that right, ask for the account to be added to the policy, or the next
-policy refresh takes it away ([nuance](../nuances.md#log-on-as-a-service-the-installer-grants-it-group-policy-can-take-it-away-level-3)).
+policy refresh takes it away ([nuance](../nuances/windows.md#log-on-as-a-service-the-installer-grants-it-group-policy-can-take-it-away-level-3)).
 `ductus service account` with no name says who the service runs as now.
 
 **Folders outside `C:\ProgramData\Ductus`.** The service can touch only what you give it: a file
 interface's inbox, archive or output folder needs a grant
-([nuance](../nuances.md#the-windows-service-can-only-touch-what-you-give-it-level-2)):
+([nuance](../nuances/windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2)):
 
 ```powershell
 icacls "D:\Interfaces" /grant "NT SERVICE\Ductus:(OI)(CI)M"
@@ -92,7 +94,7 @@ grant the computer account (`HOSPITAL\SERVER01$`), or the gMSA.
 2. **The project.** Clone it into `C:\ProgramData\Ductus\project` (or point `DUCTUS_PROJECT`
    elsewhere and grant the service read access there). In YAML, write Windows paths with their
    drive and in single quotes (`'D:\Interfaces\in'`): in double quotes a backslash starts an
-   escape ([nuance](../nuances.md#certificate-files-write-the-drive-level-1)).
+   escape ([nuance](../nuances/windows.md#certificate-files-write-the-drive-level-1)).
 
 3. **Check before starting**, with the service's own settings:
 
@@ -120,15 +122,15 @@ newest one may carry tomorrow's or yesterday's date.
   stop finishing the messages in hand isn't taken for a hang.
 - **A stop is clean**, whether from the service manager, a Windows shutdown (the service takes
   its preshutdown time, 90 s) or `ductus drain --stop`: the messages in hand are finished and
-  saved ([what finishes](../nuances.md#stopping-the-engine-what-finishes-and-what-waits-level-2)).
+  saved ([what finishes](../nuances/delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2)).
 - **A restart is a short gap**: measured 0 refused, a few connections reset, the longest wait
-  for an ACK ~1.1 s ([measured](../nuances.md#windows-and-containers-a-restart-is-a-short-gap-level-2)).
+  for an ACK ~1.1 s ([measured](../nuances/upgrades.md#windows-and-containers-a-restart-is-a-short-gap-level-2)).
   Senders resend by themselves.
 - **If it fails** it's started again after a minute, twice, then waits for a person. A start
   refused because another engine runs these interfaces isn't retried.
 - **The Event Log** gets what operations watch for: started, stopped, couldn't start (with the
   reason), an interface stopped, a critical alert, and other errors at most once a minute per
-  kind ([IDs](../reference/event-log.md), [nuance](../nuances.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2)).
+  kind ([IDs](../reference/event-log.md), [nuance](../nuances/windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2)).
   The detail is in the log files.
 
 ## Upgrade
@@ -138,17 +140,20 @@ first, then the new MSI the same way as the first (`msiexec /i … /qn`; no need
 The installer stops the service cleanly, replaces the program and starts it again; settings,
 project and logs are never touched. The engine is down for **3.1–3.5 s** (measured: a few
 connections refused, nothing lost), so pick a quiet moment
-([measured](../nuances.md#windows-and-containers-a-restart-is-a-short-gap-level-2)).
+([measured](../nuances/upgrades.md#windows-and-containers-a-restart-is-a-short-gap-level-2)).
 
 - A service someone **stopped on purpose** stays stopped after the upgrade
-  ([nuance](../nuances.md#an-upgrade-starts-the-service-again-unless-it-was-stopped-on-purpose-level-2)).
+  ([nuance](../nuances/windows.md#an-upgrade-starts-the-service-again-unless-it-was-stopped-on-purpose-level-2)).
 - A **password account** leaves the service stopped, waiting for
   `ductus service account NAME --start` (Event Log 1005 says so).
 - Where Group Policy turns **Restart Manager** off, msiexec may wait 100–160 s before it stops the
   service (the engine keeps running meanwhile). Close Event Viewer first, or stop the service
-  yourself first to save the wait ([why](../nuances.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2)).
-- **Rolling back** is installing the previous MSI: the database changes a version makes only ever
-  add, so the version before runs on them.
+  yourself first to save the wait ([why](../nuances/windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2)).
+- **Rolling back** is uninstalling, then installing the previous MSI: the installer refuses to put
+  an older version over a newer one ("A newer version of Ductus is already installed. Uninstall
+  it first to go back."). `C:\ProgramData\Ductus` and the database stay; give `SERVICEACCOUNT=`
+  again if the service ran as another account. The database changes a version makes only ever
+  add, so the version before runs on them ([Going back](../upgrade.md#going-back-rollback)).
 
 ## Uninstall
 

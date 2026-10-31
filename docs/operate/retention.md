@@ -11,18 +11,18 @@ interface's).
 
 - **Three windows**: `1w`, `3w` or `7w` (the default). Each is a set of partitions of the
   message tables, a day each for `1w` and a week each for `3w` and `7w`
-  ([nuance](../nuances.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1)).
+  ([nuance](../nuances/retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1)).
 - **Old messages go by dropping a whole partition** once all of it is older than the window,
   checked hourly. Dropping a partition costs the same whether it held ten messages or ten
   million, and blocks nothing: no row-by-row delete, no table bloat, nothing to vacuum.
 - **So a message is kept at least its window**, and gone within a day (`1w`) or a week (`3w`,
   `7w`) after: a `7w` message lives 49 to 56 days
-  ([nuance](../nuances.md#messages-are-kept-at-least-their-window-and-gone-within-a-period-after-level-2)).
+  ([nuance](../nuances/retention.md#messages-are-kept-at-least-their-window-and-gone-within-a-period-after-level-2)).
   Treat the window as "at least".
 - **Nothing anyone still needs is deleted.** When a partition expires, its messages still pending
   for a destination, and its quarantined ones (with `quarantined: keep`, the default), move to
   the **held area** first, with their deliveries, and stay in their queue and in the console
-  ([nuance](../nuances.md#pending-messages-are-never-purged-past-the-window-theyre-held-level-2)).
+  ([nuance](../nuances/retention.md#pending-messages-are-never-purged-past-the-window-theyre-held-level-2)).
   A month of the held area is dropped once it's over and nothing in it is waiting.
 - **The audit log is kept apart**, six years by default (`audit.keep`), and trimmed hourly.
 
@@ -53,15 +53,15 @@ Change `retention:` in interface.yaml (or ductus.yaml) and deploy.
   `ductus retention confirm <interface>` (an operator token), or typing the interface's name on
   the Retention page, applies it: finished messages past the new window are deleted in the
   background, the rest move into the new window's partitions
-  ([nuance](../nuances.md#shortening-retention-deletes-messages-so-it-needs-a-confirmation-level-2)).
+  ([nuance](../nuances/retention.md#shortening-retention-deletes-messages-so-it-needs-a-confirmation-level-2)).
   Confirm on each database the project runs on.
 - **One change at a time per interface**: a change works in batches, at most half the time busy
   (8,000 messages took 1 to 1.5 s on a dev machine), and a different value deployed meanwhile
-  waits ([nuance](../nuances.md#one-retention-change-at-a-time-per-interface-level-3)). Don't flip
+  waits ([nuance](../nuances/retention.md#one-retention-change-at-a-time-per-interface-level-3)). Don't flip
   it back and forth.
 - **Shortening frees disk later**, as the old partitions are dropped; to free it now, a DBA can
   `VACUUM FULL` the affected old partitions off-hours
-  ([nuance](../nuances.md#shortening-frees-disk-when-partitions-go-not-at-once-level-4)).
+  ([nuance](../nuances/retention.md#shortening-frees-disk-when-partitions-go-not-at-once-level-4)).
 
 **Choose the window** your team looks back over when a problem surfaces: `1w` for busy feeds
 nobody looks back on, `7w` where problems show up weeks later (billing, a monthly

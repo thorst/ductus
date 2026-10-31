@@ -44,7 +44,7 @@ CREATE DATABASE ductus OWNER ductus;
   live in `public`; sharing a database with an application invites a clash. Several *engines*
   share one database without trouble: each runs its own interfaces, and an engine started with
   interfaces another runs is refused
-  ([nuance](../nuances.md#an-interface-runs-on-one-engine-at-a-time-a-second-one-is-refused-level-2)).
+  ([nuance](../nuances/engines.md#an-interface-runs-on-one-engine-at-a-time-a-second-one-is-refused-level-2)).
 - **No superuser**, no `CREATEDB`, no `CREATEROLE`, no extensions.
 - **A read-only login** for checks and audits: `ductus upgrade --check` and `ductus replay` only
   read, so give them one that can't write (Postgres 14+):
@@ -76,7 +76,7 @@ them, **plus one** it holds for its lock. Budget for:
 - each engine on the database: 33;
 - **twice that for a few seconds during a Linux upgrade or deploy**: the new engine starts beside
   the running one, with its own pool, before the old one leaves
-  ([handover](../nuances.md#systemctl-reload-hands-over-receiving-never-stops-sending-pauses-briefly-level-2));
+  ([handover](../nuances/upgrades.md#systemctl-reload-hands-over-receiving-never-stops-sending-pauses-briefly-level-2));
 - a few more for the command line (`ductus status`, `doctor`, `user`) and the DBA's own tools.
 
 The pool is for the engine's own database only. The databases interfaces query (`db()`, in
@@ -85,7 +85,7 @@ resources.yaml) have pools of their own, set per entry
 
 **PgBouncer and other poolers:** session mode only. In transaction mode the engine's lock is
 lost at once, since each transaction lands on another server connection
-([nuance](../nuances.md#pgbouncer-in-transaction-mode-cant-hold-the-engines-lock-level-3)). The
+([nuance](../nuances/engines.md#pgbouncer-in-transaction-mode-cant-hold-the-engines-lock-level-3)). The
 engine pools its own connections, so a pooler in front of it saves little.
 
 ## TLS to the database
@@ -94,7 +94,7 @@ Without `sslmode` in the URL, the connection is libpq's `prefer`: TLS when the s
 and **the server's certificate is never checked**. That stops someone listening, not someone
 answering in the database's place. For a database on another machine, ask for its certificate
 to be checked
-([nuance](../nuances.md#without-sslmode-the-database-connection-is-tls-when-offered-and-nobody-is-checked-level-3)):
+([nuance](../nuances/tls-postgres.md#without-sslmode-the-database-connection-is-tls-when-offered-and-nobody-is-checked-level-3)):
 
 | `sslmode` | TLS | Checked | Use for |
 |---|---|---|---|
@@ -106,13 +106,13 @@ to be checked
 
 The CA is trusted when the engine's server trusts it (Linux: `update-ca-certificates`; Windows:
 the machine's store), or when the URL names it: `&sslrootcert=/etc/ductus/tls/db-ca.pem`
-([nuance](../nuances.md#a-ca-installed-on-this-server-counts-level-2)). The engine's start log,
+([nuance](../nuances/tls-postgres.md#a-ca-installed-on-this-server-counts-level-2)). The engine's start log,
 `ductus validate`, `ductus doctor` and the web UI's Connections page all say how the connection
 is protected ("TLS 1.3, verified (sslmode=verify-full)"), and warn when a database on another
 machine isn't verified. A verified database's certificate is also watched: its expiry alerts at
 30, 14 and 7 days like every other certificate the engine uses.
 
-**Managed Postgres** ([nuance](../nuances.md#cloud-postgres-requires-tls-level-1)):
+**Managed Postgres** ([nuance](../nuances/tls-postgres.md#cloud-postgres-requires-tls-level-1)):
 
 - **Azure**: `sslmode=verify-full`. Its certificates chain to public roots servers already
   trust.
@@ -126,7 +126,12 @@ Always connect by the endpoint's DNS name, the one on its certificate, not its a
 **A client certificate** instead of (or beside) a password, where the DBA logs the engine in by
 certificate (`cert` in `pg_hba.conf`): `&sslcert=/etc/ductus/tls/db-client.pem&sslkey=/etc/ductus/tls/db-client.key`.
 A renewed pair is used by the next new connection
-([nuance](../nuances.md#a-client-certificate-renews-at-the-next-connection-level-3)).
+([nuance](../nuances/tls-postgres.md#a-client-certificate-renews-at-the-next-connection-level-3)).
+
+A verified connection's certificate (`verify-full`, `verify-ca`) is watched like any other:
+alerts at 30, 14 and 7 days ([nuance](../nuances/tls-postgres.md#the-databases-certificate-is-watched-when-the-engine-checks-it-level-3)). Opening a
+connection over TLS costs about 60 ms for now, which pools hide
+([measured](../nuances/tls-postgres.md#opening-a-database-connection-over-tls-costs-60-ms-for-now-level-4)).
 
 ## Sizing
 
@@ -135,7 +140,7 @@ default) waits for one durable commit, so a sender that sends one message at a t
 faster than the database's disk can flush: about 400 a second at 2.4 ms a flush. Commits from
 many senders at once are grouped, so the engine as a whole goes much faster. `ductus doctor`
 measures the commit time from the engine's server and says what it means
-([nuance](../nuances.md#the-commit-time-is-the-stores-disk-and-the-ceiling-per-strict-sender-level-4)).
+([nuance](../nuances/doctor.md#the-commit-time-is-the-stores-disk-and-the-ceiling-per-strict-sender-level-4)).
 Put Postgres's write-ahead log on the fastest disk you have (NVMe, or a cloud disk with low write
 latency). For scale: a million HL7 messages a day averages 12 a second.
 
@@ -144,14 +149,14 @@ latency). For scale: a million HL7 messages a day averages 12 a second.
 per message (its delivery and status), the indexes, what destinations keep with
 [`save_output`](../reference/config/interface.md#destinationsave_output) (about 1.15 GB per
 million deliveries, measured), and anything waiting or quarantined past its window (kept until
-it's resolved: [the held area](../nuances.md#pending-messages-are-never-purged-past-the-window-theyre-held-level-2)).
+it's resolved: [the held area](../nuances/retention.md#pending-messages-are-never-purged-past-the-window-theyre-held-level-2)).
 Measure it on your own traffic after a week: `SELECT pg_size_pretty(pg_database_size('ductus'))`.
 Space comes back as whole partitions are dropped, a day or a week at a time: there's nothing to
 vacuum away.
 
 **Long queries** against the message tables (a report run on the store) can make the engine's
 hourly partition work wait; keep them short, or run them on a replica
-([nuance](../nuances.md#a-query-that-holds-the-message-tables-for-days-can-pause-intake-level-4)).
+([nuance](../nuances/store.md#a-query-that-holds-the-message-tables-for-days-can-pause-intake-level-4)).
 Autovacuum's defaults are fine.
 
 ## Backups are the DBA's
@@ -170,6 +175,6 @@ What a backup means for messages:
 - **The engine reconnects by itself** after a restart or failover of the database. While it's
   cut off, nothing can be stored, so nothing is acknowledged and senders try again; when it
   can't hold its lock, it pauses sending until it can
-  ([nuance](../nuances.md#losing-the-database-connection-pauses-sending-not-receiving-level-3)).
+  ([nuance](../nuances/engines.md#losing-the-database-connection-pauses-sending-not-receiving-level-3)).
 - **Messages are kept 1, 3 or 7 weeks** by design, not forever: longer history belongs in the
   source systems or an archive, not in backups of this database.

@@ -51,7 +51,7 @@ file: **the mapping is code**, and a mapping can still be written as a table in 
 So a function's job is to say *what this destination should get*, or that it gets nothing, or
 that a person must look. Never swallow a problem with `return null`: a message nobody can see
 again is the failure people find months later. Quarantine it, with a reason a person can act on
-([nuance](../nuances.md#return-null-filters-throwing-quarantines-level-1)).
+([nuance](../nuances/transforms.md#return-null-filters-throwing-quarantines-level-1)).
 
 ## The functions
 
@@ -87,16 +87,24 @@ export function toLab(msg: Message) {
   (`db()`, `api()`, `fetch()`, `env()`, `secret()`), so the engine can time them, retry them,
   mock them in tests and list them in `ductus impact`.
 - **It can run more than once for one message**: after a temporary failure, a restart in the
-  middle, a resend or a replay ([nuance](../nuances.md#your-transform-can-run-more-than-once-for-the-same-message-level-3)).
+  middle, a resend or a replay ([nuance](../nuances/delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3)).
   So it must give the same answer for the same message, and anything it *writes* elsewhere
   (`db().execute`, an API `POST`) must be safe to repeat: use `meta.id` as the key.
 - **It shouldn't run long.** A function that runs past [`timeout`](../reference/config/interface.md#timeout)
   (5 s by default) without pausing is stopped, its message quarantined, and three in a row stop
-  the interface ([runaway scripts](../nuances.md#a-runaway-message-is-quarantined-three-in-a-row-stop-the-interface-level-2)).
+  the interface ([runaway scripts](../nuances/runaway.md#a-runaway-message-is-quarantined-three-in-a-row-stop-the-interface-level-2)).
   Waiting on a lookup doesn't count.
 - **Missing fields read as `""` and never throw**, so a typo in a field number gives `""` quietly:
   test with real messages and check the fields you map
-  ([nuance](../nuances.md#missing-fields-read-as--and-never-throw-level-1)).
+  ([nuance](../nuances/transforms.md#missing-fields-read-as--and-never-throw-level-1)).
+
+- **`timeout` counts time the code runs**, not time it waits on an `await`: a function waiting
+  on a slow lookup isn't stopped for it ([nuance](../nuances/runaway.md#timeout-counts-time-without-pausing-not-total-time-level-2)). Code that runs
+  away *after* an `await` interrupts every async call on its thread
+  ([nuance](../nuances/runaway.md#a-runaway-after-await-interrupts-every-async-transform-on-its-thread-level-5)).
+- **An import used only for what it does when it loads** is removed by TypeScript: import
+  something from it you use, or call a function it exports
+  ([nuance](../nuances/transforms.md#imports-used-only-for-their-side-effects-are-removed-level-2)).
 
 ## Code shared between interfaces
 
@@ -110,7 +118,11 @@ and helpers that more than one interface needs. Two rules
   (`DX3`).
 - **A heavy loop belongs in the interface's own file**: a runaway in a shared file after an
   `await` can't be blamed on one interface
-  ([nuance](../nuances.md#a-runaway-in-a-shared-library-after-await-cant-be-blamed-on-anyone-level-5)).
+  ([nuance](../nuances/runaway.md#a-runaway-in-a-shared-library-after-await-cant-be-blamed-on-anyone-level-5)).
+
+All interfaces in an engine share one global scope per thread, so a global set by one is seen by
+others ([nuance](../nuances/shared-pool.md#interfaces-share-a-global-scope-level-2)), and a shared library file is
+one copy per thread, not one per project ([nuance](../nuances/shared-pool.md#a-shared-library-file-is-one-copy-per-thread-not-one-per-project-level-4)).
 
 ## A new interface, and the editor
 
@@ -121,7 +133,7 @@ passing `ductus test` and `ductus validate` as written. Start from there.
 `ductus test` and `ductus validate` write the SDK's typings into `.ductus/types` and a
 `tsconfig.json`, so VS Code (or any editor that speaks TypeScript) completes `msg.PID[` with the
 fields' names and underlines mistakes as you type. After an upgrade, run `ductus types` so the
-editor knows the new version ([nuance](../nuances.md#your-editors-help-is-the-installed-versions-run-ductus-types-after-an-upgrade-level-1)).
+editor knows the new version ([nuance](../nuances/dev.md#your-editors-help-is-the-installed-versions-run-ductus-types-after-an-upgrade-level-1)).
 
 ## The examples on these pages
 

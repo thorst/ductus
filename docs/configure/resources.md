@@ -56,7 +56,7 @@ databases:
 
 - **The login**: give it only what the queries need, often read-only on a few tables or views.
   A wrong password makes messages wait and retry rather than quarantine: fixing it fixes them
-  all ([nuance](../nuances.md#database-login-failures-make-messages-wait-not-fail-level-3)).
+  all ([nuance](../nuances/ordering.md#database-login-failures-make-messages-wait-not-fail-level-3)).
 - **Connections**: each entry has a pool, shared by every interface's calls, of up to
   `max_connections` (default 5), opened as needed. A call that finds them all busy waits up to
   10 s, then fails as a temporary error (the message waits and is tried again). Raise it when
@@ -69,14 +69,14 @@ databases:
 - **SQL Server is always TLS, verified**: `encrypt: mandatory` by default, `strict` (TDS 8) for
   servers set to force it; there's no unencrypted mode. `ca:` for the domain's CA where this
   server doesn't trust it; `name_in_certificate` when connecting by an alias or a listener's
-  name ([nuance](../nuances.md#sql-server-connections-are-verified-and-trust_server_certificate-is-for-labs-level-3)).
+  name ([nuance](../nuances/tls-sqlserver.md#sql-server-connections-are-verified-and-trust_server_certificate-is-for-labs-level-3)).
   A named instance is `instance: PROD`: its port comes from the SQL Server Browser (UDP 1434,
   which the firewall must let through).
 - **SQL Server Windows logins** (`auth: windows`), where the DBA allows only those: without
   `user`, the engine logs in as the Windows service's own account (a gMSA is best: no password
   anywhere); with `user` and `password`, as that domain account. From Linux that is always NTLM,
-  which some servers refuse ([nuance](../nuances.md#auth-windows-the-engines-own-account-or-a-named-one-level-1),
-  [from Linux](../nuances.md#from-linux-a-windows-login-is-always-ntlm-level-3)).
+  which some servers refuse ([nuance](../nuances/sqlserver-windows-logins.md#auth-windows-the-engines-own-account-or-a-named-one-level-1),
+  [from Linux](../nuances/sqlserver-windows-logins.md#from-linux-a-windows-login-is-always-ntlm-level-3)).
 
 ```yaml
 # resources.yaml
@@ -92,7 +92,26 @@ databases:
 **What code can do with one**, and what to watch for: one result set per call on SQL Server, a
 query that writes is a write a crash can repeat, write names out (`db("patient_db")`, not
 `db(name)`, so `ductus impact` can see it)
-([databases and APIs](../nuances.md#databases-and-apis), [running twice](../nuances.md#your-transform-can-run-more-than-once-for-the-same-message-level-3)).
+([databases and APIs](../nuances/databases-and-apis.md), [running twice](../nuances/delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3)).
+
+SQL Server, worth knowing before the first connection:
+
+- **`encrypt: strict`** is TDS 8: TLS first, before anything else is said
+  ([nuance](../nuances/tls-sqlserver.md#encrypt-strict-is-tds-8-tls-before-anything-level-3)). SQL Server 2022 on Linux refuses it whatever it's
+  given; 2025 accepts it ([nuance](../nuances/tls-sqlserver.md#sql-server-2022-on-linux-doesnt-accept-encrypt-strict-level-3)).
+- **Connecting by an alias, a listener or an address** the certificate doesn't list:
+  `name_in_certificate` checks it for the right name
+  ([nuance](../nuances/tls-sqlserver.md#connecting-by-a-name-the-certificate-doesnt-list-name_in_certificate-level-3)).
+- **Its certificate is read through PRELOGIN**, as the connection meets it, and watched when
+  verified ([nuance](../nuances/tls-sqlserver.md#sql-servers-certificate-is-read-through-prelogin-and-watched-when-verified-level-3)); verifying it costs nothing
+  measurable ([measured](../nuances/tls-sqlserver.md#verification-costs-nothing-measurable-level-4)).
+- **Windows logins (`auth: windows`)** from the service's own account are the *computer's*
+  account on the network: give that a login ([nuance](../nuances/sqlserver-windows-logins.md#the-services-own-account-is-the-computer-on-the-network-level-3)).
+  Doctor and the start log say whether Kerberos or NTLM was used
+  ([nuance](../nuances/sqlserver-windows-logins.md#kerberos-or-ntlm-doctor-and-the-start-log-say-which-level-3)). A refusal is 18452 (Windows said no)
+  or 18456 (no login on SQL Server's side) ([nuance](../nuances/sqlserver-windows-logins.md#a-refused-windows-login-18452-is-windows-saying-no-18456-is-sql-server-level-2)),
+  and Extended Protection set to Required refuses NTLM
+  ([nuance](../nuances/sqlserver-windows-logins.md#extended-protection-set-to-required-refuses-ntlm-logins-level-3)).
 
 ## SFTP servers
 
@@ -140,9 +159,9 @@ apis:
 - Paths in code and destinations go under the URL: `api("empi").get("/patients/1")` calls
   `${EMPI_URL}/patients/1`.
 - A header the code or a destination sets itself replaces the API's of the same name
-  ([nuance](../nuances.md#api-headers-the-apis-then-yours-level-2)).
+  ([nuance](../nuances/databases-and-apis.md#api-headers-the-apis-then-yours-level-2)).
 - 5xx, 408 and 429 answers are retried by default
-  ([nuance](../nuances.md#fetch-and-api-retry-5xx-408-and-429-by-default-level-3)).
+  ([nuance](../nuances/databases-and-apis.md#fetch-and-api-retry-5xx-408-and-429-by-default-level-3)).
 - `ca:` for an API with a private CA's certificate, `certificate:` for one that asks for a client
   certificate (mutual TLS): both `certificates:` entries ([TLS](tls.md)).
 

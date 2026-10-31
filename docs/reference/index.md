@@ -1,6 +1,6 @@
 # Reference
 
-Everything Ductus takes and gives, listed: every command, API operation, setting, Event Log ID, metric and audit action. These pages are made from the engine itself (`ductus reference`), so they always match the version they come with. The guides explain how the pieces fit together; the [nuances](../nuances.md) say what could surprise you.
+Everything Ductus takes and gives, listed: every command, API operation, setting, Event Log ID, metric and audit action. These pages are made from the engine itself (`ductus reference`), so they always match the version they come with. The guides explain how the pieces fit together; the [nuances](../nuances/index.md) say what could surprise you.
 
 - [Command line](cli/index.md): every `ductus` command and option.
 - [REST API](api/index.md): every operation under `/api/v1`, who may call it, and what it takes and returns.

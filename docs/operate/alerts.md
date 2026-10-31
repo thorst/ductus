@@ -11,7 +11,7 @@ rule in ductus.yaml names, an **alert opens** and its channels are told **once**
 open and nobody has acknowledged it, they're **reminded** every `repeat` (4 h by default); if it
 gets worse (a warning becomes critical) they're told again; once the state has been fine for
 `settle` (2 min), it **recovers** and they're told that too
-([nuance](../nuances.md#alerts-tell-you-once-then-remind-they-dont-repeat-every-check-level-2)).
+([nuance](../nuances/alerts.md#alerts-tell-you-once-then-remind-they-dont-repeat-every-check-level-2)).
 
 What a webhook receives, from a real engine whose lab receiver went down (`format: json`; Teams
 and Slack get the same as a card or message):
@@ -28,7 +28,7 @@ The title says the environment, so a test engine's alert can't be taken for prod
    what and how much ("30 waiting; retrying: Connection refused").
 2. **Acknowledge** it once someone is on it: the reminders stop, and the others on the channel see
    who took it. Acknowledging isn't fixing: the alert stays open until the state is fine
-   ([nuance](../nuances.md#silencing-is-not-pausing-and-acknowledging-is-not-fixing-level-1)).
+   ([nuance](../nuances/alerts.md#silencing-is-not-pausing-and-acknowledging-is-not-fixing-level-1)).
 3. **Find the cause**: `stalled` → [hotspots](monitoring.md#where-a-backlog-sits-hotspots) (the
    receiver, or one message); `error` → the [quarantine](resend.md); `behind` → the receiver's
    speed and the catch-up time; `silent`/`missed` → the sender; `stopped` → the code (the log and
@@ -36,7 +36,7 @@ The title says the environment, so a test engine's alert can't be taken for prod
    ([renewing](../configure/tls.md)).
 4. **If it's planned downtime you forgot to announce**, pause the destination with the reason: a
    paused destination doesn't alert, and its open alert waits quietly until it's resumed
-   ([nuance](../nuances.md#a-pause-never-alerts-and-holds-an-alert-open-level-2)).
+   ([nuance](../nuances/alerts.md#a-pause-never-alerts-and-holds-an-alert-open-level-2)).
 5. **It recovers by itself** when the state is fine, and the channel is told. Nothing to close.
 
 ## Silence, pause, mute: which one
@@ -60,7 +60,7 @@ already fixing, and never mute a live interface to stop noise: fix the rule inst
   `active_within` doesn't fit the feed's quiet hours: add `between:`. A `behind` that fires during
   every nightly batch means the limit is below a normal night.
 - **Send to teams, not people**: a team's list or chat channel survives holidays and job changes
-  ([nuance](../nuances.md#who-owner-is-level-2)).
+  ([nuance](../nuances/alerts.md#who-owner-is-level-2)).
 - **Test every channel before you rely on it**, and after the mail team changes anything:
 
 ```text
@@ -72,13 +72,13 @@ sent a test notification to `chat`
   `"kind":"test"`, `"title":"[Ductus dev] test notification"`). The Alerts page's
   channel table also has **Test**, and shows each channel's sent, failed and last error: a
   channel that's failing can't tell you so itself
-  ([nuance](../nuances.md#notifications-are-sent-at-least-once-and-a-failing-channel-only-shows-in-the-ui-level-3)).
+  ([nuance](../nuances/alerts.md#notifications-are-sent-at-least-once-and-a-failing-channel-only-shows-in-the-ui-level-3)).
   Prometheus's `ductus_alert_send_failures_total` is the other way to hear about it.
 - **Quiet hours hold warnings, never critical alerts**
-  ([nuance](../nuances.md#quiet-hours-hold-warnings-until-morning-critical-ones-never-wait-level-2)).
+  ([nuance](../nuances/alerts.md#quiet-hours-hold-warnings-until-morning-critical-ones-never-wait-level-2)).
 - **After a restart**, states the engine hasn't watched for a minute yet don't alert, so a restart
   doesn't raise a wave of alerts for things that were already known
-  ([nuance](../nuances.md#a-restart-doesnt-alert-on-what-it-hasnt-watched-yet-level-3)).
+  ([nuance](../nuances/alerts.md#a-restart-doesnt-alert-on-what-it-hasnt-watched-yet-level-3)).
 
 ## An engine that's down tells nobody: the heartbeat
 
@@ -87,4 +87,4 @@ can't send one. Set [`alerts.heartbeat`](../reference/config/ductus.md#alertshea
 production: the engine calls a URL every `every` (say `5m`) while it runs, and a service that
 expects the calls (healthchecks.io, Better Stack, Uptime Kuma, your monitoring's own push check),
 running somewhere else, raises the alarm when they stop. Give that service a grace period of about
-twice `every` ([nuance](../nuances.md#an-engine-that-is-down-sends-nothing-use-the-heartbeat-level-2)).
+twice `every` ([nuance](../nuances/alerts.md#an-engine-that-is-down-sends-nothing-use-the-heartbeat-level-2)).

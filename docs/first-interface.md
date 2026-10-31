@@ -77,7 +77,7 @@ export function transform(msg: Message) {
 ```
 
 Returning `null` would drop the message (filtered, with the reason kept); throwing would
-quarantine it for a person to look at ([nuance](nuances.md#return-null-filters-throwing-quarantines-level-1)).
+quarantine it for a person to look at ([nuance](nuances/transforms.md#return-null-filters-throwing-quarantines-level-1)).
 
 ## 3. Test and validate
 
@@ -188,7 +188,7 @@ test("addresses the lab and capitalizes the family name", () => {
 `ductus test`, then stop `ductus dev` (Ctrl-C) and start it again: it starts in well under a
 second, and new messages get the new code. HL7 is numbered as the standard numbers it, from 1,
 and a field that isn't there reads as `""`, never an error
-([nuance](nuances.md#missing-fields-read-as--and-never-throw-level-1)).
+([nuance](nuances/transforms.md#missing-fields-read-as--and-never-throw-level-1)).
 
 ## 6. The same over TLS, with client certificates
 
@@ -254,7 +254,7 @@ $ ductus cert show ductus-mllp
 (Shown the file alone, `ductus cert show tls/mllp.pem` warns that the chain is incomplete: it
 can't know Test Hospital CA is a root until resources.yaml names it. With a real CA, append its
 intermediate certificates to `mllp.pem` after yours:
-[why](nuances.md#give-the-whole-chain-in-cert_file-level-3).)
+[why](nuances/tls-listening.md#give-the-whole-chain-in-cert_file-level-3).)
 
 **Turn TLS on** for the listener, and ask senders for a certificate from `test-ca` naming
 `sender.test`:
@@ -303,7 +303,7 @@ sending failed, retrying: connection closed before ACK
 ```
 
 while the engine's log says why, once a minute per sender address
-([nuance](nuances.md#a-refused-handshake-is-logged-once-a-minute-per-sender-level-3)):
+([nuance](nuances/tls-listening.md#a-refused-handshake-is-logged-once-a-minute-per-sender-level-3)):
 
 ```text
 WARN ductus_runtime::tls: TLS handshake refused (logged once a minute per sender) listener="interface `adt-in` (MLLP)" peer=127.0.0.1 reason=the sender isn't speaking TLS (a plain MLLP or HTTP sender on a TLS port?)

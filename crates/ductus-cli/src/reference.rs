@@ -36,12 +36,14 @@ const OWNED: [&str; 3] = ["cli", "api", "config"];
 pub fn write(docs: &Path) -> Result<()> {
     let pages = pages()?;
     let dir = docs.join("reference");
-    for owned in OWNED {
-        match std::fs::remove_dir_all(dir.join(owned)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-                return Err(e).with_context(|| format!("emptying {}", dir.join(owned).display()));
-            }
-            _ => {}
+    // Emptied, not removed: Windows refuses to remove a folder some program has open (a shell
+    // standing in it, an editor's watcher), even when it's empty.
+    for owned in OWNED.map(|o| dir.join(o)) {
+        let Ok(entries) = std::fs::read_dir(&owned) else { continue };
+        for entry in entries {
+            let path = entry.with_context(|| format!("reading {}", owned.display()))?.path();
+            let gone = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+            gone.with_context(|| format!("emptying {}", owned.display()))?;
         }
     }
     for page in &pages {
@@ -64,8 +66,77 @@ pub fn write(docs: &Path) -> Result<()> {
         let updated = format!("{}{BEGIN}\n{contents}{}", &text[..start], &text[end..]);
         std::fs::write(&summary, updated).with_context(|| format!("writing {}", summary.display()))?;
     }
+    let index = docs.join("nuances/index.md");
+    if index.is_file() {
+        let text = std::fs::read_to_string(&index).with_context(|| format!("reading {}", index.display()))?;
+        std::fs::write(&index, with_nuance_lists(&text, &nuance_lists(docs)?)?)
+            .with_context(|| format!("writing {}", index.display()))?;
+    }
     println!("wrote {} reference pages under {}", pages.len(), dir.display());
     Ok(())
+}
+
+const NUANCES_BEGIN: &str =
+    "<!-- nuances: written by `ductus reference docs` from the pages; edit them, not these lists -->";
+const NUANCES_END: &str = "<!-- end of nuances -->";
+
+/// The nuances' index lists, by subject and by level: every page of `nuances/` in the book's
+/// order (SUMMARY.md), every `## … (level N)` heading on them.
+fn nuance_lists(docs: &Path) -> Result<String> {
+    let summary = std::fs::read_to_string(docs.join("SUMMARY.md")).context("reading SUMMARY.md")?;
+    let mut subjects = Vec::new(); // (title, page, [(level, heading)])
+    for line in summary.lines().map(str::trim) {
+        let Some((title, page)) = line
+            .strip_prefix("- [")
+            .and_then(|l| l.split_once("](nuances/"))
+            .and_then(|(t, rest)| Some((t, rest.strip_suffix(".md)")?)))
+        else {
+            continue;
+        };
+        if page == "index" {
+            continue;
+        }
+        let file = docs.join("nuances").join(format!("{page}.md"));
+        let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+        let mut entries = Vec::new();
+        for heading in text.lines().filter_map(|l| l.strip_prefix("## ")) {
+            let level = heading
+                .strip_suffix(')')
+                .and_then(|h| h.rsplit_once(" (level "))
+                .and_then(|(_, n)| n.parse::<u8>().ok())
+                .filter(|n| (1..=5).contains(n))
+                .with_context(|| {
+                    format!("{}: `{heading}` doesn't end with its level, `(level 1)` … `(level 5)`", file.display())
+                })?;
+            entries.push((level, heading.to_string()));
+        }
+        subjects.push((title.to_string(), page.to_string(), entries));
+    }
+    let mut out = String::from("## By subject\n\n");
+    for (title, page, entries) in &subjects {
+        let _ = writeln!(out, "- [{title}]({page}.md) ({})", entries.len());
+    }
+    const LEVELS: [&str; 5] = ["Foundations", "Practitioner", "Professional", "Advanced", "Expert"];
+    for (n, name) in (1u8..).zip(LEVELS) {
+        let these: Vec<_> = subjects
+            .iter()
+            .flat_map(|(title, page, entries)| entries.iter().map(move |(l, h)| (*l, h, title, page)))
+            .filter(|(l, ..)| *l == n)
+            .collect();
+        let _ = writeln!(out, "\n## Level {n}: {name} ({})\n", these.len());
+        for (_, heading, title, page) in these {
+            let short = heading.rsplit_once(" (level ").map_or(heading.as_str(), |(h, _)| h);
+            let _ = writeln!(out, "- [{short}]({page}.md#{}) ({title})", anchor(heading));
+        }
+    }
+    Ok(out)
+}
+
+fn with_nuance_lists(index: &str, lists: &str) -> Result<String> {
+    let (Some(start), Some(end)) = (index.find(NUANCES_BEGIN), index.find(NUANCES_END)) else {
+        bail!("nuances/index.md has no lists block (`{NUANCES_BEGIN}` … `{NUANCES_END}`)");
+    };
+    Ok(format!("{}{NUANCES_BEGIN}\n{lists}{}", &index[..start], &index[end..]))
 }
 
 fn pages() -> Result<Vec<Page>> {
@@ -85,7 +156,7 @@ fn index() -> String {
 Everything Ductus takes and gives, listed: every command, API operation, setting, Event Log ID, \
 metric and audit action. These pages are made from the engine itself (`ductus reference`), so \
 they always match the version they come with. The guides explain how the pieces fit together; \
-the [nuances](../nuances.md) say what could surprise you.
+the [nuances](../nuances/index.md) say what could surprise you.
 
 - [Command line](cli/index.md): every `ductus` command and option.
 - [REST API](api/index.md): every operation under `/api/v1`, who may call it, and what it takes \
@@ -886,9 +957,54 @@ mod tests {
     /// The pages that explain (the guides): not the reference, the nuances, the architecture or
     /// the database's description, which list rather than explain.
     fn guide(page: &str) -> bool {
-        const NOT: [&str; 6] =
-            ["SUMMARY.md", "STYLE.md", "nuances.md", "architecture.md", "schema.md", "shared-pool.md"];
-        !page.starts_with("reference/") && !NOT.contains(&page)
+        const NOT: [&str; 5] = ["SUMMARY.md", "STYLE.md", "architecture.md", "schema.md", "shared-pool.md"];
+        !page.starts_with("reference/") && !page.starts_with("nuances/") && !NOT.contains(&page)
+    }
+
+    /// The nuances' index lists every nuance, by subject and by level, as the pages have them now.
+    #[test]
+    fn the_nuances_index_is_current() {
+        let path = docs().join("nuances/index.md");
+        let text = std::fs::read_to_string(&path).unwrap().replace("\r\n", "\n");
+        let lists = super::nuance_lists(&docs()).unwrap();
+        assert!(lists.matches("\n- [").count() > 200, "too few nuances listed:\n{lists}");
+        assert!(
+            super::with_nuance_lists(&text, &lists).unwrap() == text,
+            "nuances/index.md is out of date: run `ductus reference docs` (check.sh does)"
+        );
+    }
+
+    /// No orphan nuance: every entry on the nuances' pages is linked from a guide page it affects,
+    /// so someone reading how to do a thing meets what could surprise them while doing it.
+    #[test]
+    fn every_nuance_is_linked_from_a_guide() {
+        let mut linked = std::collections::BTreeSet::new();
+        for (_, text) in pages().iter().filter(|(p, _)| guide(p)) {
+            for target in text.split("](").skip(1).filter_map(|rest| rest.split(')').next()) {
+                let Some((file, anchor)) = target.split_once('#') else { continue };
+                if let Some(page) = file.rsplit_once("nuances/").and_then(|(_, p)| p.strip_suffix(".md")) {
+                    linked.insert((page.to_string(), anchor.to_string()));
+                }
+            }
+        }
+        let (mut seen, mut orphans) = (0, Vec::new());
+        for (page, text) in pages().iter().filter(|(p, _)| p.starts_with("nuances/") && *p != "nuances/index.md") {
+            let page = page.trim_start_matches("nuances/").trim_end_matches(".md");
+            for heading in text.lines().filter_map(|l| l.strip_prefix("## ")) {
+                seen += 1;
+                let anchor = super::anchor(heading);
+                if !linked.contains(&(page.to_string(), anchor.clone())) {
+                    orphans.push(format!("{heading} (link it as nuances/{page}.md#{anchor})"));
+                }
+            }
+        }
+        assert!(seen > 200, "only {seen} nuances found: has the layout of docs/nuances/ changed?");
+        assert!(
+            orphans.is_empty(),
+            "{} nuances no guide page links to: link each from the page it affects (docs/STYLE.md):\n{}",
+            orphans.len(),
+            orphans.join("\n")
+        );
     }
 
     /// The `#anchor`s of reference/config/<page>.md that a page links to, as (page, anchor).

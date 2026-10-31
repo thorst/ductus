@@ -168,7 +168,7 @@ pub fn installed() -> Result<()> {
     let account = current()?.unwrap_or_default();
     let kind = Kind::of(&account);
     if kind != Kind::Computer {
-        // Where Group Policy owns the right, the next refresh may take this away again (nuances.md).
+        // Where Group Policy owns the right, the next refresh may take this away again (docs/nuances/windows.md).
         if let Err(e) = sid_of(&account).and_then(|sid| grant_logon_right(&sid)) {
             eventlog::write(
                 Event::Warning,

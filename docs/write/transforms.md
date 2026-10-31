@@ -25,7 +25,7 @@ Change it and return it:
   path, `msg.get("PV1-2")` / `msg.set("PV1-2", "IN")`. Paths are handy when the field is data
   (a table, below); positions read better in code.
 - **No copy needed.** Each destination's function already gets its own message as received, so
-  changing it can't affect another destination ([nuance](../nuances.md#copy-what-you-change-not-the-whole-thing-through-json-level-2)).
+  changing it can't affect another destination ([nuance](../nuances/transforms.md#copy-what-you-change-not-the-whole-thing-through-json-level-2)).
 - The reference for every way to read and write HL7 (components, repetitions, adding and removing
   segments, escaping) is [Formats: HL7 v2](formats.md#hl7-v2).
 
@@ -146,12 +146,12 @@ date. Keep these rules:
 
 - **Same message, same answer.** No `Math.random`, no `new Date()` in what you send, nothing kept
   from one message to the next except a bounded cache
-  ([nuance](../nuances.md#your-transform-can-run-more-than-once-for-the-same-message-level-3)).
+  ([nuance](../nuances/delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3)).
 - **Say why a message can't be handled**: `throw quarantine("…")` with what's wrong and which
   value, never `return null` for a broken message ([routes and filters](routes-and-filters.md#quarantine-for-a-person-to-look-at)).
 - **Ask once for many values**: a lookup per OBX in a loop is a round trip per OBX
-  ([nuance](../nuances.md#one-query-for-many-values-not-one-query-per-value-level-3)).
+  ([nuance](../nuances/transforms.md#one-query-for-many-values-not-one-query-per-value-level-3)).
 - **Big messages**: build objects with every property in the same order, and let per-message
-  objects go at the end ([nuance](../nuances.md#loops-over-thousands-of-items-give-objects-one-shape-level-4)).
+  objects go at the end ([nuance](../nuances/transforms.md#loops-over-thousands-of-items-give-objects-one-shape-level-4)).
 - **Keep it fast**: a function running past `timeout` (5 s by default) without waiting on
   anything is stopped and its message quarantined. For most HL7 transforms `500ms` is plenty.

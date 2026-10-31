@@ -56,7 +56,7 @@ itself, so MSH-9 is the message type, as in every spec.
   this.
 - **Missing reads as `""` and never throws**: a segment, field or component that isn't there
   is `""`, so code needs no null checks, but a wrong position is a quiet `""`. Test the fields you
-  map ([nuance](../nuances.md#missing-fields-read-as--and-never-throw-level-1)).
+  map ([nuance](../nuances/transforms.md#missing-fields-read-as--and-never-throw-level-1)).
 - **Writing into a segment the message doesn't have throws** ("message has no PV1 segment; add
   it first with msg.add("PV1")"): a missing segment is usually a mistake worth seeing.
 - **Simple fields read as text, composite ones as fields.** PV1-2 (a code) is a string;
@@ -127,7 +127,7 @@ What it shows, and why each part is there:
 - **A delivery can happen twice** (a lost answer, a resend), so each Observation carries an
   identifier made from the result itself and is created with `ifNoneExist`: the server creates it
   once and answers the repeat with the one it has
-  ([nuance](../nuances.md#a-message-can-be-delivered-twice-level-3)). Every FHIR create should
+  ([nuance](../nuances/delivery.md#a-message-can-be-delivered-twice-level-3)). Every FHIR create should
   have such a key.
 - **The patient is found by MRN** with a conditional reference (`Patient?identifier=…|123456`),
   which the server resolves inside the transaction: no lookup from your code first.

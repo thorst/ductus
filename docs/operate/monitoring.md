@@ -22,9 +22,9 @@ and what to graph.
 A destination shows the worst state that applies, worded with the numbers ("behind 1,240
 (oldest 12 min), catching up ~6 min"), and once a few weeks of history are in, why: a burst of
 arrivals, or a receiver slower than usual for this hour of the week
-([nuance](../nuances.md#burst-and-slow-receiver-need-a-few-weeks-of-history-level-3)).
+([nuance](../nuances/monitoring.md#burst-and-slow-receiver-need-a-few-weeks-of-history-level-3)).
 **Nothing is expected until you say so**: without `monitor:`, a quiet interface is *ok*, and a
-destination is *behind* only past a limit you set ([nuance](../nuances.md#nothing-is-expected-until-you-say-so-level-2)).
+destination is *behind* only past a limit you set ([nuance](../nuances/monitoring.md#nothing-is-expected-until-you-say-so-level-2)).
 
 **Set `behind` with both a count and an age** on every feed someone would phone about: a count
 alone misses an overnight stall when little arrives, an age alone misses a daytime pile-up that
@@ -46,7 +46,7 @@ adt-in → lab: 30 waiting in 8 of 8 lanes; blocked by message 381 (key 102001, 
   (5 more lanes waiting: --lanes N lists more)
 ```
 
-How to read the first line ([nuance](../nuances.md#finding-the-message-or-patient-that-holds-a-queue-up-level-3)):
+How to read the first line ([nuance](../nuances/monitoring.md#finding-the-message-or-patient-that-holds-a-queue-up-level-3)):
 
 - **"blocked by message M" while others were sent since it arrived**: the receiver is up and
   takes other messages; this one is the trouble (its content, or the receiver's data for that
@@ -60,12 +60,12 @@ How to read the first line ([nuance](../nuances.md#finding-the-message-or-patien
   help that key. A hot key that clears by itself is a burst; one that's hot every day is a feed
   to discuss with the sender.
 - **"a lane no worker reads"**: `ordering.partitions` was lowered while messages waited
-  ([nuance](../nuances.md#change-orderingpartitions-only-with-an-empty-queue-level-4)).
+  ([nuance](../nuances/ordering.md#change-orderingpartitions-only-with-an-empty-queue-level-4)).
 
 After a receiver comes back, the first message is tried at its next retry: the wait between tries
 doubles up to `retry.max_backoff_ms` (60 s by default), so a destination can show *stalled* for up
 to a minute after the receiver is back, then drains in order
-([nuance](../nuances.md#a-receiver-thats-back-can-stay-stalled-for-up-to-a-minute-level-2)).
+([nuance](../nuances/monitoring.md#a-receiver-thats-back-can-stay-stalled-for-up-to-a-minute-level-2)).
 
 ## Prometheus
 
@@ -111,12 +111,12 @@ Every metric, with its labels: [Prometheus metrics](../reference/metrics.md).
 | Database and API calls from code | `ductus_resource_call_seconds`, `ductus_resource_call_errors_total` |
 
 - **Counters start at zero when the engine starts**; `rate()` and `increase()` handle it. Graph
-  rates, not totals ([nuance](../nuances.md#counts-and-timings-start-at-zero-when-the-engine-starts-level-3)).
+  rates, not totals ([nuance](../nuances/monitoring.md#counts-and-timings-start-at-zero-when-the-engine-starts-level-3)).
   Queue sizes come from the database at each scrape and are always current.
 - **Timings are histogram buckets**: a p95 is good to about a bucket's width
-  ([nuance](../nuances.md#timings-are-estimates-to-a-bucket-averages-are-exact-level-4)).
+  ([nuance](../nuances/monitoring.md#timings-are-estimates-to-a-bucket-averages-are-exact-level-4)).
 - **About 65 series per destination**: on a hosted service that bills per series, drop what you
-  don't graph with `metric_relabel_configs` ([nuance](../nuances.md#prometheus-series-grow-with-destinations-level-4)).
+  don't graph with `metric_relabel_configs` ([nuance](../nuances/monitoring.md#prometheus-series-grow-with-destinations-level-4)).
 
 ### Alerting from Prometheus
 

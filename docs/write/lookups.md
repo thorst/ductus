@@ -18,7 +18,7 @@ engine can time each call, retry what's temporary, mock it in tests and list it 
 
 **Write the name out**: `db("provider_db")`, not `db(name)`. `ductus validate` then checks the
 database exists, and `ductus impact` knows this interface uses it; a name in a variable gets a
-warning (`DX4`) because neither can see it ([nuance](../nuances.md#write-resource-names-out-dbpatient_db-not-dbname-level-2)).
+warning (`DX4`) because neither can see it ([nuance](../nuances/databases-and-apis.md#write-resource-names-out-dbpatient_db-not-dbname-level-2)).
 
 ## A database lookup
 
@@ -43,12 +43,12 @@ async function npiOf(ehrId: string): Promise<string> {
   Values from a message are whatever the sender sent.
 - **SQL Server** sends text parameters as `nvarchar`: compared with an indexed `varchar` column,
   that can turn an index seek into a scan. Cast it: `WHERE ehr_id = CAST($1 AS varchar(20))`.
-  One statement and one result set per call ([nuance](../nuances.md#sql-server-one-result-set-one-batch-per-call-level-3)).
+  One statement and one result set per call ([nuance](../nuances/databases-and-apis.md#sql-server-one-result-set-one-batch-per-call-level-3)).
 - **Not found is a decision.** Here an unknown provider is quarantined, because billing can't
   bill without the NPI. For an optional field, leave it out instead. Never send a guess.
 - **Many values, one query**: looking up every OBX's code one at a time is a round trip each.
   Collect them and ask once (an array parameter is `jsonb` in Postgres)
-  ([nuance](../nuances.md#one-query-for-many-values-not-one-query-per-value-level-3)).
+  ([nuance](../nuances/transforms.md#one-query-for-many-values-not-one-query-per-value-level-3)).
 - **Writes must be safe to repeat.** A message's code can run again (a retry, a resend), so an
   `execute` that inserts uses the message's `meta.id` as a key, or an upsert.
 - The login, host and TLS of the database are in resources.yaml, with the password in a secret;
@@ -61,11 +61,11 @@ anything that changes rarely and is asked often (providers, locations, a code li
 100,000 messages a day then makes a few hundred queries, not 100,000.
 
 - **A cache lives in one isolate**: each worker thread has its own copy, and it's empty after a
-  restart ([nuance](../nuances.md#module-level-caches-live-until-the-engine-restarts-level-2)).
+  restart ([nuance](../nuances/shared-pool.md#module-level-caches-live-until-the-engine-restarts-level-2)).
   Fine for a cache; never use it for anything that must be counted or remembered.
 - **Bound it**: keyed by something with a known number of values (providers), with a time limit.
   A cache keyed by patient grows with every patient until the engine restarts and counts toward
-  the isolate's memory ([nuance](../nuances.md#short-lived-objects-are-cheap-what-you-keep-is-what-costs-level-4)).
+  the isolate's memory ([nuance](../nuances/transforms.md#short-lived-objects-are-cheap-what-you-keep-is-what-costs-level-4)).
 - **Choose the time by how wrong a stale answer is**: an NPI an hour old is fine; a patient's
   current insurance probably isn't.
 
@@ -83,12 +83,12 @@ export async function enterpriseId(mrn: string): Promise<string> {
 
 - **`api("name")`** sends to a path under the API's URL from resources.yaml, with its headers
   (the token) and TLS added by the engine: credentials never pass through your code. Prefer it
-  to `fetch()` for anything with a token ([nuance](../nuances.md#api-headers-the-apis-then-yours-level-2)).
+  to `fetch()` for anything with a token ([nuance](../nuances/databases-and-apis.md#api-headers-the-apis-then-yours-level-2)).
 - **`fetch(url, options)`** for a URL of its own: `method`, `headers`, `body` (an object is sent as
   JSON), `query`, `timeout` (ms, default 30 s).
 - **Temporary failures wait and retry by default**: a network error, a timeout, 408, 429 or a 5xx
   makes the message wait (in order) and try again later, so an API that's down for ten minutes
-  costs ten minutes, not a quarantine ([nuance](../nuances.md#fetch-and-api-retry-5xx-408-and-429-by-default-level-3)).
+  costs ten minutes, not a quarantine ([nuance](../nuances/databases-and-apis.md#fetch-and-api-retry-5xx-408-and-429-by-default-level-3)).
   Every other status comes back to your code to decide: check `r.status` or `r.ok`.
 - **`retry: false`** gives you every status and turns network errors into ordinary errors (which
   quarantine unless you catch them): for a call whose failure shouldn't hold the message up,
@@ -151,4 +151,4 @@ already maintains, is the way.
 An HTTP source in `respond` mode answers the caller from your code, so lookups there are on the
 caller's clock. Calls that don't depend on each other should run together:
 `const [a, b] = await Promise.all([db("x").one(…), api("y").get(…)])`, not one after the other
-([nuance](../nuances.md#in-respond-mode-calls-run-one-after-another-unless-you-await-them-together-level-2)).
+([nuance](../nuances/monitoring.md#in-respond-mode-calls-run-one-after-another-unless-you-await-them-together-level-2)).

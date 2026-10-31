@@ -27,9 +27,9 @@ api:
 
 Without `tls`, passwords and tokens cross the network readable and the web UI's sign-in doesn't
 work at all (its cookie is only sent over HTTPS:
-[nuance](nuances.md#the-api-on-the-network-needs-tls-level-1)). Keep `127.0.0.1` in the list, or
+[nuance](nuances/tls-listening.md#the-api-on-the-network-needs-tls-level-1)). Keep `127.0.0.1` in the list, or
 commands run on the server itself are refused
-([nuance](nuances.md#list-127001-on-the-api-if-you-use-it-from-its-own-server-level-2)).
+([nuance](nuances/allow.md#list-127001-on-the-api-if-you-use-it-from-its-own-server-level-2)).
 Developers need this port and whatever they deploy with (SSH, Git), nothing more.
 
 **Interfaces' listeners**: each MLLP source has a port of its own; HTTP sources can share one,
@@ -49,7 +49,7 @@ The engine checks who may connect itself too: `allow:` on a source lists the sen
 subnets or host names, and anyone else is disconnected before a byte is read
 ([who may connect](configure/sources.md#who-may-connect-allow)). Keep the firewall rules as well:
 each catches the other's mistakes
-([nuance](nuances.md#its-defence-in-depth-next-to-the-firewall-level-2)).
+([nuance](nuances/allow.md#its-defence-in-depth-next-to-the-firewall-level-2)).
 
 A port below 1024 (MLLP on 104, say) needs a capability under the Linux package's service; the
 unit file says which two lines to add with `systemctl edit ductus`. Above 1024 needs nothing.
@@ -99,7 +99,7 @@ each one it prints the **source address** the connection left from: that is the 
 firewall request must name, which on a server with several networks isn't always the one you'd
 guess. `--report doctor.txt` saves it as text for the network team or a vendor (`doctor.json`
 as JSON)
-([what a pass means](nuances.md#a-pass-means-can-connect-and-log-in-not-will-accept-your-messages-level-2)).
+([what a pass means](nuances/doctor.md#a-pass-means-can-connect-and-log-in-not-will-accept-your-messages-level-2)).
 
 ## Opening a range on the server itself
 

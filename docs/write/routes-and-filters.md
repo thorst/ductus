@@ -57,22 +57,22 @@ export function toBilling(msg: Message) {
 
 Each destination names its function with `transform:`. Both get the message **as it was
 received**: `toLab` changing the patient class and removing Z segments changes nothing for
-`toBilling` ([nuance](../nuances.md#each-destination-runs-its-own-function-on-the-original-message-level-2)).
+`toBilling` ([nuance](../nuances/destinations.md#each-destination-runs-its-own-function-on-the-original-message-level-2)).
 So "route ADT to the lab, and admissions and discharges to billing" is two functions of a few
 lines, each tested on its own, and a message can go to both, either or neither.
 
 What each destination has of its own, and why that's the point of routing this way:
 
 - **Its own queue and order.** The lab down for an upgrade holds up only the lab; billing keeps
-  receiving ([nuance](../nuances.md#one-destination-down-holds-up-only-itself-level-2)).
+  receiving ([nuance](../nuances/destinations.md#one-destination-down-holds-up-only-itself-level-2)).
 - **Its own outcome.** The lab can quarantine a message billing sent; the message shows both
-  ([nuance](../nuances.md#filtering-and-quarantine-are-per-destination-level-2)).
+  ([nuance](../nuances/destinations.md#filtering-and-quarantine-are-per-destination-level-2)).
 - **Its own pause, retries, rate limit and alerts** ([delivery](../configure/delivery.md)).
 
 **When to split instead.** Past a handful of destinations, or when destinations belong to
 different teams who change them on different days, give each receiver an interface of its own
 and route to it ([below](#to-another-interface)): each then has its own code, owner, tests and
-deploys ([when to split](../nuances.md#many-destinations-on-one-interface-when-to-split-level-3)).
+deploys ([when to split](../nuances/destinations.md#many-destinations-on-one-interface-when-to-split-level-3)).
 
 ## To another interface
 
@@ -94,10 +94,10 @@ destination:
 A destination with `interface: adt-to-billing` puts the message into that interface's queue, in
 the same database transaction that marks it sent from here. Nothing crosses a network, and
 nothing is lost or sent twice between the two
-([nuance](../nuances.md#a-route-is-exactly-once-inside-the-engine-not-beyond-it-level-3)).
+([nuance](../nuances/routes.md#a-route-is-exactly-once-inside-the-engine-not-beyond-it-level-3)).
 The receiving interface has `source: internal` and is an interface like any other: its own code,
 ordering key, dedupe, destinations, retries, owner and alerts
-([nuance](../nuances.md#the-receiving-interfaces-keys-dedupe-and-destinations-apply-level-2)).
+([nuance](../nuances/routes.md#the-receiving-interfaces-keys-dedupe-and-destinations-apply-level-2)).
 Its code sees `meta.origin`: the message's id in the interface it came from.
 
 Use a route to:
@@ -114,11 +114,11 @@ What to know:
   only *whether* this destination sends (`null` or the message). That's what lets
   `ductus validate` refuse a loop and check that the receiving interface reads the format this
   one writes, and `ductus impact` follow a vendor's messages through every hop
-  ([nuance](../nuances.md#routes-are-fixed-in-interfaceyaml-and-loops-are-refused-level-2)).
+  ([nuance](../nuances/routes.md#routes-are-fixed-in-interfaceyaml-and-loops-are-refused-level-2)).
 - **Order holds across a route** when the sending interface keeps it (an ordering key), and the
-  receiving one has a key too ([nuance](../nuances.md#order-holds-across-a-route-when-the-sender-keeps-it-level-4)).
+  receiving one has a key too ([nuance](../nuances/routes.md#order-holds-across-a-route-when-the-sender-keeps-it-level-4)).
 - **A routed message waits up to 20 ms** before the next interface sees it: nothing a feed
-  notices ([nuance](../nuances.md#a-routed-message-waits-up-to-20-ms-before-the-next-interface-sees-it-level-4)).
+  notices ([nuance](../nuances/routes.md#a-routed-message-waits-up-to-20-ms-before-the-next-interface-sees-it-level-4)).
 
 ## Quarantine: for a person to look at
 
@@ -145,7 +145,7 @@ every case you can foresee: its reason is yours, not a stack trace.
 **Quarantine doesn't stop the queue.** The next message for that destination goes on, so one bad
 message doesn't hold up the feed. Messages that wait instead, in order, are the ones that hit a
 *temporary* failure: a receiver or database that's down. Those are tried again until they go
-([nuance](../nuances.md#temporary-failures-retry-forever-by-default-level-3)).
+([nuance](../nuances/ordering.md#temporary-failures-retry-forever-by-default-level-3)).
 
 ## Routing by sender or event without code
 

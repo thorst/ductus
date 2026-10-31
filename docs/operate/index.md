@@ -42,7 +42,7 @@ it.
 | A destination **behind** | It's sending, but slower than messages arrive: the receiver is slow, or a rate limit |
 | A destination in **error** | Quarantined messages: [the quarantine](resend.md) |
 | An interface **silent** or **missed** | Nothing received when it should have been: the sender, or the network between |
-| An interface **stopped** | Its code ran away or ran out of memory three times: the logs and the quarantined messages say which message ([nuance](../nuances.md#a-runaway-message-is-quarantined-three-in-a-row-stop-the-interface-level-2)) |
+| An interface **stopped** | Its code ran away or ran out of memory three times: the logs and the quarantined messages say which message ([nuance](../nuances/runaway.md#a-runaway-message-is-quarantined-three-in-a-row-stop-the-interface-level-2)) |
 | A sender says **connection refused** | Is the engine running, draining, or refusing it by `allow:`? [Logs](logs.md#what-the-lines-mean), `ductus doctor` |
 | A **TLS** handshake fails | The engine logs the reason once a minute per sender; `ductus cert show` and `ductus doctor` ([TLS](../configure/tls.md)) |
 

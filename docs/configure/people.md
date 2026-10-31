@@ -18,9 +18,9 @@ Two **permissions** go on top of a role, given only to the people who need them:
 - **`payloads`**: read message contents, which is usually patient data (and edit them, as an
   operator). Without it the message page shows status, destinations and errors, and says the
   payload is hidden. Every read is in the audit log, written before the payload is shown
-  ([nuance](../nuances.md#reading-payloads-is-a-permission-not-part-of-a-role-level-4)).
+  ([nuance](../nuances/people.md#reading-payloads-is-a-permission-not-part-of-a-role-level-4)).
 - **`audit`**: read and export the audit log. For compliance and security staff, not operators
-  ([nuance](../nuances.md#the-audit-log-records-who-did-what-and-what-it-leaves-out-level-2)).
+  ([nuance](../nuances/people.md#the-audit-log-records-who-did-what-and-what-it-leaves-out-level-2)).
 
 ## Accounts
 
@@ -43,7 +43,7 @@ alerts reach them.
   characters (length matters more). Stored as argon2id hashes.
 - **Lockout**: five wrong passwords for one username within 15 minutes lock it for 15 minutes
   (`auth.lockout`); `ductus user unlock ben` or the Users page unlocks it at once
-  ([nuance](../nuances.md#passwords-lockout-and-what-a-disabled-account-loses-level-2)).
+  ([nuance](../nuances/people.md#passwords-lockout-and-what-a-disabled-account-loses-level-2)).
 - **Disable** (`ductus user disable ben`, or the Users page) ends their sessions at once and stops
   every token of theirs. Accounts are never deleted: their history in the audit log stays theirs.
   The last admin can't be disabled or demoted.
@@ -117,35 +117,45 @@ auth:
 - **The directory entry** ([`ldap`](../reference/config/resources.md#ldap)): `ldaps://` (port
   636), or `ldap://` with `starttls: true`. Plain `ldap://` is refused unless `insecure: true`,
   which is only for a test directory on the same machine: passwords would cross the network
-  readable ([nuance](../nuances.md#the-directory-connection-is-tls-verified-like-the-rest-level-3)).
+  readable ([nuance](../nuances/people.md#the-directory-connection-is-tls-verified-like-the-rest-level-3)).
   The service account (`bind_dn`) needs read access to people and groups, nothing else; give it a
   password that doesn't expire, or note when it does: an expired one stops directory sign-ins.
 - **Who may sign in**: people under `user_base`, found by `user_filter`
   (`(sAMAccountName={username})` by default; `(uid={username})` for OpenLDAP and FreeIPA), and in
   at least one role group. The highest role their groups give wins; `permissions` groups add to
   it. Someone in no role group is told they have no access
-  ([nuance](../nuances.md#signing-in-with-the-directory-local-names-first-groups-decide-the-role-level-2)).
+  ([nuance](../nuances/people.md#signing-in-with-the-directory-local-names-first-groups-decide-the-role-level-2)).
 - **Write several groups one per line**, as above, never `[a, b]`: DNs have commas
-  ([nuance](../nuances.md#write-several-group-dns-one-per-line-not-a-b-level-2)).
+  ([nuance](../nuances/people.md#write-several-group-dns-one-per-line-not-a-b-level-2)).
 - **Their account** is made at their first sign-in, marked as a directory account; its role,
   permissions, name and email are the directory's, read-only here. An admin can still disable it.
 - **Removal reaches Ductus within `refresh`** (15 minutes by default): someone taken out of the
   groups, disabled or deleted in the directory loses their sessions and tokens at the next
   refresh. For someone who must lose access now, disable them on the Users page first
-  ([nuance](../nuances.md#a-person-removed-from-the-groups-loses-access-within-refresh-level-2)).
+  ([nuance](../nuances/people.md#a-person-removed-from-the-groups-loses-access-within-refresh-level-2)).
 - **A renamed person keeps their account** (found by their directory id, `objectGUID` or
   `entryUUID`), and a sign-in name given to someone new gets a new account
-  ([nuance](../nuances.md#a-renamed-directory-person-keeps-one-account-a-reused-name-gets-a-new-one-level-2)).
+  ([nuance](../nuances/people.md#a-renamed-directory-person-keeps-one-account-a-reused-name-gets-a-new-one-level-2)).
 - **Nested groups**: `nested: true` counts members of groups inside the configured ones. Prefer
   direct membership: one search per group, easy to audit
-  ([nuance](../nuances.md#nested-groups-active-directory-answers-other-directories-are-walked-level-4)).
+  ([nuance](../nuances/people.md#nested-groups-active-directory-answers-other-directories-are-walked-level-4)).
 
 **Keep one local admin** (`ductus user create … --role admin`), with a long password the on-call
 can reach: when the directory is down, directory sign-ins are refused ("the directory can't be
 reached right now") but local accounts and open sessions keep working
-([nuance](../nuances.md#when-the-directory-is-down-level-2)). A name a local account holds is
+([nuance](../nuances/people.md#when-the-directory-is-down-level-2)). A name a local account holds is
 always checked locally, so the directory can't take it over.
 
 **Active Directory has not been tested against yet** (the tests use OpenLDAP); its
 transitive-membership filter for nested groups is unit-tested, and the first pilot with a domain
 verifies it.
+
+More on directory accounts:
+
+- **A person deleted and made again in the directory** is a new id there, so a new account here:
+  it can't be linked to the old one, which is refused at the next refresh
+  ([nuance](../nuances/people.md#a-new-directory-account-for-the-same-person-cant-be-linked-to-the-old-one-level-2)).
+- **OpenLDAP** follows a renamed person in their groups only with its `refint` overlay
+  ([nuance](../nuances/people.md#openldap-group-membership-follows-a-rename-only-with-refint-level-3)).
+- **Wrong passwords count twice**: towards Ductus's lockout and towards the directory's own
+  ([nuance](../nuances/people.md#wrong-passwords-count-twice-here-and-in-the-directory-level-3)).

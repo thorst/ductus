@@ -18,12 +18,12 @@ The rules are the project's: whole partitions dropped, kept at least the window,
 ever deleted, a shorter window waiting for `ductus retention confirm adt-in`
 ([how long messages are kept](ductus-yaml.md#how-long-messages-are-kept)). Change it per interface
 when its feed is far busier or far more looked-back-on than the rest. One change at a time per
-interface ([nuance](../nuances.md#one-retention-change-at-a-time-per-interface-level-3)).
+interface ([nuance](../nuances/retention.md#one-retention-change-at-a-time-per-interface-level-3)).
 
 [`quarantined`](../reference/config/interface.md#quarantined) is the same choice as the project's,
 for this interface's quarantined messages past the window: `keep` them in the held area until
 someone resends, corrects or dismisses them, or `purge` them with the rest
-([nuance](../nuances.md#quarantined-messages-are-kept-until-resolved-unless-you-say-purge-level-2)).
+([nuance](../nuances/retention.md#quarantined-messages-are-kept-until-resolved-unless-you-say-purge-level-2)).
 
 Neither applies to an HTTP source in `respond` mode: it keeps nothing.
 
@@ -32,7 +32,7 @@ Neither applies to an HTTP source in `respond` mode: it keeps nothing.
 The engine can't know that a quiet feed is a problem: ADT from an EHR that stops for half an hour
 in the afternoon is an outage, a lab's nightly file that doesn't come by 07:00 is one too, and a
 test feed that's quiet all week is fine. So **nothing is expected until you say so**
-([nuance](../nuances.md#nothing-is-expected-until-you-say-so-level-2)), in the terms the receiving
+([nuance](../nuances/monitoring.md#nothing-is-expected-until-you-say-so-level-2)), in the terms the receiving
 team uses, with [`monitor`](../reference/config/interface.md#monitor):
 
 ```yaml
@@ -61,7 +61,7 @@ Besides these, some states need no setting: a destination with messages waiting 
 nothing for a minute is **stalled**, one with quarantined messages is in **error**, an interface
 whose code was stopped is **stopped**, and a paused destination is **paused** (never an alert).
 The web UI, `ductus status` and Prometheus show them all
-([what each state means](../nuances.md#what-each-state-means-and-when-it-shows-level-2)).
+([what each state means](../nuances/monitoring.md#what-each-state-means-and-when-it-shows-level-2)).
 
 ## Who hears: `alert`
 
@@ -83,5 +83,5 @@ alert:
 ```
 
 `to: [owner]` reaches whoever the interface's (or the destination's) `owner` names
-([who "owner" is](../nuances.md#who-owner-is-level-2)). `mute` sends nothing about this interface;
+([who "owner" is](../nuances/alerts.md#who-owner-is-level-2)). `mute` sends nothing about this interface;
 its alerts still open and show in the web UI, so nothing is hidden from people who look.

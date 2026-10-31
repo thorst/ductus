@@ -14,6 +14,25 @@ async fn store() -> Option<Store> {
     Some(Store::connect(&url, 4).await.expect("connecting to test database"))
 }
 
+/// The engine's start says in words what was wrong with its database URL, not the server's text
+/// with its internal source line ("… at line 1016").
+#[tokio::test]
+async fn a_wrong_database_url_is_said_in_words() {
+    let Some(url) = std::env::var("DUCTUS_TEST_DATABASE_URL").ok() else { return };
+    let mut nowhere = url::Url::parse(&url).unwrap();
+    nowhere.set_path("/ductus_no_such_database");
+    let e = Store::connect(nowhere.as_str(), 1).await.err().expect("no such database").to_string();
+    assert!(e.contains("there's no database `ductus_no_such_database` on that server"), "{e}");
+    assert!(!e.contains(" at line "), "{e}");
+    // A server that trusts local logins takes any password: then there's nothing to check.
+    let mut wrong = url::Url::parse(&url).unwrap();
+    wrong.set_password(Some("not-the-password")).unwrap();
+    if let Err(e) = Store::connect_read_only(wrong.as_str()).await {
+        let user = wrong.username().to_string();
+        assert!(e.to_string().contains(&format!("the password for `{user}` was refused")), "{e}");
+    }
+}
+
 /// A test interface (unique per test and run, so tests can share one database) and its
 /// registered destinations.
 struct Iface {

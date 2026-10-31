@@ -18,10 +18,10 @@ correction start from.
 lab's code on the stored original again, which gives what was sent as long as the code hasn't
 changed since. Where you must be able to *prove* what went out (a receiver that disputes it, a
 regulator), turn on `save_output` for that destination; it costs about 1.15 GB per million
-deliveries ([nuance](../nuances.md#only-the-original-is-stored-outputs-are-recomputed-level-3)).
+deliveries ([nuance](../nuances/delivery.md#only-the-original-is-stored-outputs-are-recomputed-level-3)).
 
 An HTTP source in `respond` mode stores nothing: its requests are answered from code, not queued
-([nuance](../nuances.md#respond-mode-http-requests-arent-stored-level-3)).
+([nuance](../nuances/ordering.md#respond-mode-http-requests-arent-stored-level-3)).
 
 ## Statuses
 
@@ -81,11 +81,13 @@ ORDER BY id;
   officer would let read every message, and prefer selecting ids and keys (as above) over
   `payload`.
 
+Why not yet, and what's planned: [nuance](../nuances/monitoring.md#theres-no-search-by-message-content-yet-level-1).
+
 ## Who can see what
 
 - Everyone signed in sees messages' metadata (ids, statuses, errors, keys).
 - **Payloads** need the `payloads` permission, and every read is logged before it's shown, once
-  per reader per message per 10 minutes ([nuance](../nuances.md#payload-reads-are-logged-before-they-are-shown-level-3)).
+  per reader per message per 10 minutes ([nuance](../nuances/people.md#payload-reads-are-logged-before-they-are-shown-level-3)).
   The message's page lists **who viewed the payload**.
 - **Errors can hold data**: a receiver's AR text or a quarantine reason may quote a field. Write
   quarantine reasons that name the field and the problem, not the patient.

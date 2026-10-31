@@ -71,7 +71,7 @@ adt-in               ok, received 1 min ago
 
 For a receiver's planned downtime (an upgrade, a weekend cut-over), pause its destination
 **before** it goes down: nothing is sent or retried, messages keep arriving and wait in order,
-and a paused destination never alerts ([nuance](../nuances.md#pausing-a-destination-at-once-no-questions-and-it-holds-level-2)).
+and a paused destination never alerts ([nuance](../nuances/destinations.md#pausing-a-destination-at-once-no-questions-and-it-holds-level-2)).
 
 ```text
 $ ductus pause adt-in lab
@@ -133,12 +133,19 @@ accepting: taking new messages
 
 - `--stop` exits the engine once drained (the service manager then sees a clean stop).
 - **Senders are refused while it drains**, on purpose: they hold their messages and resend once
-  the engine takes them again ([nuance](../nuances.md#a-stopped-service-a-failed-start-and-a-drain-refuse-connections-on-purpose-level-2)).
+  the engine takes them again ([nuance](../nuances/upgrades.md#a-stopped-service-a-failed-start-and-a-drain-refuse-connections-on-purpose-level-2)).
 - **A drain isn't needed for an upgrade or a project deploy** on Linux: `systemctl reload ductus`
   hands over without refusing anything ([high availability](high-availability.md#deploying-and-upgrading-without-a-gap)).
 - A drain finishes only when every destination has caught up, so a receiver that's down keeps it
-  draining ([nuance](../nuances.md#a-drain-finishes-only-when-every-destination-has-caught-up-level-4)).
+  draining ([nuance](../nuances/drain-and-api.md#a-drain-finishes-only-when-every-destination-has-caught-up-level-4)).
   Drain mode isn't remembered across a restart.
+
+What a drain does to each kind of interface: MLLP listeners close (a message half received when
+it started is the sender's to send again: no AE is answered,
+[nuance](../nuances/drain-and-api.md#draining-closes-mllp-listeners-it-doesnt-answer-ae-level-4)); respond-mode HTTP keeps answering, since
+nothing waits in a queue for it ([nuance](../nuances/drain-and-api.md#respond-mode-http-keeps-answering-while-draining-level-4)); and a drain isn't
+remembered across a restart: a restarted engine takes messages again
+([nuance](../nuances/drain-and-api.md#drain-mode-isnt-remembered-across-a-restart-level-4)).
 
 ## Alerts
 
@@ -184,13 +191,20 @@ checked 5 connection(s) in 0.0 s: 4 ok, 1 warning(s), 0 failed
 - **Run it after any network change**, a firewall request, a certificate renewal, and when a
   destination is stalled and you want to know whether the receiver is reachable at all.
 - A **pass** means "can connect and log in", not "will accept your messages"
-  ([nuance](../nuances.md#a-pass-means-can-connect-and-log-in-not-will-accept-your-messages-level-2)).
+  ([nuance](../nuances/doctor.md#a-pass-means-can-connect-and-log-in-not-will-accept-your-messages-level-2)).
 - The `commits` line is the store's disk: on a laptop (here) it's quick; on a server, what it
   says per sender connection is the ceiling for strict senders. A port "in use" while the engine
   runs is expected, as here.
 - The engine runs the certificate part of it on its own every 6 hours
   ([`doctor`](../reference/config/ductus.md#doctor) in ductus.yaml); the console's
   **Connections** page shows the last runs and has **Check now**.
+
+- **It checks from where it runs.** DNS, routes, firewalls and the source address in a firewall
+  request are this machine's: a laptop on the VPN and the engine's server can get opposite
+  answers. Run it on the server ([nuance](../nuances/doctor.md#doctor-checks-from-where-it-runs-level-2)).
+- **A name with several addresses** (IPv4 and IPv6, a cluster) passes when one of them works,
+  with a warning: the engine may try a failing one first and be slow
+  ([nuance](../nuances/doctor.md#one-working-address-is-enough-to-pass-with-a-warning-level-3)).
 
 ## Who did what: `ductus audit export`
 

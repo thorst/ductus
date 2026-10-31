@@ -50,17 +50,17 @@ quarantined: keep
 - **Why only three:** each window is a set of partitions of the message tables, and old messages
   go by dropping a whole partition at once, which costs nothing however busy the feed. Deleting
   rows one at a time, as engines with any number of days must, slows the busiest tables and
-  bloats them ([nuance](../nuances.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1)).
+  bloats them ([nuance](../nuances/retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1)).
 - **Kept at least the window**, and gone within a day (`1w`) or a week (`3w`, `7w`) after it.
 - **Nothing waiting is ever deleted.** A message still waiting for a destination past the window
   moves to the held area and is sent when it can be
-  ([nuance](../nuances.md#pending-messages-are-never-purged-past-the-window-theyre-held-level-2)).
+  ([nuance](../nuances/retention.md#pending-messages-are-never-purged-past-the-window-theyre-held-level-2)).
 - **Choose** the window that covers how far back your team looks into problems: `1w` for busy
   feeds nobody looks back on, `7w` where problems surface weeks later (billing, a monthly
   reconciliation). Longer history belongs in the source system or an archive, not here.
 - **Shortening it later deletes messages**, so the engine waits for
   `ductus retention confirm <interface>` before it applies; a longer window applies at once
-  ([nuance](../nuances.md#shortening-retention-deletes-messages-so-it-needs-a-confirmation-level-2)).
+  ([nuance](../nuances/retention.md#shortening-retention-deletes-messages-so-it-needs-a-confirmation-level-2)).
 
 [`quarantined`](../reference/config/ductus.md#quarantined) says what happens to quarantined
 messages (ones a destination refused for good, or the code rejected) once the window has passed:
@@ -97,6 +97,10 @@ api:
 Every call needs a token or a signed-in person either way: the network settings decide who can
 reach the port, not who may do what ([people](people.md)).
 
+By default the API and the console listen on this machine only. Anyone else reaches them once you
+set `api.listen` to an address on the network, and then they need `tls`
+([nuance](../nuances/drain-and-api.md#the-api-listens-on-this-machine-only-until-you-open-it-level-4)).
+
 ## Signing in
 
 [`auth`](../reference/config/ductus.md#auth) sets how people sign in to the web UI and the API:
@@ -123,7 +127,12 @@ audit:
   documentation period; ask your compliance office for yours. Older rows are deleted hourly.
 - **`payload_reads`**: with patient data, who looked matters as much as who changed. Turn it off
   only where messages hold no personal data. Reading needs the `payloads` permission either way
-  ([nuance](../nuances.md#payload-reads-are-logged-before-they-are-shown-level-3)).
+  ([nuance](../nuances/people.md#payload-reads-are-logged-before-they-are-shown-level-3)).
+
+The audit log and the messages it names are kept for different times: the log for `audit.keep`
+(six years), a message for its interface's retention, so an audit row can outlive the payload it
+mentions ([nuance](../nuances/people.md#copies-of-payloads-and-the-audit-log-are-kept-for-different-times-level-3)). An engine that crashed shows in the log as a
+start whose previous run never stopped ([nuance](../nuances/people.md#a-crash-shows-in-the-audit-log-level-3)).
 
 ## Alerts and owners
 
@@ -153,7 +162,7 @@ doctor:
 - **Turn it off** only if something else watches every certificate the engine connects to.
 - The first check runs a minute or two after the engine starts, at a random moment, so engines
   started together don't check together
-  ([nuance](../nuances.md#the-engine-checks-certificates-by-itself-and-logs-in-to-nothing-level-2)).
+  ([nuance](../nuances/certificates.md#the-engine-checks-certificates-by-itself-and-logs-in-to-nothing-level-2)).
 
 ## Memory for interface code
 
@@ -169,8 +178,8 @@ a few MB, so that's a ceiling, not what you'll see.
   until a restart. The engine and every other interface keep running.
 - **In the shared pool the limit is shared** by every interface on the thread, so the one that
   runs out isn't always the one that filled it: a cache in another interface that only grows
-  ([nuance](../nuances.md#the-heap-limit-is-shared-by-everything-in-an-isolate-level-4),
-  [what you keep is what costs](../nuances.md#short-lived-objects-are-cheap-what-you-keep-is-what-costs-level-4)).
+  ([nuance](../nuances/runaway.md#the-heap-limit-is-shared-by-everything-in-an-isolate-level-4),
+  [what you keep is what costs](../nuances/transforms.md#short-lived-objects-are-cheap-what-you-keep-is-what-costs-level-4)).
 - **Raise it** for code that holds a lot on purpose (a large lookup table loaded once), or give
   that interface `isolation: dedicated` with its own isolates. **Lower it** on a small server
   with many cores, so the ceiling fits in its memory.

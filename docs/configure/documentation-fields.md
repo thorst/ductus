@@ -88,10 +88,10 @@ and on every resources.yaml entry.)
 ## What to know
 
 - **Checked by `ductus validate`, not by the engine**: a wrong value is a validate error and
-  nothing else ([nuance](../nuances.md#your-own-documentation-fields-are-checked-by-ductus-validate-not-by-the-engine-level-2)).
+  nothing else ([nuance](../nuances/impact.md#your-own-documentation-fields-are-checked-by-ductus-validate-not-by-the-engine-level-2)).
   Run validate in CI and the fields stay filled.
 - **The web UI shows them as of the engine's last start**: it keeps a snapshot from the project
-  it started with ([nuance](../nuances.md#the-documentation-snapshot-is-as-old-as-the-last-engine-start-level-3)).
+  it started with ([nuance](../nuances/impact.md#the-documentation-snapshot-is-as-old-as-the-last-engine-start-level-3)).
 - **Read-only in the web UI**: a change is a commit, reviewed like any other.
 - Keys are yours to choose, except names Ductus already uses beside `custom` (`name`, `owner`,
   `vendor`, …).

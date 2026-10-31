@@ -54,9 +54,42 @@ pub fn init() {
 /// taken over from), else on a new one (which systemd is then given to keep).
 pub async fn listen(host: &str, port: u16) -> io::Result<TcpListener> {
     #[cfg(target_os = "linux")]
-    return linux::SOCKETS.listen(host, port).await;
+    let listening = linux::SOCKETS.listen(host, port).await;
     #[cfg(not(target_os = "linux"))]
-    TcpListener::bind((host, port)).await
+    let listening = TcpListener::bind((host, port)).await;
+    listening.map_err(|e| in_use(e, port))
+}
+
+/// "Address already in use" says nothing about what to do: name the port and how to find what
+/// holds it.
+fn in_use(e: io::Error, port: u16) -> io::Error {
+    if e.kind() != io::ErrorKind::AddrInUse {
+        return e;
+    }
+    let find = if cfg!(windows) {
+        format!("`netstat -ano | findstr :{port}` (the last column is its process id)")
+    } else {
+        format!("`sudo ss -ltnp 'sport = :{port}'`")
+    };
+    io::Error::new(
+        io::ErrorKind::AddrInUse,
+        format!(
+            "port {port} is in use: another program listens on it (another engine, or a test tool); find it with \
+             {find}, or give this one another port"
+        ),
+    )
+}
+
+#[cfg(test)]
+mod in_use_tests {
+    #[tokio::test]
+    async fn a_port_in_use_says_how_to_find_what_holds_it() {
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = holder.local_addr().unwrap().port();
+        let e = super::listen("127.0.0.1", port).await.unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse);
+        assert!(e.to_string().starts_with(&format!("port {port} is in use: another program listens on it")), "{e}");
+    }
 }
 
 /// The listener on `host:port` is about to close for a while (a drain): systemd mustn't keep it
