@@ -18,7 +18,12 @@ create-missing = false
 git-repository-url = "https://github.com/thorst/ductus"
 edit-url-template = "https://github.com/thorst/ductus/edit/main/docs/{path}"
 no-section-label = true
+# docs.getductus.com searches with Pagefind (scripts/dev/docs-site.sh); these add its modal there and
+# do nothing where mdBook's own search is on (this build, the offline docs zip, `mdbook serve`).
+additional-js = ["site/search.js"]
+additional-css = ["site/search.css"]
 
+# mdBook's own search: the offline docs zip's, and `mdbook serve`'s. docs-site.sh turns it off.
 [output.html.search]
 limit-results = 30
 use-boolean-and = true

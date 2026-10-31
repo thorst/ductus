@@ -6,6 +6,10 @@
 //! A difference from the other version is the change being judged. A difference from the record or a
 //! kept output that the other version shares is drift (the data a lookup reads, a setting): shown,
 //! but it doesn't fail the replay. Without another version, record and kept outputs are the evidence.
+//!
+//! "Identical" is claimed only for what was compared whole: a sent output with the other version's
+//! or a kept one, or a filter or quarantine (which has no output) with its reason. A send matched
+//! only by the record's "sent" is "same decision (outputs not compared)".
 
 use super::{Decision, Event, Row};
 use chrono::{DateTime, Utc};
@@ -92,6 +96,10 @@ struct Destination {
     output: OutputKind,
     compared: u64,
     identical: u64,
+    /// Sent by both, but no output to compare with: only the decision is known to match.
+    same_decision: u64,
+    /// Rows whose output was compared (with the other version's or a kept one), however it came out.
+    outputs_compared: u64,
     different: u64,
     drift: u64,
     not_comparable: u64,
@@ -198,6 +206,8 @@ impl Report {
         }
         let mut found: Vec<(Against, String, String, String)> = Vec::new();
         let ran = !matches!(other, OtherSide::NotRun);
+        let sent = matches!(row.decision, Decision::Sent { .. });
+        let mut output_compared = false;
         match other {
             OtherSide::NotRun => {}
             OtherSide::Missing => found.push((
@@ -210,6 +220,7 @@ impl Report {
                 if let Decision::NotComparable { why } = &theirs.decision {
                     return d.not_comparable(format!("in {label}: {why}"), row.id);
                 }
+                output_compared |= sent && matches!(theirs.decision, Decision::Sent { .. });
                 for (what, before, after) in compare(&theirs.decision, &row.decision, d.output) {
                     found.push((Against::Other, what, before, after));
                 }
@@ -234,6 +245,7 @@ impl Report {
                     }
                 }
                 if let (Some(kept), Decision::Sent { output }) = (&r.output, &row.decision) {
+                    output_compared = true;
                     let kept = String::from_utf8_lossy(kept);
                     for (what, before, after) in differences(d.output, &kept, output) {
                         found.push((Against::Stored, what, before, after));
@@ -242,7 +254,12 @@ impl Report {
             }
         }
         let drift = ran && !found.iter().any(|(against, ..)| *against == Against::Other);
-        if found.is_empty() {
+        if output_compared {
+            d.outputs_compared += 1;
+        }
+        if found.is_empty() && sent && !output_compared {
+            d.same_decision += 1;
+        } else if found.is_empty() {
             d.identical += 1;
         } else if drift {
             d.drift += 1;
@@ -298,6 +315,22 @@ impl Report {
         self.differences() == 0 && self.broken().is_empty()
     }
 
+    /// When no output was compared anywhere and sends matched by decision only: what that means and
+    /// how to compare outputs. The same words in the text, the JSON (`outputs_not_compared`) and the
+    /// page, and `upgrade --check` shows them as its ⚠.
+    pub fn outputs_not_compared(&self) -> Option<String> {
+        let same = self.total(|d| d.same_decision);
+        (same > 0 && self.total(|d| d.outputs_compared) == 0).then(|| {
+            format!(
+                "outputs not compared: {} comparison(s) matched by decision only (both sent), not by what was sent, \
+                 because no version ran beside this one and no destination keeps its outputs; to compare outputs, \
+                 run it on the server, where the installed version runs beside it, or name the installed binary \
+                 with --against PATH",
+                number(same)
+            )
+        })
+    }
+
     fn destinations(&self) -> impl Iterator<Item = (&str, &str, &Destination)> {
         self.interfaces
             .iter()
@@ -337,6 +370,7 @@ impl Report {
                             .collect();
                         json!({
                             "name": name, "output": d.output, "compared": d.compared, "identical": d.identical,
+                            "same_decision": d.same_decision, "outputs_compared": d.outputs_compared,
                             "different": d.different, "drift": d.drift, "not_comparable": d.not_comparable,
                             "waiting": d.waiting, "looked_up": d.looked_up, "differences": groups,
                             "not_comparable_reasons": reasons,
@@ -360,10 +394,13 @@ impl Report {
             "messages": self.interfaces.values().map(|i| i.messages).sum::<u64>(),
             "compared": self.total(|d| d.compared),
             "identical": self.total(|d| d.identical),
+            "same_decision": self.total(|d| d.same_decision),
+            "outputs_compared": self.total(|d| d.outputs_compared),
             "different": self.total(|d| d.different),
             "drift": self.total(|d| d.drift),
             "not_comparable": self.total(|d| d.not_comparable),
             "waiting": self.total(|d| d.waiting),
+            "outputs_not_compared": self.outputs_not_compared(),
             "values_hidden": self.hide_values,
             "notes": self.notes,
             "seconds": round(self.seconds),
@@ -446,9 +483,13 @@ impl Report {
                 }
             }
         }
+        let same = match self.total(|d| d.same_decision) {
+            0 => String::new(),
+            n => format!(", {} {SAME_DECISION}", number(n)),
+        };
         let _ = writeln!(
             out,
-            "\n{} message(s), {} comparison(s): {} identical, {} different, {} drift, {} not comparable, {} waiting ({:.1} s)",
+            "\n{} message(s), {} comparison(s): {} identical{same}, {} different, {} drift, {} not comparable, {} waiting ({:.1} s)",
             number(self.interfaces.values().map(|i| i.messages).sum()),
             number(self.total(|d| d.compared)),
             number(self.total(|d| d.identical)),
@@ -458,6 +499,9 @@ impl Report {
             number(self.total(|d| d.waiting)),
             self.seconds
         );
+        if let Some(warning) = self.outputs_not_compared() {
+            let _ = writeln!(out, "⚠ {warning}");
+        }
         let broken = self.broken();
         if !broken.is_empty() {
             let _ =
@@ -475,8 +519,16 @@ impl Report {
             || "the record and kept outputs only".to_string(),
             |o| format!("{} (binary {}, project {})", o.label, o.binary, o.project),
         );
-        let result =
-            if self.ok() { "identical: nothing differs from what it's compared with" } else { "differences found" };
+        let result = match (self.ok(), self.total(|d| d.same_decision)) {
+            (false, _) => "differences found".to_string(),
+            (true, 0) => "identical: nothing differs from what it's compared with".to_string(),
+            (true, n) if self.outputs_not_compared().is_some() => {
+                format!("same decisions: nothing differs, but no output was compared ({} comparison(s))", number(n))
+            }
+            (true, n) => {
+                format!("nothing differs; {} comparison(s) matched by decision only (outputs not compared)", number(n))
+            }
+        };
         let _ = write!(
             out,
             "<!doctype html>\n<html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\
@@ -494,6 +546,7 @@ impl Report {
             ("Messages", number(self.interfaces.values().map(|i| i.messages).sum())),
             ("Comparisons (message × destination)", number(self.total(|d| d.compared))),
             ("Identical", number(self.total(|d| d.identical))),
+            ("Same decision (outputs not compared)", number(self.total(|d| d.same_decision))),
             ("Different", number(self.total(|d| d.different))),
             ("Drift (the other version does the same)", number(self.total(|d| d.drift))),
             ("Not comparable", number(self.total(|d| d.not_comparable))),
@@ -506,6 +559,9 @@ impl Report {
             let _ = write!(out, "<tr><th>{}</th><td>{}</td></tr>", escape(k), escape(&v));
         }
         out.push_str("</table>\n");
+        if let Some(warning) = self.outputs_not_compared() {
+            let _ = writeln!(out, "<p class=\"warn\">⚠ {}</p>", escape(&warning));
+        }
         if !self.hide_values {
             out.push_str("<p class=\"note\">Examples show field values from real messages: keep this report as you keep patient data, or make it with <code>--hide-values</code>.</p>\n");
         }
@@ -529,14 +585,15 @@ impl Report {
             if i.destinations.is_empty() {
                 continue;
             }
-            out.push_str("<table><tr><th>Destination</th><th>Compared</th><th>Identical</th><th>Different</th><th>Drift</th><th>Not comparable</th><th>Waiting</th></tr>");
+            out.push_str("<table><tr><th>Destination</th><th>Compared</th><th>Identical</th><th>Same decision (outputs not compared)</th><th>Different</th><th>Drift</th><th>Not comparable</th><th>Waiting</th></tr>");
             for (destination, d) in &i.destinations {
                 let _ = write!(
                     out,
-                    "<tr><td>{}</td><td>{}</td><td>{}</td><td class=\"{}\">{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
+                    "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td class=\"{}\">{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                     escape(destination),
                     number(d.compared),
                     number(d.identical),
+                    number(d.same_decision),
                     if d.different > 0 { "bad" } else { "" },
                     number(d.different),
                     number(d.drift),
@@ -625,6 +682,7 @@ impl Destination {
 const CSS: &str = "body{font:15px/1.5 system-ui,sans-serif;max-width:70rem;margin:2rem auto;padding:0 1rem;color:#1a1a1a;background:#fff}\
 table{border-collapse:collapse;margin:.5rem 0 1.5rem;width:100%}th,td{border:1px solid #bbb;padding:.3rem .5rem;text-align:left;vertical-align:top}\
 th{background:#f0f0f0}.summary th{width:22rem}code{font-size:13px;word-break:break-all}.note{color:#444}.bad{color:#a00;font-weight:600}\
+.warn{border-left:4px solid #b36b00;padding:.3rem .7rem;background:#fff6e5}\
 h2{margin-top:2rem;border-bottom:1px solid #bbb}@media print{body{margin:0;max-width:none}h2{page-break-before:auto}}";
 
 /// A row's decision in a few words, for "only in" differences.
@@ -850,10 +908,14 @@ fn shown(value: &str, hide: bool) -> String {
     shown
 }
 
+/// A row sent by both sides with no output to compare, in the report's words.
+const SAME_DECISION: &str = "same decision (outputs not compared)";
+
 fn counts(d: &Destination) -> String {
     let mut parts = vec![format!("{} compared", number(d.compared))];
     for (n, what) in [
         (d.identical, "identical"),
+        (d.same_decision, SAME_DECISION),
         (d.different, "different"),
         (d.drift, "drift"),
         (d.not_comparable, "not comparable"),
@@ -1069,11 +1131,12 @@ mod tests {
         assert_eq!(
             (
                 lab["identical"].as_u64(),
+                lab["same_decision"].as_u64(),
                 lab["waiting"].as_u64(),
                 lab["not_comparable"].as_u64(),
                 lab["different"].as_u64()
             ),
-            (Some(1), Some(1), Some(1), Some(1)),
+            (Some(0), Some(1), Some(1), Some(1), Some(1)),
             "{document:#}"
         );
         assert_eq!(
@@ -1084,5 +1147,51 @@ mod tests {
         assert!(!report.ok());
         assert_eq!(number(1_234_567), "1,234,567");
         assert_eq!(number(12), "12");
+    }
+
+    #[test]
+    fn a_send_matched_only_by_the_record_is_the_same_decision_not_identical() {
+        let from = Utc::now();
+        let mut report = Report::new("prod", from, from, None, false);
+        let changed = ADT.replace("DOE^JOHN", "DOE^JON");
+        // The record says "sent" and nothing kept what: the code may have changed what it sends.
+        report.add(&row(1, sent(&changed), Some(record(Status::Sent, None))), OtherSide::NotRun);
+        report.add(&row(2, sent(ADT), Some(record(Status::Sent, None))), OtherSide::NotRun);
+        // A filter has no output: its decision and reason are all there is, so that's identical.
+        let filtered = || Decision::Filtered { reason: Some("killed: test".into()) };
+        report.add(&row(3, filtered(), Some(record(Status::Filtered, Some("killed: test")))), OtherSide::NotRun);
+        assert!(report.ok(), "nothing differs");
+        let document = report.document();
+        assert_eq!(
+            (document["identical"].as_u64(), document["same_decision"].as_u64(), document["outputs_compared"].as_u64()),
+            (Some(1), Some(2), Some(0)),
+            "{document:#}"
+        );
+        let warning = document["outputs_not_compared"].as_str().expect("the warning is in the JSON");
+        assert!(warning.starts_with("outputs not compared: 2 comparison(s) matched by decision only"), "{warning}");
+        assert!(warning.ends_with("or name the installed binary with --against PATH"), "{warning}");
+        let text = report.text();
+        assert!(text.contains("✓ lab: 3 compared, 1 identical, 2 same decision (outputs not compared)"), "{text}");
+        assert!(text.contains("1 identical, 2 same decision (outputs not compared), 0 different"), "{text}");
+        assert!(text.contains(&format!("⚠ {warning}")), "{text}");
+        let html = report.html();
+        assert!(html.contains(&format!("<p class=\"warn\">⚠ {}</p>", escape(warning))), "{html}");
+        assert!(html.contains("<th>Same decision (outputs not compared)</th><td>2</td>"), "{html}");
+        assert!(html.contains("same decisions: nothing differs, but no output was compared"), "{html}");
+
+        // One output compared anywhere (a kept one): no warning, the counts still say which is which.
+        let mut kept = record(Status::Sent, None);
+        kept.output = Some(ADT.as_bytes().to_vec());
+        report.add(&row(4, sent(ADT), Some(kept)), OtherSide::NotRun);
+        let document = report.document();
+        assert_eq!((document["identical"].as_u64(), document["same_decision"].as_u64()), (Some(2), Some(2)));
+        assert!(document["outputs_not_compared"].is_null(), "{document:#}");
+        assert!(!report.text().contains('⚠'));
+
+        // With the other version beside it, every send compares outputs.
+        let mut beside = Report::new("prod", from, from, None, false);
+        beside.add(&row(1, sent(ADT), Some(record(Status::Sent, None))), OtherSide::Row(&row(1, sent(ADT), None)));
+        let document = beside.document();
+        assert_eq!((document["identical"].as_u64(), document["same_decision"].as_u64()), (Some(1), Some(0)));
     }
 }

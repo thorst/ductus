@@ -2983,8 +2983,9 @@ export async function toBilling(m: Message) {
 }
 "#;
 
-/// `ductus replay` over traffic an engine recorded: unchanged code is identical with the record and
-/// the kept outputs; a changed field and a changed filter show against an older version of the
+/// `ductus replay` over traffic an engine recorded: unchanged code is identical with the kept outputs
+/// and the same decision where nothing kept them (`upgrade --check --replay` warns when that's all it
+/// could compare); a changed field and a changed filter show against an older version of the
 /// project (a folder, or a Git revision), field by field, with the clock and the random pinned on
 /// both sides; a write isn't made and makes the message not comparable; the HTML and JSON reports.
 #[tokio::test(flavor = "multi_thread")]
@@ -3041,14 +3042,64 @@ async fn replay_compares_a_change_with_the_record_kept_outputs_and_the_version_b
         )
     };
 
-    // The code as it ran: the record and the kept outputs say the same.
+    // The code as it ran: the record and the kept outputs say the same. Billing keeps no output, so
+    // only its decisions are known to match.
     let (code, out, err) = replay(&["--against", "stored"]);
     assert_eq!(code, Some(0), "{out}{err}");
     assert!(out.contains("note: outputs compared with kept outputs only (--against stored)"), "{out}");
     assert!(
-        out.contains("✓ lab: 4 compared, 4 identical") && out.contains("✓ billing: 4 compared, 4 identical"),
+        out.contains("✓ lab: 4 compared, 4 identical")
+            && out.contains("✓ billing: 4 compared, 4 same decision (outputs not compared)"),
         "{out}"
     );
+    assert!(!out.contains("⚠ outputs not compared"), "lab's outputs were compared: {out}");
+
+    // `upgrade --check --replay` over a project whose destinations keep no outputs: without an
+    // installed version beside it, it passes with a ⚠ that says only decisions were compared, and how
+    // to compare outputs.
+    let billing_only = tempfile::tempdir().unwrap();
+    let copy = billing_only.path().join(&interface);
+    std::fs::create_dir_all(&copy).unwrap();
+    std::fs::copy(dir.path().join(&interface).join("transform.ts"), copy.join("transform.ts")).unwrap();
+    std::fs::copy(dir.path().join("resources.yaml"), billing_only.path().join("resources.yaml")).unwrap();
+    std::fs::write(
+        copy.join("interface.yaml"),
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\nscript: transform.ts\ndestinations:\n  billing: {{ file: {{ dir: out/billing }}, transform: toBilling, output: json }}\n"
+        ),
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["upgrade", "--check", "--replay", "1h", "--json", "--root"])
+        .arg(billing_only.path())
+        .env("DUCTUS_DATABASE_URL", &db)
+        .env_remove("DUCTUS_PROJECT")
+        .env_remove("DUCTUS_ENV")
+        .output()
+        .unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let check: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {said}"));
+    let replayed = &check["replay"];
+    let warning = check["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["text"].as_str().is_some_and(|t| t.starts_with("replay: outputs not compared")));
+    if replayed["other"].is_null() {
+        assert_eq!((replayed["identical"].as_u64(), replayed["same_decision"].as_u64()), (Some(0), Some(4)), "{said}");
+        let warning = warning.unwrap_or_else(|| panic!("no ⚠ for outputs not compared: {said}"));
+        assert_eq!(warning["level"], "warning", "{said}");
+        assert!(warning["text"].as_str().unwrap().contains("--against PATH"), "{said}");
+        let summary =
+            check["checks"].as_array().unwrap().iter().find(|c| {
+                c["text"].as_str().is_some_and(|t| t.starts_with("replay against the record and kept outputs"))
+            });
+        let summary = summary.unwrap_or_else(|| panic!("{said}"))["text"].as_str().unwrap();
+        assert!(summary.ends_with("0 identical, 4 same decision (outputs not compared), 0 different"), "{summary}");
+    } else {
+        // An installed version ran beside it (a developer's machine with the package or MSI).
+        assert!(warning.is_none(), "{said}");
+    }
     assert!(err.contains(&format!("{name}: 4 message(s) replayed")), "{err}");
 
     // A new version of the code: PID-8 changes, MRN 2 is filtered now.

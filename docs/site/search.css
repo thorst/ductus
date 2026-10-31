@@ -1,0 +1,52 @@
+/* docs.getductus.com's search (search.js): Pagefind's modal in the colours of whichever mdBook
+   theme is chosen (light, rust, coal, navy, ayu all set these variables). :root:root outranks
+   Pagefind's own :root defaults whatever order the two files load in. */
+:root:root {
+  --pf-text: var(--fg);
+  --pf-text-secondary: var(--fg);
+  --pf-text-muted: var(--icons);
+  --pf-background: var(--bg);
+  --pf-border: var(--searchbar-border-color);
+  --pf-border-focus: var(--links);
+  --pf-hover: var(--theme-hover);
+  --pf-skeleton: var(--theme-hover);
+  --pf-skeleton-shine: var(--sidebar-bg);
+  --pf-outline-focus: var(--links);
+  --pf-mark: var(--fg);
+  --pf-font: inherit;
+  --pf-modal-top: 8vh;
+}
+
+/* Pagefind's own rules carry three ID-weight :is(*, #\#) each (so host pages can't break them);
+   these carry one more, so they win where the site differs. */
+
+/* The button looks like mdBook's other menu-bar icons (the theme brush beside it). */
+#menu-bar pagefind-modal-trigger {
+  display: inline-flex;
+  align-items: center;
+  height: var(--menu-bar-height);
+}
+#menu-bar :is(*, #\#):is(*, #\#):is(*, #\#) .pf-trigger-btn {
+  width: auto;
+  height: var(--menu-bar-height);
+  padding: 0 8px;
+  background: none;
+  border: none;
+  box-shadow: none;
+}
+#menu-bar :is(*, #\#):is(*, #\#):is(*, #\#) .pf-trigger-icon {
+  width: 17px;
+  height: 17px;
+  background: var(--icons);
+  transition: background-color 0.5s;
+}
+#menu-bar :is(*, #\#):is(*, #\#):is(*, #\#) .pf-trigger-btn:hover .pf-trigger-icon {
+  background: var(--icons-hover);
+}
+
+/* Matched words highlighted as mdBook's own search does. (Pagefind's rule has a class in it too:
+   four here.) */
+pagefind-modal :is(*, #\#):is(*, #\#):is(*, #\#):is(*, #\#) mark {
+  background: var(--search-mark-bg);
+  color: var(--fg);
+}

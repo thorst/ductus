@@ -391,8 +391,12 @@ fn replay(options: &Options, since: &str, report: &mut Report) {
             }
         }
     }
+    let same = match count("same_decision") {
+        0 => String::new(),
+        n => format!(", {n} same decision (outputs not compared)"),
+    };
     let summary = format!(
-        "replay against {against}: {} message(s), {} comparison(s), {} identical, {} different",
+        "replay against {against}: {} message(s), {} comparison(s), {} identical{same}, {} different",
         count("messages"),
         count("compared"),
         count("identical"),
@@ -403,6 +407,10 @@ fn replay(options: &Options, since: &str, report: &mut Report) {
     } else {
         differences.push(format!("the page with every difference: ductus replay --since {since} --report replay.html"));
         report.add(Level::Problem, summary, differences.into_iter().chain(notes).collect());
+    }
+    // Decisions alone can't show a changed field: said as a warning, with the fix, not as a pass.
+    if let Some(warning) = document["outputs_not_compared"].as_str() {
+        report.add(Level::Warning, format!("replay: {warning}"), Vec::new());
     }
     if count("not_comparable") + count("drift") > 0 {
         report.add(

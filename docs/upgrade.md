@@ -96,7 +96,7 @@ What each section means, and what to do when it isn't ✓:
 | Engines on this database | Every engine running on it: host, process, version, environment, how many interfaces | Engines you didn't expect: find out whose they are before you go on. Engines before 0.6.2 aren't recorded: look on each server |
 | The project | `ductus validate` and `ductus test`, run with the new version's SDK and type checker | Fix the project (or the new version broke it: then don't upgrade yet). The full output is under the line |
 | Between versions | Versions you must install on the way (none before 1.0), and settings the new version deprecates | Replace each deprecated setting with the one named; it still works until the next major |
-| The last … replayed | With `--replay`: the period's traffic through the new version, compared ([below](#ductus-replay-what-it-does-to-real-traffic)) | Read the differences before going on |
+| The last … replayed | With `--replay`: the period's traffic through the new version, compared ([below](#ductus-replay-what-it-does-to-real-traffic)) | ✗: read the differences before going on. ⚠ "outputs not compared": only decisions were compared, so a changed field can't show; run it where the installed version is, or name that binary with `--against` |
 
 A failing check, here a test the new version fails, ends with the count and exits 1:
 
@@ -111,11 +111,17 @@ The project (., environment dev)
           expected "RECEIVER", got "LAB"
 …
 The last 1h replayed through 0.6.0-dev (nothing is sent)
-✓ replay against the record and kept outputs: 300 message(s), 600 comparison(s), 600 identical, 0 different
+✓ replay against the record and kept outputs: 300 message(s), 600 comparison(s), 0 identical, 600 same decision (outputs not compared), 0 different
     note: no installed version found (/usr/bin/ductus): outputs compared with kept outputs only; name a binary with --against
+⚠ replay: outputs not compared: 600 comparison(s) matched by decision only (both sent), not by what was sent, because no version ran beside this one and no destination keeps its outputs; to compare outputs, run it on the server, where the installed version runs beside it, or name the installed binary with --against PATH
 
 1 problem(s): fix them before upgrading (checked in 0.7 s)
 ```
+
+The replay there passed although the code now sets MSH-5 to "LAB" in every message: this lab has
+no installed version and keeps no outputs, so all it could compare was that each message was
+still sent. That's what the ⚠ is for. "Identical" is only ever claimed for an output that was
+compared.
 
 On a database no version has run on yet, the first section says so instead: "a new database: the
 first start creates every table (25 migrations)".
@@ -170,10 +176,19 @@ that writes (`db().execute`, a `POST`): those messages are reported as not compa
 `C:\Program Files\Ductus\ductus.exe`), run beside it; that needs the installed one to be 0.6.6.4
 or later ([why](nuances/upgrades.md#a-replay-compares-outputs-with-the-installed-version-from-0664-on-level-2)).
 **Without an installed version, outputs are compared only where they were kept**
-(`save_output: true`): every other destination is compared by its decision alone (sent, filtered,
-quarantined), so "identical" there means the same decision, not the same bytes. The report says
-so on its `note:` line. On a machine without the installed version, name it: `--against
-/path/to/old/ductus`.
+(`save_output: true`). Every other destination is compared by its decision alone, and the report
+counts what it could compare separately:
+
+| Count | Means |
+|---|---|
+| identical | Compared whole and the same: the output, with the installed version's or a kept one; or a filter or quarantine with its reason (those have no output) |
+| same decision (outputs not compared) | Both sent, but there was nothing to compare the output with: a changed field wouldn't show |
+| different | The output, the decision or its reason changed: the replay fails (exit 1) |
+
+When no output was compared at all, the report ends with **⚠ outputs not compared** and the fix,
+in the terminal, the `--json` document (`outputs_not_compared`) and the HTML page alike; `upgrade
+--check --replay` shows it as a warning (exit 0: nothing differed, but little was checked). On a
+machine without the installed version, name it: `--against /path/to/old/ductus`.
 
 A difference the installed version shares with the new one isn't the upgrade's: the data it looks
 up changed since the message was sent. The report calls it **drift** and doesn't fail for it
@@ -187,18 +202,21 @@ The same tool compares a *code* change with `--baseline <git revision>`:
 
 ```text
 $ ductus replay --since 1h --baseline HEAD --report replay.html
-adt-in: 300 message(s) replayed in 0.1 s
-ductus replay: version 0.6.0-dev against the project at HEAD, 2026-10-31 11:52 to 2026-10-31 12:52 UTC, environment dev (nothing was sent)
+adt-in: 300 message(s) replayed in 0.0 s
+ductus replay: version 0.6.0-dev against the project at HEAD, 2026-10-31 15:25 to 2026-10-31 16:25 UTC, environment dev (nothing was sent)
 
-adt-in: 300 message(s) in 0.1 s
+adt-in: 300 message(s) in 0.0 s
   ✗ archive: 300 compared, 300 different
-      vs the project at HEAD: MSH-5 differs in 300 message(s) (e.g. message 1: "RECEIVER" → "LAB")
+      vs the project at HEAD: MSH-5 differs in 300 message(s) (e.g. message 406: "RECEIVER" → "LAB")
   ✗ lab: 300 compared, 300 different
-      vs the project at HEAD: MSH-5 differs in 300 message(s) (e.g. message 1: "RECEIVER" → "LAB")
+      vs the project at HEAD: MSH-5 differs in 300 message(s) (e.g. message 406: "RECEIVER" → "LAB")
 
-300 message(s), 600 comparison(s): 0 identical, 600 different, 0 drift, 0 not comparable, 0 waiting (0.2 s)
-report: …/replay.html (sha256:36f4f1782108ad30cd539435c598924e090fe5b6806e377c3dfe014c28532a99)
+300 message(s), 600 comparison(s): 0 identical, 600 different, 0 drift, 0 not comparable, 0 waiting (0.1 s)
+report: …/replay.html (sha256:794fea6a30fe050d12f3253ba1240f39f40f5219f780783cb192b06c3d20489f)
 ```
+
+Here the earlier project ran beside this one, so every output was compared: the change shows
+field by field, on the same messages that passed by decision above.
 
 More on replay, with what the clock and `Math.random` do in it:
 [Replay a period before a change](operate/resend.md#replay-a-period-before-a-change).
