@@ -506,7 +506,9 @@ jobs:
       - name: The release's files (made and checked)
         run: |
           bash scripts/dev/release-files.sh "$RELEASE_VERSION" artifacts release
-          sed "s/@VERSION@/$RELEASE_VERSION/g" packaging/release-notes.md >release-notes.md
+          # @PACKAGE_VERSION@: nfpm's spelling in the .deb and .rpm names (0.6.1-rc.1 is 0.6.1~rc.1).
+          sed -e "s/@PACKAGE_VERSION@/${RELEASE_VERSION/-/\~}/g" -e "s/@VERSION@/$RELEASE_VERSION/g" \
+            packaging/release-notes.md >release-notes.md
       - name: Attest every file (who built it, from which commit and workflow)
         if: env.RELEASE_KIND == 'tag'
         uses: actions/attest-build-provenance@v4

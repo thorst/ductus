@@ -6,8 +6,8 @@ upgrade notes). No support is offered for pre-releases.
 
 | File | For | How |
 |---|---|---|
-| `ductus_@VERSION@_amd64.deb` | Ubuntu 22.04+, Debian 12+ | [Linux packages](https://docs.getductus.com/install/linux.html) |
-| `ductus-@VERSION@-1.x86_64.rpm` | RHEL, Rocky, Alma 9 | [Linux packages](https://docs.getductus.com/install/linux.html) |
+| `ductus_@PACKAGE_VERSION@_amd64.deb` | Ubuntu 22.04+, Debian 12+ | [Linux packages](https://docs.getductus.com/install/linux.html) |
+| `ductus-@PACKAGE_VERSION@-1.x86_64.rpm` | RHEL, Rocky, Alma 9 | [Linux packages](https://docs.getductus.com/install/linux.html) |
 | `ductus-@VERSION@-x64.msi` | Windows Server, Windows 11 | [Windows installer](https://docs.getductus.com/install/windows.html) |
 | `ductus-@VERSION@-linux-x64.tar.gz`, `ductus-@VERSION@-windows-x64.zip` | Checking an upgrade before installing it (`ductus upgrade --check`); servers without the packages | [The portable archive](https://docs.getductus.com/install/archive.html) |
 | `ductus-docs-@VERSION@.zip` | These docs as they are for this version, offline: unzip, open `ductus-docs-@VERSION@/index.html` | |
@@ -21,7 +21,7 @@ demo, the packages under real systemd, the MSI installed, upgraded and removed a
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify ductus_@VERSION@_amd64.deb -R thorst/ductus
+gh attestation verify ductus_@PACKAGE_VERSION@_amd64.deb -R thorst/ductus
 ```
 
 On Windows, compare `(Get-FileHash ductus-@VERSION@-x64.msi).Hash` with the file's line in

@@ -44,7 +44,22 @@ sha256sum --check --ignore-missing SHA256SUMS
 ```
 
 Each file says `OK`. Anything else (`FAILED`, `No such file`) means the file isn't the one the
-release holds: download it again from the release page, and don't install it.
+release holds: download it again from the release page, and don't install it. On the release
+job's dry run (version `0.0.0-dryrun.118`; a release's files are named the same way with its
+version), with only the `.deb` downloaded beside `SHA256SUMS`, then the same file with one byte
+added to it:
+
+```text
+$ sha256sum --check --ignore-missing SHA256SUMS
+ductus_0.0.0~dryrun.118_amd64.deb: OK
+$ sha256sum --check --ignore-missing SHA256SUMS
+sha256sum: WARNING: 1 computed checksum did NOT match
+sha256sum: SHA256SUMS: no file was verified
+ductus_0.0.0~dryrun.118_amd64.deb: FAILED
+```
+
+The second exits 1, so a script can stop on it. (A pre-release's `.deb` and `.rpm` are named
+with `~` where the version has `-`: that is how Debian and RPM spell "sorts before the release".)
 
 On Windows, in PowerShell, the hash of the file, then the line `SHA256SUMS` has for it:
 
@@ -54,7 +69,15 @@ Select-String ductus-0.6.0-x64.msi .\SHA256SUMS
 ```
 
 The two must be the same 64 characters (`Get-FileHash` writes them in capitals, `SHA256SUMS` in
-small letters: the case doesn't matter).
+small letters: the case doesn't matter). On the dry run's MSI:
+
+```text
+PS> (Get-FileHash .\ductus-0.0.0-dryrun.118-x64.msi -Algorithm SHA256).Hash
+3F8DB975E899350CCC54FC0DAF3F659A7BC5A1BA69DE074ADE95AF47BE43A47D
+PS> Select-String ductus-0.0.0-dryrun.118-x64.msi .\SHA256SUMS
+
+SHA256SUMS:6:3f8db975e899350ccc54fc0daf3f659a7bc5a1ba69de074ade95af47be43a47d  ductus-0.0.0-dryrun.118-x64.msi
+```
 
 ## Check who built it: the attestation
 
@@ -93,7 +116,8 @@ format Dependency-Track, Microsoft Defender and most scanners import.
 | `ductus-0.6.0-windows-x64.cdx.json` | The same for `ductus.exe` (the .msi and .zip): a few crates differ by platform |
 | `ductus-0.6.0-web-ui.cdx.json` | The web UI's npm packages (the UI is built into both binaries) |
 
-They leave out the tools used only while building (code generators, the build scripts' own
+On the dry run: 530 crates in the Linux binary's, 534 in the Windows one's, 95 npm packages in
+the web UI's, about 700 KB, 700 KB and 100 KB. They leave out the tools used only while building (code generators, the build scripts' own
 libraries): those aren't in the program you run. The same lists, for reading, with the notable
 libraries first (V8, TypeScript, rustls, sqlx, tokio), are on
 [Libraries and versions](../reference/libraries.md); that page also counts build-time crates, so
@@ -104,7 +128,8 @@ v0.9.
 ## The docs as a download
 
 `ductus-docs-0.6.0.zip` is this site as it is for that version: unzip it anywhere, open
-`ductus-docs-0.6.0/index.html` in a browser. Every page says the version in its title. It's for:
+`ductus-docs-0.6.0/index.html` in a browser. Every page says the version in its title. It's
+about 3.2 MB (3,212,719 bytes on the dry run). It's for:
 
 - **A server room or network without internet access**: the docs are with the download, nothing
   is fetched from anywhere.
