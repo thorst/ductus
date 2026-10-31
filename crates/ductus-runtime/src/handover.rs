@@ -473,8 +473,15 @@ mod linux {
         ours.set_nonblocking(true)?;
         let mut spawned =
             Spawned { child: Unready(Some(child)), pid, path, pair: Lined::new(UnixStream::from_std(ours)?) };
-        spawned.pair.send(&ToNew::From(me.clone())).await.context("telling the new engine who it takes over from")?;
-        Ok(spawned)
+        // A new engine whose project doesn't load says why and exits at once, possibly before this
+        // line is written (CI saw "Broken pipe" instead of the reason): what it said is still in the
+        // pair for `start` to read, so a closed pair isn't the failure to report here.
+        match spawned.pair.send(&ToNew::From(me.clone())).await {
+            Err(e) if !matches!(e.kind(), io::ErrorKind::BrokenPipe | io::ErrorKind::ConnectionReset) => {
+                Err(e).context("telling the new engine who it takes over from")
+            }
+            _ => Ok(spawned),
+        }
     }
 
     /// The new engine, ready: this engine stops now.
@@ -698,6 +705,28 @@ mod linux {
                     bail!("the engine closed the connection without an answer: see its log (`journalctl -u ductus`)")
                 }
             }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// What `spawn` relies on when a new engine fails at once: it said why and closed before
+        /// the old engine's first line, so that line meets a closed pair, and the reason can still
+        /// be read after it.
+        #[tokio::test]
+        async fn a_new_engine_that_failed_at_once_is_still_heard() {
+            let (old, new) = UnixStream::pair().unwrap();
+            let mut new = Lined::new(new);
+            new.send(&ToOld::Failed("unknown field `bogus`".into())).await.unwrap();
+            drop(new);
+            let mut old = Lined::new(old);
+            let me = Predecessor { pid: 1, version: "0".into(), instance: "i".into() };
+            let sent = old.send(&ToNew::From(me)).await;
+            assert!(sent.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::BrokenPipe), "{sent:?}");
+            let said = old.receive::<ToOld>().await.unwrap();
+            assert!(matches!(said, Some(ToOld::Failed(why)) if why.contains("bogus")));
         }
     }
 }
