@@ -125,6 +125,14 @@ fn the_release_version_comes_from_the_tag_or_the_dry_run() {
     let crates = lock.matches("version = \"0.0.0-dryrun.42\"").count();
     assert_eq!(crates, lock.matches("\nname = \"ductus").count(), "every workspace crate's entry, nothing else");
     assert!(!lock.contains(&format!("version = \"{ours}\"")));
+
+    // The crates' own dependencies on each other name no version (only paths): a version there
+    // would be one more place a release or a dry run has to change (the first dry run failed on it).
+    for entry in std::fs::read_dir(repo.join("crates")).unwrap() {
+        let manifest = entry.unwrap().path().join("Cargo.toml");
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        assert!(!text.contains(&format!("\"{ours}\"")), "{}: write `{{ path = ... }}` alone", manifest.display());
+    }
 }
 
 #[test]
@@ -913,8 +921,21 @@ fn doctor_checks_what_the_project_uses_and_saves_a_report() {
 }
 
 /// A free local port (bound, then released).
+/// A port for a test's listener, free when asked: from 20000-32767, below where Linux (32768 up)
+/// and Windows (49152 up) pick the local ports of outgoing connections. A port from `bind(0)` is
+/// one of those, and with the tests' many database connections one was taken before the engine
+/// could listen on it (Windows CI: "port 51567 is in use", a_paused_destination_waits_until_resumed).
+/// Each call takes the next port in this run, so tests running at once never get the same one.
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static NEXT: AtomicU32 = AtomicU32::new(0);
+    let start = std::process::id() % 12768;
+    loop {
+        let port = 20000 + ((start + NEXT.fetch_add(1, Ordering::Relaxed)) % 12768) as u16;
+        if std::net::TcpListener::bind(("127.0.0.1", port)).is_ok() {
+            return port;
+        }
+    }
 }
 
 /// Ends the engine if the test fails half-way.
