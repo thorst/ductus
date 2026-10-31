@@ -6,6 +6,7 @@
 
 - [Choosing Linux or Windows](choosing-linux-or-windows.md)
 - [Install](install/index.md)
+  - [Downloading and checking a release](install/download.md)
   - [Linux packages](install/linux.md)
   - [Windows installer](install/windows.md)
   - [The portable archive](install/archive.md)

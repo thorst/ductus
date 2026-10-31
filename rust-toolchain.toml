@@ -1,0 +1,9 @@
+# The Rust every build uses: CI, the Dockerfile and a developer's cargo (rustup reads this file and
+# installs the version on first use). Pinned so a release can be built again the same way later,
+# and so a new Rust can't change behaviour between the commit CI tested and a rebuild of it
+# (decisions.md "0.6.8 answers", Q4). Bumped on purpose, in a commit of its own, after a new
+# stable has been out a couple of weeks: change `channel`, run check.sh, push, watch CI.
+[toolchain]
+channel = "1.99.1"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

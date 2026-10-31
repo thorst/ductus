@@ -19,6 +19,10 @@ there are no cron jobs or scheduled tasks to set up.
 Not sure between Linux and Windows? [Choosing Linux or Windows](../choosing-linux-or-windows.md)
 lists every difference.
 
+Each release on GitHub holds all of these, plus the docs for that version as a zip, SBOMs and
+`SHA256SUMS`. Check a file before you install it:
+[Downloading and checking a release](download.md).
+
 ## What you need first
 
 - **A server**: 64-bit x86 (`x86_64`/`amd64`; no ARM builds yet), Linux with glibc 2.34 or later

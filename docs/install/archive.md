@@ -2,7 +2,8 @@
 
 The engine as one program, without an installer: `ductus-0.6.0-linux-x64.tar.gz` and
 `ductus-0.6.0-windows-x64.zip`, each unpacking into a folder `ductus-0.6.0`. Unpack it anywhere
-and run it; nothing is registered, and nothing is installed.
+and run it; nothing is registered, and nothing is installed. Both are on each
+[release](download.md), with `SHA256SUMS` to check them against.
 
 **Use it** to check an upgrade before installing it (the main reason it exists), to try a new
 version beside the installed one, to run the command line on a workstation (`doctor`, `replay`,

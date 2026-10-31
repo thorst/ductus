@@ -21,6 +21,14 @@ sudo apt install ./ductus_0.6.0_amd64.deb
 sudo dnf install ./ductus-0.6.0-1.x86_64.rpm
 ```
 
+Both files are on the [release](download.md) page. Check the one you downloaded first, in its
+folder with the release's `SHA256SUMS` (each file you have says `OK`):
+
+```sh
+sha256sum --check --ignore-missing SHA256SUMS
+gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus    # GitHub built it, from the tagged source
+```
+
 Before v0.6.0 is released, packages are development builds: `docker build --target packages
 --build-arg VERSION=0.6.0-dev.1 --output dist .` in a clone of the repository makes both.
 

@@ -19,17 +19,22 @@ RUN npm run build
 FROM quay.io/rockylinux/rockylinux:9 AS engine
 RUN dnf install -y --setopt=install_weak_deps=False gcc gcc-c++ make perl python3 \
     && dnf clean all \
-    && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+    && curl -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --default-toolchain none
 ENV PATH=/root/.cargo/bin:$PATH DUCTUS_REQUIRE_UI=1 CARGO_TARGET_DIR=/target
 WORKDIR /src
+# The Rust named in rust-toolchain.toml (pinned), in a layer of its own: kept until the file changes.
+COPY rust-toolchain.toml .
+RUN rustup toolchain install && rustc --version
 COPY . .
 COPY --from=ui /src/ui/dist ui/dist
 RUN --mount=type=cache,target=/root/.cargo/registry \
     --mount=type=cache,target=/target \
     cargo build --release --locked --bin ductus && cp /target/release/ductus /ductus
 
-# The .deb and .rpm (nfpm, packaging/linux/nfpm.yaml).
-FROM ghcr.io/goreleaser/nfpm:latest AS package-build
+# The .deb and .rpm (nfpm, packaging/linux/nfpm.yaml). Pinned by version and digest, so a release
+# can be packaged again the same way; bumped on purpose (the digest: docker buildx imagetools
+# inspect ghcr.io/goreleaser/nfpm:<version>).
+FROM ghcr.io/goreleaser/nfpm:v2.48.0@sha256:d57a1452e7a019896b355f7b1ec67262278f6c503631f652d4fce7aef9ac8df7 AS package-build
 ARG VERSION=0.0.0-dev
 WORKDIR /src
 COPY packaging/linux packaging/linux

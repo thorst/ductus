@@ -24,9 +24,14 @@ cleanup() {
 trap cleanup EXIT
 cleanup
 
+# The binary's version (Cargo.toml), and two package versions of it: the same binary, packaged
+# twice, is enough to see an upgrade. Both sort below the release itself (0.6.0-dev.1 < 0.6.0).
+BINARY_VERSION=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' Cargo.toml)
+OLD=${BINARY_VERSION%%-*}-dev.1
+NEW=${BINARY_VERSION%%-*}-dev.2
 if [ "${BUILD:-1}" = 1 ]; then
   rm -rf "$DIST"
-  for v in 0.6.0-dev.1 0.6.0-dev.2; do # the same binary, two versions: enough to see an upgrade
+  for v in $OLD $NEW; do
     echo "== building the packages ($v)"
     docker build -q --target packages --build-arg VERSION=$v --output "$DIST/$v" . >/dev/null
   done
@@ -35,10 +40,10 @@ ls "$DIST"/*/ | grep -E '\.(deb|rpm|tar\.gz)$' | sed 's/^/   /'
 deb() { ls "$DIST/$1"/*.deb; }
 rpm() { ls "$DIST/$1"/*.rpm; }
 archive() { ls "$DIST/$1"/*.tar.gz; }
-echo "   binary: $(du -h "$(deb 0.6.0-dev.1)" | cut -f1) .deb, $(du -h "$(rpm 0.6.0-dev.1)" | cut -f1) .rpm, $(du -h "$(archive 0.6.0-dev.2)" | cut -f1) .tar.gz"
+echo "   binary: $(du -h "$(deb $OLD)" | cut -f1) .deb, $(du -h "$(rpm $OLD)" | cut -f1) .rpm, $(du -h "$(archive $NEW)" | cut -f1) .tar.gz"
 # The newer version's archive, unpacked where every container sees it (/dist/unpacked/ductus-*).
 rm -rf "$DIST/unpacked" && mkdir "$DIST/unpacked"
-tar -xzf "$(archive 0.6.0-dev.2)" -C "$DIST/unpacked"
+tar -xzf "$(archive $NEW)" -C "$DIST/unpacked"
 CHECK=$(cd "$DIST/unpacked" && ls -d ductus-*)/ductus
 
 fail=""
@@ -54,13 +59,13 @@ check() { # check <name> <condition...>
 echo "== installing on plain images (no systemd)"
 for image in ubuntu:22.04 ubuntu:24.04 debian:12 debian:13; do
   out=$(docker run --rm --quiet -v "$DIST:/dist:ro" "$image" sh -c \
-    "dpkg -i /dist/0.6.0-dev.1/*.deb >/dev/null 2>&1; ductus --version; stat -c '%U:%G %a' /etc/ductus/ductus.env" 2>&1 | tr '\n' ' ')
+    "dpkg -i /dist/$OLD/*.deb >/dev/null 2>&1; ductus --version; stat -c '%U:%G %a' /etc/ductus/ductus.env" 2>&1 | tr '\n' ' ')
   echo "   $image: $out"
   check "plain-$image" '[[ "$out" == "ductus "*"root:ductus 640"* ]]'
 done
 for image in quay.io/rockylinux/rockylinux:9 quay.io/rockylinux/rockylinux:8; do
   out=$(docker run --rm --quiet -v "$DIST:/dist:ro" "$image" sh -c \
-    "rpm -i /dist/0.6.0-dev.1/*.rpm >/dev/null 2>&1; ductus --version 2>&1 | head -1" 2>&1 | tr '\n' ' ')
+    "rpm -i /dist/$OLD/*.rpm >/dev/null 2>&1; ductus --version 2>&1 | head -1" 2>&1 | tr '\n' ' ')
   echo "   ${image##*/}: $out"
   # RHEL 8 (glibc 2.28) is reported, not required: the binary needs 2.34.
   [[ "$image" == *:8 ]] || check "plain-${image##*/}" '[[ "$out" == "ductus "* ]]'
@@ -88,7 +93,7 @@ out=$(docker run --rm --network "$NET" -v "$DIST:/dist:ro" -v "$WORK/project:/se
 echo "$out" >"$WORK/archive-new.log"
 echo "   $(grep -E '^(ready|[0-9]+ problem)' <<<"$out" || echo "no verdict: see $WORK/archive-new.log")"
 check archive-files 'grep -E "^LICENSE$" <<<"$out" >/dev/null && grep -E "^ductus.service$" <<<"$out" >/dev/null'
-check archive-version 'grep -E "^ductus 0\.6\." <<<"$out" >/dev/null'
+check archive-version 'grep -Fx "ductus $BINARY_VERSION" <<<"$out" >/dev/null'
 check archive-new-database 'grep "a new database: the first start creates every table" <<<"$out" >/dev/null'
 check archive-project 'grep "✓ validate: valid" <<<"$out" >/dev/null && grep -E "✓ test: [0-9]+ passed, 0 failed" <<<"$out" >/dev/null'
 check archive-ready 'grep "^exit 0$" <<<"$out" >/dev/null'
@@ -121,7 +126,7 @@ lifecycle() {
     sleep 0.5
   done
 
-  on "$install /dist/0.6.0-dev.1/*.$ext" >"$WORK/$ext-install.log" 2>&1
+  on "$install /dist/$OLD/*.$ext" >"$WORK/$ext-install.log" 2>&1
   check "$ext-install-message" 'grep "It isn'"'"'t running yet" "$WORK/$ext-install.log" >/dev/null'
   check "$ext-not-started" '[ "$(on "systemctl is-active ductus" || true)" = inactive ]'
   check "$ext-not-enabled" '[ "$(on "systemctl is-enabled ductus" || true)" = disabled ]'
@@ -226,7 +231,7 @@ lifecycle() {
   local pid_before handed
   pid_before=$(mainpid)
   handed=$(handovers)
-  on "$upgrade /dist/0.6.0-dev.2/*.$ext" >"$WORK/$ext-upgrade.log" 2>&1
+  on "$upgrade /dist/$NEW/*.$ext" >"$WORK/$ext-upgrade.log" 2>&1
   local pid_after
   pid_after=$(mainpid)
   check "$ext-upgraded" '[ "$pid_before" != "$pid_after" ] && [ "$pid_after" != 0 ]'
@@ -261,7 +266,7 @@ lifecycle() {
   verdict=$(on "/dist/unpacked/$CHECK upgrade --check --env-file /etc/ductus/ductus.env; echo exit \$?" 2>&1 || true)
   echo "$verdict" >"$WORK/$ext-check.log"
   echo "   upgrade --check beside it: $(grep -E '^✓ .* on .*\(pid' <<<"$verdict" | head -1 | cut -c1-90)"
-  check "$ext-check-engine" 'grep -E "^✓ .* \(pid [0-9]+\): version 0\.6\." <<<"$verdict" >/dev/null'
+  check "$ext-check-engine" 'grep -E "^✓ .* \(pid [0-9]+\): version " <<<"$verdict" | grep -F "version $BINARY_VERSION" >/dev/null'
   check "$ext-check-migrations" 'grep "✓ migrations: nothing to apply" <<<"$verdict" >/dev/null'
   check "$ext-check-ready" 'grep "^exit 0$" <<<"$verdict" >/dev/null'
 

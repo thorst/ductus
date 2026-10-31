@@ -88,6 +88,45 @@ fn the_libraries_page_is_current() {
     assert_eq!(made_from, now, "a lock file changed: run `bash scripts/dev/dependencies.sh` and commit the page");
 }
 
+/// ci.yml's release version (scripts/dev/release-version.sh): a tag must say what Cargo.toml says,
+/// and a dry run makes a copy of the workspace build `0.0.0-dryrun.<run>`, Cargo.lock included.
+#[cfg(target_os = "linux")]
+#[test]
+fn the_release_version_comes_from_the_tag_or_the_dry_run() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(dir.path().join("scripts/dev")).unwrap();
+    for file in ["scripts/dev/release-version.sh", "Cargo.toml", "Cargo.lock"] {
+        std::fs::copy(repo.join(file), dir.path().join(file)).unwrap();
+    }
+    let run = |args: &[&str]| {
+        let out =
+            Command::new("bash").arg(dir.path().join("scripts/dev/release-version.sh")).args(args).output().unwrap();
+        (
+            out.status.success(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+    let ours = env!("CARGO_PKG_VERSION");
+
+    let (ok, out, _) = run(&[&format!("refs/tags/v{ours}"), "false", "7"]);
+    assert!(ok && out == format!("RELEASE_VERSION={ours}\nRELEASE_KIND=tag\n"), "{out}");
+    let (ok, out, err) = run(&["refs/tags/v9.9.9", "false", "7"]);
+    assert!(!ok && out.is_empty() && err.contains(&format!("the tag says 9.9.9 but Cargo.toml says {ours}")), "{err}");
+    let (ok, out, _) = run(&["refs/heads/main", "false", "7"]);
+    assert!(ok && out.is_empty(), "{out}");
+
+    let (ok, out, _) = run(&["refs/heads/main", "true", "42", "--apply"]);
+    assert!(ok && out == "RELEASE_VERSION=0.0.0-dryrun.42\nRELEASE_KIND=dry-run\n", "{out}");
+    let toml = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
+    assert!(toml.contains("\nversion = \"0.0.0-dryrun.42\"\n") && !toml.contains(ours), "{toml}");
+    let lock = std::fs::read_to_string(dir.path().join("Cargo.lock")).unwrap();
+    let crates = lock.matches("version = \"0.0.0-dryrun.42\"").count();
+    assert_eq!(crates, lock.matches("\nname = \"ductus").count(), "every workspace crate's entry, nothing else");
+    assert!(!lock.contains(&format!("version = \"{ours}\"")));
+}
+
 #[test]
 fn there_is_no_default_database() {
     let dir = tempfile::tempdir().unwrap();

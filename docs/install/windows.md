@@ -12,7 +12,8 @@ machine ([`ductus dev`](dev.md) needs no installer and no administrator).
 > Windows SmartScreen says "Windows protected your PC" and "unknown publisher" when it's run from
 > a download. Check the file before you run it: its SHA-256 against the release's `SHA256SUMS`
 > (`Get-FileHash ductus-0.6.0-x64.msi`), and that GitHub built it from the tagged source
-> (`gh attestation verify ductus-0.6.0-x64.msi -R thorst/ductus`). Then "More info" → "Run
+> (`gh attestation verify ductus-0.6.0-x64.msi -R thorst/ductus`): both are on
+> [Downloading and checking a release](download.md#check-the-checksum). Then "More info" → "Run
 > anyway", or unblock it first (`Unblock-File`). Signing comes with v1.0
 > ([nuance](../nuances/windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1)).
 

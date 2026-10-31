@@ -30,6 +30,18 @@ pages=$(find "$out" -name '*.html' ! -name print.html ! -name 404.html ! -name t
 sed -i -e '0,/<main>/s//<main data-pagefind-body>/' -e '0,/<h1 id=/s//<h1 data-pagefind-meta="title" id=/' $pages
 marked=$(grep -l '<main data-pagefind-body>' $pages | wc -l)
 
+# Guides first, then nuances, then the reference (Todd, 2026-10-31). Left alone, Pagefind ranks short
+# pages first, so "retention" listed the CLI and API reference before operate/retention. A page's
+# weight scales every word in it, headings too (guides keep Pagefind's 1). Measured over 12 everyday
+# words (retention, alerts, tls, ...): an explanation first for 11 (the reference first for 8
+# before); a word only the reference has still finds it first (history.md, 0.6.8.3 part B).
+weigh() {
+  # shellcheck disable=SC2046
+  sed -i -e "0,/<main data-pagefind-body>/s//<main data-pagefind-body data-pagefind-weight=\"$2\">/" $(find "$out/$1" -name '*.html')
+}
+weigh reference 0.1
+weigh nuances 0.6
+
 said=$(pagefind --site "$out" 2>&1) || { echo "$said" >&2; exit 1; }
 indexed=$(echo "$said" | sed -n 's/^ *Indexed \([0-9]*\) pages$/\1/p')
 if [ "$indexed" != "$marked" ]; then

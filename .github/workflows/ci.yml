@@ -3,18 +3,27 @@ name: CI
 on:
   # Commits that only change prose don't run CI. The exception is docs/schema.md: a store test
   # checks it against the migrations. (Later patterns win, so it is added back after the *.md rule.)
+  # A release tag (v0.6.0) runs everything, then the `release` job (paths aren't looked at for tags).
   push:
     branches: [main]
+    tags: ["v*"]
     paths: ["**", "!**/*.md", "docs/schema.md"]
   pull_request:
     paths: ["**", "!**/*.md", "docs/schema.md"]
   # Manual runs can pick the runner image, e.g. to try a new Ubuntu before `ubuntu-latest` moves:
   #   gh workflow run ci.yml -f runner=ubuntu-26.04
+  # or try the release job without releasing anything (version 0.0.0-dryrun.<run>; the files it
+  # would release are the run's `release` artifact):
+  #   gh workflow run ci.yml -f dry_run=true
   workflow_dispatch:
     inputs:
       runner:
         description: Runner image
         default: ubuntu-latest
+      dry_run:
+        description: Build and check what a release would hold, with a test version (no tag, release or attestation)
+        type: boolean
+        default: false
 
 # A newer push to the same branch cancels the run for the commit before it (a quick follow-up fix
 # then costs one run, not two). Manual runs are never cancelled and don't cancel others.
@@ -51,9 +60,9 @@ jobs:
       # builds; "Wait for SQL Server" below waits for its logins.
       - name: Start SQL Server
         run: nohup bash scripts/dev/sqlserver.sh start >/tmp/sqlserver.log 2>&1 &
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: clippy, rustfmt
+      # The Rust rust-toolchain.toml pins, with clippy and rustfmt (the file names them).
+      - name: Rust
+        run: rustup toolchain install && rustc --version
       # Cache per runner image (ImageOS, e.g. ubuntu24): build outputs from a newer image must never be
       # restored on an older one, or the other way round.
       - run: echo "RUNNER_IMAGE=$ImageOS" >> "$GITHUB_ENV"
@@ -241,6 +250,11 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # On a tag or a dry run: RELEASE_VERSION (a tag must match Cargo.toml; a dry run makes this
+      # checkout build 0.0.0-dryrun.<run>). Nothing on other runs.
+      - name: The release's version
+        run: bash scripts/dev/release-version.sh "$GITHUB_REF" "${{ inputs.dry_run }}" "$GITHUB_RUN_NUMBER" --apply >>"$GITHUB_ENV"
+
       - name: Sign in to ghcr.io (the mirrored Postgres image)
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
 
@@ -250,10 +264,20 @@ jobs:
       - name: Linux packages (systemd in containers; install, upgrade under traffic, stop, remove; Ubuntu and Rocky; the portable archive's upgrade --check)
         run: bash scripts/demo-packages.sh
 
+      # The engine the demos tested, packaged again with the release's version: Docker reuses the
+      # engine's build (dist/ is in .dockerignore, so nothing it reads changed), nfpm runs again.
+      - name: The release's packages (a tag or a dry run)
+        if: env.RELEASE_VERSION != ''
+        run: |
+          docker build -q --target packages --build-arg VERSION="$RELEASE_VERSION" --output dist/release . >/dev/null
+          ls -l dist/release
+
+      # The .deb, .rpm and .tar.gz: the release's on a tag or a dry run, else the demo's newer pair.
       - uses: actions/upload-artifact@v7
         with:
-          name: linux-archive
-          path: dist/0.6.0-dev.2/*.tar.gz
+          name: linux-packages
+          path: ${{ env.RELEASE_VERSION != '' && 'dist/release/*' || 'dist/*-dev.2/*' }}
+          if-no-files-found: error
 
   # The Rust tests on Windows (paths, line endings, sockets and file renames behave differently
   # there), on `ductus dev`'s Postgres, in parallel with the others, and SQL Server's Windows logins
@@ -264,7 +288,8 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Rust
+        run: rustup toolchain install && rustc --version
       # Shared with `windows`, saved here: this job's build covers that one's. The cold build is
       # long: keep it when a test fails.
       - uses: Swatinem/rust-cache@v2
@@ -349,7 +374,13 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      # On a tag or a dry run: RELEASE_VERSION, as in `packaging` (the dry run's rebuilds our crates
+      # here, its version being new to the cache; a tag's doesn't).
+      - name: The release's version
+        shell: bash
+        run: bash scripts/dev/release-version.sh "$GITHUB_REF" "${{ inputs.dry_run }}" "$GITHUB_RUN_NUMBER" --apply >>"$GITHUB_ENV"
+      - name: Rust
+        run: rustup toolchain install && rustc --version
       # One Windows cache for both Windows jobs, saved by `windows-tests` (its build covers this one's).
       - uses: Swatinem/rust-cache@v2
         with:
@@ -373,14 +404,14 @@ jobs:
         run: |
           dotnet tool install --global wix --version 5.0.2
           wix extension add --global WixToolset.Util.wixext/5.0.2
-          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version 0.6.0-ci -Out dist
+          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version ${{ env.RELEASE_VERSION || '0.6.0-ci' }} -Out dist
           # A second build (its own ProductCode): the demo's upgrades go from one to the other, a
           # real major upgrade. The same file again would only be a maintenance run.
-          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version 0.6.0-ci -Out dist-upgrade
+          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version ${{ env.RELEASE_VERSION || '0.6.0-ci' }} -Out dist-upgrade
 
       - name: Portable archive (ductus-<version>-windows-x64.zip)
         shell: pwsh
-        run: ./packaging/windows/archive.ps1 -Binary target/release/ductus.exe -Version 0.6.0-ci -Out dist
+        run: ./packaging/windows/archive.ps1 -Binary target/release/ductus.exe -Version ${{ env.RELEASE_VERSION || '0.6.0-ci' }} -Out dist
 
       - name: A Postgres for the service (ductus dev --database-only)
         shell: pwsh
@@ -410,19 +441,88 @@ jobs:
           Expand-Archive (Get-Item dist/*.zip).FullName $dir
           Get-ChildItem $dir -Recurse -File | ForEach-Object { $_.FullName }
           $exe = (Get-ChildItem $dir -Recurse -Filter ductus.exe).FullName
-          & $exe --version
+          $said = & $exe --version
+          $said
+          if ($env:RELEASE_VERSION -and $said -ne "ductus $env:RELEASE_VERSION") { throw "the zip's ductus.exe says '$said', not ductus $env:RELEASE_VERSION" }
           $project = Join-Path $env:RUNNER_TEMP "check-project"
           Copy-Item -Recurse examples/adt-relay $project
           $env:DUCTUS_DATABASE_URL = $env:DEMO_DATABASE_URL
           & $exe upgrade --check --root $project
           if ($LASTEXITCODE -ne 0) { throw "upgrade --check found problems" }
 
+      # The installer and the zip (the release takes these), and the demo's logs on their own.
       - uses: actions/upload-artifact@v7
-        if: always()
         with:
           name: windows-installer
           path: |
             dist/*.msi
             dist/*.zip
-            ${{ runner.temp }}/demo-logs
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: windows-demo-logs
+          path: ${{ runner.temp }}/demo-logs
           if-no-files-found: ignore
+
+  # What a release holds (scripts/dev/release-files.sh), from this commit's own jobs and only once
+  # every one of them passed: the Linux packages and archive, the MSI and zip, the docs zip, the
+  # SBOMs, SHA256SUMS. On a v* tag: attested (GitHub's build provenance, signed through Sigstore's
+  # public log: pushing the tag is what makes it public) and made a *draft* pre-release, which Todd
+  # reviews and publishes. A dry run (gh workflow run ci.yml -f dry_run=true): the same files with
+  # version 0.0.0-dryrun.<run>, kept as the run's `release` artifact with the notes; no release, no
+  # attestation, nothing public.
+  release:
+    needs: [test, packaging, windows-tests, windows]
+    if: ${{ startsWith(github.ref, 'refs/tags/v') || inputs.dry_run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Only this job writes: the draft release (contents), and the attestations (id-token: the run's
+    # identity, which Sigstore signs with).
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: The release's version
+        run: bash scripts/dev/release-version.sh "$GITHUB_REF" "${{ inputs.dry_run }}" "$GITHUB_RUN_NUMBER" --apply >>"$GITHUB_ENV"
+      # cargo-cyclonedx reads the dependency tree through cargo.
+      - name: Rust
+        run: rustup toolchain install && rustc --version
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Tools (mdBook, lychee, cargo-cyclonedx, rpm, msitools)
+        run: bash scripts/dev/docs-tools.sh && bash scripts/dev/release-tools.sh
+      - uses: actions/download-artifact@v8
+        with:
+          name: linux-packages
+          path: artifacts/linux
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-installer
+          path: artifacts/windows
+      - name: The release's files (made and checked)
+        run: |
+          bash scripts/dev/release-files.sh "$RELEASE_VERSION" artifacts release
+          sed "s/@VERSION@/$RELEASE_VERSION/g" packaging/release-notes.md >release-notes.md
+      - name: Attest every file (who built it, from which commit and workflow)
+        if: env.RELEASE_KIND == 'tag'
+        uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: release/*
+      - name: The draft pre-release
+        if: env.RELEASE_KIND == 'tag'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$RELEASE_VERSION" release/* --draft --prerelease --verify-tag \
+            --title "Ductus $RELEASE_VERSION" --notes-file release-notes.md
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release
+          path: |
+            release/
+            release-notes.md
+          if-no-files-found: error

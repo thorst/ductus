@@ -82,6 +82,13 @@ const server = http.createServer((req, res) => {
     await page.waitForTimeout(300);
     check(await input.isVisible(), "Ctrl+K opens the search");
   }
+  // Guides rank above the reference (docs-site.sh's weights): "retention" opens with the guide.
+  const ranked = await page.evaluate(async () => {
+    const pf = await import(new URL(path_to_root + "pagefind/pagefind.js", location.href).pathname);
+    const r = await pf.search("retention");
+    return Promise.all(r.results.slice(0, 3).map(async (x) => (await x.data()).url));
+  }).catch((e) => [String(e)]);
+  check(ranked[0] === "/operate/retention.html", `"retention" lists the guide first (${ranked.join(", ")})`);
   check(errors.length === 0, `no errors on the site's pages${errors.length ? `: ${errors.join(" | ")}` : ""}`);
 
   // The offline docs: mdBook's search from file://.

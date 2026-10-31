@@ -58,8 +58,35 @@ for `upgrade --check` before installing and for servers that can't use the packa
 `README.md` is `packaging/archive/README.md`. The `.tar.gz` comes out of the same Dockerfile build
 as the packages (`--target packages`); the zip from `packaging/windows/archive.ps1 -Binary
 ductus.exe -Version 0.6.0-dev.20261028`. CI builds both, runs each one's `upgrade --check`
-(`demo-packages.sh`, the `windows` job) and keeps them as artifacts; releases attach them from
-0.6.8.
+(`demo-packages.sh`, the `windows` job) and keeps them as artifacts; releases attach them
+(below).
+
+## Releases
+
+A release is made by CI from a tag, never by hand: `.github/workflows/ci.yml`'s `release` job,
+which runs only after every other job passed on the tagged commit.
+
+1. Set `[workspace.package] version` in `Cargo.toml` to the release (`0.6.0`), build once so
+   `Cargo.lock` follows, commit, push, wait for CI to be green.
+2. Try the release job first: `gh workflow run ci.yml -f dry_run=true`. It builds everything with
+   version `0.0.0-dryrun.<run>` (the run's checkout says that version, so the binary does too) and
+   keeps what the release would hold as the run's `release` artifact, with the notes. Nothing is
+   tagged, released or attested.
+3. Tag the commit (`git tag -a v0.6.0 -m "..."`) and push the tag. **Pushing the tag is the public
+   step**: the job attests every file through Sigstore's public transparency log as it runs. A tag
+   that doesn't match `Cargo.toml` fails the run at its first step
+   (`scripts/dev/release-version.sh`).
+4. The job makes a **draft pre-release** with the files and `packaging/release-notes.md`
+   (`@VERSION@` filled in). Read it on GitHub, then publish it (`gh release edit v0.6.0
+   --draft=false`).
+5. Set `main` to the next development version (`0.7.0-dev`).
+
+What the release holds, and the checks each file passes before it's attached (each package opened
+for its version, the docs zip's links, the SBOMs, `SHA256SUMS`): `scripts/dev/release-files.sh`.
+The tools a rebuild must find again are pinned: Rust in `rust-toolchain.toml` (CI, the Dockerfile
+and every developer's cargo), nfpm by version and digest in the Dockerfile, WiX by version in CI,
+mdBook/lychee/Pagefind in `scripts/dev/docs-tools.sh`, cargo-cyclonedx in
+`scripts/dev/release-tools.sh`. Each is bumped on purpose, in a commit of its own.
 
 ## Container image
 
