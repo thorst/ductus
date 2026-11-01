@@ -142,6 +142,9 @@ The installer stops the service cleanly, replaces the program and starts it agai
 project and logs are never touched. The engine is down for **3.1–3.5 s** (measured: a few
 connections refused, nothing lost), so pick a quiet moment
 ([measured](../nuances/upgrades.md#windows-and-containers-a-restart-is-a-short-gap-level-2)).
+A sender sending through an upgrade over TLS, on CI's runner: 8 connection attempts refused, the
+slowest message 3.3 s to its ACK, 12,000 of 12,000 received once each and in order
+([the demo's output](../upgrade.md#on-windows-the-same-with-a-gap)).
 
 - A service someone **stopped on purpose** stays stopped after the upgrade
   ([nuance](../nuances/windows.md#an-upgrade-starts-the-service-again-unless-it-was-stopped-on-purpose-level-2)).
@@ -155,6 +158,7 @@ connections refused, nothing lost), so pick a quiet moment
   it first to go back."). `C:\ProgramData\Ductus` and the database stay; give `SERVICEACCOUNT=`
   again if the service ran as another account. The database changes a version makes only ever
   add, so the version before runs on them ([Going back](../upgrade.md#going-back-rollback)).
+  `demo-windows.ps1` goes back this way on every push.
 
 ## Uninstall
 

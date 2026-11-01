@@ -460,8 +460,9 @@ unique 1000 | duplicates 0 | out of order 0 | patients 100
   engine took the interfaces.
 
 Over four runs of the demo on a laptop (an upgrade and a downgrade each), the longest wait was
-0.34–0.52 s and sending paused 26–180 ms; refused was 0 and the receiver complete, with no
-duplicate and nothing out of order, every time.
+0.34–0.52 s and sending paused 26–180 ms; on CI's runner 143 ms (upgrade) and 157 ms
+(downgrade), paused 14 and 18 ms. Refused was 0 and the receiver complete, with no duplicate and
+nothing out of order, every time.
 Without TLS, in the same kind of container, `demo-packages.sh` measured a reload at 75–81 ms
 longest wait and a package upgrade at 0.30–0.45 s.
 
@@ -506,9 +507,27 @@ newer version's migration and its table are still there, and the older engine ru
 (`upgrade --check` with the installed program describes *this* version's view: nothing to apply,
 and one migration it doesn't know.)
 
-On Windows, going back is uninstall then install (the installer refuses an older version over a
-newer one): `demo-windows.ps1` does that on every push, with the settings, the project and the
-database kept ([Windows installer](install/windows.md#upgrade)).
+### On Windows: the same, with a gap
+
+`demo-windows.ps1` (every push, on CI's Windows runner) upgrades the MSI while a sender sends
+over TLS with its client certificate: 4 connections, 200 messages a second for a minute, the
+installer started 3 s in and done 3.4 s later. What the sender and the receiver saw:
+
+```text
+sent 12000 messages over 4 connection(s) in 60.0s (200/s), retries 12, rejected 0, refused 8, dropped 4, longest wait 3291 ms
+received 12200 | unique 12200 | duplicates 0 | out of order 0 | patients 300
+```
+
+(the receiver's count includes the 200 sent before). While the installer stopped, replaced and
+started the engine, the sender's connections were closed (dropped 4) and its new ones refused
+for a moment (refused 8); its slowest message waited 3.3 s for its ACK. Nothing was lost, sent
+twice or out of order: the sender resent on its own, as MLLP senders do. That's the Windows gap
+until the handover comes to Windows (v1.0): pick a quiet moment.
+
+Going back on Windows is uninstall then install: the demo upgrades to a build numbered as the
+next minor version, tries the older MSI over it (refused, exit 1603: "A newer version of Ductus
+is already installed. Uninstall it first to go back."), uninstalls, installs the older one, and
+starts it on the same settings, project and database ([Windows installer](install/windows.md#upgrade)).
 
 ## After the upgrade: confirm
 
