@@ -141,10 +141,10 @@ loads its index from the folder. The site's search (Pagefind) needs a web server
 doesn't have it. **Don't** put the zip's folder on a web server as your copy of the site: it
 works, but people then read an old version's docs as current; link to docs.getductus.com instead.
 
-## Before a release: development builds
+## Between releases: development builds
 
-Until a release exists, every push to `main` builds the packages, the archives and the installer
-in CI as development builds (versions like `0.6.0-dev.2` and `0.6.0-ci`, kept 90 days as the
-run's artifacts `linux-packages` and `windows-installer`; no checksums, attestations or SBOMs), and
+Every push to `main` also builds the packages, the archives and the installer in CI as
+development builds of what comes next (versions like `0.7.0-dev.2`, kept 90 days as the run's
+artifacts `linux-packages` and `windows-installer`; no checksums, attestations or SBOMs), and
 [the packages](linux.md) and [the installer](windows.md) can be built from a clone of the
 repository. They are for testing the project itself: use a release for anything else.

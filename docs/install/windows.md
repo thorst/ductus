@@ -26,9 +26,9 @@ As an administrator:
 msiexec /i ductus-0.6.0-x64.msi /qn          # silent; without /qn, the usual wizard
 ```
 
-Before v0.6.0 is released, MSIs are development builds: `packaging/windows/build.ps1` in a clone
-of the repository makes one (it needs Rust, the Visual Studio Build Tools and WiX 5: see
-`packaging/README.md`).
+To test changes not yet released, `packaging/windows/build.ps1` in a clone of the repository makes
+a development MSI (it needs Rust, the Visual Studio Build Tools and WiX 5: see
+`packaging/README.md`; [development builds](download.md#between-releases-development-builds)).
 
 The install registers the service (it starts automatically at boot) but **doesn't start it**:
 nothing is configured yet, and without a database it would stop at once.

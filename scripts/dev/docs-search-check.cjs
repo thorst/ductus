@@ -9,12 +9,17 @@
 //
 // The argument is where Playwright is (docs.yml installs playwright-core alone and sets
 // DOCS_BROWSER=chrome, the runner's own Chrome, so no browser is downloaded).
+//
+// After a publish, the same checks against the live site (the offline part is skipped):
+//
+//   DOCS_SITE_URL=https://docs.getductus.com node scripts/dev/docs-search-check.cjs ui/node_modules/playwright
 "use strict";
 const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { chromium } = require(path.resolve(process.argv[2] || "ui/node_modules/playwright"));
 
+const live = (process.env.DOCS_SITE_URL || "").replace(/\/+$/, "");
 const repo = path.resolve(__dirname, "../..");
 const site = path.join(repo, "target/site");
 const book = path.join(repo, "target/book");
@@ -34,11 +39,11 @@ const server = http.createServer((req, res) => {
 });
 
 (async () => {
-  for (const [dir, made] of [[site, "docs-site.sh"], [book, "docs-check.sh"]]) {
+  for (const [dir, made] of live ? [] : [[site, "docs-site.sh"], [book, "docs-check.sh"]]) {
     if (!fs.existsSync(path.join(dir, "index.html"))) throw new Error(`${dir} isn't built: run scripts/dev/${made} first`);
   }
-  await new Promise((r) => server.listen(0, "127.0.0.1", r));
-  const base = `http://127.0.0.1:${server.address().port}`;
+  if (!live) await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  const base = live || `http://127.0.0.1:${server.address().port}`;
   const browser = await chromium.launch(process.env.DOCS_BROWSER ? { channel: process.env.DOCS_BROWSER } : {});
   const errors = [];
   const page = await browser.newPage();
@@ -90,6 +95,16 @@ const server = http.createServer((req, res) => {
   }).catch((e) => [String(e)]);
   check(ranked[0] === "/operate/retention.html", `"retention" lists the guide first (${ranked.join(", ")})`);
   check(errors.length === 0, `no errors on the site's pages${errors.length ? `: ${errors.join(" | ")}` : ""}`);
+
+  if (live) {
+    await browser.close();
+    if (failures.length) {
+      console.error(`\n${failures.length} check(s) failed on ${live}`);
+      process.exit(1);
+    }
+    console.log(`\nthe search works on ${live}`);
+    return;
+  }
 
   // The offline docs: mdBook's search from file://.
   errors.length = 0;

@@ -1547,7 +1547,7 @@ dependencies = [
 
 [[package]]
 name = "ductus"
-version = "0.6.0-dev"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -1580,7 +1580,7 @@ dependencies = [
 
 [[package]]
 name = "ductus-core"
-version = "0.6.0-dev"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
@@ -1600,14 +1600,14 @@ dependencies = [
 
 [[package]]
 name = "ductus-hl7"
-version = "0.6.0-dev"
+version = "0.6.0"
 dependencies = [
  "thiserror",
 ]
 
 [[package]]
 name = "ductus-mllp"
-version = "0.6.0-dev"
+version = "0.6.0"
 dependencies = [
  "bytes",
  "tokio",
@@ -1618,7 +1618,7 @@ dependencies = [
 
 [[package]]
 name = "ductus-runtime"
-version = "0.6.0-dev"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "axum",
@@ -1663,7 +1663,7 @@ dependencies = [
 
 [[package]]
 name = "ductus-script"
-version = "0.6.0-dev"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "deno_ast",
@@ -1677,7 +1677,7 @@ dependencies = [
 
 [[package]]
 name = "ductus-store"
-version = "0.6.0-dev"
+version = "0.6.0"
 dependencies = [
  "anyhow",
  "chrono",

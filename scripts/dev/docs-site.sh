@@ -16,8 +16,14 @@ export PATH="$HOME/.local/bin:$PATH"
 out=$(realpath -m "${1:-target/site}")
 
 rm -rf "$out"
+# Every page's title names the version it describes ("Ductus 0.6.0"), as the docs zip's do: the
+# site is published from a release tag (or docs-0.6, which follows it), so Cargo.toml says the
+# release's version there. Same reading of Cargo.toml as release-version.sh.
+version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)".*/\1/p' Cargo.toml)
+[ -n "$version" ] || { echo "no version in Cargo.toml's [workspace.package]" >&2; exit 1; }
 # MDBOOK_OUTPUT__HTML__SEARCH__ENABLE is book.toml's output.html.search.enable, for this build only.
-MDBOOK_OUTPUT__HTML__SEARCH__ENABLE=false mdbook build docs -d "$out" 2>&1 | grep -vE '\[INFO\]' >&2 || true
+MDBOOK_BOOK__TITLE="${MDBOOK_BOOK__TITLE:-Ductus $version}" MDBOOK_OUTPUT__HTML__SEARCH__ENABLE=false \
+  mdbook build docs -d "$out" 2>&1 | grep -vE '\[INFO\]' >&2 || true
 [ -f "$out/index.html" ] || { echo "the docs site didn't build (mdbook build docs)" >&2; exit 1; }
 [ ! -e "$out/searchindex.js" ] || { echo "mdBook's search index is in the site: it should be off here" >&2; exit 1; }
 
@@ -49,4 +55,4 @@ if [ "$indexed" != "$marked" ]; then
   echo "Pagefind indexed ${indexed:-no} pages of the $marked marked for search" >&2
   exit 1
 fi
-echo "docs site: $out ($marked pages, searched with Pagefind $(pagefind --version | cut -d' ' -f2))" >&2
+echo "docs site: $out ($marked pages titled \"Ductus $version\", searched with Pagefind $(pagefind --version | cut -d' ' -f2))" >&2

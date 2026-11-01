@@ -13,9 +13,9 @@ name: Docs
 #     file://, which is what the release's docs zip holds).
 #   - weekly, and by hand (gh workflow run docs.yml -f network=true): also the links to other
 #     sites. Reports in the run's summary, never fails it: other people's sites go down.
-#   - publishing to GitHub Pages: on a release tag (v*), and by hand from the `docs-0.6` branch
-#     (fixes between releases, cherry-picked there: decisions.md "0.6.8 answers", Q2). OFF until
-#     Todd turns it on, see the `pages` job.
+#   - publishing to GitHub Pages (docs.getductus.com): on a release tag (v*), and by hand from the
+#     `docs-0.6` branch (fixes between releases, cherry-picked there: decisions.md "0.6.8 answers",
+#     Q2). On since 2026-11-01, see the `pages` job.
 on:
   push:
     branches: [main, "docs-*"]
@@ -93,18 +93,22 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/dev/docs-check.sh --network --format markdown --output "$GITHUB_STEP_SUMMARY"
 
-  # Publishing to docs.getductus.com. OFF: it runs only when the repository variable DOCS_PAGES is
-  # `on`, and nothing sets it yet. Before turning it on, Todd (0.6-design.md "0.6.8 detailed
-  # design", "What each outward step will need from Todd"):
-  #   1. Settings -> Pages -> Source: "GitHub Actions"; Custom domain: docs.getductus.com;
-  #      "Enforce HTTPS" once GitHub has the certificate.
+  # Publishing to docs.getductus.com. It runs only when the repository variable DOCS_PAGES is `on`
+  # (set 2026-11-01, with Todd's OK). How it was set up, should it ever need doing again:
+  #   1. Pages: source "GitHub Actions", custom domain docs.getductus.com (gh api -X POST
+  #      repos/thorst/ductus/pages -f build_type=workflow; then PUT -f cname=docs.getductus.com),
+  #      Enforce HTTPS once GitHub has the certificate (PUT -F https_enforced=true).
   #   2. DNS at Hostinger: `docs` CNAME `thorst.github.io` (nothing else changes).
-  #   3. Settings -> Environments -> github-pages -> Deployment branches and tags: add the tag rule
-  #      `v*` and the branch `docs-0.6` (GitHub allows only the default branch at first, and this
-  #      job never publishes main: main describes unreleased behaviour).
+  #   3. The github-pages environment's deployment rules: the tag `v*` and the branch `docs-0.6`
+  #      (this job never publishes main: main describes unreleased behaviour).
   #   4. gh variable set DOCS_PAGES --body on -R thorst/ductus
-  # Then a v* tag publishes that release's docs; fixes between releases go to the docs-0.6 branch
-  # and are published with: gh workflow run docs.yml --ref docs-0.6 -f publish=true
+  # If no certificate comes (https_certificate stays null for half an hour after DNS answers),
+  # clear the domain and set it again (PUT -F cname=null, then -f cname=docs.getductus.com): that
+  # started it the first time, approved within minutes.
+  # A v* tag publishes that release's docs; fixes between releases go to the docs-0.6 branch and
+  # are published with: gh workflow run docs.yml --ref docs-0.6 -f publish=true
+  # Then check the live site's search: DOCS_SITE_URL=https://docs.getductus.com node
+  # scripts/dev/docs-search-check.cjs ui/node_modules/playwright
   pages:
     needs: build
     if: ${{ vars.DOCS_PAGES == 'on' && (startsWith(github.ref, 'refs/tags/v') || (inputs.publish && github.ref == 'refs/heads/docs-0.6')) }}

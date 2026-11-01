@@ -124,7 +124,11 @@ fn the_release_version_comes_from_the_tag_or_the_dry_run() {
     let lock = std::fs::read_to_string(dir.path().join("Cargo.lock")).unwrap();
     let crates = lock.matches("version = \"0.0.0-dryrun.42\"").count();
     assert_eq!(crates, lock.matches("\nname = \"ductus").count(), "every workspace crate's entry, nothing else");
-    assert!(!lock.contains(&format!("version = \"{ours}\"")));
+    // Only our entries: other crates can have our version too (seven did at 0.6.0) and stay as they are.
+    let lines: Vec<&str> = lock.lines().collect();
+    for pair in lines.windows(2).filter(|p| p[0].starts_with("name = \"ductus")) {
+        assert_ne!(pair[1], format!("version = \"{ours}\""), "{} kept the old version", pair[0]);
+    }
 
     // The crates' own dependencies on each other name no version (only paths): a version there
     // would be one more place a release or a dry run has to change (the first dry run failed on it).

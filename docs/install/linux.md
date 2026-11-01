@@ -29,8 +29,9 @@ sha256sum --check --ignore-missing SHA256SUMS
 gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus    # GitHub built it, from the tagged source
 ```
 
-Before v0.6.0 is released, packages are development builds: `docker build --target packages
---build-arg VERSION=0.6.0-dev.1 --output dist .` in a clone of the repository makes both.
+To test changes not yet released, `docker build --target packages --build-arg
+VERSION=0.6.1-dev.1 --output dist .` in a clone of the repository makes both as development
+builds ([development builds](download.md#between-releases-development-builds)).
 
 The install creates the `ductus` user and group, and doesn't start anything: nothing is
 configured yet. It prints what to do next, which is the rest of this page.
