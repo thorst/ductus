@@ -94,11 +94,71 @@ Check one with the [GitHub CLI](https://cli.github.com/), signed in with any Git
 gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus
 ```
 
-It says whether it found an attestation for exactly this file, made by a workflow of
-`thorst/ductus`, and ends with the verification succeeding. If it finds none, or one from another
-repository, don't install the file. On Windows it's the same command (`gh` installs with
-`winget install GitHub.cli`); it's the check that replaces a code signature until v1.0
+It looks up the file's SHA-256 in GitHub's record of attestations, checks the signature, and
+checks the attestation was made by a workflow of `thorst/ductus`. On v0.6.0's `.deb` (gh 2.87.3):
+
+```text
+$ gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus
+Loaded digest sha256:afb4c7f622a256e1aade44cc9a8a9f023504523c6bdac69a66d4eabc381e2ba9 for file://ductus_0.6.0_amd64.deb
+Loaded 1 attestation from GitHub API
+
+The following policy criteria will be enforced:
+- Predicate type must match:................ https://slsa.dev/provenance/v1
+- Source Repository Owner URI must match:... https://github.com/thorst
+- Source Repository URI must match:......... https://github.com/thorst/ductus
+- Subject Alternative Name must match regex: (?i)^https://github.com/thorst/ductus/
+- OIDC Issuer must match:................... https://token.actions.githubusercontent.com
+
+✓ Verification succeeded!
+
+The following 1 attestation matched the policy criteria
+
+- Attestation #1
+  - Build repo:..... thorst/ductus
+  - Build workflow:. .github/workflows/ci.yml@refs/tags/v0.6.0
+  - Signer repo:.... thorst/ductus
+  - Signer workflow: .github/workflows/ci.yml@refs/tags/v0.6.0
+```
+
+**What to look for:** `✓ Verification succeeded!`, and a build workflow that names the release's
+own tag (`@refs/tags/v0.6.0` for 0.6.0): the file was built by the project's CI from that tag,
+not from a branch or someone's fork. The `Loaded digest` line's checksum is the same as the
+file's line in `SHA256SUMS`.
+
+On Windows it's the same command (`gh` installs with `winget install GitHub.cli`), and the same
+output for the MSI, with its own checksum:
+
+```text
+PS> gh attestation verify ductus-0.6.0-x64.msi -R thorst/ductus
+Loaded digest sha256:c53fbcf84bf60d21a7a4df857d9258f4a6f626ffc6f32b9ae04c1c368907a1c9 for file://ductus-0.6.0-x64.msi
+Loaded 1 attestation from GitHub API
+...
+✓ Verification succeeded!
+...
+  - Build workflow:. .github/workflows/ci.yml@refs/tags/v0.6.0
+```
+
+It's the check that replaces a code signature until v1.0
 ([nuance](../nuances/windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1)).
+
+**When it fails**, it says so and exits 1. A file changed on the way (here the `.deb` with one
+byte added) has a checksum GitHub has no attestation for:
+
+```text
+$ gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus
+Loaded digest sha256:179c1bd745298606b4f9224421609b247d70f12cb2888d57a8146fd27c75ffaf for file://ductus_0.6.0_amd64.deb
+✗ Loading attestations from GitHub API failed
+
+Error: HTTP 404: Not Found (https://api.github.com/repos/thorst/ductus/attestations/sha256:179c1bd745298606b4f9224421609b247d70f12cb2888d57a8146fd27c75ffaf?per_page=30&predicate_type=https://slsa.dev/provenance/v1)
+```
+
+The "404" is the point: no attestation exists for a file with that content. Don't install it;
+download it again from the release page. The same happens for a file from another repository.
+
+**In a script, check the exit code, not the text:** `gh` writes this report only to a terminal.
+Run from a script, a pipe or a CI job, it prints nothing at all and exits 0 (verified) or 1 (not):
+`gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus || exit 1`. Add `--format json`
+for the details as JSON.
 
 **When to use which:** the checksum always (it needs nothing but the system's own tools); the
 attestation once per release on the machine you download on, before the file is copied to
