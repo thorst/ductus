@@ -1096,6 +1096,75 @@ mod tests {
         assert!(wrong.is_empty(), "{} blocks disagree with examples/guides:\n{}", wrong.len(), wrong.join("\n"));
     }
 
+    /// The pages show what the v0.6 demo runs: a block on the line after
+    /// `<!-- scripts/demo-v06.sh -->` is from the demo's transcript, so each of its `$ ` commands
+    /// is one the demo gives `run`, or `gap` (which runs it while a sender sends); an `@NAME@`
+    /// there stands for a package's version. A demo step can't change without the pages that
+    /// show it.
+    #[test]
+    fn the_pages_show_what_the_v06_demo_runs() {
+        let demo = std::fs::read_to_string(docs().join("../scripts/demo-v06.sh")).unwrap().replace("\r\n", "\n");
+        fn command(line: &str) -> Option<&str> {
+            let l = line.trim_start();
+            let quoted = l.strip_prefix("run '").or_else(|| Some(&l[l.strip_prefix("gap ")?.find('\'')? + 5..]))?;
+            quoted.strip_suffix('\'')
+        }
+        let runs: Vec<&str> = demo.lines().filter_map(command).collect();
+        assert!(
+            runs.len() >= 20,
+            "only {} `run '…'` lines in demo-v06.sh: has the way it runs them changed?",
+            runs.len()
+        );
+        let (mut checked, mut wrong) = (0, Vec::new());
+        for (page, text) in pages().iter().filter(|(p, _)| guide(p)) {
+            let text = text.replace("\r\n", "\n");
+            let mut lines = text.lines();
+            while let Some(line) = lines.next() {
+                if line.trim_end() != "<!-- scripts/demo-v06.sh -->" {
+                    continue;
+                }
+                if !lines.next().is_some_and(|l| l.starts_with("```")) {
+                    wrong.push(format!("{page}: the marker isn't right above a fenced block"));
+                    continue;
+                }
+                for cmd in lines.by_ref().take_while(|l| l.trim_end() != "```").filter_map(|l| l.strip_prefix("$ ")) {
+                    checked += 1;
+                    if !runs.iter().any(|r| same_command(r, cmd)) {
+                        wrong.push(format!("{page}: `{cmd}` isn't a command demo-v06.sh runs"));
+                    }
+                }
+            }
+        }
+        assert!(checked >= 10, "only {checked} commands checked: are the pages' blocks still marked?");
+        assert!(wrong.is_empty(), "{} commands differ from the demo's:\n{}", wrong.len(), wrong.join("\n"));
+    }
+
+    /// A demo command, with `@NAME@` standing for a version (letters, digits, `.~+-`), against a
+    /// command as a page shows it.
+    fn same_command(pattern: &str, cmd: &str) -> bool {
+        fn rest(parts: &[&str], cmd: &str) -> bool {
+            let Some((literal, more)) = parts.split_first() else { return cmd.is_empty() };
+            let Some(cmd) = cmd.strip_prefix(literal) else { return false };
+            let Some((_, more)) = more.split_first() else { return cmd.is_empty() };
+            (1..=cmd.len())
+                .take_while(|&n| {
+                    cmd.as_bytes()[n - 1].is_ascii_alphanumeric() || b".~+-".contains(&cmd.as_bytes()[n - 1])
+                })
+                .any(|n| rest(more, &cmd[n..]))
+        }
+        rest(&pattern.split('@').collect::<Vec<_>>(), cmd)
+    }
+
+    #[test]
+    fn a_demo_command_matches_with_its_versions() {
+        let archive = "sudo -u ductus ./ductus-@ARCHIVE_NEW@/ductus upgrade --check";
+        assert!(same_command(archive, "sudo -u ductus ./ductus-0.6.0-dev.2/ductus upgrade --check"));
+        assert!(same_command("apt install ./ductus_@DEB_OLD@_amd64.deb", "apt install ./ductus_0.6.0~dev.1_amd64.deb"));
+        assert!(!same_command("apt install ./ductus_@DEB_OLD@_amd64.deb", "apt install ./ductus__amd64.deb"));
+        assert!(!same_command(archive, "sudo -u ductus ./ductus-0.6.0/ductus upgrade --check --json"));
+        assert!(same_command("cd /tmp", "cd /tmp") && !same_command("cd /tmp", "cd /tmp/x"));
+    }
+
     /// Text decoded twice (UTF-8 read as Windows-1252 and saved again) shows as `Â·` and `â€¦`:
     /// it reached the reference pages once from a source file.
     #[test]

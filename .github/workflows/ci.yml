@@ -264,6 +264,9 @@ jobs:
       - name: Linux packages (systemd in containers; install, upgrade under traffic, stop, remove; Ubuntu and Rocky; the portable archive's upgrade --check)
         run: bash scripts/demo-packages.sh
 
+      - name: The v0.6 demo (a new server to MLLP over TLS; upgrade --check; upgrade and downgrade under traffic)
+        run: BUILD=0 bash scripts/demo-v06.sh
+
       # The engine the demos tested, packaged again with the release's version: Docker reuses the
       # engine's build (dist/ is in .dockerignore, so nothing it reads changed), nfpm runs again.
       - name: The release's packages (a tag or a dry run)
@@ -408,6 +411,10 @@ jobs:
           # A second build (its own ProductCode): the demo's upgrades go from one to the other, a
           # real major upgrade. The same file again would only be a maintenance run.
           ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version ${{ env.RELEASE_VERSION || '0.6.0-ci' }} -Out dist-upgrade
+          # A build numbered as the next minor version (the same program): the demo upgrades to it
+          # and goes back, as a site would after an upgrade it regrets.
+          $v = [version](("${{ env.RELEASE_VERSION || '0.6.0-ci' }}" -split '-')[0])
+          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version "$($v.Major).$($v.Minor + 1).0" -Out dist-newer
 
       - name: Portable archive (ductus-<version>-windows-x64.zip)
         shell: pwsh
@@ -428,9 +435,9 @@ jobs:
           if (-not $url) { Get-Content $log, "$log.err" -ErrorAction SilentlyContinue; throw "no database" }
           "DEMO_DATABASE_URL=$($url.Trim())" >> $env:GITHUB_ENV
 
-      - name: Installer demo (install, service, Event Log, upgrades, a named account, uninstall)
+      - name: Installer demo (install, service, MLLP over TLS, Event Log, upgrades with a sender through them, going back, a named account, uninstall)
         shell: pwsh
-        run: ./scripts/demo-windows.ps1 -Msi (Get-Item dist/*.msi).FullName -UpgradeMsi (Get-Item dist-upgrade/*.msi).FullName -DatabaseUrl $env:DEMO_DATABASE_URL -LogDir "$env:RUNNER_TEMP/demo-logs"
+        run: ./scripts/demo-windows.ps1 -Msi (Get-Item dist/*.msi).FullName -UpgradeMsi (Get-Item dist-upgrade/*.msi).FullName -NewerMsi (Get-Item dist-newer/*.msi).FullName -DatabaseUrl $env:DEMO_DATABASE_URL -LogDir "$env:RUNNER_TEMP/demo-logs"
 
       # From the zip, as a site would before upgrading: against the database the demo's service
       # used (migrated, its engine stopped), with the example project.

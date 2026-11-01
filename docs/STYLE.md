@@ -85,6 +85,12 @@ word for word; a `ts` block elsewhere in the guides that names such a path is ch
 `ductus validate` run in the CLI tests (`the_guides_example_project_passes_its_tests_and_validate`),
 so a page's code has run. To show new code, add it to the project with a test, then quote it.
 
+**What a demo runs is marked.** A block that shows a demo's transcript (today the v0.6 demo's,
+on the first-interface and upgrade pages) has `<!-- scripts/demo-v06.sh -->` on the line above
+it, and each of its `$ ` lines must be a command that demo gives `run` (or `gap`, which runs
+one while a sender sends; `the_pages_show_what_the_v06_demo_runs`, CLI crate): change the demo's step and the page
+together. The demo writes its whole transcript to a file (it says where) for the outputs.
+
 **Commands are real.** Every command on a page has been run, and its output, where shown, is
 what it printed (trimmed with `…`, never made up). Measurements name what was measured, on what,
 and link to where it's recorded (`architecture.md`, a nuance); they're never worded as limits

@@ -325,10 +325,13 @@ Under the Linux package's service senders wait in the queue rather than being re
 long as it takes. Plan the window by the size shown, and time it on a restored backup first.
 There have been none since v0.5 (0011, the queue index, was the last).
 
-**When one fails** part-way, the start refuses, and so does every later start, until it's
-repaired, and `upgrade --check` shows it ✗ with its number. Don't edit
-`_sqlx_migrations` by hand: [ask for help](https://github.com/thorst/ductus/issues). The version
-before still runs on the database as it is: going back keeps you running meanwhile.
+**When one fails**, the start refuses with the database's reason, and so does every later start
+of that version until the cause is fixed. Each migration runs in one transaction, so a failure
+leaves nothing half done: the database is as it was before it, and the version before still runs
+on it (going back keeps you running meanwhile). A migration recorded as failed (`upgrade
+--check` shows it ✗ with its number) is one that couldn't run in a transaction; none so far
+does. Then every version refuses to start until it's repaired: don't edit `_sqlx_migrations` by
+hand, [ask for help](https://github.com/thorst/ductus/issues).
 
 **Backups are the DBA's.** The engine needs no backup of its own before an upgrade, but your
 usual point-in-time recovery (pgBackRest, WAL archiving) is what undoes anything at all
@@ -345,7 +348,7 @@ problem in Ductus itself is a rollback, and an [issue](https://github.com/thorst
 
 | Installed with | Going back |
 |---|---|
-| Linux package | `sudo apt install --allow-downgrades ./ductus_0.6.0_amd64.deb`, or `sudo dnf downgrade ./ductus-0.6.0-1.x86_64.rpm`: the package hands over to the older program as an upgrade does (when the older one is 0.6.6.3 or later; before that, it restarts) |
+| Linux package | `sudo apt install -y --allow-downgrades ./ductus_0.6.0_amd64.deb` (apt asks before a downgrade; `-y` answers it), or `sudo dnf downgrade ./ductus-0.6.0-1.x86_64.rpm`: the package hands over to the older program as an upgrade does (when the older one is 0.6.6.3 or later; before that, it restarts). [On a server](#going-back-under-traffic) shows one |
 | Windows installer | The installer refuses to install an older version over a newer one ("A newer version of Ductus is already installed. Uninstall it first to go back."). Uninstall (`msiexec /x`), then install the older MSI: `C:\ProgramData\Ductus` and the database stay. Give `SERVICEACCOUNT=` again if the service ran as another account (a gMSA): the install sets the account afresh |
 | Portable archive | Put the older program back and `sudo systemctl reload ductus` |
 | Docker | Run the older image |
@@ -355,8 +358,157 @@ and columns the older one doesn't read. Messages received meanwhile are kept and
 features only the new version had stop until you upgrade again. Going back across a major version
 isn't possible (from 1.0 on: the major may have removed what the older one needs).
 
-Package downgrades aren't part of the end-to-end demos yet (the database side is: an older
-program on a newer database is tested on every push); the v0.6 demo adds them.
+**What going back does to a database the new version migrated:** nothing. The older program
+doesn't undo the new version's migrations, can't, and needn't: they only added. At its start it
+sees migrations it doesn't know in `_sqlx_migrations`, leaves them as they are, and runs on the
+tables it knows; what the new version added (a table, a column) stays, unused, until you upgrade
+again, when the new version finds its migrations already applied and applies nothing twice.
+`ductus upgrade --check` lists them as "applied by a newer version than this one" (✓, not a
+problem). Two things to know:
+
+- **Data written only into what the new version added** isn't read by the older one while it
+  runs. Messages themselves are in tables every version reads, so none is lost or left waiting.
+- **A migration that failed** left nothing behind: each runs in one transaction, so a failure
+  undoes all of it. The new version refuses to start (each time, with the reason) and the older
+  one runs on the database as it was ([Database changes](#database-changes-migrations)).
+
+Both are shown [on a server, under traffic](#going-back-under-traffic) and tested on every push:
+a store test starts the engine on a database with a migration it doesn't know, and the v0.6 demo
+goes back with a package while a sender sends.
+
+## On a server: the v0.6 demo
+
+**What:** an upgrade and a downgrade of the Linux package, each while a sender sends, on the
+server [Your first interface](first-interface.md#on-a-new-server-start-to-finish) set up (Ubuntu
+24.04, MLLP over TLS with client certificates, Postgres on another machine). The commands and
+outputs are from `scripts/demo-v06.sh`, which runs them under real systemd on every push.
+
+**Why:** "receiving never stops" is a claim; this is what a sender saw while it happened, and
+what the database looks like after going back.
+
+The demo's two packages (`0.6.0~dev.1` and `~dev.2`) hold the same program, so they show the
+mechanics of an upgrade, not a version's changes; a release's files are named `0.6.0`, `0.6.1`.
+
+### Check first, from the new version's archive
+
+The new version's [portable archive](install/archive.md), unpacked anywhere, checks the running
+server with the service's settings, and replays the last day's traffic through the new version
+beside the installed one:
+
+<!-- scripts/demo-v06.sh -->
+```text
+$ cd /tmp
+$ tar -xzf ductus-0.6.0-dev.2-linux-x64.tar.gz
+$ sudo -u ductus ./ductus-0.6.0-dev.2/ductus upgrade --check --replay 1d --env-file /etc/ductus/ductus.env --root /var/lib/ductus/project
+ductus upgrade --check: what version 0.6.0-dev would do here (nothing is changed)
+
+The database
+✓ migrations: nothing to apply
+
+Engines on this database
+✓ 18e3c2043934cad1-14e on ductus1 (pid 334): version 0.6.0-dev, environment prod, since 2026-10-31 23:46 UTC, runs 1 interface(s)
+
+The project (/var/lib/ductus/project, environment prod)
+✓ validate: valid
+    ⚠ database: plain, no TLS: the server doesn't offer it (sslmode=prefer); whoever answers at its address is believed: add sslmode=verify-full to DUCTUS_DATABASE_URL (sslrootcert=/path/ca.pem for a private CA)
+✓ test: 1 passed, 0 failed
+
+Between versions
+✓ required stops: none (versions before 1.0 upgrade to any later one)
+✓ deprecated settings: none used
+
+The last 1d replayed through 0.6.0-dev (nothing is sent)
+✓ replay against version 0.6.0-dev (installed): 100 message(s), 100 comparison(s), 100 identical, 0 different
+
+ready to upgrade to 0.6.0-dev (checked in 0.9 s)
+```
+
+On the server, the replay found the installed version (`/usr/bin/ductus`) and ran it beside the
+new one, so every output was compared whole: "100 identical", where the lab example
+[above](#ductus-upgrade---check) could only compare decisions. (The database warning is the
+demo's database server offering no TLS; a real one should.)
+
+### The upgrade, under traffic
+
+A sender keeps 4 connections open and sends 1,000 messages at 200 a second, over TLS with its
+client certificate; 1.5 s in, the package is installed:
+
+<!-- scripts/demo-v06.sh -->
+```text
+$ sudo apt install ./ductus_0.6.0~dev.2_amd64.deb
+…
+Unpacking ductus (0.6.0~dev.2) over (0.6.0~dev.1) ...
+Setting up ductus (0.6.0~dev.2) ...
+$ journalctl -u ductus -o cat --no-pager | grep "^handed over"
+handed over to ductus 0.6.0-dev (pid 637): receiving never stopped, sending paused 180 ms
+```
+
+What the sender saw (`ductus gen`'s last line), and what the receiver got:
+
+```text
+retries 4, rejected 0, refused 0, dropped 4, longest wait 504 ms
+unique 1000 | duplicates 0 | out of order 0 | patients 100
+```
+
+- **Refused 0**: no connection was turned away at any moment.
+- **Dropped 4, retries 4**: each of the 4 open connections was closed once, by the old engine
+  as it let go, with no message lost on it, and opened again at once on the new one. A sender's
+  MLLP client does this by itself; to its operators it looks like nothing.
+- **Longest wait 504 ms**: the slowest ACK, from first try to ACK, for a message that waited
+  out the close, the reconnect and the TLS handshake.
+- **Every message once and in order** at the receiver; sending paused 180 ms while the new
+  engine took the interfaces.
+
+Over four runs of the demo on a laptop (an upgrade and a downgrade each), the longest wait was
+0.34–0.52 s and sending paused 26–180 ms; refused was 0 and the receiver complete, with no
+duplicate and nothing out of order, every time.
+Without TLS, in the same kind of container, `demo-packages.sh` measured a reload at 75–81 ms
+longest wait and a package upgrade at 0.30–0.45 s.
+
+### Going back, under traffic
+
+To see what an older version does on a database a newer one migrated, the demo first records one
+migration the older program doesn't know (number 9999, with a table of its own), as if the newer
+version had added it; both packages hold one program, so this stands in for a real one. Then the
+same sender sends while the older package goes in:
+
+<!-- scripts/demo-v06.sh -->
+```text
+$ sudo apt install -y --allow-downgrades ./ductus_0.6.0~dev.1_amd64.deb
+…
+The following packages will be DOWNGRADED:
+  ductus
+…
+dpkg: warning: downgrading ductus from 0.6.0~dev.2 to 0.6.0~dev.1
+…
+Unpacking ductus (0.6.0~dev.1) over (0.6.0~dev.2) ...
+Setting up ductus (0.6.0~dev.1) ...
+$ journalctl -u ductus -o cat --no-pager | grep "^handed over" | tail -1
+handed over to ductus 0.6.0-dev (pid 832): receiving never stopped, sending paused 26 ms
+$ cd /var/lib/ductus/project
+$ sudo -u ductus ductus upgrade --check --env-file /etc/ductus/ductus.env
+ductus upgrade --check: what version 0.6.0-dev would do here (nothing is changed)
+
+The database
+✓ migrations: nothing to apply
+✓ applied by a newer version than this one: 9999 (fine: migrations only add, so this version runs on them)
+…
+ready to upgrade to 0.6.0-dev (checked in 0.5 s)
+```
+
+```text
+retries 4, rejected 0, refused 0, dropped 4, longest wait 349 ms
+unique 1000 | duplicates 0 | out of order 0 | patients 100
+```
+
+A downgrade is a handover like an upgrade: refused 0, every message once and in order. The
+newer version's migration and its table are still there, and the older engine runs beside them.
+(`upgrade --check` with the installed program describes *this* version's view: nothing to apply,
+and one migration it doesn't know.)
+
+On Windows, going back is uninstall then install (the installer refuses an older version over a
+newer one): `demo-windows.ps1` does that on every push, with the settings, the project and the
+database kept ([Windows installer](install/windows.md#upgrade)).
 
 ## After the upgrade: confirm
 

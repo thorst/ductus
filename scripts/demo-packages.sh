@@ -14,6 +14,7 @@
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
+source scripts/dev/systemd-box.sh
 DIST=$PWD/dist
 NET=ductus-pkg
 WORK=$(mktemp -d)
@@ -72,13 +73,7 @@ for image in quay.io/rockylinux/rockylinux:9 quay.io/rockylinux/rockylinux:8; do
 done
 
 echo "== Postgres (its own container, like a database server)"
-docker network create "$NET" >/dev/null
-docker run -d --name ductus-pkg-db --network "$NET" -e POSTGRES_USER=ductus -e POSTGRES_PASSWORD=pkg-test \
-  -e POSTGRES_DB=ductus "${POSTGRES_IMAGE:-public.ecr.aws/docker/library/postgres:18}" >/dev/null
-for _ in $(seq 1 60); do
-  docker exec ductus-pkg-db pg_isready -U ductus >/dev/null 2>&1 && break
-  sleep 0.5
-done
+box_network "$NET" ductus-pkg-db
 
 # The example relay, sending to a receiver on the same machine.
 cp -r examples/adt-relay "$WORK/project"
@@ -98,33 +93,13 @@ check archive-new-database 'grep "a new database: the first start creates every 
 check archive-project 'grep "✓ validate: valid" <<<"$out" >/dev/null && grep -E "✓ test: [0-9]+ passed, 0 failed" <<<"$out" >/dev/null'
 check archive-ready 'grep "^exit 0$" <<<"$out" >/dev/null'
 
-# systemd test images: the distribution + systemd + curl.
-build_image() { docker build -q -t "$1" - >/dev/null; }
-build_image ductus-pkg-ubuntu <<'EOF'
-FROM ubuntu:24.04
-RUN apt-get update && apt-get install -y --no-install-recommends systemd systemd-sysv curl ca-certificates procps \
-    && rm -rf /var/lib/apt/lists/*
-CMD ["/sbin/init"]
-EOF
-build_image ductus-pkg-rocky <<'EOF'
-FROM quay.io/rockylinux/rockylinux:9
-RUN dnf install -y --setopt=install_weak_deps=False systemd procps-ng && dnf clean all
-CMD ["/sbin/init"]
-EOF
+box_images
 
 # lifecycle <name> <image> <install command> <upgrade command> <remove command> <ext>
 lifecycle() {
   local name=$1 image=$2 install=$3 upgrade=$4 remove=$5 ext=$6
-  local c=ductus-pkg-$ext
   echo "== $name: the whole life of the package under systemd"
-  docker run -d --name "$c" --network "$NET" --privileged --cgroupns=host -v /sys/fs/cgroup:/sys/fs/cgroup:rw \
-    --tmpfs /run --tmpfs /run/lock -v "$DIST:/dist:ro" -v "$WORK/project:/seed:ro" "$image" >/dev/null
-  on() { docker exec "$c" bash -c "$1"; }
-  for _ in $(seq 1 60); do
-    state=$(on "systemctl is-system-running 2>/dev/null" || true)
-    [[ "$state" == running || "$state" == degraded ]] && break
-    sleep 0.5
-  done
+  box_start "ductus-pkg-$ext" "$image" -v "$DIST:/dist:ro" -v "$WORK/project:/seed:ro"
 
   on "$install /dist/$OLD/*.$ext" >"$WORK/$ext-install.log" 2>&1
   check "$ext-install-message" 'grep "It isn'"'"'t running yet" "$WORK/$ext-install.log" >/dev/null'
@@ -136,41 +111,15 @@ lifecycle() {
       cp -r /seed /var/lib/ductus/project && chown -R ductus:ductus /var/lib/ductus/project
       systemctl enable --now ductus 2>/dev/null"
   local healthy=0
-  for _ in $(seq 1 100); do
-    on "curl -sf http://127.0.0.1:7700/api/v1/health >/dev/null" && healthy=1 && break
-    sleep 0.2
-  done
+  wait_healthy && healthy=1
   check "$ext-healthy" '[ $healthy = 1 ]'
   [ $healthy = 1 ] || on "journalctl -u ductus --no-pager | tail -20"
   echo "   configured and started: $(on "journalctl -u ductus --no-pager -o cat | grep -o 'started interfaces=[0-9]*' | tail -1")"
   # Type=notify: systemd heard READY=1 (`systemctl start` waited for every interface).
   check "$ext-notify-ready" '[ "$(on "systemctl show -p StatusText --value ductus")" = "running 1 interface" ]'
 
-  # What a sender sees while systemd restarts or kills the engine: 4 kept connections, 200
-  # messages/s, the action 1.5 s in. Sequence numbers from <offset> (the example dedupes MSH-10).
-  gap() { # gap <label> <offset> <action>
-    local label=$1 offset=$2 action=$3 file=${1//[^a-z0-9]/-}
-    on "nohup ductus sink --port 6662 >/tmp/sink-$file.log 2>&1 &"
-    on "nohup ductus gen --to 127.0.0.1:6661 --count 1000 --patients 100 --connections 4 --rate 200 --offset $offset >/tmp/gen-$file.log 2>&1 &"
-    sleep 1.5
-    on "$action"
-    for _ in $(seq 1 300); do
-      on "pgrep -f '[d]uctus gen' >/dev/null" || break # [d]: not this command's own bash
-      sleep 0.2
-    done
-    for _ in $(seq 1 120); do
-      left=$(docker exec ductus-pkg-db psql -U ductus -Atc "SELECT count(*) FROM deliveries WHERE status = 0")
-      [ "$left" = 0 ] && break
-      sleep 0.5
-    done
-    on "pkill -INT -f 'ductus sink'"
-    sleep 0.5
-    sent=$(on "tail -1 /tmp/gen-$file.log")
-    received=$(on "tail -1 /tmp/sink-$file.log")
-    echo "   $label: ${sent#*), } | receiver: ${received#*| }"
-  }
-  refused() { sed -n 's/.*refused \([0-9]*\),.*/\1/p' <<<"$1"; }
-
+  # What a sender sees while systemd restarts or kills the engine (gap, systemd-box.sh); the
+  # example dedupes MSH-10.
   # Before: the same restart without systemd's store (as up to 0.6.6.1). A stop flushes the store.
   on "mkdir -p /etc/systemd/system/ductus.service.d
       printf '[Service]\nFileDescriptorStoreMax=0\n' >/etc/systemd/system/ductus.service.d/no-store.conf
@@ -237,15 +186,8 @@ lifecycle() {
   check "$ext-upgraded" '[ "$pid_before" != "$pid_after" ] && [ "$pid_after" != 0 ]'
   check "$ext-upgrade-handed-over" '[ "$(handovers)" -gt "$handed" ]'
   echo "   upgraded under traffic: $(on "$7") (pid $pid_before -> $pid_after), $(on "journalctl -u ductus --no-pager -o cat | grep -o 'sending paused [0-9.]* m*s' | tail -1")"
-  for _ in $(seq 1 100); do
-    on "pgrep -f '[d]uctus gen' >/dev/null" || break
-    sleep 0.2
-  done
-  for _ in $(seq 1 120); do
-    left=$(docker exec ductus-pkg-db psql -U ductus -Atc "SELECT count(*) FROM deliveries WHERE status = 0")
-    [ "$left" = 0 ] && break
-    sleep 0.5
-  done
+  wait_sent
+  wait_delivered
   on "pkill -INT -f 'ductus sink'"
   sleep 0.5
   local sink
@@ -287,7 +229,7 @@ lifecycle() {
   # rpm keeps changed settings as ductus.env.rpmsave; dpkg keeps the file itself.
   check "$ext-kept-data" 'on "test -f /var/lib/ductus/project/interfaces/adt-in/interface.yaml && ls /etc/ductus/ductus.env* >/dev/null && getent passwd ductus >/dev/null"'
   echo "   removed: service stopped, binary gone; project, settings ($(on "ls /etc/ductus | tr '\n' ' '")) and user kept"
-  docker rm -f "$c" >/dev/null
+  docker rm -f "$BOX" >/dev/null
   docker exec ductus-pkg-db psql -U ductus -qc "DROP SCHEMA public CASCADE; CREATE SCHEMA public" >/dev/null 2>&1
 }
 

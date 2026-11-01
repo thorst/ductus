@@ -335,3 +335,197 @@ git add -A && git commit -m "adt-in: ADT from Epic to the lab archive"
 4. `ductus doctor` on the server, then start the service.
 
 The [Configure](configure/index.md) pages go through every file in turn.
+
+### On a new server, start to finish
+
+**What:** the steps above on a fresh Ubuntu 24.04 server, with the Linux package, a database on
+another machine (`db1.hospital.org`), MLLP over TLS with client certificates, and a sending
+system that has its own certificate. Every command and output below is from the v0.6 demo
+(`scripts/demo-v06.sh`), which runs them under real systemd on every push to the repository;
+only what's marked `…` is left out.
+
+**Why:** a laptop hides what a server adds: a service account that owns the files, a database
+elsewhere, a CA that isn't yours, and senders that must be told what to trust. Seeing it once end
+to end shows where each of those comes in.
+
+**When not:** this builds the project on the server, to show every step in one place. In real
+life the project comes from Git (step 2 above), and only the certificate's key is made on the
+server.
+
+**Install**, then tell the engine where its database is. The package doesn't start the engine:
+
+<!-- scripts/demo-v06.sh -->
+```text
+$ cd /tmp
+$ sudo apt install ./ductus_0.6.0~dev.1_amd64.deb
+…
+Unpacking ductus (0.6.0~dev.1) ...
+Setting up ductus (0.6.0~dev.1) ...
+
+Ductus is installed. It isn't running yet: first tell it where its database and project are.
+  1. Edit /etc/ductus/ductus.env (the database URL, the project folder, the environment).
+  2. Put the project in /var/lib/ductus/project (git clone), readable by the ductus user.
+  3. sudo systemctl enable --now ductus
+  4. journalctl -u ductus -f      (it says "started" once every interface is up)
+```
+
+(`0.6.0~dev.1` is the demo's development package; a release is `ductus_0.6.0_amd64.deb`.) In
+`/etc/ductus/ductus.env` the demo sets one line, the database; `DUCTUS_ENV=prod` and
+`DUCTUS_PROJECT=/var/lib/ductus/project` are already the package's defaults
+([the file](install/linux.md#configure)):
+
+```sh
+# /etc/ductus/ductus.env, in part
+DUCTUS_DATABASE_URL=postgres://ductus:…@db1.hospital.org/ductus
+```
+
+**The project**, made as the `ductus` user so the service owns it (on a real server: `sudo -u
+ductus git clone …` instead), and **the listener's certificate**, its key made on this server:
+
+<!-- scripts/demo-v06.sh -->
+```text
+$ cd /var/lib/ductus
+$ sudo -u ductus ductus init project
+created interfaces/adt-in/ (MLLP on port 6661)
+…
+$ cd /var/lib/ductus/project
+$ sudo -u ductus ductus cert request tls/mllp --dns mllp.hospital.org
+wrote tls/mllp.key (the new RSA 2048 private key: it stays on this server; only you can read it) and tls/mllp.csr (the request)
+
+Send tls/mllp.csr to the hospital's CA (its PKI or security team). It asks for a certificate for mllp.hospital.org, for a TLS server and client (one certificate can serve listeners and be the engine's client certificate). Never send tls/mllp.key.
+…
+```
+
+The hospital's PKI team signs the request and sends back the certificate and their CA's own. In
+the demo `openssl` plays the CA, on the same machine:
+
+<!-- scripts/demo-v06.sh -->
+```text
+$ openssl x509 -req -in tls/mllp.csr -CA /root/hospital-ca/ca.pem -CAkey /root/hospital-ca/ca.key -CAcreateserial -out tls/mllp.pem -days 90 -copy_extensions copy
+Certificate request self-signature ok
+subject=CN = mllp.hospital.org
+$ cp /root/hospital-ca/ca.pem tls/hospital-ca.pem
+```
+
+The certificates by name, and the interface sending to the lab system's receiver instead of
+files (a service writes only where its unit lets it):
+
+```yaml
+# resources.yaml
+certificates:
+  ductus-mllp: { cert_file: tls/mllp.pem, key_file: tls/mllp.key }
+  hospital-ca: { ca_file: tls/hospital-ca.pem }
+```
+
+```yaml
+# interfaces/adt-in/interface.yaml
+name: adt-in
+about:
+  description: ADT from the EHR to the lab system
+  owner: interfaces@hospital.org
+  from: { application: Epic, vendor: Epic Systems }
+  to: { application: Lab system, vendor: In-house }
+source:
+  mllp:
+    port: 6661
+    tls:
+      certificate: ductus-mllp
+      clients: { ca: hospital-ca, subjects: ["CN=epic.hospital.org"] }
+script: transform.ts
+destination: { mllp: { host: 127.0.0.1, port: 6662 } }
+```
+
+**Check before starting**, with the service's own settings (`--env-file` reads `ductus.env` as
+the service does), then start it and let `ductus doctor` check every connection from the server:
+
+<!-- scripts/demo-v06.sh -->
+```text
+$ sudo -u ductus ductus cert show ductus-mllp
+✓ certificate `ductus-mllp` (resources.yaml): ./tls/mllp.pem
+  subject  CN=mllp.hospital.org
+  names    mllp.hospital.org
+  issuer   issued by Test Hospital CA
+  valid    2026-10-31 → 2027-01-29: 89 days left
+  chain    complete: mllp.hospital.org, issued by Test Hospital CA (the CA `hospital-ca` in resources.yaml)
+  key      matches (./tls/mllp.key)
+→ Senders must trust Test Hospital CA (the hospital's CA): ask them to confirm.
+$ sudo -u ductus ductus validate --env-file /etc/ductus/ductus.env
+environment: prod
+✓ resources: 0 database(s), 0 SFTP server(s), 0 API(s), 2 certificate(s)
+✓ adt-in: config and code load
+✓ certificate `ductus-mllp`: CN=mllp.hospital.org (mllp.hospital.org), expires 2027-01-29 (89 days)
+✓ certificate `hospital-ca`: a CA
+⚠ database: plain, no TLS: the server doesn't offer it (sslmode=prefer); whoever answers at its address is believed: add sslmode=verify-full to DUCTUS_DATABASE_URL (sslrootcert=/path/ca.pem for a private CA)
+✓ database: new (no engine has run on it yet): no messages wait, no retention is applied
+✓ types: no errors
+
+valid
+$ sudo systemctl enable --now ductus
+Created symlink /etc/systemd/system/multi-user.target.wants/ductus.service → /usr/lib/systemd/system/ductus.service.
+$ systemctl show -p StatusText ductus
+StatusText=running 1 interface
+$ sudo -u ductus ductus doctor --env-file /etc/ductus/ductus.env
+ductus doctor · environment prod · 2026-10-31 23:46:41 +00:00
+on ductus1 · ductus 0.6.0-dev
+checked 3 connection(s) in 0.1 s: 1 ok, 2 warning(s), 0 failed
+
+⚠ engine database  db1.hospital.org:5432 Postgres
+    used by  the engine (DUCTUS_DATABASE_URL)
+    DNS      db1.hospital.org → 172.18.0.2 (0.9 ms)
+    connect  172.18.0.2:5432 from 172.18.0.3 in 0.2 ms
+  ⚠ TLS      none: the server doesn't offer TLS (sslmode=prefer), the connection is plain
+    login    as `ductus`, database `ductus`: PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2); plain, no TLS: the server doesn't offer it (sslmode=prefer)
+    commits  2.2 ms median of 20 (each waits for the disk): strict ingest ≈ 450 msg/s per sender connection, one commit per ACK; more connections share commits. A 1M/day ADT feed averages ~12 msg/s.
+  → Queries, their results and the login cross the network readable: ask the DBA to turn on ssl, then set sslmode=verify-full.
+
+✓ MLLP destination  127.0.0.1:6662 MLLP
+    used by  adt-in
+    address  127.0.0.1 (an address, nothing to look up)
+    connect  127.0.0.1:6662 from 127.0.0.1 in 0.3 ms
+
+⚠ listening port  0.0.0.0:6661 MLLP over TLS
+    used by  adt-in
+  ⚠ port     in use: by a running engine, or another program
+    address  127.0.0.1 (an address, nothing to look up)
+    connect  127.0.0.1:6661 from 127.0.0.1 in 0.2 ms
+    TLS      TLS 1.3, post-quantum key exchange (X25519MLKEM768), serves `ductus-mllp`: certificate for mllp.hospital.org, issued by Test Hospital CA, valid until 2027-01-29 (89 days); covers mllp.hospital.org
+    chain    complete: mllp.hospital.org, issued by Test Hospital CA (the CA `hospital-ca` in resources.yaml)
+  → If the engine isn't running on this server, another program holds port 6661: find it with `ss -ltnp` (Linux) or `netstat -ano` (Windows).
+  → Senders must trust Test Hospital CA (the hospital's CA): ask them to confirm.
+  → Doctor can't know the name senders connect with: it must be one of mllp.hospital.org (ask senders which name or address they use).
+```
+
+Doctor passes (nothing failed: it exits 0) with two warnings to read, not ignore. The database
+connection isn't encrypted: the demo's database server offers no TLS, and a real one should
+([PostgreSQL](install/postgres.md)); the warning goes once `DUCTUS_DATABASE_URL` says
+`sslmode=verify-full`. Port 6661 is in use: here by the engine itself, which doctor can't tell
+from another program; run before the start, the same check says whether the port is free.
+
+**The sending system** gets its own certificate from the same CA (in real life its team asks
+for it), and sends:
+
+<!-- scripts/demo-v06.sh -->
+```text
+$ ductus cert request /root/epic/sender --dns epic.hospital.org
+…
+$ openssl x509 -req -in /root/epic/sender.csr -CA /root/hospital-ca/ca.pem -CAkey /root/hospital-ca/ca.key -CAcreateserial -out /root/epic/sender.pem -days 90 -copy_extensions copy
+Certificate request self-signature ok
+subject=CN = epic.hospital.org
+$ ductus gen --to mllp.hospital.org:6661 --ca /root/hospital-ca/ca.pem --cert /root/epic/sender.pem --key /root/epic/sender.key --count 100
+sent 100 messages over 1 connection(s) in 0.6s (156/s), retries 0, rejected 0, refused 0, dropped 0, longest wait 139 ms
+```
+
+The lab system's receiver (`ductus sink` in the demo) got all 100, once each, in order. A sender
+without a certificate of its own is refused before anything is read, and the engine's log says
+why, once a minute per sender:
+
+<!-- scripts/demo-v06.sh -->
+```text
+$ timeout 5 ductus gen --to mllp.hospital.org:6661 --ca /root/hospital-ca/ca.pem --count 1
+sending failed, retrying: TLS: the receiver wants a client certificate (name one in --cert)
+$ journalctl -u ductus -o cat --no-pager | grep "TLS handshake refused" | tail -1
+2026-10-31T23:47:03.775177Z  WARN ductus_runtime::tls: TLS handshake refused (logged once a minute per sender) listener="interface `adt-in` (MLLP)" peer=127.0.0.1 reason=the sender presented no client certificate
+```
+
+The demo then upgrades this server and goes back, both under traffic:
+[Upgrade](upgrade.md#on-a-server-the-v06-demo) shows it.

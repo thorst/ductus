@@ -1,18 +1,23 @@
 # The Windows installer, end to end (needs an elevated PowerShell; CI runs it on windows-latest):
 #   install silently -> service registered right -> configure -> start -> health -> MLLP round trip
-#   -> log and Event Log written -> clean stop -> upgrade over a running, configured install
-#   -> an upgrade leaves a service stopped on purpose stopped -> run as a named local account
-#   (`ductus service account`) -> an upgrade keeps the account and waits for its password
-#   -> uninstall -> install with SERVICEACCOUNT -> uninstall.
+#   -> MLLP over TLS, senders with a client certificate -> log and Event Log written -> clean stop
+#   -> upgrade over a running, configured install, a sender sending through it (what it saw is
+#   printed: refused, reset, longest wait; nothing lost) -> an upgrade leaves a service stopped on
+#   purpose stopped -> going back: the installer refuses an older version, uninstall then install
+#   it -> run as a named local account (`ductus service account`) -> an upgrade keeps the account
+#   and waits for its password -> uninstall -> install with SERVICEACCOUNT -> uninstall.
 #
 # Upgrades need a second build of the installer (-UpgradeMsi): each build has its own ProductCode,
 # so one over the other is a real (major) upgrade. The same file again is only a maintenance run of
 # the installed product: nothing is removed or reinstalled, and it proves nothing about upgrades.
+# Going back needs a build with a higher version (-NewerMsi, the next minor), standing in for the
+# version a site upgraded to: the demo upgrades to it, then goes back to -Msi.
 #
-#   .\scripts\demo-windows.ps1 -Msi dist\ductus-0.5.0-dev-x64.msi -UpgradeMsi dist2\ductus-0.5.0-dev-x64.msi -DatabaseUrl postgres://u:p@localhost/db
+#   .\scripts\demo-windows.ps1 -Msi dist\ductus-0.6.0-x64.msi -UpgradeMsi dist2\ductus-0.6.0-x64.msi -NewerMsi dist3\ductus-0.7.0-x64.msi -DatabaseUrl postgres://u:p@localhost/db
 param(
     [Parameter(Mandatory)] [string] $Msi,
     [Parameter(Mandatory)] [string] $UpgradeMsi,
+    [Parameter(Mandatory)] [string] $NewerMsi,
     [Parameter(Mandatory)] [string] $DatabaseUrl,
     # Where the installer logs and the receiver's output go (CI uploads it).
     [string] $LogDir = ""
@@ -20,6 +25,7 @@ param(
 $ErrorActionPreference = "Stop"
 $Msi = (Resolve-Path $Msi).Path
 $UpgradeMsi = (Resolve-Path $UpgradeMsi).Path
+$NewerMsi = (Resolve-Path $NewerMsi).Path
 # Which build is installed: an upgrade installs the other one.
 $installed = $Msi
 $data = "C:\ProgramData\Ductus"
@@ -93,6 +99,17 @@ function Native([scriptblock] $run) {
     $out = & $run 2>&1 | ForEach-Object { "$_" } | Out-String
     return @{ Ok = ($LASTEXITCODE -eq 0); Out = $out }
 }
+# Senders over TLS from 3b on: the lab's listener certificate trusted, the sender's presented.
+$tls = @()
+# How many distinct messages the receiver should have by now.
+$expected = 0
+# The receiver's latest count line ("... | unique N | duplicates N | out of order N | ...").
+function Received { Get-Content "$work\sink.log" -ErrorAction SilentlyContinue | Where-Object { $_ -match "unique \d+ " } | Select-Object -Last 1 }
+function Send([int] $count, [int] $offset, [string] $name) {
+    & $tools gen @tls --count $count --offset $offset | Out-Null
+    $script:expected += $count
+    Check $name (Wait-Until { (Received) -match "unique $script:expected " } 30) (Received)
+}
 function Set-Account([string[]] $more = @()) {
     $r = Native { $password | & $exe service account ".\$account" --password-stdin @more }
     Write-Host $r.Out
@@ -137,11 +154,35 @@ try {
     Check "and warns that its integrated login is the computer account's" ($validate -match "Windows login to SQL Server \(``billing``\) is the computer account") $validate
 
     Write-Host "== 3. a message round trip over MLLP"
-    & $tools gen --to 127.0.0.1:6661 --count 100 --patients 10 | Out-Null
-    Check "the receiver got all 100" (Wait-Until { (Get-Content "$work\sink.log" -ErrorAction SilentlyContinue | Out-String) -match "unique 100 " } 30)
+    Send 100 0 "the receiver got all 100"
     Check "the engine wrote its log" ((Engine-Log | Out-String) -match "started interfaces=")
     Check "Event Log: started, in our words (version, project, no password)" (Has-Event 1000 "Ductus .* started\.[\s\S]*project: ")
     Check "Event Log: the start event doesn't carry the database login" (-not (@(Event-Messages 1000) | Where-Object { $_ -match "@" }))
+
+    Write-Host "== 3b. MLLP over TLS, senders with a client certificate"
+    # Lab certificates: the listener's, and a sender's that the listener takes as its clients' CA
+    # (a self-signed certificate is its own CA). On a server both come from the hospital's CA
+    # (first-interface.md; demo-v06.sh does it that way on Linux).
+    & $exe cert self-signed "$data\project\tls\mllp" --name 127.0.0.1 --name localhost | Out-Null
+    & $exe cert self-signed "$work\sender" --name sender.test | Out-Null
+    Copy-Item "$work\sender.pem" "$data\project\tls\sender-ca.pem"
+    Set-Content "$data\project\resources.yaml" "certificates:`n  ductus-mllp: { cert_file: tls/mllp.pem, key_file: tls/mllp.key }`n  senders: { ca_file: tls/sender-ca.pem }`n" -Encoding utf8
+    (Get-Content $yaml -Raw) -replace 'source: \{ mllp: \{ port: 6661 \} \}', 'source: { mllp: { port: 6661, tls: { certificate: ductus-mllp, clients: { ca: senders, subjects: ["CN=sender.test"] } } } }' | Set-Content $yaml -Encoding utf8
+    $ports = (Native { & $exe ports --root "$data\project" }).Out
+    Check "ductus ports: the listener is MLLP over TLS" ($ports -match "MLLP over TLS") $ports
+    Restart-Service Ductus
+    Check "running again, TLS on the listener" (Wait-Until { Health })
+    $script:tls = @("--to", "127.0.0.1:6661", "--ca", "$data\project\tls\mllp.pem", "--cert", "$work\sender.pem", "--key", "$work\sender.key")
+    $sent = (Native { & $tools gen @tls --count 100 --offset 500 }).Out
+    Write-Host "   $($sent.Trim())"
+    $script:expected += 100
+    Check "a sender with its certificate: all 100 received" (Wait-Until { (Received) -match "unique $expected " } 30) (Received)
+    # A sender without TLS gets no ACK (it would retry for ever: stopped after 5 s).
+    $plain = Start-Process $tools -ArgumentList "gen --to 127.0.0.1:6661 --count 1 --offset 900" -PassThru -NoNewWindow -RedirectStandardOutput "$work\gen-plain.log" -RedirectStandardError "$work\gen-plain.err"
+    Start-Sleep 5
+    if (-not $plain.HasExited) { Stop-Process -Id $plain.Id -Force }
+    $said = (Get-Content "$work\gen-plain.log", "$work\gen-plain.err" -ErrorAction SilentlyContinue | Out-String)
+    Check "a sender without TLS is refused" (($said -match "connection closed before ACK") -and ((Received) -match "unique $expected ")) $said
 
     Write-Host "== 4. clean stop"
     $at = Get-Date
@@ -157,12 +198,30 @@ try {
     Start-Service Ductus
     Check "running again" (Wait-Until { Health })
     Check "the start removed the marker" (-not (Test-Path "$data\logs\stopped"))
+    # A sender through the upgrade, as an EHR would keep sending: 4 kept connections, 200
+    # messages/s for a minute, the installer started 3 s in. The engine is down while the installer
+    # stops, replaces and starts it: what the sender saw is printed (the gap is the documented
+    # behaviour); only "nothing lost" is judged.
+    $began_sending = Get-Date
+    $through = Start-Process $tools -ArgumentList (@("gen") + $tls + @("--count", "12000", "--patients", "100", "--connections", "4", "--rate", "200", "--offset", "10000")) `
+        -PassThru -NoNewWindow -RedirectStandardOutput "$work\gen-upgrade.log" -RedirectStandardError "$work\gen-upgrade.err"
+    Start-Sleep 3
+    $at = Get-Date
     Check "msiexec /i of the other build: a real upgrade" (Upgrade "upgrade")
+    $msi_took = ((Get-Date) - $at).TotalSeconds
     Check "service running after the upgrade" (Wait-Until { (Get-Service Ductus).Status -eq "Running" -and (Health) })
+    Check "the sender finished" ($through.WaitForExit(180000))
+    $sending_took = ((Get-Date) - $began_sending).TotalSeconds
+    $script:expected += 12000
+    Check "nothing lost through the upgrade" (Wait-Until { (Received) -match "unique $expected " } 60) (Received)
+    $line = Get-Content "$work\gen-upgrade.log" -ErrorAction SilentlyContinue | Select-Object -Last 1
+    Write-Host ("   the installer ran from 3.0 s to {0:N1} s; the sender sent from 0 to {1:N1} s" -f (3 + $msi_took), $sending_took)
+    Write-Host "   the sender through the upgrade: $line"
+    Write-Host "   the receiver: $(Received)"
+    Check "the upgrade fell inside the sending" ((3 + $msi_took) -lt $sending_took)
     Check "settings kept" ((Get-Content "$data\ductus.env" -Raw) -match "marker kept across the upgrade")
     Check "project kept" (Test-Path "$data\project\interfaces\adt-in\interface.yaml")
-    & $tools gen --to 127.0.0.1:6661 --count 50 --offset 1000 | Out-Null
-    Check "still takes messages" (Wait-Until { (Get-Content "$work\sink.log" -ErrorAction SilentlyContinue | Out-String) -match "unique 150 " } 30)
+    Send 50 1000 "still takes messages"
 
     Write-Host "== 6. an upgrade leaves a service stopped on purpose stopped"
     Stop-Service Ductus
@@ -184,6 +243,24 @@ try {
     Start-Service Ductus
     Check "starts again once fixed" (Wait-Until { Health })
 
+    Write-Host "== 6c. going back to an older version: uninstall, then install it"
+    # Up to the next version first, as a site would have; the database stays as that version
+    # left it, and the older one runs on it (migrations only add: upgrade.md, "Going back").
+    $older = $script:installed
+    Check "msiexec /i of the newer version: a real upgrade" (((Msi @("/i", "`"$NewerMsi`"") "upgrade-newer") -in 0, 3010) -and ((Get-Content "$work\upgrade-newer.log" -Raw) -match "Product: Ductus -- Installation completed successfully"))
+    Check "running on the newer version" (Wait-Until { (Get-Service Ductus).Status -eq "Running" -and (Health) })
+    $refused = Msi @("/i", "`"$older`"") "downgrade-refused"
+    Check "the installer refuses the older version over it, and says how to go back" (($refused -notin 0, 3010) -and ((Get-Content "$work\downgrade-refused.log" -Raw) -match "A newer version of Ductus is already installed\. Uninstall it first to go back\.")) "exit $refused"
+    Check "the newer version still runs" (Health)
+    Check "msiexec /x of the newer version" ((Msi @("/x", "`"$NewerMsi`"") "downgrade-uninstall") -in 0, 3010)
+    Check "settings and project kept" ((Test-Path "$data\ductus.env") -and (Test-Path "$data\project\resources.yaml"))
+    Check "msiexec /i of the older version" ((Msi @("/i", "`"$older`"") "downgrade-install") -in 0, 3010)
+    $script:installed = $older
+    Check "installed, not started (as any install)" ((Get-Service Ductus).Status -eq "Stopped")
+    Start-Service Ductus
+    Check "the older version starts on the database the newer one used" (Wait-Until { Health })
+    Send 50 3000 "and takes messages over TLS again"
+
     Write-Host "== 7. run as a named local account (ductus service account)"
     # net.exe, not New-LocalUser: PowerShell 7 (CI) reaches that cmdlet only through Windows PowerShell.
     net user $account $password /add /expires:never /comment:"Ductus demo-windows.ps1" | Out-Null
@@ -195,8 +272,7 @@ try {
     Check "its process is the account's" ((Process-Owner) -match "\\$account$") (Process-Owner)
     Check "the account may log on as a service" (Has-Logon-Right ".\$account")
     Check "it still reads its settings and project (health)" (Wait-Until { Health })
-    & $tools gen --to 127.0.0.1:6661 --count 50 --offset 2000 | Out-Null
-    Check "and takes messages" (Wait-Until { (Get-Content "$work\sink.log" -ErrorAction SilentlyContinue | Out-String) -match "unique 200 " } 30)
+    Send 50 2000 "and takes messages"
     Check "Event Log: the change, by whom" (Has-Event 1007 "to: \.\\$account")
     $shown = (Native { & $exe service account }).Out
     Check "``ductus service account`` says who and that it has the right" (($shown -match [regex]::Escape(".\$account")) -and ($shown -match "may log on as a service")) $shown
