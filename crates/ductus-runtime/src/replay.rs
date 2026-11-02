@@ -252,7 +252,8 @@ impl Replay {
                                 *calls.borrow_mut() = Calls::default();
                                 let meta = worker::meta(reference, destination, message.origin);
                                 let result = isolate.call_function(ids[i], &input, Some(&meta)).await;
-                                decide(&input, result, std::mem::take(&mut *calls.borrow_mut()))
+                                let calls = std::mem::take(&mut *calls.borrow_mut());
+                                decide(&input, result, calls, config.project_root())
                             }
                         };
                         rows.push(Row {
@@ -286,12 +287,12 @@ fn seed(id: i64, destination: usize) -> u32 {
 
 /// What the code's result stands for, as the engine decides (`Outcome::of`); a write the replay
 /// refused makes it not comparable, even when the code caught the error and went on.
-fn decide(input: &str, result: Result<Option<String>>, calls: Calls) -> (Decision, bool) {
+fn decide(input: &str, result: Result<Option<String>>, calls: Calls, root: &std::path::Path) -> (Decision, bool) {
     let looked_up = calls.lookups > 0;
     if let Some(write) = calls.write {
         return (Decision::NotComparable { why: format!("writes {write}: not made in a replay") }, looked_up);
     }
-    let decision = match Outcome::of(input, Some(result)) {
+    let decision = match Outcome::of(input, Some(result), root) {
         Outcome::Deliver(output) => Decision::Sent { output },
         Outcome::Filter(reason) => Decision::Filtered { reason },
         Outcome::Quarantine(reason) => Decision::Quarantined { reason },
@@ -361,6 +362,7 @@ impl Services for ReplayServices {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     #[test]
     fn seeds_differ_by_message_and_destination_and_never_by_run() {
@@ -372,16 +374,16 @@ mod tests {
     #[test]
     fn a_refused_write_makes_the_call_not_comparable_even_when_the_code_went_on() {
         let calls = Calls { write: Some("to database `billing`".into()), lookups: 1 };
-        let (decision, looked_up) = decide("in", Ok(Some("out".into())), calls);
+        let (decision, looked_up) = decide("in", Ok(Some("out".into())), calls, Path::new("."));
         assert_eq!(
             decision,
             Decision::NotComparable { why: "writes to database `billing`: not made in a replay".into() }
         );
         assert!(looked_up);
-        let (decision, _) = decide("in", Ok(None), Calls::default());
+        let (decision, _) = decide("in", Ok(None), Calls::default(), Path::new("."));
         assert_eq!(decision, Decision::Filtered { reason: None });
         let error = anyhow!("{} database unavailable: refused", ductus_script::TRANSIENT);
-        let (decision, _) = decide("in", Err(error), Calls::default());
+        let (decision, _) = decide("in", Err(error), Calls::default(), Path::new("."));
         assert!(
             matches!(decision, Decision::NotComparable { why } if why.starts_with("a temporary failure: transform failed: database unavailable"))
         );

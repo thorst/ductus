@@ -8,6 +8,7 @@
 //! a runaway interface is stopped with a [`Runaway`] error instead of stalling the thread.
 
 mod check;
+pub mod errors;
 mod guard;
 mod loader;
 mod ops;
@@ -295,7 +296,7 @@ const bind = (name, formats) => {{
         let glue = format!(
             r#"import {{ __setFixtures, __runTests }} from "@ductus/sdk";
 __setFixtures({fixtures_json}, {formats_json});
-{imports}globalThis.{ENTRY} = () => __runTests();
+{imports}globalThis.{ENTRY} = (options) => __runTests(options);
 "#
         );
         let mut isolate = Self::host();
@@ -455,7 +456,13 @@ __setFixtures({fixtures_json}, {formats_json});
 
     /// Run the loaded test suite (tests may be async); returns the JSON report.
     pub async fn run_tests(&mut self) -> Result<String> {
-        let report = match self.call(FunctionId(0), &[])? {
+        self.run_tests_with("{}").await
+    }
+
+    /// `run_tests` with the SDK runner's options (JSON): `filter` (tests whose name contains it),
+    /// `list` (report the tests without running them).
+    pub async fn run_tests_with(&mut self, options: &str) -> Result<String> {
+        let report = match self.call(FunctionId(0), &[options])? {
             RawResult::Value(report) => report,
             RawResult::Promise(promise) => {
                 let pending = PendingCall(Box::pin(self.runtime.resolve(promise)));

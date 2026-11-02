@@ -23,8 +23,54 @@ adt-to-billing
 
 It exits 1 when a test fails, so it belongs in the checks every change goes through (a pull
 request's CI, a script before deploying), next to `ductus validate --env prod`, which type-checks
-the code and checks the configuration against that environment. `--interface adt-in` runs one
-interface's tests.
+the code and checks the configuration against that environment.
+
+| Option | Runs |
+|---|---|
+| `--interface adt-in` | one interface's tests |
+| `--filter "A31"` | the tests whose name contains the text, in every interface (or the one `--interface` names); case matters. A filter that matches nothing exits 1, so a typo in a CI script can't pass by running nothing ([nuance](../nuances/transforms.md#a-test-filter-matches-part-of-a-name-level-1)) |
+| `--list` | nothing: it lists the tests with where each is, and takes `--interface` and `--filter` too |
+| `--json` | the same, as JSON Lines for an editor or CI ([below](#for-editors-and-ci-json)) |
+
+```text
+$ ductus test --list --filter billing
+adt-in
+  billing gets admissions and discharges only  (interfaces/adt-in/route.test.ts:26:1)
+remits-in
+  the CSV the billing office gets  (interfaces/remits-in/remits.test.ts:21:1)
+
+2 test(s)
+```
+
+## When a test fails
+
+A failed test says where it is, where it failed and why. Here a mapping's expected patient class
+was mistyped as `I`:
+
+```text
+$ ductus test --interface adt-in
+adt-in
+  ✗ the lab gets visits, with its own patient class and no Z segments  (interfaces/adt-in/route.test.ts:4:1)
+      expected "I", got "IN"
+      at interfaces/adt-in/route.test.ts:6:28
+  ✓ the lab doesn't get patient updates (A31) (0ms)
+  ✓ test patients are dropped with a reason (0ms)
+  ✓ an unknown patient class is quarantined, not guessed (1ms)
+  ✓ billing gets admissions and discharges only (0ms)
+
+4 passed, 1 failed
+```
+
+- **The test's place** follows its name: `route.test.ts:4:1` is the `test(...)` call.
+- **A failed `expect`** gives both values and the line and column of the `expect` that failed
+  (`6:28`: the `toBe` on line 6), also after an `await`. A failed `toReject` points at the
+  `await` of it.
+- **An error thrown by the code under test** (not an `expect`) shows its stack trace on your
+  `.ts` lines, with the file and line it was thrown from at the end of its first line:
+  `Error: no PID (interfaces/adt/route.ts:5:11)`, then `at transform (interfaces/adt/route.ts:5:11)`
+  and the test's line that called it. The SDK's and the engine's own frames are left out. The
+  engine quarantines a message with the same first line, so the Quarantine page says where too
+  ([nuance](../nuances/transforms.md#a-thrown-errors-reason-says-where-it-was-thrown-level-1)).
 
 ## A test
 
@@ -174,6 +220,125 @@ test("an MRN the EMPI doesn't know is quarantined", async () => {
 
 A mocked temporary failure (a 503) makes your code's call throw the same temporary error the
 engine would wait on and retry; tests usually check the answers your code decides on instead.
+
+## For editors and CI: JSON
+
+`ductus test --json` and `ductus validate --json` give tools what the text gives people: an
+editor puts a failure or a problem at its line, a CI system annotates the pull request. Both keep
+their shape across versions: fields and codes are only ever added, never renamed, removed or reused,
+so a tool should ignore fields it doesn't know
+([nuance](../nuances/transforms.md#the---json-outputs-only-ever-gain-fields-level-3)).
+
+### `ductus test --json`
+
+JSON Lines: one object per line, one line per test as each interface's tests finish, and a
+summary last. The exit code is the same as without `--json`.
+
+```text
+$ ductus test --interface adt-in --filter "visits" --json
+{"type":"test","interface":"adt-in","name":"the lab gets visits, with its own patient class and no Z segments","file":"interfaces/adt-in/route.test.ts","line":4,"column":1,"error":"expected \"I\", got \"IN\"","failure":{"file":"interfaces/adt-in/route.test.ts","line":6,"column":28},"expected":"\"I\"","actual":"\"IN\"","ok":false,"ms":3}
+{"type":"summary","passed":0,"failed":1,"ms":36}
+```
+
+| Field | On | What it is |
+|---|---|---|
+| `type` | every line | `test`, `load` (an interface whose test files didn't load: `interface` and `error` only) or `summary` |
+| `interface` | `test`, `load` | the interface the test file belongs to |
+| `name` | `test` | the name given to `test(...)` |
+| `file`, `line`, `column` | `test` | where the `test(...)` call is: the file relative to the project, with `/`; line and column from 1, on the `.ts` as written |
+| `ok`, `ms` | `test`, when run | whether it passed, and how long it took |
+| `error` | a failed `test`, `load` | what failed: an `expect`'s message, or a thrown error's stack as the text output shows it |
+| `failure` | a failed `test` | `{ file, line, column }` of where it failed: the `expect`, or the first frame of a thrown error in project code (which may be in the code under test) |
+| `expected`, `actual` | a failed `toBe`, `toEqual` or `toBeNull` | both values as text, objects and arrays as indented JSON, for a side-by-side view |
+| `passed`, `failed`, `ms` | `summary` | the counts (a `load` line counts as one failed) and the run's time |
+| `tests` | `summary` with `--list` | how many tests were listed |
+
+With `--list`, test lines have no `ok`, `ms` or failure: nothing ran.
+
+```text
+$ ductus test --list --interface adt-in --json
+{"type":"test","interface":"adt-in","name":"the lab gets visits, with its own patient class and no Z segments","file":"interfaces/adt-in/route.test.ts","line":4,"column":1}
+{"type":"test","interface":"adt-in","name":"the lab doesn't get patient updates (A31)","file":"interfaces/adt-in/route.test.ts","line":11,"column":1}
+{"type":"test","interface":"adt-in","name":"test patients are dropped with a reason","file":"interfaces/adt-in/route.test.ts","line":15,"column":1}
+{"type":"test","interface":"adt-in","name":"an unknown patient class is quarantined, not guessed","file":"interfaces/adt-in/route.test.ts","line":20,"column":1}
+{"type":"test","interface":"adt-in","name":"billing gets admissions and discharges only","file":"interfaces/adt-in/route.test.ts","line":26,"column":1}
+{"type":"summary","tests":5}
+```
+
+### `ductus validate --json`
+
+One JSON document, after every check has run (validate takes about a second on a project of a few
+interfaces: most of it is the TypeScript type check). The text output is unchanged without
+`--json`. Here `adt-in`'s port was mistyped as 66610 and the secrets weren't set:
+
+```text
+$ ductus validate --json
+{
+  "environment": "dev",
+  "valid": false,
+  "errors": 2,
+  "warnings": 1,
+  "findings": [
+    {
+      "severity": "error",
+      "code": "DUC111",
+      "source": "ductus",
+      "message": "resources: in ./resources.yaml: missing in environment `dev`: secret:BILLING_TOKEN, secret:EMPI_TOKEN, secret:FHIR_TOKEN, secret:PROVIDER_DB_PASSWORD",
+      "file": "resources.yaml",
+      "line": 12,
+      "column": 39,
+      "end_line": 12,
+      "end_column": 62
+    },
+    {
+      "severity": "error",
+      "code": "DUC122",
+      "source": "ductus",
+      "message": "adt-in: in ./interfaces/adt-in/interface.yaml: invalid value: integer `66610`, expected u16",
+      "file": "interfaces/adt-in/interface.yaml",
+      "line": 6,
+      "column": 19,
+      "end_line": 6,
+      "end_column": 23,
+      "interface": "adt-in"
+    },
+    {
+      "severity": "warning",
+      "code": "DUC204",
+      "source": "ductus",
+      "message": "adt-to-billing: has `source: internal` but no interface routes to it (`destination: { interface: adt-to-billing }`)",
+      "file": "interfaces/adt-to-billing/interface.yaml",
+      "line": 6,
+      "column": 1,
+      "end_line": 6,
+      "end_column": 7,
+      "interface": "adt-to-billing",
+      "hint": "route to it from another interface: `destination: { interface: adt-to-billing }`"
+    },
+    {
+      "severity": "note",
+      "code": "DUC390",
+      "source": "ductus",
+      "message": "not checked against a database (set DUCTUS_DATABASE_URL): lanes that would strand waiting messages, retention changes",
+      "hint": "set DUCTUS_DATABASE_URL (or --database-url)"
+    }
+  ]
+}
+```
+
+(`adt-to-billing` gets the warning because `adt-in`, which routes to it, didn't load.)
+
+| Field | What it is |
+|---|---|
+| `environment`, `valid`, `errors`, `warnings` | the environment checked; whether the project is valid (no errors: exit 0); the counts |
+| `severity` | `error` (makes the project invalid), `warning`, or `note` (what wasn't checked) |
+| `code` | stable: `DUC…` for Ductus's checks, `DX1`–`DX4` for its checks of your code, `TS…` for TypeScript's errors; every one is in the [reference](../reference/validate.md) |
+| `source` | `typescript` for TypeScript's own errors, `ductus` for the rest: an editor that already runs TypeScript (VS Code does) shows only `ductus` ones to avoid showing errors twice |
+| `message` | what the text output prints for it, without the ✗ or ⚠ |
+| `file` | relative to the project, with `/`; absent for findings about no one file (the database) |
+| `line`, `column`, `end_line`, `end_column` | from 1, columns counted in characters: the key in YAML (`port`), the code in TypeScript, the `${...}` that has no value, or where the YAML parser stopped. Absent when the file doesn't have even the first part of the key (a missing `about:`) ([nuance](../nuances/transforms.md#a-places-precision-in-validate---json-depends-on-the-file-level-2)) |
+| `interface` | the interface it's about |
+| `hint` | what to do, when the message says (already part of `message`) |
 
 ## Beyond unit tests
 

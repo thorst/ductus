@@ -139,8 +139,10 @@ the person who will read it at 3 a.m.: what's wrong and with which value ("unkno
 \"X\""), not "error".
 
 Any other error your code throws (a `TypeError` from a field that isn't there, a failed
-`JSON.parse`) quarantines the message too, with the error's text. Prefer `quarantine()` for
-every case you can foresee: its reason is yours, not a stack trace.
+`JSON.parse`) quarantines the message too, with the error's text and the `.ts` file and line it
+was thrown from (`transform failed: Error: no PID (interfaces/adt/route.ts:6:11)`, then the stack:
+[nuance](../nuances/transforms.md#a-thrown-errors-reason-says-where-it-was-thrown-level-1)).
+Prefer `quarantine()` for every case you can foresee: its reason is yours, not a stack trace.
 
 **Quarantine doesn't stop the queue.** The next message for that destination goes on, so one bad
 message doesn't hold up the feed. Messages that wait instead, in order, are the ones that hit a

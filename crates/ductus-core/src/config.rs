@@ -3,6 +3,7 @@
 use crate::about::{About, System};
 use crate::format::Format;
 use crate::resources::Kind;
+use crate::yaml::Problem;
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 use std::collections::BTreeMap;
@@ -446,7 +447,7 @@ pub struct Schedule {
 /// MLLP and HTTP on one port, two interfaces handling the same HTTP method and path, or HTTP
 /// interfaces on one port with different `tls`. (Several HTTP interfaces may share a port with
 /// different routes: they share one server.)
-pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<String> {
+pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<Problem> {
     use std::collections::HashMap;
     let mut problems = Vec::new();
     let mut mllp: HashMap<u16, &str> = HashMap::new();
@@ -454,38 +455,43 @@ pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig
     let mut http_tls: HashMap<u16, (&str, &Option<crate::tls::ListenTls>)> = HashMap::new();
     let mut http_allow: HashMap<u16, (&str, &Option<crate::allow::Allow>)> = HashMap::new();
     let mut routes: HashMap<(u16, String, String), &str> = HashMap::new();
+    // Each is about the interface found second, at its source's port.
     for c in configs {
         match &c.source {
             Source::Mllp { port, .. } => {
                 let first = *mllp.entry(*port).or_insert(&c.name);
                 if first != c.name {
-                    problems.push(format!("port {port}: MLLP listeners for both `{first}` and `{}`", c.name));
+                    let text = format!("port {port}: MLLP listeners for both `{first}` and `{}`", c.name);
+                    problems.push(Problem::new(text, &c.name, &["source", "mllp", "port"]));
                 }
             }
             Source::Http { port, method, path, tls, allow, .. } => {
                 http_ports.entry(*port).or_insert(&c.name);
                 let (first, first_tls) = *http_tls.entry(*port).or_insert((&c.name, tls));
                 if first_tls != tls {
-                    problems.push(format!(
+                    let text = format!(
                         "port {port}: `{first}` and `{}` share it with different `tls` (one server per port: give them the same)",
                         c.name
-                    ));
+                    );
+                    problems.push(Problem::new(text, &c.name, &["source", "http", "tls"]));
                 }
                 // Checked before anything is read, so before the path is known: one list per port.
                 let (first, first_allow) = *http_allow.entry(*port).or_insert((&c.name, allow));
                 if first_allow != allow {
-                    problems.push(format!(
+                    let text = format!(
                         "port {port}: `{first}` and `{}` share it with different `allow` (it's checked before the request is read: give them the same)",
                         c.name
-                    ));
+                    );
+                    problems.push(Problem::new(text, &c.name, &["source", "http", "allow"]));
                 }
                 let key = (*port, method.to_ascii_uppercase(), path.clone());
                 if let Some(other) = routes.insert(key, &c.name) {
-                    problems.push(format!(
+                    let text = format!(
                         "port {port}: `{other}` and `{}` both handle {} {path}",
                         c.name,
                         method.to_ascii_uppercase()
-                    ));
+                    );
+                    problems.push(Problem::new(text, &c.name, &["source", "http", "path"]));
                 }
             }
             Source::File(_) | Source::Sftp(_) | Source::Schedule(_) | Source::Internal => {}
@@ -493,17 +499,18 @@ pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig
     }
     for (port, m) in &mllp {
         if let Some(h) = http_ports.get(port) {
-            problems.push(format!("port {port}: MLLP (`{m}`) and HTTP (`{h}`) can't share a port"));
+            let text = format!("port {port}: MLLP (`{m}`) and HTTP (`{h}`) can't share a port");
+            problems.push(Problem::new(text, h, &["source", "http", "port"]));
         }
     }
-    problems.sort();
+    problems.sort_by(|a, b| a.text.cmp(&b.text));
     problems
 }
 
 /// Problems with routes between interfaces (`destination: { interface: b }`): a target that
 /// doesn't exist or doesn't have `source: internal`, a format the target doesn't read, and
 /// loops (a message would go round forever).
-pub fn check_routes<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<String> {
+pub fn check_routes<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<Problem> {
     use std::collections::{BTreeMap, BTreeSet};
     let configs: BTreeMap<&str, &InterfaceConfig> = configs.into_iter().map(|c| (c.name.as_str(), c)).collect();
     let mut problems = Vec::new();
@@ -512,24 +519,27 @@ pub fn check_routes<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) 
         for (name, d) in c.destinations() {
             let Some(target) = d.route() else { continue };
             let from = c.label_destination(name);
+            let route = [c.destination_key(name), vec!["interface"]].concat();
             let Some(t) = configs.get(target) else {
-                problems.push(format!("{from}: no interface named `{target}`"));
+                problems.push(Problem::new(format!("{from}: no interface named `{target}`"), &c.name, &route));
                 continue;
             };
             if !matches!(t.source, Source::Internal) {
-                problems.push(format!(
+                let text = format!(
                     "{from} routes to `{target}`, which has a `{}` source: give `{target}` `source: internal`",
                     t.source.kind()
-                ));
+                );
+                problems.push(Problem::new(text, &c.name, &route));
                 continue;
             }
             let output = c.output_for(d);
             if *output != t.format {
-                problems.push(format!(
+                let text = format!(
                     "{from} sends {} but `{target}` reads {}: set `output:` on the destination or `format:` on `{target}`",
                     output.name(),
                     t.format.name()
-                ));
+                );
+                problems.push(Problem::new(text, &c.name, &route));
             }
             edges.entry(c.name.as_str()).or_default().insert(target);
         }
@@ -544,7 +554,16 @@ pub fn check_routes<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) 
                 if next == start {
                     let members: BTreeSet<&str> = path.iter().copied().collect();
                     if reported.insert(members) {
-                        problems.push(format!("routes loop: {} → {start}", path.join(" → ")));
+                        // About the first interface's route into the loop.
+                        let into = path.get(1).copied().unwrap_or(start);
+                        let c = configs[start];
+                        let key = c
+                            .destinations()
+                            .find(|(_, d)| d.route() == Some(into))
+                            .map(|(name, _)| [c.destination_key(name), vec!["interface"]].concat())
+                            .unwrap_or_default();
+                        let text = format!("routes loop: {} → {start}", path.join(" → "));
+                        problems.push(Problem::new(text, start, &key));
                     }
                 } else if next > start && !path.contains(&next) {
                     let mut longer = path.clone();
@@ -554,7 +573,7 @@ pub fn check_routes<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) 
             }
         }
     }
-    problems.sort();
+    problems.sort_by(|a, b| a.text.cmp(&b.text));
     problems
 }
 
@@ -1153,186 +1172,256 @@ impl InterfaceConfig {
     pub fn load_in(dir: &Path, env: &crate::Environment) -> Result<Self> {
         let file = dir.join("interface.yaml");
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-        let mut value: serde_yaml_ng::Value =
-            crate::env::parse_yaml(&text).with_context(|| format!("parsing {}", file.display()))?;
-        env.substitute(&mut value).with_context(|| format!("in {}", file.display()))?;
-        let mut config: Self = serde_yaml_ng::from_value(value).with_context(|| format!("in {}", file.display()))?;
+        let mut value = crate::yaml::parse(&text).with_context(|| format!("parsing {}", file.display()))?;
+        crate::yaml::substitute(env, &mut value).with_context(|| format!("in {}", file.display()))?;
+        let mut config: Self = crate::yaml::from_value(value).with_context(|| format!("in {}", file.display()))?;
         config.dir = dir.to_path_buf();
         config.validate().with_context(|| format!("validating {}", file.display()))?;
         Ok(config)
     }
 
+    /// The rules settings must keep together. Each refusal names its key (`yaml::Located`), so
+    /// `validate --json` can point at it.
     fn validate(&self) -> Result<()> {
+        use crate::yaml::at;
+        // `bail!` about the setting at a key.
+        macro_rules! refuse {
+            ($key:expr, $($arg:tt)*) => {
+                return Err(crate::yaml::Located::rule(&$key, format!($($arg)*)).into())
+            };
+        }
         match (self.isolation, self.workers) {
             (Isolation::Shared, Some(_)) => {
-                bail!("workers only applies with `isolation: dedicated` (shared interfaces use the engine's pool)")
+                refuse!(
+                    ["workers"],
+                    "workers only applies with `isolation: dedicated` (shared interfaces use the engine's pool)"
+                )
             }
-            (Isolation::Dedicated, Some(0)) => bail!("workers must be at least 1"),
+            (Isolation::Dedicated, Some(0)) => refuse!(["workers"], "workers must be at least 1"),
             _ => {}
         }
         if !self.dedicated_pools.is_empty() && self.isolation == Isolation::Shared {
-            bail!(
+            refuse!(
+                ["dedicated_pools"],
                 "dedicated_pools needs `isolation: dedicated` (interfaces in the shared pool use the shared \
                  connection pools; set max_connections in resources.yaml)"
             );
         }
         if let Some((name, _)) = self.dedicated_pools.iter().find(|(_, n)| **n == 0) {
-            bail!("dedicated_pools.{name} must be at least 1 connection");
+            refuse!(["dedicated_pools", name], "dedicated_pools.{name} must be at least 1 connection");
         }
         if self.ordering.partitions == 0 {
-            bail!("ordering.partitions must be at least 1");
+            refuse!(["ordering", "partitions"], "ordering.partitions must be at least 1");
         }
         if !(Duration::from_millis(10)..=Duration::from_secs(600)).contains(&self.timeout) {
-            bail!("timeout must be between 10ms and 10m (other interfaces on the thread wait while code runs)");
+            refuse!(
+                ["timeout"],
+                "timeout must be between 10ms and 10m (other interfaces on the thread wait while code runs)"
+            );
         }
         if let Some(script) = self.script_path()
             && !script.is_file()
         {
-            bail!("script not found: {}", script.display());
+            refuse!(["script"], "script not found: {}", script.display());
         }
         if let Some(d) = &self.dedupe
             && d.keys.is_empty()
         {
-            bail!("dedupe.keys must list at least one key path");
+            refuse!(["dedupe", "keys"], "dedupe.keys must list at least one key path");
         }
-        let keys = self.ordering.key.iter().chain(self.dedupe.iter().flat_map(|d| d.keys.iter()));
-        for key in keys {
-            self.format.check_key_path(key).with_context(|| format!("key `{key}` (format {})", self.format.name()))?;
+        let keys = self.ordering.key.iter().map(|k| (["ordering", "key"], k));
+        for (place, key) in keys.chain(self.dedupe.iter().flat_map(|d| d.keys.iter().map(|k| (["dedupe", "keys"], k))))
+        {
+            let checked = self.format.check_key_path(key);
+            at(&place, checked.with_context(|| format!("key `{key}` (format {})", self.format.name())))?;
         }
         if matches!(self.source, Source::Mllp { .. }) && self.format != Format::Hl7 {
-            bail!("an MLLP source carries HL7: `format: {}` needs another source type", self.format.name());
+            refuse!(
+                ["format"],
+                "an MLLP source carries HL7: `format: {}` needs another source type",
+                self.format.name()
+            );
         }
         if self.destination.is_some() && !self.destinations.is_empty() {
-            bail!("use either `destination` (one) or `destinations` (several, by name), not both");
+            refuse!(["destinations"], "use either `destination` (one) or `destinations` (several, by name), not both");
         }
         let has_destination = self.destinations().next().is_some();
+        let destination_key = if self.destination.is_some() { "destination" } else { "destinations" };
         match (self.responds(), has_destination) {
             (true, true) => {
-                bail!("an HTTP source in `respond` mode answers with the transform's result; remove `destination`")
+                refuse!(
+                    [destination_key],
+                    "an HTTP source in `respond` mode answers with the transform's result; remove `destination`"
+                )
             }
-            (true, false) if self.script.is_none() => bail!("an HTTP source in `respond` mode needs a `script`"),
+            (true, false) if self.script.is_none() => {
+                refuse!(["source"], "an HTTP source in `respond` mode needs a `script`")
+            }
             (true, false) if self.retention.is_some() => {
-                bail!("an HTTP source in `respond` mode stores no messages; remove `retention`")
+                refuse!(["retention"], "an HTTP source in `respond` mode stores no messages; remove `retention`")
             }
             (true, false) if self.quarantined.is_some() => {
-                bail!("an HTTP source in `respond` mode stores no messages; remove `quarantined`")
+                refuse!(["quarantined"], "an HTTP source in `respond` mode stores no messages; remove `quarantined`")
             }
-            (false, false) => bail!("`destination` is required (or `destinations`, to send to several places)"),
+            (false, false) => refuse!([], "`destination` is required (or `destinations`, to send to several places)"),
             _ => {}
         }
         for (name, d) in self.destinations() {
             let what = || format!("destination `{name}`");
+            let here = self.destination_key(name);
+            let key = |more: &[&'static str]| [here.as_slice(), more].concat();
             let valid_name = |c: char| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-';
             if name.is_empty() || name.len() > 64 || !name.chars().all(valid_name) {
-                bail!("{}: names use lower-case letters, digits, `_` and `-` (at most 64)", what());
+                refuse!(key(&[]), "{}: names use lower-case letters, digits, `_` and `-` (at most 64)", what());
             }
             if let Some(function) = &d.transform {
                 let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
                 if function.is_empty() || function.starts_with(|c: char| c.is_ascii_digit()) {
-                    bail!("{}: `transform` must name an exported function", what());
+                    refuse!(key(&["transform"]), "{}: `transform` must name an exported function", what());
                 }
                 if !function.chars().all(identifier) {
-                    bail!("{}: `transform: {function}` isn't a function name", what());
+                    refuse!(key(&["transform"]), "{}: `transform: {function}` isn't a function name", what());
                 }
                 if self.script.is_none() {
-                    bail!("{}: `transform: {function}` needs a `script` that exports it", what());
+                    refuse!(
+                        key(&["transform"]),
+                        "{}: `transform: {function}` needs a `script` that exports it",
+                        what()
+                    );
                 }
             }
             if let Destination::Sftp { server, .. } = &d.connector
                 && server.trim().is_empty()
             {
-                bail!("{}: SFTP needs `server` (a name under `sftp:` in resources.yaml)", what());
+                refuse!(key(&["sftp"]), "{}: SFTP needs `server` (a name under `sftp:` in resources.yaml)", what());
             }
             if let Destination::Http { url, api, path, ca, certificate, .. } = &d.connector {
                 let tls = ca.is_some() || certificate.is_some();
                 if tls && api.is_some() {
-                    bail!("{}: `ca` and `certificate` go on the API in resources.yaml (it brings them)", what());
+                    refuse!(
+                        key(&["http"]),
+                        "{}: `ca` and `certificate` go on the API in resources.yaml (it brings them)",
+                        what()
+                    );
                 }
                 if tls && url.as_deref().is_some_and(|u| !u.trim().to_ascii_lowercase().starts_with("https://")) {
-                    bail!("{}: `ca` and `certificate` are for an https:// `url`", what());
+                    refuse!(key(&["http", "url"]), "{}: `ca` and `certificate` are for an https:// `url`", what());
                 }
                 match (url, api) {
                     (Some(_), Some(_)) | (None, None) => {
-                        bail!("{}: HTTP needs either `url` or `api` (a name under `apis:` in resources.yaml)", what())
+                        refuse!(
+                            key(&["http"]),
+                            "{}: HTTP needs either `url` or `api` (a name under `apis:` in resources.yaml)",
+                            what()
+                        )
                     }
                     (Some(_), None) if path.is_some() => {
-                        bail!("{}: `path` goes with `api`; put it in the `url` instead", what())
+                        refuse!(
+                            key(&["http", "path"]),
+                            "{}: `path` goes with `api`; put it in the `url` instead",
+                            what()
+                        )
                     }
                     (Some(u), None) if crate::resources::Endpoint::from_url(u).is_none() => {
-                        bail!("{}: `url` must be an http(s) URL, not `{u}`", what())
+                        refuse!(key(&["http", "url"]), "{}: `url` must be an http(s) URL, not `{u}`", what())
                     }
                     _ => {}
                 }
             }
             if let Some(target) = d.route() {
                 if target.trim().is_empty() {
-                    bail!("{}: `interface` needs the name of the interface to route to", what());
+                    refuse!(key(&["interface"]), "{}: `interface` needs the name of the interface to route to", what());
                 }
                 if target == self.name {
-                    bail!("{}: an interface can't route to itself (messages would go round forever)", what());
+                    refuse!(
+                        key(&["interface"]),
+                        "{}: an interface can't route to itself (messages would go round forever)",
+                        what()
+                    );
                 }
             }
             if let Some(r) = &d.rate_limit {
-                check_rate_limit(r).with_context(what)?;
+                at(&key(&["rate_limit"]), check_rate_limit(r).with_context(what))?;
             }
         }
         for host in &self.about.from.hosts {
-            crate::about::Network::parse(host).context("about.from.hosts")?;
+            at(&["about", "from", "hosts"], crate::about::Network::parse(host).context("about.from.hosts"))?;
         }
         if let Some(allow) = self.source.allow() {
-            allow.rules().context("source: allow")?;
+            at(&["source"], allow.rules().context("source: allow"))?;
         }
         if let Source::Http { path, method, .. } = &self.source {
             if !path.starts_with('/') {
-                bail!("HTTP path must start with /");
+                refuse!(["source", "http", "path"], "HTTP path must start with /");
             }
             if !matches!(method.to_ascii_uppercase().as_str(), "GET" | "POST" | "PUT" | "PATCH" | "DELETE") {
-                bail!("HTTP method must be GET, POST, PUT, PATCH or DELETE");
+                refuse!(["source", "http", "method"], "HTTP method must be GET, POST, PUT, PATCH or DELETE");
             }
         }
         if self.responds() && (self.ordering.key.is_some() || self.dedupe.is_some() || self.rate_limit.is_some()) {
-            bail!("ordering, dedupe and rate_limit apply to queued messages, not `respond` mode");
+            refuse!(["source"], "ordering, dedupe and rate_limit apply to queued messages, not `respond` mode");
         }
         if self.responds() && !self.monitor.is_empty() {
-            bail!("`monitor` watches queued messages; an HTTP source in `respond` mode has none");
+            refuse!(["monitor"], "`monitor` watches queued messages; an HTTP source in `respond` mode has none");
         }
-        self.monitor.validate()?;
+        at(&["monitor"], self.monitor.validate())?;
         match &self.source {
             Source::File(f) | Source::Sftp(f) => {
                 let sftp = matches!(self.source, Source::Sftp(_));
+                let kind = if sftp { "sftp" } else { "file" };
                 match (&f.server, sftp) {
-                    (None, true) => bail!("an SFTP source needs `server` (a name under `sftp:` in resources.yaml)"),
-                    (Some(_), false) => bail!("`server` is for SFTP sources; use `source: {{ sftp: ... }}`"),
+                    (None, true) => refuse!(
+                        ["source", kind],
+                        "an SFTP source needs `server` (a name under `sftp:` in resources.yaml)"
+                    ),
+                    (Some(_), false) => {
+                        refuse!(
+                            ["source", kind, "server"],
+                            "`server` is for SFTP sources; use `source: {{ sftp: ... }}`"
+                        )
+                    }
                     _ => {}
                 }
                 if f.pattern.trim().is_empty() {
-                    bail!("pattern can't be empty (use * for every file)");
+                    refuse!(["source", kind, "pattern"], "pattern can't be empty (use * for every file)");
                 }
                 if f.poll < Duration::from_millis(100) {
-                    bail!("poll must be at least 100ms");
+                    refuse!(["source", kind, "poll"], "poll must be at least 100ms");
                 }
                 if f.marker.as_deref().is_some_and(|m| m.trim().is_empty()) {
-                    bail!("marker can't be empty (e.g. `.done`)");
+                    refuse!(["source", kind, "marker"], "marker can't be empty (e.g. `.done`)");
                 }
                 if f.split == Split::Records && self.format == Format::Xml {
-                    bail!("`split: records` doesn't apply to XML; each XML file is one message");
+                    refuse!(
+                        ["source", kind, "split"],
+                        "`split: records` doesn't apply to XML; each XML file is one message"
+                    );
                 }
             }
             Source::Schedule(s) => {
-                crate::schedule::Timing::new(s)?;
+                at(&["source", "schedule"], crate::schedule::Timing::new(s))?;
                 if self.script.is_none() {
-                    bail!("a schedule source needs a `script`: its transform produces the messages");
+                    refuse!(["source"], "a schedule source needs a `script`: its transform produces the messages");
                 }
                 if self.ordering.key.is_some() || self.dedupe.is_some() {
-                    bail!("ordering and dedupe don't apply to a schedule source (runs are one at a time)");
+                    refuse!(
+                        ["source"],
+                        "ordering and dedupe don't apply to a schedule source (runs are one at a time)"
+                    );
                 }
             }
             Source::Mllp { .. } | Source::Http { .. } | Source::Internal => {}
         }
         if let Some(r) = &self.rate_limit {
-            check_rate_limit(r)?;
+            at(&["rate_limit"], check_rate_limit(r))?;
         }
         Ok(())
+    }
+
+    /// Where a destination is written in interface.yaml: `destination` for the one given that way,
+    /// else `destinations.<name>`.
+    pub fn destination_key<'a>(&self, name: &'a str) -> Vec<&'a str> {
+        if self.destination.is_some() { vec!["destination"] } else { vec!["destinations", name] }
     }
 
     /// Every destination with its name (`default` for one given with `destination:`).
@@ -1411,17 +1500,27 @@ impl InterfaceConfig {
     /// The resources.yaml entries this config refers to, each with where (`source`,
     /// `destination `lab``, `dedicated_pools`). Code may use more (`db()`, `api()`).
     pub fn resource_references(&self) -> Vec<(Kind, &str, String)> {
+        self.resource_references_at().into_iter().map(|(kind, name, place, _)| (kind, name, place)).collect()
+    }
+
+    /// `resource_references`, each with its key in interface.yaml.
+    pub fn resource_references_at(&self) -> Vec<(Kind, &str, String, Vec<&str>)> {
         let mut out = Vec::new();
         if let Source::Sftp(FileSource { server: Some(s), .. }) = &self.source {
-            out.push((Kind::Sftp, s.as_str(), "source".to_string()));
+            out.push((Kind::Sftp, s.as_str(), "source".to_string(), vec!["source", "sftp", "server"]));
         }
         for (name, d) in self.destinations() {
             if let Some((kind, resource)) = d.resource() {
-                out.push((kind, resource, format!("destination `{name}`")));
+                out.push((kind, resource, format!("destination `{name}`"), self.destination_key(name)));
             }
         }
         for db in self.dedicated_pools.keys() {
-            out.push((Kind::Database, db.as_str(), "dedicated_pools".to_string()));
+            out.push((
+                Kind::Database,
+                db.as_str(),
+                "dedicated_pools".to_string(),
+                vec!["dedicated_pools", db.as_str()],
+            ));
         }
         out
     }
@@ -1429,6 +1528,11 @@ impl InterfaceConfig {
     /// An HTTP source in `respond` mode: requests are answered directly, nothing is queued.
     pub fn responds(&self) -> bool {
         matches!(self.source, Source::Http { mode: HttpMode::Respond, .. })
+    }
+
+    /// The project folder: an interface's folder is `<project>/interfaces/<name>`.
+    pub fn project_root(&self) -> &Path {
+        self.dir.parent().and_then(Path::parent).unwrap_or(Path::new("."))
     }
 
     pub fn script_path(&self) -> Option<PathBuf> {

@@ -208,7 +208,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     }
     let alerts = match alert_settings {
         Some(a) => {
-            let wrong: Vec<String> = configs.iter().flat_map(|c| a.check_interface(&c.name, &c.alert)).collect();
+            let wrong: Vec<_> = configs.iter().flat_map(|c| a.check_interface(&c.name, &c.alert)).collect();
             if !wrong.is_empty() {
                 bail!("{}", wrong.join("\n"));
             }

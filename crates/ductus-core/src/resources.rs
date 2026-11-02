@@ -68,7 +68,7 @@
 use crate::InterfaceConfig;
 use crate::about::System;
 use crate::env::Environment;
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -986,16 +986,21 @@ impl Resources {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-        let mut value: serde_yaml_ng::Value =
-            crate::env::parse_yaml(&text).with_context(|| format!("parsing {}", file.display()))?;
+        let mut value = crate::yaml::parse(&text).with_context(|| format!("parsing {}", file.display()))?;
         if value.is_null() {
             return Ok(Self::default()); // only comments (as `ductus init` writes it)
         }
-        env.substitute(&mut value).with_context(|| format!("in {}", file.display()))?;
-        let mut resources: Self = serde_yaml_ng::from_value(value).with_context(|| format!("in {}", file.display()))?;
+        crate::yaml::substitute(env, &mut value).with_context(|| format!("in {}", file.display()))?;
+        let mut resources: Self = crate::yaml::from_value(value).with_context(|| format!("in {}", file.display()))?;
+        // `bail!` about the entry at a key (`validate --json` points at it).
+        macro_rules! refuse {
+            ($key:expr, $($arg:tt)*) => {
+                return Err(crate::yaml::Located::rule(&$key, format!($($arg)*)).into())
+            };
+        }
         for (name, c) in &mut resources.certificates {
             if let Some(problem) = c.problem() {
-                bail!("in {}: certificate `{name}`: {problem}", file.display());
+                refuse!(["certificates", name], "in {}: certificate `{name}`: {problem}", file.display());
             }
             for (written, read) in c.resolve(root) {
                 resources.without_drive.push((name.clone(), written, read));
@@ -1003,21 +1008,34 @@ impl Resources {
         }
         for (name, s) in &resources.sftp {
             if s.password.is_none() && s.private_key.is_none() {
-                bail!("in {}: sftp server `{name}` needs `password` or `private_key`", file.display());
+                refuse!(
+                    ["sftp", name],
+                    "in {}: sftp server `{name}` needs `password` or `private_key`",
+                    file.display()
+                );
             }
         }
         for (name, api) in &resources.apis {
             match url::Url::parse(&api.url) {
                 Ok(u) if u.scheme() == "http" && api.tls().is_set() => {
-                    bail!("in {}: api `{name}`: `ca` and `certificate` are for an https:// `url`", file.display())
+                    refuse!(
+                        ["apis", name, "url"],
+                        "in {}: api `{name}`: `ca` and `certificate` are for an https:// `url`",
+                        file.display()
+                    )
                 }
                 Ok(u) if matches!(u.scheme(), "http" | "https") && u.host_str().is_some() => {}
-                _ => bail!("in {}: api `{name}`: `url` must be an http(s) URL, not `{}`", file.display(), api.url),
+                _ => refuse!(
+                    ["apis", name, "url"],
+                    "in {}: api `{name}`: `url` must be an http(s) URL, not `{}`",
+                    file.display(),
+                    api.url
+                ),
             }
         }
         for (name, l) in &resources.ldap {
             if let Some(problem) = l.problem() {
-                bail!("in {}: ldap `{name}`: {problem}", file.display());
+                refuse!(["ldap", name], "in {}: ldap `{name}`: {problem}", file.display());
             }
         }
         for (name, db) in &resources.databases {
@@ -1026,7 +1044,7 @@ impl Resources {
                 Database::Sqlserver(c) => c.problem(),
             };
             if let Some(problem) = problem {
-                bail!("in {}: database `{name}`: {problem}", file.display());
+                refuse!(["databases", name], "in {}: database `{name}`: {problem}", file.display());
             }
         }
         Ok(resources)
@@ -1198,12 +1216,16 @@ impl Resources {
 
     /// Interfaces whose config refers to SFTP servers, databases or APIs resources.yaml doesn't
     /// define.
-    pub fn missing_references<'a>(&self, configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<String> {
+    pub fn missing_references<'a>(
+        &self,
+        configs: impl IntoIterator<Item = &'a InterfaceConfig>,
+    ) -> Vec<crate::yaml::Problem> {
         let mut problems = Vec::new();
         for c in configs {
-            for (kind, name, place) in c.resource_references() {
+            for (kind, name, place, key) in c.resource_references_at() {
                 if let Some(missing) = self.missing(kind, name) {
-                    problems.push(format!("interface `{}`: {place}: {missing}", c.name));
+                    let text = format!("interface `{}`: {place}: {missing}", c.name);
+                    problems.push(crate::yaml::Problem::new(text, &c.name, &key));
                 }
             }
         }

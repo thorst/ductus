@@ -8,7 +8,7 @@ that only run while the binary is compiled (macros, build scripts), since they s
 Nothing on this page is downloaded when Ductus runs, except Postgres for `ductus dev` (below). The binary
 needs only the operating system's C library on Linux (glibc 2.34 or later).
 
-- Rust crates: **567** (542 in the Linux build, 549 in the Windows build)
+- Rust crates: **569** (544 in the Linux build, 551 in the Windows build)
 - npm packages in the web UI: **102**
 - TypeScript **6.0.3** (Microsoft, Apache-2.0), inside the binary: `ductus validate` and `ductus types` type-check interface code with it
 
@@ -56,12 +56,12 @@ How many libraries use each license expression (`A OR B`: the library may be use
 
 | License | Rust crates | npm packages |
 |---|---|---|
-| MIT OR Apache-2.0 | 257 |  |
+| MIT OR Apache-2.0 | 258 |  |
 | MIT | 107 | 98 |
 | Apache-2.0 OR MIT | 61 |  |
 | Apache-2.0 | 42 | 1 |
 | Unicode-3.0 | 25 |  |
-| MIT/Apache-2.0 | 22 |  |
+| MIT/Apache-2.0 | 23 |  |
 | BSD-3-Clause | 7 |  |
 | ISC | 4 | 1 |
 | Unlicense OR MIT | 5 |  |
@@ -111,6 +111,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `ar_archive_writer` | 0.5.3 | Apache-2.0 WITH LLVM-exception | ✓ | ✓ |
 | `argon2` | 0.5.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `argon2` | 0.6.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `arraydeque` | 0.5.1 | MIT/Apache-2.0 | ✓ | ✓ |
 | `ascii` | 1.1.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `asn1-rs` | 0.7.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `asn1-rs-derive` | 0.6.0 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -463,6 +464,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `ryu` | 1.0.23 | Apache-2.0 OR BSL-1.0 | ✓ | ✓ |
 | `ryu-js` | 1.0.3 | Apache-2.0 OR BSL-1.0 | ✓ | ✓ |
 | `salsa20` | 0.11.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `saphyr-parser` | 0.3.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `schannel` | 0.1.29 | MIT |  | ✓ |
 | `scoped-tls` | 1.0.1 | MIT/Apache-2.0 | ✓ | ✓ |
 | `scopeguard` | 1.2.0 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -777,6 +779,6 @@ The packages its production build bundles (the build tools and test tools aren't
 Made by `scripts/dev/dependencies.sh` from these files (a test fails when either changes and this page
 isn't made again):
 
-<!-- made from: Cargo.lock 4f0481ae6e8348f0599ce0faac4804899857d3154c079080b117b90e340f49e4 ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
-- `Cargo.lock`, SHA-256 `4f0481ae6e8348f0599ce0faac4804899857d3154c079080b117b90e340f49e4`
+<!-- made from: Cargo.lock 42dc8839f20094d10e4b5646e30ba2e358f53eda9d6b2cd7aff6db3856fd2858 ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
+- `Cargo.lock`, SHA-256 `42dc8839f20094d10e4b5646e30ba2e358f53eda9d6b2cd7aff6db3856fd2858`
 - `ui/package-lock.json`, SHA-256 `aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5`

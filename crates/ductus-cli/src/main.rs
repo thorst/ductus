@@ -3,6 +3,7 @@ mod cert;
 mod dev;
 mod doctor;
 mod envfile;
+mod findings;
 mod init;
 mod new;
 mod owners;
@@ -127,6 +128,11 @@ enum Command {
         database_only: bool,
     },
     /// Run each interface's `*.test.ts` files.
+    ///
+    /// Each test runs inside the engine's own JavaScript runtime with the SDK it uses, one at a
+    /// time, with no database, network or engine. A failed test prints where it is, where it failed
+    /// (the `expect`'s line, or the stack of what was thrown) and why; exits 1 when one fails, or
+    /// when `--filter` matches no test.
     Test {
         /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
@@ -134,6 +140,17 @@ enum Command {
         /// Only this interface.
         #[arg(long)]
         interface: Option<String>,
+        /// Only the tests whose name contains this text (case matters): `--filter "A31"`.
+        #[arg(long)]
+        filter: Option<String>,
+        /// List the tests, with the file and line of each, without running them.
+        #[arg(long)]
+        list: bool,
+        /// JSON Lines for tools (an editor, CI): one object per test (its interface, name, file,
+        /// line, column, and when run `ok`, `ms`, the error, where it failed and the expected and
+        /// actual values), then a summary. The testing guide describes every field.
+        #[arg(long)]
+        json: bool,
         /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
@@ -153,6 +170,11 @@ enum Command {
         /// waiting messages, retention changes still running or waiting for a confirmation.
         #[arg(long, env = "DUCTUS_DATABASE_URL")]
         database_url: Option<String>,
+        /// One JSON document for tools (an editor, CI) instead of the text: every finding with its
+        /// severity, code (reference/validate.md), file, line and column, whether TypeScript or
+        /// Ductus found it, and a fix where there is one.
+        #[arg(long)]
+        json: bool,
         /// Write nothing into the project (no editor typings): for `ductus upgrade --check`.
         #[arg(long, hide = true)]
         read_only: bool,
@@ -1012,11 +1034,18 @@ async fn run(cli: Cli) -> Result<()> {
             };
             dev::run(dev::Options { root, engine, port, reset, yes, database_only }).await
         }
-        Command::Test { root, interface, env, read_only } => {
-            exit_on_failure(project::test(&root, &env, interface.as_deref(), read_only).await)
+        Command::Test { root, interface, filter, list, json, env, read_only } => {
+            let options = project::TestOptions {
+                interface: interface.as_deref(),
+                filter: filter.as_deref(),
+                list,
+                json,
+                read_only,
+            };
+            exit_on_failure(project::test(&root, &env, options).await)
         }
-        Command::Validate { root, env, database_url, read_only } => {
-            exit_on_failure(project::validate(&root, &env, database_url, read_only).await)
+        Command::Validate { root, env, database_url, json, read_only } => {
+            exit_on_failure(project::validate(&root, &env, database_url, read_only, json).await)
         }
         Command::Upgrade { check: _, json, root, env, database_url, replay } => {
             let options =

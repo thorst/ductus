@@ -252,7 +252,8 @@ pub fn known_values<'a>(
 /// Where an interface doesn't say which systems it connects (what `validate` warns about).
 /// A side counts as known when `about:`, the destination, or the resources.yaml entry it goes
 /// through names an application or vendor. Schedules have no sender to name.
-pub fn about_gaps(c: &InterfaceConfig, resources: &Resources) -> Vec<String> {
+pub fn about_gaps(c: &InterfaceConfig, resources: &Resources) -> Vec<crate::yaml::Problem> {
+    use crate::yaml::Problem;
     let mut gaps = Vec::new();
     let sender_known = match &c.source {
         // Schedules have no sender; internal interfaces' senders are the interfaces routing to them.
@@ -265,16 +266,21 @@ pub fn about_gaps(c: &InterfaceConfig, resources: &Resources) -> Vec<String> {
     };
     if !sender_known {
         let who = if c.responds() { "calling" } else { "sending" };
-        gaps.push(format!("about.from: add the {who} system's `application` or `vendor`"));
+        let text = format!("about.from: add the {who} system's `application` or `vendor`");
+        gaps.push(Problem::new(text, &c.name, &["about", "from"]));
     }
     let several = c.destination.is_none();
     for (name, d) in c.destinations().filter(|(_, d)| d.route().is_none()) {
         let through = d.resource().map(|(kind, r)| resources.system(kind, r).is_known()).unwrap_or(false);
         if !(d.system().is_known() || c.about.to.is_known() || through) {
             gaps.push(if several {
-                format!("destination `{name}`: add `application` or `vendor` (on the destination, or about.to for all)")
+                let text = format!(
+                    "destination `{name}`: add `application` or `vendor` (on the destination, or about.to for all)"
+                );
+                Problem::new(text, &c.name, &c.destination_key(name))
             } else {
-                "about.to: add the receiving system's `application` or `vendor`".to_string()
+                let text = "about.to: add the receiving system's `application` or `vendor`";
+                Problem::new(text, &c.name, &["about", "to"])
             });
         }
     }

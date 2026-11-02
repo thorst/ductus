@@ -4,9 +4,41 @@ import { type Message, parse } from "./hl7.ts";
 import { decode, type FormatSpec } from "./formats.ts";
 import { __useOps, type FetchCall, type Ops, type Param, type RawResponse, type Row } from "./services.ts";
 
+/** A place in a project file, as a stack trace names it (source-mapped: the `.ts` line). */
+export interface Where {
+  /** The file's `file://` URL. */
+  url: string;
+  line: number;
+  column: number;
+}
+
 interface TestCase {
   name: string;
   fn: () => unknown;
+  /** Made at `test(...)`: its stack says where (read only when asked: writing it costs ~30 µs). */
+  site: Error;
+}
+
+// A frame of the SDK (`ductus:///sdk/...`) or of the engine's glue modules is never where a
+// developer should look.
+function internal(frame: string): boolean {
+  return frame.includes("ductus:///") || frame.includes(".__ductus__.") || frame.includes("__ductus_main__");
+}
+
+const FRAME = /(file:\/\/\/[^\s()]+):(\d+):(\d+)/;
+
+/** The first frame of a stack trace in project code. */
+function where(stack: string | undefined): Where | undefined {
+  for (const line of (stack ?? "").split("\n").slice(1)) {
+    const m = internal(line) ? null : FRAME.exec(line);
+    if (m) return { url: m[1], line: Number(m[2]), column: Number(m[3]) };
+  }
+  return undefined;
+}
+
+/** A stack trace without the SDK's and the engine's own frames. */
+function projectStack(stack: string): string {
+  return stack.split("\n").filter((line) => !/^\s+at /.test(line) || !internal(line)).join("\n");
 }
 
 /** What a mocked `db()` answers: rows for `query`/`one`, a count (or rows) for `execute`. */
@@ -125,9 +157,17 @@ const mockOps: Ops = {
 
 export interface TestResult {
   name: string;
-  ok: boolean;
+  /** Absent with `list`: the test didn't run. */
+  ok?: boolean;
   error?: string;
-  ms: number;
+  ms?: number;
+  /** Where `test(...)` is. */
+  at?: Where;
+  /** Where it failed: the `expect` that failed, or the first project frame of what was thrown. */
+  failedAt?: Where;
+  /** A failed `toBe`/`toEqual`/`toBeNull`: both values as text (objects as indented JSON). */
+  expected?: string;
+  actual?: string;
 }
 
 const tests: TestCase[] = [];
@@ -137,7 +177,13 @@ let inputFormat: FormatSpec = { kind: "hl7" };
 
 /** Register a test. */
 export function test(name: string, fn: () => unknown): void {
-  tests.push({ name, fn });
+  // Where the call is: an Error's frames, captured now (~3 µs); this frame and the caller's are all
+  // it needs. Its stack is written (each frame source-mapped, ~30 µs) only if the place is shown.
+  const limit = Error.stackTraceLimit;
+  Error.stackTraceLimit = 2;
+  const site = new Error();
+  Error.stackTraceLimit = limit;
+  tests.push({ name, fn, site });
 }
 
 /** Contents of a file in the interface's `fixtures/` folder. */
@@ -166,13 +212,30 @@ export function input<T = unknown>(name: string): T {
   return decode(fixture(name), inputFormat) as T;
 }
 
-class AssertionError extends Error {}
+/** A failed `expect`: its message, where it is, and for comparisons both values. */
+class AssertionError extends Error {
+  readonly at: Where | undefined;
+  constructor(message: string, readonly expected?: string, readonly actual?: string) {
+    super(message);
+    this.at = where(this.stack);
+  }
+}
 
 function show(value: unknown): string {
   if (typeof value === "string") return JSON.stringify(value);
   if (value === undefined) return "undefined";
   try {
     return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/** A value for a side-by-side comparison: objects and arrays as indented JSON. */
+function showLong(value: unknown): string {
+  if (value === null || typeof value !== "object") return show(value);
+  try {
+    return JSON.stringify(value, null, 2);
   } catch {
     return String(value);
   }
@@ -195,20 +258,28 @@ export class Expectation {
     return new Expectation(this.actual, !this.negate);
   }
 
-  private check(pass: boolean, message: string): void {
-    if (pass === this.negate) throw new AssertionError(this.negate ? `not: ${message}` : message);
+  /** Throws when it failed; `expected` (a comparison's) is reported with the actual value. */
+  private check(pass: boolean, message: string, expected?: { value: unknown }): void {
+    if (pass !== this.negate) return;
+    if (this.negate) throw new AssertionError(`not: ${message}`);
+    if (expected) throw new AssertionError(message, showLong(expected.value), showLong(this.actual));
+    throw new AssertionError(message);
   }
 
   toBe(expected: unknown): void {
-    this.check(Object.is(this.actual, expected), `expected ${show(expected)}, got ${show(this.actual)}`);
+    this.check(Object.is(this.actual, expected), `expected ${show(expected)}, got ${show(this.actual)}`, {
+      value: expected,
+    });
   }
 
   toEqual(expected: unknown): void {
-    this.check(deepEqual(this.actual, expected), `expected ${show(expected)}, got ${show(this.actual)}`);
+    this.check(deepEqual(this.actual, expected), `expected ${show(expected)}, got ${show(this.actual)}`, {
+      value: expected,
+    });
   }
 
   toBeNull(): void {
-    this.check(this.actual === null, `expected null, got ${show(this.actual)}`);
+    this.check(this.actual === null, `expected null, got ${show(this.actual)}`, { value: null });
   }
 
   toBeTruthy(): void {
@@ -273,18 +344,37 @@ export function __setFixtures(map: Record<string, string>, formats?: { input: Fo
   __useOps(mockOps);
 }
 
-/** Run every registered test, one at a time (async ones are awaited); returns a JSON report. */
-export async function __runTests(): Promise<string> {
+/**
+ * Run the registered tests, one at a time (async ones are awaited); returns a JSON report.
+ * `options` (JSON): `filter`, only tests whose name contains it; `list`, report the tests without
+ * running them; `places`, where every test is (else only failed ones say).
+ */
+export async function __runTests(options?: string): Promise<string> {
+  const { filter, list, places } = JSON.parse(options ?? "{}") as {
+    filter?: string | null;
+    list?: boolean;
+    places?: boolean;
+  };
+  const chosen = typeof filter === "string" ? tests.filter((t) => t.name.includes(filter)) : tests;
+  const at = (t: TestCase) => where(t.site.stack);
+  if (list) return JSON.stringify(chosen.map((t): TestResult => ({ name: t.name, at: at(t) })));
   const results: TestResult[] = [];
-  for (const t of tests) {
+  for (const t of chosen) {
     resetMocks();
     const start = Date.now();
     try {
       await t.fn();
-      results.push({ name: t.name, ok: true, ms: Date.now() - start });
+      results.push({ name: t.name, ok: true, ms: Date.now() - start, at: places ? at(t) : undefined });
     } catch (e) {
-      const error = e instanceof AssertionError ? e.message : e instanceof Error ? (e.stack ?? e.message) : String(e);
-      results.push({ name: t.name, ok: false, error, ms: Date.now() - start });
+      const result: TestResult = { name: t.name, ok: false, ms: Date.now() - start, at: at(t) };
+      if (e instanceof AssertionError) {
+        Object.assign(result, { error: e.message, failedAt: e.at, expected: e.expected, actual: e.actual });
+      } else if (e instanceof Error) {
+        Object.assign(result, { error: projectStack(e.stack ?? e.message), failedAt: where(e.stack) });
+      } else {
+        result.error = String(e);
+      }
+      results.push(result);
     }
   }
   return JSON.stringify(results);

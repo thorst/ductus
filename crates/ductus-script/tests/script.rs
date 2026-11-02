@@ -465,6 +465,107 @@ fn transform_errors_carry_the_js_message() {
     assert!(rt.block_on(isolate.transform(ADT)).is_err());
 }
 
+/// The test runner's report says where each test is, where a failed `expect` failed (also after
+/// an `await`, and in `toReject`), both values of a failed comparison, and where a thrown error
+/// came from, without the SDK's frames; `filter` and `list` choose and list without running.
+#[test]
+fn test_reports_say_where_tests_are_and_where_they_failed() {
+    let dir = project(&[
+        ("x/t.ts", "type A = string;\n\nexport function boom(): string {\n  throw new Error(\"no PID\");\n}\n"),
+        (
+            "x/t.test.ts",
+            r#"import { test, expect } from "@ductus/sdk";
+import { boom } from "./t.ts";
+
+test("adds", () => {
+  expect(1 + 1).toBe(2);
+});
+
+test("fails an expect", () => {
+  expect(1).toBe(2);
+});
+
+test("throws", () => {
+  boom();
+});
+
+test("fails after an await", async () => {
+  await Promise.resolve();
+  expect({ a: 1 }).toEqual({ a: 2 });
+});
+
+test("fails in toReject", async () => {
+  await expect(Promise.resolve(1)).toReject("x");
+});
+
+test("fails a negated expect", () => {
+  expect(1).not.toBe(1);
+});
+"#,
+        ),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let test_file = dir.path().join("x/t.test.ts");
+    let mut isolate = rt.block_on(Isolate::tests(&[&test_file], "{}", DEFAULT_FORMATS)).unwrap();
+    let report = rt.block_on(isolate.run_tests_with(r#"{"places": true}"#)).unwrap();
+    let report: Vec<serde_json::Value> = serde_json::from_str(&report).unwrap();
+    let by_name =
+        |name: &str| report.iter().find(|r| r["name"] == name).unwrap_or_else(|| panic!("{name}: {report:#?}"));
+    let place = |w: &serde_json::Value| {
+        let file = w["url"].as_str().unwrap().rsplit('/').next().unwrap().to_string();
+        (file, w["line"].as_u64().unwrap(), w["column"].as_u64().unwrap())
+    };
+    let at = |file: &str, line, column| (file.to_string(), line, column);
+
+    let adds = by_name("adds");
+    assert_eq!((adds["ok"].as_bool(), place(&adds["at"])), (Some(true), at("t.test.ts", 4, 1)));
+    assert!(adds.get("failedAt").is_none() && adds.get("expected").is_none(), "{adds}");
+
+    let failed = by_name("fails an expect");
+    assert_eq!(failed["error"], "expected 2, got 1");
+    assert_eq!(place(&failed["at"]), at("t.test.ts", 8, 1));
+    assert_eq!(place(&failed["failedAt"]), at("t.test.ts", 9, 13));
+    assert_eq!((&failed["expected"], &failed["actual"]), (&"2".into(), &"1".into()));
+
+    let thrown = by_name("throws");
+    // The first project frame is in the code under test, on its `.ts` line.
+    assert_eq!(place(&thrown["failedAt"]), at("t.ts", 4, 9));
+    let error = thrown["error"].as_str().unwrap();
+    assert!(error.starts_with("Error: no PID\n    at boom (file://") && !error.contains("ductus:///"), "{error}");
+
+    let awaited = by_name("fails after an await");
+    assert_eq!(place(&awaited["failedAt"]), at("t.test.ts", 18, 20));
+    assert_eq!(awaited["expected"], "{\n  \"a\": 2\n}", "objects indented, for a side-by-side view");
+    assert_eq!(awaited["actual"], "{\n  \"a\": 1\n}");
+
+    let rejected = by_name("fails in toReject");
+    assert_eq!(rejected["error"], "expected it to reject");
+    // An async matcher fails after its own `await`: the test's frame is the `await` of it.
+    assert_eq!(place(&rejected["failedAt"]), at("t.test.ts", 22, 3));
+
+    let negated = by_name("fails a negated expect");
+    assert_eq!(negated["error"], "not: expected 1, got 1");
+    assert!(negated.get("expected").is_none(), "no side-by-side for `not`: {negated}");
+
+    // Without `places`, only a failed test says where it is (writing a stack costs ~30 µs).
+    let mut isolate = rt.block_on(Isolate::tests(&[&test_file], "{}", DEFAULT_FORMATS)).unwrap();
+    let plain: Vec<serde_json::Value> = serde_json::from_str(&rt.block_on(isolate.run_tests()).unwrap()).unwrap();
+    assert!(plain[0].get("at").is_none() && plain[1]["at"]["line"] == 8, "{plain:#?}");
+
+    // Chosen by name, and listed without running.
+    let mut isolate = rt.block_on(Isolate::tests(&[&test_file], "{}", DEFAULT_FORMATS)).unwrap();
+    let only: Vec<serde_json::Value> =
+        serde_json::from_str(&rt.block_on(isolate.run_tests_with(r#"{"filter": "fails a"}"#)).unwrap()).unwrap();
+    let names: Vec<&str> = only.iter().map(|r| r["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["fails an expect", "fails after an await", "fails a negated expect"]);
+    let mut isolate = rt.block_on(Isolate::tests(&[&test_file], "{}", DEFAULT_FORMATS)).unwrap();
+    let listed: Vec<serde_json::Value> =
+        serde_json::from_str(&rt.block_on(isolate.run_tests_with(r#"{"list": true}"#)).unwrap()).unwrap();
+    assert_eq!(listed.len(), 6);
+    assert!(listed.iter().all(|r| r.get("ok").is_none() && r["at"]["line"].is_u64()), "{listed:#?}");
+}
+
 fn runaway(result: anyhow::Result<Option<String>>) -> Runaway {
     match result {
         Err(e) => *e.downcast_ref::<Runaway>().unwrap_or_else(|| panic!("not a runaway: {e:#}")),

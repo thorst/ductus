@@ -1,7 +1,7 @@
 //! `ductus reference DOCS` (hidden): the docs site's reference pages, made from the binary itself
 //! so they can't drift from it: the command line (clap), the REST API (the OpenAPI document), the
-//! configuration files (their JSON Schemas, `ductus_core::schema`), Event Log IDs, Prometheus
-//! metrics and audit actions. It also rewrites the reference part of `DOCS/SUMMARY.md`.
+//! configuration files (their JSON Schemas, `ductus_core::schema`), `validate`'s finding codes
+//! (`findings::CODES`), Event Log IDs, Prometheus metrics and audit actions. It also rewrites the reference part of `DOCS/SUMMARY.md`.
 //!
 //! The pages are committed; a CLI test writes them into a temporary folder and compares, so a
 //! change to a command, an API operation or a setting fails until `ductus reference docs` is run.
@@ -144,6 +144,7 @@ fn pages() -> Result<Vec<Page>> {
     pages.extend(cli());
     pages.extend(api()?);
     pages.extend(config()?);
+    pages.push(validate_codes());
     pages.push(event_log());
     pages.push(metrics());
     pages.push(audit());
@@ -163,6 +164,7 @@ the [nuances](../nuances/index.md) say what could surprise you.
 and returns.
 - [Configuration files](config/index.md): every setting of `interface.yaml`, `resources.yaml`, \
 `ductus.yaml`, the environment files and `docs-schema.yaml`.
+- [Validate findings](validate.md): every code `ductus validate` reports, and what to do.
 - [Event Log IDs](event-log.md): what the Windows service writes to the Event Log.
 - [Prometheus metrics](metrics.md): what `GET /api/v1/metrics` serves.
 - [Audit actions](audit.md): what the audit log records.
@@ -838,7 +840,42 @@ impl<'a> Settings<'a> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Event Log IDs, metrics, audit actions
+// Validate findings, Event Log IDs, metrics, audit actions
+
+fn validate_codes() -> Page {
+    let mut text = String::from(
+        "# Validate findings
+
+What `ductus validate` reports, by code. The text output prints each finding on a line of its own \
+(`✗` an error, `⚠` a warning, `note:` what wasn't checked); `ductus validate --json` gives the \
+same findings to tools, with the code, the file and the line and column of the key or code it's \
+about ([testing guide](../write/testing.md#for-editors-and-ci-json)). Errors make the project \
+invalid (exit 1); warnings and notes don't.
+
+Codes are stable: a check keeps its code, a new check gets a new one, and a retired code isn't \
+reused. Three families come from elsewhere:
+
+- **`TS` followed by a number** (`TS2322`): TypeScript's own errors, with `source: typescript` in \
+the JSON. VS Code's TypeScript server shows them as you type; `validate` checks with the TypeScript \
+version it carries.
+- **`DX1` to `DX4`**: Ductus's checks of interface code: writing to the global scope (`DX1`), \
+changing built-in prototypes (`DX2`), mutable state in a shared library (`DX3`) ([the shared \
+pool](../shared-pool.md)), and a database or API name computed at run time (`DX4`) \
+([lookups](../write/lookups.md)).
+- **`DUC` followed by three digits**: everything else, below. For the five files, the last digit \
+says how far loading got: 0 not YAML, 1 a `${...}` value the environment doesn't have, 2 a \
+setting that doesn't exist or has the wrong kind of value, 3 a rule between settings, 4 the file \
+can't be read.
+
+| Code | Usually | What it means, and what to do |
+|---|---|---|
+",
+    );
+    for c in crate::findings::CODES {
+        let _ = writeln!(text, "| `{}` | {} | **{}** {} |", c.code, c.severity, cell(c.title), cell(c.about));
+    }
+    Page::new("validate.md", "Validate findings", 1, text)
+}
 
 fn event_log() -> Page {
     use crate::service::messages::{ABOUT, MESSAGES};

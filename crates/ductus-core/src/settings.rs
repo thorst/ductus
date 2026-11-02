@@ -560,27 +560,35 @@ impl Settings {
         }
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
         // `${...}` references (alerts only) must not break the YAML: parsed protected.
-        let value = crate::env::parse_yaml(&text).with_context(|| format!("parsing {}", file.display()))?;
+        let value = crate::yaml::parse(&text).with_context(|| format!("parsing {}", file.display()))?;
         if value.is_null() {
             return Ok(Self::default());
         }
-        let settings: Self = serde_yaml_ng::from_value(value).with_context(|| format!("in {}", file.display()))?;
-        settings.api.address(None).with_context(|| format!("in {}", file.display()))?;
+        let settings: Self = crate::yaml::from_value(value).with_context(|| format!("in {}", file.display()))?;
+        use crate::yaml::at;
+        let in_file = || format!("in {}", file.display());
+        at(&["api", "listen"], settings.api.address(None).with_context(in_file))?;
         if let Some(allow) = &settings.api.allow {
-            allow.rules().with_context(|| format!("in {}: api.allow", file.display()))?;
+            at(&["api", "allow"], allow.rules().with_context(|| format!("in {}: api.allow", file.display())))?;
         }
+        let refuse = |key: &[&str], text: &str| -> Result<Self> {
+            Err(crate::yaml::Located::rule(key, format!("in {}: {text}", file.display())).into())
+        };
         if settings.isolates.heap_mb < 64 {
-            bail!("in {}: isolates.heap_mb must be at least 64 (the SDK alone needs a few MB)", file.display());
+            return refuse(
+                &["isolates", "heap_mb"],
+                "isolates.heap_mb must be at least 64 (the SDK alone needs a few MB)",
+            );
         }
-        settings.auth.check().with_context(|| format!("in {}", file.display()))?;
+        at(&["auth"], settings.auth.check().with_context(in_file))?;
         if settings.audit.keep < std::time::Duration::from_secs(365 * 86_400) {
-            bail!(
-                "in {}: audit.keep must be at least a year (`1y`): the log is the record of who did what",
-                file.display()
+            return refuse(
+                &["audit", "keep"],
+                "audit.keep must be at least a year (`1y`): the log is the record of who did what",
             );
         }
         if settings.doctor.schedule.is_some_and(|s| s < std::time::Duration::from_secs(60)) {
-            bail!("in {}: doctor.schedule must be at least 1m (or `off`)", file.display());
+            return refuse(&["doctor", "schedule"], "doctor.schedule must be at least 1m (or `off`)");
         }
         Ok(settings)
     }
@@ -590,10 +598,11 @@ impl Settings {
     pub fn alerts(&self, env: &crate::Environment) -> Result<Option<crate::alerts::AlertSettings>> {
         let Some(raw) = &self.alerts else { return Ok(None) };
         let mut value = raw.clone();
-        env.substitute(&mut value).with_context(|| format!("in {FILE}: alerts"))?;
-        let alerts: crate::alerts::AlertSettings =
-            serde_yaml_ng::from_value(value).with_context(|| format!("in {FILE}: alerts"))?;
-        alerts.check().with_context(|| format!("in {FILE}"))?;
+        crate::yaml::substitute(env, &mut value).with_context(|| format!("in {FILE}: alerts"))?;
+        let alerts: crate::alerts::AlertSettings = crate::yaml::from_value(value)
+            .map_err(|e| crate::yaml::under(&["alerts"], e))
+            .with_context(|| format!("in {FILE}: alerts"))?;
+        crate::yaml::at(&["alerts"], alerts.check().with_context(|| format!("in {FILE}")))?;
         Ok(Some(alerts))
     }
 }

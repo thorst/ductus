@@ -54,8 +54,13 @@ impl Environment {
         let file = root.join("environments").join(format!("{name}.yaml"));
         let variables = if file.is_file() {
             let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-            let parsed: EnvironmentFile =
-                serde_yaml_ng::from_str(&text).with_context(|| format!("parsing {}", file.display()))?;
+            let parsed: EnvironmentFile = match serde_yaml_ng::from_str::<Value>(&text) {
+                Ok(Value::Null) => Ok(EnvironmentFile::default()),
+                Ok(value) => crate::yaml::from_value(value),
+                Err(e) => Err(e.into()),
+            }
+            .map_err(|e| crate::yaml::syntax(e, &text))
+            .with_context(|| format!("parsing {}", file.display()))?;
             parsed.variables
         } else if root.join("environments").is_dir() {
             bail!("unknown environment `{name}`: {} doesn't exist", file.display());

@@ -653,12 +653,15 @@ impl AlertSettings {
     }
 
     /// An interface's `alert.to` must name channels (or `owner`).
-    pub fn check_interface(&self, interface: &str, options: &AlertOptions) -> Vec<String> {
+    pub fn check_interface(&self, interface: &str, options: &AlertOptions) -> Vec<crate::yaml::Problem> {
         options
             .to
             .iter()
             .filter(|t| *t != OWNER && !self.channels.contains_key(*t))
-            .map(|t| format!("{interface}: alert.to names `{t}`, but alerts.channels has no such channel"))
+            .map(|t| {
+                let text = format!("{interface}: alert.to names `{t}`, but alerts.channels has no such channel");
+                crate::yaml::Problem::new(text, interface, &["alert", "to"])
+            })
             .collect()
     }
 

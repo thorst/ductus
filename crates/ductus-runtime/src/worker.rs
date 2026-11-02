@@ -28,6 +28,7 @@ use ductus_core::config::Retry;
 use ductus_script::{Call, FunctionId, InterfaceId, Isolate, Runaway};
 use ductus_store::{DestinationId, Done, MessageRef, Pending, Status, Store};
 use std::cell::RefCell;
+use std::path::Path;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -332,7 +333,8 @@ pub(crate) enum Outcome {
 impl Outcome {
     /// What a destination's function returned, as the decision it stands for (`ductus replay`
     /// decides with this too). `None`: the destination has no function, the message goes as is.
-    pub(crate) fn of(input: &str, result: Option<Result<Option<String>>>) -> Self {
+    /// A thrown error's reason names where in the project's code (`root`) it was thrown.
+    pub(crate) fn of(input: &str, result: Option<Result<Option<String>>>, root: &Path) -> Self {
         let result = match result {
             None => return Outcome::Deliver(input.to_string()),
             Some(result) => result,
@@ -353,7 +355,7 @@ impl Outcome {
                 } else if error.contains(ductus_script::TRANSIENT) {
                     Outcome::Retry(format!("transform failed: {}", error.replace(ductus_script::TRANSIENT, "").trim()))
                 } else {
-                    Outcome::Quarantine(format!("transform failed: {error}"))
+                    Outcome::Quarantine(format!("transform failed: {}", ductus_script::errors::readable(&error, root)))
                 }
             }
         }
@@ -476,7 +478,7 @@ impl Worker {
                 None => None,
                 Some(script) => Some(self.transformed(script, &input, &meta).await),
             };
-            let outcome = Outcome::of(&input, result);
+            let outcome = Outcome::of(&input, result, self.config.project_root());
 
             match &outcome {
                 Outcome::Runaway(runaway) => ran_away(&self.config.name, &self.health, runaway),
@@ -724,5 +726,47 @@ fn ran_away(interface: &str, health: &Health, runaway: &Runaway) {
     tracing::error!(%interface, error = %runaway, "runaway script stopped");
     if let Some(reason) = health.runaway(runaway) {
         tracing::error!(%interface, %reason, "{}", crate::events::INTERFACE_STOPPED);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The reason a thrown error quarantines a message with names the `.ts` line it was thrown on
+    /// (after type-only lines the JavaScript doesn't have), sync and async, relative to the
+    /// project, without the engine's frames.
+    #[test]
+    fn a_thrown_error_s_quarantine_reason_names_the_ts_line() {
+        let root = tempfile::tempdir().unwrap();
+        let code = "type A = string;\ntype B = number;\n\nexport function transform(m: string) {\n  if (m) {\n    throw new Error(\"no PID\");\n  }\n  return m;\n}\nexport async function later(m: string) {\n  await Promise.resolve();\n  throw new Error(\"later\");\n}\n";
+        let module = root.path().join("interfaces/adt/route.ts");
+        std::fs::create_dir_all(module.parent().unwrap()).unwrap();
+        std::fs::write(&module, code).unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let _guard = rt.enter();
+        let mut isolate = Isolate::host();
+        let formats = ductus_script::DEFAULT_FORMATS;
+        let (_, ids) = rt
+            .block_on(isolate.add_functions(
+                &module,
+                &[("transform", formats), ("later", formats)],
+                Duration::from_secs(1),
+            ))
+            .unwrap();
+        let adt = "MSH|^~\\&|EPIC|HOSP|LAB|HOSP|20261101120000||ADT^A01|1|P|2.5\rPID|1||123^^^MRN\r";
+        let mut reason =
+            |id| match Outcome::of(adt, Some(rt.block_on(isolate.call_function(id, adt, None))), root.path()) {
+                Outcome::Quarantine(reason) => reason,
+                _ => panic!("not quarantined"),
+            };
+        assert_eq!(
+            reason(ids[0]),
+            "transform failed: Error: no PID (interfaces/adt/route.ts:6:11)\n    at transform (interfaces/adt/route.ts:6:11)"
+        );
+        assert_eq!(
+            reason(ids[1]),
+            "transform failed: Error: later (interfaces/adt/route.ts:12:9)\n    at later (interfaces/adt/route.ts:12:9)"
+        );
     }
 }

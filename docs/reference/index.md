@@ -5,6 +5,7 @@ Everything Ductus takes and gives, listed: every command, API operation, setting
 - [Command line](cli/index.md): every `ductus` command and option.
 - [REST API](api/index.md): every operation under `/api/v1`, who may call it, and what it takes and returns.
 - [Configuration files](config/index.md): every setting of `interface.yaml`, `resources.yaml`, `ductus.yaml`, the environment files and `docs-schema.yaml`.
+- [Validate findings](validate.md): every code `ductus validate` reports, and what to do.
 - [Event Log IDs](event-log.md): what the Windows service writes to the Event Log.
 - [Prometheus metrics](metrics.md): what `GET /api/v1/metrics` serves.
 - [Audit actions](audit.md): what the audit log records.

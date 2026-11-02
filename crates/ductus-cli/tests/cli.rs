@@ -317,6 +317,13 @@ fn the_guides_example_project_passes_its_tests_and_validate() {
     let (ok, out) = run(&["validate"], &key, "");
     assert!(ok && out.contains("valid"), "{out}");
     assert!(!out.contains('⚠'), "the guides' examples are written to pass without warnings: {out}");
+    let (ok, out) = run(&["validate", "--json"], &key, "");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    let codes: Vec<&str> = doc["findings"].as_array().unwrap().iter().map(|f| f["code"].as_str().unwrap()).collect();
+    assert!(ok && doc["valid"] == true && codes == ["DUC390"], "only the note that no database was checked: {out}");
+    let (ok, out) = ductus(dir.path(), &["test", "--json"]);
+    let lines = json_lines(&out);
+    assert!(ok && lines.iter().filter(|l| l["type"] == "test").all(|l| l["ok"] == true && l["line"].is_u64()), "{out}");
 }
 
 /// A test file that reads a fixture as it loads (outside `test(...)`) is told why it can't,
@@ -341,6 +348,210 @@ fn a_fixture_read_as_the_test_file_loads_says_to_read_it_in_a_test() {
     let (ok, out) = ductus(dir.path(), &["test"]);
     assert!(!ok, "{out}");
     assert!(out.contains("fixtures can be read only inside a test"), "{out}");
+}
+
+/// A project whose tests pass, fail an `expect` and throw from the code under test.
+fn tested() -> tempfile::TempDir {
+    project(&[
+        (
+            "interfaces/adt/interface.yaml",
+            "name: adt\nsource: { mllp: { port: 6661 } }\nscript: route.ts\ndestination: { file: { dir: out } }\n",
+        ),
+        (
+            "interfaces/adt/route.ts",
+            "import type { Message } from \"@ductus/sdk\";\n\nexport function transform(m: Message) {\n  if (m.get(\"PID-3\") === \"\") {\n    throw new Error(\"no PID\");\n  }\n  return m;\n}\n",
+        ),
+        (
+            "interfaces/adt/route.test.ts",
+            r#"import { parse, test, expect } from "@ductus/sdk";
+import { transform } from "./route.ts";
+
+test("passes", () => {
+  expect(1 + 1).toBe(2);
+});
+
+test("fails an expect", () => {
+  expect({ a: 1 }).toEqual({ a: 2 });
+});
+
+test("throws from the code", () => {
+  transform(parse("MSH|^~\\&|A|B|C|D|20260101||ADT^A01|1|P|2.5\rPID|1\r"));
+});
+"#,
+        ),
+    ])
+}
+
+fn json_lines(out: &str) -> Vec<serde_json::Value> {
+    out.lines().map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}\n{out}"))).collect()
+}
+
+/// An object's keys, sorted.
+fn keys(v: &serde_json::Value) -> Vec<&str> {
+    let mut keys: Vec<&str> = v.as_object().unwrap().keys().map(String::as_str).collect();
+    keys.sort();
+    keys
+}
+
+/// `ductus test --json` is a contract for editors and CI (fields are only ever added): one line
+/// per test with where it is, where it failed and both values, then a summary. Text output says
+/// where too; `--list` runs nothing; `--filter` chooses by name, and one that matches nothing fails.
+#[test]
+fn test_reports_where_tests_are_and_where_they_failed_as_text_and_json() {
+    let dir = tested();
+    let (ok, out) = ductus(dir.path(), &["test"]);
+    assert!(!ok, "{out}");
+    for expected in [
+        "  ✓ passes (",
+        "  ✗ fails an expect  (interfaces/adt/route.test.ts:8:1)\n      expected {\"a\":2}, got {\"a\":1}\n      at interfaces/adt/route.test.ts:9:20",
+        "  ✗ throws from the code  (interfaces/adt/route.test.ts:12:1)\n      Error: no PID (interfaces/adt/route.ts:5:11)\n          at transform (interfaces/adt/route.ts:5:11)\n          at Object.fn (interfaces/adt/route.test.ts:13:3)",
+        "1 passed, 2 failed",
+    ] {
+        assert!(out.contains(expected), "missing {expected:?} in\n{out}");
+    }
+    assert!(!out.contains("ductus:///") && !out.contains("file://"), "no engine frames or URLs: {out}");
+
+    let (ok, out) = ductus(dir.path(), &["test", "--json"]);
+    assert!(!ok, "{out}");
+    let lines = json_lines(&out);
+    assert_eq!(lines.len(), 4, "{out}");
+    assert_eq!(keys(&lines[0]), ["column", "file", "interface", "line", "ms", "name", "ok", "type"]);
+    assert_eq!(
+        (&lines[0]["type"], &lines[0]["file"], &lines[0]["line"], &lines[0]["ok"]),
+        (&"test".into(), &"interfaces/adt/route.test.ts".into(), &4.into(), &true.into())
+    );
+    let failed = &lines[1];
+    assert_eq!(
+        keys(failed),
+        ["actual", "column", "error", "expected", "failure", "file", "interface", "line", "ms", "name", "ok", "type"]
+    );
+    assert_eq!(
+        failed["failure"],
+        serde_json::json!({ "file": "interfaces/adt/route.test.ts", "line": 9, "column": 20 })
+    );
+    assert_eq!((&failed["expected"], &failed["actual"]), (&"{\n  \"a\": 2\n}".into(), &"{\n  \"a\": 1\n}".into()));
+    let thrown = &lines[2];
+    assert_eq!(thrown["failure"], serde_json::json!({ "file": "interfaces/adt/route.ts", "line": 5, "column": 11 }));
+    assert!(
+        thrown["error"].as_str().unwrap().starts_with("Error: no PID (interfaces/adt/route.ts:5:11)\n"),
+        "{thrown}"
+    );
+    assert!(thrown.get("expected").is_none(), "{thrown}");
+    assert_eq!(keys(&lines[3]), ["failed", "ms", "passed", "type"]);
+    assert_eq!((&lines[3]["passed"], &lines[3]["failed"]), (&1.into(), &2.into()));
+
+    // Listed, not run: nothing fails.
+    let (ok, out) = ductus(dir.path(), &["test", "--list", "--json"]);
+    assert!(ok, "{out}");
+    let lines = json_lines(&out);
+    assert_eq!(keys(&lines[1]), ["column", "file", "interface", "line", "name", "type"]);
+    assert_eq!(lines[3], serde_json::json!({ "type": "summary", "tests": 3 }));
+    let (ok, out) = ductus(dir.path(), &["test", "--list"]);
+    assert!(ok && out.contains("  throws from the code  (interfaces/adt/route.test.ts:12:1)\n"), "{out}");
+
+    let (ok, out) = ductus(dir.path(), &["test", "--filter", "passes"]);
+    assert!(ok && out.contains("1 passed, 0 failed"), "{out}");
+    let (ok, out) = ductus(dir.path(), &["test", "--filter", "nothing like it"]);
+    assert!(!ok && out.contains("no test's name contains `nothing like it`"), "{out}");
+}
+
+/// `ductus validate --json` gives every finding a code, a severity, who found it, and the file
+/// with the line and column of the key or code it's about (a wrong value inside a destination, the
+/// `transform` naming a missing function, a missing `${...}`, a port two interfaces want, a
+/// syntax error where the parser stopped); the text output is as before.
+#[test]
+fn validate_json_places_each_finding_in_its_file() {
+    let dir = project(&[
+        (
+            "interfaces/a/interface.yaml",
+            "name: a\nsource: { mllp: { port: 7001 } }\nscript: t.ts\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestinations:\n  lab:\n    mllp: { host: localhost, port: 7002 }\n    transform: toLab\n",
+        ),
+        ("interfaces/a/t.ts", "export function transform(m: string) {\n  const n: number = \"x\";\n  return m;\n}\n"),
+        (
+            "interfaces/b/interface.yaml",
+            "name: b\nsource: { mllp: { port: 7001 } }\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestination:\n  mllp: { host: localhost, port: 70000 }\n",
+        ),
+        (
+            "interfaces/c/interface.yaml",
+            "name: c\nsource: { mllp: { port: 7003 } }\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestination:\n  mllp: { host: \"${LAB_HOST}\", port: 7004 }\n",
+        ),
+        ("interfaces/d/interface.yaml", "name: d\nsource: { mllp: { port: 7005 }\n"),
+        (
+            "interfaces/e/interface.yaml",
+            "name: e\nsource: { mllp: { port: 7001 } }\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestination: { mllp: { host: localhost, port: 7006 } }\nworkers: 2\n",
+        ),
+    ]);
+    let (ok, text) = without_a_database(dir.path(), &["validate"]);
+    assert!(
+        !ok && text.contains("✗ b: in ./interfaces/b/interface.yaml: invalid value: integer `70000`, expected u16"),
+        "{text}"
+    );
+    let (ok, out) = without_a_database(dir.path(), &["validate", "--json"]);
+    assert!(!ok, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    assert_eq!(keys(&doc), ["environment", "errors", "findings", "valid", "warnings"]);
+    assert_eq!((&doc["valid"], &doc["environment"]), (&false.into(), &"dev".into()));
+    let findings = doc["findings"].as_array().unwrap();
+    let find = |code: &str| findings.iter().find(|f| f["code"] == code).unwrap_or_else(|| panic!("no {code} in {out}"));
+    let place =
+        |f: &serde_json::Value| (f["file"].as_str().unwrap().to_string(), f["line"].clone(), f["column"].clone());
+    let at = |file: &str, line: u32, column: u32| (file.to_string(), line.into(), column.into());
+
+    // Every finding of the text output is in the JSON, and every error is counted.
+    let errors = findings.iter().filter(|f| f["severity"] == "error").count();
+    assert_eq!(doc["errors"], errors);
+    assert!(text.contains(&format!("{errors} problem(s)")), "{text}");
+
+    let code = find("DUC125");
+    assert_eq!(place(code), at("interfaces/a/interface.yaml", 8, 5), "the `transform` naming it");
+    assert_eq!(
+        (&code["interface"], &code["source"], &code["severity"]),
+        (&"a".into(), &"ductus".into(), &"error".into())
+    );
+    assert_eq!(place(find("DUC122")), at("interfaces/b/interface.yaml", 5, 28), "port: 70000");
+    let reference = find("DUC121");
+    assert_eq!(place(reference), at("interfaces/c/interface.yaml", 5, 18), "${{LAB_HOST}}");
+    assert_eq!((&reference["end_line"], &reference["end_column"]), (&5.into(), &29.into()));
+    let syntax = find("DUC120");
+    assert_eq!((syntax["file"].as_str(), &syntax["line"]), (Some("interfaces/d/interface.yaml"), &3.into()));
+    assert_eq!(place(find("DUC123")), at("interfaces/e/interface.yaml", 5, 1), "workers without dedicated");
+    let typescript = find("TS2322");
+    assert_eq!(place(typescript), at("interfaces/a/t.ts", 2, 9));
+    assert_eq!(typescript["source"], "typescript");
+    let note = find("DUC390");
+    assert_eq!(
+        (&note["severity"], &note["hint"]),
+        (&"note".into(), &"set DUCTUS_DATABASE_URL (or --database-url)".into())
+    );
+    assert!(note.get("file").is_none(), "{note}");
+}
+
+/// Two interfaces on one port: the second one's source port, in its file.
+#[test]
+fn validate_json_places_cross_interface_problems_in_the_interface_they_re_about() {
+    let about = "about: { from: { application: EHR }, to: { application: Lab } }\n";
+    let dir = project(&[
+        (
+            "interfaces/a/interface.yaml",
+            &format!("name: a\nsource: {{ mllp: {{ port: 7001 }} }}\n{about}destination: {{ interface: nowhere }}\n"),
+        ),
+        (
+            "interfaces/b/interface.yaml",
+            &format!("name: b\n{about}source:\n  mllp:\n    port: 7001\ndestination: {{ file: {{ dir: out }} }}\n"),
+        ),
+    ]);
+    let (ok, out) = without_a_database(dir.path(), &["validate", "--json"]);
+    assert!(!ok, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let findings = doc["findings"].as_array().unwrap();
+    let find = |code: &str| findings.iter().find(|f| f["code"] == code).unwrap_or_else(|| panic!("no {code} in {out}"));
+    let port = find("DUC200");
+    assert_eq!(
+        (&port["file"], &port["line"], &port["column"], &port["interface"]),
+        (&"interfaces/b/interface.yaml".into(), &5.into(), &5.into(), &"b".into())
+    );
+    let route = find("DUC201");
+    assert_eq!((&route["file"], &route["line"]), (&"interfaces/a/interface.yaml".into(), &4.into()));
 }
 
 #[test]

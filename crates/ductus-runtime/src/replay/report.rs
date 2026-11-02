@@ -718,9 +718,9 @@ impl Recorded {
         match decision {
             Decision::Sent { .. } => Recorded::Sent,
             Decision::Filtered { reason } => Recorded::Filtered(reason.clone()),
-            // A deliberate reason, or the error's first line (its stack trace names lines that move
-            // with every edit).
-            Decision::Quarantined { reason } => Recorded::Quarantined(first_line(reason).to_string()),
+            // A deliberate reason, or the error's first line without where it was thrown (lines
+            // move with every edit).
+            Decision::Quarantined { reason } => Recorded::Quarantined(reason_alone(reason).to_string()),
             Decision::NotComparable { why } => Recorded::Other(why.clone()),
         }
     }
@@ -754,7 +754,7 @@ fn recorded(r: &ductus_store::Recorded) -> Option<Recorded> {
         },
         Status::Quarantined => match error {
             Some(e) if receiver_refused(e) => Some(Recorded::Sent),
-            e => Some(Recorded::Quarantined(first_line(e.unwrap_or("")).to_string())),
+            e => Some(Recorded::Quarantined(reason_alone(e.unwrap_or("")).to_string())),
         },
         Status::Pending | Status::Duplicate => None,
     }
@@ -770,6 +770,21 @@ fn receiver_refused(error: &str) -> bool {
 
 fn first_line(text: &str) -> &str {
     text.lines().next().unwrap_or("").trim()
+}
+
+/// A quarantine's reason as compared: its first line, without the `(file.ts:line:column)` a thrown
+/// error's reason ends with since 0.7.1 (`errors::readable`), so the same error matches across an
+/// edit that moved it and against a record from before 0.7.1.
+fn reason_alone(reason: &str) -> &str {
+    let line = first_line(reason);
+    if !line.starts_with("transform failed: ") || !line.ends_with(')') {
+        return line;
+    }
+    let Some((before, place)) = line.rsplit_once(" (") else { return line };
+    // `file:line:column)`
+    let mut parts = place.trim_end_matches(')').rsplitn(3, ':');
+    let number = |p: Option<&str>| p.is_some_and(|n| n.parse::<u32>().is_ok());
+    if number(parts.next()) && number(parts.next()) && parts.next().is_some() { before } else { line }
 }
 
 /// Where two outputs differ: `(where, before, after)`, at most `PER_MESSAGE`. HL7 by field
@@ -1026,6 +1041,21 @@ mod tests {
                 Some("transform failed: Error: no PID\n    at transform (file:///x.ts:3:9)")
             )),
             Some(Recorded::Quarantined("transform failed: Error: no PID".into()))
+        );
+        // Since 0.7.1 the first line says where: the same decision, wherever the line moved to.
+        assert_eq!(
+            recorded(&record(
+                Status::Quarantined,
+                Some(
+                    "transform failed: Error: no PID (interfaces/adt/t.ts:3:9)\n    at transform (interfaces/adt/t.ts:3:9)"
+                )
+            )),
+            Some(Recorded::Quarantined("transform failed: Error: no PID".into()))
+        );
+        assert_eq!(
+            recorded(&record(Status::Quarantined, Some("transform failed: Error: bad (code 7)"))),
+            Some(Recorded::Quarantined("transform failed: Error: bad (code 7)".into())),
+            "a message's own parentheses stay"
         );
         assert_eq!(
             recorded(&record(Status::Quarantined, Some("HTTP is down"))),

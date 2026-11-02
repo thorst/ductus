@@ -6,7 +6,9 @@ use ductus_script::Isolate;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use crate::findings::{Finding, Report, Severity};
 use ductus_runtime::project::{TYPES_FILE, code_references, files_under, key, resource_kind};
+use ductus_script::errors::Root;
 
 const TSCONFIG: &str = r#"{
   "compilerOptions": {
@@ -177,14 +179,76 @@ fn vscode_schemas(root: &Path) -> Result<Mapped> {
     })
 }
 
-/// Run each interface's `*.test.ts` files. Returns false if anything failed. `read_only` writes no
-/// editor typings (`ductus upgrade --check` runs a newer version's tests on the project as it is).
-pub async fn test(root: &Path, env: &str, only: Option<&str>, read_only: bool) -> Result<bool> {
+/// What `ductus test` runs and how it reports.
+#[derive(Default)]
+pub struct TestOptions<'a> {
+    /// Only this interface's tests.
+    pub interface: Option<&'a str>,
+    /// Only tests whose name contains this.
+    pub filter: Option<&'a str>,
+    /// List the tests (and where they are) without running them.
+    pub list: bool,
+    /// JSON Lines instead of text.
+    pub json: bool,
+    /// Write no editor typings (`ductus upgrade --check` runs a newer version's tests on the
+    /// project as it is).
+    pub read_only: bool,
+}
+
+/// A test's report from the SDK's runner (`TestResult` in testing.ts).
+#[derive(serde::Deserialize)]
+struct TestReport {
+    name: String,
+    ok: Option<bool>,
+    error: Option<String>,
+    ms: Option<u64>,
+    at: Option<Where>,
+    #[serde(rename = "failedAt")]
+    failed_at: Option<Where>,
+    expected: Option<String>,
+    actual: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct Where {
+    url: String,
+    line: u32,
+    column: u32,
+}
+
+impl Where {
+    fn json(&self, root: &Root) -> serde_json::Value {
+        serde_json::json!({ "file": root.relative(&self.url), "line": self.line, "column": self.column })
+    }
+
+    fn text(&self, root: &Root) -> String {
+        format!("{}:{}:{}", root.relative(&self.url), self.line, self.column)
+    }
+}
+
+/// Run each interface's `*.test.ts` files (or list them). Returns false if anything failed, or
+/// a filter matched nothing.
+pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bool> {
+    let TestOptions { interface: only, filter, list, json, read_only } = options;
     if !read_only {
         write_types(root).await?;
     }
     let env = Environment::load(root, env)?;
-    let (mut passed, mut failed) = (0, 0);
+    let project = &Root::new(root);
+    let (mut passed, mut failed, mut found) = (0, 0, 0);
+    let started = std::time::Instant::now();
+    let say = |line: String| {
+        if !json {
+            println!("{line}");
+        }
+    };
+    let emit = |value: serde_json::Value| {
+        if json {
+            println!("{value}");
+        }
+    };
+    // Every test's place only where it's shown (writing a stack costs ~30 µs a test).
+    let runner_options = serde_json::json!({ "filter": filter, "list": list, "places": json }).to_string();
 
     for iface in interface_dirs(root, &env)? {
         let label = iface.label();
@@ -193,7 +257,9 @@ pub async fn test(root: &Path, env: &str, only: Option<&str>, read_only: bool) -
         }
         let tests = files_under(&iface.dir, &is_test);
         if tests.is_empty() {
-            println!("{label}: no tests");
+            if filter.is_none() {
+                say(format!("{label}: no tests"));
+            }
             continue;
         }
         let fixtures_dir = iface.dir.join("fixtures");
@@ -203,7 +269,6 @@ pub async fn test(root: &Path, env: &str, only: Option<&str>, read_only: bool) -
             fixtures.insert(name, std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display()))?);
         }
 
-        println!("{label}");
         let paths: Vec<&Path> = tests.iter().map(PathBuf::as_path).collect();
         let formats = iface
             .config
@@ -211,48 +276,163 @@ pub async fn test(root: &Path, env: &str, only: Option<&str>, read_only: bool) -
             .map(|c| c.format_spec())
             .unwrap_or_else(|_| ductus_script::DEFAULT_FORMATS.to_string());
         let report = match Isolate::tests(&paths, &serde_json::to_string(&fixtures)?, &formats).await {
-            Ok(mut isolate) => isolate.run_tests().await,
+            Ok(mut isolate) => isolate.run_tests_with(&runner_options).await,
             Err(e) => Err(e),
         };
         let report = match report {
             Ok(r) => r,
             Err(e) => {
-                println!("  ✗ failed to load tests\n{}", indent(&format!("{e:#}"), 6));
+                let error = project.readable(&format!("{e:#}"));
+                say(format!("{label}\n  ✗ failed to load tests\n{}", indent(&error, 6)));
+                emit(serde_json::json!({ "type": "load", "interface": label, "error": error }));
                 failed += 1;
                 continue;
             }
         };
-        let results: Vec<serde_json::Value> = serde_json::from_str(&report)?;
+        let results: Vec<TestReport> = serde_json::from_str(&report)?;
+        if results.is_empty() {
+            continue; // nothing matched the filter here
+        }
+        say(label.clone());
         for r in results {
-            let name = r["name"].as_str().unwrap_or("?");
-            if r["ok"] == true {
-                passed += 1;
-                println!("  ✓ {name} ({}ms)", r["ms"]);
-            } else {
-                failed += 1;
-                println!("  ✗ {name}\n{}", indent(r["error"].as_str().unwrap_or(""), 6));
+            found += 1;
+            let place = r.at.as_ref().map(|w| w.text(project)).unwrap_or_default();
+            let mut line = serde_json::json!({ "type": "test", "interface": label, "name": r.name });
+            if let Some(at) = &r.at {
+                line["file"] = project.relative(&at.url).into();
+                (line["line"], line["column"]) = (at.line.into(), at.column.into());
             }
+            match r.ok {
+                None => say(format!("  {}  ({place})", r.name)),
+                Some(true) => {
+                    passed += 1;
+                    say(format!("  ✓ {} ({}ms)", r.name, r.ms.unwrap_or(0)));
+                }
+                Some(false) => {
+                    failed += 1;
+                    // A thrown error's stack says where (readable); a failed `expect` has none.
+                    let error = project.readable(r.error.as_deref().unwrap_or(""));
+                    let mut shown = error.clone();
+                    if let Some(w) = &r.failed_at
+                        && !error.lines().any(|l| l.trim_start().starts_with("at "))
+                    {
+                        shown.push_str(&format!("\nat {}", w.text(project)));
+                    }
+                    say(format!("  ✗ {}  ({place})\n{}", r.name, indent(&shown, 6)));
+                    line["error"] = error.into();
+                    if let Some(w) = &r.failed_at {
+                        line["failure"] = w.json(project);
+                    }
+                    if let (Some(expected), Some(actual)) = (&r.expected, &r.actual) {
+                        line["expected"] = expected.as_str().into();
+                        line["actual"] = actual.as_str().into();
+                    }
+                }
+            }
+            if let Some(ok) = r.ok {
+                line["ok"] = ok.into();
+                line["ms"] = r.ms.unwrap_or(0).into();
+            }
+            emit(line);
         }
     }
 
-    println!("\n{passed} passed, {failed} failed");
-    Ok(failed == 0)
+    let unmatched = filter.filter(|_| found == 0 && failed == 0);
+    if let Some(text) = unmatched {
+        say(format!("no test's name contains `{text}`"));
+    }
+    if list {
+        say(format!("\n{found} test(s)"));
+        emit(serde_json::json!({ "type": "summary", "tests": found }));
+    } else {
+        say(format!("\n{passed} passed, {failed} failed"));
+        let ms = started.elapsed().as_millis() as u64;
+        emit(serde_json::json!({ "type": "summary", "passed": passed, "failed": failed, "ms": ms }));
+    }
+    Ok(failed == 0 && unmatched.is_none())
+}
+
+/// Project files by interface name (`interfaces/adt/interface.yaml`), with each one's config, to
+/// place findings about an interface.
+struct Places<'a> {
+    files: BTreeMap<String, (String, Option<&'a InterfaceConfig>)>,
+}
+
+impl<'a> Places<'a> {
+    fn new(root: &Path, interfaces: &'a [InterfaceDir]) -> Self {
+        let files = interfaces
+            .iter()
+            .map(|i| (i.label(), (relative_path(root, &i.dir.join("interface.yaml")), i.config.as_ref().ok())))
+            .collect();
+        Self { files }
+    }
+
+    fn file(&self, interface: &str) -> Option<&str> {
+        self.files.get(interface).map(|(f, _)| f.as_str())
+    }
+
+    /// A check's finding placed in the interface.yaml and at the key it names.
+    fn problem(&self, report: &Report, finding: Finding, problem: &ductus_core::yaml::Problem) -> Finding {
+        match problem.interface.as_deref().and_then(|i| self.file(i).map(|f| (i, f))) {
+            Some((interface, file)) => report.at_key(finding.interface(interface), file, &problem.key),
+            None => finding,
+        }
+    }
+
+    /// Where a TLS check's place (`interface `adt` destination `lab``, `database `x`
+    /// (resources.yaml)`, `alerts.smtp`) is written: the file and key.
+    fn tls(&self, text: &str) -> Option<(String, Vec<String>, Option<String>)> {
+        let quoted = |s: &str| s.split('`').nth(1).map(str::to_string);
+        if let Some(rest) = text.strip_prefix("interface `") {
+            let name = rest.split('`').next()?;
+            let (file, config) = self.files.get(name)?;
+            let key = match rest.split_once("destination `").and_then(|(_, d)| d.split('`').next()) {
+                Some(d) => {
+                    config.map(|c| c.destination_key(d)).unwrap_or_default().into_iter().map(String::from).collect()
+                }
+                None => vec!["source".to_string()],
+            };
+            return Some((file.clone(), key, Some(name.to_string())));
+        }
+        if text.starts_with("api (ductus.yaml)") {
+            return Some(("ductus.yaml".into(), vec!["api".into(), "tls".into()], None));
+        }
+        if let Some(alerts) = text.strip_prefix("alerts.") {
+            let path = alerts.split(':').next()?;
+            let key = std::iter::once("alerts").chain(path.split('.')).map(String::from).collect();
+            return Some(("ductus.yaml".into(), key, None));
+        }
+        let (prefix, _) = text.split_once(" (resources.yaml)")?;
+        let section = match prefix.split(' ').next()? {
+            "api" => "apis",
+            "ldap" => "ldap",
+            "database" => "databases",
+            _ => return None,
+        };
+        Some(("resources.yaml".into(), vec![section.to_string(), quoted(prefix)?], None))
+    }
+}
+
+/// A path under the project, relative to it, with `/`.
+fn relative_path(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root).unwrap_or(path).to_string_lossy().replace('\\', "/")
 }
 
 /// `tls:` on the listeners, `ca` and `certificate` on what the engine connects to, and the
 /// `certificates:` entries: names, kinds, files, keys, expiry, and the API on the network without
-/// TLS. Returns the number of problems.
+/// TLS.
 fn check_tls<'a>(
+    report: &mut Report,
+    places: &Places,
     root: &Path,
     env: &Environment,
     resources: &ductus_core::Resources,
     configs: impl IntoIterator<Item = &'a InterfaceConfig> + Clone,
-) -> usize {
+) {
     let settings = ductus_core::settings::Settings::load(root).ok();
     let api = settings.as_ref().map(|s| &s.api);
     // Broken alert settings are reported below; their TLS names are checked once they load.
     let alerts = settings.as_ref().and_then(|s| s.alerts(env).ok().flatten());
-    let mut problems = 0;
     let mut wrong = ductus_core::tls::check(
         &ductus_core::tls::listeners(configs.clone(), api.and_then(|a| a.tls.as_ref())),
         resources,
@@ -262,18 +442,26 @@ fn check_tls<'a>(
         resources,
     ));
     for problem in wrong {
-        problems += 1;
-        println!("✗ {problem}");
+        let finding = Finding::error("DUC210", &problem);
+        let finding = match places.tls(&problem) {
+            Some((file, key, interface)) => {
+                let finding = report.at_key(finding, &file, &key);
+                if let Some(i) = interface { finding.interface(&i) } else { finding }
+            }
+            None => finding,
+        };
+        report.add(finding);
     }
     for (name, entry) in &resources.certificates {
+        let key = ["certificates", name.as_str()];
         // One at a time, so every broken one is reported.
         match ductus_runtime::tls::Certificates::load(&BTreeMap::from([(name.clone(), entry.clone())])) {
             Err(e) => {
-                problems += 1;
-                println!("✗ {e:#}");
+                let finding = report.at_key(Finding::error("DUC211", format!("{e:#}")), "resources.yaml", &key);
+                report.add(finding);
             }
             Ok(loaded) => match loaded.pairs().next().map(|p| p.about()) {
-                None => println!("✓ certificate `{name}`: a CA"),
+                None => report.ok(format!("certificate `{name}`: a CA")),
                 Some(about) => {
                     let days = (about.not_after - chrono::Utc::now()).num_days();
                     let line = format!(
@@ -282,7 +470,13 @@ fn check_tls<'a>(
                         about.names.join(", "),
                         about.not_after.format("%Y-%m-%d")
                     );
-                    if days < 30 { println!("⚠ {line}: renew it soon") } else { println!("✓ {line}") }
+                    if days < 30 {
+                        let finding = Finding::warning("DUC212", format!("{line}: renew it soon")).hint("renew it");
+                        let finding = report.at_key(finding, "resources.yaml", &key);
+                        report.add(finding);
+                    } else {
+                        report.ok(line)
+                    }
                 }
             },
         }
@@ -292,12 +486,17 @@ fn check_tls<'a>(
         && let Ok(Some((host, _))) = api.address(None)
         && !ductus_core::settings::loopback(&host)
     {
-        println!(
-            "⚠ api.listen `{}` is on the network without TLS: passwords and tokens cross it readable, and browsers won't keep the session cookie; add `tls: {{ certificate: <name> }}` to `api`",
-            api.listen
-        );
+        let finding = Finding::warning(
+            "DUC213",
+            format!(
+                "api.listen `{}` is on the network without TLS: passwords and tokens cross it readable, and browsers won't keep the session cookie; add `tls: {{ certificate: <name> }}` to `api`",
+                api.listen
+            ),
+        )
+        .hint("add `tls: { certificate: <name> }` to `api`");
+        let finding = report.at_key(finding, "ductus.yaml", &["api", "listen"]);
+        report.add(finding);
     }
-    problems
 }
 
 /// What `validate` warns about directory sign-in: settings under which a renamed person and a
@@ -322,16 +521,18 @@ fn directory_warnings(auth: &ductus_core::ldap::LdapAuth) -> Vec<String> {
 /// senders `about.from.hosts` names that the list would refuse, and an API list that leaves
 /// out this machine. Warnings only: DNS seen from here may not be the engine's.
 async fn check_allow<'a>(
+    report: &mut Report,
+    places: &Places<'_>,
     configs: impl Iterator<Item = &'a InterfaceConfig>,
     api: Option<&ductus_core::allow::Allow>,
-) -> Vec<String> {
+) {
     const API: &str = "api (ductus.yaml)";
     let lists: Vec<(String, &ductus_core::allow::Allow, &[String])> = configs
         .filter_map(|c| c.source.allow().map(|a| (c.name.clone(), a, c.about.from.hosts.as_slice())))
         .chain(api.map(|a| (API.to_string(), a, &[][..])))
         .collect();
     if lists.is_empty() {
-        return Vec::new();
+        return;
     }
     // Every name once (lists, and the hosts `about` names).
     let mut names: Vec<String> = lists
@@ -356,58 +557,100 @@ async fn check_allow<'a>(
     }
     let resolve = |name: &str| found.get(name).cloned().unwrap_or_default();
 
-    let mut lines = vec![format!(
-        "✓ who may connect: {} listener(s) with an `allow:` list ({})",
+    report.ok(format!(
+        "who may connect: {} listener(s) with an `allow:` list ({})",
         lists.len(),
         lists.iter().map(|(n, ..)| n.as_str()).collect::<Vec<_>>().join(", ")
-    )];
+    ));
     for (name, allow, hosts) in &lists {
         let Ok(rules) = allow.rules() else { continue };
+        // The list's place: the interface's source, or the API's in ductus.yaml.
+        let place = |report: &Report, finding: Finding, key: &[&str]| match places.file(name) {
+            Some(file) => report.at_key(finding.interface(name), file, key),
+            None => report.at_key(finding, "ductus.yaml", &["api", "allow"]),
+        };
         for listed in &rules.names {
             if resolve(listed).is_empty() {
-                lines.push(format!(
-                    "⚠ {name}: `allow` names `{listed}`, which doesn't resolve from here: nothing is let in for it until it does (the engine looks again every 5 minutes)"
-                ));
+                let finding = Finding::warning(
+                    "DUC220",
+                    format!(
+                        "{name}: `allow` names `{listed}`, which doesn't resolve from here: nothing is let in for it until it does (the engine looks again every 5 minutes)"
+                    ),
+                );
+                let finding = place(report, finding, &["source"]);
+                report.add(finding);
             }
         }
         for host in hosts.iter() {
-            match rules.covers(host, &resolve) {
-                Some(true) => {}
-                Some(false) => lines.push(format!(
-                    "⚠ {name}: about.from.hosts `{host}` isn't covered by `allow`: connections from it will be refused"
-                )),
-                None => lines.push(format!(
-                    "⚠ {name}: can't tell whether about.from.hosts `{host}` is allowed (it doesn't resolve from here)"
-                )),
-            }
+            let finding = match rules.covers(host, &resolve) {
+                Some(true) => continue,
+                Some(false) => Finding::warning(
+                    "DUC221",
+                    format!(
+                        "{name}: about.from.hosts `{host}` isn't covered by `allow`: connections from it will be refused"
+                    ),
+                ),
+                None => Finding::warning(
+                    "DUC222",
+                    format!(
+                        "{name}: can't tell whether about.from.hosts `{host}` is allowed (it doesn't resolve from here)"
+                    ),
+                ),
+            };
+            let finding = place(report, finding, &["about", "from", "hosts"]);
+            report.add(finding);
         }
         let local = [std::net::IpAddr::from([127, 0, 0, 1]), std::net::Ipv6Addr::LOCALHOST.into()];
         let here = |ip| rules.permits(ip, |n, ip| resolve(n).contains(&ip));
         if name == API && !local.into_iter().any(here) {
-            lines.push(
-                "⚠ api.allow leaves out 127.0.0.1: `ductus status`, `drain` and the web UI on this machine will be refused (add 127.0.0.1 if you use them here)"
-                    .into(),
-            );
+            let finding = Finding::warning(
+                "DUC223",
+                "api.allow leaves out 127.0.0.1: `ductus status`, `drain` and the web UI on this machine will be refused (add 127.0.0.1 if you use them here)",
+            )
+            .hint("add 127.0.0.1 to api.allow if you use them here");
+            let finding = report.at_key(finding, "ductus.yaml", &["api", "allow"]);
+            report.add(finding);
         }
     }
-    lines
 }
 
-/// Check configs, module loading and types. Returns false if anything is wrong.
-pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read_only: bool) -> Result<bool> {
+/// Check configs, module loading and types. Returns false if anything is wrong. `json`: one JSON
+/// document with every finding instead of the text.
+pub async fn validate(
+    root: &Path,
+    env: &str,
+    database_url: Option<String>,
+    read_only: bool,
+    json: bool,
+) -> Result<bool> {
+    let mut report = Report::new(root, json);
+    check_project(&mut report, root, env, database_url, read_only).await?;
+    report.finish(env)
+}
+
+/// Everything `validate` checks, into `report`.
+async fn check_project(
+    report: &mut Report,
+    root: &Path,
+    env: &str,
+    database_url: Option<String>,
+    read_only: bool,
+) -> Result<()> {
     let types = if read_only { Isolate::generate_types().await? } else { write_types(root).await? };
-    let mut problems = 0;
     let mut files = BTreeMap::new();
     files.insert(key(&root.join(TYPES_FILE)), types);
 
-    println!("environment: {env}");
+    report.say(format!("environment: {env}"));
     let env = match Environment::load(root, env) {
         Ok(e) => e,
         Err(e) => {
-            println!("✗ {e:#}");
-            return Ok(false);
+            let file = format!("environments/{env}.yaml");
+            let finding = report.load_error(100, Severity::Error, format!("{e:#}"), &e, &file);
+            report.add(finding);
+            return Ok(());
         }
     };
+    const RESOURCES: &str = "resources.yaml";
     let resources = match ductus_core::Resources::load(root, &env) {
         Ok(r) => {
             if !r.databases.is_empty()
@@ -423,88 +666,129 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read
                 } else {
                     format!(", {} certificate(s)", r.certificates.len())
                 };
-                println!(
-                    "✓ resources: {} database(s), {} SFTP server(s), {} API(s){directories}{certificates}",
+                report.ok(format!(
+                    "resources: {} database(s), {} SFTP server(s), {} API(s){directories}{certificates}",
                     r.databases.len(),
                     r.sftp.len(),
                     r.apis.len()
-                );
+                ));
             }
             for (name, written, read) in &r.without_drive {
-                println!(
-                    "⚠ certificate `{name}`: `{}` has no drive letter, so Windows reads it from the project's drive: {}. Write the whole path (C:\\... or \\\\server\\share\\...), or one relative to the project folder",
-                    written.display(),
-                    read.display()
-                );
+                let finding = Finding::warning(
+                    "DUC115",
+                    format!(
+                        "certificate `{name}`: `{}` has no drive letter, so Windows reads it from the project's drive: {}. Write the whole path (C:\\... or \\\\server\\share\\...), or one relative to the project folder",
+                        written.display(),
+                        read.display()
+                    ),
+                )
+                .hint("write the whole path (C:\\... or \\\\server\\share\\...), or one relative to the project folder");
+                report.add(report.at_key(finding, RESOURCES, &["certificates", name.as_str()]));
             }
             for name in r.insecure_ldap() {
-                println!(
-                    "⚠ ldap `{name}`: plain ldap:// (`insecure: true`) sends passwords readable; use ldaps:// or `starttls: true` outside a test directory"
-                );
+                let finding = Finding::warning(
+                    "DUC116",
+                    format!(
+                        "ldap `{name}`: plain ldap:// (`insecure: true`) sends passwords readable; use ldaps:// or `starttls: true` outside a test directory"
+                    ),
+                )
+                .hint("use ldaps:// or `starttls: true` outside a test directory");
+                report.add(report.at_key(finding, RESOURCES, &["ldap", name]));
             }
             for (name, mode) in r.unverified_postgres() {
-                println!(
-                    "⚠ database `{name}`: `tls: {mode}` doesn't check its certificate (whoever answers at its address is believed, and sees every query): set `tls: verify-full`, with `ca:` for a private CA"
-                );
+                let finding = Finding::warning(
+                    "DUC117",
+                    format!(
+                        "database `{name}`: `tls: {mode}` doesn't check its certificate (whoever answers at its address is believed, and sees every query): set `tls: verify-full`, with `ca:` for a private CA"
+                    ),
+                )
+                .hint("set `tls: verify-full`, with `ca:` for a private CA");
+                report.add(report.at_key(finding, RESOURCES, &["databases", name]));
             }
             for name in r.unverified_sqlserver() {
-                println!(
-                    "⚠ database `{name}`: `trust_server_certificate: true` doesn't check its certificate (whoever answers at its address is believed, and sees every query): remove it, with `ca:` for a private CA (SQL Server's own generated certificate can't be verified: ask the DBA for one from your CA)"
-                );
+                let finding = Finding::warning(
+                    "DUC118",
+                    format!(
+                        "database `{name}`: `trust_server_certificate: true` doesn't check its certificate (whoever answers at its address is believed, and sees every query): remove it, with `ca:` for a private CA (SQL Server's own generated certificate can't be verified: ask the DBA for one from your CA)"
+                    ),
+                )
+                .hint("remove `trust_server_certificate`, with `ca:` for a private CA");
+                report.add(report.at_key(finding, RESOURCES, &["databases", name]));
             }
             for name in r.ntlm_sqlserver() {
-                println!(
-                    "⚠ database `{name}`: a named Windows account logs in from Linux with NTLM, never Kerberos: Microsoft is retiring NTLM and some domains block it (the login is then refused); a SQL login, or the engine on Windows, avoids it"
+                let finding = Finding::warning(
+                    "DUC119",
+                    format!(
+                        "database `{name}`: a named Windows account logs in from Linux with NTLM, never Kerberos: Microsoft is retiring NTLM and some domains block it (the login is then refused); a SQL login, or the engine on Windows, avoids it"
+                    ),
                 );
+                report.add(report.at_key(finding, RESOURCES, &["databases", name]));
             }
             for note in crate::service::notes(Some(&r), false) {
-                println!("{note}");
+                match note.strip_prefix("⚠ ") {
+                    Some(warning) => report.add(Finding::warning("DUC150", warning)),
+                    None => report.say(note),
+                }
             }
             Some(r)
         }
         Err(e) => {
-            problems += 1;
-            println!("✗ resources: {e:#}");
+            let finding = report.load_error(110, Severity::Error, format!("resources: {e:#}"), &e, RESOURCES);
+            report.add(finding);
             None
         }
     };
 
     let interfaces = interface_dirs(root, &env)?;
+    let places = Places::new(root, &interfaces);
     for iface in &interfaces {
         let label = iface.label();
+        let file = places.file(&label).unwrap_or_default().to_string();
         match &iface.config {
             Err(e) => {
-                problems += 1;
-                println!("✗ {label}: {e:#}");
+                let finding = report.load_error(120, Severity::Error, format!("{label}: {e:#}"), e, &file);
+                report.add(finding.interface(&label));
                 continue;
             }
             Ok(config) => {
                 if let Some(script) = config.script_path()
                     && let Err(e) = load_functions(config, &script).await
                 {
-                    problems += 1;
-                    println!("✗ {label}: {}", first_line(&format!("{e:#}")));
+                    let text = format!("{e:#}");
+                    let finding = Finding::error("DUC125", format!("{label}: {}", first_line(&text))).interface(&label);
+                    report.add(report.at_key(finding, &file, &function_key(config, &text)));
                     continue;
                 }
-                println!("✓ {label}: config and code load");
+                report.ok(format!("{label}: config and code load"));
             }
         }
     }
 
     let configs = || interfaces.iter().filter_map(|i| i.config.as_ref().ok());
-    let mut wiring = ductus_core::config::check_endpoints(configs());
-    wiring.extend(ductus_core::config::check_routes(configs()));
+    let mut wiring: Vec<(&str, ductus_core::yaml::Problem)> =
+        ductus_core::config::check_endpoints(configs()).into_iter().map(|p| ("DUC200", p)).collect();
+    wiring.extend(ductus_core::config::check_routes(configs()).into_iter().map(|p| ("DUC201", p)));
     if let Some(r) = &resources {
-        wiring.extend(r.missing_references(configs()));
+        wiring.extend(r.missing_references(configs()).into_iter().map(|p| ("DUC202", p)));
     }
-    for problem in wiring {
-        problems += 1;
-        println!("✗ {problem}");
+    for (code, problem) in wiring {
+        let finding = places.problem(report, Finding::error(code, &problem.text), &problem);
+        report.add(finding);
     }
     for name in ductus_core::config::unrouted(configs()) {
-        println!(
-            "⚠ {name}: has `source: internal` but no interface routes to it (`destination: {{ interface: {name} }}`)"
-        );
+        let finding = Finding::warning(
+            "DUC204",
+            format!(
+                "{name}: has `source: internal` but no interface routes to it (`destination: {{ interface: {name} }}`)"
+            ),
+        )
+        .hint(format!("route to it from another interface: `destination: {{ interface: {name} }}`"))
+        .interface(name);
+        let finding = match places.file(name) {
+            Some(file) => report.at_key(finding, file, &["source"]),
+            None => finding,
+        };
+        report.add(finding);
     }
 
     let shared = project_files(root, &interfaces, &mut files)?;
@@ -520,12 +804,19 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read
                     && let Some(missing) = r.missing(kind, &reference.name)
                     && seen.insert((&reference.file, reference.line, reference.column))
                 {
-                    problems += 1;
                     let at = relative(root, &reference.file);
-                    println!(
-                        "✗ {at}:{}:{} {}(\"{}\"): {missing}",
-                        reference.line, reference.column, reference.kind, reference.name
-                    );
+                    let finding = Finding::error(
+                        "DUC203",
+                        format!(
+                            "{at}:{}:{} {}(\"{}\"): {missing}",
+                            reference.line, reference.column, reference.kind, reference.name
+                        ),
+                    )
+                    .file(at)
+                    .at(reference.line, reference.column)
+                    .interface(&config.name)
+                    .hint(format!("add `{}` to resources.yaml, or use one it defines", reference.name));
+                    report.add(finding);
                 }
             }
         }
@@ -537,28 +828,29 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read
     for config in configs() {
         for gap in ductus_core::impact::about_gaps(config, resources.as_ref().unwrap_or(&Default::default())) {
             gaps += 1;
-            println!("{} {}: {gap}", if require_about { "✗" } else { "⚠" }, config.name);
+            let message = format!("{}: {gap}", config.name);
+            let hint = gap.text.split_once(": ").map(|(_, fix)| fix.to_string()).unwrap_or_default();
+            let finding =
+                if require_about { Finding::error("DUC205", message) } else { Finding::warning("DUC205", message) };
+            report.add(places.problem(report, finding.hint(hint), &gap));
         }
     }
-    if require_about {
-        problems += gaps;
-    } else if gaps > 0 {
-        println!(
-            "  (warnings: `ductus impact` can't find what isn't named; `require_about: true` in ductus.yaml makes them errors)"
+    if !require_about && gaps > 0 {
+        report.say(
+            "  (warnings: `ductus impact` can't find what isn't named; `require_about: true` in ductus.yaml makes them errors)",
         );
     }
 
     // The company's own documentation fields (docs-schema.yaml) against their values.
     match ductus_core::docs::Schema::load(root) {
         Err(e) => {
-            problems += 1;
-            println!("✗ {}: {e:#}", ductus_core::docs::FILE);
+            let finding = Finding::error("DUC250", format!("{}: {e:#}", ductus_core::docs::FILE));
+            report.add(finding.file(ductus_core::docs::FILE));
         }
         Ok(schema) => {
             let none = Default::default();
             for line in ductus_core::docs::check_project(&schema, configs(), resources.as_ref().unwrap_or(&none)) {
-                problems += 1;
-                println!("✗ {line}");
+                report.add(Finding::error("DUC251", line));
             }
         }
     }
@@ -575,56 +867,59 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read
             .as_ref()
             .and_then(|a| r.ldap.get(&a.resource))
             .is_some_and(|l| ductus_runtime::ldap::trust(l, &certificates).is_err());
+        let ldap = ["auth", "ldap"];
         match ductus_runtime::ldap::Directory::new(settings.auth.ldap.as_ref(), r, &certificates) {
             Ok(Some(d)) => {
-                println!("✓ sign-in with directory `{}` ({})", d.name, d.server.url);
+                report.ok(format!("sign-in with directory `{}` ({})", d.name, d.server.url));
                 for line in directory_warnings(&d.auth) {
-                    println!("⚠ {line}");
+                    report.add(report.at_key(Finding::warning("DUC231", line), "ductus.yaml", &ldap));
                 }
             }
             Ok(None) => {}
             Err(_) if ca_reported => {}
-            Err(e) => {
-                problems += 1;
-                println!("✗ {e:#}");
-            }
+            Err(e) => report.add(report.at_key(Finding::error("DUC230", format!("{e:#}")), "ductus.yaml", &ldap)),
         }
     }
 
     // TLS: what each listener names, and each certificate loads as the engine would load it.
     if let Some(r) = &resources {
-        problems += check_tls(root, &env, r, configs());
+        check_tls(report, &places, root, &env, r, configs());
     }
     // Who may connect: warnings only (malformed lists are refused when the config loads).
     let api_allow = ductus_core::settings::Settings::load(root).ok().and_then(|s| s.api.allow);
-    for line in check_allow(configs(), api_allow.as_ref()).await {
-        println!("{line}");
-    }
+    check_allow(report, &places, configs(), api_allow.as_ref()).await;
 
     // Alerts (`alerts:` in ductus.yaml), with this environment's variables and secrets.
+    const SETTINGS: &str = "ductus.yaml";
     match ductus_core::settings::Settings::load(root) {
         Err(e) => {
-            problems += 1;
-            println!("✗ {e:#}");
+            let finding = report.load_error(130, Severity::Error, format!("{e:#}"), &e, SETTINGS);
+            report.add(finding);
         }
         Ok(settings) => match settings.alerts(&env) {
             Err(e) => {
-                problems += 1;
-                println!("✗ {e:#}");
+                let finding = report.load_error(130, Severity::Error, format!("{e:#}"), &e, SETTINGS);
+                report.add(finding);
             }
             Ok(None) => {
                 for config in configs().filter(|c| !c.alert.to.is_empty()) {
-                    println!("⚠ {}: alert.to is set, but ductus.yaml has no `alerts:`", config.name);
+                    let finding = Finding::warning(
+                        "DUC240",
+                        format!("{}: alert.to is set, but ductus.yaml has no `alerts:`", config.name),
+                    )
+                    .hint("add `alerts:` to ductus.yaml, or remove `alert.to`")
+                    .interface(&config.name);
+                    let file = places.file(&config.name).unwrap_or_default().to_string();
+                    report.add(report.at_key(finding, &file, &["alert", "to"]));
                 }
             }
             Ok(Some(alerts)) => {
-                println!("✓ alerts: {} channel(s), {} rule(s)", alerts.channels.len(), alerts.rules.len());
+                report.ok(format!("alerts: {} channel(s), {} rule(s)", alerts.channels.len(), alerts.rules.len()));
                 for warning in alerts.warnings() {
-                    println!("⚠ {warning}");
+                    report.add(report.at_key(Finding::warning("DUC241", warning), SETTINGS, &["alerts"]));
                 }
                 for problem in configs().flat_map(|c| alerts.check_interface(&c.name, &c.alert)) {
-                    problems += 1;
-                    println!("✗ {problem}");
+                    report.add(places.problem(report, Finding::error("DUC242", &problem.text), &problem));
                 }
                 // With the database, owners are matched to accounts below.
                 let accounts_known = database_url.as_deref().is_some_and(|u| !u.trim().is_empty());
@@ -633,9 +928,12 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read
                         .into_iter()
                         .filter(|_| !accounts_known)
                 {
-                    println!(
-                        "⚠ owner `{owner}`: not in `owners:` in ductus.yaml and not an email address: its alerts reach someone only if a user has that name and an email (the engine checks at start)"
-                    );
+                    report.add(Finding::warning(
+                        "DUC243",
+                        format!(
+                            "owner `{owner}`: not in `owners:` in ductus.yaml and not an email address: its alerts reach someone only if a user has that name and an email (the engine checks at start)"
+                        ),
+                    ).hint("write the owner's email, or add the team to `owners:` in ductus.yaml"));
                 }
             }
         },
@@ -647,68 +945,80 @@ pub async fn validate(root: &Path, env: &str, database_url: Option<String>, read
     match database_url.filter(|u| !u.trim().is_empty()) {
         Some(url) => {
             let teams = ductus_core::settings::Settings::load(root).map(|s| s.owners).unwrap_or_default();
-            problems += check_database(root, &url, &configs, &resources.clone().unwrap_or_default(), &teams).await
+            check_database(report, &places, root, &url, &configs, &resources.clone().unwrap_or_default(), &teams).await
         }
-        None => println!(
-            "note: not checked against a database (set DUCTUS_DATABASE_URL): lanes that would strand waiting messages, retention changes"
+        None => report.add(
+            Finding::note(
+                "DUC390",
+                "not checked against a database (set DUCTUS_DATABASE_URL): lanes that would strand waiting messages, retention changes",
+            )
+            .hint("set DUCTUS_DATABASE_URL (or --database-url)"),
         ),
     }
 
     let diagnostics = &analysis.diagnostics;
     for d in diagnostics {
-        if d.is_error() {
-            problems += 1;
-        }
-        let at = match &d.file {
-            Some(f) => format!("{}:{}:{} ", relative(root, f), d.line, d.column),
-            None => String::new(),
-        };
-        // Codes 90000+ are Ductus lints; below that, TypeScript's own.
-        let code = if d.code >= 90_000 { format!("DX{}", d.code - 90_000) } else { format!("TS{}", d.code) };
-        println!("{at}{} {code}: {}", d.category, d.message);
+        report.add(Finding::diagnostic(d, root));
     }
     if diagnostics.is_empty() {
-        println!("✓ types: no errors");
+        report.ok("types: no errors");
     }
+    Ok(())
+}
 
-    println!("\n{}", if problems == 0 { "valid".to_string() } else { format!("{problems} problem(s)") });
-    Ok(problems == 0)
+/// Where in interface.yaml a code loading error points: the destination whose `transform` names
+/// the function the module doesn't export, else `script`.
+fn function_key<'a>(config: &'a InterfaceConfig, error: &str) -> Vec<&'a str> {
+    let missing = error.split_once("must export a function named `").and_then(|(_, rest)| rest.split('`').next());
+    let Some(missing) = missing else { return vec!["script"] };
+    config
+        .destinations()
+        .find(|(_, d)| d.transform.as_deref() == Some(missing))
+        .map(|(name, _)| [config.destination_key(name), vec!["transform"]].concat())
+        .unwrap_or_else(|| vec!["script"])
 }
 
 /// `validate` against a database, reading only (it may run with a newer binary than the engines
 /// there, before deploying it): the lanes guard the engine runs at start, and retention changes
-/// running, waiting for a confirmation, or that the next start would begin. Returns the problems
-/// (what would refuse the start), after printing everything.
+/// running, waiting for a confirmation, or that the next start would begin.
 async fn check_database(
+    report: &mut Report,
+    places: &Places<'_>,
     root: &Path,
     url: &str,
     configs: &[&InterfaceConfig],
     resources: &ductus_core::Resources,
     teams: &BTreeMap<String, ductus_core::alerts::OwnerContact>,
-) -> usize {
+) {
     use ductus_runtime::ownership::{Lanes, check_lanes, stranded_lines};
     use std::collections::HashMap;
     let store = match ductus_store::Store::connect_read_only(url).await {
         Ok(s) => s,
-        Err(e) => {
-            println!("✗ database: {e:#}");
-            return 1;
-        }
+        Err(e) => return report.add(Finding::error("DUC300", format!("database: {e:#}"))),
     };
     match ductus_runtime::database_security(&store, url).await {
-        Ok(s) if s.warns() => println!(
-            "⚠ database: {s}; whoever answers at its address is believed: add sslmode=verify-full to DUCTUS_DATABASE_URL (sslrootcert=/path/ca.pem for a private CA)"
+        Ok(s) if s.warns() => report.add(
+            Finding::warning(
+                "DUC301",
+                format!(
+                    "database: {s}; whoever answers at its address is believed: add sslmode=verify-full to DUCTUS_DATABASE_URL (sslrootcert=/path/ca.pem for a private CA)"
+                ),
+            )
+            .hint("add sslmode=verify-full to DUCTUS_DATABASE_URL (sslrootcert=/path/ca.pem for a private CA)"),
         ),
-        Ok(s) if s.local && !s.verified() => println!("✓ database: {s} (on this machine)"),
-        Ok(s) => println!("✓ database: {s}"),
-        Err(e) => println!("⚠ database: couldn't read how the connection is protected: {e:#}"),
+        Ok(s) if s.local && !s.verified() => report.ok(format!("database: {s} (on this machine)")),
+        Ok(s) => report.ok(format!("database: {s}")),
+        Err(e) => report.add(Finding::warning(
+            "DUC302",
+            format!("database: couldn't read how the connection is protected: {e:#}"),
+        )),
     }
     // Before a first install (`ductus upgrade --check` runs this too): no tables to read yet.
     if !store.has_table("deliveries").await.unwrap_or(false) {
-        println!("✓ database: new (no engine has run on it yet): no messages wait, no retention is applied");
-        return 0;
+        report.ok("database: new (no engine has run on it yet): no messages wait, no retention is applied");
+        return;
     }
-    check_owners(&store, configs, resources, teams).await;
+    check_owners(report, &store, configs, resources, teams).await;
     let lanes: Vec<Lanes> = configs.iter().filter_map(|c| Lanes::of(c)).collect();
     let names: Vec<String> = lanes.iter().map(|l| l.interface.clone()).collect();
     let recorded = store.has_table("interface_applied").await.unwrap_or(false);
@@ -717,42 +1027,49 @@ async fn check_database(
     } else {
         HashMap::new()
     };
-    let mut problems = 0;
+    // A finding about one interface, at a key of its interface.yaml.
+    let about = |report: &Report, finding: Finding, interface: &str, key: &[&str]| match places.file(interface) {
+        Some(file) => report.at_key(finding.interface(interface), file, key),
+        None => finding.interface(interface),
+    };
     match check_lanes(&store, &lanes, &applied).await {
-        Err(e) => {
-            println!("✗ database: checking lanes: {e:#}");
-            problems += 1;
-        }
+        Err(e) => report.add(Finding::error("DUC304", format!("database: checking lanes: {e:#}"))),
         Ok(check) => {
-            for line in stranded_lines(&check.stranded) {
-                problems += 1;
-                println!("✗ {line}");
+            for (stranded, line) in check.stranded.iter().zip(stranded_lines(&check.stranded)) {
+                let finding = Finding::error("DUC303", line)
+                    .hint("keep `ordering` as it is until they're sent (`ductus drain --wait` stops new messages until nothing waits)");
+                report.add(about(report, finding, &stranded.row.interface, &["ordering"]));
             }
             if !check.stranded.is_empty() {
-                println!(
-                    "  (the engine would refuse to start: no worker reads those lanes. Keep `ordering` as it is until they're sent; `ductus drain --wait` stops new messages until nothing waits)"
+                report.say(
+                    "  (the engine would refuse to start: no worker reads those lanes. Keep `ordering` as it is until they're sent; `ductus drain --wait` stops new messages until nothing waits)",
                 );
             }
             for r in &check.raised {
-                println!(
-                    "⚠ {}: lanes go from {} to {} with {} message(s) waiting: a patient's (key's) new messages may be sent before its older ones until those are",
-                    r.interface, r.before, r.now, r.waiting
+                let finding = Finding::warning(
+                    "DUC305",
+                    format!(
+                        "{}: lanes go from {} to {} with {} message(s) waiting: a patient's (key's) new messages may be sent before its older ones until those are",
+                        r.interface, r.before, r.now, r.waiting
+                    ),
                 );
+                report.add(about(report, finding, &r.interface, &["ordering"]));
             }
             if check.stranded.is_empty() {
-                println!("✓ database: every interface's lanes reach the messages waiting for it");
+                report.ok("database: every interface's lanes reach the messages waiting for it");
             }
             if !recorded {
-                println!(
-                    "note: no engine of this version has run on this database yet: the lanes interfaces last ran with aren't recorded, so raised lanes can't be told (lowered ones are checked)"
-                );
+                report.add(Finding::note(
+                    "DUC391",
+                    "no engine of this version has run on this database yet: the lanes interfaces last ran with aren't recorded, so raised lanes can't be told (lowered ones are checked)",
+                ));
             }
         }
     }
     // Retention: what the engine does with each interface's configured value at its next start.
     let settings = ductus_core::settings::Settings::load(root).ok();
     match store.retention().await {
-        Err(e) => println!("⚠ database: reading retention: {e:#}"),
+        Err(e) => report.add(Finding::warning("DUC309", format!("database: reading retention: {e:#}"))),
         Ok(states) => {
             let states: HashMap<&str, &ductus_store::RetentionState> =
                 states.iter().map(|s| (s.interface.as_str(), s)).collect();
@@ -763,38 +1080,51 @@ async fn check_database(
                 let window = |days: ductus_store::Tier| format!("{}w", days / 7);
                 if let Some(from) = state.changing_from {
                     let left = state.rows_left.map(|n| format!(", ~{n} rows left")).unwrap_or_default();
-                    println!(
-                        "⚠ {}: a retention change from {} to {} is still running{left}",
-                        c.name,
-                        window(from),
-                        window(state.days)
+                    let finding = Finding::warning(
+                        "DUC306",
+                        format!(
+                            "{}: a retention change from {} to {} is still running{left}",
+                            c.name,
+                            window(from),
+                            window(state.days)
+                        ),
                     );
+                    report.add(about(report, finding, &c.name, &["retention"]));
                 }
                 if wanted < state.days && state.confirmed != Some(wanted) {
-                    println!(
-                        "⚠ {}: retention {} is shorter than the {} applied: it deletes messages, so it waits for `ductus retention confirm {}`",
-                        c.name,
-                        window(wanted),
-                        window(state.days),
-                        c.name
-                    );
+                    let finding = Finding::warning(
+                        "DUC307",
+                        format!(
+                            "{}: retention {} is shorter than the {} applied: it deletes messages, so it waits for `ductus retention confirm {}`",
+                            c.name,
+                            window(wanted),
+                            window(state.days),
+                            c.name
+                        ),
+                    )
+                    .hint(format!("ductus retention confirm {}", c.name));
+                    report.add(about(report, finding, &c.name, &["retention"]));
                 } else if wanted != state.days && state.changing_from.is_none() {
-                    println!(
-                        "⚠ {}: retention changes from {} to {} at the next start (its messages move in the background)",
-                        c.name,
-                        window(state.days),
-                        window(wanted)
+                    let finding = Finding::warning(
+                        "DUC308",
+                        format!(
+                            "{}: retention changes from {} to {} at the next start (its messages move in the background)",
+                            c.name,
+                            window(state.days),
+                            window(wanted)
+                        ),
                     );
+                    report.add(about(report, finding, &c.name, &["retention"]));
                 }
             }
         }
     }
-    problems
 }
 
 /// Owners matched to the accounts in the database, as `ductus owners` does: warnings only (an
 /// owner never makes a project invalid; `ductus owners --check` is the gate).
 async fn check_owners(
+    report: &mut Report,
     store: &ductus_store::Store,
     configs: &[&InterfaceConfig],
     resources: &ductus_core::Resources,
@@ -803,7 +1133,7 @@ async fn check_owners(
     use ductus_core::owners::{self, Reach};
     let accounts = match store.accounts().await {
         Ok(a) => a,
-        Err(e) => return println!("⚠ owners: couldn't read the accounts: {e:#}"),
+        Err(e) => return report.add(Finding::warning("DUC310", format!("owners: couldn't read the accounts: {e:#}"))),
     };
     let people = ductus_runtime::alerts::people(&accounts.users, &accounts.former);
     for (owner, _) in owners::by_owner(owners::owned(configs.iter().copied(), resources)) {
@@ -811,19 +1141,27 @@ async fn check_owners(
             continue;
         }
         let reach = owners::reach(&owner, &people, teams);
-        let line = match (&reach, owners::advice(&owner, &reach, &people)) {
+        let (line, hint) = match (&reach, owners::advice(&owner, &reach, &people)) {
             (_, Some(advice)) => match advice.to {
-                Some(to) => format!("{}: `{}`", advice.text, owners::fix(&owner, &to)),
-                None => advice.text,
+                Some(to) => {
+                    let fix = owners::fix(&owner, &to);
+                    (format!("{}: `{fix}`", advice.text), Some(fix))
+                }
+                None => (advice.text, None),
             },
-            (Reach::Disabled(u), None) => format!("the account {u} is disabled: move what they own"),
-            (Reach::Several(n), None) => format!("names {n} accounts: write the email of the one meant"),
-            (Reach::Nobody, None) => {
-                "not an account, a team in `owners:` or an email address: write their email, or add the team to `owners:` in ductus.yaml".into()
-            }
+            (Reach::Disabled(u), None) => (format!("the account {u} is disabled: move what they own"), None),
+            (Reach::Several(n), None) => (format!("names {n} accounts: write the email of the one meant"), None),
+            (Reach::Nobody, None) => (
+                "not an account, a team in `owners:` or an email address: write their email, or add the team to `owners:` in ductus.yaml".into(),
+                None,
+            ),
             _ => continue,
         };
-        println!("⚠ owner `{owner}`: {line}");
+        let finding = Finding::warning("DUC244", format!("owner `{owner}`: {line}"));
+        report.add(match hint {
+            Some(h) => finding.hint(h),
+            None => finding,
+        });
     }
 }
 
@@ -1092,7 +1430,7 @@ pub fn ports(root: &Path, env: &str) -> Result<bool> {
     }
 
     println!();
-    conflicts.extend(ductus_core::config::check_endpoints(configs.iter().copied()));
+    conflicts.extend(ductus_core::config::check_endpoints(configs.iter().copied()).into_iter().map(|p| p.text));
     if conflicts.is_empty() {
         println!("✓ no port conflicts");
     }
