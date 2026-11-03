@@ -8,7 +8,7 @@ that only run while the binary is compiled (macros, build scripts), since they s
 Nothing on this page is downloaded when Ductus runs, except Postgres for `ductus dev` (below). The binary
 needs only the operating system's C library on Linux (glibc 2.34 or later).
 
-- Rust crates: **569** (544 in the Linux build, 551 in the Windows build)
+- Rust crates: **575** (550 in the Linux build, 558 in the Windows build)
 - npm packages in the web UI: **102**
 - TypeScript **6.0.3** (Microsoft, Apache-2.0), inside the binary: `ductus validate` and `ductus types` type-check interface code with it
 
@@ -56,8 +56,8 @@ How many libraries use each license expression (`A OR B`: the library may be use
 
 | License | Rust crates | npm packages |
 |---|---|---|
-| MIT OR Apache-2.0 | 258 |  |
-| MIT | 107 | 98 |
+| MIT OR Apache-2.0 | 263 |  |
+| MIT | 108 | 98 |
 | Apache-2.0 OR MIT | 61 |  |
 | Apache-2.0 | 42 | 1 |
 | Unicode-3.0 | 25 |  |
@@ -274,7 +274,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `futures-util` | 0.3.34 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `generic-array` | 0.14.7 | MIT | ✓ | ✓ |
 | `generic-array` | 1.4.5 | MIT | ✓ | ✓ |
-| `getrandom` | 0.3.4 | MIT OR Apache-2.0 | ✓ |  |
+| `getrandom` | 0.3.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ghash` | 0.6.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `glob` | 0.3.4 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -417,6 +417,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `postgresql_embedded` | 0.21.0 | (Apache-2.0 OR MIT) AND PostgreSQL | ✓ | ✓ |
 | `potential_utf` | 0.1.6 | Unicode-3.0 | ✓ | ✓ |
 | `powerfmt` | 0.2.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `ppv-lite86` | 0.2.21 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `pretty-hex` | 0.4.2 | MIT | ✓ | ✓ |
 | `prettyplease` | 0.2.37 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `primefield` | 0.14.0 | Apache-2.0 OR MIT | ✓ | ✓ |
@@ -428,8 +429,11 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `quoted_printable` | 0.5.2 | 0BSD | ✓ | ✓ |
 | `radium` | 0.7.0 | MIT | ✓ | ✓ |
 | `rand` | 0.8.8 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `rand` | 0.9.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rand` | 0.10.3 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `rand_chacha` | 0.9.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rand_core` | 0.6.4 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `rand_core` | 0.9.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rand_core` | 0.10.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rcgen` | 0.14.10 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `regex` | 1.13.1 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -579,6 +583,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `tokio-macros` | 2.7.2 | MIT | ✓ | ✓ |
 | `tokio-rustls` | 0.26.6 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `tokio-stream` | 0.1.19 | MIT | ✓ | ✓ |
+| `tokio-tungstenite` | 0.29.0 | MIT | ✓ | ✓ |
 | `tokio-util` | 0.7.19 | MIT | ✓ | ✓ |
 | `toml` | 1.1.8+spec-1.1.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `toml_datetime` | 1.1.2+spec-1.1.0 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -596,6 +601,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `tracing-subscriber` | 0.3.23 | MIT | ✓ | ✓ |
 | `triomphe` | 0.1.16 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `try-lock` | 0.2.5 | MIT | ✓ | ✓ |
+| `tungstenite` | 0.29.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `typed-path` | 0.12.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `unicode-bidi` | 0.3.18 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -779,6 +785,6 @@ The packages its production build bundles (the build tools and test tools aren't
 Made by `scripts/dev/dependencies.sh` from these files (a test fails when either changes and this page
 isn't made again):
 
-<!-- made from: Cargo.lock c87d75342cc8875b1b41de769b15ab487e9919b632db713dbe935b58815a187c ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
-- `Cargo.lock`, SHA-256 `c87d75342cc8875b1b41de769b15ab487e9919b632db713dbe935b58815a187c`
+<!-- made from: Cargo.lock 9aed5f7f7022eb0e237dd0ec63c8ae956ea4e37057a6f38f63647225ea070365 ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
+- `Cargo.lock`, SHA-256 `9aed5f7f7022eb0e237dd0ec63c8ae956ea4e37057a6f38f63647225ea070365`
 - `ui/package-lock.json`, SHA-256 `aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5`

@@ -530,6 +530,200 @@ fn console_output_is_shown_under_its_test_and_kept_out_of_json() {
     assert_eq!((&lines[0]["type"], &lines[0]["output"]), (&"load".into(), &"starting\n".into()));
 }
 
+/// `GET path` on 127.0.0.1:port, its body (or None while nothing answers).
+fn http_get(port: u16, path: &str) -> Option<String> {
+    use std::io::{Read, Write};
+    let mut stream = std::net::TcpStream::connect(("127.0.0.1", port)).ok()?;
+    write!(stream, "GET {path} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n").ok()?;
+    let mut text = String::new();
+    stream.read_to_string(&mut text).ok()?;
+    text.split_once("\r\n\r\n").map(|(_, body)| body.to_string())
+}
+
+/// `ductus test --inspect` as a debugger sees it: the target listed, a pause at `debugger;` with
+/// the test's locals, and Todd's condition: an endless loop runs on while a debugger is attached
+/// (past the 5 s limit) and, once it detaches, is stopped within the limit, the test failed and
+/// the run over. stdout stays `--json`'s.
+#[test]
+fn test_inspect_pauses_for_a_debugger_and_an_endless_loop_ends_when_it_detaches() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let dir = project(&[
+        (
+            "interfaces/dbg/interface.yaml",
+            "name: dbg\nsource: { mllp: { port: 6661 } }\ndestination: { file: { dir: out } }\n",
+        ),
+        (
+            "interfaces/dbg/dbg.test.ts",
+            "import { test, expect } from \"@ductus/sdk\";\n\ntest(\"pauses\", () => {\n  const n = 41;\n  debugger;\n  expect(n + 1).toBe(42);\n});\n\ntest(\"loops\", () => {\n  let i = 0;\n  while (true) i++;\n});\n",
+        ),
+    ]);
+    let port = free_port();
+    let child = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["test", &format!("--inspect=127.0.0.1:{port}"), "--json"])
+        .current_dir(dir.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let list = loop {
+        if let Some(body) = http_get(port, "/json/list") {
+            break body;
+        }
+        assert!(std::time::Instant::now() < deadline, "the debugger's port never answered");
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let targets: serde_json::Value = serde_json::from_str(&list).unwrap();
+    let target = &targets[0];
+    assert_eq!(target["title"], "dbg tests");
+    assert!(target["url"].as_str().unwrap().ends_with("/interfaces/dbg/dbg.test.ts"), "{target}");
+    assert!(http_get(port, "/json/version").unwrap().contains("\"Protocol-Version\":\"1.3\""));
+    let ws = target["webSocketDebuggerUrl"].as_str().unwrap().to_string();
+
+    type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+    /// Send a command; its id.
+    async fn send(socket: &mut Socket, id: &mut i64, method: &str, params: serde_json::Value) -> i64 {
+        *id += 1;
+        let text = serde_json::json!({ "id": *id, "method": method, "params": params }).to_string();
+        socket.send(Message::Text(text.into())).await.unwrap();
+        *id
+    }
+    /// The next message that's `wanted` (an event by method, an answer by id). Scripts' URLs by
+    /// id go into `scripts` on the way (a paused frame names its script by id).
+    async fn next(
+        socket: &mut Socket,
+        scripts: &mut std::collections::HashMap<String, String>,
+        wanted: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let wait = async {
+            while let Some(Ok(message)) = socket.next().await {
+                if let Message::Text(text) = message {
+                    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if v["method"] == "Debugger.scriptParsed" {
+                        let p = &v["params"];
+                        scripts.insert(p["scriptId"].as_str().unwrap().into(), p["url"].as_str().unwrap().into());
+                    }
+                    if wanted(&v) {
+                        return v;
+                    }
+                }
+            }
+            panic!("the debugger's connection closed");
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(20), wait).await.expect("no answer in 20 s")
+    }
+
+    let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+    let detached_at = rt.block_on(async {
+        let (mut socket, _) = tokio_tungstenite::connect_async(ws.as_str()).await.unwrap();
+        let (id, scripts) = (&mut 0, &mut std::collections::HashMap::new());
+        for method in ["Runtime.enable", "Debugger.enable", "Runtime.runIfWaitingForDebugger"] {
+            let asked = send(&mut socket, id, method, serde_json::json!({})).await;
+            next(&mut socket, scripts, |v| v["id"] == asked).await;
+        }
+        let paused = next(&mut socket, scripts, |v| v["method"] == "Debugger.paused").await;
+        let frame = paused["params"]["callFrames"][0].clone();
+        let script = |frame: &serde_json::Value, scripts: &std::collections::HashMap<String, String>| {
+            scripts.get(frame["location"]["scriptId"].as_str().unwrap()).cloned().unwrap_or_default()
+        };
+        assert!(script(&frame, scripts).ends_with("/interfaces/dbg/dbg.test.ts"), "{frame}");
+        let params = serde_json::json!({ "callFrameId": frame["callFrameId"], "expression": "n" });
+        let asked = send(&mut socket, id, "Debugger.evaluateOnCallFrame", params).await;
+        let n = next(&mut socket, scripts, |v| v["id"] == asked).await;
+        assert_eq!(n["result"]["result"]["value"], 41, "{n}");
+        send(&mut socket, id, "Debugger.resume", serde_json::json!({})).await;
+
+        // The second test loops; with the debugger attached it still runs past the 5 s limit:
+        // pausing it lands inside the loop.
+        tokio::time::sleep(std::time::Duration::from_millis(6_000)).await;
+        send(&mut socket, id, "Debugger.pause", serde_json::json!({})).await;
+        let in_loop = next(&mut socket, scripts, |v| v["method"] == "Debugger.paused").await;
+        let frame = &in_loop["params"]["callFrames"][0];
+        assert!(script(frame, scripts).ends_with("/interfaces/dbg/dbg.test.ts"), "{frame}");
+        // Detach while paused: the loop goes on, and the limit applies to it from now.
+        socket.close(None).await.unwrap();
+        std::time::Instant::now()
+    });
+
+    let out = child.wait_with_output().unwrap();
+    let ended = detached_at.elapsed();
+    assert!(ended < std::time::Duration::from_secs(9), "stopped within the 5 s limit after detaching: {ended:?}");
+    assert!(!out.status.success());
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let lines = json_lines(&stdout); // only JSON on stdout
+    // A runaway ends the interface's whole run (V8 drops the runner's pending work with it).
+    assert_eq!(lines[0]["type"], "load", "{stdout}");
+    assert!(lines[0]["error"].as_str().unwrap().contains("5s timeout"), "{stdout}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    for said in [
+        format!("dbg: waiting for a debugger on 127.0.0.1:{port}"),
+        "debugger attached: no time limit on the tests while it is".into(),
+        "debugger detached: the time limit applies again".into(),
+    ] {
+        assert!(stderr.contains(&said), "missing {said:?} in\n{stderr}");
+    }
+}
+
+/// `ductus types` adds VS Code's "Ductus: debug these tests" to `.vscode/launch.json` (made if
+/// missing, added beside the project's own, never over one of the same name), and `--interface`
+/// takes the open file's folder as that configuration passes it.
+#[test]
+fn types_adds_the_debug_configuration_and_interface_takes_a_folder() {
+    let dir = logging();
+    let (ok, out) = ductus(dir.path(), &["types"]);
+    assert!(ok && out.contains(".vscode/launch.json has \"Ductus: debug these tests\""), "{out}");
+    let read = || -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/launch.json")).unwrap()).unwrap()
+    };
+    let ours = read()["configurations"][0].clone();
+    assert_eq!(ours["attachSimplePort"], 9229);
+    assert_eq!(ours["runtimeArgs"], serde_json::json!(["test", "--inspect", "--interface", "${fileDirname}"]));
+
+    let theirs = serde_json::json!({ "version": "0.2.0", "configurations": [
+        { "type": "node", "request": "launch", "name": "Ductus: debug these tests", "runtimeArgs": ["test", "--inspect=9230"] },
+        { "type": "node", "request": "launch", "name": "mine" }
+    ]});
+    std::fs::write(dir.path().join(".vscode/launch.json"), theirs.to_string()).unwrap();
+    let (ok, _) = ductus(dir.path(), &["types"]);
+    assert!(ok);
+    assert_eq!(read(), theirs, "the project's own configuration of that name is kept");
+    std::fs::write(dir.path().join(".vscode/launch.json"), "// comments\n{}").unwrap();
+    let (ok, out) = ductus(dir.path(), &["types"]);
+    assert!(ok && out.contains("isn't plain JSON") && out.contains("\"attachSimplePort\": 9229"), "{out}");
+
+    // The open file's folder, absolute or relative, deeper too.
+    std::fs::create_dir_all(dir.path().join("interfaces/adt/lib")).unwrap();
+    for folder in [dir.path().join("interfaces/adt/lib").display().to_string(), "interfaces/adt".to_string()] {
+        let (_, out) = ductus(dir.path(), &["test", "--interface", &folder]);
+        assert!(out.contains("adt\n  while loading") && out.contains("✓ logs ("), "{folder}: {out}");
+    }
+    let (ok, out) = ductus(dir.path(), &["test", "--inspect", "--interface", "interfaces/nowhere"]);
+    assert!(
+        !ok && out.contains("`--interface interfaces/nowhere` isn't an interface with tests (those with tests: adt)"),
+        "{out}"
+    );
+}
+
+/// A `debugger;` left in code (or a test) is a warning (`DX5`): it would pause every debugging session.
+#[test]
+fn validate_warns_about_a_debugger_statement() {
+    let dir = logging();
+    let code = "import type { Message } from \"@ductus/sdk\";\n\nexport function transform(m: Message) {\n  debugger;\n  return m;\n}\n";
+    std::fs::write(dir.path().join("interfaces/adt/route.ts"), code).unwrap();
+    let (ok, out) = ductus(dir.path(), &["validate", "--json"]);
+    assert!(ok, "a warning: {out}");
+    let document: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let dx5: Vec<&serde_json::Value> =
+        document["findings"].as_array().unwrap().iter().filter(|f| f["code"] == "DX5").collect();
+    assert_eq!(dx5.len(), 1, "{out}");
+    assert_eq!(
+        (&dx5[0]["file"], &dx5[0]["line"], &dx5[0]["severity"]),
+        (&"interfaces/adt/route.ts".into(), &4.into(), &"warning".into())
+    );
+}
+
 /// `console` is declared for interface code, and `validate` warns about each call an environment
 /// writes to its log (`DUC206`), except where it says `console: debug`; tests' own calls never.
 #[test]

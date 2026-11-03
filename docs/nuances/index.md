@@ -26,6 +26,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
 - [Writing transforms](transforms.md) (16)
+- [Debugging](debugging.md) (7)
 - [Shared pool](shared-pool.md) (3)
 - [Runaway scripts](runaway.md) (6)
 - [Databases and APIs](databases-and-apis.md) (5)
@@ -48,7 +49,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Upgrades](upgrades.md) (15)
 - [Windows](windows.md) (9)
 
-## Level 1: Foundations (27)
+## Level 1: Foundations (30)
 
 - [Retention is 1, 3 or 7 weeks, not any number of days](retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1) (Retention)
 - [Missing fields read as "" and never throw](transforms.md#missing-fields-read-as--and-never-throw-level-1) (Writing transforms)
@@ -58,6 +59,9 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A test filter matches part of a name](transforms.md#a-test-filter-matches-part-of-a-name-level-1) (Writing transforms)
 - [`console` in tests: each line under the test that wrote it](transforms.md#console-in-tests-each-line-under-the-test-that-wrote-it-level-1) (Writing transforms)
 - [A quoted number in an environment file is text](transforms.md#a-quoted-number-in-an-environment-file-is-text-level-1) (Writing transforms)
+- [`ductus test --inspect` waits for a debugger before anything runs](debugging.md#ductus-test---inspect-waits-for-a-debugger-before-anything-runs-level-1) (Debugging)
+- [One interface's tests per debugging run](debugging.md#one-interfaces-tests-per-debugging-run-level-1) (Debugging)
+- [A `debugger;` statement pauses every debugging session](debugging.md#a-debugger-statement-pauses-every-debugging-session-level-1) (Debugging)
 - [A destination's owner is its interface's unless it says otherwise](impact.md#a-destinations-owner-is-its-interfaces-unless-it-says-otherwise-level-1) (Impact and `about:`)
 - [Moving ownership in the web UI is a preview, not a change](impact.md#moving-ownership-in-the-web-ui-is-a-preview-not-a-change-level-1) (Impact and `about:`)
 - [An owner is a person when the text names exactly one account](impact.md#an-owner-is-a-person-when-the-text-names-exactly-one-account-level-1) (Impact and `about:`)
@@ -78,7 +82,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (86)
+## Level 2: Practitioner (88)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -99,6 +103,8 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [With `split: records`, `input()` gives a fixture's first record](transforms.md#with-split-records-input-gives-a-fixtures-first-record-level-2) (Writing transforms)
 - [A place's precision in `validate --json` depends on the file](transforms.md#a-places-precision-in-validate---json-depends-on-the-file-level-2) (Writing transforms)
 - [A `console` line in code is written for every message](transforms.md#a-console-line-in-code-is-written-for-every-message-level-2) (Writing transforms)
+- [The time limit is off while a debugger is attached](debugging.md#the-time-limit-is-off-while-a-debugger-is-attached-level-2) (Debugging)
+- [A runaway test ends that interface's test run](debugging.md#a-runaway-test-ends-that-interfaces-test-run-level-2) (Debugging)
 - [Interfaces share a global scope](shared-pool.md#interfaces-share-a-global-scope-level-2) (Shared pool)
 - [Module-level caches live until the engine restarts](shared-pool.md#module-level-caches-live-until-the-engine-restarts-level-2) (Shared pool)
 - [`timeout` counts time without pausing, not total time](runaway.md#timeout-counts-time-without-pausing-not-total-time-level-2) (Runaway scripts)
@@ -167,7 +173,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (68)
+## Level 3: Professional (70)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
@@ -188,6 +194,8 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A route is exactly once inside the engine, not beyond it](routes.md#a-route-is-exactly-once-inside-the-engine-not-beyond-it-level-3) (Routing between interfaces)
 - [One query for many values, not one query per value](transforms.md#one-query-for-many-values-not-one-query-per-value-level-3) (Writing transforms)
 - [The `--json` outputs only ever gain fields](transforms.md#the---json-outputs-only-ever-gain-fields-level-3) (Writing transforms)
+- [The debugger listens on this machine only, and never in `ductus run`](debugging.md#the-debugger-listens-on-this-machine-only-and-never-in-ductus-run-level-3) (Debugging)
+- [Breakpoints are set on your `.ts` lines; the engine runs JavaScript](debugging.md#breakpoints-are-set-on-your-ts-lines-the-engine-runs-javascript-level-3) (Debugging)
 - [SQL Server: one result set, one batch per call](databases-and-apis.md#sql-server-one-result-set-one-batch-per-call-level-3) (Databases and APIs)
 - [`fetch()` and `api()` retry 5xx, 408 and 429 by default](databases-and-apis.md#fetch-and-api-retry-5xx-408-and-429-by-default-level-3) (Databases and APIs)
 - [The documentation snapshot is as old as the last engine start](impact.md#the-documentation-snapshot-is-as-old-as-the-last-engine-start-level-3) (Impact and `about:`)

@@ -15,10 +15,15 @@
 //!
 //! Near the heap limit, V8 asks us for more room: we give a little (so the process doesn't
 //! die) and stop the running code the same way.
+//!
+//! While a debugger is attached ([`DebugSwitch`]) the time limit is off: a call paused at a
+//! breakpoint would otherwise be stopped the moment it went on. The heap limit stays. When the
+//! last debugger detaches, the call in progress gets its whole budget again from that moment, so
+//! an endless loop left running is stopped within the interface's timeout, as any runaway.
 
 use deno_core::v8;
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant};
 
@@ -67,6 +72,38 @@ struct Shared {
     heap_mb: usize,
     interfaces: Mutex<Vec<Interface>>,
     trip: Mutex<Option<Trip>>,
+    /// Debuggers attached now: while any is, no call is stopped for time.
+    debuggers: AtomicUsize,
+}
+
+/// Turns an isolate's time limit off while debuggers are attached (`attached`/`detached` from
+/// any thread: the inspector server's).
+#[derive(Clone)]
+pub struct DebugSwitch(Arc<Shared>);
+
+impl DebugSwitch {
+    /// A debugger attached: from now on nothing is stopped for running too long.
+    pub fn attached(&self) {
+        self.0.debuggers.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// A debugger detached. When it was the last, the call in progress (if any) may run for its
+    /// whole budget from now, then is stopped as any runaway.
+    pub fn detached(&self) {
+        let shared = &self.0;
+        if shared.debuggers.fetch_sub(1, Ordering::AcqRel) != 1 {
+            return;
+        }
+        let now = now_ms();
+        shared.started.store(now, Ordering::Relaxed);
+        shared.deadline.store(now + shared.budget.load(Ordering::Relaxed), Ordering::Relaxed);
+        shared.requested.store(0, Ordering::Release);
+    }
+
+    /// Whether a debugger is attached now.
+    pub fn is_attached(&self) -> bool {
+        self.0.debuggers.load(Ordering::Acquire) > 0
+    }
 }
 
 /// One isolate's guard. Owned by `Isolate`; all methods are called on the isolate's thread.
@@ -100,9 +137,15 @@ impl Guard {
             heap_mb,
             interfaces: Mutex::new(Vec::new()),
             trip: Mutex::new(None),
+            debuggers: AtomicUsize::new(0),
         });
         watchdog().lock().unwrap_or_else(|e| e.into_inner()).push(Arc::downgrade(&shared));
         Self { shared, generation: 0 }
+    }
+
+    /// What the inspector server turns the time limit off with.
+    pub fn debug_switch(&self) -> DebugSwitch {
+        DebugSwitch(self.shared.clone())
     }
 
     /// Register the next interface (`module`: its URL and folder) and its time budget.
@@ -201,6 +244,13 @@ unsafe extern "C" fn interrupt(mut isolate: v8::UnsafeRawIsolatePtr, data: *mut 
     if shared.armed.load(Ordering::Acquire) != request.generation {
         return; // that call already finished: this is someone else's code now
     }
+    if let Cause::Timeout(_) = request.cause
+        && shared.debuggers.load(Ordering::Acquire) > 0
+    {
+        // A debugger attached after it was asked: no time limit now (detaching re-arms it).
+        shared.requested.store(0, Ordering::Release);
+        return;
+    }
     // SAFETY: V8 calls interrupts on the isolate's thread with the isolate entered.
     let isolate = unsafe { v8::Isolate::ref_from_raw_isolate_ptr_mut(&mut isolate) };
     let interface = shared.whose(&stack(isolate));
@@ -258,7 +308,8 @@ fn watchdog() -> &'static Mutex<Vec<Weak<Shared>>> {
                     list.retain(|guard| {
                         let Some(shared) = guard.upgrade() else { return false };
                         let generation = shared.armed.load(Ordering::Acquire);
-                        if generation != 0 && now > shared.deadline.load(Ordering::Relaxed) {
+                        let debugged = shared.debuggers.load(Ordering::Acquire) > 0;
+                        if generation != 0 && !debugged && now > shared.deadline.load(Ordering::Relaxed) {
                             let budget = Duration::from_millis(shared.budget.load(Ordering::Relaxed));
                             // The deadline read may belong to a newer call; the interrupt re-checks.
                             if shared.armed.load(Ordering::Acquire) == generation {

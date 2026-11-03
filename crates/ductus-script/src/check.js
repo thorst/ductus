@@ -169,6 +169,26 @@ function findConsoleCalls(checker, sourceFile) {
   return calls;
 }
 
+/**
+ * `debugger;` statements: harmless where no debugger is attached (the engine has none), but one
+ * left in pauses every debugging session there, whatever breakpoints are set.
+ */
+function findDebuggerStatements(sourceFile) {
+  const found = [];
+  const visit = (node) => {
+    if (node.kind === ts.SyntaxKind.DebuggerStatement) {
+      found.push({
+        start: node.getStart(sourceFile),
+        code: 90005,
+        message: "a `debugger;` statement: it pauses here in every debugging session (`ductus test --inspect`); remove it when you're done, and set a breakpoint in the editor instead",
+      });
+    }
+    ts.forEachChild(node, visit);
+  };
+  visit(sourceFile);
+  return found;
+}
+
 /** The project files a file imports (static and dynamic imports, re-exports). */
 function localImports(sourceFile, options, host) {
   const specifiers = [];
@@ -246,7 +266,9 @@ globalThis.__ductus_check = (filesJson, libsJson, sharedJson, wantDiagnostics) =
     for (const r of found.references) references.push({ ...at(r.start), kind: r.kind, name: r.name });
     imports[sourceFile.fileName] = localImports(sourceFile, options, host);
     if (!wantDiagnostics) continue;
-    for (const f of lintSharedPool(sourceFile, shared.has(sourceFile.fileName)).concat(found.lints)) {
+    const fileLints = lintSharedPool(sourceFile, shared.has(sourceFile.fileName))
+      .concat(found.lints, findDebuggerStatements(sourceFile));
+    for (const f of fileLints) {
       lints.push({ ...at(f.start), code: f.code, category: "warning", message: f.message });
     }
     for (const c of findConsoleCalls(checker, sourceFile)) {

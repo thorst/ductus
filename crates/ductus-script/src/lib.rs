@@ -10,11 +10,13 @@
 mod check;
 pub mod errors;
 mod guard;
+mod inspect;
 mod loader;
 mod ops;
 
 pub use check::{Analysis, ConsoleCall, Diagnostic, ResourceReference, analyze, type_check};
-pub use guard::Cause;
+pub use guard::{Cause, DebugSwitch};
+pub use inspect::{FromIsolate, InspectorSessions, ToIsolate};
 pub use ops::{BoxFuture, FetchRequest, FetchResponse, KILL, QUARANTINE, Services, TRANSIENT};
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -55,6 +57,9 @@ impl std::fmt::Display for Runaway {
 }
 
 impl std::error::Error for Runaway {}
+
+/// What `Isolate::tests_inspected` calls with the isolate before any code loads.
+pub type BeforeLoading<'a> = &'a mut dyn FnMut(&mut Isolate) -> Result<()>;
 
 /// Test files that didn't load (`Isolate::tests`), with what they wrote to `console` until then.
 #[derive(Debug)]
@@ -130,6 +135,8 @@ pub struct Isolate {
     guard: Guard,
     /// Sets the pinned clock and the random seed (`pin_clock`), in a replay.
     clock: Option<v8::Global<v8::Function>>,
+    /// V8's inspector is on (`with_inspector`).
+    inspector: bool,
 }
 
 /// Replaces `Date` and `Math.random` so that a replay computes what the engine computed then, and
@@ -174,10 +181,19 @@ impl Isolate {
 
     /// An empty isolate with engine services and a heap limit of `heap_mb`.
     pub fn new(services: Option<Rc<dyn Services>>, heap_mb: usize) -> Self {
+        Self::with_inspector(services, heap_mb, false)
+    }
+
+    /// `new`, with V8's inspector on when `inspector`: debuggers can then attach through
+    /// `inspector_sessions` (it costs nothing measurable while none is). Must be created inside a
+    /// tokio runtime.
+    pub fn with_inspector(services: Option<Rc<dyn Services>>, heap_mb: usize, inspector: bool) -> Self {
         let mut runtime = JsRuntime::new(RuntimeOptions {
             module_loader: Some(Rc::new(loader::Loader)),
             extensions: vec![ops::extension()],
             create_params: Some(v8::Isolate::create_params().heap_limits(0, heap_mb << 20)),
+            inspector,
+            is_main: inspector,
             ..Default::default()
         });
         if let Some(services) = services {
@@ -186,7 +202,26 @@ impl Isolate {
         let context = runtime.main_context();
         let guard = Guard::new(runtime.v8_isolate(), context, heap_mb);
         runtime.add_near_heap_limit_callback(guard.heap_callback());
-        Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard, clock: None }
+        Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard, clock: None, inspector }
+    }
+
+    /// Where debuggers open sessions on this isolate; None without the inspector.
+    pub fn inspector_sessions(&mut self) -> Option<InspectorSessions> {
+        self.inspector.then(|| InspectorSessions(self.runtime.inspector().get_session_sender()))
+    }
+
+    /// Turns this isolate's time limit off while debuggers are attached.
+    pub fn debug_switch(&self) -> DebugSwitch {
+        self.guard.debug_switch()
+    }
+
+    /// Block this thread until a debugger has attached and said to go on
+    /// (`Runtime.runIfWaitingForDebugger`, which VS Code and Chrome DevTools send once they've
+    /// set their breakpoints). Call it before loading code, so top-level code stops at them too.
+    pub fn wait_for_debugger(&mut self) {
+        if self.inspector {
+            self.runtime.inspector().wait_for_runtime_run_if_waiting_for_debugger();
+        }
     }
 
     /// Interface code's `console` lines go to the engine's log from now on (target `script`),
@@ -325,9 +360,27 @@ const bind = (name, formats) => {{
     /// lines are kept (`take_console`; the runner takes each test's own): what loading wrote is
     /// there first, or in the error when loading failed.
     pub async fn tests(modules: &[&Path], fixtures_json: &str, formats_json: &str) -> Result<Self, TestsFailed> {
-        let mut isolate = Self::host();
+        Self::tests_inspected(modules, fixtures_json, formats_json, None).await
+    }
+
+    /// `tests`, with the inspector on when `before_loading` is given: it's called with the isolate
+    /// before any code loads (to offer it to debuggers and wait for one, `wait_for_debugger`).
+    pub async fn tests_inspected(
+        modules: &[&Path],
+        fixtures_json: &str,
+        formats_json: &str,
+        before_loading: Option<BeforeLoading<'_>>,
+    ) -> Result<Self, TestsFailed> {
+        let mut isolate = Self::with_inspector(None, DEFAULT_HEAP_MB, before_loading.is_some());
         isolate.capture_console();
-        match isolate.load_tests(modules, fixtures_json, formats_json).await {
+        let loaded = match before_loading {
+            Some(before) => match before(&mut isolate) {
+                Ok(()) => isolate.load_tests(modules, fixtures_json, formats_json).await,
+                Err(e) => Err(e),
+            },
+            None => isolate.load_tests(modules, fixtures_json, formats_json).await,
+        };
+        match loaded {
             Ok(()) => Ok(isolate),
             Err(error) => Err(TestsFailed { error, output: isolate.take_console() }),
         }
@@ -559,6 +612,11 @@ __setFixtures({fixtures_json}, {formats_json});
             }
         }
     }
+}
+
+/// A module's `file://` URL as the isolate names it (in stack traces, and to debuggers).
+pub fn module_url(path: &Path) -> Result<String> {
+    Ok(file_url(path)?.to_string())
 }
 
 /// `file://` URL for a path, with `..` and symlinks resolved so specifiers always match.

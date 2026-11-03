@@ -105,6 +105,8 @@ adt-in
   ([nuance](../nuances/transforms.md#console-in-tests-each-line-under-the-test-that-wrote-it-level-1)).
 - **Remove them when you're done**: in the engine, a `console.log` in the code runs for every
   message, and `ductus validate` warns about it for environments that would log it.
+- **To stop the code and look** instead (every variable, step by step), run the test under a
+  debugger: [debugging](debugging.md).
 
 ## A test
 
@@ -376,7 +378,7 @@ $ ductus validate --json
 |---|---|
 | `environment`, `valid`, `errors`, `warnings` | the environment checked; whether the project is valid (no errors: exit 0); the counts |
 | `severity` | `error` (makes the project invalid), `warning`, or `note` (what wasn't checked) |
-| `code` | stable: `DUC…` for Ductus's checks, `DX1`–`DX4` for its checks of your code, `TS…` for TypeScript's errors; every one is in the [reference](../reference/validate.md) |
+| `code` | stable: `DUC…` for Ductus's checks, `DX1`–`DX5` for its checks of your code, `TS…` for TypeScript's errors; every one is in the [reference](../reference/validate.md) |
 | `source` | `typescript` for TypeScript's own errors, `ductus` for the rest: an editor that already runs TypeScript (VS Code does) shows only `ductus` ones to avoid showing errors twice |
 | `message` | what the text output prints for it, without the ✗ or ⚠ |
 | `file` | relative to the project, with `/`; absent for findings about no one file (the database) |

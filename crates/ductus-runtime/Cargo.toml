@@ -7,7 +7,8 @@ repository.workspace = true
 
 [dependencies]
 anyhow = "1.0.104"
-axum = "0.8.9"
+# ws: the inspector server's WebSocket per debugger (`inspect.rs`; adds tokio-tungstenite).
+axum = { version = "0.8.9", features = ["ws"] }
 bytes = "1.12.1"
 chrono = { version = "0.4.45", features = ["serde"] }
 csv = "1.4.0"

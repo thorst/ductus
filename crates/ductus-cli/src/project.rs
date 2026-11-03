@@ -1,6 +1,6 @@
 //! Project commands: `types`, `test`, `validate`, `ports`, `secret`.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use ductus_core::{Environment, InterfaceConfig};
 use ductus_script::Isolate;
 use std::collections::BTreeMap;
@@ -73,6 +73,7 @@ pub async fn write_types(root: &Path) -> Result<String> {
         std::fs::write(&tsconfig, TSCONFIG)?;
     }
     write_schemas(root)?;
+    vscode_launch(root)?;
     Ok(types)
 }
 
@@ -90,12 +91,67 @@ pub async fn types(root: &Path) -> Result<()> {
             serde_json::to_string_pretty(&schema_mapping()).unwrap_or_default().replace('\n', "\n  ")
         ),
     }
+    match vscode_launch(root)? {
+        Mapped::Written | Mapped::Already | Mapped::Elsewhere(_) => {
+            println!("{LAUNCH} has \"Ductus: debug these tests\" (Run and Debug, with a test file open)")
+        }
+        Mapped::Unreadable => println!(
+            "{LAUNCH} isn't plain JSON (comments?), so it wasn't changed: to debug tests from VS Code, add to its configurations\n  {}",
+            serde_json::to_string_pretty(&launch_configuration()).unwrap_or_default().replace('\n', "\n  ")
+        ),
+    }
     Ok(())
 }
 
 /// Where the configuration files' schemas go in a project.
 const SCHEMA_DIR: &str = ".ductus/schema";
 const VSCODE: &str = ".vscode/settings.json";
+
+const LAUNCH: &str = ".vscode/launch.json";
+
+/// VS Code's launch configuration for debugging the open file's interface's tests: js-debug
+/// starts `ductus test --inspect` and attaches to its port (`attachSimplePort`), so no extension
+/// is needed. `${fileDirname}` is the open file's folder, which `--interface` takes.
+fn launch_configuration() -> serde_json::Value {
+    serde_json::json!({
+        "type": "node",
+        "request": "launch",
+        "name": "Ductus: debug these tests",
+        "runtimeExecutable": "ductus",
+        "runtimeArgs": ["test", "--inspect", "--interface", "${fileDirname}"],
+        "attachSimplePort": 9229,
+        // The results are ductus's own output, not console lines: show stdout and stderr.
+        "console": "internalConsole",
+        "outputCapture": "std",
+    })
+}
+
+/// Add our configuration to `.vscode/launch.json` (made if missing), never replacing one of the
+/// project's: a configuration with the same name is left as it is.
+fn vscode_launch(root: &Path) -> Result<Mapped> {
+    let path = root.join(LAUNCH);
+    let ours = launch_configuration();
+    let mut launch = match std::fs::read_to_string(&path) {
+        Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
+            Ok(serde_json::Value::Object(launch)) => launch,
+            _ => return Ok(Mapped::Unreadable),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            serde_json::Map::from_iter([("version".to_string(), serde_json::json!("0.2.0"))])
+        }
+        Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+    };
+    let configurations = launch.entry("configurations").or_insert_with(|| serde_json::json!([]));
+    let Some(configurations) = configurations.as_array_mut() else { return Ok(Mapped::Unreadable) };
+    if configurations.iter().any(|c| c["name"] == ours["name"]) {
+        return Ok(Mapped::Already);
+    }
+    configurations.push(ours);
+    std::fs::create_dir_all(path.parent().expect("a folder"))?;
+    let text = serde_json::to_string_pretty(&serde_json::Value::Object(launch))? + "\n";
+    std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
+    Ok(Mapped::Written)
+}
 
 /// The schemas the installed version reads by, for editors (the binary carries them).
 fn write_schemas(root: &Path) -> Result<()> {
@@ -193,6 +249,100 @@ pub struct TestOptions<'a> {
     /// Write no editor typings (`ductus upgrade --check` runs a newer version's tests on the
     /// project as it is).
     pub read_only: bool,
+    /// Under a debugger listening here (one interface's tests).
+    pub inspect: Option<std::net::SocketAddr>,
+}
+
+/// Whether `--interface` names this interface: by name, or a path inside its folder (an editor
+/// passes the open file's folder, `interfaces/adt-in` or deeper).
+fn names_interface(root: &Path, chosen: &str, iface: &InterfaceDir) -> bool {
+    if chosen == iface.label() {
+        return true;
+    }
+    if !chosen.contains(['/', '\\']) {
+        return false;
+    }
+    let canonical = |p: &Path| std::fs::canonicalize(p).ok();
+    match (canonical(&root.join(chosen)), canonical(&iface.dir)) {
+        (Some(path), Some(dir)) => path.starts_with(dir),
+        _ => false,
+    }
+}
+
+/// The one interface `ductus test --inspect` runs: the one `--interface` names, or the only one
+/// with tests.
+fn debugged<'a>(root: &Path, interfaces: &'a [InterfaceDir], only: Option<&str>) -> Result<&'a InterfaceDir> {
+    let tested: Vec<&InterfaceDir> = interfaces.iter().filter(|i| !files_under(&i.dir, &is_test).is_empty()).collect();
+    let names = || tested.iter().map(|i| i.label()).collect::<Vec<_>>().join(", ");
+    match only {
+        Some(chosen) => match tested.iter().find(|i| names_interface(root, chosen, i)) {
+            Some(found) => Ok(found),
+            None => bail!("`--interface {chosen}` isn't an interface with tests (those with tests: {})", names()),
+        },
+        None if tested.len() == 1 => Ok(tested[0]),
+        None if tested.is_empty() => bail!("no interface has tests (`*.test.ts` in its folder) to debug"),
+        None => bail!(
+            "a debugger attaches to one interface's tests at a time: add `--interface <name>` (those with tests: {})",
+            names()
+        ),
+    }
+}
+
+/// One interface's tests, loaded and run: the runner's report (JSON), and what loading wrote to
+/// `console`. Under a debugger (`debugged`: where it listens, the interface) the isolate is
+/// offered to one and waits for it before any code loads.
+async fn run_suite(
+    paths: &[&Path],
+    fixtures: &str,
+    formats: &str,
+    options: &str,
+    debugged: Option<(std::net::SocketAddr, &str)>,
+) -> (Result<String>, String) {
+    let mut server = None; // the debugger's, serving until these tests are done
+    let mut before_loading = |isolate: &mut Isolate| -> Result<()> {
+        if let Some((addr, label)) = debugged {
+            server = Some(wait_for_debugger(isolate, addr, label, paths[0])?);
+        }
+        Ok(())
+    };
+    let hook: Option<ductus_script::BeforeLoading> = if debugged.is_some() { Some(&mut before_loading) } else { None };
+    let ran = match Isolate::tests_inspected(paths, fixtures, formats, hook).await {
+        Ok(mut isolate) => {
+            let loading = isolate.take_console();
+            (isolate.run_tests_with(options).await, loading)
+        }
+        Err(failed) => (Err(failed.error), failed.output),
+    };
+    drop(server); // the debugger's session ends with the run
+    ran
+}
+
+/// Offer `isolate` to debuggers on `addr` and wait for one, saying so on stderr (stdout may be
+/// `--json`). The server is returned: it serves until dropped.
+fn wait_for_debugger(
+    isolate: &mut Isolate,
+    addr: std::net::SocketAddr,
+    label: &str,
+    first_test: &Path,
+) -> Result<ductus_runtime::inspect::Inspector> {
+    use ductus_runtime::inspect::{Attach, Inspector, Target};
+    let inspector = Inspector::listen(addr)?;
+    let say: std::sync::Arc<dyn Fn(Attach) + Send + Sync> = std::sync::Arc::new(|what| match what {
+        Attach::Attached => eprintln!("debugger attached: no time limit on the tests while it is"),
+        Attach::Detached => eprintln!("debugger detached: the time limit applies again"),
+    });
+    let id = inspector.add(Target {
+        title: format!("{label} tests"),
+        url: ductus_script::module_url(first_test)?,
+        sessions: isolate.inspector_sessions().context("the isolate has no inspector")?,
+        switch: isolate.debug_switch(),
+        say,
+    });
+    eprintln!(
+        "{label}: waiting for a debugger on {addr} (ws://{addr}/{id}): VS Code's \"Ductus: debug these tests\", or chrome://inspect in Chrome"
+    );
+    isolate.wait_for_debugger();
+    Ok(inspector)
 }
 
 /// A test's report from the SDK's runner (`TestResult` in testing.ts).
@@ -235,11 +385,16 @@ impl Where {
 /// Run each interface's `*.test.ts` files (or list them). Returns false if anything failed, or
 /// a filter matched nothing.
 pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bool> {
-    let TestOptions { interface: only, filter, list, json, read_only } = options;
+    let TestOptions { interface: only, filter, list, json, read_only, inspect } = options;
     if !read_only {
         write_types(root).await?;
     }
     let env = Environment::load(root, env)?;
+    let interfaces = interface_dirs(root, &env)?;
+    let debugged = match inspect {
+        Some(_) => Some(debugged(root, &interfaces, only)?.label()),
+        None => None,
+    };
     let project = &Root::new(root);
     let (mut passed, mut failed, mut found) = (0, 0, 0);
     let started = std::time::Instant::now();
@@ -256,9 +411,9 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
     // Every test's place only where it's shown (writing a stack costs ~30 µs a test).
     let runner_options = serde_json::json!({ "filter": filter, "list": list, "places": json }).to_string();
 
-    for iface in interface_dirs(root, &env)? {
+    for iface in &interfaces {
         let label = iface.label();
-        if only.is_some_and(|o| o != label) {
+        if debugged.as_ref().is_some_and(|d| *d != label) || only.is_some_and(|o| !names_interface(root, o, iface)) {
             continue;
         }
         let tests = files_under(&iface.dir, &is_test);
@@ -281,13 +436,25 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
             .as_ref()
             .map(|c| c.format_spec())
             .unwrap_or_else(|_| ductus_script::DEFAULT_FORMATS.to_string());
-        // What the test files and the code they import wrote to `console` while loading.
-        let (report, loading) = match Isolate::tests(&paths, &serde_json::to_string(&fixtures)?, &formats).await {
-            Ok(mut isolate) => {
-                let loading = isolate.take_console();
-                (isolate.run_tests_with(&runner_options).await, loading)
+        // `loading`: what the test files and the code they import wrote to `console` while loading.
+        let fixtures = serde_json::to_string(&fixtures)?;
+        let (report, loading) = match inspect {
+            None => run_suite(&paths, &fixtures, &formats, &runner_options, None).await,
+            Some(addr) => {
+                // deno_core's inspector spawns tasks that must stay on the isolate's thread: a
+                // thread of its own with a single-threaded runtime, as the engine's workers have.
+                let owned: Vec<PathBuf> = tests.clone();
+                let (fixtures, formats, options, label) =
+                    (fixtures.clone(), formats.clone(), runner_options.clone(), label.clone());
+                std::thread::spawn(move || {
+                    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                    let paths: Vec<&Path> = owned.iter().map(PathBuf::as_path).collect();
+                    let debugged = (addr, label.as_str());
+                    anyhow::Ok(runtime.block_on(run_suite(&paths, &fixtures, &formats, &options, Some(debugged))))
+                })
+                .join()
+                .map_err(|_| anyhow::anyhow!("the debugged tests' thread panicked"))??
             }
-            Err(failed) => (Err(failed.error), failed.output),
         };
         let report = match report {
             Ok(r) => r,

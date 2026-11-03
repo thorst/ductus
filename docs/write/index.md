@@ -5,7 +5,8 @@ An interface's code is a TypeScript file in its folder, named by
 its functions for each message and each destination, and sends on what the function returns. This
 page is how that works; the pages after it are the tasks: [routing and
 filtering](routes-and-filters.md), [mapping one message to another](transforms.md),
-[formats](formats.md), [lookups and code tables](lookups.md) and [testing](testing.md).
+[formats](formats.md), [lookups and code tables](lookups.md), [testing](testing.md) and
+[debugging](debugging.md).
 
 **Say it in YAML first.** Much of what interface code does in other engines is a setting here,
 checked by `ductus validate` and visible to `ductus impact` without reading any code. Write code

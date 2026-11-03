@@ -17,6 +17,7 @@ pub mod handover;
 pub mod health;
 mod http;
 mod ingest;
+pub mod inspect;
 pub mod keys;
 pub mod ldap;
 mod limiter;

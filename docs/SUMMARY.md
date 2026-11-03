@@ -41,6 +41,7 @@
   - [Formats: HL7 v2, FHIR, X12, CSV, JSON, XML](write/formats.md)
   - [Lookups and code tables](write/lookups.md)
   - [Testing with fixtures](write/testing.md)
+  - [Debugging: breakpoints in your code](write/debugging.md)
 
 # Operate
 
@@ -73,6 +74,7 @@
   - [Resending and correcting messages](nuances/resend.md)
   - [Routing between interfaces](nuances/routes.md)
   - [Writing transforms](nuances/transforms.md)
+  - [Debugging](nuances/debugging.md)
   - [Shared pool](nuances/shared-pool.md)
   - [Runaway scripts](nuances/runaway.md)
   - [Databases and APIs](nuances/databases-and-apis.md)

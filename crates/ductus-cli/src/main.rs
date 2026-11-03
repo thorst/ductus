@@ -137,7 +137,8 @@ enum Command {
         /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        /// Only this interface.
+        /// Only this interface: its name, or a file or folder inside its folder
+        /// (`interfaces/adt-in/route.test.ts`), as an editor passes the open file.
         #[arg(long)]
         interface: Option<String>,
         /// Only the tests whose name contains this text (case matters): `--filter "A31"`.
@@ -146,6 +147,14 @@ enum Command {
         /// List the tests, with the file and line of each, without running them.
         #[arg(long)]
         list: bool,
+        /// Run the tests under a debugger (VS Code, Chrome DevTools, anything that speaks the
+        /// Chrome DevTools Protocol): listen on 127.0.0.1:9229 (or the address given, on this
+        /// machine only), wait for one to attach, then run one interface's tests (`--interface`,
+        /// or the only one with tests). Breakpoints and `debugger;` statements pause there; the
+        /// time limit is off while it's attached. The debugging guide shows VS Code's and
+        /// Chrome's setup.
+        #[arg(long, value_name = "ADDRESS", num_args = 0..=1, require_equals = true, default_missing_value = "127.0.0.1:9229")]
+        inspect: Option<String>,
         /// JSON Lines for tools (an editor, CI): one object per test (its interface, name, file,
         /// line, column, and when run `ok`, `ms`, the error, where it failed and the expected and
         /// actual values), then a summary. The testing guide describes every field.
@@ -1035,13 +1044,18 @@ async fn run(cli: Cli) -> Result<()> {
             };
             dev::run(dev::Options { root, engine, port, reset, yes, database_only }).await
         }
-        Command::Test { root, interface, filter, list, json, env, read_only } => {
+        Command::Test { root, interface, filter, list, inspect, json, env, read_only } => {
+            let inspect = inspect.as_deref().map(ductus_runtime::inspect::address).transpose()?;
+            if inspect.is_some() && list {
+                anyhow::bail!("`--list` runs nothing to debug: leave out `--inspect`, or `--list`");
+            }
             let options = project::TestOptions {
                 interface: interface.as_deref(),
                 filter: filter.as_deref(),
                 list,
                 json,
                 read_only,
+                inspect,
             };
             exit_on_failure(project::test(&root, &env, options).await)
         }

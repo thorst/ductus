@@ -34,4 +34,5 @@ echo "##### one owner";       bash scripts/demo-one-owner.sh | tail -1
 echo "##### web UI";          bash scripts/demo-ui.sh | tail -1
 echo "##### v0.5 release";    bash scripts/demo-v05.sh | tail -1
 echo "##### ductus dev";      bash scripts/demo-dev.sh | tail -1
+echo "##### debugging";       bash scripts/demo-debug.sh | tail -1
 echo "##### scale";           SHARED=300 EPIC_SECONDS=10 SAMPLED=50 bash scripts/demo-scale.sh | tail -1

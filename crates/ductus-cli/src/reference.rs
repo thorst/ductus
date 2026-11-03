@@ -858,10 +858,11 @@ reused. Three families come from elsewhere:
 - **`TS` followed by a number** (`TS2322`): TypeScript's own errors, with `source: typescript` in \
 the JSON. VS Code's TypeScript server shows them as you type; `validate` checks with the TypeScript \
 version it carries.
-- **`DX1` to `DX4`**: Ductus's checks of interface code: writing to the global scope (`DX1`), \
+- **`DX1` to `DX5`**: Ductus's checks of interface code: writing to the global scope (`DX1`), \
 changing built-in prototypes (`DX2`), mutable state in a shared library (`DX3`) ([the shared \
-pool](../shared-pool.md)), and a database or API name computed at run time (`DX4`) \
-([lookups](../write/lookups.md)).
+pool](../shared-pool.md)), a database or API name computed at run time (`DX4`) \
+([lookups](../write/lookups.md)), and a `debugger;` statement, which pauses every debugging \
+session (`DX5`) ([debugging](../write/debugging.md)).
 - **`DUC` followed by three digits**: everything else, below. For the five files, the last digit \
 says how far loading got: 0 not YAML, 1 a `${...}` value the environment doesn't have, 2 a \
 setting that doesn't exist or has the wrong kind of value, 3 a rule between settings, 4 the file \

@@ -175,6 +175,14 @@ Delivery failures: transient → back off and retry (forever unless `retry.max_a
 - Heap: each isolate is created with `heap_limits(0, isolates.heap_mb)` (`ductus.yaml`, default 512). Near the limit V8 calls our callback: we raise the limit by a quarter (or the process dies) and stop the running call the same way, then run a full GC.
 - **A termination in the event loop drops every queued continuation** (V8 clears the microtask queue), not just the runaway's: every async transform in flight on that thread will never settle. The worker's `drive_event_loop` signals them all (`watch`): the culprit gets the `Runaway`, the others a transient error and are retried.
 - Limits: code in a shared module resumed after an `await` has no interface file on its stack, so it can't be attributed: all in-flight transforms are retried and it can recur. While runaway code runs, its thread's other interfaces wait up to `timeout`.
+- **While a debugger is attached** (`DebugSwitch`, counted per isolate by the inspector server) the watchdog asks nothing and an interrupt already asked for returns; when the last one detaches, the call in progress is re-armed with its whole budget from then. The heap limit is unchanged.
+
+### Debugging (0.7.2, `ductus-runtime/src/inspect.rs`)
+
+- An isolate made `with_inspector` has V8's inspector on (deno_core's `JsRuntimeInspector`); it costs nothing measurable until a session opens (calls 1.18 vs 1.19 µs, +10 KB an isolate). `ductus_script::InspectorSessions` opens a session from any thread over deno_core's channels (Chrome DevTools Protocol as text).
+- The server (`inspect::Inspector`, its own thread and single-threaded runtime: the isolate's thread blocks while it waits and while it's paused) serves what clients expect of Node: `GET /json/version`, `GET /json/list` (a target per isolate) and a WebSocket per target bridged to a new session. Loopback addresses only.
+- `ductus test --inspect`: the interface's tests run on a thread of their own with a current-thread runtime (deno_core's inspector spawns `!Send` tasks with `deno_core::unsync::spawn`: on the CLI's multi-threaded runtime one ran on another thread and panicked), the isolate is offered before any code loads, and `wait_for_runtime_run_if_waiting_for_debugger` blocks until the client says go (after setting its breakpoints). Clients map breakpoints to `.ts` lines through the inline source map deno_ast writes. Console lines reach the debugger too (ops.js wraps V8's console).
+- Checked: VS Code's js-debug 1.140.0 (`attachSimplePort`, over its DAP server: `scripts/demo-debug.sh`) and Chrome DevTools' own frontend (by hand).
 
 ## SDK ↔ engine protocol
 

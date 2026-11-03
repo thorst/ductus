@@ -627,6 +627,47 @@ test("logs after an await, then fails", async () => {
     assert!(format!("{failed}").contains("no"), "{failed}");
 }
 
+/// While a debugger is attached nothing is stopped for time (a call paused at a breakpoint would
+/// be, the moment it went on); once it detaches, a call still running has its whole budget from
+/// then, and is stopped as any runaway.
+#[test]
+fn a_debugger_turns_the_time_limit_off_until_it_detaches() {
+    let dir = project(&[
+        (
+            "busy/t.ts",
+            "export function transform(m: unknown) {\n  const end = Date.now() + 700;\n  while (Date.now() < end) {}\n  return m;\n}\n",
+        ),
+        ("loop/t.ts", "export function transform(m: unknown) {\n  while (true) {}\n}\n"),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let limit = Duration::from_millis(200);
+    let busy = rt.block_on(host.add_interface_with(&dir.path().join("busy/t.ts"), DEFAULT_FORMATS, limit)).unwrap();
+    let endless = rt.block_on(host.add_interface_with(&dir.path().join("loop/t.ts"), DEFAULT_FORMATS, limit)).unwrap();
+    let switch = host.debug_switch();
+
+    assert!(matches!(runaway(rt.block_on(host.transform_with(busy, ADT))).cause, Cause::Timeout(_)), "no debugger");
+    switch.attached();
+    assert!(switch.is_attached());
+    assert!(rt.block_on(host.transform_with(busy, ADT)).unwrap().is_some(), "700 ms over a 200 ms limit, attached");
+
+    let detach = switch.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(500));
+        detach.detached();
+    });
+    let start = Instant::now();
+    let stopped = runaway(rt.block_on(host.transform_with(endless, ADT)));
+    let took = start.elapsed();
+    assert!(matches!(stopped.cause, Cause::Timeout(_)));
+    assert!(
+        took >= Duration::from_millis(650) && took < Duration::from_secs(3),
+        "detached at 500 ms + 200 ms: {took:?}"
+    );
+    assert!(!switch.is_attached());
+}
+
 /// A writer for a test's tracing subscriber: everything written, kept.
 #[derive(Clone, Default)]
 struct Written(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);

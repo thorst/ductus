@@ -219,6 +219,9 @@ jobs:
       - name: Dev demo (ductus dev starts a Postgres of its own; same port and data on restart; a killed one is cleaned up)
         run: BIN=target/release/ductus bash scripts/demo-dev.sh
 
+      - name: Debugging demo (VS Code's own debugger, js-debug, starts `ductus test --inspect` on the guides project and stops at a breakpoint on a .ts line, through the source map; no extension)
+        run: BIN=target/release/ductus bash scripts/demo-debug.sh
+
       - name: One-owner demo (a second engine with the same interfaces refused, another project alongside, the lock lost and taken back, kill -9 then a start at once, lowered lanes with a backlog refused)
         run: BIN=target/release/ductus bash scripts/demo-one-owner.sh
 

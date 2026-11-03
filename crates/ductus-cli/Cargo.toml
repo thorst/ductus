@@ -44,3 +44,6 @@ ductus-store = { path = "../ductus-store", features = ["testing"] }
 rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12", "prefer-post-quantum"] }
 sha2 = "0.10.9"
 tempfile = "3.27.0"
+# A debugger's side of `--inspect` in the CLI tests (already in the tree through axum's ws).
+tokio-tungstenite = "0.29.0"
+futures-util = "0.3"
