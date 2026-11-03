@@ -282,7 +282,7 @@ impl Replay {
 }
 
 /// `Math.random`'s seed for one message and destination: the same in every version.
-fn seed(id: i64, destination: usize) -> u32 {
+pub(crate) fn seed(id: i64, destination: usize) -> u32 {
     let mixed =
         (id as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ (destination as u64).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     (mixed ^ (mixed >> 32)) as u32
@@ -290,7 +290,12 @@ fn seed(id: i64, destination: usize) -> u32 {
 
 /// What the code's result stands for, as the engine decides (`Outcome::of`); a write the replay
 /// refused makes it not comparable, even when the code caught the error and went on.
-fn decide(input: &str, result: Result<Option<String>>, calls: Calls, root: &std::path::Path) -> (Decision, bool) {
+pub(crate) fn decide(
+    input: &str,
+    result: Result<Option<String>>,
+    calls: Calls,
+    root: &std::path::Path,
+) -> (Decision, bool) {
     let looked_up = calls.lookups > 0;
     if let Some(write) = calls.write {
         return (Decision::NotComparable { why: format!("writes {write}: not made in a replay") }, looked_up);
@@ -307,7 +312,7 @@ fn decide(input: &str, result: Result<Option<String>>, calls: Calls, root: &std:
 
 /// What one call of interface code asked of the engine.
 #[derive(Default)]
-struct Calls {
+pub(crate) struct Calls {
     /// The first write it tried (refused), in words.
     write: Option<String>,
     lookups: u32,
@@ -315,9 +320,9 @@ struct Calls {
 
 /// The engine's services, except that nothing is written: `db().execute` and `fetch()` other than
 /// GET or HEAD fail (and mark the call), lookups are counted.
-struct ReplayServices {
-    inner: EngineServices,
-    calls: Rc<RefCell<Calls>>,
+pub(crate) struct ReplayServices {
+    pub(crate) inner: EngineServices,
+    pub(crate) calls: Rc<RefCell<Calls>>,
 }
 
 impl ReplayServices {

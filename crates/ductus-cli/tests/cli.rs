@@ -677,9 +677,11 @@ fn types_adds_the_debug_configuration_and_interface_takes_a_folder() {
     let read = || -> serde_json::Value {
         serde_json::from_str(&std::fs::read_to_string(dir.path().join(".vscode/launch.json")).unwrap()).unwrap()
     };
-    let ours = read()["configurations"][0].clone();
-    assert_eq!(ours["attachSimplePort"], 9229);
-    assert_eq!(ours["runtimeArgs"], serde_json::json!(["test", "--inspect", "--interface", "${fileDirname}"]));
+    let ours = read()["configurations"].clone();
+    assert_eq!(ours[0]["attachSimplePort"], 9229);
+    assert_eq!(ours[0]["runtimeArgs"], serde_json::json!(["test", "--inspect", "--interface", "${fileDirname}"]));
+    assert_eq!(ours[1]["name"], "Ductus: debug this message");
+    assert_eq!(ours[1]["runtimeArgs"], serde_json::json!(["try", "${file}", "${file}", "--inspect"]));
 
     let theirs = serde_json::json!({ "version": "0.2.0", "configurations": [
         { "type": "node", "request": "launch", "name": "Ductus: debug these tests", "runtimeArgs": ["test", "--inspect=9230"] },
@@ -688,7 +690,17 @@ fn types_adds_the_debug_configuration_and_interface_takes_a_folder() {
     std::fs::write(dir.path().join(".vscode/launch.json"), theirs.to_string()).unwrap();
     let (ok, _) = ductus(dir.path(), &["types"]);
     assert!(ok);
-    assert_eq!(read(), theirs, "the project's own configuration of that name is kept");
+    let now = read()["configurations"].clone();
+    assert_eq!(
+        (&now[0], &now[1]),
+        (&theirs["configurations"][0], &theirs["configurations"][1]),
+        "the project's own kept"
+    );
+    assert_eq!(
+        (now.as_array().unwrap().len(), &now[2]["name"]),
+        (3, &"Ductus: debug this message".into()),
+        "ours added"
+    );
     std::fs::write(dir.path().join(".vscode/launch.json"), "// comments\n{}").unwrap();
     let (ok, out) = ductus(dir.path(), &["types"]);
     assert!(ok && out.contains("isn't plain JSON") && out.contains("\"attachSimplePort\": 9229"), "{out}");
@@ -704,6 +716,63 @@ fn types_adds_the_debug_configuration_and_interface_takes_a_folder() {
         !ok && out.contains("`--interface interfaces/nowhere` isn't an interface with tests (those with tests: adt)"),
         "{out}"
     );
+}
+
+/// `ductus try` runs one message through every destination's function and sends nothing: what
+/// each would do (sent and what, filtered and why), a write refused and reported instead of made,
+/// each call's console lines, from a file or a fixture, as text or JSON; the interface by name or by
+/// a path inside it.
+#[test]
+fn try_runs_one_message_through_every_destination_and_sends_nothing() {
+    let dir = project(&[
+        (
+            "interfaces/orders/interface.yaml",
+            "name: orders\nsource: { mllp: { port: 6661 } }\nscript: route.ts\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestinations:\n  lab:\n    mllp: { host: 127.0.0.1, port: 7001 }\n    transform: toLab\n  audit:\n    file: { dir: out }\n    transform: toAudit\n  billing:\n    file: { dir: out }\n    transform: toBilling\n",
+        ),
+        (
+            "interfaces/orders/route.ts",
+            "import { db, type Message } from \"@ductus/sdk\";\n\nexport function toLab(msg: Message) {\n  console.log(\"to the lab\", msg.MSH[10]);\n  msg.set(\"MSH-5\", \"LAB\");\n  return msg;\n}\n\nexport async function toAudit(msg: Message) {\n  await db(\"audit_db\").execute(\"INSERT INTO seen VALUES ($1)\", [msg.MSH[10]]);\n  return msg;\n}\n\nexport function toBilling(msg: Message) {\n  return null;\n}\n",
+        ),
+        (
+            "resources.yaml",
+            "databases:\n  audit_db:\n    postgres: { host: 127.0.0.1, port: 1, database: audit, user: ductus, password: x }\n",
+        ),
+        ("interfaces/orders/fixtures/o01.hl7", "MSH|^~\\&|EHR|HOSP|X|HOSP|20261101||ORM^O01|77|P|2.5\rPID|1||123456\r"),
+    ]);
+    let (ok, out) = ductus(dir.path(), &["try", "orders", "--fixture", "o01.hl7"]);
+    assert!(ok, "{out}");
+    for expected in [
+        "orders: fixture o01.hl7, received ",
+        "through the code as it is now; nothing sent\n",
+        "  lab: sent\n      │ to the lab 77\n      MSH|^~\\&|EHR|HOSP|LAB|HOSP|20261101||ORM^O01|77|P|2.5\n      PID|1||123456\n",
+        "  audit: not decided: writes to database `audit_db`: not made by `ductus try`\n",
+        "  billing: filtered\n",
+    ] {
+        assert!(out.contains(expected), "missing {expected:?} in\n{out}");
+    }
+    let file = dir.path().join("interfaces/orders/fixtures/o01.hl7");
+    let (ok, out) = ductus(dir.path(), &["try", file.to_str().unwrap(), file.to_str().unwrap(), "--json"]);
+    assert!(ok, "{out}");
+    let document: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(chrono_like(&document["received_at"]), "{document}");
+    let destinations = document["trial"]["destinations"].as_array().unwrap();
+    let names: Vec<&str> = destinations.iter().map(|d| d["destination"].as_str().unwrap()).collect();
+    assert_eq!(names, ["audit", "billing", "lab"], "by name, as the engine makes their workers");
+    assert_eq!(
+        (&destinations[2]["decision"], &destinations[2]["console"]),
+        (&"sent".into(), &"to the lab 77\n".into())
+    );
+    assert!(destinations[2]["output"].as_str().unwrap().contains("|LAB|"));
+    assert_eq!(destinations[0]["decision"], "not_comparable");
+    assert_eq!(destinations[1]["decision"], "filtered");
+
+    let (ok, out) = ductus(dir.path(), &["try", "orders"]);
+    assert!(!ok && out.contains("give the message: a file, `--fixture NAME`, or `--message ID`"), "{out}");
+}
+
+/// An RFC 3339 time, as `--json` gives them.
+fn chrono_like(v: &serde_json::Value) -> bool {
+    v.as_str().is_some_and(|t| t.len() >= 20 && t.as_bytes()[10] == b'T')
 }
 
 /// A `debugger;` left in code (or a test) is a warning (`DX5`): it would pause every debugging session.

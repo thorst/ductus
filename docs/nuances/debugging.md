@@ -3,7 +3,7 @@
 What could surprise you here, why it is so, and what to do. Each entry has a level, 1 (day one) to 5 (expert): the [index](index.md) lists them all by level.
 
 ## `ductus test --inspect` waits for a debugger before anything runs (level 1)
-- **What:** with `--inspect`, `ductus test` says `waiting for a debugger on 127.0.0.1:9229` and does nothing else until a debugger attaches and tells it to go on (VS Code and Chrome DevTools do once they've set their breakpoints). Then the test files load, so a breakpoint on a line at the top of a file (outside any function) stops too.
+- **What:** with `--inspect` (`ductus try --inspect` too), `ductus test` says `waiting for a debugger on 127.0.0.1:9229` and does nothing else until a debugger attaches and tells it to go on (VS Code and Chrome DevTools do once they've set their breakpoints). Then the test files load, so a breakpoint on a line at the top of a file (outside any function) stops too.
 - **Why:** tests finish in milliseconds; without the wait they'd be over before a debugger could attach.
 - **What to do:** start it from VS Code's "Ductus: debug these tests", which attaches by itself. From a terminal, attach with Chrome DevTools (chrome://inspect) or your editor; Ctrl+C ends it.
 
@@ -30,6 +30,21 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 ## A `debugger;` statement pauses every debugging session (level 1)
 - **What:** `debugger;` in code or a test pauses there whenever a debugger is attached, whatever breakpoints are set; without one (the engine, `ductus test` without `--inspect`) it does nothing. `ductus validate` warns about each (`DX5`).
 - **What to do:** use the editor's breakpoints; remove `debugger;` lines once you're done.
+
+## `ductus try` sends nothing; lookups are made, writes aren't (level 2)
+- **What:** `ductus try` runs each destination's function on the message and stops there: nothing is connected, sent, stored or routed. Lookups are made in the environment named (`--env`, default dev): `db().query` (on a read-only session for Postgres) and `fetch()` GET or HEAD, so the code sees that environment's data **as it is today**; such a destination is marked "it looked something up: today's data". Writes aren't made: `db().execute` and other `fetch()` methods fail inside the code with "not made in ...", and the destination is reported "not decided: writes to …: not made by `ductus try`", even when the code caught the error and went on.
+- **Why:** trying a message must never change anything; and a lookup's answer from today can differ from the one the engine got then, which explains many "it decided differently" surprises.
+- **What to do:** when a stored message decides differently now and the destination looked something up, check the data before the code. For code that writes, test the write with `mock.db` in `ductus test`.
+
+## Without the environment's secrets, `ductus try` runs without databases and APIs (level 1)
+- **What:** when resources.yaml can't be loaded for the environment (a `${secret:…}` not set, as on a laptop without the environment's key), `ductus try` still runs the code, without databases and APIs, and says so first: "(without databases and APIs: resources.yaml …)". A destination whose code looks something up then fails as the engine would with the resource missing.
+- **Why:** most interfaces' code uses no resource; refusing to try them for a password they don't need would get in the way.
+- **What to do:** for an interface that looks things up, give the environment's key (`DUCTUS_SECRET_KEY`) or try in an environment you have the secrets for.
+
+## A message read with `--from` is in that engine's audit log (level 2)
+- **What:** `ductus try --message ID --from https://ductus-prod:7700` reads the stored message through that engine's API with the token in DUCTUS_API_TOKEN. Reading a payload needs the token's `payloads` permission, and the engine records the read in its audit log (`message.payload.read`, the token's name, the message), as for the web UI. A token without it is refused: "the token may not read payloads". The code then runs on your machine, in your environment (`--env`).
+- **Why:** this is how a production problem is debugged without a debugger on production: the message comes to the code. Patient data leaving the engine is what the audit log is for.
+- **What to do:** use a personal token, so the audit log names you. The message is on your machine afterwards only in what `ductus try` printed: treat that output as patient data.
 
 ## Breakpoints are set on your `.ts` lines; the engine runs JavaScript (level 3)
 - **What:** the engine runs your TypeScript as JavaScript it makes when the file loads (types removed), with a source map inside it. Debuggers read the map, so breakpoints, the current line and stack traces are on your `.ts` lines as written. A client that ignores source maps shows the JavaScript, without types; line numbers can differ there.

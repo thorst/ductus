@@ -13,6 +13,7 @@ mod replay;
 mod service;
 mod sinks;
 mod tools;
+mod trying;
 mod upgrade;
 
 use anyhow::Result;
@@ -166,6 +167,50 @@ enum Command {
         /// Write nothing into the project (no editor typings): for `ductus upgrade --check`.
         #[arg(long, hide = true)]
         read_only: bool,
+    },
+    /// Run one message through an interface's code, every destination, and show what each would
+    /// do with it now: sent (and what), filtered and why, quarantined and why. Sends nothing and
+    /// writes nothing: lookups (`db().query`, GET requests) are made, writes (`db().execute`, other
+    /// requests) are refused and reported. The message comes from a file, a fixture, or the store
+    /// (`--message`), then with what each destination did with it then. With `--inspect`, under a
+    /// debugger, as `ductus test --inspect`.
+    Try {
+        /// The interface: its name, or a file or folder inside its folder.
+        interface: String,
+        /// A file holding the message as the sender sends it.
+        file: Option<PathBuf>,
+        /// A file in the interface's `fixtures/` folder instead.
+        #[arg(long, conflicts_with = "file")]
+        fixture: Option<String>,
+        /// A stored message, by id: read from the database (DUCTUS_DATABASE_URL), or from the
+        /// running engine at `--from` through its API.
+        #[arg(long, conflicts_with_all = ["file", "fixture"])]
+        message: Option<i64>,
+        /// With `--message`: the engine's REST API to read it from (`https://ductus-prod:7700`):
+        /// a token with the `payloads` permission (DUCTUS_API_TOKEN), and the read is in that
+        /// engine's audit log.
+        #[arg(long, requires = "message")]
+        from: Option<String>,
+        /// The token for `--from`.
+        #[arg(long, env = "DUCTUS_API_TOKEN", hide_env_values = true)]
+        token: Option<String>,
+        /// With `--message` and no `--from`: the database.
+        #[arg(long, env = "DUCTUS_DATABASE_URL", hide_env_values = true)]
+        database_url: Option<String>,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// The environment whose values and resources the code uses (lookups go to its databases).
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+        /// Under a debugger, as `ductus test --inspect`: listen on 127.0.0.1:9229 (or the address
+        /// given, on this machine only) and wait for one before the code loads.
+        #[arg(long, value_name = "ADDRESS", num_args = 0..=1, require_equals = true, default_missing_value = "127.0.0.1:9229")]
+        inspect: Option<String>,
+        /// One JSON document: each destination's decision, output, console lines and what it
+        /// recorded then.
+        #[arg(long)]
+        json: bool,
     },
     /// Check configs, code loading and TypeScript types for an environment (exits 1 on problems).
     Validate {
@@ -1058,6 +1103,16 @@ async fn run(cli: Cli) -> Result<()> {
                 inspect,
             };
             exit_on_failure(project::test(&root, &env, options).await)
+        }
+        Command::Try { interface, file, fixture, message, from, token, database_url, root, env, inspect, json } => {
+            let inspect = inspect.as_deref().map(ductus_runtime::inspect::address).transpose()?;
+            let source = match (file, fixture, message) {
+                (Some(file), _, _) => trying::Source::File(file),
+                (_, Some(fixture), _) => trying::Source::Fixture(fixture),
+                (_, _, Some(id)) => trying::Source::Stored { id, api: from.map(|url| (url, token)), database_url },
+                _ => anyhow::bail!("give the message: a file, `--fixture NAME`, or `--message ID`"),
+            };
+            trying::run(trying::Args { root, env, interface, source, json, inspect }).await
         }
         Command::Validate { root, env, database_url, json, read_only } => {
             exit_on_failure(project::validate(&root, &env, database_url, read_only, json).await)

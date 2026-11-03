@@ -10,6 +10,7 @@ Options can also come from the environment (the variable each one names), or fro
 | [`ductus run`](run.md) | Run every interface in a project. |
 | [`ductus dev`](dev.md) | Run the project with a Postgres of its own, for local development: nothing to install. |
 | [`ductus test`](test.md) | Run each interface's `*.test.ts` files. |
+| [`ductus try`](try.md) | Run one message through an interface's code, every destination, and show what each would do with it now: sent (and what), filtered and why, quarantined and why. |
 | [`ductus validate`](validate.md) | Check configs, code loading and TypeScript types for an environment (exits 1 on problems). |
 | [`ductus upgrade`](upgrade.md) | Before an upgrade, run with the new version's binary (from the portable archive, on the server or beside it), reading only: the migrations its start would apply and how big the tables they work through are, the engines on the database and their versions, the project validated against the database and its tests run with the new SDK, deprecated settings in use. |
 | [`ductus replay`](replay.md) | Run a period's messages through this version's code again, sending nothing, and compare what each destination's code decides (sent and what, filtered, quarantined) with the installed version run beside it, with what was recorded, and with kept outputs (`save_output`): the evidence a change board asks for before an upgrade or a code change. |

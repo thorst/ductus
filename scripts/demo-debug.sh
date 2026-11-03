@@ -3,7 +3,9 @@
 # VS Code runs for the launch configuration `ductus types` writes) starts `ductus test --inspect`
 # on the guides' example project, attaches to its port, and stops at a breakpoint on a .ts line of
 # the code a test calls: the top frame, the locals, an expression, then the test passes. The .ts
-# line is found through the source map (the code is run as JavaScript). No editor extension.
+# line is found through the source map (the code is run as JavaScript). Then the same for one
+# message (0.7.2.2): "Ductus: debug this message" with a fixture open runs `ductus try --inspect`.
+# No editor extension.
 # Needs: node, curl (js-debug is fetched once, pinned: scripts/dev/js-debug.sh).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
@@ -22,7 +24,17 @@ CODE=$P/interfaces/adt-in/route.ts
 timeout 90 node "$CLIENT" "$SERVER" "$CODE" 18 'msg.PV1[2] + " for a " + msg.MSH[9][2]' \
   "$BIN" test --inspect --interface "$P/interfaces/adt-in" --filter "the lab gets visits" | tee "$P/session.log"
 
+echo "== \"Ductus: debug this message\": the fixture a01.hl7 open, the same breakpoint, ductus try"
+FIXTURE=$P/interfaces/adt-in/fixtures/a01.hl7
+timeout 90 node "$CLIENT" "$SERVER" "$CODE" 18 'msg.get("MSH-10")' \
+  "$BIN" try "$FIXTURE" "$FIXTURE" --inspect | tee "$P/message.log"
+
 fail=""
+grep -q '^stopped: breakpoint$' "$P/message.log" || fail+=" try-not-stopped"
+grep -q "^at: toLab $CODE:18$" "$P/message.log" || fail+=" try-wrong-line"
+grep -q "^msg.get(\"MSH-10\") = 'MSG00001'$" "$P/message.log" || fail+=" try-evaluate"
+grep -q '^output:   lab: sent$' "$P/message.log" || fail+=" try-not-sent"
+grep -q '^terminated$' "$P/message.log" || fail+=" try-not-ended"
 grep -q '^stopped: breakpoint$' "$P/session.log" || fail+=" not-stopped"
 grep -q "^at: toLab $CODE:18$" "$P/session.log" || fail+=" wrong-line"
 grep -q '^locals: msg=Proxy(MessageImpl)' "$P/session.log" || fail+=" locals"

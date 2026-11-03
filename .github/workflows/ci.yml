@@ -222,6 +222,9 @@ jobs:
       - name: Debugging demo (VS Code's own debugger, js-debug, starts `ductus test --inspect` on the guides project and stops at a breakpoint on a .ts line, through the source map; no extension)
         run: BIN=target/release/ductus bash scripts/demo-debug.sh
 
+      - name: Try demo (`ductus try` on a stored message from the database and through the API, the record beside the new decision, nothing sent again)
+        run: BIN=target/release/ductus bash scripts/demo-try.sh
+
       - name: One-owner demo (a second engine with the same interfaces refused, another project alongside, the lock lost and taken back, kill -9 then a start at once, lowered lanes with a backlog refused)
         run: BIN=target/release/ductus bash scripts/demo-one-owner.sh
 

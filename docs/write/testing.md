@@ -390,6 +390,9 @@ $ ductus validate --json
 
 - **`ductus validate`** type-checks every interface and checks its configuration and resources
   for one environment: run it for each environment you deploy to.
+- **`ductus try`** runs one message (a file, a fixture, or one the engine stored) through the
+  interface's code and says what each destination would do with it now, sending nothing
+  ([debugging](debugging.md#one-message-ductus-try)).
 - **`ductus replay`** runs a real period's stored messages through a changed version of the code
   and compares every destination's output with what the installed version sent, before you
   deploy: the test against real traffic that fixtures can't be

@@ -93,11 +93,13 @@ pub async fn types(root: &Path) -> Result<()> {
     }
     match vscode_launch(root)? {
         Mapped::Written | Mapped::Already | Mapped::Elsewhere(_) => {
-            println!("{LAUNCH} has \"Ductus: debug these tests\" (Run and Debug, with a test file open)")
+            println!(
+                "{LAUNCH} has \"Ductus: debug these tests\" (with a test or code file open) and \"Ductus: debug this message\" (with a message file open, a fixture)"
+            )
         }
         Mapped::Unreadable => println!(
-            "{LAUNCH} isn't plain JSON (comments?), so it wasn't changed: to debug tests from VS Code, add to its configurations\n  {}",
-            serde_json::to_string_pretty(&launch_configuration()).unwrap_or_default().replace('\n', "\n  ")
+            "{LAUNCH} isn't plain JSON (comments?), so it wasn't changed: to debug from VS Code, add to its configurations\n  {}",
+            serde_json::to_string_pretty(&launch_configurations()).unwrap_or_default().replace('\n', "\n  ")
         ),
     }
     Ok(())
@@ -109,28 +111,34 @@ const VSCODE: &str = ".vscode/settings.json";
 
 const LAUNCH: &str = ".vscode/launch.json";
 
-/// VS Code's launch configuration for debugging the open file's interface's tests: js-debug
-/// starts `ductus test --inspect` and attaches to its port (`attachSimplePort`), so no extension
-/// is needed. `${fileDirname}` is the open file's folder, which `--interface` takes.
-fn launch_configuration() -> serde_json::Value {
-    serde_json::json!({
-        "type": "node",
-        "request": "launch",
-        "name": "Ductus: debug these tests",
-        "runtimeExecutable": "ductus",
-        "runtimeArgs": ["test", "--inspect", "--interface", "${fileDirname}"],
-        "attachSimplePort": 9229,
-        // The results are ductus's own output, not console lines: show stdout and stderr.
-        "console": "internalConsole",
-        "outputCapture": "std",
-    })
+/// VS Code's launch configurations: js-debug starts the command and attaches to its port
+/// (`attachSimplePort`), so no extension is needed. "These tests": the open file's interface's
+/// tests (`${fileDirname}`, which `--interface` takes). "This message": the open file as the
+/// message, through the interface whose folder it's in (a fixture, `${file}` as both).
+fn launch_configurations() -> Vec<serde_json::Value> {
+    let configuration = |name: &str, args: &[&str]| {
+        serde_json::json!({
+            "type": "node",
+            "request": "launch",
+            "name": name,
+            "runtimeExecutable": "ductus",
+            "runtimeArgs": args,
+            "attachSimplePort": 9229,
+            // What it reports is ductus's own output, not console lines: show stdout and stderr.
+            "console": "internalConsole",
+            "outputCapture": "std",
+        })
+    };
+    vec![
+        configuration("Ductus: debug these tests", &["test", "--inspect", "--interface", "${fileDirname}"]),
+        configuration("Ductus: debug this message", &["try", "${file}", "${file}", "--inspect"]),
+    ]
 }
 
-/// Add our configuration to `.vscode/launch.json` (made if missing), never replacing one of the
+/// Add our configurations to `.vscode/launch.json` (made if missing), never replacing one of the
 /// project's: a configuration with the same name is left as it is.
 fn vscode_launch(root: &Path) -> Result<Mapped> {
     let path = root.join(LAUNCH);
-    let ours = launch_configuration();
     let mut launch = match std::fs::read_to_string(&path) {
         Ok(text) => match serde_json::from_str::<serde_json::Value>(&text) {
             Ok(serde_json::Value::Object(launch)) => launch,
@@ -143,10 +151,14 @@ fn vscode_launch(root: &Path) -> Result<Mapped> {
     };
     let configurations = launch.entry("configurations").or_insert_with(|| serde_json::json!([]));
     let Some(configurations) = configurations.as_array_mut() else { return Ok(Mapped::Unreadable) };
-    if configurations.iter().any(|c| c["name"] == ours["name"]) {
+    let missing: Vec<serde_json::Value> = launch_configurations()
+        .into_iter()
+        .filter(|ours| !configurations.iter().any(|c| c["name"] == ours["name"]))
+        .collect();
+    if missing.is_empty() {
         return Ok(Mapped::Already);
     }
-    configurations.push(ours);
+    configurations.extend(missing);
     std::fs::create_dir_all(path.parent().expect("a folder"))?;
     let text = serde_json::to_string_pretty(&serde_json::Value::Object(launch))? + "\n";
     std::fs::write(&path, text).with_context(|| format!("writing {}", path.display()))?;
@@ -255,7 +267,7 @@ pub struct TestOptions<'a> {
 
 /// Whether `--interface` names this interface: by name, or a path inside its folder (an editor
 /// passes the open file's folder, `interfaces/adt-in` or deeper).
-fn names_interface(root: &Path, chosen: &str, iface: &InterfaceDir) -> bool {
+pub(crate) fn names_interface(root: &Path, chosen: &str, iface: &InterfaceDir) -> bool {
     if chosen == iface.label() {
         return true;
     }

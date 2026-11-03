@@ -2,7 +2,8 @@
 
 When a test fails and the reason isn't obvious from the values it prints, stop the code where it
 goes wrong and look: the values of every variable, the call that led there, what an expression
-gives, one line at a time. `ductus test --inspect` runs an interface's tests under a debugger.
+gives, one line at a time. `ductus test --inspect` runs an interface's tests under a debugger, and
+`ductus try --inspect` [one message](#one-message-ductus-try), a file or one the engine stored.
 
 **No extension is needed.** The engine speaks the protocol every JavaScript debugger speaks (the
 Chrome DevTools Protocol, as Node and Deno do), so VS Code's built-in debugger, Chrome DevTools,
@@ -10,13 +11,13 @@ JetBrains IDEs and anything else that can attach to Node attach to Ductus too.
 
 | You use | What to do |
 |---|---|
-| **VS Code** | open a file of the interface (its code or a test), set breakpoints, Run and Debug → **Ductus: debug these tests** ([below](#vs-code)) |
+| **VS Code** | open a file of the interface (its code or a test), set breakpoints, Run and Debug → **Ductus: debug these tests**; or open a message file (a fixture) → **Ductus: debug this message** ([below](#vs-code)) |
 | **Chrome or Edge** | `ductus test --inspect --interface adt-in` in a terminal, then chrome://inspect → **inspect** ([below](#chrome-devtools)) |
 | **JetBrains, Neovim, others** | `ductus test --inspect`, then attach to a Node.js process on 127.0.0.1:9229 ([below](#other-debuggers)) |
 
 ## VS Code
 
-`ductus types` (also run by every `ductus test` and `ductus validate`) adds a configuration to
+`ductus types` (also run by every `ductus test` and `ductus validate`) adds two configurations to
 `.vscode/launch.json`: only added, beside your own, and never over one of the same name.
 
 ```text
@@ -38,10 +39,30 @@ $ cat .vscode/launch.json
       "attachSimplePort": 9229,
       "console": "internalConsole",
       "outputCapture": "std"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Ductus: debug this message",
+      "runtimeExecutable": "ductus",
+      "runtimeArgs": [
+        "try",
+        "${file}",
+        "${file}",
+        "--inspect"
+      ],
+      "attachSimplePort": 9229,
+      "console": "internalConsole",
+      "outputCapture": "std"
     }
   ]
 }
 ```
+
+**Ductus: debug this message** runs the file you have open as one message through its
+interface ([`ductus try`](#one-message-ductus-try)): open a fixture (`interfaces/adt-in/fixtures/a01.hl7`),
+set breakpoints in the interface's code, F5. The file names its interface by the folder it's in,
+so `${file}` is both.
 
 1. **Open a file of the interface** you want to debug: its code (`route.ts`) or a test
    (`route.test.ts`). `${fileDirname}` is that file's folder, and `--interface` takes a folder
@@ -149,6 +170,82 @@ $ ductus test --inspect=0.0.0.0:9229
 Error: `--inspect=0.0.0.0:9229`: the debugger listens on this machine only (127.0.0.1 or ::1): whoever reaches it runs any code as this user and reads every message. To debug from another machine, forward the port: `ssh -L 9229:127.0.0.1:9229 <this machine>`, or VS Code Remote's port forwarding
 ```
 
+## One message: `ductus try`
+
+`ductus try` runs one message through an interface's code, every destination, and says what each
+would do with it now: sent and what, filtered and why, quarantined and why. **It sends nothing and
+writes nothing.** It answers "what would this message do?" with or without a debugger: after a
+change, for a message a sender complains about, for one that was quarantined.
+
+```text
+$ ductus try adt-in --fixture a01.hl7
+adt-in: fixture a01.hl7, received 2026-11-03 22:08:47 UTC, through the code as it is now; nothing sent
+  (without databases and APIs: resources.yaml in ./resources.yaml: missing in environment `dev`: secret:BILLING_TOKEN, secret:EMPI_TOKEN, secret:FHIR_TOKEN, secret:PROVIDER_DB_PASSWORD)
+  billing: sent
+      MSH|^~\&|EHR|HOSP|ADT|HOSP|20261031083000-0500||ADT^A01^ADT_A01|MSG00001|P|2.5
+      EVN|A01|20261031083000-0500
+      PID|1||123456^^^HOSP^MR||SMITH^ANNA^M||19800214|F|||12 MAIN ST^^SPRINGFIELD^IL^62701
+      PV1|1|I|4W^401^A||||1234^JONES^PAT^^^DR|||MED|||||||||V9001|||||||||||||||||||||||||20261031083000-0500
+      ZPV|EHR-ONLY|42
+  lab: sent
+      MSH|^~\&|EHR|HOSP|LAB|HOSP|20261031083000-0500||ADT^A01^ADT_A01|MSG00001|P|2.5
+      EVN|A01|20261031083000-0500
+      PID|1||123456^^^HOSP^MR||SMITH^ANNA^M||19800214|F|||12 MAIN ST^^SPRINGFIELD^IL^62701
+      PV1|1|IN|4W^401^A||||1234^JONES^PAT^^^DR|||MED|||||||||V9001|||||||||||||||||||||||||20261031083000-0500
+```
+
+| The message | Written |
+|---|---|
+| a file, as the sender sends it | `ductus try adt-in a01.hl7` |
+| a fixture of the interface | `ductus try adt-in --fixture a01.hl7` |
+| one the engine stored, from its database | `ductus try adt-in --message 20042988` (DUCTUS_DATABASE_URL) |
+| one a running engine stored, through its API | `ductus try adt-in --message 20042988 --from https://ductus-prod:7700` (a token with `payloads` in DUCTUS_API_TOKEN) |
+
+The interface is its name or a file or folder inside its folder, as for `ductus test`. `--env`
+chooses whose values and resources the code uses (default `dev`); `--json` gives one document
+(each destination's `decision`, `output` or `reason`, `console`, `recorded`); `--inspect` runs it
+under a debugger, as `ductus test --inspect` does.
+
+**A stored message** comes with what each destination did with it then, beside what the code
+decides now: here the code was changed after the message went through, so billing would drop it
+today (from the [try demo](#checked-in-ci)):
+
+```text
+$ ductus try interfaces/adt --message 20042988
+try-demo: message 20042988, received 2026-11-03 22:21:12 UTC, through the code as it is now; nothing sent
+  billing: filtered
+    then: sent
+  lab: sent
+      MSH|^~\&|EPIC|HOSP|LAB|HOSP|20261103172112||ADT^A08|1|P|2.5
+      EVN|A08|20261103172112
+      PID|1||100001^^^MRN||JOHNSON^JAMES||19010101|M
+      PV1|1|I|4W^401^A
+    then: sent, the same output
+```
+
+`then: sent, the same output` compares the output too, for a destination that keeps what it sent
+(`save_output`); otherwise `then:` compares the decision.
+
+- **Nothing leaves.** Destinations aren't connected, routes aren't stored, the receiver gets
+  nothing. Lookups are made (`db().query`, a `fetch()` GET), so the code sees the environment's
+  data as it is today, which may not be what it saw then: such a destination says "it looked
+  something up: today's data". Writes (`db().execute`, a POST) aren't made: the destination says
+  "not decided: writes to database `audit_db`: not made by `ductus try`"
+  ([nuance](../nuances/debugging.md#ductus-try-sends-nothing-lookups-are-made-writes-arent-level-2)).
+- **The code's clock** (`new Date()`) is when the message was received, and `meta.id` its id (0
+  for a file, received now), as the engine had them.
+- **Without the environment's secrets** (a laptop without the production key), the code runs
+  without databases and APIs and says so first, as above; an interface that uses none is tried in
+  full ([nuance](../nuances/debugging.md#without-the-environments-secrets-ductus-try-runs-without-databases-and-apis-level-1)).
+- **Production messages come to the code, not the debugger to production.** `--from` reads the
+  message through the engine's API, which needs the `payloads` permission and records the read in
+  its audit log as every payload read is; the code runs on your machine
+  ([nuance](../nuances/debugging.md#a-message-read-with---from-is-in-that-engines-audit-log-level-2)).
+  A token without it is refused: "the token may not read payloads: give it the `payloads`
+  permission". The message is then on your machine: handle it as the patient data it is.
+- **Not for interfaces that answer HTTP requests themselves** (`respond`): test their function
+  with `ductus test`.
+
 ## The time limit while you debug
 
 Interface code is stopped when it runs past its `timeout` without pausing (5 s for tests), so an
@@ -182,19 +279,21 @@ interfaces/adt/route.ts:4:3 warning DX5: a `debugger;` statement: it pauses here
 
 ## What it doesn't do (yet)
 
-- **One message through an interface** under the debugger (`ductus try`), and **a running dev
-  engine** with one interface debugged (`ductus dev --inspect`), are the next parts of v0.7.
+- **A running dev engine** with one interface debugged (`ductus dev --inspect`) is the next part
+  of v0.7.
 - **Production is never debugged in place.** A paused interface would hold its real traffic, and a
-  debugger's port runs any code beside patient data. Bring the message to the code instead: a
-  fixture made from it (with the patient replaced), or, once it ships, `ductus try` with the stored
-  message.
+  debugger's port runs any code beside patient data. Bring the message to the code instead:
+  `ductus try --message ID --from https://ductus-prod:7700 --inspect` on your machine.
 
 ## Checked in CI
 
 `scripts/demo-debug.sh` runs VS Code's JavaScript debugger (js-debug, the same code VS Code runs,
 version pinned) the way VS Code does for the configuration above, on this guide's example project:
 it starts `ductus test --inspect`, stops at a breakpoint on a `.ts` line through the source map,
-reads the locals and an expression, and lets the test pass. A CLI test attaches over the protocol directly, pauses at a
+reads the locals and an expression, and lets the test pass; then "Ductus: debug this message" on
+a fixture, stopping at the same line under `ductus try`. `scripts/demo-try.sh` tries a message an
+engine stored, from its database and through its API, before and after a change to the code, and
+checks the receiver got nothing more. A CLI test attaches over the protocol directly, pauses at a
 `debugger;`, keeps an endless loop running past the time limit while attached, and checks it's
 stopped within the limit once it detaches. Chrome DevTools was checked by hand (2026-11-03): it
 lists the run, stops at `debugger;` in the `.ts` with its types and locals, and resumes.

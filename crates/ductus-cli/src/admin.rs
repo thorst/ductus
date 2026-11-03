@@ -294,6 +294,11 @@ impl Remote {
         Ok(Self { base: format!("{}/api/v1", api.trim_end_matches('/')), token, client })
     }
 
+    /// `GET path` (under `/api/v1`), its JSON.
+    pub async fn get(&self, path: &str) -> Result<Value> {
+        self.call(reqwest::Method::GET, path, None).await
+    }
+
     async fn call(&self, method: reqwest::Method, path: &str, body: Option<Value>) -> Result<Value> {
         let mut request = self.client.request(method, format!("{}{path}", self.base)).bearer_auth(&self.token);
         if let Some(body) = body {

@@ -33,6 +33,7 @@ mod split;
 pub mod stats;
 pub mod systemd;
 pub mod tls;
+pub mod try_message;
 mod worker;
 
 use anyhow::{Context, Result, bail};
