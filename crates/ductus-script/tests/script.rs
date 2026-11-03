@@ -671,8 +671,12 @@ fn console_lines_go_to_the_log_at_the_environment_s_level() {
         let mut lines = |level| {
             isolate.console_to_log(dir.path(), level);
             rt.block_on(isolate.transform(ADT)).unwrap();
+            // Only the code's lines: loading the SDK the first time also logs (swc, at debug).
             let text = written.take();
-            text.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>()
+            text.lines()
+                .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+                .filter(|l| l.contains(" script: "))
+                .collect::<Vec<_>>()
         };
         assert_eq!(
             lines(ConsoleLevel::Debug),
