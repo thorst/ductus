@@ -13,7 +13,7 @@ mod guard;
 mod loader;
 mod ops;
 
-pub use check::{Analysis, Diagnostic, ResourceReference, analyze, type_check};
+pub use check::{Analysis, ConsoleCall, Diagnostic, ResourceReference, analyze, type_check};
 pub use guard::Cause;
 pub use ops::{BoxFuture, FetchRequest, FetchResponse, KILL, QUARANTINE, Services, TRANSIENT};
 
@@ -55,6 +55,21 @@ impl std::fmt::Display for Runaway {
 }
 
 impl std::error::Error for Runaway {}
+
+/// Test files that didn't load (`Isolate::tests`), with what they wrote to `console` until then.
+#[derive(Debug)]
+pub struct TestsFailed {
+    pub error: anyhow::Error,
+    pub output: String,
+}
+
+impl std::fmt::Display for TestsFailed {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:#}", self.error)
+    }
+}
+
+impl std::error::Error for TestsFailed {}
 
 /// An async transform still running: resolves once the event loop settles its promise.
 /// The isolate isn't borrowed while waiting, so other interfaces on the thread keep running.
@@ -174,6 +189,26 @@ impl Isolate {
         Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard, clock: None }
     }
 
+    /// Interface code's `console` lines go to the engine's log from now on (target `script`),
+    /// each with its place relative to `root`, from `lowest` up (the environment's `console:`).
+    pub fn console_to_log(&mut self, root: &Path, lowest: ductus_core::ConsoleLevel) {
+        let root = Some(errors::Root::new(root));
+        self.runtime.op_state().borrow_mut().put(ops::Console::Log { root, lowest });
+    }
+
+    /// Interface code's `console` lines are kept from now on, every level, until `take_console`.
+    pub fn capture_console(&mut self) {
+        self.runtime.op_state().borrow_mut().put(ops::Console::Captured(String::new()));
+    }
+
+    /// The `console` lines kept since the last call (`capture_console`), one per line.
+    pub fn take_console(&mut self) -> String {
+        match self.runtime.op_state().borrow_mut().try_borrow_mut::<ops::Console>() {
+            Some(ops::Console::Captured(lines)) => std::mem::take(lines),
+            _ => String::new(),
+        }
+    }
+
     /// For a replay: from now on the clock is the one `set_clock` sets (0 until then) and
     /// `Math.random` is seeded by it. Call it before loading interfaces, so their top-level code
     /// sees it too.
@@ -286,8 +321,19 @@ const bind = (name, formats) => {{
     }
 
     /// Load test modules; `run_tests()` then executes everything they registered.
-    /// `formats_json` is the interface's formats, used by the `input()` test helper.
-    pub async fn tests(modules: &[&Path], fixtures_json: &str, formats_json: &str) -> Result<Self> {
+    /// `formats_json` is the interface's formats, used by the `input()` test helper. `console`
+    /// lines are kept (`take_console`; the runner takes each test's own): what loading wrote is
+    /// there first, or in the error when loading failed.
+    pub async fn tests(modules: &[&Path], fixtures_json: &str, formats_json: &str) -> Result<Self, TestsFailed> {
+        let mut isolate = Self::host();
+        isolate.capture_console();
+        match isolate.load_tests(modules, fixtures_json, formats_json).await {
+            Ok(()) => Ok(isolate),
+            Err(error) => Err(TestsFailed { error, output: isolate.take_console() }),
+        }
+    }
+
+    async fn load_tests(&mut self, modules: &[&Path], fixtures_json: &str, formats_json: &str) -> Result<()> {
         let Some(first) = modules.first() else { bail!("no test files") };
         let mut imports = String::new();
         for m in modules {
@@ -299,9 +345,7 @@ __setFixtures({fixtures_json}, {formats_json});
 {imports}globalThis.{ENTRY} = (options) => __runTests(options);
 "#
         );
-        let mut isolate = Self::host();
-        isolate.load_main(first, glue).await?;
-        Ok(isolate)
+        self.load_main(first, glue).await
     }
 
     /// Contents of the editor typings for `@ductus/sdk` (`ductus-sdk.d.ts`).

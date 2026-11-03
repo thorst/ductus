@@ -566,6 +566,128 @@ test("fails a negated expect", () => {
     assert!(listed.iter().all(|r| r.get("ok").is_none() && r["at"]["line"].is_u64()), "{listed:#?}");
 }
 
+/// Under `ductus test`, `console` lines are each test's own (the code under test's too, after an
+/// `await` too), what loading wrote comes first, and nothing reaches the process's stdout.
+#[test]
+fn console_lines_belong_to_their_test() {
+    let dir = project(&[
+        (
+            "x/t.ts",
+            "console.log(\"t.ts loaded\");\nexport function f(n: number) {\n  console.debug(\"f got\", n);\n  return n;\n}\n",
+        ),
+        (
+            "x/t.test.ts",
+            r#"import { test, expect } from "@ductus/sdk";
+import { f } from "./t.ts";
+console.info("test file loaded");
+test("logs", () => {
+  console.log("text", { a: 1 }, [1, "two"], null, undefined, 3n, new Map([["k", 1]]), new Set([2]));
+  console.warn("warned");
+  f(7);
+});
+test("quiet", () => {});
+test("logs after an await, then fails", async () => {
+  await Promise.resolve();
+  console.error(new Error("boom"));
+  console.assert(1 === 2, "one is not two");
+  console.assert(true, "never shown");
+  console.log({ toString: () => "MSH|^~\\&|A" }, () => 1, function named() {});
+  expect(1).toBe(2);
+});
+"#,
+        ),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let test_file = dir.path().join("x/t.test.ts");
+    let mut isolate = rt.block_on(Isolate::tests(&[&test_file], "{}", DEFAULT_FORMATS)).unwrap();
+    assert_eq!(isolate.take_console(), "t.ts loaded\ntest file loaded\n", "imports load first");
+    let report: Vec<serde_json::Value> = serde_json::from_str(&rt.block_on(isolate.run_tests()).unwrap()).unwrap();
+    assert_eq!(
+        report[0]["output"], "text {\"a\":1} [1,\"two\"] null undefined 3n Map {\"k\":1} Set [2]\nwarned\nf got 7\n",
+        "every level, objects as one line of JSON"
+    );
+    assert!(report[1].get("output").is_none(), "nothing written, no field: {}", report[1]);
+    let output = report[2]["output"].as_str().unwrap();
+    let lines: Vec<&str> = output.lines().collect();
+    assert_eq!(lines[0], "Error: boom", "an error as its stack: {output}");
+    assert!(lines[1].trim_start().starts_with("at ") && lines[1].contains("t.test.ts:12"), "{output}");
+    assert!(output.contains("\nAssertion failed one is not two\n") && !output.contains("never shown"), "{output}");
+    assert!(output.ends_with("MSH|^~\\&|A [Function (anonymous)] [Function named]\n"), "{output}");
+    assert_eq!(report[2]["ok"], false);
+    assert_eq!(isolate.take_console(), "", "all taken");
+
+    // Loading that fails keeps what it wrote until then.
+    std::fs::write(&test_file, "console.log(\"before\");\nthrow new Error(\"no\");\n").unwrap();
+    let failed = match rt.block_on(Isolate::tests(&[&test_file], "{}", DEFAULT_FORMATS)) {
+        Err(failed) => failed,
+        Ok(_) => panic!("the file throws"),
+    };
+    assert_eq!(failed.output, "before\n");
+    assert!(format!("{failed}").contains("no"), "{failed}");
+}
+
+/// A writer for a test's tracing subscriber: everything written, kept.
+#[derive(Clone, Default)]
+struct Written(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+impl std::io::Write for Written {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Written {
+    fn take(&self) -> String {
+        String::from_utf8(std::mem::take(&mut *self.0.lock().unwrap())).unwrap()
+    }
+}
+
+/// In the engine, `console` lines go to its log (target `script`) at their level, with the place
+/// relative to the project, and the environment's `console:` keeps the lower ones out.
+#[test]
+fn console_lines_go_to_the_log_at_the_environment_s_level() {
+    use ductus_core::ConsoleLevel;
+    let dir = project(&[(
+        "interfaces/x/t.ts",
+        "export function transform(m: unknown) {\n  console.debug(\"d\", 1);\n  console.log(\"l\", 2);\n  console.error(\"e\", 3);\n  return m;\n}\n",
+    )]);
+    let written = Written::default();
+    let log = written.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_writer(move || log.clone())
+        .finish();
+    tracing::subscriber::with_default(subscriber, || {
+        let rt = rt();
+        let _guard = rt.enter();
+        let mut isolate = rt.block_on(Isolate::interface(&dir.path().join("interfaces/x/t.ts"))).unwrap();
+        let mut lines = |level| {
+            isolate.console_to_log(dir.path(), level);
+            rt.block_on(isolate.transform(ADT)).unwrap();
+            let text = written.take();
+            text.lines().map(|l| l.split_whitespace().collect::<Vec<_>>().join(" ")).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(ConsoleLevel::Debug),
+            [
+                "DEBUG script: d 1 at=interfaces/x/t.ts:2:11",
+                "INFO script: l 2 at=interfaces/x/t.ts:3:11",
+                "WARN script: e 3 at=interfaces/x/t.ts:4:11"
+            ]
+        );
+        assert_eq!(lines(ConsoleLevel::Info).len(), 2);
+        assert_eq!(lines(ConsoleLevel::Warn), ["WARN script: e 3 at=interfaces/x/t.ts:4:11"]);
+        assert!(lines(ConsoleLevel::Off).is_empty());
+    });
+}
+
 fn runaway(result: anyhow::Result<Option<String>>) -> Runaway {
     match result {
         Err(e) => *e.downcast_ref::<Runaway>().unwrap_or_else(|| panic!("not a runaway: {e:#}")),

@@ -47,6 +47,22 @@ pub struct Analysis {
     pub references: Vec<ResourceReference>,
     /// Each file's imports that are project files (same path form as the keys passed in).
     pub imports: BTreeMap<String, Vec<String>>,
+    /// Calls of the global `console` (empty unless diagnostics were asked for).
+    #[serde(default)]
+    pub console: Vec<ConsoleCall>,
+}
+
+/// `console.log(...)` in code: where, and which method.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ConsoleCall {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    /// `log`, `warn`, ...
+    pub method: String,
+    /// Outside every function: it runs once, when the module loads (each start), not per call.
+    #[serde(rename = "topLevel")]
+    pub top_level: bool,
 }
 
 impl Analysis {

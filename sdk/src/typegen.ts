@@ -320,6 +320,34 @@ export function generateTypes(): string {
     toString(): string;
   }
 }
+
+/**
+ * Lines for the engine's log, each with the place it was written from: text as is, objects as
+ * one line of JSON, values joined with spaces. The environment's \`console:\` decides which reach
+ * the log (default \`info\`: all but debug); \`ductus test\` shows every line under its test.
+ * A line in code runs for every message: in prod, use it to look into something, then remove it.
+ */
+interface Console {
+  /** At info. */
+  log(...data: unknown[]): void;
+  /** At info. */
+  info(...data: unknown[]): void;
+  /** At debug: only where the environment says \`console: debug\`. */
+  debug(...data: unknown[]): void;
+  /** At debug, as \`debug\`. */
+  trace(...data: unknown[]): void;
+  /** At warn. */
+  warn(...data: unknown[]): void;
+  /** At warn (the engine's own errors are ERROR). */
+  error(...data: unknown[]): void;
+  /** One value, at info. */
+  dir(value: unknown): void;
+  /** One value as JSON, at info. */
+  table(value: unknown): void;
+  /** "Assertion failed" and the rest, at warn, when \`condition\` is falsy. */
+  assert(condition?: unknown, ...data: unknown[]): void;
+}
+declare var console: Console;
 `;
   return out;
 }

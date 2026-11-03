@@ -72,6 +72,40 @@ adt-in
   engine quarantines a message with the same first line, so the Quarantine page says where too
   ([nuance](../nuances/transforms.md#a-thrown-errors-reason-says-where-it-was-thrown-level-1)).
 
+## Seeing what the code did: `console`
+
+`console.log` in a test, or in the code it runs, is the quick way to see a value. Each line is
+shown under the test that wrote it, whether it passed or failed, marked `│` so it reads apart
+from `ductus test`'s own text, and before the failure it led to:
+
+```text
+$ ductus test
+adt-in
+  ✓ the lab gets the visit (1ms)
+      │ class I for visit V9001
+      │ sent {"segments":["MSH","PV1"]}
+  ✗ a visit without a class is still sent  (interfaces/adt-in/route.test.ts:12:1)
+      │ class  for visit V9001
+      │ no patient class 41
+      expected "IN", got ""
+      at interfaces/adt-in/route.test.ts:15:35
+
+1 passed, 1 failed
+```
+
+- **Every level is shown** (`log`, `info`, `debug`, `warn`, `error`), whatever the environment's
+  [`console:`](../configure/environments.md#console-lines-from-your-code) says: that setting is
+  for the engine's log.
+- **Values**: text as is, numbers and `null` as written, objects and arrays as one line of JSON,
+  an error as its stack, an HL7 message as its text; values are joined with a space. `%s`-style
+  placeholders aren't filled in.
+- **Lines written while the test files load** (at the top of a file, outside any function) are
+  shown first, under `while loading`. A line a test's promise writes after the test ended (one
+  it didn't `await`) lands under the next test
+  ([nuance](../nuances/transforms.md#console-in-tests-each-line-under-the-test-that-wrote-it-level-1)).
+- **Remove them when you're done**: in the engine, a `console.log` in the code runs for every
+  message, and `ductus validate` warns about it for environments that would log it.
+
 ## A test
 
 ```ts
@@ -240,10 +274,20 @@ $ ductus test --interface adt-in --filter "visits" --json
 {"type":"summary","passed":0,"failed":1,"ms":36}
 ```
 
+The tests above that log ([`console`](#seeing-what-the-code-did-console)) carry what they wrote:
+
+```text
+$ ductus test --json
+{"type":"test","interface":"adt-in","name":"the lab gets the visit","file":"interfaces/adt-in/route.test.ts","line":6,"column":1,"output":"class I for visit V9001\nsent {\"segments\":[\"MSH\",\"PV1\"]}\n","ok":true,"ms":1}
+{"type":"test","interface":"adt-in","name":"a visit without a class is still sent","file":"interfaces/adt-in/route.test.ts","line":12,"column":1,"output":"class  for visit V9001\nno patient class 41\n","error":"expected \"IN\", got \"\"","failure":{"file":"interfaces/adt-in/route.test.ts","line":15,"column":35},"expected":"\"IN\"","actual":"\"\"","ok":false,"ms":1}
+{"type":"summary","passed":1,"failed":1,"ms":25}
+```
+
 | Field | On | What it is |
 |---|---|---|
-| `type` | every line | `test`, `load` (an interface whose test files didn't load: `interface` and `error` only) or `summary` |
-| `interface` | `test`, `load` | the interface the test file belongs to |
+| `type` | every line | `test`, `output` (what an interface's test files wrote to `console` while loading, before its first test line), `load` (an interface whose test files didn't load: `interface`, `error` and `output`) or `summary` |
+| `interface` | `test`, `output`, `load` | the interface the test file belongs to |
+| `output` | `test`, `output`, `load`, when something was written | the `console` lines, each ending in `\n`; absent when nothing was written. Nothing else reaches stdout or stderr with `--json` |
 | `name` | `test` | the name given to `test(...)` |
 | `file`, `line`, `column` | `test` | where the `test(...)` call is: the file relative to the project, with `/`; line and column from 1, on the `.ts` as written |
 | `ok`, `ms` | `test`, when run | whether it passed, and how long it took |

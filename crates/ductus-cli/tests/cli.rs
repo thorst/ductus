@@ -455,6 +455,120 @@ fn test_reports_where_tests_are_and_where_they_failed_as_text_and_json() {
     assert!(!ok && out.contains("no test's name contains `nothing like it`"), "{out}");
 }
 
+/// A project whose code and tests write to `console`: at load, in a passing test, in the code under
+/// test and in a failing one. Its environments: dev logs everything, prod isn't set (`info`),
+/// test only warnings.
+fn logging() -> tempfile::TempDir {
+    project(&[
+        (
+            "interfaces/adt/interface.yaml",
+            "name: adt\nsource: { mllp: { port: 6661 } }\nscript: route.ts\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestination: { file: { dir: out } }\n",
+        ),
+        (
+            "interfaces/adt/route.ts",
+            "import type { Message } from \"@ductus/sdk\";\nconsole.log(\"route.ts loaded\");\n\nexport function transform(m: Message) {\n  console.log(\"routing\", m.get(\"MSH-10\"));\n  console.warn(\"no PV1\");\n  return m;\n}\n",
+        ),
+        (
+            "interfaces/adt/route.test.ts",
+            r#"import { parse, test, expect } from "@ductus/sdk";
+import { transform } from "./route.ts";
+
+test("logs", () => {
+  console.log("checking", { id: 7 });
+  transform(parse("MSH|^~\\&|A|B|C|D|20260101||ADT^A01|42|P|2.5\r"));
+});
+
+test("silent", () => {});
+
+test("logs, then fails", () => {
+  console.error("about to fail");
+  expect(1).toBe(2);
+});
+"#,
+        ),
+        ("environments/dev.yaml", "console: debug\n"),
+        ("environments/prod.yaml", "variables: {}\n"),
+        ("environments/test.yaml", "console: warn\n"),
+    ])
+}
+
+/// What tests write to `console` is theirs: under each test in the text (whether it passed or
+/// failed), an `output` field in `--json`, and nothing else on stdout or stderr there.
+#[test]
+fn console_output_is_shown_under_its_test_and_kept_out_of_json() {
+    let dir = logging();
+    let (ok, out) = ductus(dir.path(), &["test"]);
+    assert!(!ok, "{out}");
+    for expected in [
+        "adt\n  while loading\n      │ route.ts loaded\n  ✓ logs (",
+        "ms)\n      │ checking {\"id\":7}\n      │ routing 42\n      │ no PV1\n  ✓ silent (",
+        "  ✗ logs, then fails  (interfaces/adt/route.test.ts:11:1)\n      │ about to fail\n      expected 2, got 1\n",
+    ] {
+        assert!(out.contains(expected), "missing {expected:?} in\n{out}");
+    }
+
+    let (ok, out) = ductus(dir.path(), &["test", "--json"]);
+    assert!(!ok, "{out}");
+    let lines = json_lines(&out); // stdout and stderr: every line JSON
+    assert_eq!(lines.len(), 5, "{out}");
+    assert_eq!(lines[0], serde_json::json!({ "type": "output", "interface": "adt", "output": "route.ts loaded\n" }));
+    assert_eq!(keys(&lines[1]), ["column", "file", "interface", "line", "ms", "name", "ok", "output", "type"]);
+    assert_eq!(lines[1]["output"], "checking {\"id\":7}\nrouting 42\nno PV1\n");
+    assert!(lines[2].get("output").is_none(), "{}", lines[2]);
+    assert_eq!(lines[3]["output"], "about to fail\n");
+    assert_eq!(lines[4]["type"], "summary");
+
+    // A test file that fails to load: what it wrote until then, with the error.
+    std::fs::write(
+        dir.path().join("interfaces/adt/route.test.ts"),
+        "console.log(\"starting\");\nthrow new Error(\"no\");\n",
+    )
+    .unwrap();
+    let (ok, out) = ductus(dir.path(), &["test", "--json"]);
+    assert!(!ok, "{out}");
+    let lines = json_lines(&out);
+    assert_eq!((&lines[0]["type"], &lines[0]["output"]), (&"load".into(), &"starting\n".into()));
+}
+
+/// `console` is declared for interface code, and `validate` warns about each call an environment
+/// writes to its log (`DUC206`), except where it says `console: debug`; tests' own calls never.
+#[test]
+fn validate_warns_about_console_calls_an_environment_logs() {
+    let dir = logging();
+    let (ok, out) = ductus(dir.path(), &["validate"]);
+    assert!(ok && !out.contains("TS2584") && !out.contains("console."), "dev logs everything: {out}");
+
+    let (ok, out) = ductus(dir.path(), &["validate", "--env", "prod", "--json"]);
+    assert!(ok, "a warning: {out}");
+    let document: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let found: Vec<(String, u64, String)> = document["findings"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["code"] == "DUC206")
+        .map(|f| {
+            (f["file"].as_str().unwrap().into(), f["line"].as_u64().unwrap(), f["message"].as_str().unwrap().into())
+        })
+        .collect();
+    assert_eq!(
+        found.iter().map(|f| (f.0.as_str(), f.1)).collect::<Vec<_>>(),
+        [("interfaces/adt/route.ts", 2), ("interfaces/adt/route.ts", 5), ("interfaces/adt/route.ts", 6)]
+    );
+    assert!(
+        found[0].2.contains(
+            "console.log(): environment `prod` writes it to the log at every start (`console:` isn't set, so `info`)"
+        ),
+        "{}",
+        found[0].2
+    );
+    assert!(found[1].2.contains("for every message this code runs for"), "{}", found[1].2);
+
+    let (ok, out) = ductus(dir.path(), &["validate", "--env", "test"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("interfaces/adt/route.ts:6:3 console.warn(): environment `test` writes it to the log for every message this code runs for (`console: warn`)"), "{out}");
+    assert!(!out.contains("console.log()"), "warn lets only warn and error through: {out}");
+}
+
 /// `ductus validate --json` gives every finding a code, a severity, who found it, and the file
 /// with the line and column of the key or code it's about (a wrong value inside a destination, the
 /// `transform` naming a missing function, a missing `${...}`, a port two interfaces want, a

@@ -27,7 +27,7 @@ pub mod tls;
 pub mod yaml;
 
 pub use config::InterfaceConfig;
-pub use env::Environment;
+pub use env::{ConsoleLevel, Environment};
 pub use resources::Resources;
 pub use retention::{Quarantined, Retention};
 

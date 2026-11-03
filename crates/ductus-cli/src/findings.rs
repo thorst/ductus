@@ -294,7 +294,7 @@ pub const CODES: &[Code] = &[
         "DUC102",
         "error",
         "An environment file has a setting it doesn't know",
-        "`environments/<env>.yaml` has a key other than `variables`, or a value of the wrong kind. Put every value under `variables:`.",
+        "`environments/<env>.yaml` has a key other than `variables` and `console`, or a value of the wrong kind (`console` is `debug`, `info`, `warn` or `off`). Put every value under `variables:`.",
     ),
     code(
         "DUC104",
@@ -454,6 +454,12 @@ pub const CODES: &[Code] = &[
         "warning",
         "An interface doesn't say which systems it connects",
         "Name the sending and receiving application or vendor (`about.from`, `about.to`, or on the destination), so `ductus impact` can find it. An error with `require_about: true` in ductus.yaml.",
+    ),
+    code(
+        "DUC206",
+        "warning",
+        "Code writes to the log for every message in this environment",
+        "A `console` call (not in a test) whose lines the environment's `console:` lets through (`info` when it isn't set): each message the code runs for adds a log line, kept with the engine's own. Fine while looking into something; then remove it, or set `console: warn` (or `off`) in `environments/<env>.yaml`. Not reported for an environment that says `console: debug` (development and test, where logging everything is the point).",
     ),
     code(
         "DUC210",

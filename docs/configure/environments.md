@@ -126,6 +126,71 @@ databases:
 - **Rotating a secret:** `ductus secret set` the new value, commit, deploy (`systemctl reload
   ductus` on Linux). Rotating the *key* means setting every secret again with the new key.
 
+## Console lines from your code
+
+Interface code can write lines for the engine's log with `console.log` (and `info`, `debug`,
+`warn`, `error`). Each environment says which of them the log takes, with
+[`console`](../reference/config/environment.md#console), so the code doesn't have to ask where
+it runs (`if (!isProd()) console.log(...)`): log freely while developing, and let production
+keep only what it should.
+
+```yaml
+# environments/dev.yaml
+variables:
+  EPIC_PORT: 6661
+console: debug
+```
+
+```yaml
+# environments/prod.yaml
+variables:
+  EPIC_PORT: 6661
+console: warn
+```
+
+| `console:` | The log takes | For |
+|---|---|---|
+| `debug` | every line, `console.debug` and `console.trace` included | development and test environments: logging everything is the point there |
+| `info` (the default) | `console.log`, `info`, `warn` and `error` | looking into something in production for a while |
+| `warn` | `console.warn` and `console.error` only | production, as `ductus init` writes it |
+| `off` | none | an environment that should log nothing from code |
+
+- **Where the lines go**: the engine's log, with its own lines (`journalctl -u ductus` on Linux,
+  the log files on Windows), as `INFO script: sent 41 {"pid":"100001"}
+  at=interfaces/adt-in/route.ts:4:11`: `script` names the code as the source, `at` the line that
+  wrote it. `console.error` is logged as a warning: the log's errors are the engine's own, and on
+  Windows each becomes an Event Log entry. ([Logs](../operate/logs.md#lines-from-interface-code).)
+- **A line in code runs for every message.** One `console.log` a message measured 75–81 µs on
+  one thread (the realistic transform it was added to took 82–83 µs) and 86 bytes of log, and
+  journald keeps at most 10,000 lines per 30 s from the engine by default, dropping the rest,
+  the engine's own included ([nuance](../nuances/transforms.md#a-console-line-in-code-is-written-for-every-message-level-2)).
+  A line the environment doesn't take costs only working out its values (2.6–4.6 µs there).
+- **`ductus validate` reminds you**: for an environment that isn't `debug`, each `console` call
+  it would log is a warning (`DUC206`), so a line left in from a debugging session shows up before
+  it reaches production, and a production switched to `info` to look into something keeps saying
+  so until it's back to `warn`:
+
+```text
+$ ductus validate --env prod
+environment: prod
+✓ adt-in: config and code load
+⚠ interfaces/adt-in/route.ts:4:3 console.log(): environment `prod` writes it to the log for every message this code runs for (`console:` isn't set, so `info`); remove it once you've seen what you needed, or set `console: warn` (or `off`) in environments/prod.yaml
+⚠ interfaces/adt-in/route.ts:5:32 console.warn(): environment `prod` writes it to the log for every message this code runs for (`console:` isn't set, so `info`); remove it once you've seen what you needed, or set `console: warn` (or `off`) in environments/prod.yaml
+note: not checked against a database (set DUCTUS_DATABASE_URL): lanes that would strand waiting messages, retention changes
+✓ types: no errors
+
+valid
+```
+
+- **Tests show every line** under the test that wrote it, whatever this says
+  ([testing](../write/testing.md#seeing-what-the-code-did-console)).
+- **The engine's start says the level**: `started interfaces=… console=warn`.
+
+**When not to use `console`:** for what someone needs to find later about a message. The engine
+already keeps each message, what every destination decided and why (the message view, `ductus
+replay`); a quarantine's reason (`throw quarantine("…")`) or a kill's (`kill("…")`) is stored
+with the message, where a log line scrolls away.
+
 ## Choosing environment names
 
 `dev` (the default), `test` and `prod` cover most teams; any name works (`staging`,

@@ -113,7 +113,11 @@ pub fn spawn_thread(
                 tokio::runtime::Builder::new_current_thread().enable_all().build().expect("building worker runtime");
             let local = tokio::task::LocalSet::new();
             local.block_on(&runtime, async move {
+                let console = services.console();
                 let mut host = Isolate::new(Some(Rc::new(services)), heap_mb);
+                if let Some(job) = jobs.first() {
+                    host.console_to_log(job.config.project_root(), console);
+                }
                 let mut loaded = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     let config = &job.config;

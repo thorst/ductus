@@ -81,6 +81,8 @@ require_about: false
 # secrets/dev.json (`ductus secret set NAME`) as ${secret:NAME}.
 variables: {}
 #  PATIENT_DB_HOST: localhost
+# Every `console` line from interface code goes to the log here, console.debug included.
+console: debug
 "#,
     ),
     (
@@ -90,6 +92,9 @@ variables: {}
 # production values.
 variables: {}
 #  PATIENT_DB_HOST: patients.hospital.local
+# Only console.warn and console.error reach the log here: console.log lines stay in dev. To look
+# into something for a while, `info`, then back to `warn` (validate reminds you meanwhile).
+console: warn
 "#,
     ),
     (

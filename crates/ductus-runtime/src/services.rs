@@ -428,6 +428,11 @@ impl EngineServices {
     pub(crate) fn new(shared: Arc<SharedServices>, own: Pools) -> Self {
         Self { shared, own }
     }
+
+    /// Which `console` lines from interface code reach the log (the environment's `console:`).
+    pub(crate) fn console(&self) -> ductus_core::ConsoleLevel {
+        self.shared.env.console()
+    }
 }
 
 impl Services for EngineServices {

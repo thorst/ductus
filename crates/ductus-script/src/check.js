@@ -142,6 +142,33 @@ function findResources(checker, sourceFile) {
   return { references, lints };
 }
 
+/**
+ * Calls of the global `console`'s methods (`console.log(...)`), with the method: validate warns
+ * about those an environment would write to its log. A local named `console` isn't it.
+ */
+function findConsoleCalls(checker, sourceFile) {
+  const calls = [];
+  // Outside every function the call runs once, when the module loads; inside one, per call.
+  const visit = (node, inFunction) => {
+    if (ts.isCallExpression(node)) {
+      const callee = unwrap(node.expression);
+      if (ts.isPropertyAccessExpression(callee)) {
+        const target = unwrap(callee.expression);
+        if (ts.isIdentifier(target) && target.text === "console") {
+          const decl = checker.getSymbolAtLocation(target)?.declarations?.[0];
+          if (!decl || decl.getSourceFile().isDeclarationFile) {
+            calls.push({ start: node.getStart(sourceFile), method: callee.name.text, topLevel: !inFunction });
+          }
+        }
+      }
+    }
+    const inside = inFunction || ts.isFunctionLike(node) || ts.isClassStaticBlockDeclaration(node);
+    ts.forEachChild(node, (child) => visit(child, inside));
+  };
+  visit(sourceFile, false);
+  return calls;
+}
+
 /** The project files a file imports (static and dynamic imports, re-exports). */
 function localImports(sourceFile, options, host) {
   const specifiers = [];
@@ -208,6 +235,7 @@ globalThis.__ductus_check = (filesJson, libsJson, sharedJson, wantDiagnostics) =
   const lints = [];
   const references = [];
   const imports = {};
+  const consoleCalls = [];
   for (const sourceFile of program.getSourceFiles()) {
     if (sourceFile.isDeclarationFile || sourceFile.fileName.startsWith(LIB_DIR)) continue;
     const at = (start) => {
@@ -220,6 +248,9 @@ globalThis.__ductus_check = (filesJson, libsJson, sharedJson, wantDiagnostics) =
     if (!wantDiagnostics) continue;
     for (const f of lintSharedPool(sourceFile, shared.has(sourceFile.fileName)).concat(found.lints)) {
       lints.push({ ...at(f.start), code: f.code, category: "warning", message: f.message });
+    }
+    for (const c of findConsoleCalls(checker, sourceFile)) {
+      consoleCalls.push({ ...at(c.start), method: c.method, topLevel: c.topLevel });
     }
   }
   if (!wantDiagnostics) return JSON.stringify({ diagnostics: [], references, imports });
@@ -240,5 +271,5 @@ globalThis.__ductus_check = (filesJson, libsJson, sharedJson, wantDiagnostics) =
       message: ts.flattenDiagnosticMessageText(d.messageText, "\n"),
     };
   });
-  return JSON.stringify({ diagnostics: diagnostics.concat(lints), references, imports });
+  return JSON.stringify({ diagnostics: diagnostics.concat(lints), references, imports, console: consoleCalls });
 };

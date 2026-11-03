@@ -1,0 +1,2 @@
+# Not a level: debug, info, warn or off.
+console: verbose

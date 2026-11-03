@@ -1678,10 +1678,13 @@ dependencies = [
  "deno_ast",
  "deno_core",
  "deno_error",
+ "ductus-core",
  "serde",
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

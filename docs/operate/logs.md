@@ -30,7 +30,7 @@ INFO ductus_runtime: the engine's database database=plain, no TLS: the server do
 INFO ductus_runtime::alerts: alerts on channels=1 rules=2 heartbeat=false
 INFO ductus_runtime::certificates: no connection has a certificate: scheduled checks have nothing to do
 INFO ductus_runtime::api: REST API listening (/api/v1) host=127.0.0.1 port=7700 https=false
-INFO ductus_runtime: started interfaces=1 mllp=1 http=0 files=0 schedules=0 internal=0 shared=1 pool_threads=8 dedicated_threads=0 took=299.820201ms
+INFO ductus_runtime: started interfaces=1 mllp=1 http=0 files=0 schedules=0 internal=0 shared=1 pool_threads=8 dedicated_threads=0 console=info took=299.820201ms
 WARN ductus_runtime::api::status: destination paused interface=adt-in destination=lab by="ops-probe" reason="lab system upgrade until 14:00, ticket CHG0042"
 INFO ductus_runtime::worker: paused: waiting to be resumed interface=adt-in destination=lab slot=0
 WARN ductus_runtime::api::status: destination resumed interface=adt-in destination=lab by="ops-probe"
@@ -50,7 +50,7 @@ INFO ductus_runtime: stopped took=2.217222ms
 
 | Line | Means | Act when |
 |---|---|---|
-| `started interfaces=N … took=` | every interface is up and taking messages; how long the start took | never: it's the "ready" line (systemd's `status` says the same) |
+| `started interfaces=N … console=… took=` | every interface is up and taking messages; which of the code's `console` lines this environment logs ([below](#lines-from-interface-code)); how long the start took | never: it's the "ready" line (systemd's `status` says the same) |
 | `the engine's database database=…` | how the database connection is protected (TLS, verified or not) | it says plain or unverified in production: [TLS to the database](../install/postgres.md#tls-to-the-database) |
 | `delivery failed; retrying in Ns … attempts=N error=…` | a temporary failure; the wait doubles to `max_backoff_ms` | the same id keeps failing: [hotspots](monitoring.md#where-a-backlog-sits-hotspots) |
 | `destination rejected; quarantined … error=` | the receiver refused this message (an AR, a 4xx) | look at it the same day: [resend](resend.md) |
@@ -66,6 +66,33 @@ are said **once a minute** per sender or kind instead: a refused TLS handshake
 connection refused by `allow:` ([nuance](../nuances/allow.md#refusals-are-logged-once-a-minute-per-listener-and-address-level-3)),
 so a misconfigured sender can't flood the log.
 
+## Lines from interface code
+
+What the interfaces' TypeScript writes with `console.log` (and `info`, `debug`, `warn`, `error`)
+is in the same log, from the source `script`, with the line of code that wrote it:
+
+```text
+INFO script: module loaded at=interfaces/con-log/t.ts:2:9
+INFO script: sent 1 {"pid":"100001"} at=interfaces/con-log/t.ts:4:11
+DEBUG script: debug line at=interfaces/con-log/t.ts:5:11
+WARN script: an error line at=interfaces/con-log/t.ts:6:11
+```
+
+- **Which lines** is the environment's
+  [`console:`](../configure/environments.md#console-lines-from-your-code): `debug` all of them,
+  `info` (the default) all but `console.debug`, `warn` only `console.warn` and `console.error`,
+  `off` none. The start line says which (`console=warn`). `RUST_LOG` can only take more away
+  (`info,script=warn`); the engine's default lets the setting decide.
+- **`console.error` is a WARN line**, not ERROR: ERROR lines are the engine's own failures (on
+  Windows each kind becomes an Event Log entry, and operations watch them).
+- **Grep them** by source and place: `grep 'script:.*at=interfaces/adt-in/'`.
+- **They can hold patient data.** Unlike the engine's own lines, a `console.log(msg)` writes
+  whatever the code gives it, and the log is kept and read with less care than the message store
+  (the journal's own rules, readable by its `adm` group). Log ids and decisions, not payloads.
+- **Volume**: each line is written for every message the code runs for; journald keeps at most
+  10,000 lines per 30 s from one service by default and drops the rest, the engine's own lines
+  included ([nuance](../nuances/transforms.md#a-console-line-in-code-is-written-for-every-message-level-2)).
+
 ## When a sender says "connection refused"
 
 The engine logs every refusal it makes, with the reason. If there's no line for the sender's
@@ -80,5 +107,6 @@ server.
 - **Message content.** The log names messages by id (`id=381`) and never prints a payload. Error
   texts are the receiver's answer and your code's quarantine reasons, which can quote a value:
   write reasons that name the field, not the patient. Look a message up by its id in the console.
+  The exception is what your own code writes with `console` ([above](#lines-from-interface-code)).
 - **Who read what.** That's the [audit log](cli.md#who-did-what-ductus-audit-export), kept six
   years, not the service log, kept days.

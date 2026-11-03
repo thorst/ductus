@@ -178,7 +178,10 @@ impl Replay {
     async fn run(self, configs: Vec<InterfaceConfig>, shared: Arc<SharedServices>, heap_mb: usize) -> Result<()> {
         let calls = Rc::new(RefCell::new(Calls::default()));
         let services = ReplayServices { inner: EngineServices::new(shared, Default::default()), calls: calls.clone() };
+        let console = services.inner.console();
         let mut isolate = Isolate::new(Some(Rc::new(services)), heap_mb);
+        // Never on stdout, which is `--json`'s or `--emit`'s (`ductus replay` logs nothing by default).
+        isolate.console_to_log(&self.options.root, console);
         isolate.pin_clock()?;
         // Top-level code of the interfaces' modules runs as the period starts.
         isolate.set_clock(self.options.from.timestamp_millis() as f64, 0)?;

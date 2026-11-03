@@ -11,7 +11,7 @@ Codes are stable: a check keeps its code, a new check gets a new one, and a reti
 | Code | Usually | What it means, and what to do |
 |---|---|---|
 | `DUC100` | error | **An environment file isn't YAML.** `environments/<env>.yaml` doesn't parse: the line and column are where the parser stopped. Usually an indentation or a missing quote. |
-| `DUC102` | error | **An environment file has a setting it doesn't know.** `environments/<env>.yaml` has a key other than `variables`, or a value of the wrong kind. Put every value under `variables:`. |
+| `DUC102` | error | **An environment file has a setting it doesn't know.** `environments/<env>.yaml` has a key other than `variables` and `console`, or a value of the wrong kind (`console` is `debug`, `info`, `warn` or `off`). Put every value under `variables:`. |
 | `DUC104` | error | **The environment can't be loaded.** `--env` names an environment with no file in `environments/`, or its secrets (`secrets/<env>.json`) can't be read. Check the name, or create the file. |
 | `DUC110` | error | **resources.yaml isn't YAML.** It doesn't parse: the line and column are where the parser stopped. |
 | `DUC111` | error | **resources.yaml uses a value the environment doesn't have.** A `${NAME}` or `${secret:NAME}` has no value in this environment: the place is the first one missing; the message lists them all. Add it to `environments/<env>.yaml`, or set the secret with `ductus secret set NAME --env <env>`. |
@@ -41,6 +41,7 @@ Codes are stable: a check keeps its code, a new check gets a new one, and a reti
 | `DUC203` | error | **Code names a resource resources.yaml doesn't have.** `db("name")` or `api("name")` in TypeScript: the place is the call. |
 | `DUC204` | warning | **An internal interface gets nothing.** It has `source: internal` but no interface routes to it. |
 | `DUC205` | warning | **An interface doesn't say which systems it connects.** Name the sending and receiving application or vendor (`about.from`, `about.to`, or on the destination), so `ductus impact` can find it. An error with `require_about: true` in ductus.yaml. |
+| `DUC206` | warning | **Code writes to the log for every message in this environment.** A `console` call (not in a test) whose lines the environment's `console:` lets through (`info` when it isn't set): each message the code runs for adds a log line, kept with the engine's own. Fine while looking into something; then remove it, or set `console: warn` (or `off`) in `environments/<env>.yaml`. Not reported for an environment that says `console: debug` (development and test, where logging everything is the point). |
 | `DUC210` | error | **A TLS setting names the wrong certificate.** A listener's `tls.certificate`, or a connection's `ca` or `certificate`, names an entry `certificates:` doesn't have, or one of the wrong kind (a CA where a pair is needed, or the other way round). |
 | `DUC211` | error | **A certificate doesn't load.** A `certificates:` entry's files can't be read, don't match their key, or have expired: the engine would refuse to start. |
 | `DUC212` | warning | **A certificate expires within 30 days.** Renew it: the engine alerts too, 30, 14 and 7 days before. |

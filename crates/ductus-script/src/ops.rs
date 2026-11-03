@@ -4,6 +4,7 @@
 
 use deno_core::{OpState, op2};
 use deno_error::JsErrorBox;
+use ductus_core::ConsoleLevel;
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -118,9 +119,96 @@ fn op_ductus_secret(state: &mut OpState, #[string] name: String) -> Result<Optio
     services(state)?.secret(&name).map_err(js_error)
 }
 
+/// Where interface code's `console` lines go (kept in the isolate's `OpState`; `Log` with no root
+/// and every level when nothing was set).
+pub enum Console {
+    /// The engine's log (target `script`), each line with the place in the project it was
+    /// written from; `lowest` is the environment's `console:`.
+    Log { root: Option<crate::errors::Root>, lowest: ConsoleLevel },
+    /// Kept for whoever reads them (`ductus test`, per test): every level, no places.
+    Captured(String),
+}
+
+/// A line's level as ops.js numbers it.
+fn console_level(level: u32) -> ConsoleLevel {
+    match level {
+        0 => ConsoleLevel::Debug,
+        1 => ConsoleLevel::Info,
+        _ => ConsoleLevel::Warn,
+    }
+}
+
+/// Whether the log takes a line of this level: the environment's `console:`, then the log's
+/// filter (`RUST_LOG`), so a line nobody reads isn't even formatted.
+fn logged(lowest: ConsoleLevel, level: ConsoleLevel) -> bool {
+    lowest.lets_through(level)
+        && match level {
+            ConsoleLevel::Debug => tracing::enabled!(target: "script", tracing::Level::DEBUG),
+            ConsoleLevel::Info => tracing::enabled!(target: "script", tracing::Level::INFO),
+            _ => tracing::enabled!(target: "script", tracing::Level::WARN),
+        }
+}
+
+/// 0: drop the line; 1: its text; 2: its text and the stack it was written from.
+#[op2(fast)]
+fn op_ductus_console_wants(state: &mut OpState, level: u32) -> u32 {
+    match state.try_borrow::<Console>() {
+        Some(Console::Captured(_)) => 1,
+        Some(Console::Log { lowest, .. }) => 2 * logged(*lowest, console_level(level)) as u32,
+        None => 2 * logged(ConsoleLevel::Debug, console_level(level)) as u32,
+    }
+}
+
+#[op2(fast)]
+fn op_ductus_console(state: &mut OpState, level: u32, #[string] text: &str, #[string] stack: &str) {
+    let root = match state.try_borrow_mut::<Console>() {
+        Some(Console::Captured(lines)) => {
+            lines.push_str(text);
+            lines.push('\n');
+            return;
+        }
+        Some(Console::Log { root, .. }) => root.as_ref(),
+        None => None,
+    };
+    // The first frame in project code (the SDK's and ops.js's own aren't `file://`).
+    let place = stack
+        .lines()
+        .filter(|l| !crate::errors::internal(l))
+        .find_map(crate::errors::frame)
+        .map(|f| {
+            let file = root.map(|r| r.relative(&f.url)).unwrap_or(f.url);
+            format!("{file}:{}:{}", f.line, f.column)
+        })
+        .unwrap_or_default();
+    match console_level(level) {
+        ConsoleLevel::Debug => tracing::debug!(target: "script", at = %place, "{text}"),
+        ConsoleLevel::Info => tracing::info!(target: "script", at = %place, "{text}"),
+        _ => tracing::warn!(target: "script", at = %place, "{text}"),
+    }
+}
+
+/// The captured lines since the last take (empty when they go to the log).
+#[op2]
+#[string]
+fn op_ductus_console_take(state: &mut OpState) -> String {
+    match state.try_borrow_mut::<Console>() {
+        Some(Console::Captured(lines)) => std::mem::take(lines),
+        _ => String::new(),
+    }
+}
+
 deno_core::extension!(
     ductus_ops,
-    ops = [op_ductus_db_query, op_ductus_db_execute, op_ductus_fetch, op_ductus_variable, op_ductus_secret],
+    ops = [
+        op_ductus_db_query,
+        op_ductus_db_execute,
+        op_ductus_fetch,
+        op_ductus_variable,
+        op_ductus_secret,
+        op_ductus_console_wants,
+        op_ductus_console,
+        op_ductus_console_take
+    ],
     esm_entry_point = "ext:ductus_ops/ops.js",
     esm = [dir "src", "ops.js"],
 );

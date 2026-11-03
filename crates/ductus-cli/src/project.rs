@@ -207,6 +207,12 @@ struct TestReport {
     failed_at: Option<Where>,
     expected: Option<String>,
     actual: Option<String>,
+    output: Option<String>,
+}
+
+/// A test's `console` lines under it, marked as its own (`│`) so they read apart from ours.
+fn output_lines(output: &str) -> String {
+    output.lines().map(|l| format!("      │ {l}")).collect::<Vec<_>>().join("\n")
 }
 
 #[derive(serde::Deserialize)]
@@ -275,25 +281,42 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
             .as_ref()
             .map(|c| c.format_spec())
             .unwrap_or_else(|_| ductus_script::DEFAULT_FORMATS.to_string());
-        let report = match Isolate::tests(&paths, &serde_json::to_string(&fixtures)?, &formats).await {
-            Ok(mut isolate) => isolate.run_tests_with(&runner_options).await,
-            Err(e) => Err(e),
+        // What the test files and the code they import wrote to `console` while loading.
+        let (report, loading) = match Isolate::tests(&paths, &serde_json::to_string(&fixtures)?, &formats).await {
+            Ok(mut isolate) => {
+                let loading = isolate.take_console();
+                (isolate.run_tests_with(&runner_options).await, loading)
+            }
+            Err(failed) => (Err(failed.error), failed.output),
         };
         let report = match report {
             Ok(r) => r,
             Err(e) => {
                 let error = project.readable(&format!("{e:#}"));
-                say(format!("{label}\n  ✗ failed to load tests\n{}", indent(&error, 6)));
-                emit(serde_json::json!({ "type": "load", "interface": label, "error": error }));
+                let mut text = format!("{label}\n  ✗ failed to load tests\n");
+                if !loading.is_empty() {
+                    text.push_str(&format!("{}\n", output_lines(&loading)));
+                }
+                text.push_str(&indent(&error, 6));
+                say(text);
+                let mut line = serde_json::json!({ "type": "load", "interface": label, "error": error });
+                if !loading.is_empty() {
+                    line["output"] = loading.into();
+                }
+                emit(line);
                 failed += 1;
                 continue;
             }
         };
         let results: Vec<TestReport> = serde_json::from_str(&report)?;
-        if results.is_empty() {
+        if results.is_empty() && loading.is_empty() {
             continue; // nothing matched the filter here
         }
         say(label.clone());
+        if !loading.is_empty() {
+            say(format!("  while loading\n{}", output_lines(&loading)));
+            emit(serde_json::json!({ "type": "output", "interface": label, "output": loading }));
+        }
         for r in results {
             found += 1;
             let place = r.at.as_ref().map(|w| w.text(project)).unwrap_or_default();
@@ -302,11 +325,16 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
                 line["file"] = project.relative(&at.url).into();
                 (line["line"], line["column"]) = (at.line.into(), at.column.into());
             }
+            // Its output first: it was written before the failure (if any) below.
+            let output = r.output.as_deref().map(|o| format!("\n{}", output_lines(o))).unwrap_or_default();
+            if let Some(o) = &r.output {
+                line["output"] = o.as_str().into();
+            }
             match r.ok {
                 None => say(format!("  {}  ({place})", r.name)),
                 Some(true) => {
                     passed += 1;
-                    say(format!("  ✓ {} ({}ms)", r.name, r.ms.unwrap_or(0)));
+                    say(format!("  ✓ {} ({}ms){output}", r.name, r.ms.unwrap_or(0)));
                 }
                 Some(false) => {
                     failed += 1;
@@ -318,7 +346,7 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
                     {
                         shown.push_str(&format!("\nat {}", w.text(project)));
                     }
-                    say(format!("  ✗ {}  ({place})\n{}", r.name, indent(&shown, 6)));
+                    say(format!("  ✗ {}  ({place}){output}\n{}", r.name, indent(&shown, 6)));
                     line["error"] = error.into();
                     if let Some(w) = &r.failed_at {
                         line["failure"] = w.json(project);
@@ -819,6 +847,36 @@ async fn check_project(
                     report.add(finding);
                 }
             }
+        }
+    }
+
+    // `console` lines this environment writes to its log for every message: fine for a while, to
+    // look into something, but not to keep (an environment saying `console: debug` is one where
+    // logging everything is the point). Tests' own lines only show in `ductus test`.
+    let lowest = env.console();
+    if lowest != ductus_core::ConsoleLevel::Debug {
+        let setting = format!("environments/{}.yaml", env.name);
+        let level = match env.console_written() {
+            true => format!("`console: {}`", lowest.as_str()),
+            false => "`console:` isn't set, so `info`".to_string(),
+        };
+        for call in analysis.console.iter().filter(|c| !c.file.ends_with(".test.ts")) {
+            if !lowest.lets_through(ductus_core::ConsoleLevel::of_method(&call.method)) {
+                continue;
+            }
+            let at = relative(root, &call.file);
+            let how_often = if call.top_level { "at every start" } else { "for every message this code runs for" };
+            let finding = Finding::warning(
+                "DUC206",
+                format!(
+                    "{at}:{}:{} console.{}(): environment `{}` writes it to the log {how_often} ({level}); remove it once you've seen what you needed, or set `console: warn` (or `off`) in {setting}",
+                    call.line, call.column, call.method, env.name
+                ),
+            )
+            .file(at)
+            .at(call.line, call.column)
+            .hint(format!("remove it, or set `console: warn` (or `off`) in {setting}"));
+            report.add(finding);
         }
     }
 
@@ -1511,7 +1569,9 @@ fn indent(text: &str, n: usize) -> String {
 async fn load_functions(config: &ductus_core::InterfaceConfig, script: &Path) -> Result<()> {
     let functions = config.functions();
     let functions: Vec<(&str, &str)> = functions.iter().map(|(n, f)| (n.as_str(), f.as_str())).collect();
-    Isolate::host().add_functions(script, &functions, config.timeout).await.map(drop)
+    let mut isolate = Isolate::host();
+    isolate.capture_console(); // top-level `console` lines: never among validate's output
+    isolate.add_functions(script, &functions, config.timeout).await.map(drop)
 }
 
 pub(crate) fn first_line(text: &str) -> &str {

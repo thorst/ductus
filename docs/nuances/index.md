@@ -25,7 +25,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Order, retries and durability](ordering.md) (7)
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
-- [Writing transforms](transforms.md) (14)
+- [Writing transforms](transforms.md) (16)
 - [Shared pool](shared-pool.md) (3)
 - [Runaway scripts](runaway.md) (6)
 - [Databases and APIs](databases-and-apis.md) (5)
@@ -48,7 +48,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Upgrades](upgrades.md) (15)
 - [Windows](windows.md) (9)
 
-## Level 1: Foundations (26)
+## Level 1: Foundations (27)
 
 - [Retention is 1, 3 or 7 weeks, not any number of days](retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1) (Retention)
 - [Missing fields read as "" and never throw](transforms.md#missing-fields-read-as--and-never-throw-level-1) (Writing transforms)
@@ -56,6 +56,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Fixtures can be read only inside a test](transforms.md#fixtures-can-be-read-only-inside-a-test-level-1) (Writing transforms)
 - [A thrown error's reason says where it was thrown](transforms.md#a-thrown-errors-reason-says-where-it-was-thrown-level-1) (Writing transforms)
 - [A test filter matches part of a name](transforms.md#a-test-filter-matches-part-of-a-name-level-1) (Writing transforms)
+- [`console` in tests: each line under the test that wrote it](transforms.md#console-in-tests-each-line-under-the-test-that-wrote-it-level-1) (Writing transforms)
 - [A quoted number in an environment file is text](transforms.md#a-quoted-number-in-an-environment-file-is-text-level-1) (Writing transforms)
 - [A destination's owner is its interface's unless it says otherwise](impact.md#a-destinations-owner-is-its-interfaces-unless-it-says-otherwise-level-1) (Impact and `about:`)
 - [Moving ownership in the web UI is a preview, not a change](impact.md#moving-ownership-in-the-web-ui-is-a-preview-not-a-change-level-1) (Impact and `about:`)
@@ -77,7 +78,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (85)
+## Level 2: Practitioner (86)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -97,6 +98,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Copy what you change, not the whole thing through JSON](transforms.md#copy-what-you-change-not-the-whole-thing-through-json-level-2) (Writing transforms)
 - [With `split: records`, `input()` gives a fixture's first record](transforms.md#with-split-records-input-gives-a-fixtures-first-record-level-2) (Writing transforms)
 - [A place's precision in `validate --json` depends on the file](transforms.md#a-places-precision-in-validate---json-depends-on-the-file-level-2) (Writing transforms)
+- [A `console` line in code is written for every message](transforms.md#a-console-line-in-code-is-written-for-every-message-level-2) (Writing transforms)
 - [Interfaces share a global scope](shared-pool.md#interfaces-share-a-global-scope-level-2) (Shared pool)
 - [Module-level caches live until the engine restarts](shared-pool.md#module-level-caches-live-until-the-engine-restarts-level-2) (Shared pool)
 - [`timeout` counts time without pausing, not total time](runaway.md#timeout-counts-time-without-pausing-not-total-time-level-2) (Runaway scripts)

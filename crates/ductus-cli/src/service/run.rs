@@ -253,7 +253,7 @@ fn log_to_files(context: String) -> Result<tracing_appender::non_blocking::Worke
     tracing_subscriber::registry()
         .with(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info,sqlx=warn,rustls_platform_verifier=off,tiberius=error".into()),
+                .unwrap_or_else(|_| "info,sqlx=warn,rustls_platform_verifier=off,tiberius=error,script=debug".into()),
         )
         .with(tracing_subscriber::fmt::layer().with_ansi(false).with_writer(writer))
         .with(EventLogLayer::new(context))

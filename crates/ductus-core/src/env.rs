@@ -23,6 +23,8 @@ pub struct Environment {
     pub name: String,
     variables: BTreeMap<String, Value>,
     secrets: Option<SecretStore>,
+    /// `console:` as the file has it (None: not written, so `info`).
+    console: Option<ConsoleLevel>,
 }
 
 /// `environments/<name>.yaml`: one environment's values (`dev.yaml`, `test.yaml`,
@@ -46,29 +48,92 @@ pub(crate) struct EnvironmentFile {
     #[serde(default)]
     #[cfg_attr(test, schemars(with = "BTreeMap<String, serde_json::Value>"))]
     pub(crate) variables: BTreeMap<String, Value>,
+    /// Which of interface code's `console` lines reach the engine's log in this environment:
+    /// `debug` (all of them), `info` (`console.log`, `info`, `warn` and `error`), `warn` (only
+    /// `console.warn` and `console.error`) or `off` (none). Code can then log freely and each
+    /// environment decides, instead of `if (notProd) console.log(...)` in the code: `debug` in
+    /// development and test environments, `warn` or `off` in prod. A line in code is written for
+    /// every message the code runs for (a log line each, kept with the engine's own), so in prod
+    /// turn it on to look into something, and back off after: `ductus validate` warns about each
+    /// `console` call an environment lets through, except one that says `debug` (where logging
+    /// everything is the point). `ductus test` shows every line whatever this says. Default:
+    /// `info`. Example: `console: warn`.
+    #[serde(default)]
+    pub(crate) console: Option<ConsoleLevel>,
+}
+
+/// The lowest `console` level written to the engine's log (`console:` in an environment file).
+#[derive(serde::Deserialize, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum ConsoleLevel {
+    /// Every line, `console.debug` and `console.trace` included.
+    Debug,
+    /// `console.log`, `info`, `warn` and `error`.
+    #[default]
+    Info,
+    /// Only `console.warn` and `console.error`.
+    Warn,
+    /// None.
+    Off,
+}
+
+impl ConsoleLevel {
+    /// As written in an environment file.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ConsoleLevel::Debug => "debug",
+            ConsoleLevel::Info => "info",
+            ConsoleLevel::Warn => "warn",
+            ConsoleLevel::Off => "off",
+        }
+    }
+
+    /// The level a `console` method writes at (`log` → info, `error` → warn, ...).
+    pub fn of_method(method: &str) -> Self {
+        match method {
+            "debug" | "trace" => ConsoleLevel::Debug,
+            "warn" | "error" | "assert" => ConsoleLevel::Warn,
+            _ => ConsoleLevel::Info,
+        }
+    }
+
+    /// Whether a line written at `level` reaches the log.
+    pub fn lets_through(self, level: ConsoleLevel) -> bool {
+        self != ConsoleLevel::Off && level >= self
+    }
 }
 
 impl Environment {
     /// Load `<root>/environments/<name>.yaml` and `<root>/secrets/<name>.json` (both optional).
     pub fn load(root: &Path, name: &str) -> Result<Self> {
         let file = root.join("environments").join(format!("{name}.yaml"));
-        let variables = if file.is_file() {
+        let parsed = if file.is_file() {
             let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-            let parsed: EnvironmentFile = match serde_yaml_ng::from_str::<Value>(&text) {
+            match serde_yaml_ng::from_str::<Value>(&text) {
                 Ok(Value::Null) => Ok(EnvironmentFile::default()),
                 Ok(value) => crate::yaml::from_value(value),
                 Err(e) => Err(e.into()),
             }
             .map_err(|e| crate::yaml::syntax(e, &text))
-            .with_context(|| format!("parsing {}", file.display()))?;
-            parsed.variables
+            .with_context(|| format!("parsing {}", file.display()))?
         } else if root.join("environments").is_dir() {
             bail!("unknown environment `{name}`: {} doesn't exist", file.display());
         } else {
-            BTreeMap::new()
+            EnvironmentFile::default()
         };
         let secrets = SecretStore::open(root, name)?;
-        Ok(Self { name: name.to_string(), variables, secrets })
+        Ok(Self { name: name.to_string(), variables: parsed.variables, secrets, console: parsed.console })
+    }
+
+    /// Which `console` lines from interface code reach the log here (`console:`, default `info`).
+    pub fn console(&self) -> ConsoleLevel {
+        self.console.unwrap_or_default()
+    }
+
+    /// Whether the environment file says `console:` (else it's the default, `info`).
+    pub fn console_written(&self) -> bool {
+        self.console.is_some()
     }
 
     /// An environment with just these variables (for tests).
@@ -77,7 +142,7 @@ impl Environment {
             .iter()
             .map(|(k, v)| (k.to_string(), serde_yaml_ng::from_str(v).unwrap_or(Value::String(v.to_string()))))
             .collect();
-        Self { name: name.to_string(), variables, secrets: None }
+        Self { name: name.to_string(), variables, secrets: None, console: None }
     }
 
     pub fn variable(&self, name: &str) -> Option<String> {

@@ -122,6 +122,8 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
 async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions) -> Result<()> {
     let mut phases = Phases::new();
     let env = Environment::load(root, &options.env)?;
+    // Said in the start's line: which of the code's `console` lines this environment logs.
+    let console = env.console().as_str();
     let configs = load_interfaces(root, &env)?;
     phases.mark("interface.yaml files read");
     // Loaded now so a missing variable or secret stops startup; used by interface code (v0.4).
@@ -644,6 +646,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         shared = shared_count,
         pool_threads,
         dedicated_threads = jobs - shared_count,
+        console = %console,
         took = ?phases.total(),
         "{}",
         events::STARTED

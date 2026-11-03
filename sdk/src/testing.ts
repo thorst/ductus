@@ -168,7 +168,12 @@ export interface TestResult {
   /** A failed `toBe`/`toEqual`/`toBeNull`: both values as text (objects as indented JSON). */
   expected?: string;
   actual?: string;
+  /** What the test (and the code it ran) wrote to `console`, a line each; absent when nothing. */
+  output?: string;
 }
+
+// The engine keeps `console` lines while tests run (ops.js); this takes those written since.
+declare const __ductus_console_take: () => string;
 
 const tests: TestCase[] = [];
 /** null until `ductus test` hands them over, which is after the test files have loaded. */
@@ -376,6 +381,9 @@ export async function __runTests(options?: string): Promise<string> {
       }
       results.push(result);
     }
+    // Lines a test's stray promise writes after it finished land in the next test's.
+    const output = __ductus_console_take();
+    if (output !== "") results[results.length - 1].output = output;
   }
   return JSON.stringify(results);
 }

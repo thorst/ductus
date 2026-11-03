@@ -3,3 +3,5 @@ variables:
   PATIENT_DB_HOST: patients.hospital.local
   EPIC_PORT: 6661
   STRICT: true
+# Only console.warn and console.error reach the log here.
+console: warn
