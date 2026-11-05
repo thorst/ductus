@@ -56,5 +56,7 @@ What each state means exactly, and when it shows:
 - **A project change** (new code, a new destination): `ductus test` and `ductus validate --env
   prod` in CI, then deploy. On Linux, `systemctl reload ductus` deploys without refusing a single
   connection ([high availability](high-availability.md#deploying-and-upgrading-without-a-gap)).
+  Each start and handover records what every interface runs, from which commit, by whom and why
+  ([what runs, recorded](deployments.md)).
 - **A shorter retention** deletes messages, so it waits for a confirmation
   ([retention](retention.md#changing-retention)).

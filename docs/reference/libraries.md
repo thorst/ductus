@@ -8,7 +8,7 @@ that only run while the binary is compiled (macros, build scripts), since they s
 Nothing on this page is downloaded when Ductus runs, except Postgres for `ductus dev` (below). The binary
 needs only the operating system's C library on Linux (glibc 2.34 or later).
 
-- Rust crates: **575** (550 in the Linux build, 558 in the Windows build)
+- Rust crates: **631** (604 in the Linux build, 614 in the Windows build)
 - npm packages in the web UI: **102**
 - TypeScript **6.0.3** (Microsoft, Apache-2.0), inside the binary: `ductus validate` and `ductus types` type-check interface code with it
 
@@ -34,6 +34,7 @@ needs only the operating system's C library on Linux (glibc 2.34 or later).
 | `chacha20poly1305` | 0.11.0 | Apache-2.0 OR MIT | Encrypts secrets files | Linux, Windows |
 | `postgresql_embedded` | 0.21.0 | (Apache-2.0 OR MIT) AND PostgreSQL | `ductus dev`: downloads and runs Postgres for a laptop | Linux, Windows |
 | `serde_yaml_ng` | 0.10.0 | MIT | Reads the project's YAML files | Linux, Windows |
+| `gix` | 0.90.0 | MIT OR Apache-2.0 | Reads the project's git commit at each start (gitoxide; no `git` needed on the server) | Linux, Windows |
 | `clap` | 4.6.7 | MIT OR Apache-2.0 | The `ductus` command line | Linux, Windows |
 | `windows-service` | 0.8.1 | MIT OR Apache-2.0 | Runs as a Windows service | Windows |
 | TypeScript | 6.0.3 | Apache-2.0 | Type-checks interface code (`validate`, `types`); kept in `vendor/typescript` | Linux, Windows |
@@ -56,23 +57,23 @@ How many libraries use each license expression (`A OR B`: the library may be use
 
 | License | Rust crates | npm packages |
 |---|---|---|
-| MIT OR Apache-2.0 | 263 |  |
-| MIT | 108 | 98 |
+| MIT OR Apache-2.0 | 308 |  |
+| MIT | 112 | 98 |
 | Apache-2.0 OR MIT | 61 |  |
-| Apache-2.0 | 42 | 1 |
+| Apache-2.0 | 43 | 1 |
 | Unicode-3.0 | 25 |  |
 | MIT/Apache-2.0 | 23 |  |
+| Unlicense OR MIT | 9 |  |
 | BSD-3-Clause | 7 |  |
 | ISC | 4 | 1 |
-| Unlicense OR MIT | 5 |  |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 4 |  |
+| Unlicense/MIT | 4 |  |
 | (Apache-2.0 OR MIT) AND PostgreSQL | 3 |  |
 | Apache-2.0 OR ISC OR MIT | 3 |  |
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 2 |  |
 | 0BSD | 1 | 1 |
 | Apache-2.0 OR BSL-1.0 | 2 |  |
 | MIT OR Zlib OR Apache-2.0 | 2 |  |
-| Unlicense/MIT | 2 |  |
 | Zlib | 2 |  |
 | Zlib OR Apache-2.0 OR MIT | 2 |  |
 | (Apache-2.0 OR MIT) AND BSD-3-Clause | 1 |  |
@@ -109,6 +110,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `anstyle-wincon` | 3.0.11 | MIT OR Apache-2.0 |  | ✓ |
 | `anyhow` | 1.0.104 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ar_archive_writer` | 0.5.3 | Apache-2.0 WITH LLVM-exception | ✓ | ✓ |
+| `arc-swap` | 1.9.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `argon2` | 0.5.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `argon2` | 0.6.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `arraydeque` | 0.5.1 | MIT/Apache-2.0 | ✓ | ✓ |
@@ -146,6 +148,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `block-padding` | 0.4.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `blowfish` | 0.10.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `boxed_error` | 0.2.3 | MIT | ✓ | ✓ |
+| `bstr` | 1.13.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `bumpalo` | 3.20.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `bytemuck` | 1.25.2 | Zlib OR Apache-2.0 OR MIT | ✓ |  |
 | `byteorder` | 1.5.0 | Unlicense OR MIT | ✓ | ✓ |
@@ -169,6 +172,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `clap_builder` | 4.6.7 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `clap_derive` | 4.6.7 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `clap_lex` | 1.1.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `clru` | 0.6.3 | MIT | ✓ | ✓ |
 | `cmake` | 0.1.58 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `cmov` | 0.5.4 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `colorchoice` | 1.0.5 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -249,6 +253,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `errno` | 0.3.14 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `etcetera` | 0.11.0 | MIT OR Apache-2.0 |  | ✓ |
 | `event-listener` | 5.4.2 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `faster-hex` | 0.10.1 | MIT | ✓ | ✓ |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `ff` | 0.14.0 | MIT/Apache-2.0 | ✓ | ✓ |
 | `filetime` | 0.2.29 | MIT/Apache-2.0 | ✓ | ✓ |
@@ -277,14 +282,55 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `getrandom` | 0.3.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ghash` | 0.6.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `gix` | 0.90.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-actor` | 0.44.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-chunk` | 0.10.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-command` | 0.12.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-commitgraph` | 0.42.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-config` | 0.62.2 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-config-value` | 0.21.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-date` | 0.18.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-diff` | 0.70.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-discover` | 0.57.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-error` | 0.5.2 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-fs` | 0.24.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-glob` | 0.29.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-hash` | 0.28.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-hashtable` | 0.18.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-lock` | 26.0.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-macros` | 0.2.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-object` | 0.66.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-odb` | 0.87.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-pack` | 0.77.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-packetline` | 0.24.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-parallel` | 0.50.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-path` | 0.14.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-protocol` | 0.68.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-quote` | 0.10.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-ref` | 0.69.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-refspec` | 0.47.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-revision` | 0.52.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-revwalk` | 0.38.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-sec` | 0.16.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-shallow` | 0.15.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-tempfile` | 26.0.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-trace` | 0.3.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-transport` | 0.62.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-traverse` | 0.64.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-url` | 0.40.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-utils` | 0.5.2 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-validate` | 0.13.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-zlib` | 0.4.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `glob` | 0.3.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `group` | 0.14.0 | MIT/Apache-2.0 | ✓ | ✓ |
 | `gzip-header` | 1.1.0 | MIT/Apache-2.0 | ✓ | ✓ |
 | `h2` | 0.4.19 | MIT | ✓ | ✓ |
+| `hash32` | 0.3.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hashbrown` | 0.14.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hashbrown` | 0.16.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hashbrown` | 0.17.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hashlink` | 0.11.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `heapless` | 0.8.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `heck` | 0.5.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hex` | 0.4.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hex-literal` | 1.1.0 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -327,6 +373,10 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `itertools` | 0.13.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `itoa` | 1.0.18 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ixdtf` | 0.6.6 | Unicode-3.0 | ✓ | ✓ |
+| `jiff` | 0.2.39 | Unlicense OR MIT | ✓ | ✓ |
+| `jiff-core` | 0.1.2 | Unlicense OR MIT | ✓ | ✓ |
+| `jiff-tzdb` | 0.1.9 | Unlicense OR MIT |  | ✓ |
+| `jiff-tzdb-platform` | 0.1.3 | Unlicense OR MIT |  | ✓ |
 | `jobserver` | 0.1.35 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `keccak` | 0.2.2 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `kem` | 0.3.0 | Apache-2.0 OR MIT | ✓ | ✓ |
@@ -351,6 +401,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `md4` | 0.11.0 | MIT OR Apache-2.0 | ✓ |  |
 | `md5` | 0.8.1 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `memchr` | 2.8.3 | Unlicense OR MIT | ✓ | ✓ |
+| `memmap2` | 0.9.12 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `mime` | 0.3.17 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `minimal-lexical` | 0.2.1 | MIT/Apache-2.0 | ✓ | ✓ |
 | `miniz_oxide` | 0.8.9 | MIT OR Zlib OR Apache-2.0 | ✓ | ✓ |
@@ -363,6 +414,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `nix` | 0.31.3 | MIT | ✓ |  |
 | `nom` | 7.1.3 | MIT | ✓ | ✓ |
 | `nom` | 8.0.0 | MIT | ✓ | ✓ |
+| `nonempty` | 0.12.0 | MIT | ✓ | ✓ |
 | `nu-ansi-term` | 0.50.3 | MIT | ✓ | ✓ |
 | `num_cpus` | 1.17.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `num-bigint` | 0.4.8 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -423,6 +475,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `primefield` | 0.14.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `primeorder` | 0.14.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `proc-macro2` | 1.0.107 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `prodash` | 31.0.1 | MIT | ✓ | ✓ |
 | `psm` | 0.1.32 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `quick-xml` | 0.41.0 | MIT | ✓ | ✓ |
 | `quote` | 1.0.47 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -468,6 +521,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `ryu` | 1.0.23 | Apache-2.0 OR BSL-1.0 | ✓ | ✓ |
 | `ryu-js` | 1.0.3 | Apache-2.0 OR BSL-1.0 | ✓ | ✓ |
 | `salsa20` | 0.11.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `same-file` | 1.0.6 | Unlicense/MIT | ✓ | ✓ |
 | `saphyr-parser` | 0.3.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `schannel` | 0.1.29 | MIT |  | ✓ |
 | `scoped-tls` | 1.0.1 | MIT/Apache-2.0 | ✓ | ✓ |
@@ -489,6 +543,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `serde_yaml_ng` | 0.10.0 | MIT | ✓ | ✓ |
 | `sha1` | 0.10.7 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sha1` | 0.11.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `sha1dc` | 0.1.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sha2` | 0.11.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sha3` | 0.11.0 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -605,6 +660,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `typed-path` | 0.12.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `unicode-bidi` | 0.3.18 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `unicode-bom` | 2.0.3 | Apache-2.0 | ✓ | ✓ |
 | `unicode-id-start` | 1.5.0 | (MIT OR Apache-2.0) AND Unicode-3.0 | ✓ | ✓ |
 | `unicode-ident` | 1.0.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | ✓ | ✓ |
 | `unicode-normalization` | 0.1.25 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -624,6 +680,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `v8` | 150.4.0 | MIT | ✓ | ✓ |
 | `version_check` | 0.9.5 | MIT/Apache-2.0 | ✓ | ✓ |
 | `vsimd` | 0.8.0 | MIT | ✓ | ✓ |
+| `walkdir` | 2.5.0 | Unlicense/MIT | ✓ | ✓ |
 | `want` | 0.3.2 | MIT | ✓ | ✓ |
 | `wasm_dep_analyzer` | 0.4.0 | MIT | ✓ | ✓ |
 | `webpki-roots` | 1.0.9 | CDLA-Permissive-2.0 | ✓ | ✓ |
@@ -785,6 +842,6 @@ The packages its production build bundles (the build tools and test tools aren't
 Made by `scripts/dev/dependencies.sh` from these files (a test fails when either changes and this page
 isn't made again):
 
-<!-- made from: Cargo.lock 9aed5f7f7022eb0e237dd0ec63c8ae956ea4e37057a6f38f63647225ea070365 ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
-- `Cargo.lock`, SHA-256 `9aed5f7f7022eb0e237dd0ec63c8ae956ea4e37057a6f38f63647225ea070365`
+<!-- made from: Cargo.lock bb436225d9e8e440e02829cabc77b616641ffafe874f21ae712f90234b06156f ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
+- `Cargo.lock`, SHA-256 `bb436225d9e8e440e02829cabc77b616641ffafe874f21ae712f90234b06156f`
 - `ui/package-lock.json`, SHA-256 `aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5`

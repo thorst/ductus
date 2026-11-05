@@ -13,4 +13,5 @@ ductus handover [OPTIONS]
 | `--control <CONTROL>` | The running engine's control socket (default: `$RUNTIME_DIRECTORY/control`, which systemd sets for the service and its reload, else /run/ductus/control). |  | `DUCTUS_CONTROL` |
 | `--timeout <TIMEOUT>` | How long the new engine may take to be ready: it migrates the database first. | `5m` |  |
 | `--with-environment` | Start the new engine with this command's environment rather than the running engine's: under systemd, ductus.env as it is now (the unit's reload passes this). |  |  |
+| `-m, --message <REASON>` | Why: recorded with the new engine's deployment, beside who asked (the person behind `sudo`, else this account; `systemctl reload` is recorded as systemd's, with no reason). Example: `sudo ductus handover -m "lab wants PV1-3 mapped"`. |  |  |
 

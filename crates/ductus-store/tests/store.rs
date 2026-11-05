@@ -2331,6 +2331,28 @@ async fn everything_at_once_without_lock_errors() {
             (claimed, refused)
         })
     };
+    // Starts and handovers recording what they run (0.7.3), two engines at once with the same new
+    // version now and then (each writes what it hasn't seen; shared files are written once).
+    let deploy_env = format!("test-deploy-stress-{}", t.name);
+    let deployer = {
+        let (store, t, stop, env) = (store.clone(), t.clone(), stop.clone(), deploy_env.clone());
+        tokio::spawn(async move {
+            let mut rounds = 0;
+            while !stop.load(Relaxed) {
+                rounds += 1;
+                let shared = format!("// {env}\n");
+                let interface = format!("{env}-{}", t.name);
+                let own = format!("// {env} round {rounds}\n");
+                let v = TestVersion::new(&interface, &[("t.ts", &own), ("lib.ts", &shared)]);
+                let versions = [&v];
+                let (x, y) = tokio::join!(deploy(&store, &env, "x", &versions), deploy(&store, &env, "y", &versions));
+                x.unwrap();
+                y.unwrap();
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+            rounds
+        })
+    };
     let maintenance = {
         let (store, stop) = (store.clone(), stop.clone());
         tokio::spawn(async move {
@@ -2359,6 +2381,9 @@ async fn everything_at_once_without_lock_errors() {
     let held = holder.await;
     let resent = resender.await;
     let engines = engines.await;
+    let deployed = deployer.await;
+    forget_deployments(&pool, &deploy_env).await;
+    assert!(deployed.expect("recording deployments failed") > 0, "deployments were recorded");
     drop_test_partitions(&pool).await;
     let (claims, refusals) = engines.expect("engines claiming interfaces failed");
     assert!(claims > 0 && refusals > 0, "engines claimed and were refused");
@@ -3490,4 +3515,136 @@ async fn the_docs_snapshot_follows_the_project() {
     // An empty project empties the table.
     store.save_docs_snapshot(&[]).await.unwrap();
     assert!(read().await.is_empty());
+}
+
+/// A code version made up for a test: `(interface, [(path, text)])`, hashed as the engine would
+/// (the version's hash only has to be unique here).
+struct TestVersion {
+    interface: String,
+    hash: Vec<u8>,
+    files: Vec<(String, Vec<u8>, String)>,
+}
+
+impl TestVersion {
+    fn new(interface: &str, files: &[(&str, &str)]) -> Self {
+        use sha2::Digest;
+        let files: Vec<(String, Vec<u8>, String)> = files
+            .iter()
+            .map(|(path, text)| (path.to_string(), sha2::Sha256::digest(text.as_bytes()).to_vec(), text.to_string()))
+            .collect();
+        let mut all = sha2::Sha256::new();
+        all.update(interface.as_bytes());
+        for (_, hash, _) in &files {
+            all.update(hash);
+        }
+        Self { interface: interface.into(), hash: all.finalize().to_vec(), files }
+    }
+
+    fn borrow(&self) -> ductus_store::NewVersion<'_> {
+        ductus_store::NewVersion {
+            interface: &self.interface,
+            hash: &self.hash,
+            files: self.files.iter().map(|(p, h, t)| (p.as_str(), h.as_slice(), t.as_str())).collect(),
+        }
+    }
+}
+
+/// Record a deployment of `versions` in the test environment `env`.
+async fn deploy(
+    store: &Store,
+    env: &str,
+    by: &str,
+    versions: &[&TestVersion],
+) -> anyhow::Result<ductus_store::Deployed> {
+    let versions: Vec<_> = versions.iter().map(|v| v.borrow()).collect();
+    let d = ductus_store::NewDeployment {
+        environment: env,
+        instance: env,
+        host: "test-host",
+        version: "0.7.0-test",
+        how: "start",
+        by,
+        reason: Some("testing"),
+        git_commit: None,
+        uncommitted: None,
+        versions: &versions,
+    };
+    store.record_deployment(&d).await
+}
+
+/// Delete what deployments in environments named `env`… recorded (tests share the database).
+async fn forget_deployments(pool: &sqlx::PgPool, env: &str) {
+    let like = format!("{env}%");
+    for statement in [
+        "DELETE FROM interface_versions WHERE deployment_id IN (SELECT id FROM deployments WHERE environment LIKE $1)",
+        "DELETE FROM deployment_changes WHERE deployment_id IN (SELECT id FROM deployments WHERE environment LIKE $1)",
+        "DELETE FROM deployments WHERE environment LIKE $1",
+        "DELETE FROM code_files f USING code_versions v, jsonb_array_elements(v.files) e
+         WHERE v.interface LIKE $1 AND f.hash = decode(e->>'hash', 'hex')",
+        "DELETE FROM code_versions WHERE interface LIKE $1",
+    ] {
+        sqlx::query(statement).bind(&like).execute(pool).await.unwrap();
+    }
+}
+
+/// A start records each interface's version once; one that changes nothing writes only its
+/// deployment, and says which deployment each version came with; a change names what it replaced.
+#[tokio::test]
+async fn deployments_record_what_changed() {
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let env = format!("test-deploy-{}-{nanos}", std::process::id());
+    let (a, b) = (format!("{env}-a"), format!("{env}-b"));
+    let shared = format!("// shared by {env}\n");
+    let (ya, yb) = (format!("name: a # {env}\n"), format!("name: b # {env}\n"));
+    let a1 = TestVersion::new(&a, &[("interfaces/a/interface.yaml", &ya), ("lib/shared.ts", &shared)]);
+    let b1 = TestVersion::new(&b, &[("interfaces/b/interface.yaml", &yb), ("lib/shared.ts", &shared)]);
+
+    let first = deploy(&store, &env, "todd", &[&a1, &b1]).await.unwrap();
+    assert_eq!(first.changed(), 2);
+    assert!(first.interfaces.iter().all(|i| i.previous.is_none() && i.since.deployment == first.id));
+    let shared_rows: i64 = sqlx::query_scalar("SELECT count(*) FROM code_files WHERE content = $1")
+        .bind(&shared)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(shared_rows, 1, "a file two versions share is kept once");
+
+    let again = deploy(&store, &env, "ductus", &[&a1, &b1]).await.unwrap();
+    assert_eq!(again.changed(), 0);
+    assert!(again.interfaces.iter().all(|i| i.since.deployment == first.id && i.since.by == "todd"));
+
+    let changed = format!("{ya}# changed\n");
+    let a2 = TestVersion::new(&a, &[("interfaces/a/interface.yaml", &changed), ("lib/shared.ts", &shared)]);
+    let third = deploy(&store, &env, "ann", &[&a2, &b1]).await.unwrap();
+    assert_eq!(third.changed(), 1);
+    assert_eq!(third.interfaces[0].previous.as_deref(), Some(a1.hash.as_slice()));
+    assert_eq!(third.interfaces[0].since.deployment, third.id);
+    assert_eq!(third.interfaces[1].since.deployment, first.id);
+    let (changes, from): (i64, Option<i32>) = sqlx::query_as(
+        "SELECT count(*) OVER (), from_version FROM deployment_changes WHERE interface = $1 ORDER BY deployment_id DESC LIMIT 1",
+    )
+    .bind(&a)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(changes, 2, "new, then changed");
+    assert!(from.is_some());
+
+    // Two engines recording the same new version at once (each start writes what it hasn't seen):
+    // both succeed, and the version and its files are there once.
+    let third_text = format!("{ya}# {nanos}\n");
+    let a3 = TestVersion::new(&a, &[("interfaces/a/interface.yaml", &third_text)]);
+    let versions = [&a3];
+    let (x, y) = tokio::join!(deploy(&store, &env, "x", &versions), deploy(&store, &env, "y", &versions));
+    x.unwrap();
+    y.unwrap();
+    let versions: i64 = sqlx::query_scalar("SELECT count(*) FROM code_versions WHERE hash = $1")
+        .bind(&a3.hash)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(versions, 1);
+    forget_deployments(&pool, &env).await;
 }

@@ -97,6 +97,7 @@ const notable = [
   ["chacha20poly1305", "Encrypts secrets files"],
   ["postgresql_embedded", "`ductus dev`: downloads and runs Postgres for a laptop"],
   ["serde_yaml_ng", "Reads the project's YAML files"],
+  ["gix", "Reads the project's git commit at each start (gitoxide; no `git` needed on the server)"],
   ["clap", "The `ductus` command line"],
   ["windows-service", "Runs as a Windows service"],
 ];

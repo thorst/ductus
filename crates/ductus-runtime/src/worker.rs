@@ -91,8 +91,9 @@ pub struct Outlet {
     pub pause: Arc<Pause>,
 }
 
-/// Readiness report for one job: its interface name and whether its code loaded.
-pub type Ready = (String, Result<()>);
+/// Readiness report for one job: its interface name and whether its code loaded, with the files
+/// it loaded (its code version's: `code`; none without `script:`).
+pub type Ready = (String, Result<Vec<ductus_script::CodeFile>>);
 
 /// Start a worker thread for `jobs`, with one isolate of `heap_mb`. Each job reports on
 /// `ready` once its interface code has loaded (or failed to); then the thread processes
@@ -129,13 +130,20 @@ pub fn spawn_thread(
                 let mut loaded = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     let config = &job.config;
+                    let mut files = Vec::new();
                     let script = match config.script_path() {
                         Some(path) => {
                             let functions = config.functions();
                             let functions: Vec<(&str, &str)> =
                                 functions.iter().map(|(name, formats)| (name.as_str(), formats.as_str())).collect();
                             match host.add_functions(&path, &functions, config.timeout).await {
-                                Ok(loaded) => Some(loaded),
+                                Ok(loaded) => {
+                                    files = host.code_files(&path).unwrap_or_else(|e| {
+                                        tracing::warn!(interface = %config.name, error = %format!("{e:#}"), "couldn't tell which files its code loaded: its code version counts its interface.yaml only");
+                                        Vec::new()
+                                    });
+                                    Some(loaded)
+                                }
                                 Err(e) => {
                                     let _ = ready.send((job.config.name.clone(), Err(e)));
                                     continue;
@@ -144,10 +152,11 @@ pub fn spawn_thread(
                         }
                         None => None,
                     };
-                    let _ = ready.send((job.config.name.clone(), Ok(())));
+                    let _ = ready.send((job.config.name.clone(), Ok(files)));
                     loaded.push((job, script));
                 }
                 drop(ready);
+                host.forget_code_files();
 
                 let host = Rc::new(RefCell::new(host));
                 let kick = Rc::new(Notify::new());

@@ -319,7 +319,7 @@ Index: primary key `destination_id`.
 
 ## `docs_snapshot`
 
-The project's documentation as the company wrote it, for SQL reports and BI tools ("which interfaces have no signed BAA": `SELECT name FROM docs_snapshot WHERE kind = 'interface' AND docs->'custom'->>'baa_signed' = 'no'`). One row per interface and per resources.yaml entry. The YAML in Git is the source of truth: every engine start makes the table match the project (changed rows are rewritten, entries the project no longer has are removed), so it is as current as the last start. Versioned history comes with versioned releases (v0.6).
+The project's documentation as the company wrote it, for SQL reports and BI tools ("which interfaces have no signed BAA": `SELECT name FROM docs_snapshot WHERE kind = 'interface' AND docs->'custom'->>'baa_signed' = 'no'`). One row per interface and per resources.yaml entry. The YAML in Git is the source of truth: every engine start makes the table match the project (changed rows are rewritten, entries the project no longer has are removed), so it is as current as the last start. Its history comes with 0.7.3's history (a later part); what each start ran is in `deployments`.
 
 | column | type | |
 |---|---|---|
@@ -329,6 +329,78 @@ The project's documentation as the company wrote it, for SQL reports and BI tool
 | `updated_at` | timestamptz | When the row last changed. |
 
 Indexes: primary key `(kind, name)`; `docs_snapshot_docs` (GIN on `docs`).
+
+## `deployments`
+
+One row per engine start and handover (migration 0026, 0.7.3), whether or not anything changed: what it runs, by whom, why, from which git commit. A few hundred bytes each; kept. The guide: [what runs, recorded](operate/deployments.md).
+
+| column | type | |
+|---|---|---|
+| `id` | integer | From a sequence. |
+| `at` | timestamptz | When it was recorded (once the engine held its interfaces). |
+| `environment` | text | `DUCTUS_ENV`. |
+| `instance` | text | The engine run, as in the audit log's `engine.start` and `engine.handover`. |
+| `host` | text | The machine's name. |
+| `version` | text | The binary's version. |
+| `how` | text | `start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`. |
+| `by_name` | text | Who: the account that started it, the person who asked for the handover (`sudo ductus handover`: the person behind `sudo`), or `systemd (systemctl reload)`. |
+| `reason` | text | Why (`ductus handover -m`); null when nobody said. |
+| `git_commit` | text | The project's git commit (HEAD, in hex); null when the project isn't in a git repository, or the repository has no commit yet. |
+| `uncommitted` | text[] | Files the interfaces run that aren't the commit's (changed since, or never committed), as `code_versions.files` names them; null without git, empty when everything is committed. |
+| `interfaces` | integer | How many interfaces it runs. |
+| `changed` | integer | How many of them run a code version they didn't run before it. |
+
+Indexes: primary key `id`; `deployments_at (at)`.
+
+## `deployment_changes`
+
+The interfaces a deployment changed (migration 0026): one row each, none for interfaces that run what they ran before.
+
+| column | type | |
+|---|---|---|
+| `deployment_id` | integer | `deployments.id` (deleted with it). |
+| `interface` | text | The interface's name. |
+| `from_version` | integer | `code_versions.id` it ran before; null when it's new on this database. |
+| `to_version` | integer | `code_versions.id` it runs from this deployment. |
+
+Indexes: primary key `(deployment_id, interface)`; `deployment_changes_interface (interface, deployment_id)`.
+
+## `interface_versions`
+
+What each interface runs now (migration 0026): its last deployment's version, read at every start to tell what changed. One row per interface ever run on this database.
+
+| column | type | |
+|---|---|---|
+| `interface` | text | The interface's name. |
+| `version_id` | integer | `code_versions.id`. |
+| `deployment_id` | integer | `deployments.id` that version came with. |
+
+Index: primary key `interface`.
+
+## `code_versions`
+
+Each distinct version of an interface's code (migration 0026): a start that changes nothing adds none. The version is a SHA-256 over the interface's name and its files' paths and hashes (its interface.yaml and every project file its code imports, shared ones too; not the SDK), so the same files give the same version on any machine: how it's computed is in [what runs, recorded](operate/deployments.md#the-code-version).
+
+| column | type | |
+|---|---|---|
+| `id` | integer | From a sequence. |
+| `hash` | bytea | The version (32 bytes); shown as its first 12 hex characters. Unique. |
+| `interface` | text | The interface's name. |
+| `files` | jsonb | `[{"path": "interfaces/adt/interface.yaml", "hash": "<hex>"}, ...]` in path order: paths relative to the project with `/`, each file's SHA-256 (its text in `code_files`). |
+| `first_seen` | timestamptz | When a start first ran it. |
+
+Indexes: primary key `id`; unique `hash`.
+
+## `code_files`
+
+Every file any code version has had, once by its content (migration 0026), so the code that ran can be read (and run again) without git: `SELECT content FROM code_files WHERE hash = decode('<hex>', 'hex')`. A start writes only files not there yet: a project's first start stores it whole (about a megabyte of text for a thousand interfaces), later ones only what changed. Postgres compresses long values itself. Kept.
+
+| column | type | |
+|---|---|---|
+| `hash` | bytea | SHA-256 of `content`. |
+| `content` | text | The text as hashed: without a byte order mark, lines ending in `\n`. |
+
+Index: primary key `hash`.
 
 ## `alert_state`
 

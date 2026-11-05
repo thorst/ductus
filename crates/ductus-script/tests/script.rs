@@ -84,6 +84,55 @@ export function transform(msg: Message) {
     assert_eq!(rt.block_on(isolate.transform(&a01)).unwrap(), None);
 }
 
+/// What an interface's code version counts (0.7.3): its module and every project file it imports,
+/// through shared files, including `import("...")` that hasn't run yet and type-only imports; not
+/// the SDK, not files nothing imports; texts normalized, so CRLF reads as LF.
+#[test]
+fn code_files_are_everything_an_interface_imports() {
+    let dir = project(&[
+        (
+            "interfaces/a/transform.ts",
+            "import type { Message } from \"@ductus/sdk\";\r\nimport type { Shape } from \"./shape.ts\";\r\nimport { tag } from \"../../lib/tag.ts\";\r\nexport async function transform(msg: Message) {\r\n  if (msg.MSH[9][2] === \"A01\") { const m = await import(\"./later.ts\"); m.later(); }\r\n  const s: Shape = { tag: tag() };\r\n  msg.add(\"ZDU\", [s.tag]);\r\n  return msg;\r\n}\r\n",
+        ),
+        ("interfaces/a/shape.ts", "export interface Shape { tag: string }\n"),
+        ("interfaces/a/later.ts", "export const later = () => 1;\n"),
+        ("lib/tag.ts", "export { tag } from \"./words.ts\";\n"),
+        ("lib/words.ts", "\u{feff}export const tag = (): string => \"relayed\";\n"),
+        ("lib/unrelated.ts", "export const nobody = 1;\n"),
+        ("interfaces/b/transform.ts", "export function transform(m: unknown) { return m; }\n"),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut isolate = Isolate::host();
+    let a = dir.path().join("interfaces/a/transform.ts");
+    let b = dir.path().join("interfaces/b/transform.ts");
+    rt.block_on(isolate.add_interface(&a)).unwrap();
+    rt.block_on(isolate.add_interface(&b)).unwrap();
+    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let names = |files: &[ductus_script::CodeFile]| -> Vec<String> {
+        files.iter().map(|f| f.path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/")).collect()
+    };
+    let files = isolate.code_files(&a).unwrap();
+    assert_eq!(
+        names(&files),
+        ["interfaces/a/later.ts", "interfaces/a/shape.ts", "interfaces/a/transform.ts", "lib/tag.ts", "lib/words.ts"]
+    );
+    let transform = files.iter().find(|f| f.path.ends_with("transform.ts")).unwrap();
+    assert!(!transform.text.contains('\r'), "CRLF read as LF");
+    let words = files.iter().find(|f| f.path.ends_with("words.ts")).unwrap();
+    assert!(words.text.starts_with("export"), "no byte order mark");
+    use sha2::Digest;
+    assert_eq!(transform.hash, <[u8; 32]>::from(sha2::Sha256::digest(transform.text.as_bytes())));
+    assert_eq!(names(&isolate.code_files(&b).unwrap()), ["interfaces/b/transform.ts"]);
+
+    // Forgotten after asking: a file read later (the dynamic import running) is recorded then.
+    isolate.forget_code_files();
+    let a01 = ADT.replace("ADT^A08", "ADT^A01");
+    rt.block_on(isolate.transform(&a01)).unwrap();
+    let after = names(&isolate.code_files(&a).unwrap());
+    assert_eq!(after.len(), 5, "still found from disk: {after:?}");
+}
+
 #[test]
 fn one_isolate_hosts_many_interfaces() {
     let mut files = Vec::new();

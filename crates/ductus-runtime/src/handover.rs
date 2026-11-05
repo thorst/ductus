@@ -52,6 +52,32 @@ pub struct Request {
     /// Start the new engine with this environment (`--with-environment`: systemd's, with
     /// ductus.env read again) instead of the running engine's.
     pub environment: Option<Vec<(String, String)>>,
+    /// Who asks and why, for the new engine's deployment record (0.7.3; engines before ignore it).
+    #[serde(default)]
+    pub asked: Asked,
+}
+
+/// Who asked for a handover and why (`ductus handover -m`): the old engine passes it to the new
+/// one, which records it with its deployment.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct Asked {
+    pub by: Option<String>,
+    pub reason: Option<String>,
+}
+
+impl Asked {
+    /// Asked from here: the person behind `sudo` (`SUDO_USER`); `systemd (systemctl reload)` when
+    /// systemd runs it (the unit's `ExecReload`, which gets `MAINPID`), since that can't tell who
+    /// typed `systemctl reload`; else this account.
+    pub fn here(reason: Option<String>) -> Self {
+        let set = |name: &str| std::env::var(name).ok().filter(|v| !v.is_empty());
+        let by = match (set("SUDO_USER"), set("MAINPID")) {
+            (Some(person), _) => person,
+            (None, Some(_)) => "systemd (systemctl reload)".into(),
+            (None, None) => crate::deployment::account(),
+        };
+        Self { by: Some(by), reason: reason.filter(|r| !r.trim().is_empty()) }
+    }
 }
 
 /// The running engine → `ductus handover`: what it does as it goes, then how it ended.
@@ -68,6 +94,9 @@ pub struct Predecessor {
     pub pid: u32,
     pub version: String,
     pub instance: String,
+    /// Who asked for this handover and why (absent from engines before 0.7.3).
+    #[serde(default)]
+    pub asked: Asked,
 }
 
 /// How this engine took over (`GET /engine`, the audit log's `engine.handover`).
@@ -555,6 +584,7 @@ mod linux {
             pid: std::process::id(),
             version: env!("CARGO_PKG_VERSION").into(),
             instance: engine.instance.clone(),
+            asked: requested.request.asked.clone(),
         };
         let started = Instant::now();
         let mut spawned = match spawn(&requested.request, &me).await {
@@ -722,7 +752,7 @@ mod linux {
             new.send(&ToOld::Failed("unknown field `bogus`".into())).await.unwrap();
             drop(new);
             let mut old = Lined::new(old);
-            let me = Predecessor { pid: 1, version: "0".into(), instance: "i".into() };
+            let me = Predecessor { pid: 1, version: "0".into(), instance: "i".into(), asked: Asked::default() };
             let sent = old.send(&ToNew::From(me)).await;
             assert!(sent.as_ref().is_err_and(|e| e.kind() == io::ErrorKind::BrokenPipe), "{sent:?}");
             let said = old.receive::<ToOld>().await.unwrap();

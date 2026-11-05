@@ -1361,6 +1361,18 @@ export interface components {
             /** @description `database patient_db`, `api empi`, `destination adt → lab`, `listener`. */
             what: string;
         };
+        /** @description What an interface runs, and the deployment it came with. */
+        CodeInfo: {
+            /** @description All 64 hex characters. */
+            hash: string;
+            /** @description The deployment this version came with (an earlier one when this start changed nothing). */
+            since: components["schemas"]["DeploymentRef"];
+            /**
+             * @description The code version: a hash of its interface.yaml and every file its code loads, shown as its
+             *     first 12 hex characters (the same for the same files on any machine).
+             */
+            version: string;
+        };
         CreatedToken: {
             /** @description The token itself: shown this once, never stored (only its hash is). */
             secret: string;
@@ -1375,6 +1387,42 @@ export interface components {
             output?: string | null;
             /** @description `pending`, `sent`, `filtered` or `quarantined`. */
             status: string;
+        };
+        DeploymentInfo: {
+            /** Format: date-time */
+            at: string;
+            /**
+             * @description The account that started it, the person who asked for the handover, or
+             *     `systemd (systemctl reload)`.
+             */
+            by: string;
+            /** @description Interfaces whose code version is new for them with this deployment. */
+            changed: number;
+            /** @description The project's git commit (HEAD); none without a git repository. */
+            git_commit?: string | null;
+            /** @description `start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`. */
+            how: string;
+            /**
+             * Format: int32
+             * @description The deployment's id (`deployments.id`).
+             */
+            id: number;
+            /** @description Why (`ductus handover -m`); none when nobody said. */
+            reason?: string | null;
+            /**
+             * @description Files the interfaces run that aren't the commit's (changed since, or not in it); none
+             *     without git.
+             */
+            uncommitted?: string[] | null;
+        };
+        DeploymentRef: {
+            /** Format: date-time */
+            at: string;
+            by: string;
+            /** Format: int32 */
+            deployment: number;
+            git_commit?: string | null;
+            reason?: string | null;
         };
         DestinationCounts: {
             /** Format: int64 */
@@ -1625,6 +1673,7 @@ export interface components {
             replaced: string[];
         };
         EngineInfo: {
+            deployment?: components["schemas"]["DeploymentInfo"] | null;
             drain: components["schemas"]["DrainStatus"];
             environment: string;
             handover?: components["schemas"]["Handover"] | null;
@@ -1805,6 +1854,7 @@ export interface components {
             store_failures: number;
         };
         InterfaceDetail: components["schemas"]["InterfaceStatus"] & {
+            code?: components["schemas"]["CodeInfo"] | null;
             folder: string;
             format: string;
             /** @description The sending system and where its connections come from. */

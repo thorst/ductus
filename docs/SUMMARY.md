@@ -55,6 +55,7 @@
   - [Alerts in practice](operate/alerts.md)
   - [High availability and lanes](operate/high-availability.md)
   - [Retention and storage](operate/retention.md)
+  - [What runs, recorded](operate/deployments.md)
 
 # Upgrade and troubleshoot
 
@@ -95,6 +96,7 @@
   - [People and access](nuances/people.md)
   - [Local development](nuances/dev.md)
   - [Upgrades](nuances/upgrades.md)
+  - [What runs, recorded](nuances/deployments.md)
   - [Windows](nuances/windows.md)
 - [The shared pool](shared-pool.md)
 - [Database schema](schema.md)

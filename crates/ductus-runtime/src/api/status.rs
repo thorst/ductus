@@ -117,6 +117,83 @@ pub struct EngineInfo {
     /// How this engine took over from the one before it (`systemctl reload`: an upgrade or a
     /// project deploy); none after a plain start.
     handover: Option<Handover>,
+    /// What this engine's start (or handover) recorded about the code it runs: by whom, why, the
+    /// git commit, how many interfaces changed. None while it's being recorded, or when it couldn't
+    /// be (the log says why).
+    deployment: Option<DeploymentInfo>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DeploymentInfo {
+    /// The deployment's id (`deployments.id`).
+    id: i32,
+    at: DateTime<Utc>,
+    /// `start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`.
+    how: &'static str,
+    /// The account that started it, the person who asked for the handover, or
+    /// `systemd (systemctl reload)`.
+    by: String,
+    /// Why (`ductus handover -m`); none when nobody said.
+    reason: Option<String>,
+    /// The project's git commit (HEAD); none without a git repository.
+    git_commit: Option<String>,
+    /// Files the interfaces run that aren't the commit's (changed since, or not in it); none
+    /// without git.
+    uncommitted: Option<Vec<String>>,
+    /// Interfaces whose code version is new for them with this deployment.
+    changed: usize,
+}
+
+/// What an interface runs, and the deployment it came with.
+#[derive(Serialize, ToSchema)]
+pub struct CodeInfo {
+    /// The code version: a hash of its interface.yaml and every file its code loads, shown as its
+    /// first 12 hex characters (the same for the same files on any machine).
+    version: String,
+    /// All 64 hex characters.
+    hash: String,
+    /// The deployment this version came with (an earlier one when this start changed nothing).
+    since: DeploymentRef,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct DeploymentRef {
+    deployment: i32,
+    at: DateTime<Utc>,
+    by: String,
+    reason: Option<String>,
+    git_commit: Option<String>,
+}
+
+impl DeploymentInfo {
+    fn of(d: &crate::deployment::Deployment) -> Self {
+        Self {
+            id: d.id,
+            at: d.at,
+            how: d.how,
+            by: d.by.clone(),
+            reason: d.reason.clone(),
+            git_commit: d.git_commit.clone(),
+            uncommitted: d.uncommitted.clone(),
+            changed: d.changed,
+        }
+    }
+}
+
+impl CodeInfo {
+    fn of(r: &ductus_store::Running) -> Self {
+        Self {
+            version: crate::code::short(&r.version),
+            hash: crate::code::hex(&r.version),
+            since: DeploymentRef {
+                deployment: r.since.deployment,
+                at: r.since.at,
+                by: r.since.by.clone(),
+                reason: r.since.reason.clone(),
+                git_commit: r.since.git_commit.clone(),
+            },
+        }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -193,6 +270,7 @@ async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
             at: h.at,
             sending_paused_ms: h.sending_paused.as_millis() as u64,
         }),
+        deployment: engine.deployment.get().map(DeploymentInfo::of),
     }))
 }
 
@@ -452,6 +530,9 @@ pub struct InterfaceDetail {
     source_tls: Option<SourceTls>,
     /// Who may connect to the source, when it has an `allow:` list (none: anyone).
     source_allow: Option<SourceAllow>,
+    /// What it runs (its code version) and since which deployment; none while the start records
+    /// it, or when it couldn't.
+    code: Option<CodeInfo>,
 }
 
 /// A listener's `allow:` list and how it's doing.
@@ -698,6 +779,7 @@ async fn interface(engine: Eng, _caller: Caller, Path(name): Path<String>) -> Ap
         folder: i.config.dir.display().to_string(),
         source_tls: source_tls(&i.config.source),
         source_allow: i.config.source.allow().map(|a| SourceAllow::of(a, &i.config.source)),
+        code: engine.deployment.get().and_then(|d| d.interfaces.get(&name)).map(CodeInfo::of),
     }))
 }
 

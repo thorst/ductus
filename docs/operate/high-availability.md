@@ -83,7 +83,9 @@ Everything the engine knows is in Postgres: the messages, the queues, the audit 
   it's ready, and the old one stops. Receiving never stops. A new version or project that can't
   start leaves the running one serving, and the reload says why
   ([nuance](../nuances/upgrades.md#a-new-version-or-project-that-cant-start-leaves-the-running-one-serving-level-2)).
-  No drain, no maintenance window for the senders.
+  No drain, no maintenance window for the senders. Every start and handover records what each
+  interface runs, by whom and why: `sudo ductus handover -m "why"` instead of `systemctl reload`
+  puts your name and reason on it ([what runs, recorded](deployments.md#who-and-why)).
 - **Windows**: a restart or the MSI is a short gap (above): pick a quiet moment. Zero-downtime
   Windows upgrades are planned for v1.0.
 - **Before every upgrade**: `ductus upgrade --check` with the new version, and `ductus replay`

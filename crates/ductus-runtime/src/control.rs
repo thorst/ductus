@@ -133,6 +133,9 @@ pub struct Engine {
     /// How this engine took over from the one before it (`systemctl reload`); unset after a
     /// plain start.
     pub handed_over: std::sync::OnceLock<crate::handover::HandedOver>,
+    /// What this engine runs, as its start recorded it (`deployment`); unset until then, or when
+    /// it couldn't be recorded.
+    pub deployment: std::sync::OnceLock<crate::deployment::Deployment>,
 }
 
 /// Where the engine's REST API (and web UI) listens, and its `tls` (none: plain HTTP).
@@ -231,6 +234,7 @@ impl Engine {
             api,
             host,
             handed_over: std::sync::OnceLock::new(),
+            deployment: std::sync::OnceLock::new(),
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

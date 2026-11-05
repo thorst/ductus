@@ -11,6 +11,7 @@ import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, Td, Th } from "@/components/ui/table";
 import { count, duration, ms, timestamp } from "@/lib/format";
 import { needingRenewal, place } from "@/lib/certificates";
+import { deployedBy } from "@/lib/deployment";
 import { describe, problems } from "@/lib/health";
 import { cn } from "@/lib/utils";
 
@@ -29,6 +30,11 @@ export function OverviewPage() {
                 · took over from v{info.data.handover.from_version} at {timestamp(info.data.handover.at)} (sending
                 paused {ms(info.data.handover.sending_paused_ms)})
               </>
+            )}
+            {info.data.deployment && (
+              <span className="block">
+                Deployed {timestamp(info.data.deployment.at)} {deployedBy(info.data.deployment)}
+              </span>
             )}
           </>
         )}

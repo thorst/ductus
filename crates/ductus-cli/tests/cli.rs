@@ -3681,7 +3681,7 @@ async fn a_handover_refuses_nothing_and_a_failed_one_leaves_the_engine_running()
         .unwrap();
     let mut sender = Child(sender);
     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    let (ok, out) = ductus(dir.path(), &["handover", "--control", control]);
+    let (ok, out) = ductus(dir.path(), &["handover", "--control", control, "-m", "lab wants PV1-3"]);
     assert!(ok, "{out}\n{}", read("engine.log"));
     assert!(out.contains("is ready after") && out.contains("receiving never stopped, sending paused"), "{out}");
     let exited = tokio::task::spawn_blocking(move || old.0.wait()).await.unwrap().unwrap();
@@ -3712,18 +3712,32 @@ async fn a_handover_refuses_nothing_and_a_failed_one_leaves_the_engine_running()
     let (ok, token) = ductus(dir.path(), &["token", "create", &token_name, "--role", "viewer"]);
     assert!(ok, "{token}");
     let token = token.lines().next().unwrap().to_string();
-    let engine: serde_json::Value = reqwest::Client::new()
-        .get(format!("http://127.0.0.1:{api}/api/v1/engine"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let get = async |path: &str| -> serde_json::Value {
+        let url = format!("http://127.0.0.1:{api}/api/v1{path}");
+        reqwest::Client::new().get(url).bearer_auth(&token).send().await.unwrap().json().await.unwrap()
+    };
+    let engine = get("/engine").await;
+    let interface = get(&format!("/interfaces/{name}")).await;
     let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
     assert_eq!(engine["handover"]["from_pid"], old_pid, "{engine}");
     assert!(engine["handover"]["sending_paused_ms"].as_u64().is_some(), "{engine}");
+    // What it runs, recorded (0.7.3): the handover by this account, with its reason; nothing
+    // changed, so the interface's version came with the first engine's start.
+    let deployment = &engine["deployment"];
+    assert_eq!((deployment["how"].as_str(), deployment["changed"].as_u64()), (Some("handover"), Some(0)), "{engine}");
+    assert_eq!(deployment["reason"], "lab wants PV1-3", "{engine}");
+    let by = deployment["by"].as_str().unwrap_or_default();
+    assert!(!by.is_empty() && !by.starts_with("unknown") && by != "systemd (systemctl reload)", "{engine}");
+    assert!(deployment["git_commit"].is_null() && deployment["uncommitted"].is_null(), "not in git: {engine}");
+    let code = &interface["code"];
+    assert_eq!(code["version"].as_str().map(str::len), Some(12), "{interface}");
+    assert!(code["hash"].as_str().unwrap().starts_with(code["version"].as_str().unwrap()), "{interface}");
+    assert_eq!(code["since"]["reason"], serde_json::Value::Null, "the start's, not the handover's: {interface}");
+    assert!(code["since"]["deployment"].as_i64() < deployment["id"].as_i64(), "{interface}\n{engine}");
+    let logged = read("engine.log");
+    let version = code["version"].as_str().unwrap();
+    assert!(logged.contains(&format!("deployed: {name} {version} (new here)")), "the start: {logged}");
+    assert!(logged.contains("deployed: nothing changed"), "the handover: {logged}");
 
     // A project that can't start: refused, and the running engine goes on.
     std::fs::write(&yaml, format!("{}bogus: true\n", config(8))).unwrap();

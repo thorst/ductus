@@ -17,7 +17,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { entryNamed, fieldsFor } from "@/lib/docs";
-import { ago, count, duration, ms, perMinute } from "@/lib/format";
+import { ago, count, duration, ms, perMinute, timestamp } from "@/lib/format";
 import { worst } from "@/lib/health";
 import { cn } from "@/lib/utils";
 
@@ -114,6 +114,17 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
             <Field label="Folder">
               <span className="font-mono text-xs">{i.folder}</span>
             </Field>
+            {i.code && (
+              <Field label="Code version">
+                <span className="font-mono text-xs" title={i.code.hash}>
+                  {i.code.version}
+                </span>{" "}
+                <span className="text-muted">
+                  deployed {timestamp(i.code.since.at)} by {i.code.since.by}
+                  {i.code.since.reason && `: ${i.code.since.reason}`}
+                </span>
+              </Field>
+            )}
           </dl>
         </CardBody>
       </Card>

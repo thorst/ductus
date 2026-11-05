@@ -3739,6 +3739,29 @@
           }
         }
       },
+      "CodeInfo": {
+        "type": "object",
+        "description": "What an interface runs, and the deployment it came with.",
+        "required": [
+          "version",
+          "hash",
+          "since"
+        ],
+        "properties": {
+          "hash": {
+            "type": "string",
+            "description": "All 64 hex characters."
+          },
+          "since": {
+            "$ref": "#/components/schemas/DeploymentRef",
+            "description": "The deployment this version came with (an earlier one when this start changed nothing)."
+          },
+          "version": {
+            "type": "string",
+            "description": "The code version: a hash of its interface.yaml and every file its code loads, shown as its\nfirst 12 hex characters (the same for the same files on any machine)."
+          }
+        }
+      },
       "CreatedToken": {
         "type": "object",
         "required": [
@@ -3786,6 +3809,97 @@
           "status": {
             "type": "string",
             "description": "`pending`, `sent`, `filtered` or `quarantined`."
+          }
+        }
+      },
+      "DeploymentInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "at",
+          "how",
+          "by",
+          "changed"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "by": {
+            "type": "string",
+            "description": "The account that started it, the person who asked for the handover, or\n`systemd (systemctl reload)`."
+          },
+          "changed": {
+            "type": "integer",
+            "description": "Interfaces whose code version is new for them with this deployment.",
+            "minimum": 0
+          },
+          "git_commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project's git commit (HEAD); none without a git repository."
+          },
+          "how": {
+            "type": "string",
+            "description": "`start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The deployment's id (`deployments.id`)."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why (`ductus handover -m`); none when nobody said."
+          },
+          "uncommitted": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Files the interfaces run that aren't the commit's (changed since, or not in it); none\nwithout git."
+          }
+        }
+      },
+      "DeploymentRef": {
+        "type": "object",
+        "required": [
+          "deployment",
+          "at",
+          "by"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "by": {
+            "type": "string"
+          },
+          "deployment": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "git_commit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
@@ -4429,6 +4543,17 @@
           "others"
         ],
         "properties": {
+          "deployment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeploymentInfo",
+                "description": "What this engine's start (or handover) recorded about the code it runs: by whom, why, the\ngit commit, how many interfaces changed. None while it's being recorded, or when it couldn't\nbe (the log says why)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "drain": {
             "$ref": "#/components/schemas/DrainStatus"
           },
@@ -4885,6 +5010,17 @@
               "folder"
             ],
             "properties": {
+              "code": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/CodeInfo",
+                    "description": "What it runs (its code version) and since which deployment; none while the start records\nit, or when it couldn't."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "folder": {
                 "type": "string"
               },

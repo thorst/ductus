@@ -340,6 +340,11 @@ enum Command {
         /// engine's: under systemd, ductus.env as it is now (the unit's reload passes this).
         #[arg(long)]
         with_environment: bool,
+        /// Why: recorded with the new engine's deployment, beside who asked (the person behind
+        /// `sudo`, else this account; `systemctl reload` is recorded as systemd's, with no reason).
+        /// Example: `sudo ductus handover -m "lab wants PV1-3 mapped"`.
+        #[arg(short = 'm', long = "message")]
+        reason: Option<String>,
     },
     /// Create something new in a project.
     New {
@@ -1187,13 +1192,14 @@ async fn run(cli: Cli) -> Result<()> {
             };
             exit_on_failure(replay::run(options).await)
         }
-        Command::Handover { control, timeout, with_environment } => {
+        Command::Handover { control, timeout, with_environment, reason } => {
             use ductus_runtime::handover;
             let path = control.or_else(handover::control_path).unwrap_or_else(|| "/run/ductus/control".into());
             let environment = with_environment.then(|| {
                 std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect()
             });
-            let request = handover::Request { timeout_secs: timeout.as_secs(), environment };
+            let asked = handover::Asked::here(reason);
+            let request = handover::Request { timeout_secs: timeout.as_secs(), environment, asked };
             let (ok, text) = handover::ask(&path, &request, |line| println!("{line}")).await?;
             if !ok {
                 eprintln!("error: {text}");

@@ -7,12 +7,15 @@ pub mod api;
 pub mod audit;
 pub mod cert_show;
 pub mod certificates;
+pub mod code;
 pub mod control;
+pub mod deployment;
 mod destination;
 pub mod doctor;
 pub mod events;
 mod files;
 pub mod gate;
+pub mod git;
 pub mod handover;
 pub mod health;
 mod http;
@@ -168,6 +171,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     if configs.is_empty() {
         bail!("no interfaces found under {}", root.join("interfaces").display());
     }
+    // Started by a service manager (the deployment's `how`): the Windows service, or systemd (which
+    // gives every unit's processes `INVOCATION_ID`).
+    let service = options.stop_request.is_some() || std::env::var_os("INVOCATION_ID").is_some();
     let inspected = options.inspect.take();
     if let Some(inspect) = &inspected {
         inspect.check(&configs)?;
@@ -530,10 +536,15 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     // Fail fast if any interface's code doesn't load, before accepting any messages.
     let mut failed = Vec::new();
     let mut reported = 0;
+    // The files each interface's code loaded: its code version's (`code`).
+    let mut loaded = std::collections::HashMap::new();
     for (name, result) in ready_rx.iter().take(jobs) {
         reported += 1;
-        if let Err(e) = result {
-            failed.push(format!("interface `{name}`: {e:#}"));
+        match result {
+            Ok(files) => {
+                loaded.entry(name).or_insert(files);
+            }
+            Err(e) => failed.push(format!("interface `{name}`: {e:#}")),
         }
     }
     // A thread that died before loading its interfaces (a panic, logged above) reports nothing:
@@ -549,6 +560,23 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         bail!("{}", failed.join("\n"));
     }
     phases.mark("interface code loaded, workers running");
+    // What each interface runs (in the start: 0.7.3.2's deliveries carry it), recorded once the
+    // interfaces are this engine's (below, beside the start).
+    let code = {
+        let (root, configs) = (root.to_path_buf(), interfaces.iter().map(|(c, ..)| c.clone()).collect::<Vec<_>>());
+        match tokio::task::spawn_blocking(move || deployment::versions(&root, &configs, &loaded)).await {
+            Ok(Ok(code)) => Some(code),
+            Ok(Err(e)) => {
+                tracing::error!(error = %format!("{e:#}"), "couldn't compute the interfaces' code versions: this start's deployment isn't recorded");
+                None
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "computing the code versions failed: this start's deployment isn't recorded");
+                None
+            }
+        }
+    };
+    phases.mark("code versions computed");
     if let Some(resolving) = resolving {
         resolving.await.context("looking up the host names in `allow:` lists")?;
         phases.mark("allow: host names looked up");
@@ -637,11 +665,26 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         certificates::start(engine, certificate_changes).await;
         ldap::start(engine);
     });
+    // Recorded beside the start, not in its way (tens of milliseconds at a thousand interfaces, the
+    // first time far more): a task that ends once it's written. The API shows it from then on.
+    let code = code.map(Arc::new);
+    let record = |engine: &Arc<control::Engine>, who: deployment::Who| {
+        let Some(versions) = code.clone() else { return };
+        let (engine, root) = (engine.clone(), root.to_path_buf());
+        tokio::spawn(async move {
+            let host = audit::host_name();
+            let recorded = deployment::record(&engine, &host, &who, versions, root).await;
+            if let Some(d) = recorded {
+                let _ = engine.deployment.set(d);
+            }
+        });
+    };
     if takeover.is_none()
         && let Some(start) = background.take()
     {
         start(&engine).await;
         phases.mark("audit log and alerts started");
+        record(&engine, deployment::Who::start(service));
     }
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
@@ -683,6 +726,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             "took over: receiving never stopped"
         );
         audit::handed_over(&engine, &handed).await;
+        record(&engine, deployment::Who::handover(&handed.from.asked));
         let _ = engine.handed_over.set(handed);
         t.running(sending_paused).await;
     }

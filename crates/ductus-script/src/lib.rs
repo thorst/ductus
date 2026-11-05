@@ -103,7 +103,18 @@ enum RawResult {
     Promise(v8::Global<v8::Value>),
 }
 
-pub use loader::transpile;
+pub use loader::{normalize, transpile};
+
+/// A project file an interface's code loaded, as its code version counts it (`Isolate::code_files`).
+#[derive(Debug, Clone)]
+pub struct CodeFile {
+    /// Canonical, as the module was loaded.
+    pub path: std::path::PathBuf,
+    /// SHA-256 of `text`.
+    pub hash: [u8; 32],
+    /// Its text, normalized (`normalize`: no byte order mark, `\n` line ends).
+    pub text: String,
+}
 
 /// Name of the global function the test and typegen glue modules install.
 const ENTRY: &str = "__ductus_entry";
@@ -137,6 +148,8 @@ pub struct Isolate {
     clock: Option<v8::Global<v8::Function>>,
     /// V8's inspector is on (`with_inspector`).
     inspector: bool,
+    /// What the module loader read (`code_files`).
+    loaded: Rc<loader::Loaded>,
 }
 
 /// Replaces `Date` and `Math.random` so that a replay computes what the engine computed then, and
@@ -188,8 +201,10 @@ impl Isolate {
     /// `inspector_sessions` (it costs nothing measurable while none is). Must be created inside a
     /// tokio runtime.
     pub fn with_inspector(services: Option<Rc<dyn Services>>, heap_mb: usize, inspector: bool) -> Self {
+        let loader = loader::Loader::default();
+        let loaded = loader.loaded.clone();
         let mut runtime = JsRuntime::new(RuntimeOptions {
-            module_loader: Some(Rc::new(loader::Loader)),
+            module_loader: Some(Rc::new(loader)),
             extensions: vec![ops::extension()],
             create_params: Some(v8::Isolate::create_params().heap_limits(0, heap_mb << 20)),
             inspector,
@@ -202,7 +217,37 @@ impl Isolate {
         let context = runtime.main_context();
         let guard = Guard::new(runtime.v8_isolate(), context, heap_mb);
         runtime.add_near_heap_limit_callback(guard.heap_callback());
-        Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard, clock: None, inspector }
+        Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard, clock: None, inspector, loaded }
+    }
+
+    /// The project files `module`'s code runs: itself and everything it imports, through shared
+    /// files too (the SDK aside), in path order, with each one's text as the loader read it. An
+    /// `import("...")` that hasn't run yet is read from disk now. Call it after loading `module`
+    /// (`add_functions`) and before `forget_code_files`.
+    pub fn code_files(&self, module: &Path) -> Result<Vec<CodeFile>> {
+        let mut todo = vec![file_url(module)?.to_string()];
+        let mut seen = std::collections::BTreeSet::new();
+        let mut files = Vec::new();
+        while let Some(url) = todo.pop() {
+            if !seen.insert(url.clone()) {
+                continue;
+            }
+            let Some(found) = self.loaded.get(&url).or_else(|| loader::read(&url)) else { continue };
+            todo.extend(found.imports.iter().cloned());
+            let path = ModuleSpecifier::parse(&url)
+                .ok()
+                .and_then(|u| u.to_file_path().ok())
+                .with_context(|| format!("not a file: {url}"))?;
+            files.push(CodeFile { path, hash: found.hash, text: found.text });
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(files)
+    }
+
+    /// Let go of the loaded files' texts (once `code_files` has been asked for every interface):
+    /// what's loaded later is recorded from then on.
+    pub fn forget_code_files(&self) {
+        self.loaded.clear();
     }
 
     /// Where debuggers open sessions on this isolate; None without the inspector.

@@ -140,6 +140,39 @@ The JSON bodies the operations above take and return.
 | `error` (optional) | text or null | Why the last lookup failed, if it did. |
 | `name` | text |  |
 
+### `CodeInfo`
+
+What an interface runs, and the deployment it came with.
+
+| Field | Type | |
+|---|---|---|
+| `hash` | text | All 64 hex characters. |
+| `since` | [`DeploymentRef`](#deploymentref) | The deployment this version came with (an earlier one when this start changed nothing). |
+| `version` | text | The code version: a hash of its interface.yaml and every file its code loads, shown as its first 12 hex characters (the same for the same files on any machine). |
+
+### `DeploymentInfo`
+
+| Field | Type | |
+|---|---|---|
+| `at` | time (RFC 3339) |  |
+| `by` | text | The account that started it, the person who asked for the handover, or `systemd (systemctl reload)`. |
+| `changed` | number | Interfaces whose code version is new for them with this deployment. |
+| `git_commit` (optional) | text or null | The project's git commit (HEAD); none without a git repository. |
+| `how` | text | `start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`. |
+| `id` | number | The deployment's id (`deployments.id`). |
+| `reason` (optional) | text or null | Why (`ductus handover -m`); none when nobody said. |
+| `uncommitted` (optional) | list of text or null | Files the interfaces run that aren't the commit's (changed since, or not in it); none without git. |
+
+### `DeploymentRef`
+
+| Field | Type | |
+|---|---|---|
+| `at` | time (RFC 3339) |  |
+| `by` | text |  |
+| `deployment` | number |  |
+| `git_commit` (optional) | text or null |  |
+| `reason` (optional) | text or null |  |
+
 ### `DestinationCounts`
 
 | Field | Type | |
@@ -211,6 +244,7 @@ The JSON bodies the operations above take and return.
 
 | Field | Type | |
 |---|---|---|
+| `deployment` (optional) | [`DeploymentInfo`](#deploymentinfo) or null |  |
 | `drain` | [`DrainStatus`](#drainstatus) |  |
 | `environment` | text |  |
 | `handover` (optional) | [`Handover`](#handover) or null |  |
