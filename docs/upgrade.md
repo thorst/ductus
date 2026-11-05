@@ -325,7 +325,14 @@ Under the Linux package's service senders wait in the queue rather than being re
 long as it takes. Plan the window by the size shown, and time it on a restored backup first.
 There have been none since v0.5 (0011, the queue index, was the last).
 
-**When one fails**, the start refuses with the database's reason, and so does every later start
+**One that needs a busy table to itself** for a moment, even a quick one, waits for the queries
+already reading it, and everything after it waits behind it. From 0027 on, such a migration
+waits at most 2 s, then gives up, says what holds the table and changes nothing: 0027 (0.7.3.2,
+the code version on each delivery) does that for `deliveries`
+([nuance](nuances/deployments.md#upgrading-to-0732-waits-at-most-2-s-for-the-deliveries-table-level-3)).
+Upgrade when no long report runs; if it gives up, start again once the query is done.
+
+**When one fails** (other than giving up on a lock, above), the start refuses with the database's reason, and so does every later start
 of that version until the cause is fixed. Each migration runs in one transaction, so a failure
 leaves nothing half done: the database is as it was before it, and the version before still runs
 on it (going back keeps you running meanwhile). A migration recorded as failed (`upgrade

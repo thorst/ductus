@@ -169,6 +169,7 @@ The JSON bodies the operations above take and return.
 | `copy` (optional) | number or null | `edit`: the copy's id. |
 | `destination` | text |  |
 | `previous_attempts` (optional) | number or null |  |
+| `previous_code_version` (optional) | text or null | The code version (12 hex characters) that had decided the delivery before (none: no code did, or an engine before 0.7.3.2). |
 | `previous_error` (optional) | text or null |  |
 | `previous_status` (optional) | text or null | The delivery before: `sent`, `filtered` or `quarantined` (none: there was none). |
 | `reason` (optional) | text or null |  |
@@ -197,15 +198,36 @@ The JSON bodies the operations above take and return.
 | `resent` | list of [`ResentMessage`](#resentmessage) | The messages sent again, by id. |
 | `skipped` | list of number | Ids with nothing to resend: not found, not run by this engine, a duplicate, or no delivery that matched (pending already, or not quarantined). |
 
+### `DecidedBy`
+
+The code version that decided a delivery, and the deployment that brought it.
+
+| Field | Type | |
+|---|---|---|
+| `deployed` (optional) | [`Deployed`](#deployed) or null |  |
+| `hash` | text | All 64. |
+| `version` | text | Its first 12 hex characters, as everywhere else. |
+
 ### `DeliveryInfo`
 
 | Field | Type | |
 |---|---|---|
 | `attempts` | number |  |
+| `decided_by` (optional) | [`DecidedBy`](#decidedby) or null |  |
 | `destination` | text |  |
 | `last_error` (optional) | text or null |  |
 | `output` (optional) | text or null | What was sent, for destinations with `save_output: true`. |
 | `status` | text | `pending`, `sent`, `filtered` or `quarantined`. |
+
+### `Deployed`
+
+When a version was deployed, by whom and why.
+
+| Field | Type | |
+|---|---|---|
+| `at` | time (RFC 3339) |  |
+| `by` | text |  |
+| `reason` (optional) | text or null |  |
 
 ### `DismissRequest`
 

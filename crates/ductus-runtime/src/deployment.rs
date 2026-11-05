@@ -2,6 +2,10 @@
 //! (`code`), the project's git commit (`git`), who and why, as a deployment
 //! (`Store::record_deployment`). The engine keeps what it recorded for the API.
 //!
+//! The versions are saved first, on their own (`save`): every delivery records the version that
+//! decided it (0.7.3.2), so the workers wait for its id before saving a decision (`Decided`),
+//! never before making one, and not for the deployment's record, which comes after.
+//!
 //! Like the audit log, a deployment that can't be recorded is an error in the log, never a reason
 //! to refuse to start: the engine may be all that's left to move messages.
 
@@ -10,13 +14,100 @@ use crate::handover::Asked;
 use anyhow::{Context, Result};
 use ductus_core::InterfaceConfig;
 use ductus_script::CodeFile;
-use ductus_store::{NewDeployment, NewVersion, Running, Store};
+use ductus_store::{NewDeployment, NewVersion, Running, Store, VersionIds};
 use std::collections::{BTreeMap, HashMap};
 use std::path::Path;
 use std::sync::Arc;
+use tokio::sync::watch;
 
 /// How many changed interfaces the start's log line names.
 const NAMED: usize = 10;
+/// How long `save` keeps trying while the database refuses, before decisions are saved without
+/// their version (said).
+const SAVE_TRIES: u32 = 30;
+
+/// The code versions as saved: each one's id (`code_versions.id`), by hash and by interface.
+#[derive(Debug, Default)]
+pub struct Saved {
+    pub ids: VersionIds,
+    pub by_interface: HashMap<String, i32>,
+}
+
+/// Each interface's code version id, once `save` has it: what the workers record with every
+/// decision (`deliveries.code_version`).
+#[derive(Clone)]
+pub struct Decided(watch::Receiver<Option<Arc<Saved>>>);
+
+/// Where `save` says what it saved.
+pub type Saving = watch::Sender<Option<Arc<Saved>>>;
+
+impl Decided {
+    pub fn channel() -> (Saving, Self) {
+        let (tx, rx) = watch::channel(None);
+        (tx, Self(rx))
+    }
+
+    /// The versions saved, once they are (at once after that). None when nothing will be: the
+    /// start ended first.
+    pub async fn saved(&self) -> Option<Arc<Saved>> {
+        let mut rx = self.0.clone();
+        rx.wait_for(Option::is_some).await.ok().and_then(|saved| saved.clone())
+    }
+
+    /// `interface`'s version id, once saved; None when it couldn't be (said in the log).
+    pub async fn id(&self, interface: &str) -> Option<i32> {
+        self.saved().await.and_then(|s| s.by_interface.get(interface).copied())
+    }
+}
+
+/// `versions` as the store saves them.
+fn new_versions(versions: &[Version]) -> Vec<NewVersion<'_>> {
+    versions
+        .iter()
+        .map(|v| NewVersion {
+            interface: &v.interface,
+            hash: &v.hash,
+            files: v.files.iter().map(|f| (f.path.as_str(), f.hash.as_slice(), f.text.as_str())).collect(),
+        })
+        .collect()
+}
+
+/// Save `versions` (`Store::save_versions`) and tell `saving`. Beside the start, as soon as they're
+/// computed; a takeover's too, before it takes over: the rows are shared by content and change
+/// nothing any engine runs, and the workers it starts then don't wait. While the database refuses
+/// it tries again for a while; then (or without versions) every decision is saved without one,
+/// and the log says so.
+pub async fn save(store: Store, versions: Option<Arc<Vec<Version>>>, saving: Saving) {
+    let started = std::time::Instant::now();
+    let Some(versions) = versions else {
+        saving.send_replace(Some(Arc::default()));
+        return;
+    };
+    let new = new_versions(&versions);
+    let mut tries = 0;
+    let ids = loop {
+        tries += 1;
+        match store.save_versions(&new).await {
+            Ok(ids) => break ids,
+            Err(e) if tries < SAVE_TRIES => {
+                tracing::warn!(error = %format!("{e:#}"), "saving the code versions; trying again");
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(e) => {
+                tracing::error!(
+                    error = %format!("{e:#}"),
+                    "the code versions couldn't be saved: this run's deliveries are saved without the code version that decided them, and its deployment isn't recorded"
+                );
+                saving.send_replace(Some(Arc::default()));
+                return;
+            }
+        }
+    };
+    let by_interface =
+        versions.iter().filter_map(|v| Some((v.interface.clone(), *ids.get(v.hash.as_slice())?))).collect();
+    tracing::debug!(took = ?started.elapsed(), versions = versions.len(), "code versions saved");
+    saving.send_replace(Some(Arc::new(Saved { ids, by_interface })));
+}
 
 /// Who started this engine and why.
 #[derive(Debug, Clone)]
@@ -87,14 +178,15 @@ pub fn commit(root: &Path, versions: &[Version]) -> Option<crate::git::Commit> {
     }
 }
 
-/// Read the project's commit (`commit`), record the deployment of `versions` by `who`, and say so
-/// in the log. None when it couldn't be recorded (said). Beside the start, once the engine holds
-/// its interfaces (a takeover's after it took over).
+/// Read the project's commit (`commit`), record the deployment of `versions` by `who` once they're
+/// saved (`decided`), and say so in the log. None when it couldn't be recorded (said). Beside the
+/// start, once the engine holds its interfaces (a takeover's after it took over).
 pub async fn record(
     engine: &crate::control::Engine,
     host: &str,
     who: &Who,
     versions: Arc<Vec<Version>>,
+    decided: Decided,
     root: std::path::PathBuf,
 ) -> Option<Deployment> {
     let started = std::time::Instant::now();
@@ -102,14 +194,9 @@ pub async fn record(
     let commit = tokio::task::spawn_blocking(move || self::commit(&root, &reading)).await.ok().flatten();
     let commit = commit.as_ref();
     let store: &Store = &engine.store;
-    let new: Vec<NewVersion> = versions
-        .iter()
-        .map(|v| NewVersion {
-            interface: &v.interface,
-            hash: &v.hash,
-            files: v.files.iter().map(|f| (f.path.as_str(), f.hash.as_slice(), f.text.as_str())).collect(),
-        })
-        .collect();
+    // Not saved: `save` said why.
+    let saved = decided.saved().await.filter(|s| !s.by_interface.is_empty() || versions.is_empty())?;
+    let new = new_versions(&versions);
     let deployment = NewDeployment {
         environment: &engine.environment,
         instance: &engine.instance,
@@ -122,7 +209,7 @@ pub async fn record(
         uncommitted: commit.map(|c| c.uncommitted.as_slice()),
         versions: &new,
     };
-    let recorded = match store.record_deployment(&deployment).await.context("recording the deployment") {
+    let recorded = match store.record_deployment(&deployment, &saved.ids).await.context("recording the deployment") {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(

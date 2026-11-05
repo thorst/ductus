@@ -148,8 +148,68 @@ changes.
   ORDER BY d.id DESC LIMIT 10;
   ```
 
-A timeline per interface (`ductus history`, an interface's **History** tab) and the code version
-on each delivery come with the next parts of 0.7.3.
+A timeline per interface (`ductus history`, an interface's **History** tab) comes with the next
+part of 0.7.3.
+
+## Which code decided each delivery
+
+From 0.7.3.2, every delivery records the code version that decided it: when a destination's
+worker saves a message as sent, filtered or quarantined, it saves the version of the code that
+made that decision with it. So "which code sent this?" has an answer per message and destination,
+however many deploys happened since, and "deployed 14:02 by todd: fix PV1-3" comes with it.
+
+| The delivery | Its code version |
+|---|---|
+| sent, filtered (`return null`, `kill()`), quarantined by the code (`quarantine()`, a thrown error, a runaway) | the version that ran |
+| quarantined because the receiver refused it (AR, an HTTP 400, gave up after its retries) | the version that ran: it decided to send, and that's what was refused |
+| dropped over its rate limit | the version running |
+| pending (not decided yet, or sent again) | none |
+| sent again (Resend, Replay) | none until it's decided again; the resend's row in its history keeps the version before |
+| dismissed, or replaced by an edited copy | none: a person decided; the history keeps the version that decided it before |
+| filtered because its destination was removed from interface.yaml | none: no code ran |
+| decided by an engine before 0.7.3.2 | none |
+
+([nuance](../nuances/deployments.md#a-delivery-names-the-code-that-decided-it-not-the-code-that-sent-it-again-level-2))
+
+**Where to see it:**
+
+- **A message's page**: the Destinations table's **Decided by** column, the version (its full
+  hash when you point at it) and the deployment that brought it to the interface: when, by whom,
+  why. A resend, dismissal or edit in its **History** says which version had decided the delivery
+  before.
+- **The API**: [`GET /messages/{id}`](../reference/api/messages.md) gives each delivery a
+  `decided_by` (`version`, `hash`, `deployed` with `at`, `by`, `reason`), and each action a
+  `previous_code_version`.
+- **`ductus try --message ID`** names the version it tries on its first line, and under a
+  destination whose record another version decided, says so: `decided by code version
+  07cd7ba85180, not this one (ae5123af1d2c)` ([one message](../write/debugging.md#one-message-ductus-try)).
+- **`ductus replay`** says per interface how many of the records it compares other code decided,
+  and which versions: `note: 8 record(s) were decided by other code than this (…): a3f9c2e81b07
+  (8); a difference from the record may be that change`. In `--json` that's each interface's
+  `code_version` and `records_by_other_code`.
+- **SQL**, for reports: what decided an interface's last day of deliveries, version by version:
+
+  ```sql
+  SELECT encode(substr(v.hash, 1, 6), 'hex') AS version, count(*)
+  FROM deliveries d
+  JOIN destinations t ON t.id = d.destination_id
+  LEFT JOIN code_versions v ON v.id = d.code_version
+  WHERE t.interface = 'adt-in' AND d.received_at > now() - interval '1 day'
+  GROUP BY 1 ORDER BY 2 DESC;
+  ```
+
+**At a start**, workers begin on the messages already waiting as soon as their code has loaded;
+the versions are saved right after (milliseconds, more the first time a project's files are
+stored), and no decision is saved before its version is: a message decided in that moment waits
+for it, never ingest
+([nuance](../nuances/deployments.md#the-first-decisions-after-a-start-wait-for-the-code-versions-to-be-saved-level-4)).
+
+**Upgrading to 0.7.3.2** adds the column (migration 0027): a change to the database's catalog,
+not to its rows, done in milliseconds. It needs `deliveries` to itself for that moment, so it waits
+at most 2 s for a query already reading it; past that the start stops, says what holds the table
+and changes nothing (senders wait those 2 s at most, never refused), and a handover leaves the old
+engine serving
+([nuance](../nuances/deployments.md#upgrading-to-0732-waits-at-most-2-s-for-the-deliveries-table-level-3)).
 
 ## What it costs
 
@@ -159,3 +219,14 @@ file as it reads it) and the whole start were within run-to-run noise of the ver
 record is written beside the start, after it: 33–100 ms (the git comparison included), 389 ms the
 first time, when every version and file is new (848 kB of file text). Nothing runs in the
 background afterwards; one row per start or handover, plus the files that changed.
+
+**The code version on each delivery** (0.7.3.2) is 4 bytes in a row (74 → 80 bytes), saved in
+the statement that saves the decision anyway. Measured against the version before
+(`scripts/bench-inspect.sh`: 20,000 HL7 messages through a transform over 4 connections, three
+passes of three runs each, on WSL): ingest 3,879–7,214 messages/s before, 3,983–7,148 after;
+everything delivered in 9.5–13.6 s before (one run of 32 s, just after a restart), 9.1–13.3 s
+after: the same, within the runs' own spread (which was wide that day, for both). At 1,001
+interfaces the whole start was 761–972 ms before and 756–927 ms after; the versions are saved
+44–52 ms after they're computed when nothing changed (mostly one statement carrying a thousand
+hashes), 212–267 ms the first time a project's files are stored. Only a decision that comes
+before that waits for it (messages waiting at the start); nothing a sender waits for does.

@@ -46,6 +46,7 @@ One row per queued message and destination: each destination's work queue and it
 | `output` | bytea | Exactly what was sent, only for destinations with `save_output: true`. |
 | `updated_at` | timestamptz | Last change. |
 | `tier` | smallint | Always its message's tier (a retention change, or the move to the held area, moves both in one statement). |
+| `code_version` | integer | The code version that decided it (`code_versions.id`; migration 0027, 0.7.3.2): set with its final status by the engine's workers, sent, filtered or quarantined, also when the receiver refused it (the code decided to send). Null while pending (a resend clears it, keeping it in `message_actions.previous_code_version`), when a person decided it (dismissed, replaced by an edited copy), when the engine did without running code (a destination removed from interface.yaml, an older engine's status taken over at start), and on deliveries decided by engines before 0.7.3.2. No foreign key (it would cost a lookup per delivery saved; versions are never deleted). 4 bytes once set, nothing while null. Which deployment brought that version: the last `deployment_changes` row for the interface with `to_version` = this, at or before `updated_at`. |
 
 Indexes: primary key `(message_id, received_at, destination_id, tier)`; `deliveries_queue (destination_id, message_id, partition_key) WHERE status = 0`, which is each destination's queue in arrival order (the lane is checked inside the index; migration 0011 replaced `deliveries_pending`, which had the lane second); `deliveries_quarantined (destination_id, message_id) WHERE status = 3` (quarantine counts without reading the table).
 
@@ -196,6 +197,7 @@ What people did to messages through the API (`POST /api/v1/messages/{id}/resend`
 | `previous_attempts` | integer | Its attempts before (a resend starts them over). |
 | `previous_error` | text | Its `last_error` before. |
 | `previous_output` | bytea | What was sent before, for destinations with `save_output: true` (sending again replaces it). A copy of a payload, so it is set to NULL once the action is older than the interface's message retention (the row stays). |
+| `previous_code_version` | integer | The code version that had decided the delivery (`deliveries.code_version` before: `code_versions.id`; migration 0027, 0.7.3.2); null when no code had, or an engine before 0.7.3.2 did. |
 | `copy_id` | bigint | `edit`: the copy's message id. |
 | `audit_id` | bigint | The `audit_log` row of the request that made this action (one request, e.g. a bulk resend, makes one audit row and one action per delivery). No foreign key: both are trimmed after `audit.keep`. |
 

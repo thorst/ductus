@@ -41,6 +41,9 @@ test("an operator corrects a quarantined message: a copy goes, the original is r
   // The copy: its own page, linked to the original, sent (the code accepts patient 100004).
   await expect(page.getByRole("note")).toContainText("An edited copy of message");
   await expect(page.getByRole("heading", { level: 1 })).toContainText("sent");
+  // Decided by the code the demo engine runs: its version, and the start that deployed it.
+  const decided = page.getByRole("region", { name: "Destinations" });
+  await expect(decided).toContainText(/[0-9a-f]{12}\s*deployed .* by /);
   await page.getByRole("button", { name: "Raw" }).click();
   await expect(page.locator("pre")).toContainText("PID|1||100004^^^MRN");
 
@@ -48,8 +51,11 @@ test("an operator corrects a quarantined message: a copy goes, the original is r
   await page.goto(original);
   await expect(page.getByRole("heading", { level: 1 })).toContainText("filtered");
   await expect(page.getByRole("region", { name: "Destinations" })).toContainText("replaced by edited copy");
+  // A person decided that: no code version on the delivery; the history keeps the one before.
+  await expect(page.getByRole("region", { name: "Destinations" })).toContainText("not recorded");
   const history = page.getByRole("region", { name: "History" });
   await expect(history).toContainText("Edited: copy");
+  await expect(history).toContainText(/decided by [0-9a-f]{12}/);
   await expect(history).toContainText("patient merged into 100004");
   await page.screenshot({ path: "test-results/message-edited.png", fullPage: true });
 });

@@ -57,9 +57,12 @@ start() {
   shift
   local t0
   t0=$(date +%s%N)
+  # Gone first: the background job truncates it only once it runs, and the wait below would read
+  # the last run's `started` line meanwhile.
+  rm -f "$P/dev.log"
   (cd "$P" && exec "$bin" dev --api-listen off "$@") >"$P/dev.log" 2>&1 &
   ENGINE=$!
-  until grep -q 'started interfaces=' "$P/dev.log"; do
+  until grep -q 'started interfaces=' "$P/dev.log" 2>/dev/null; do
     kill -0 "$ENGINE" 2>/dev/null || { cat "$P/dev.log"; exit 1; }
     sleep 0.01
   done
@@ -80,9 +83,12 @@ run() {
   shift 2
   start "$bin" "$@"
   if [ "$label" = paused ]; then
+    # As dev.log: the last pass's "attached" and "paused" would be read before it's truncated (a
+    # second pass then sent before the debugger attached and waited for a pause forever).
+    rm -f "$P/hold.log"
     node "$HOLD" "$INSPECT" >"$P/hold.log" &
     HOLDER=$!
-    until grep -q attached "$P/hold.log"; do sleep 0.05; done
+    until grep -q attached "$P/hold.log" 2>/dev/null; do sleep 0.05; done
     "$BIN" gen --to 127.0.0.1:$DBG --count 1 >/dev/null
     until grep -q paused "$P/hold.log"; do sleep 0.05; done
   fi

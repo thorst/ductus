@@ -48,6 +48,9 @@ pub struct Recorded {
     /// What was sent, when the destination keeps it (`save_output`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output: Option<String>,
+    /// The code version that decided it (64 hex characters), when known (0.7.3.2 on).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_version: Option<String>,
 }
 
 pub struct Options {
@@ -84,6 +87,10 @@ pub struct Tried {
 #[derive(Debug, Clone, Serialize)]
 pub struct Trial {
     pub interface: String,
+    /// The code version tried (64 hex characters): what the project's files make now, as a start
+    /// would compute it (`code`). None when it couldn't be computed (a file it loaded went away).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code_version: Option<String>,
     /// What the code wrote to `console` while its modules loaded.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub loading: String,
@@ -168,14 +175,17 @@ async fn tried(
         isolate.wait_for_debugger();
         server = Some(inspector);
     }
-    let functions = match config.script_path() {
-        None => None,
+    let (functions, files) = match config.script_path() {
+        None => (None, Ok(Vec::new())),
         Some(path) => {
             let functions = config.functions();
             let functions: Vec<(&str, &str)> = functions.iter().map(|(n, f)| (n.as_str(), f.as_str())).collect();
-            Some(isolate.add_functions(&path, &functions, config.timeout).await?.1)
+            let loaded = isolate.add_functions(&path, &functions, config.timeout).await?.1;
+            (Some(loaded), isolate.code_files(&path))
         }
     };
+    // As a start computes it, so it can be held against the version a record names.
+    let code_version = crate::replay::version_of(&options.root, &config, files);
     let loading = isolate.take_console();
 
     let mut recorded = message.recorded.clone();
@@ -210,5 +220,5 @@ async fn tried(
         });
     }
     drop(server);
-    Ok(Trial { interface: config.name, loading, destinations, without_resources: None })
+    Ok(Trial { interface: config.name, code_version, loading, destinations, without_resources: None })
 }

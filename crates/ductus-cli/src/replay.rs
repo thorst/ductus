@@ -122,12 +122,14 @@ pub async fn run(o: Options) -> Result<bool> {
             match t.next() {
                 Some(Event::Row(r)) if names.contains(&r.interface) => report.only_other(&r),
                 Some(Event::Row(r)) => *only_theirs.entry(r.interface).or_default() += 1,
-                Some(Event::Interface { interface, skipped, outputs }) => {
-                    if skipped.is_some() {
-                        t.skipped.insert(interface.clone());
+                Some(event @ Event::Interface { .. }) => {
+                    if let Event::Interface { interface, skipped, .. } = &event {
+                        if skipped.is_some() {
+                            t.skipped.insert(interface.clone());
+                        }
+                        t.announced.insert(interface.clone());
                     }
-                    t.announced.insert(interface.clone());
-                    report.other_event(&Event::Interface { interface, skipped, outputs });
+                    report.other_event(&event);
                 }
                 _ => {}
             }

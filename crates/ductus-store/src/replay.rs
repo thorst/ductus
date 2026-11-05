@@ -24,6 +24,9 @@ pub struct Recorded {
     pub status: Status,
     pub last_error: Option<String>,
     pub output: Option<Vec<u8>>,
+    /// The code version that decided it (its hash): None when none is known (pending, decided by a
+    /// person, or by an engine before 0.7.3.2).
+    pub code_version: Option<Vec<u8>>,
 }
 
 impl Store {
@@ -62,8 +65,10 @@ impl Store {
         };
         let ids: Vec<i64> = messages.iter().map(|m| m.id).collect();
         sqlx::query_as::<_, Recorded>(
-            "SELECT d.message_id AS id, t.name AS destination, d.status, d.last_error, d.output
+            "SELECT d.message_id AS id, t.name AS destination, d.status, d.last_error, d.output,
+                    v.hash AS code_version
              FROM deliveries d JOIN destinations t ON t.id = d.destination_id
+             LEFT JOIN code_versions v ON v.id = d.code_version
              WHERE t.interface = $1 AND d.message_id = ANY($2) AND d.received_at BETWEEN $3 AND $4",
         )
         .bind(interface)

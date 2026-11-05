@@ -3,10 +3,10 @@
 # (a transform importing one of ten shared libraries, which import another, and a file of its
 # own: 3,013 files), started ROUNDS times with BASE (a binary before 0.7.3) and BIN alternately,
 # on a database of its own. Reports each start's `took` and, for BIN, the phases 0.7.3 added
-# (code versions computed, deployment recorded); BIN's first start (every version and file new)
-# separately.
+# (code versions computed, saved: what the first decisions wait for (0.7.3.2), deployment
+# recorded); BIN's first start (every version and file new) separately.
 #
-#   BASE=~/target-base/release/ductus bash scripts/bench-versions.sh
+#   BASE=~/target-base/release/ductus bash scripts/bench-versions.sh   # BASE: an earlier binary
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
@@ -85,9 +85,12 @@ start() {
     sleep 0.1
   done
   recorded=$(grep "deployed:" "$log" | grep -o 'took=[^ ]*' | sed 's/took=//' || true)
+  # Saved right after they're computed: until then no decision is saved (0.7.3.2).
+  saved=$(grep "code versions saved" "$log" | grep -o 'took=[^ ]*' | sed 's/took=//' || true)
   kill -INT $pid
   wait $pid || true
-  printf '%-5s start %-10s code loaded %-10s versions %-10s recorded %s\n' "$2" "$took" "$loaded" "${versions:--}" "${recorded:--}"
+  printf '%-5s start %-10s code loaded %-10s versions %-10s saved %-10s recorded %s\n' "$2" "$took" "$loaded" \
+    "${versions:--}" "${saved:--}" "${recorded:--}"
 }
 
 echo "== a first start of each (migrations; for BIN every version and file is new)"

@@ -65,6 +65,8 @@ pub struct Job {
     /// takeover knows only once the engine it takes over from let go). Workers of the others skip
     /// their first read and wait for a wake-up (or the idle poll).
     pub waiting: Arc<Waiting>,
+    /// Its code version's id, once saved: recorded with every decision.
+    pub decided: crate::deployment::Decided,
 }
 
 /// Set once, before the engine holds its interfaces (see `Job::waiting`).
@@ -372,6 +374,9 @@ struct Worker {
     ownership: Arc<crate::ownership::Ownership>,
     /// Whether to skip the first read (see `Job::waiting`); taken at the first.
     waiting: Option<Arc<Waiting>>,
+    /// The code version that decides here (`Job::decided`), known from the first save on.
+    decided: crate::deployment::Decided,
+    code_version: Option<Option<i32>>,
     /// The engine is stopping: like a pause (a transform or send under way finishes, nothing new
     /// starts), but the worker then saves what it finished and ends.
     stop: CancellationToken,
@@ -457,6 +462,8 @@ impl Worker {
             pause: outlet.pause,
             ownership: job.ownership.clone(),
             waiting: Some(job.waiting.clone()),
+            decided: job.decided.clone(),
+            code_version: None,
             stop,
             config,
         }
@@ -724,9 +731,26 @@ impl Worker {
         }
     }
 
+    /// The code version deciding here, to save with each decision. The first time, it waits until
+    /// the start has saved the versions (`deployment::save`: milliseconds after the code loaded, or
+    /// longer the first time a project's files are stored); a message waiting at start can be
+    /// decided before that, but not saved.
+    async fn code_version(&mut self) -> Option<i32> {
+        if let Some(known) = self.code_version {
+            return known;
+        }
+        let id = self.decided.id(&self.config.name).await;
+        self.code_version = Some(id);
+        id
+    }
+
     async fn flush(&mut self) {
         if self.done.is_empty() {
             return;
+        }
+        let version = self.code_version().await;
+        for done in &mut self.done {
+            done.code_version = version;
         }
         let flush = || {
             let (done, destination) = (self.done.clone(), self.destination_id);
@@ -750,13 +774,14 @@ impl Worker {
     /// Persist a final status now (quarantines: someone should see them at once). Retries until
     /// the database accepts it: if we gave up here, the message would be processed again after
     /// a restart.
-    async fn finish(&self, reference: MessageRef, status: Status, error: Option<&str>) {
+    async fn finish(&mut self, reference: MessageRef, status: Status, error: Option<&str>) {
         if status == Status::Quarantined {
             stats::add(&self.stats.quarantined);
             self.stats.failed(error.unwrap_or("quarantined"));
         }
+        let version = self.code_version().await;
         let save = || {
-            let (done, destination) = (Done::with(reference, status, error), self.destination_id);
+            let (done, destination) = (Done::with(reference, status, error).by(version), self.destination_id);
             self.db(move |store| async move { store.finish(destination, &[done]).await })
         };
         while let Err(e) = save().await {

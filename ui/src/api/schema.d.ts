@@ -1004,6 +1004,11 @@ export interface components {
             destination: string;
             /** Format: int32 */
             previous_attempts?: number | null;
+            /**
+             * @description The code version (12 hex characters) that had decided the delivery before (none: no code
+             *     did, or an engine before 0.7.3.2).
+             */
+            previous_code_version?: string | null;
             previous_error?: string | null;
             /** @description The delivery before: `sent`, `filtered` or `quarantined` (none: there was none). */
             previous_status?: string | null;
@@ -1378,15 +1383,31 @@ export interface components {
             secret: string;
             token: components["schemas"]["TokenInfo"];
         };
+        /** @description The code version that decided a delivery, and the deployment that brought it. */
+        DecidedBy: {
+            deployed?: components["schemas"]["Deployed"] | null;
+            /** @description All 64. */
+            hash: string;
+            /** @description Its first 12 hex characters, as everywhere else. */
+            version: string;
+        };
         DeliveryInfo: {
             /** Format: int32 */
             attempts: number;
+            decided_by?: components["schemas"]["DecidedBy"] | null;
             destination: string;
             last_error?: string | null;
             /** @description What was sent, for destinations with `save_output: true`. */
             output?: string | null;
             /** @description `pending`, `sent`, `filtered` or `quarantined`. */
             status: string;
+        };
+        /** @description When a version was deployed, by whom and why. */
+        Deployed: {
+            /** Format: date-time */
+            at: string;
+            by: string;
+            reason?: string | null;
         };
         DeploymentInfo: {
             /** Format: date-time */

@@ -334,6 +334,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let retention = retention::Retention::new(store.clone(), configured).await.context("reading retention")?;
     // Which interfaces have messages waiting, known once they're this engine's (`take_charge`).
     let waiting = Arc::new(worker::Waiting::new());
+    // Each interface's code version id, saved once computed (below): workers record it with every
+    // decision, and wait for it before saving their first.
+    let (saving, decided) = deployment::Decided::channel();
     if takeover.is_none() {
         let _ = waiting.set(take_charge(&store, &charge, &mut phases).await?);
         settle_in(&store, &charge, &retention, &mut phases).await?;
@@ -470,6 +473,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 stats: stats.clone(),
                 ownership: owner.ownership.clone(),
                 waiting: waiting.clone(),
+                decided: decided.clone(),
             };
             if inspected.as_ref().is_some_and(|i| i.interfaces.contains(&config.name)) {
                 debugged.entry(config.name.clone()).or_default().push(job);
@@ -560,8 +564,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         bail!("{}", failed.join("\n"));
     }
     phases.mark("interface code loaded, workers running");
-    // What each interface runs (in the start: 0.7.3.2's deliveries carry it), recorded once the
-    // interfaces are this engine's (below, beside the start).
+    // What each interface runs (in the start: every delivery records it), saved at once beside the
+    // start (the workers wait for the ids before saving a decision), recorded as a deployment once
+    // the interfaces are this engine's (below, beside the start).
     let code = {
         let (root, configs) = (root.to_path_buf(), interfaces.iter().map(|(c, ..)| c.clone()).collect::<Vec<_>>());
         match tokio::task::spawn_blocking(move || deployment::versions(&root, &configs, &loaded)).await {
@@ -576,6 +581,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             }
         }
     };
+    let code = code.map(Arc::new);
+    tokio::spawn(deployment::save(store.clone(), code.clone(), saving));
     phases.mark("code versions computed");
     if let Some(resolving) = resolving {
         resolving.await.context("looking up the host names in `allow:` lists")?;
@@ -667,13 +674,12 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     });
     // Recorded beside the start, not in its way (tens of milliseconds at a thousand interfaces, the
     // first time far more): a task that ends once it's written. The API shows it from then on.
-    let code = code.map(Arc::new);
     let record = |engine: &Arc<control::Engine>, who: deployment::Who| {
         let Some(versions) = code.clone() else { return };
-        let (engine, root) = (engine.clone(), root.to_path_buf());
+        let (engine, root, decided) = (engine.clone(), root.to_path_buf(), decided.clone());
         tokio::spawn(async move {
             let host = audit::host_name();
-            let recorded = deployment::record(&engine, &host, &who, versions, root).await;
+            let recorded = deployment::record(&engine, &host, &who, versions, decided, root).await;
             if let Some(d) = recorded {
                 let _ = engine.deployment.set(d);
             }

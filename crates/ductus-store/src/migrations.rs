@@ -25,6 +25,36 @@ pub(crate) fn migrator() -> sqlx::migrate::Migrator {
     sqlx::migrate!("./migrations")
 }
 
+/// Apply `migrator`'s migrations (`Store::connect`): one that waited too long for a lock says what
+/// to do (`refusal`); other failures as sqlx words them.
+pub(crate) async fn run(pool: &sqlx::PgPool, migrator: &sqlx::migrate::Migrator) -> Result<()> {
+    match migrator.run(pool).await {
+        Ok(()) => Ok(()),
+        Err(e) => match refusal(&e) {
+            Some(why) => bail!("{why}"),
+            None => Err(e).context("running migrations"),
+        },
+    }
+}
+
+/// A migration that gave up waiting for a table's lock (`lock_timeout`, 0027 on), or that a
+/// deadlock ended, in words: what holds it and what to do. None for any other failure.
+pub(crate) fn refusal(e: &sqlx::migrate::MigrateError) -> Option<String> {
+    let sqlx::migrate::MigrateError::ExecuteMigration(sqlx::Error::Database(db), version) = e else { return None };
+    let what = match db.code().as_deref() {
+        Some("55P03") => "waited 2 s for a table's lock and gave up",
+        Some("40P01") => "was ended by a deadlock with a statement that held a table it needed",
+        _ => return None,
+    };
+    Some(format!(
+        "migration {version:04} {what}: something holds the table (a long query, a report, a psql session left in a \
+         transaction). Nothing was changed, and senders waited at most those 2 s. See what holds it with \
+         `SELECT pid, now() - xact_start AS open_for, state, query FROM pg_stat_activity WHERE datname = current_database() \
+         AND xact_start < now() - interval '2 seconds'`, let it finish (or end it with `SELECT pg_cancel_backend(<pid>)`), \
+         then start again"
+    ))
+}
+
 /// The last migration written before headers: later ones must carry theirs.
 const LAST_WITHOUT_HEADER: i64 = 24;
 
@@ -278,6 +308,49 @@ mod tests {
             let error = format!("{:#}", header(sql).unwrap_err());
             assert!(error.contains(says), "{sql:?}: {error}");
         }
+    }
+
+    /// 0027 behind a query holding `deliveries` gives up after its 2 s (`SET LOCAL lock_timeout` in
+    /// the file, inside sqlx's transaction), changes nothing and says what to do; once the query
+    /// ends it applies. In a schema of its own, so the shared test database is left alone.
+    #[tokio::test]
+    async fn a_migration_behind_a_long_query_gives_up_after_2_s_and_says_why() {
+        let Ok(url) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+        let schema = format!("test_migrate_{}_{nanos}", std::process::id());
+        let admin = sqlx::PgPool::connect(&url).await.unwrap();
+        sqlx::query(sqlx::AssertSqlSafe(format!("CREATE SCHEMA {schema}"))).execute(&admin).await.unwrap();
+        let options: sqlx::postgres::PgConnectOptions = url.parse().unwrap();
+        let options = options.options([("search_path", schema.as_str())]);
+        let pool = sqlx::postgres::PgPoolOptions::new().max_connections(2).connect_with(options).await.unwrap();
+        // Without the advisory lock: it would hold up every other test's start for those seconds.
+        let only = |up_to: i64| sqlx::migrate::Migrator {
+            migrations: migrator().migrations.iter().filter(|m| m.version <= up_to).cloned().collect(),
+            locking: false,
+            ..migrator()
+        };
+        run(&pool, &only(26)).await.unwrap();
+
+        let mut reader = pool.begin().await.unwrap();
+        sqlx::query("SELECT count(*) FROM deliveries").execute(&mut *reader).await.unwrap();
+        let started = std::time::Instant::now();
+        let e = format!("{:#}", run(&pool, &only(27)).await.unwrap_err());
+        let waited = started.elapsed();
+        assert!(e.contains("migration 0027 waited 2 s for a table's lock and gave up"), "{e}");
+        assert!(e.contains("pg_stat_activity") && e.contains("Nothing was changed"), "{e}");
+        assert!(waited >= std::time::Duration::from_millis(1900), "{waited:?}");
+        assert!(waited < std::time::Duration::from_secs(4), "{waited:?}");
+        let column = "SELECT count(*) FROM information_schema.columns
+                      WHERE table_schema = $1 AND table_name = 'deliveries' AND column_name = 'code_version'";
+        let count: i64 = sqlx::query_scalar(column).bind(&schema).fetch_one(&admin).await.unwrap();
+        assert_eq!(count, 0, "nothing changed");
+
+        reader.rollback().await.unwrap();
+        run(&pool, &only(27)).await.unwrap();
+        let count: i64 = sqlx::query_scalar(column).bind(&schema).fetch_one(&admin).await.unwrap();
+        assert_eq!(count, 1);
+        pool.close().await;
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP SCHEMA {schema} CASCADE"))).execute(&admin).await.unwrap();
     }
 
     fn migration(version: i64, checksum: u8) -> Migration {

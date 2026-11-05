@@ -33,7 +33,7 @@ pub use api::{
 };
 pub use audit::{ACTIONS as AUDIT_ACTIONS, Audit, AuditFilter, AuditRow, By, PreviousRun};
 pub use certificates::{CertificateRow, DOCTOR_RUNS_KEPT, DoctorRunRow};
-pub use deployments::{Deployed, NewDeployment, NewVersion, Running, Since};
+pub use deployments::{Deployed, NewDeployment, NewVersion, Running, Since, VersionIds};
 pub use directory::{DirectoryAccount, DirectoryPerson, DirectoryUpdate};
 pub use docs::DocsRow;
 pub use engines::{EngineLock, EngineRow, NewEngine, Owned, Stranded};
@@ -186,15 +186,23 @@ pub struct Done {
     pub status: Status,
     pub reason: Option<String>,
     pub output: Option<Vec<u8>>,
+    /// The code version that decided it (`code_versions.id`; `Store::save_versions`), None when
+    /// it isn't known.
+    pub code_version: Option<i32>,
 }
 
 impl Done {
     pub fn sent(message: MessageRef, output: Option<Vec<u8>>) -> Self {
-        Self { message, status: Status::Sent, reason: None, output }
+        Self { message, status: Status::Sent, reason: None, output, code_version: None }
     }
 
     pub fn with(message: MessageRef, status: Status, reason: Option<&str>) -> Self {
-        Self { message, status, reason: reason.map(str::to_string), output: None }
+        Self { message, status, reason: reason.map(str::to_string), output: None, code_version: None }
+    }
+
+    /// Decided by code version `id`.
+    pub fn by(self, code_version: Option<i32>) -> Self {
+        Self { code_version, ..self }
     }
 }
 
@@ -207,6 +215,14 @@ pub struct Delivery {
     pub attempts: i32,
     pub last_error: Option<String>,
     pub output: Option<Vec<u8>>,
+    /// The code version that decided it (its hash); None while pending, when a person or no code
+    /// decided it, or decided by an engine before 0.7.3.2.
+    pub code_version: Option<Vec<u8>>,
+    /// The deployment that brought that version to the interface (the last one before the
+    /// delivery was decided): when, by whom, why.
+    pub deployed_at: Option<DateTime<Utc>>,
+    pub deployed_by: Option<String>,
+    pub deployed_reason: Option<String>,
 }
 
 /// What `Store::reconcile` changed to make stored deliveries match the configured destinations.
@@ -239,7 +255,7 @@ impl Store {
         // A newer engine may have applied migrations this binary doesn't know. Migrations are
         // expand-only, so older binaries keep working: that's what makes rollback safe.
         migrator.set_ignore_missing(true);
-        migrator.run(&pool).await.context("running migrations")?;
+        migrations::run(&pool, &migrator).await?;
         let store = Self { pool };
         // Today's partition must exist before anything is received, so keep trying for a while
         // if a long query holds the tables (each try gives up quickly; see ensure_partitions).
@@ -851,8 +867,16 @@ impl Store {
     /// Every destination's record of a message, by destination name.
     pub async fn deliveries(&self, m: MessageRef) -> Result<Vec<Delivery>> {
         sqlx::query_as::<_, Delivery>(
-            "SELECT t.name AS destination, d.status, d.attempts, d.last_error, d.output
+            "SELECT t.name AS destination, d.status, d.attempts, d.last_error, d.output,
+                    v.hash AS code_version, dep.at AS deployed_at, dep.by_name AS deployed_by,
+                    dep.reason AS deployed_reason
              FROM deliveries d JOIN destinations t ON t.id = d.destination_id
+             LEFT JOIN code_versions v ON v.id = d.code_version
+             LEFT JOIN LATERAL (
+                 SELECT p.at, p.by_name, p.reason FROM deployment_changes c JOIN deployments p ON p.id = c.deployment_id
+                 WHERE c.interface = t.interface AND c.to_version = d.code_version AND p.at <= d.updated_at
+                 ORDER BY c.deployment_id DESC LIMIT 1
+             ) dep ON true
              WHERE d.message_id = $1 AND d.received_at = $2 ORDER BY t.name",
         )
         .bind(m.id)
@@ -1045,12 +1069,14 @@ async fn update_deliveries(tx: &mut sqlx::PgConnection, destination: Destination
     let statuses: Vec<i16> = done.iter().map(|d| d.status as i16).collect();
     let reasons: Vec<Option<&str>> = done.iter().map(|d| d.reason.as_deref()).collect();
     let outputs: Vec<Option<&[u8]>> = done.iter().map(|d| d.output.as_deref()).collect();
+    let versions: Vec<Option<i32>> = done.iter().map(|d| d.code_version).collect();
     let Some((first, last)) = span(&times) else { return Ok(Vec::new()) };
     sqlx::query_scalar(
         "UPDATE deliveries d
-         SET status = u.status, last_error = COALESCE(u.reason, d.last_error), output = u.output, updated_at = now()
-         FROM unnest($2::bigint[], $3::timestamptz[], $4::smallint[], $5::text[], $6::bytea[])
-              AS u(id, received_at, status, reason, output)
+         SET status = u.status, last_error = COALESCE(u.reason, d.last_error), output = u.output,
+             code_version = u.code_version, updated_at = now()
+         FROM unnest($2::bigint[], $3::timestamptz[], $4::smallint[], $5::text[], $6::bytea[], $9::int[])
+              AS u(id, received_at, status, reason, output, code_version)
          WHERE d.message_id = u.id AND d.received_at = u.received_at AND d.destination_id = $1 AND d.status = 0
            AND d.received_at BETWEEN $7 AND $8
          RETURNING d.message_id",
@@ -1063,6 +1089,7 @@ async fn update_deliveries(tx: &mut sqlx::PgConnection, destination: Destination
     .bind(&outputs)
     .bind(first)
     .bind(last)
+    .bind(&versions)
     .fetch_all(tx)
     .await
     .context("updating delivery statuses")

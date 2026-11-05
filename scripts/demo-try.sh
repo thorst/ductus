@@ -8,6 +8,9 @@
 #   3. through the running engine's API (`--from`): a token with `payloads` reads it (the read is in
 #      the engine's audit log); a token without is refused in words;
 #   4. nothing was sent: the receiver got the one message, once.
+# Each record names the code version that decided it (0.7.3.2): the same as the code tried at first
+# (nothing said), another once the code changed (said under each `then:`, from the database and
+# through the API alike).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
@@ -87,6 +90,11 @@ grep -q "^    then: sent$" "$P/2.txt" || fail+=" changed-then-sent"
 grep -q "^$NAME: message $ID from http://127.0.0.1:7796, received " "$P/3.txt" || fail+=" api-header"
 grep -q "^    then: sent, the same output$" "$P/3.txt" || fail+=" api-recorded"
 grep -q "the token may not read payloads" "$P/4.txt" || fail+=" viewer-not-refused"
+OTHER='^          decided by code version [0-9a-f]\{12\}, not this one ([0-9a-f]\{12\})$'
+grep -q "through the code as it is now (code version [0-9a-f]\{12\}); nothing sent$" "$P/1.txt" || fail+=" no-version"
+grep "decided by code version" "$P/1.txt" >/dev/null && fail+=" same-code-said-other"
+[ "$(grep -c "$OTHER" "$P/2.txt")" = 2 ] || fail+=" changed-code-not-said"
+[ "$(grep -c "$OTHER" "$P/3.txt")" = 2 ] || fail+=" api-code-not-said"
 [ "$(q "SELECT count(*) FROM audit_log WHERE action = 'message.payload.read' AND message_id = $ID AND actor_name = 'try-demo-reader-$SUFFIX'")" = 1 ] || fail+=" read-not-audited"
 kill -INT $SINK && wait $SINK 2>/dev/null || true
 grep -q "final: received 1 | unique 1 " "$P/sink.log" || fail+=" sent-again($(tail -1 "$P/sink.log"))"

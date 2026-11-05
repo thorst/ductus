@@ -116,7 +116,32 @@ struct Interface {
     other_skipped: Option<String>,
     messages: u64,
     seconds: f64,
+    /// The code version replayed (hex), when known.
+    code_version: Option<String>,
+    /// Records compared that another code version decided, by that version (12 hex characters).
+    other_code: BTreeMap<String, u64>,
     destinations: BTreeMap<String, Destination>,
+}
+
+impl Interface {
+    /// How many records compared another code version decided, and which: the text's and the page's
+    /// note. None when every record known was decided by the code replayed.
+    fn other_code_note(&self) -> Option<String> {
+        let total: u64 = self.other_code.values().sum();
+        if total == 0 {
+            return None;
+        }
+        let replayed = self.code_version.as_deref().map_or("", |v| &v[..crate::code::SHOWN.min(v.len())]);
+        let mut versions: Vec<(&String, &u64)> = self.other_code.iter().collect();
+        versions.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
+        let named: Vec<String> = versions.iter().take(3).map(|(v, n)| format!("{v} ({})", number(**n))).collect();
+        let more = if versions.len() > 3 { format!(" and {} more", versions.len() - 3) } else { String::new() };
+        Some(format!(
+            "{} record(s) were decided by other code than this ({replayed}): {}{more}; a difference from the record may be that change",
+            number(total),
+            named.join(", ")
+        ))
+    }
 }
 
 pub struct Report {
@@ -157,9 +182,10 @@ impl Report {
     /// This version's events other than rows (`add` takes those).
     pub fn event(&mut self, event: &Event) {
         match event {
-            Event::Interface { interface, skipped, outputs } => {
+            Event::Interface { interface, skipped, outputs, code_version } => {
                 let entry = self.interfaces.entry(interface.clone()).or_default();
                 entry.skipped = skipped.clone();
+                entry.code_version = code_version.clone();
                 for (name, kind) in outputs {
                     entry.destinations.entry(name.clone()).or_default().output = *kind;
                 }
@@ -190,13 +216,15 @@ impl Report {
     pub fn add(&mut self, row: &Row, other: OtherSide) {
         let label = self.other_label();
         let hide = self.hide_values;
-        let d = self
-            .interfaces
-            .entry(row.interface.clone())
-            .or_default()
-            .destinations
-            .entry(row.destination.clone())
-            .or_default();
+        let interface = self.interfaces.entry(row.interface.clone()).or_default();
+        // A record another code version decided: a difference from it may be that change.
+        if let (Some(r), Some(replayed)) = (&row.recorded, &interface.code_version)
+            && let Some(then) = &r.code_version
+            && crate::code::hex(then) != *replayed
+        {
+            *interface.other_code.entry(crate::code::short(then)).or_default() += 1;
+        }
+        let d = interface.destinations.entry(row.destination.clone()).or_default();
         d.compared += 1;
         if row.looked_up {
             d.looked_up += 1;
@@ -379,7 +407,8 @@ impl Report {
                     .collect();
                 json!({
                     "name": name, "messages": i.messages, "seconds": round(i.seconds), "skipped": i.skipped,
-                    "other_skipped": i.other_skipped, "destinations": destinations,
+                    "other_skipped": i.other_skipped, "code_version": i.code_version,
+                    "records_by_other_code": i.other_code, "destinations": destinations,
                 })
             })
             .collect();
@@ -439,6 +468,9 @@ impl Report {
             }
             if let Some(why) = &i.other_skipped {
                 let _ = writeln!(out, "  note: {} didn't replay it: {why}", self.other_label());
+            }
+            if let Some(note) = i.other_code_note() {
+                let _ = writeln!(out, "  note: {note}");
             }
             for (destination, d) in &i.destinations {
                 let mark = if d.different > 0 {
@@ -581,6 +613,9 @@ impl Report {
                     escape(&self.other_label()),
                     escape(why)
                 );
+            }
+            if let Some(note) = i.other_code_note() {
+                let _ = writeln!(out, "<p class=\"note\">{}</p>", escape(&note));
             }
             if i.destinations.is_empty() {
                 continue;
@@ -1024,7 +1059,40 @@ mod tests {
             status,
             last_error: error.map(Into::into),
             output: None,
+            code_version: None,
         }
+    }
+
+    /// Records another code version decided are counted per interface and said, by version; those
+    /// the replayed code decided, and those with no version known, aren't.
+    #[test]
+    fn records_decided_by_other_code_are_said() {
+        let from = Utc::now();
+        let mut report = Report::new("prod", from, from, None, false);
+        let (now, then) = ([0xaa; 32], [0xbb; 32]);
+        report.event(&Event::Interface {
+            interface: "adt".into(),
+            skipped: None,
+            outputs: BTreeMap::from([("lab".to_string(), OutputKind::Hl7)]),
+            code_version: Some(crate::code::hex(&now)),
+        });
+        let by = |version: Option<[u8; 32]>| {
+            let mut r = record(Status::Sent, None);
+            r.code_version = version.map(|v| v.to_vec());
+            Some(r)
+        };
+        report.add(&row(1, sent(ADT), by(Some(then))), OtherSide::NotRun);
+        report.add(&row(2, sent(ADT), by(Some(then))), OtherSide::NotRun);
+        report.add(&row(3, sent(ADT), by(Some(now))), OtherSide::NotRun);
+        report.add(&row(4, sent(ADT), by(None)), OtherSide::NotRun);
+        let document = report.document();
+        assert_eq!(document["interfaces"][0]["records_by_other_code"], json!({ "bbbbbbbbbbbb": 2 }));
+        let text = report.text();
+        assert!(
+            text.contains("note: 2 record(s) were decided by other code than this (aaaaaaaaaaaa): bbbbbbbbbbbb (2); a difference from the record may be that change"),
+            "{text}"
+        );
+        assert!(report.html().contains("bbbbbbbbbbbb (2)"));
     }
 
     #[test]
@@ -1088,6 +1156,7 @@ mod tests {
             interface: "adt".into(),
             skipped: None,
             outputs: BTreeMap::from([("lab".to_string(), OutputKind::Hl7)]),
+            code_version: None,
         });
         let changed = ADT.replace("DOE^JOHN", "DOE^JON");
         let kept = |output: &str| {

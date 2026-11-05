@@ -958,7 +958,8 @@ fn try_runs_one_message_through_every_destination_and_sends_nothing() {
     assert!(ok, "{out}");
     for expected in [
         "orders: fixture o01.hl7, received ",
-        "through the code as it is now; nothing sent\n",
+        "through the code as it is now (code version ",
+        "); nothing sent\n",
         "  lab: sent\n      │ to the lab 77\n      MSH|^~\\&|EHR|HOSP|LAB|HOSP|20261101||ORM^O01|77|P|2.5\n      PID|1||123456\n",
         "  audit: not decided: writes to database `audit_db`: not made by `ductus try`\n",
         "  billing: filtered\n",
@@ -983,6 +984,72 @@ fn try_runs_one_message_through_every_destination_and_sends_nothing() {
 
     let (ok, out) = ductus(dir.path(), &["try", "orders"]);
     assert!(!ok && out.contains("give the message: a file, `--fixture NAME`, or `--message ID`"), "{out}");
+}
+
+/// Messages already waiting when the engine starts are decided as soon as their code loads, before
+/// the code versions are saved: they're saved after, with the version that decided them (0.7.3.2),
+/// never without one.
+#[tokio::test(flavor = "multi_thread")]
+async fn messages_waiting_at_the_start_are_saved_with_the_code_that_decided_them() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("decided-test-{nanos}");
+    let port = free_port();
+    let yaml = format!(
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\nscript: transform.ts\ndestinations:\n  lab: {{ file: {{ dir: out/lab }} }}\n  archive: {{ file: {{ dir: out/archive }}, transform: archive }}\n"
+    );
+    let code = "import type { Message } from \"@ductus/sdk\";\n\nexport function transform(m: Message) {\n  m.set(\"MSH-5\", \"LAB\");\n  return m;\n}\n\nexport function archive(m: Message) {\n  return m.PID[3][1] === \"2\" ? null : m;\n}\n";
+    let dir = project(&[
+        (format!("interfaces/{name}/interface.yaml").as_str(), yaml.as_str()),
+        (format!("interfaces/{name}/transform.ts").as_str(), code),
+    ]);
+    // Stored before any engine ran it: the start gives them their deliveries (`reconcile`).
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    for i in 1..=3 {
+        let payload = format!("MSH|^~\\&|EHR|HOSP|X|HOSP|20261105||ADT^A01|{i}|P|2.5\rPID|1||{i}\r");
+        let message = ductus_store::NewMessage {
+            interface: &name,
+            partition_key: 0,
+            ordering_key: None,
+            control_id: None,
+            payload: payload.as_bytes(),
+            relaxed: false,
+            destinations: &[],
+            tier: 21,
+        };
+        store.insert(message).await.unwrap();
+    }
+    let (_engine, log) = start_engine(dir.path(), &db, None, "engine.log");
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
+    let page = ductus_store::Browse { interface: &name, status: None, before: None, limit: 10 };
+    let finished = eventually(async || {
+        let rows = store.browse(&page).await.unwrap();
+        rows.len() == 3 && rows.iter().all(|m| m.status != ductus_store::Status::Pending)
+    });
+    assert!(finished.await, "{}", std::fs::read_to_string(&log).unwrap());
+
+    // The version as a start computes it for this project: `try`'s.
+    let root = dir.path().to_string_lossy().to_string();
+    let rows = store.browse(&page).await.unwrap();
+    let id = rows[0].id.to_string();
+    let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["try", &name, "--message", &id, "--root", &root, "--database-url", &db, "--json"])
+        .env_remove("DUCTUS_PROJECT")
+        .env_remove("DUCTUS_ENV")
+        .output()
+        .unwrap();
+    let tried: serde_json::Value =
+        serde_json::from_slice(&out.stdout).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stderr)));
+    let version = tried["trial"]["code_version"].as_str().unwrap();
+    for m in &rows {
+        let deliveries = store.deliveries(ductus_store::MessageRef { id: m.id, received_at: m.received_at }).await;
+        let deliveries = deliveries.unwrap();
+        assert_eq!(deliveries.len(), 2);
+        for d in deliveries {
+            let by = d.code_version.as_deref().map(ductus_runtime::code::hex);
+            assert_eq!(by.as_deref(), Some(version), "message {} to {} ({:?})", m.id, d.destination, d.status);
+        }
+    }
 }
 
 /// An RFC 3339 time, as `--json` gives them.
@@ -3932,6 +3999,38 @@ async fn replay_compares_a_change_with_the_record_kept_outputs_and_the_version_b
         "{out}"
     );
     assert!(!out.contains("⚠ outputs not compared"), "lab's outputs were compared: {out}");
+    assert!(!out.contains("decided by other code"), "the code replayed decided them all: {out}");
+
+    // Each record names the code that decided it (0.7.3.2): the version `try` computes for the
+    // project as it is (as a start does), with the deployment that brought it.
+    let page = ductus_store::Browse { interface: &name, status: None, before: None, limit: 10 };
+    let stored = store.browse(&page).await.unwrap();
+    let first = stored.last().unwrap();
+    let first_id = first.id.to_string();
+    let try_stored = |json: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ductus"));
+        command.args(["try", &name, "--message", &first_id, "--root", &root, "--database-url", &db]);
+        command.env_remove("DUCTUS_PROJECT").env_remove("DUCTUS_ENV");
+        if json {
+            command.arg("--json");
+        }
+        let out = command.output().unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), if json { String::from_utf8_lossy(&out.stdout).into_owned() } else { said })
+    };
+    let (ok, out) = try_stored(true);
+    assert!(ok, "{out}");
+    let tried: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    let version = tried["trial"]["code_version"].as_str().unwrap_or_else(|| panic!("{tried}")).to_string();
+    for m in &stored {
+        for d in store.deliveries(ductus_store::MessageRef { id: m.id, received_at: m.received_at }).await.unwrap() {
+            let by = d.code_version.as_deref().map(ductus_runtime::code::hex);
+            assert_eq!(by.as_deref(), Some(version.as_str()), "message {} to {}", m.id, d.destination);
+            assert!(d.deployed_by.is_some_and(|by| !by.is_empty()), "the deployment that brought it");
+        }
+    }
+    let lab = tried["trial"]["destinations"].as_array().unwrap().iter().find(|d| d["destination"] == "lab").unwrap();
+    assert_eq!(lab["recorded"]["code_version"], version.as_str(), "{tried}");
 
     // `upgrade --check --replay` over a project whose destinations keep no outputs: without an
     // installed version beside it, it passes with a ⚠ that says only decisions were compared, and how
@@ -4003,6 +4102,11 @@ async fn replay_compares_a_change_with_the_record_kept_outputs_and_the_version_b
     let code_file = dir.path().join(&interface).join("transform.ts");
     edit(&code_file, "m.set(\"PID-8\", \"U\")", "m.set(\"PID-8\", \"F\")");
     edit(&code_file, "=== \"SKIP\")", "=== \"SKIP\" || m.PID[3][1] === \"2\")");
+    // `try` says the record was decided by other code than the code it ran.
+    let (ok, out) = try_stored(false);
+    assert!(ok, "{out}");
+    let then = format!("decided by code version {}, not this one (", &version[..12]);
+    assert!(out.contains(&then), "{out}");
 
     let page = dir.path().join("replay.html");
     let baseline = before.path().to_string_lossy().to_string();
@@ -4016,6 +4120,8 @@ async fn replay_compares_a_change_with_the_record_kept_outputs_and_the_version_b
     assert!(out.contains(&format!("vs {other}: decision differs in 1 message(s)")), "{out}");
     assert!(out.contains("\"sent\" → \"filtered (killed: test patient)\""), "{out}");
     assert!(out.contains("vs the kept output: PID-8 differs in 2"), "{out}");
+    let note = "note: 8 record(s) were decided by other code than this (";
+    assert!(out.contains(note) && out.contains(&format!("{} (8)", &version[..12])), "{out}");
     assert!(
         out.contains("✓ billing: 4 compared, 4 identical"),
         "the clock and the random were pinned on both sides: {out}"

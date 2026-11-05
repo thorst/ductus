@@ -110,6 +110,30 @@ pub struct DeliveryInfo {
     last_error: Option<String>,
     /// What was sent, for destinations with `save_output: true`.
     output: Option<String>,
+    /// The code that decided it (0.7.3.2). None while pending, when a person decided it (dismissed,
+    /// replaced by an edited copy), when the engine did without code (a destination removed), or
+    /// when an engine before 0.7.3.2 did.
+    decided_by: Option<DecidedBy>,
+}
+
+/// The code version that decided a delivery, and the deployment that brought it.
+#[derive(Serialize, ToSchema)]
+pub struct DecidedBy {
+    /// Its first 12 hex characters, as everywhere else.
+    version: String,
+    /// All 64.
+    hash: String,
+    /// The last deployment that brought this version to the interface before the delivery was
+    /// decided; None when none is recorded (its deployment rows were deleted by hand, say).
+    deployed: Option<Deployed>,
+}
+
+/// When a version was deployed, by whom and why.
+#[derive(Serialize, ToSchema)]
+pub struct Deployed {
+    at: DateTime<Utc>,
+    by: String,
+    reason: Option<String>,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -143,6 +167,9 @@ pub struct ActionInfo {
     previous_status: Option<&'static str>,
     previous_attempts: Option<i32>,
     previous_error: Option<String>,
+    /// The code version (12 hex characters) that had decided the delivery before (none: no code
+    /// did, or an engine before 0.7.3.2).
+    previous_code_version: Option<String>,
     /// `edit`: the copy's id.
     copy: Option<i64>,
 }
@@ -181,6 +208,15 @@ async fn message(engine: Eng, caller: Caller, Path(id): Path<i64>) -> ApiResult<
             attempts: d.attempts,
             last_error: d.last_error,
             output: d.output.filter(|_| may_read).map(|o| String::from_utf8_lossy(&o).into_owned()),
+            decided_by: d.code_version.map(|hash| DecidedBy {
+                version: crate::code::short(&hash),
+                hash: crate::code::hex(&hash),
+                deployed: d.deployed_at.zip(d.deployed_by).map(|(at, by)| Deployed {
+                    at,
+                    by,
+                    reason: d.deployed_reason,
+                }),
+            }),
         })
         .collect();
     let (made_by, done_to): (Vec<_>, Vec<_>) =
@@ -196,6 +232,7 @@ async fn message(engine: Eng, caller: Caller, Path(id): Path<i64>) -> ApiResult<
             previous_status: a.previous_status.and_then(Status::from_i16).map(Status::label),
             previous_attempts: a.previous_attempts,
             previous_error: a.previous_error,
+            previous_code_version: a.previous_code_version.as_deref().map(crate::code::short),
             copy: a.copy_id,
         })
         .collect();

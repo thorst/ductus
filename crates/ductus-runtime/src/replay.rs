@@ -104,6 +104,9 @@ pub enum Event {
         skipped: Option<String>,
         #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
         outputs: BTreeMap<String, OutputKind>,
+        /// The code version replayed (64 hex characters, `code`); none from a version before 0.7.3.2.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        code_version: Option<String>,
     },
     Row(Row),
     /// After an interface's rows: how many messages, how long.
@@ -195,26 +198,30 @@ impl Replay {
             let interface = config.name.clone();
             if config.responds() {
                 let skipped = Some("it answers HTTP requests and keeps none: nothing to replay".to_string());
-                self.send(Event::Interface { interface, skipped, outputs: BTreeMap::new() }).await?;
+                let outputs = BTreeMap::new();
+                self.send(Event::Interface { interface, skipped, outputs, code_version: None }).await?;
                 continue;
             }
-            let functions = match config.script_path() {
-                None => None,
+            let (functions, files) = match config.script_path() {
+                None => (None, Ok(Vec::new())),
                 Some(path) => {
                     let functions = config.functions();
                     let functions: Vec<(&str, &str)> =
                         functions.iter().map(|(n, f)| (n.as_str(), f.as_str())).collect();
                     match isolate.add_functions(&path, &functions, config.timeout).await {
-                        Ok((_, ids)) => Some(ids),
+                        Ok((_, ids)) => (Some(ids), isolate.code_files(&path)),
                         Err(e) => {
                             let skipped = Some(format!("its code doesn't load: {e:#}"));
-                            self.send(Event::Interface { interface, skipped, outputs }).await?;
+                            self.send(Event::Interface { interface, skipped, outputs, code_version: None }).await?;
                             continue;
                         }
                     }
                 }
             };
-            self.send(Event::Interface { interface: interface.clone(), skipped: None, outputs }).await?;
+            let code_version = version_of(&self.options.root, config, files);
+            let started_interface =
+                Event::Interface { interface: interface.clone(), skipped: None, outputs, code_version };
+            self.send(started_interface).await?;
             let destinations: Vec<&str> = config.destinations().map(|(name, _)| name).collect();
             let (mut after, mut count) = (0i64, 0u64);
             loop {
@@ -279,6 +286,19 @@ impl Replay {
         }
         Ok(())
     }
+}
+
+/// `config`'s code version as a start computes it (`code::Version`), in hex, from the files its code
+/// loaded (`Isolate::code_files`; none without `script:`); None when it can't be computed. What
+/// `try` and the replay hold against the version a record names.
+pub(crate) fn version_of(
+    root: &std::path::Path,
+    config: &InterfaceConfig,
+    files: Result<Vec<ductus_script::CodeFile>>,
+) -> Option<String> {
+    let root = ductus_script::loaded_path(root).ok()?;
+    let version = crate::code::Version::of(&root, config, &files.ok()?).ok()?;
+    Some(crate::code::hex(&version.hash))
 }
 
 /// `Math.random`'s seed for one message and destination: the same in every version.

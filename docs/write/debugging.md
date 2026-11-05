@@ -210,7 +210,7 @@ change, for a message a sender complains about, for one that was quarantined.
 
 ```text
 $ ductus try adt-in --fixture a01.hl7
-adt-in: fixture a01.hl7, received 2026-11-03 22:08:47 UTC, through the code as it is now; nothing sent
+adt-in: fixture a01.hl7, received 2026-11-05 14:57:58 UTC, through the code as it is now (code version 593b53e3a495); nothing sent
   (without databases and APIs: resources.yaml in ./resources.yaml: missing in environment `dev`: secret:BILLING_TOKEN, secret:EMPI_TOKEN, secret:FHIR_TOKEN, secret:PROVIDER_DB_PASSWORD)
   billing: sent
       MSH|^~\&|EHR|HOSP|ADT|HOSP|20261031083000-0500||ADT^A01^ADT_A01|MSG00001|P|2.5
@@ -234,28 +234,36 @@ adt-in: fixture a01.hl7, received 2026-11-03 22:08:47 UTC, through the code as i
 
 The interface is its name or a file or folder inside its folder, as for `ductus test`. `--env`
 chooses whose values and resources the code uses (default `dev`); `--json` gives one document
-(each destination's `decision`, `output` or `reason`, `console`, `recorded`); `--inspect` runs it
-under a debugger, as `ductus test --inspect` does.
+(the `code_version` tried; each destination's `decision`, `output` or `reason`, `console`,
+`recorded`); `--inspect` runs it under a debugger, as `ductus test --inspect` does. The first line
+names the [code version](../operate/deployments.md#the-code-version) of the code it runs: the one a
+start of this project would run.
 
 **A stored message** comes with what each destination did with it then, beside what the code
 decides now: here the code was changed after the message went through, so billing would drop it
 today (from the [try demo](#checked-in-ci)):
 
 ```text
-$ ductus try interfaces/adt --message 20042988
-try-demo: message 20042988, received 2026-11-03 22:21:12 UTC, through the code as it is now; nothing sent
+$ ductus try interfaces/adt --message 21198140
+try-demo: message 21198140, received 2026-11-05 14:57:56 UTC, through the code as it is now (code version ae5123af1d2c); nothing sent
   billing: filtered
     then: sent
+          decided by code version 07cd7ba85180, not this one (ae5123af1d2c)
   lab: sent
-      MSH|^~\&|EPIC|HOSP|LAB|HOSP|20261103172112||ADT^A08|1|P|2.5
-      EVN|A08|20261103172112
+      MSH|^~\&|EPIC|HOSP|LAB|HOSP|20261105095756||ADT^A08|1|P|2.5
+      EVN|A08|20261105095756
       PID|1||100001^^^MRN||JOHNSON^JAMES||19010101|M
       PV1|1|I|4W^401^A
     then: sent, the same output
+          decided by code version 07cd7ba85180, not this one (ae5123af1d2c)
 ```
 
 `then: sent, the same output` compares the output too, for a destination that keeps what it sent
-(`save_output`); otherwise `then:` compares the decision.
+(`save_output`); otherwise `then:` compares the decision. **`decided by code version …, not this
+one`** says the record was decided by other code than the code tried (0.7.3.2 on: each delivery
+[names the code that decided it](../operate/deployments.md#which-code-decided-each-delivery)), so a
+difference from it is that change as much as anything else; nothing is said when it was the same
+code, or when the record names none (decided before 0.7.3.2, or by a person).
 
 - **Nothing leaves.** Destinations aren't connected, routes aren't stored, the receiver gets
   nothing. Lookups are made (`db().query`, a `fetch()` GET), so the code sees the environment's

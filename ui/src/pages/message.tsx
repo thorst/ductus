@@ -98,6 +98,32 @@ export function MessagePage() {
   );
 }
 
+/** The code version that decided a delivery, and the deployment that brought it: "a3f9c2e81b07,
+ * deployed 5 Nov 14:02 by todd: fix PV1-3". None while pending, or when no code decided it. */
+function DecidedBy({ by, status }: { by: Schemas["DeliveryInfo"]["decided_by"]; status: string }) {
+  if (!by && status === "pending") return <span className="text-muted">–</span>;
+  if (!by) {
+    return (
+      <span className="text-muted" title="a person decided it, or an engine before 0.7.3.2">
+        not recorded
+      </span>
+    );
+  }
+  return (
+    <>
+      <span className="font-mono" title={`code version ${by.hash}`}>
+        {by.version}
+      </span>
+      {by.deployed && (
+        <div className="text-muted">
+          deployed {timestamp(by.deployed.at)} by {by.deployed.by}
+          {by.deployed.reason && `: ${by.deployed.reason}`}
+        </div>
+      )}
+    </>
+  );
+}
+
 function Deliveries({ m, canOperate }: { m: Schemas["MessageDetail"]; canOperate: boolean }) {
   const [open, setOpen] = useState<string | null>(null);
   const [resending, setResending] = useState<Schemas["DeliveryInfo"] | null>(null);
@@ -116,6 +142,7 @@ function Deliveries({ m, canOperate }: { m: Schemas["MessageDetail"]; canOperate
             <Th>Status</Th>
             <Th className="text-right">Attempts</Th>
             <Th>Error</Th>
+            <Th>Decided by</Th>
             <Th>Sent</Th>
             {canOperate && <Th>Action</Th>}
           </tr>
@@ -129,6 +156,9 @@ function Deliveries({ m, canOperate }: { m: Schemas["MessageDetail"]; canOperate
               </Td>
               <Td className="text-right tabular-nums">{d.attempts}</Td>
               <Td className="max-w-md text-xs break-words">{d.last_error ?? ""}</Td>
+              <Td className="text-xs">
+                <DecidedBy by={d.decided_by} status={d.status} />
+              </Td>
               <Td>
                 {d.output != null ? (
                   <>
@@ -380,6 +410,11 @@ function History({ actions }: { actions: Schemas["ActionInfo"][] }) {
                   <span className="text-muted">none</span>
                 )}
                 {a.previous_error && <div className="mt-1 text-xs break-words text-muted">{a.previous_error}</div>}
+                {a.previous_code_version && (
+                  <div className="mt-1 text-xs text-muted">
+                    decided by <span className="font-mono">{a.previous_code_version}</span>
+                  </div>
+                )}
               </Td>
               <Td>{a.by}</Td>
               <Td className="text-xs">{a.reason ?? ""}</Td>

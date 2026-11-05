@@ -184,8 +184,9 @@ enum Command {
     /// do with it now: sent (and what), filtered and why, quarantined and why. Sends nothing and
     /// writes nothing: lookups (`db().query`, GET requests) are made, writes (`db().execute`, other
     /// requests) are refused and reported. The message comes from a file, a fixture, or the store
-    /// (`--message`), then with what each destination did with it then. With `--inspect`, under a
-    /// debugger, as `ductus test --inspect`.
+    /// (`--message`), then with what each destination did with it then, and, when other code decided
+    /// that, which code version did (the first line names the version tried). With `--inspect`,
+    /// under a debugger, as `ductus test --inspect`.
     Try {
         /// The interface: its name, or a file or folder inside its folder.
         interface: String,

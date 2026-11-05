@@ -143,6 +143,9 @@ pub struct Action {
     pub previous_status: Option<i16>,
     pub previous_attempts: Option<i32>,
     pub previous_error: Option<String>,
+    /// The code version (its hash) that had decided the delivery (none: no code did, or an
+    /// engine before 0.7.3.2).
+    pub previous_code_version: Option<Vec<u8>>,
     /// `edit`: the copy it queued.
     pub copy_id: Option<i64>,
 }
@@ -191,7 +194,7 @@ impl Store {
             let resent: Vec<Resent> = sqlx::query_as(
                 "WITH old AS (
                      SELECT d.message_id, d.received_at, d.destination_id, d.partition_key,
-                            d.status, d.attempts, d.last_error, d.output
+                            d.status, d.attempts, d.last_error, d.output, d.code_version
                      FROM deliveries d
                      WHERE (d.message_id, d.received_at) IN (SELECT * FROM unnest($1::bigint[], $2::timestamptz[]))
                        AND d.received_at BETWEEN $3 AND $4 AND d.destination_id = ANY($5)
@@ -200,16 +203,17 @@ impl Store {
                      FOR UPDATE
                  ), reset AS (
                      UPDATE deliveries d
-                     SET status = 0, attempts = 0, last_error = NULL, output = NULL, updated_at = now()
+                     SET status = 0, attempts = 0, last_error = NULL, output = NULL, code_version = NULL,
+                         updated_at = now()
                      FROM old
                      WHERE d.message_id = old.message_id AND d.received_at = old.received_at
                        AND d.destination_id = old.destination_id AND d.received_at BETWEEN $3 AND $4
                  ), recorded AS (
                      INSERT INTO message_actions (action, token_id, actor, reason, message_id, received_at, interface,
                                                   destination_id, previous_status, previous_attempts, previous_error,
-                                                  previous_output, user_id, audit_id)
+                                                  previous_output, previous_code_version, user_id, audit_id)
                      SELECT 'resend', $7, $8, $9, old.message_id, old.received_at, t.interface, old.destination_id,
-                            old.status, old.attempts, old.last_error, old.output, $10, $11
+                            old.status, old.attempts, old.last_error, old.output, old.code_version, $10, $11
                      FROM old JOIN destinations t ON t.id = old.destination_id
                  )
                  SELECT old.message_id, t.interface, old.destination_id, t.name AS destination, old.partition_key,
@@ -349,11 +353,11 @@ impl Store {
             .await?;
             let replaced: Vec<DestinationId> = sqlx::query_scalar(
                 "WITH old AS (
-                     SELECT destination_id, status, attempts, last_error, output FROM deliveries
+                     SELECT destination_id, status, attempts, last_error, output, code_version FROM deliveries
                      WHERE message_id = $1 AND received_at = $2 AND destination_id = ANY($3)
                      ORDER BY destination_id FOR UPDATE
                  ), replaced AS (
-                     UPDATE deliveries d SET status = 2, last_error = $4, updated_at = now()
+                     UPDATE deliveries d SET status = 2, last_error = $4, code_version = NULL, updated_at = now()
                      FROM old
                      WHERE d.message_id = $1 AND d.received_at = $2 AND d.destination_id = old.destination_id
                        AND old.status = 3
@@ -361,8 +365,9 @@ impl Store {
                  ), recorded AS (
                      INSERT INTO message_actions (action, token_id, actor, reason, message_id, received_at, interface,
                                                   destination_id, previous_status, previous_attempts, previous_error,
-                                                  previous_output, copy_id, user_id, audit_id)
-                     SELECT 'edit', $5, $6, $7, $1, $2, $8, c.id, old.status, old.attempts, old.last_error, old.output, $9, $10, $11
+                                                  previous_output, previous_code_version, copy_id, user_id, audit_id)
+                     SELECT 'edit', $5, $6, $7, $1, $2, $8, c.id, old.status, old.attempts, old.last_error, old.output,
+                            old.code_version, $9, $10, $11
                      FROM unnest($3::int[]) AS c(id) LEFT JOIN old ON old.destination_id = c.id
                  )
                  SELECT destination_id FROM replaced ORDER BY 1",
@@ -438,23 +443,23 @@ impl Store {
             let dismissed: Vec<Dismissed> = sqlx::query_as(
                 "WITH old AS (
                      SELECT d.message_id, d.received_at, d.destination_id, d.partition_key,
-                            d.status, d.attempts, d.last_error, d.output
+                            d.status, d.attempts, d.last_error, d.output, d.code_version
                      FROM deliveries d
                      WHERE (d.message_id, d.received_at) IN (SELECT * FROM unnest($1::bigint[], $2::timestamptz[]))
                        AND d.received_at BETWEEN $3 AND $4 AND d.destination_id = ANY($5) AND d.status = 3
                      ORDER BY d.message_id, d.destination_id
                      FOR UPDATE
                  ), done AS (
-                     UPDATE deliveries d SET status = 2, last_error = $6, updated_at = now()
+                     UPDATE deliveries d SET status = 2, last_error = $6, code_version = NULL, updated_at = now()
                      FROM old
                      WHERE d.message_id = old.message_id AND d.received_at = old.received_at
                        AND d.destination_id = old.destination_id AND d.received_at BETWEEN $3 AND $4
                  ), recorded AS (
                      INSERT INTO message_actions (action, token_id, actor, reason, message_id, received_at, interface,
                                                   destination_id, previous_status, previous_attempts, previous_error,
-                                                  previous_output, user_id, audit_id)
+                                                  previous_output, previous_code_version, user_id, audit_id)
                      SELECT 'dismiss', $7, $8, $9, old.message_id, old.received_at, t.interface, old.destination_id,
-                            old.status, old.attempts, old.last_error, old.output, $10, $11
+                            old.status, old.attempts, old.last_error, old.output, old.code_version, $10, $11
                      FROM old JOIN destinations t ON t.id = old.destination_id
                  )
                  SELECT old.message_id, t.interface, old.destination_id, t.name AS destination, old.partition_key,
@@ -526,8 +531,10 @@ impl Store {
     pub async fn actions(&self, message: i64) -> Result<Vec<Action>> {
         sqlx::query_as::<_, Action>(
             "SELECT a.id, a.at, a.action, a.actor, a.reason, a.message_id, t.name AS destination,
-                    a.previous_status, a.previous_attempts, a.previous_error, a.copy_id
+                    a.previous_status, a.previous_attempts, a.previous_error, v.hash AS previous_code_version,
+                    a.copy_id
              FROM message_actions a JOIN destinations t ON t.id = a.destination_id
+             LEFT JOIN code_versions v ON v.id = a.previous_code_version
              WHERE a.message_id = $1 OR a.copy_id = $1 ORDER BY a.id",
         )
         .bind(message)

@@ -47,7 +47,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [People and access](people.md) (19)
 - [Local development](dev.md) (2)
 - [Upgrades](upgrades.md) (15)
-- [What runs, recorded](deployments.md) (7)
+- [What runs, recorded](deployments.md) (10)
 - [Windows](windows.md) (9)
 
 ## Level 1: Foundations (33)
@@ -86,7 +86,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (96)
+## Level 2: Practitioner (97)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -179,13 +179,14 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Line ends and a byte order mark don't change a version](deployments.md#line-ends-and-a-byte-order-mark-dont-change-a-version-level-2) (What runs, recorded)
 - ["Not committed" means the files differ from HEAD, not `git status`](deployments.md#not-committed-means-the-files-differ-from-head-not-git-status-level-2) (What runs, recorded)
 - [Interface code is kept in the database](deployments.md#interface-code-is-kept-in-the-database-level-2) (What runs, recorded)
+- [A delivery names the code that decided it, not the code that sent it again](deployments.md#a-delivery-names-the-code-that-decided-it-not-the-code-that-sent-it-again-level-2) (What runs, recorded)
 - [The service's account: the default, a gMSA, or a named account](windows.md#the-services-account-the-default-a-gmsa-or-a-named-account-level-2) (Windows)
 - [An upgrade can't keep an account's password: the service waits for it](windows.md#an-upgrade-cant-keep-an-accounts-password-the-service-waits-for-it-level-2) (Windows)
 - [An upgrade starts the service again, unless it was stopped on purpose](windows.md#an-upgrade-starts-the-service-again-unless-it-was-stopped-on-purpose-level-2) (Windows)
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (72)
+## Level 3: Professional (73)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
@@ -257,10 +258,11 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [In a replay the clock is the message's arrival, and `Math.random` repeats](upgrades.md#in-a-replay-the-clock-is-the-messages-arrival-and-mathrandom-repeats-level-3) (Upgrades)
 - [What a replay costs, and where](upgrades.md#what-a-replay-costs-and-where-level-3) (Upgrades)
 - [A start whose deployment can't be recorded runs anyway](deployments.md#a-start-whose-deployment-cant-be-recorded-runs-anyway-level-3) (What runs, recorded)
+- [Upgrading to 0.7.3.2 waits at most 2 s for the deliveries table](deployments.md#upgrading-to-0732-waits-at-most-2-s-for-the-deliveries-table-level-3) (What runs, recorded)
 - ["Log on as a service": the installer grants it, Group Policy can take it away](windows.md#log-on-as-a-service-the-installer-grants-it-group-policy-can-take-it-away-level-3) (Windows)
 - [A refused connection takes about a second on Windows, and `localhost` may be `::1` first](windows.md#a-refused-connection-takes-about-a-second-on-windows-and-localhost-may-be-1-first-level-3) (Windows)
 
-## Level 4: Advanced (30)
+## Level 4: Advanced (31)
 
 - [A query that holds the message tables for days can pause intake](store.md#a-query-that-holds-the-message-tables-for-days-can-pause-intake-level-4) (The store (Postgres))
 - [Shortening frees disk when partitions go, not at once](retention.md#shortening-frees-disk-when-partitions-go-not-at-once-level-4) (Retention)
@@ -291,6 +293,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A refused certificate is said once, not logged as an error each time](certificates.md#a-refused-certificate-is-said-once-not-logged-as-an-error-each-time-level-4) (Certificates)
 - [Reading payloads is a permission, not part of a role](people.md#reading-payloads-is-a-permission-not-part-of-a-role-level-4) (People and access)
 - [Nested groups: Active Directory answers, other directories are walked](people.md#nested-groups-active-directory-answers-other-directories-are-walked-level-4) (People and access)
+- [The first decisions after a start wait for the code versions to be saved](deployments.md#the-first-decisions-after-a-start-wait-for-the-code-versions-to-be-saved-level-4) (What runs, recorded)
 - [`import()` with a computed name isn't counted](deployments.md#import-with-a-computed-name-isnt-counted-level-4) (What runs, recorded)
 
 ## Level 5: Expert (4)

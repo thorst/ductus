@@ -2188,7 +2188,9 @@ async fn everything_at_once_without_lock_errors() {
                 if rounds.is_multiple_of(5 + n) {
                     store.record_failure(pending[0].reference(), destination, "busy").await.unwrap();
                 }
-                let done: Vec<_> = pending.iter().map(|p| sent(p.reference())).collect();
+                // Each decided by a code version (0.7.3.2), which the resends clear again.
+                let version = Some(1 + n as i32);
+                let done: Vec<_> = pending.iter().map(|p| sent(p.reference()).by(version)).collect();
                 match &route {
                     Some(target) => {
                         let messages = pending
@@ -2257,6 +2259,9 @@ async fn everything_at_once_without_lock_errors() {
                 let rows = store.browse(&page).await.unwrap();
                 if let Some(last) = rows.last() {
                     store.message(last.id).await.unwrap().expect("a listed message can be read");
+                    // The message view: each delivery with the version and deployment that decided it.
+                    store.deliveries(MessageRef { id: last.id, received_at: last.received_at }).await.unwrap();
+                    store.actions(last.id).await.unwrap();
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
@@ -2421,6 +2426,15 @@ async fn everything_at_once_without_lock_errors() {
         assert_eq!((*status, *n as usize), (Status::Sent, queued), "{destination}: {deliveries:?}");
     }
     assert_eq!(deliveries.len(), 3);
+    // Every delivery names the version that decided it, the resent ones too (cleared by the resend,
+    // set again when decided again), whatever moved them meanwhile.
+    let unnamed: i64 =
+        sqlx::query_scalar("SELECT count(*) FROM deliveries WHERE destination_id = ANY($1) AND code_version IS NULL")
+            .bind(&t.ids)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(unnamed, 0, "deliveries decided without their code version");
     let duplicates = store.payloads(&t.name, Status::Duplicate).await.unwrap().len();
     assert!(duplicates > 0, "dedupe keys collided");
     assert!(store.payloads(&routed.name, Status::Pending).await.unwrap().is_empty(), "routed: nothing left pending");
@@ -3549,7 +3563,8 @@ impl TestVersion {
     }
 }
 
-/// Record a deployment of `versions` in the test environment `env`.
+/// Record a deployment of `versions` in the test environment `env`: the versions saved first, as
+/// the engine saves them (its workers wait for their ids), then the deployment.
 async fn deploy(
     store: &Store,
     env: &str,
@@ -3569,7 +3584,8 @@ async fn deploy(
         uncommitted: None,
         versions: &versions,
     };
-    store.record_deployment(&d).await
+    let ids = store.save_versions(&versions).await?;
+    store.record_deployment(&d, &ids).await
 }
 
 /// Delete what deployments in environments named `env`… recorded (tests share the database).
@@ -3646,5 +3662,78 @@ async fn deployments_record_what_changed() {
         .await
         .unwrap();
     assert_eq!(versions, 1);
+    forget_deployments(&pool, &env).await;
+}
+
+/// A delivery says which code version decided it, with the deployment that brought that version
+/// (0.7.3.2). Sending it again clears it and the resend's row keeps it; a person's decision (an
+/// edited copy, a dismissal) leaves none, its row keeping what decided it before.
+#[tokio::test]
+async fn a_delivery_names_the_code_that_decided_it() {
+    use ductus_store::{Copy, Edited, Resend};
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let t = Iface::new(&store, "decided", &["billing", "lab"]).await;
+    let (lab, billing) = (t.id("lab"), t.id("billing"));
+    // Named as the interface, so `forget_deployments` finds its version too.
+    let env = t.name.clone();
+    let v = TestVersion::new(&t.name, &[("interfaces/x/interface.yaml", &format!("name: {}\n", t.name))]);
+    let deployed = deploy(&store, &env, "todd", &[&v]).await.unwrap();
+    let id: i32 = sqlx::query_scalar("SELECT id FROM code_versions WHERE hash = $1")
+        .bind(&v.hash)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+    let a = store.insert(t.msg(0, b"a")).await.unwrap();
+    let b = store.insert(t.msg(0, b"b")).await.unwrap();
+    let pending = store.deliveries(a).await.unwrap();
+    assert!(pending.iter().all(|d| d.code_version.is_none()), "nothing decided a pending delivery");
+    store
+        .finish(lab, &[sent(a).by(Some(id)), Done::with(b, Status::Quarantined, Some("AR")).by(Some(id))])
+        .await
+        .unwrap();
+    store.finish(billing, &[sent(a), sent(b).by(Some(id))]).await.unwrap();
+    let decided = store.deliveries(a).await.unwrap();
+    let by_lab = decided.iter().find(|d| d.destination == "lab").unwrap();
+    assert_eq!(by_lab.code_version.as_deref(), Some(v.hash.as_slice()));
+    assert_eq!((by_lab.deployed_by.as_deref(), by_lab.deployed_reason.as_deref()), (Some("todd"), Some("testing")));
+    assert_eq!(by_lab.deployed_at, Some(deployed.at));
+    let unknown = decided.iter().find(|d| d.destination == "billing").unwrap();
+    assert_eq!((unknown.code_version.as_ref(), unknown.deployed_by.as_ref()), (None, None), "not known: none");
+
+    // Sent again: pending, decided by nothing yet; the resend's row keeps the version.
+    let again = Resend { messages: &[a.id], destinations: &[lab], quarantined_only: false };
+    assert_eq!(store.resend(again, OPERATOR).await.unwrap().len(), 1);
+    let lab_now = store.deliveries(a).await.unwrap().into_iter().find(|d| d.destination == "lab").unwrap();
+    assert_eq!((lab_now.status, lab_now.code_version), (Status::Pending, None));
+    let actions = store.actions(a.id).await.unwrap();
+    assert_eq!(actions[0].previous_code_version.as_deref(), Some(v.hash.as_slice()));
+
+    // b's quarantine replaced by an edited copy: a person decided; the edit's row keeps the version.
+    let lab_only = [lab];
+    let copy = Copy {
+        original: b.id,
+        interface: &t.name,
+        partition_key: 0,
+        ordering_key: None,
+        control_id: None,
+        payload: b"b fixed",
+        tier: TIER,
+        destinations: &lab_only,
+    };
+    assert!(matches!(store.copy_edited(copy, OPERATOR).await.unwrap(), Edited::Copied { .. }));
+    let replaced = store.deliveries(b).await.unwrap().into_iter().find(|d| d.destination == "lab").unwrap();
+    assert_eq!((replaced.status, replaced.code_version), (Status::Filtered, None));
+    assert_eq!(store.actions(b.id).await.unwrap()[0].previous_code_version.as_deref(), Some(v.hash.as_slice()));
+
+    // A dismissal: the same.
+    store.finish(lab, &[Done::with(a, Status::Quarantined, Some("AR again")).by(Some(id))]).await.unwrap();
+    let dismissal = Resend { messages: &[a.id], destinations: &[lab], quarantined_only: true };
+    assert_eq!(store.dismiss(dismissal, OPERATOR).await.unwrap().len(), 1);
+    let dismissed = store.deliveries(a).await.unwrap().into_iter().find(|d| d.destination == "lab").unwrap();
+    assert_eq!((dismissed.status, dismissed.code_version), (Status::Filtered, None));
+    let last = store.actions(a.id).await.unwrap().pop().unwrap();
+    assert_eq!((last.action.as_str(), last.previous_code_version.as_deref()), ("dismiss", Some(v.hash.as_slice())));
     forget_deployments(&pool, &env).await;
 }

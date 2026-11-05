@@ -73,15 +73,19 @@ impl Deployed {
     }
 }
 
+/// Each code version's id (`code_versions.id`) by its hash: what deliveries record.
+pub type VersionIds = HashMap<Vec<u8>, i32>;
+
 impl Store {
-    /// Record a start or handover: the versions and files not seen before, the deployment, the
-    /// interfaces it changed. One transaction; it reads first and writes only what's new, so a
-    /// start that changes nothing writes one row. Engines on one database may record at once (each
-    /// its own interfaces; shared files and versions are written once, whoever comes first).
-    pub async fn record_deployment(&self, d: &NewDeployment<'_>) -> Result<Deployed> {
-        let mut tx = self.pool.begin().await.context("starting to record the deployment")?;
-        let hashes: Vec<&[u8]> = d.versions.iter().map(|v| v.hash).collect();
-        let mut ids: HashMap<Vec<u8>, i32> =
+    /// Save the versions and files not seen before, and return every version's id. One
+    /// transaction that reads first and writes only what's new (a start that changes nothing
+    /// writes nothing). Engines on one database may save at once (shared files and versions are
+    /// written once, whoever comes first). Before the deployment is recorded: the engine's
+    /// workers wait for these ids before saving what they decided (`deliveries.code_version`).
+    pub async fn save_versions(&self, versions: &[NewVersion<'_>]) -> Result<VersionIds> {
+        let mut tx = self.pool.begin().await.context("starting to save the code versions")?;
+        let hashes: Vec<&[u8]> = versions.iter().map(|v| v.hash).collect();
+        let mut ids: VersionIds =
             sqlx::query_as::<_, (Vec<u8>, i32)>("SELECT hash, id FROM code_versions WHERE hash = ANY($1)")
                 .bind(&hashes)
                 .fetch_all(&mut *tx)
@@ -89,7 +93,7 @@ impl Store {
                 .context("reading the code versions")?
                 .into_iter()
                 .collect();
-        let new: Vec<&NewVersion> = d.versions.iter().filter(|v| !ids.contains_key(v.hash)).collect();
+        let new: Vec<&NewVersion> = versions.iter().filter(|v| !ids.contains_key(v.hash)).collect();
         if !new.is_empty() {
             // Their files: each text once (sorted, so engines writing the same ones at once lock
             // them in one order).
@@ -152,6 +156,18 @@ impl Store {
                     .context("reading the code versions saved")?,
             );
         }
+        tx.commit().await.context("committing the code versions")?;
+        Ok(ids)
+    }
+
+    /// Record a start or handover: the deployment and the interfaces it changed, its versions
+    /// saved first (`save_versions`, whose `ids` these are). One transaction; a start that changes
+    /// nothing writes one row. Engines on one database may record at once (each its own interfaces).
+    pub async fn record_deployment(&self, d: &NewDeployment<'_>, ids: &VersionIds) -> Result<Deployed> {
+        if let Some(v) = d.versions.iter().find(|v| !ids.contains_key(v.hash)) {
+            anyhow::bail!("the code version of `{}` wasn't saved first", v.interface);
+        }
+        let mut tx = self.pool.begin().await.context("starting to record the deployment")?;
         let names: Vec<&str> = d.versions.iter().map(|v| v.interface).collect();
         type Current = (String, i32, Vec<u8>, i32, DateTime<Utc>, String, Option<String>, Option<String>);
         let current: HashMap<String, (i32, Vec<u8>, Since)> = sqlx::query_as::<_, Current>(

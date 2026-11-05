@@ -111,6 +111,7 @@ async fn from_store(id: i64, interface: &str, url: &str) -> Result<Message> {
             status: d.status.label().to_string(),
             error: d.last_error,
             output: d.output.map(|o| String::from_utf8_lossy(&o).into_owned()),
+            code_version: d.code_version.as_deref().map(ductus_runtime::code::hex),
         })
         .collect();
     let payload = String::from_utf8_lossy(&payload).into_owned();
@@ -144,6 +145,7 @@ async fn from_api(id: i64, interface: &str, url: &str, token: Option<String>) ->
             status: text(&d["status"]).unwrap_or_default(),
             error: text(&d["last_error"]),
             output: text(&d["output"]),
+            code_version: text(&d["decided_by"]["hash"]),
         })
         .collect();
     Ok(Message { id: Some(id), received_at, origin: None, payload: payload.to_string(), recorded })
@@ -152,8 +154,14 @@ async fn from_api(id: i64, interface: &str, url: &str, token: Option<String>) ->
 /// Text for people: each destination's decision, its output, the code's console lines, and what
 /// it recorded then.
 fn text(trial: &Trial, said: &str, received: &str, stored: bool) -> String {
-    let mut out =
-        format!("{}: {said}, received {received}, through the code as it is now; nothing sent\n", trial.interface);
+    let version = match &trial.code_version {
+        Some(hex) => format!(" (code version {})", &hex[..ductus_runtime::code::SHOWN.min(hex.len())]),
+        None => String::new(),
+    };
+    let mut out = format!(
+        "{}: {said}, received {received}, through the code as it is now{version}; nothing sent\n",
+        trial.interface
+    );
     let lines = |text: &str, prefix: &str| -> String {
         text.replace("\r\n", "\n").replace('\r', "\n").lines().map(|l| format!("{prefix}{l}\n")).collect()
     };
@@ -171,12 +179,26 @@ fn text(trial: &Trial, said: &str, received: &str, stored: bool) -> String {
             out += &lines(output, "      ");
         }
         match &t.recorded {
-            Some(then) => out += &format!("    then: {}\n", compared(&t.decision, then)),
+            Some(then) => {
+                out += &format!("    then: {}\n", compared(&t.decision, then));
+                if let Some(other) = other_code(then, trial) {
+                    out += &format!("          {other}\n");
+                }
+            }
             None if stored => out += "    then: no delivery recorded for it\n",
             None => {}
         }
     }
     out
+}
+
+/// When the record was decided by another code version than the one tried, say so: a difference
+/// from it is then the code's change as much as anything else.
+fn other_code(then: &Recorded, trial: &Trial) -> Option<String> {
+    let (then_version, now) = (then.code_version.as_deref()?, trial.code_version.as_deref()?);
+    let short = |hex: &str| hex.chars().take(ductus_runtime::code::SHOWN).collect::<String>();
+    (then_version != now)
+        .then(|| format!("decided by code version {}, not this one ({})", short(then_version), short(now)))
 }
 
 fn decided(decision: &Decision) -> String {
