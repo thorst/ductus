@@ -108,7 +108,7 @@ fn code_files_are_everything_an_interface_imports() {
     let b = dir.path().join("interfaces/b/transform.ts");
     rt.block_on(isolate.add_interface(&a)).unwrap();
     rt.block_on(isolate.add_interface(&b)).unwrap();
-    let root = std::fs::canonicalize(dir.path()).unwrap();
+    let root = ductus_script::loaded_path(dir.path()).unwrap();
     let names = |files: &[ductus_script::CodeFile]| -> Vec<String> {
         files.iter().map(|f| f.path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/")).collect()
     };

@@ -664,6 +664,13 @@ pub fn module_url(path: &Path) -> Result<String> {
     Ok(file_url(path)?.to_string())
 }
 
+/// A path in the form `CodeFile::path` has: resolved as module URLs are, then back from the URL.
+/// On Windows that drops `canonicalize`'s `\\?\` prefix, so a project folder given this way is a
+/// prefix of its files' paths (with plain `canonicalize` it isn't: `\\?\C:\p` vs `C:\p\x.ts`).
+pub fn loaded_path(path: &Path) -> Result<std::path::PathBuf> {
+    file_url(path)?.to_file_path().map_err(|_| anyhow!("not a file path: {}", path.display()))
+}
+
 /// `file://` URL for a path, with `..` and symlinks resolved so specifiers always match.
 /// The file itself may not exist yet (the in-memory glue module), but its folder must.
 fn file_url(path: &Path) -> Result<ModuleSpecifier> {

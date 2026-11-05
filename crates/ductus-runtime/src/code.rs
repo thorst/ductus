@@ -49,7 +49,7 @@ pub struct Version {
 
 impl Version {
     /// The version of `config`'s interface, whose code loaded `loaded` (`Isolate::code_files`; none
-    /// without `script:`). `root` is the project's folder, canonical (as the loader's paths are).
+    /// without `script:`). `root` is the project's folder in the loader's form (`ductus_script::loaded_path`).
     pub fn of(root: &Path, config: &InterfaceConfig, loaded: &[CodeFile]) -> Result<Self> {
         let yaml = config.dir.join("interface.yaml");
         let text = std::fs::read_to_string(&yaml).with_context(|| format!("reading {}", yaml.display()))?;

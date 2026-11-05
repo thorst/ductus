@@ -69,7 +69,8 @@ pub fn versions(
     configs: &[Arc<InterfaceConfig>],
     loaded: &HashMap<String, Vec<CodeFile>>,
 ) -> Result<Vec<Version>> {
-    let root = std::fs::canonicalize(root).with_context(|| format!("finding {}", root.display()))?;
+    // In the loader's form, or on Windows no file would be under it (`loaded_path`).
+    let root = ductus_script::loaded_path(root).with_context(|| format!("finding {}", root.display()))?;
     configs.iter().map(|c| Version::of(&root, c, loaded.get(&c.name).map(Vec::as_slice).unwrap_or_default())).collect()
 }
 
@@ -205,5 +206,31 @@ pub fn account() -> String {
             Ok(domain) if !domain.is_empty() => format!("{domain}\\{user}"),
             _ => user,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Files are named relative to the project on every system: on Windows `canonicalize` gives
+    /// `\\?\C:\…` and the loader's paths `C:\…` (CI's Windows tests caught it), so every file was
+    /// named by its full path there and the same code had another version than on Linux.
+    #[test]
+    fn files_are_named_relative_to_the_project_on_every_system() {
+        let dir = tempfile::tempdir().unwrap();
+        let folder = dir.path().join("interfaces").join("a");
+        std::fs::create_dir_all(&folder).unwrap();
+        let yaml = "name: a\nsource: { mllp: { port: 6661 } }\ndestination: { file: { dir: out } }\n";
+        std::fs::write(folder.join("interface.yaml"), yaml).unwrap();
+        std::fs::write(folder.join("t.ts"), "export const x = 1;\n").unwrap();
+        let env = ductus_core::Environment::load(dir.path(), "dev").unwrap();
+        let config = Arc::new(InterfaceConfig::load_in(&folder, &env).unwrap());
+        let path = ductus_script::loaded_path(&folder.join("t.ts")).unwrap();
+        let file = CodeFile { path, hash: [0; 32], text: "export const x = 1;\n".into() };
+        let loaded = HashMap::from([("a".to_string(), vec![file])]);
+        let versions = versions(dir.path(), &[config], &loaded).unwrap();
+        let paths: Vec<&str> = versions[0].files.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(paths, ["interfaces/a/interface.yaml", "interfaces/a/t.ts"]);
     }
 }
