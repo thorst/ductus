@@ -540,14 +540,72 @@ fn http_get(port: u16, path: &str) -> Option<String> {
     text.split_once("\r\n\r\n").map(|(_, body)| body.to_string())
 }
 
+/// A debugger's connection (the Chrome DevTools Protocol over a WebSocket), for the tests.
+mod cdp {
+    use futures_util::{SinkExt, StreamExt};
+    use std::collections::HashMap;
+    use tokio_tungstenite::tungstenite::Message;
+
+    pub type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+    /// Send a command; its id.
+    pub async fn send(socket: &mut Socket, id: &mut i64, method: &str, params: serde_json::Value) -> i64 {
+        *id += 1;
+        let text = serde_json::json!({ "id": *id, "method": method, "params": params }).to_string();
+        socket.send(Message::Text(text.into())).await.unwrap();
+        *id
+    }
+
+    /// The next message that's `wanted` (an event by method, an answer by id). Scripts' URLs by
+    /// id go into `scripts` on the way (a paused frame names its script by id).
+    pub async fn next(
+        socket: &mut Socket,
+        scripts: &mut HashMap<String, String>,
+        wanted: impl Fn(&serde_json::Value) -> bool,
+    ) -> serde_json::Value {
+        let wait = async {
+            while let Some(Ok(message)) = socket.next().await {
+                if let Message::Text(text) = message {
+                    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+                    if v["method"] == "Debugger.scriptParsed" {
+                        let p = &v["params"];
+                        scripts.insert(p["scriptId"].as_str().unwrap().into(), p["url"].as_str().unwrap().into());
+                    }
+                    if wanted(&v) {
+                        return v;
+                    }
+                }
+            }
+            panic!("the debugger's connection closed");
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(20), wait).await.expect("no answer in 20 s")
+    }
+
+    /// Send a command and wait for its answer.
+    pub async fn ask(
+        socket: &mut Socket,
+        id: &mut i64,
+        scripts: &mut HashMap<String, String>,
+        method: &str,
+        params: serde_json::Value,
+    ) -> serde_json::Value {
+        let asked = send(socket, id, method, params).await;
+        next(socket, scripts, |v| v["id"] == asked).await
+    }
+
+    /// The URL of the script a paused frame is in.
+    pub fn script(frame: &serde_json::Value, scripts: &HashMap<String, String>) -> String {
+        scripts.get(frame["location"]["scriptId"].as_str().unwrap()).cloned().unwrap_or_default()
+    }
+}
+
 /// `ductus test --inspect` as a debugger sees it: the target listed, a pause at `debugger;` with
 /// the test's locals, and Todd's condition: an endless loop runs on while a debugger is attached
 /// (past the 5 s limit) and, once it detaches, is stopped within the limit, the test failed and
 /// the run over. stdout stays `--json`'s.
 #[test]
 fn test_inspect_pauses_for_a_debugger_and_an_endless_loop_ends_when_it_detaches() {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message;
+    use cdp::{next, script, send};
     let dir = project(&[
         (
             "interfaces/dbg/interface.yaml",
@@ -582,39 +640,6 @@ fn test_inspect_pauses_for_a_debugger_and_an_endless_loop_ends_when_it_detaches(
     assert!(http_get(port, "/json/version").unwrap().contains("\"Protocol-Version\":\"1.3\""));
     let ws = target["webSocketDebuggerUrl"].as_str().unwrap().to_string();
 
-    type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
-    /// Send a command; its id.
-    async fn send(socket: &mut Socket, id: &mut i64, method: &str, params: serde_json::Value) -> i64 {
-        *id += 1;
-        let text = serde_json::json!({ "id": *id, "method": method, "params": params }).to_string();
-        socket.send(Message::Text(text.into())).await.unwrap();
-        *id
-    }
-    /// The next message that's `wanted` (an event by method, an answer by id). Scripts' URLs by
-    /// id go into `scripts` on the way (a paused frame names its script by id).
-    async fn next(
-        socket: &mut Socket,
-        scripts: &mut std::collections::HashMap<String, String>,
-        wanted: impl Fn(&serde_json::Value) -> bool,
-    ) -> serde_json::Value {
-        let wait = async {
-            while let Some(Ok(message)) = socket.next().await {
-                if let Message::Text(text) = message {
-                    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
-                    if v["method"] == "Debugger.scriptParsed" {
-                        let p = &v["params"];
-                        scripts.insert(p["scriptId"].as_str().unwrap().into(), p["url"].as_str().unwrap().into());
-                    }
-                    if wanted(&v) {
-                        return v;
-                    }
-                }
-            }
-            panic!("the debugger's connection closed");
-        };
-        tokio::time::timeout(std::time::Duration::from_secs(20), wait).await.expect("no answer in 20 s")
-    }
-
     let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
     let detached_at = rt.block_on(async {
         let (mut socket, _) = tokio_tungstenite::connect_async(ws.as_str()).await.unwrap();
@@ -625,9 +650,6 @@ fn test_inspect_pauses_for_a_debugger_and_an_endless_loop_ends_when_it_detaches(
         }
         let paused = next(&mut socket, scripts, |v| v["method"] == "Debugger.paused").await;
         let frame = paused["params"]["callFrames"][0].clone();
-        let script = |frame: &serde_json::Value, scripts: &std::collections::HashMap<String, String>| {
-            scripts.get(frame["location"]["scriptId"].as_str().unwrap()).cloned().unwrap_or_default()
-        };
         assert!(script(&frame, scripts).ends_with("/interfaces/dbg/dbg.test.ts"), "{frame}");
         let params = serde_json::json!({ "callFrameId": frame["callFrameId"], "expression": "n" });
         let asked = send(&mut socket, id, "Debugger.evaluateOnCallFrame", params).await;
@@ -682,6 +704,10 @@ fn types_adds_the_debug_configuration_and_interface_takes_a_folder() {
     assert_eq!(ours[0]["runtimeArgs"], serde_json::json!(["test", "--inspect", "--interface", "${fileDirname}"]));
     assert_eq!(ours[1]["name"], "Ductus: debug this message");
     assert_eq!(ours[1]["runtimeArgs"], serde_json::json!(["try", "${file}", "${file}", "--inspect"]));
+    assert_eq!(ours[2]["name"], "Ductus: debug this interface");
+    assert_eq!(ours[2]["runtimeArgs"], serde_json::json!(["dev", "--inspect", "${fileDirname}"]));
+    assert_eq!((&ours[2]["timeout"], &ours[2]["killBehavior"]), (&120_000.into(), &"polite".into()));
+    assert_eq!(ours[2]["windows"], serde_json::json!({ "killBehavior": "forceful" }));
 
     let theirs = serde_json::json!({ "version": "0.2.0", "configurations": [
         { "type": "node", "request": "launch", "name": "Ductus: debug these tests", "runtimeArgs": ["test", "--inspect=9230"] },
@@ -697,8 +723,8 @@ fn types_adds_the_debug_configuration_and_interface_takes_a_folder() {
         "the project's own kept"
     );
     assert_eq!(
-        (now.as_array().unwrap().len(), &now[2]["name"]),
-        (3, &"Ductus: debug this message".into()),
+        (now.as_array().unwrap().len(), &now[2]["name"], &now[3]["name"]),
+        (4, &"Ductus: debug this message".into(), &"Ductus: debug this interface".into()),
         "ours added"
     );
     std::fs::write(dir.path().join(".vscode/launch.json"), "// comments\n{}").unwrap();
@@ -716,6 +742,192 @@ fn types_adds_the_debug_configuration_and_interface_takes_a_folder() {
         !ok && out.contains("`--interface interfaces/nowhere` isn't an interface with tests (those with tests: adt)"),
         "{out}"
     );
+}
+
+/// `ductus dev --inspect` under real traffic (0.7.2.3, Todd's condition): one interface (`dbg`)
+/// under a debugger, another (`other`) sending to a receiver. Paused at a breakpoint, `dbg`'s
+/// senders still get their ACKs and `other` goes on; an endless loop in `dbg` runs past its 2 s
+/// limit while the debugger is attached (pausing lands in it), the engine and `other` unharmed;
+/// once the debugger detaches it's stopped within the limit, its message quarantined, and the
+/// messages queued behind it are delivered. Stopping dev while paused doesn't wait for anyone to
+/// press "continue" (the message in hand stays pending, delivered at the next start). The
+/// debugger's handshake is answered while the interface is idle.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn dev_inspect_holds_only_its_interface_and_an_endless_loop_ends_when_the_debugger_detaches() {
+    // dev starts its own Postgres: the binaries are downloaded once per user (CI has them).
+    if std::env::var("DUCTUS_TEST_DATABASE_URL").is_err() {
+        return;
+    }
+    use cdp::{ask, next, script, send};
+    let (dbg_port, other_port, receiver, inspector) = (free_port(), free_port(), free_port(), free_port());
+    let code = "import type { Message } from \"@ductus/sdk\";\n\nexport function transform(m: Message) {\n  const id = m.get(\"MSH-10\");\n  if (id === \"PAUSE\") {\n    debugger;\n  }\n  if (id === \"LOOP\") {\n    let i = 0;\n    while (true) i++;\n  }\n  return m;\n}\n";
+    let dbg = format!(
+        "name: dbg\nscript: route.ts\ntimeout: 2s\nsource: {{ mllp: {{ host: 127.0.0.1, port: {dbg_port} }} }}\ndestination: {{ file: {{ dir: out }} }}\n"
+    );
+    let other = format!(
+        "name: other\nsource: {{ mllp: {{ host: 127.0.0.1, port: {other_port} }} }}\ndestination: {{ mllp: {{ host: 127.0.0.1, port: {receiver} }} }}\n"
+    );
+    let dir = project(&[
+        ("interfaces/dbg/interface.yaml", dbg.as_str()),
+        ("interfaces/dbg/route.ts", code),
+        ("interfaces/other/interface.yaml", other.as_str()),
+    ]);
+    let out_dir = dir.path().join("interfaces/dbg/out");
+    let written = || std::fs::read_dir(&out_dir).map(|d| d.count()).unwrap_or(0);
+
+    // `other`'s receiver: when each message arrived.
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", receiver)).await.unwrap();
+    type Arrivals = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>>;
+    let arrived: Arrivals = Default::default();
+    let got = arrived.clone();
+    tokio::spawn(ductus_mllp::serve(listener, move |m: bytes::Bytes| {
+        let text = String::from_utf8_lossy(&m).to_string();
+        got.lock().unwrap().insert(text.split('|').nth(9).unwrap_or("").to_string(), std::time::Instant::now());
+        async { bytes::Bytes::from_static(b"MSH|^~\\&|LAB|H|EPIC|H|20260101||ACK|1|P|2.5\rMSA|AA|1\r") }
+    }));
+    let message = |id: &str| format!("MSH|^~\\&|EPIC|H|LAB|H|20260101||ADT^A01|{id}|P|2.5\rPID|1||MRN\r");
+    let mut to_dbg = ductus_mllp::Client::new(format!("127.0.0.1:{dbg_port}"), std::time::Duration::from_secs(5));
+    let mut to_other = ductus_mllp::Client::new(format!("127.0.0.1:{other_port}"), std::time::Duration::from_secs(5));
+    /// Send and time the ACK.
+    async fn acked(client: &mut ductus_mllp::Client, text: String) -> std::time::Duration {
+        let sent = std::time::Instant::now();
+        let ack = client.send(text.as_bytes()).await.unwrap();
+        assert!(String::from_utf8_lossy(&ack).contains("MSA|AA"), "{}", String::from_utf8_lossy(&ack));
+        sent.elapsed()
+    }
+    // `n` messages to `other`, then the longest time from sending one to its arrival.
+    let mut through_other = async |batch: &str, n: usize| -> std::time::Duration {
+        let mut sent = Vec::new();
+        for i in 0..n {
+            let id = format!("{batch}-{i}");
+            sent.push((id.clone(), std::time::Instant::now()));
+            acked(&mut to_other, message(&id)).await;
+        }
+        let all = eventually(async || sent.iter().all(|(id, _)| arrived.lock().unwrap().contains_key(id)));
+        assert!(all.await, "{batch}: `other` delivered everything");
+        let at = arrived.lock().unwrap();
+        sent.iter().map(|(id, when)| at[id] - *when).max().unwrap()
+    };
+
+    let log = dir.path().join("dev.log");
+    let file = std::fs::File::create(&log).unwrap();
+    let mut dev = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["dev", "--threads", "1", "--api-listen", "off", "--inspect", "dbg"])
+        .args(["--inspect-address", &format!("127.0.0.1:{inspector}")])
+        .current_dir(dir.path())
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
+        .spawn()
+        .unwrap();
+    let stopper = Terminate(dev.id());
+    let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(wait_for_log(&log, "started interfaces=", 120), "{}", read_log());
+    assert!(read_log().contains("debugged=1"), "{}", read_log());
+
+    let targets: serde_json::Value = serde_json::from_str(&http_get(inspector, "/json/list").unwrap()).unwrap();
+    assert_eq!(targets.as_array().unwrap().len(), 1, "only the debugged interface: {targets}");
+    assert_eq!(targets[0]["title"], "dbg (ductus dev)");
+    assert!(targets[0]["url"].as_str().unwrap().ends_with("/interfaces/dbg/route.ts"), "{targets}");
+    let ws = targets[0]["webSocketDebuggerUrl"].as_str().unwrap();
+    let (mut socket, _) = tokio_tungstenite::connect_async(ws).await.unwrap();
+    let (id, scripts) = (&mut 0, &mut std::collections::HashMap::new());
+    // Answered while `dbg` has nothing to do (no message would wake its thread).
+    for method in ["Runtime.enable", "Debugger.enable"] {
+        ask(&mut socket, id, scripts, method, serde_json::json!({})).await;
+    }
+    assert!(wait_for_log(&log, "a debugger attached", 5), "{}", read_log());
+
+    // Paused at a breakpoint: `dbg` still ACKs, `other` goes on.
+    let alone = through_other("before", 20).await;
+    acked(&mut to_dbg, message("PAUSE")).await;
+    let paused = next(&mut socket, scripts, |v| v["method"] == "Debugger.paused").await;
+    let frame = paused["params"]["callFrames"][0].clone();
+    assert!(script(&frame, scripts).ends_with("/interfaces/dbg/route.ts"), "{frame}");
+    let params = serde_json::json!({ "callFrameId": frame["callFrameId"], "expression": "id" });
+    let id_there = ask(&mut socket, id, scripts, "Debugger.evaluateOnCallFrame", params).await;
+    assert_eq!(id_there["result"]["result"]["value"], "PAUSE", "{id_there}");
+    let mut dbg_acks = Vec::new();
+    for i in 0..3 {
+        dbg_acks.push(acked(&mut to_dbg, message(&format!("Q{i}"))).await);
+    }
+    let while_paused = through_other("paused", 20).await;
+    assert_eq!(written(), 0, "`dbg` waits while paused");
+    send(&mut socket, id, "Debugger.resume", serde_json::json!({})).await;
+    assert!(eventually(async || written() == 4).await, "the paused message and the 3 behind it: {}", written());
+
+    // An endless loop under the debugger: past the 2 s limit it still runs (pausing lands in it).
+    acked(&mut to_dbg, message("LOOP")).await;
+    tokio::time::sleep(std::time::Duration::from_millis(3_000)).await;
+    send(&mut socket, id, "Debugger.pause", serde_json::json!({})).await;
+    let in_loop = next(&mut socket, scripts, |v| v["method"] == "Debugger.paused").await;
+    let frame = &in_loop["params"]["callFrames"][0];
+    assert!(script(frame, scripts).ends_with("/interfaces/dbg/route.ts"), "{frame}");
+    assert_eq!(frame["functionName"], "transform", "{frame}");
+    send(&mut socket, id, "Debugger.resume", serde_json::json!({})).await;
+    for i in 0..5 {
+        dbg_acks.push(acked(&mut to_dbg, message(&format!("B{i}"))).await);
+    }
+    let while_looping = through_other("looping", 20).await;
+    assert_eq!(written(), 4, "nothing behind the loop yet");
+
+    // The debugger detaches: the limit is back; the loop is stopped within it, the rest delivered.
+    let detached = std::time::Instant::now();
+    socket.close(None).await.unwrap();
+    let behind = async || written() == 9;
+    let mut delivered = false;
+    for _ in 0..200 {
+        if behind().await {
+            delivered = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let took = detached.elapsed();
+    assert!(delivered, "the 5 messages behind the loop were delivered: {}\n{}", written(), read_log());
+    assert!(took < std::time::Duration::from_secs(6), "stopped within the 2 s limit after detaching: {took:?}");
+    let text = read_log();
+    assert!(text.contains("the debugger detached: the time limit (`timeout`) applies again"), "{text}");
+    assert!(text.lines().any(|l| l.contains("runaway script stopped") && l.contains("interface=dbg")), "{text}");
+    let after = through_other("after", 20).await;
+    eprintln!(
+        "other's longest wait: alone {alone:?}, dbg paused {while_paused:?}, dbg looping {while_looping:?}, after {after:?}; dbg's ACKs while held: {dbg_acks:?}; stopped {took:?} after detaching"
+    );
+    for wait in [while_paused, while_looping] {
+        assert!(wait < std::time::Duration::from_secs(1), "`other` unaffected: {wait:?}");
+    }
+    assert!(dbg_acks.iter().all(|a| *a < std::time::Duration::from_secs(1)), "`dbg` ACKed while held: {dbg_acks:?}");
+
+    // Paused again, then dev is stopped: it ends the session itself rather than wait.
+    let (mut socket, _) = tokio_tungstenite::connect_async(ws).await.unwrap();
+    for method in ["Runtime.enable", "Debugger.enable"] {
+        ask(&mut socket, id, scripts, method, serde_json::json!({})).await;
+    }
+    acked(&mut to_dbg, message("PAUSE")).await;
+    next(&mut socket, scripts, |v| v["method"] == "Debugger.paused").await;
+    let stopping = std::time::Instant::now();
+    stopper.kill(&[]);
+    let status = dev.wait().unwrap();
+    let took = stopping.elapsed();
+    assert!(status.success() && took < std::time::Duration::from_secs(10), "{status:?} after {took:?}\n{}", read_log());
+    let text = read_log();
+    assert!(text.contains("Postgres stopped") && !text.contains("stopping anyway"), "{text}");
+    // Its function finished after the stop began, so it wasn't sent: it waits for the next start,
+    // as any message in hand at a stop.
+    assert_eq!(written(), 9, "{text}");
+    let file = std::fs::File::create(&log).unwrap();
+    let mut again = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["dev", "--threads", "1", "--api-listen", "off"])
+        .current_dir(dir.path())
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
+        .spawn()
+        .unwrap();
+    let stopper = Terminate(again.id());
+    assert!(wait_for_log(&log, "started interfaces=", 120), "{}", read_log());
+    assert!(eventually(async || written() == 10).await, "delivered at the next start: {}", written());
+    stopper.kill(&[]);
+    assert!(again.wait().unwrap().success(), "{}", read_log());
 }
 
 /// `ductus try` runs one message through every destination's function and sends nothing: what

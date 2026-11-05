@@ -84,6 +84,36 @@ pub struct EngineOptions {
     pub control: bool,
     /// Take over from the running engine that started this one (`handover`).
     pub takeover: Option<Arc<handover::Takeover>>,
+    /// `ductus dev --inspect`: interfaces a debugger may attach to (never `ductus run`).
+    pub inspect: Option<Inspect>,
+}
+
+/// Interfaces a debugger may attach to, served by `inspector`. Each gets a thread and isolate of
+/// its own for the run (all its workers on it, if it's dedicated), so a pause or an endless loop
+/// under the debugger holds only that interface: receiving, ACKs and every other interface go on.
+pub struct Inspect {
+    pub inspector: Arc<inspect::Inspector>,
+    /// By name.
+    pub interfaces: Vec<String>,
+}
+
+impl Inspect {
+    /// Each named interface exists and has code to debug.
+    fn check(&self, configs: &[InterfaceConfig]) -> Result<()> {
+        for name in &self.interfaces {
+            match configs.iter().find(|c| &c.name == name) {
+                None => bail!(
+                    "`--inspect {name}`: no such interface (there are: {})",
+                    configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
+                ),
+                Some(c) if c.script_path().is_none() => {
+                    bail!("`--inspect {name}`: it has no code to debug (no `script:` in its interface.yaml)")
+                }
+                Some(_) => {}
+            }
+        }
+        Ok(())
+    }
 }
 
 impl Default for EngineOptions {
@@ -98,6 +128,7 @@ impl Default for EngineOptions {
             on_started: None,
             control: false,
             takeover: None,
+            inspect: None,
         }
     }
 }
@@ -136,6 +167,10 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let api_address = settings.api.address(options.api_listen.as_deref())?;
     if configs.is_empty() {
         bail!("no interfaces found under {}", root.join("interfaces").display());
+    }
+    let inspected = options.inspect.take();
+    if let Some(inspect) = &inspected {
+        inspect.check(&configs)?;
     }
     let conflicts = ductus_core::config::check_endpoints(&configs);
     if !conflicts.is_empty() {
@@ -308,6 +343,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let pool_threads = options.pool_threads.max(1);
     let mut pool: Vec<Vec<worker::Job>> = (0..pool_threads).map(|_| Vec::new()).collect();
     let mut dedicated: Vec<(String, worker::Job)> = Vec::new();
+    // Under a debugger: one thread per interface, all its workers on it.
+    let mut debugged: std::collections::BTreeMap<String, Vec<worker::Job>> = Default::default();
     let mut interfaces = Vec::new();
     let mut http_endpoints = Vec::new();
     // One admission per HTTP port (its interfaces share one list: `check_endpoints`).
@@ -428,6 +465,10 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 ownership: owner.ownership.clone(),
                 waiting: waiting.clone(),
             };
+            if inspected.as_ref().is_some_and(|i| i.interfaces.contains(&config.name)) {
+                debugged.entry(config.name.clone()).or_default().push(job);
+                continue;
+            }
             match config.isolation {
                 Isolation::Shared => {
                     pool[shared_count % pool_threads].push(job);
@@ -448,7 +489,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         let engine = services::EngineServices::new(services.clone(), Default::default());
         let name = format!("pool-{i}");
         let ready = ready_tx.clone();
-        threads.push(worker::spawn_thread(name, thread_jobs, store.clone(), engine, heap_mb, ready, stopping.clone())?);
+        let stop = stopping.clone();
+        threads.push(worker::spawn_thread(name, thread_jobs, store.clone(), engine, heap_mb, ready, stop, None)?);
     }
     // A dedicated interface's own pools are shared by all its worker threads.
     let mut own_pools = std::collections::HashMap::new();
@@ -458,7 +500,31 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             own_pools.entry(job.config.name.clone()).or_insert_with(|| services.dedicated_pools(&job.config)).clone();
         let engine = services::EngineServices::new(services.clone(), own);
         let ready = ready_tx.clone();
-        threads.push(worker::spawn_thread(name, vec![job], store.clone(), engine, heap_mb, ready, stopping.clone())?);
+        let stop = stopping.clone();
+        threads.push(worker::spawn_thread(name, vec![job], store.clone(), engine, heap_mb, ready, stop, None)?);
+    }
+    let inspector = inspected.map(|i| i.inspector);
+    let (debugged_jobs, debugged_interfaces) = (debugged.values().map(Vec::len).sum::<usize>(), debugged.len());
+    for (name, interface_jobs) in debugged {
+        jobs += interface_jobs.len();
+        let config = &interface_jobs[0].config;
+        let own = match config.isolation {
+            Isolation::Dedicated => services.dedicated_pools(config),
+            Isolation::Shared => Default::default(),
+        };
+        let engine = services::EngineServices::new(services.clone(), own);
+        let (ready, stop) = (ready_tx.clone(), stopping.clone());
+        let thread = format!("{name}-debug");
+        threads.push(worker::spawn_thread(
+            thread,
+            interface_jobs,
+            store.clone(),
+            engine,
+            heap_mb,
+            ready,
+            stop,
+            inspector.clone(),
+        )?);
     }
     drop(ready_tx);
     // Fail fast if any interface's code doesn't load, before accepting any messages.
@@ -647,7 +713,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         internal = count(|s| matches!(s, Source::Internal)),
         shared = shared_count,
         pool_threads,
-        dedicated_threads = jobs - shared_count,
+        dedicated_threads = jobs - shared_count - debugged_jobs,
+        debugged = debugged_interfaces,
         console = %console,
         took = ?phases.total(),
         "{}",
@@ -709,6 +776,10 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         systemd::stopping();
     }
     let started = std::time::Instant::now();
+    // A call paused at a breakpoint would hold its thread until someone pressed "continue".
+    if let Some(inspector) = &inspector {
+        inspector.close();
+    }
     let stop = stop(&engine, &stopping, threads);
     let mut forced = false;
     tokio::select! {

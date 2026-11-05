@@ -19,6 +19,7 @@ use crate::destination::{SendError, Sender};
 use crate::health::Health;
 use crate::http::HttpCall;
 use crate::ingest::{Intake, Routed};
+use crate::inspect::{Attach, Inspector, Target};
 use crate::limiter::{Decision, Limiter};
 use crate::services::EngineServices;
 use crate::stats::{self, DestinationStats, InterfaceStats};
@@ -95,7 +96,10 @@ pub type Ready = (String, Result<()>);
 
 /// Start a worker thread for `jobs`, with one isolate of `heap_mb`. Each job reports on
 /// `ready` once its interface code has loaded (or failed to); then the thread processes
-/// messages until `stop`, and ends once its workers have saved what they finished.
+/// messages until `stop`, and ends once its workers have saved what they finished. With
+/// `inspector` (`ductus dev --inspect`: the thread holds one interface), its isolate is offered
+/// to debuggers there before its code loads.
+#[allow(clippy::too_many_arguments)]
 pub fn spawn_thread(
     name: String,
     jobs: Vec<Job>,
@@ -104,6 +108,7 @@ pub fn spawn_thread(
     heap_mb: usize,
     ready: std::sync::mpsc::Sender<Ready>,
     stop: CancellationToken,
+    inspector: Option<Arc<Inspector>>,
 ) -> Result<std::thread::JoinHandle<()>> {
     let io = tokio::runtime::Handle::current(); // the main runtime (see `Worker::db`)
     std::thread::Builder::new()
@@ -114,9 +119,12 @@ pub fn spawn_thread(
             let local = tokio::task::LocalSet::new();
             local.block_on(&runtime, async move {
                 let console = services.console();
-                let mut host = Isolate::new(Some(Rc::new(services)), heap_mb);
+                let mut host = Isolate::with_inspector(Some(Rc::new(services)), heap_mb, inspector.is_some());
                 if let Some(job) = jobs.first() {
                     host.console_to_log(job.config.project_root(), console);
+                    if let Some(inspector) = &inspector {
+                        offer(inspector, &mut host, &job.config);
+                    }
                 }
                 let mut loaded = Vec::with_capacity(jobs.len());
                 for job in jobs {
@@ -181,8 +189,41 @@ pub fn spawn_thread(
         .context("spawning worker thread")
 }
 
+/// Offer the thread's isolate (one interface's: `ductus dev --inspect`) to debuggers, and say in
+/// the log where to attach and when one does.
+fn offer(inspector: &Inspector, host: &mut Isolate, config: &InterfaceConfig) {
+    let (Some(sessions), Some(script)) = (host.inspector_sessions(), config.script_path()) else { return };
+    let interface = config.name.clone();
+    let say = move |what: Attach| match what {
+        Attach::Attached => tracing::warn!(
+            %interface,
+            "a debugger attached: this interface's code has no time limit until it detaches (its messages wait while it's paused; every other interface goes on)"
+        ),
+        Attach::Detached => {
+            tracing::info!(%interface, "the debugger detached: the time limit (`timeout`) applies again")
+        }
+    };
+    let id = inspector.add(Target {
+        title: format!("{} (ductus dev)", config.name),
+        url: ductus_script::module_url(&script).unwrap_or_default(),
+        sessions,
+        switch: host.debug_switch(),
+        say: Arc::new(say),
+    });
+    tracing::info!(
+        interface = %config.name,
+        debugger = %format!("ws://{}/{id}", inspector.addr()),
+        "on a thread of its own for debugging: attach with VS Code (\"Ductus: debug this interface\") or chrome://inspect"
+    );
+}
+
 /// Runs the thread's JavaScript event loop whenever async transforms are waiting (on database
 /// calls etc.), so many of them can be in flight at once. Sleeps when there's nothing to do.
+///
+/// It's polled again when what it waits for wakes it, or when a call starts (`kick`). Ready
+/// (nothing in flight) counts as waiting too: an inspected isolate's debugger wakes the task that
+/// polled last, and its messages (setting a breakpoint, pausing) are handled in the poll, even
+/// while no message is running.
 ///
 /// If code resumed after an `await` runs away, V8 drops every queued continuation on the
 /// isolate, so no async transform in flight will ever finish: `interrupted` tells them all.
@@ -193,18 +234,23 @@ async fn drive_event_loop(
     interrupted: Rc<watch::Sender<Option<Runaway>>>,
 ) {
     loop {
-        if let Err(e) = std::future::poll_fn(|cx| host.borrow_mut().poll_event_loop(cx)).await {
-            match e.downcast_ref::<Runaway>() {
-                Some(runaway) => {
-                    if runaway.interface.is_none() {
-                        tracing::error!(%thread, error = %runaway, "runaway code in a shared module (not in any interface's folder) was stopped; can't tell whose it was, so every transform in flight on this thread will be retried");
-                    }
-                    interrupted.send_replace(Some(*runaway));
+        let failed = std::future::poll_fn(|cx| match host.borrow_mut().poll_event_loop(cx) {
+            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(e),
+            _ => std::task::Poll::Pending,
+        });
+        let e = tokio::select! {
+            e = failed => e,
+            _ = kick.notified() => continue,
+        };
+        match e.downcast_ref::<Runaway>() {
+            Some(runaway) => {
+                if runaway.interface.is_none() {
+                    tracing::error!(%thread, error = %runaway, "runaway code in a shared module (not in any interface's folder) was stopped; can't tell whose it was, so every transform in flight on this thread will be retried");
                 }
-                None => tracing::error!(error = %e, "JavaScript event loop error"),
+                interrupted.send_replace(Some(*runaway));
             }
+            None => tracing::error!(error = %e, "JavaScript event loop error"),
         }
-        kick.notified().await;
     }
 }
 

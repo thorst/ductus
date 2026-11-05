@@ -26,7 +26,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
 - [Writing transforms](transforms.md) (16)
-- [Debugging](debugging.md) (10)
+- [Debugging](debugging.md) (14)
 - [Shared pool](shared-pool.md) (3)
 - [Runaway scripts](runaway.md) (6)
 - [Databases and APIs](databases-and-apis.md) (5)
@@ -49,7 +49,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Upgrades](upgrades.md) (15)
 - [Windows](windows.md) (9)
 
-## Level 1: Foundations (31)
+## Level 1: Foundations (32)
 
 - [Retention is 1, 3 or 7 weeks, not any number of days](retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1) (Retention)
 - [Missing fields read as "" and never throw](transforms.md#missing-fields-read-as--and-never-throw-level-1) (Writing transforms)
@@ -61,6 +61,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A quoted number in an environment file is text](transforms.md#a-quoted-number-in-an-environment-file-is-text-level-1) (Writing transforms)
 - [`ductus test --inspect` waits for a debugger before anything runs](debugging.md#ductus-test---inspect-waits-for-a-debugger-before-anything-runs-level-1) (Debugging)
 - [One interface's tests per debugging run](debugging.md#one-interfaces-tests-per-debugging-run-level-1) (Debugging)
+- [On Windows, stopping the debug session leaves dev's Postgres until the next start](debugging.md#on-windows-stopping-the-debug-session-leaves-devs-postgres-until-the-next-start-level-1) (Debugging)
 - [A `debugger;` statement pauses every debugging session](debugging.md#a-debugger-statement-pauses-every-debugging-session-level-1) (Debugging)
 - [Without the environment's secrets, `ductus try` runs without databases and APIs](debugging.md#without-the-environments-secrets-ductus-try-runs-without-databases-and-apis-level-1) (Debugging)
 - [A destination's owner is its interface's unless it says otherwise](impact.md#a-destinations-owner-is-its-interfaces-unless-it-says-otherwise-level-1) (Impact and `about:`)
@@ -83,7 +84,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (90)
+## Level 2: Practitioner (92)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -105,6 +106,8 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A place's precision in `validate --json` depends on the file](transforms.md#a-places-precision-in-validate---json-depends-on-the-file-level-2) (Writing transforms)
 - [A `console` line in code is written for every message](transforms.md#a-console-line-in-code-is-written-for-every-message-level-2) (Writing transforms)
 - [The time limit is off while a debugger is attached](debugging.md#the-time-limit-is-off-while-a-debugger-is-attached-level-2) (Debugging)
+- [Under `ductus dev --inspect`, only the debugged interface waits](debugging.md#under-ductus-dev---inspect-only-the-debugged-interface-waits-level-2) (Debugging)
+- [Stopping `ductus dev` while paused leaves that message for the next start](debugging.md#stopping-ductus-dev-while-paused-leaves-that-message-for-the-next-start-level-2) (Debugging)
 - [A runaway test ends that interface's test run](debugging.md#a-runaway-test-ends-that-interfaces-test-run-level-2) (Debugging)
 - [`ductus try` sends nothing; lookups are made, writes aren't](debugging.md#ductus-try-sends-nothing-lookups-are-made-writes-arent-level-2) (Debugging)
 - [A message read with `--from` is in that engine's audit log](debugging.md#a-message-read-with---from-is-in-that-engines-audit-log-level-2) (Debugging)
@@ -176,7 +179,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (70)
+## Level 3: Professional (71)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
@@ -197,6 +200,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A route is exactly once inside the engine, not beyond it](routes.md#a-route-is-exactly-once-inside-the-engine-not-beyond-it-level-3) (Routing between interfaces)
 - [One query for many values, not one query per value](transforms.md#one-query-for-many-values-not-one-query-per-value-level-3) (Writing transforms)
 - [The `--json` outputs only ever gain fields](transforms.md#the---json-outputs-only-ever-gain-fields-level-3) (Writing transforms)
+- [With several `--inspect` interfaces, VS Code attaches to the first](debugging.md#with-several---inspect-interfaces-vs-code-attaches-to-the-first-level-3) (Debugging)
 - [The debugger listens on this machine only, and never in `ductus run`](debugging.md#the-debugger-listens-on-this-machine-only-and-never-in-ductus-run-level-3) (Debugging)
 - [Breakpoints are set on your `.ts` lines; the engine runs JavaScript](debugging.md#breakpoints-are-set-on-your-ts-lines-the-engine-runs-javascript-level-3) (Debugging)
 - [SQL Server: one result set, one batch per call](databases-and-apis.md#sql-server-one-result-set-one-batch-per-call-level-3) (Databases and APIs)

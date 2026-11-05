@@ -25,6 +25,7 @@ use futures_util::{SinkExt, StreamExt};
 use serde_json::json;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
+use tokio_util::sync::CancellationToken;
 
 /// The address `--inspect` listens on without one: what VS Code and Chrome look at first.
 pub const DEFAULT: &str = "127.0.0.1:9229";
@@ -76,12 +77,13 @@ struct Served {
 struct Shared {
     addr: SocketAddr,
     targets: Mutex<Vec<Arc<Served>>>,
+    /// Closing: stop listening and end every session.
+    closed: CancellationToken,
 }
 
-/// The running server. Dropping it stops it.
+/// The running server. Dropping it (or `close`) stops it.
 pub struct Inspector {
     shared: Arc<Shared>,
-    _stop: tokio::sync::oneshot::Sender<()>,
 }
 
 impl Inspector {
@@ -95,8 +97,8 @@ impl Inspector {
             _ => anyhow::anyhow!("the debugger's port {addr}: {e}"),
         })?;
         listener.set_nonblocking(true)?;
-        let shared = Arc::new(Shared { addr, targets: Mutex::new(Vec::new()) });
-        let (stop, stopped) = tokio::sync::oneshot::channel::<()>();
+        let closed = CancellationToken::new();
+        let shared = Arc::new(Shared { addr, targets: Mutex::new(Vec::new()), closed: closed.clone() });
         let state = shared.clone();
         std::thread::Builder::new()
             .name("inspector".into())
@@ -111,11 +113,17 @@ impl Inspector {
                         .route("/json/list", get(list))
                         .route("/{id}", get(socket))
                         .with_state(state);
-                    let _ = axum::serve(listener, app).with_graceful_shutdown(async { drop(stopped.await) }).await;
+                    let _ = axum::serve(listener, app).with_graceful_shutdown(closed.cancelled_owned()).await;
                 });
             })
             .context("starting the debugger's thread")?;
-        Ok(Self { shared, _stop: stop })
+        Ok(Self { shared })
+    }
+
+    /// Stop listening and end every session: a call paused at a breakpoint goes on, and the time
+    /// limit applies again (an engine that stops must not wait for someone to press "continue").
+    pub fn close(&self) {
+        self.shared.closed.cancel();
     }
 
     /// Offer `target` to debuggers; its id is in its URL.
@@ -127,6 +135,12 @@ impl Inspector {
 
     pub fn addr(&self) -> SocketAddr {
         self.shared.addr
+    }
+}
+
+impl Drop for Inspector {
+    fn drop(&mut self) {
+        self.close();
     }
 }
 
@@ -145,8 +159,11 @@ async fn version() -> Json<serde_json::Value> {
     Json(json!({ "Browser": format!("Ductus/{}", env!("CARGO_PKG_VERSION")), "Protocol-Version": "1.3" }))
 }
 
+/// By title: VS Code attaches to the first, so with several (`dev --inspect a --inspect b`) it's
+/// the same one every run, whichever thread offered its isolate first.
 async fn list(State(shared): State<Arc<Shared>>) -> Json<serde_json::Value> {
-    let targets = shared.targets.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    let mut targets = shared.targets.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    targets.sort_by(|a, b| a.target.title.cmp(&b.target.title));
     let host = shared.addr;
     Json(serde_json::Value::Array(
         targets
@@ -174,20 +191,44 @@ async fn socket(
 ) -> Response {
     let found = shared.targets.lock().unwrap_or_else(|e| e.into_inner()).iter().find(|t| t.id == id).cloned();
     match found {
-        Some(served) => upgrade.on_upgrade(move |ws| bridge(ws, served)),
+        Some(served) => {
+            let closed = shared.closed.clone();
+            upgrade.on_upgrade(move |ws| bridge(ws, served, closed))
+        }
         None => (axum::http::StatusCode::NOT_FOUND, "no such target: GET /json/list names them").into_response(),
     }
 }
 
+/// A client attached to a target, until dropped: however its session ends (the client closed it,
+/// the connection broke, the server closed or its thread ended), the time limit comes back with
+/// the last one.
+struct Attached<'a>(&'a Target);
+
+impl<'a> Attached<'a> {
+    fn new(target: &'a Target) -> Self {
+        let first = !target.switch.is_attached();
+        target.switch.attached();
+        if first {
+            (target.say)(Attach::Attached);
+        }
+        Self(target)
+    }
+}
+
+impl Drop for Attached<'_> {
+    fn drop(&mut self) {
+        self.0.switch.detached();
+        if !self.0.switch.is_attached() {
+            (self.0.say)(Attach::Detached);
+        }
+    }
+}
+
 /// One client: its WebSocket to and from a new session on the isolate's thread.
-async fn bridge(ws: WebSocket, served: Arc<Served>) {
+async fn bridge(ws: WebSocket, served: Arc<Served>, closed: CancellationToken) {
     let target = &served.target;
     let Some((mut from_isolate, to_isolate)) = target.sessions.open() else { return };
-    let first = !target.switch.is_attached();
-    target.switch.attached();
-    if first {
-        (target.say)(Attach::Attached);
-    }
+    let attached = Attached::new(target);
     let (mut out, mut incoming) = ws.split();
     let send = async move {
         while let Some(message) = from_isolate.next().await {
@@ -205,13 +246,10 @@ async fn bridge(ws: WebSocket, served: Arc<Served>) {
             }
         }
     };
-    tokio::select! { _ = send => {}, _ = receive => {} }
+    tokio::select! { _ = send => {}, _ = receive => {}, _ = closed.cancelled() => {} }
     // The session ends with `to_isolate`: V8 lets a paused call go on, without breakpoints.
     drop(to_isolate);
-    target.switch.detached();
-    if !target.switch.is_attached() {
-        (target.say)(Attach::Detached);
-    }
+    drop(attached);
 }
 
 #[cfg(test)]

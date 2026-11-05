@@ -94,7 +94,7 @@ pub async fn types(root: &Path) -> Result<()> {
     match vscode_launch(root)? {
         Mapped::Written | Mapped::Already | Mapped::Elsewhere(_) => {
             println!(
-                "{LAUNCH} has \"Ductus: debug these tests\" (with a test or code file open) and \"Ductus: debug this message\" (with a message file open, a fixture)"
+                "{LAUNCH} has \"Ductus: debug these tests\" (with a test or code file open), \"Ductus: debug this message\" (with a message file open, a fixture) and \"Ductus: debug this interface\" (`ductus dev` with the open file's interface under the debugger)"
             )
         }
         Mapped::Unreadable => println!(
@@ -114,7 +114,8 @@ const LAUNCH: &str = ".vscode/launch.json";
 /// VS Code's launch configurations: js-debug starts the command and attaches to its port
 /// (`attachSimplePort`), so no extension is needed. "These tests": the open file's interface's
 /// tests (`${fileDirname}`, which `--interface` takes). "This message": the open file as the
-/// message, through the interface whose folder it's in (a fixture, `${file}` as both).
+/// message, through the interface whose folder it's in (a fixture, `${file}` as both). "This
+/// interface": `ductus dev` with the open file's interface under the debugger.
 fn launch_configurations() -> Vec<serde_json::Value> {
     let configuration = |name: &str, args: &[&str]| {
         serde_json::json!({
@@ -129,9 +130,20 @@ fn launch_configurations() -> Vec<serde_json::Value> {
             "outputCapture": "std",
         })
     };
+    let mut dev = configuration("Ductus: debug this interface", &["dev", "--inspect", "${fileDirname}"]);
+    // How long js-debug tries to attach: dev starts its Postgres first (the first run downloads
+    // it), past js-debug's 10 s. Stopping the session asks dev to stop (SIGTERM), so it stops its
+    // Postgres too; "forceful" (the default) would kill it and leave Postgres to the next start.
+    // On Windows a console program can't be asked (`taskkill` without /F is refused): "polite"
+    // there only detaches and leaves dev running, so it's killed, and the next dev stops its
+    // Postgres (VS Code merges `windows` into the configuration there).
+    dev["timeout"] = serde_json::json!(120_000);
+    dev["killBehavior"] = serde_json::json!("polite");
+    dev["windows"] = serde_json::json!({ "killBehavior": "forceful" });
     vec![
         configuration("Ductus: debug these tests", &["test", "--inspect", "--interface", "${fileDirname}"]),
         configuration("Ductus: debug this message", &["try", "${file}", "${file}", "--inspect"]),
+        dev,
     ]
 }
 

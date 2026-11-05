@@ -3,11 +3,23 @@
 // `attachSimplePort`, answer js-debug's request for a child session, set one breakpoint, and when
 // it's hit print the top frame, the locals and an expression's value, then go on to the end.
 //   node dap-client.mjs DAP_SERVER FILE LINE EXPRESSION PROGRAM [ARGS...]
+// With DAP_CONFIG (a configuration's name), the configuration is read from ./.vscode/launch.json
+// as VS Code reads it instead of ARGS: `${file}`, `${fileDirname}` and `${workspaceFolder}`
+// filled in for FILE open in the editor, `ductus` found as PROGRAM (VS Code finds it on the PATH).
+// For a program that doesn't end by itself (a running engine): DAP_TRIGGER, a shell command run
+// once the breakpoint is set (a message to the interface); DAP_WHILE_PAUSED, one run while stopped
+// at it (its output printed); DAP_STOP, a shell command waited for after continuing (until the
+// message is through), then the session stopped as VS Code's stop button does.
 // Prints what happened, one line each; exits 1 if a step doesn't come within 30 s.
-import { spawn } from "node:child_process";
+import { execSync, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import net from "node:net";
+import path from "node:path";
 
 const [server, file, line, expression, program, ...args] = process.argv.slice(2);
+const { DAP_CONFIG, DAP_TRIGGER, DAP_WHILE_PAUSED, DAP_STOP } = process.env;
+// The commands are bash's; on Windows (checked by hand there) cmd's.
+const shell = process.platform === "win32" ? true : "/bin/bash";
 const PORT = 4711 + (process.pid % 1000);
 const say = (...a) => console.log(...a);
 const fail = (why) => {
@@ -88,28 +100,65 @@ parent.onRequest.startDebugging = async (request) => {
   await initialize(c);
   c.send("launch", request.arguments.configuration);
   await c.event("initialized");
-  await breakpoint(c);
+  const set = await breakpoint(c);
   await c.send("configurationDone");
+  // In code that's already loaded (a running engine) the breakpoint is placed once js-debug has
+  // read the script's source map: wait for that before sending anything to it.
+  if (DAP_TRIGGER && !set.breakpoints?.[0]?.verified) {
+    while (!(await c.event("breakpoint")).body.breakpoint.verified);
+  }
   childReady(c);
 };
+
+/** The configuration named DAP_CONFIG in .vscode/launch.json, as VS Code hands it to js-debug. */
+function fromLaunchJson() {
+  const launch = JSON.parse(readFileSync(".vscode/launch.json", "utf8"));
+  const found = launch.configurations.find((c) => c.name === DAP_CONFIG);
+  if (!found) fail(`no configuration "${DAP_CONFIG}" in .vscode/launch.json`);
+  const vars = { file, fileDirname: path.dirname(file), workspaceFolder: process.cwd() };
+  const fill = (s) => s.replace(/\$\{(\w+)\}/g, (_, v) => vars[v] ?? fail(`unknown \${${v}}`));
+  say(`configuration: ${found.name}: ${found.runtimeExecutable} ${found.runtimeArgs.join(" ")}`);
+  // VS Code merges the platform's own block (`windows`, `linux`, `osx`) into the configuration.
+  const platform = { win32: "windows", linux: "linux", darwin: "osx" }[process.platform];
+  const { windows, linux, osx, ...common } = found;
+  return {
+    ...common,
+    ...{ windows, linux, osx }[platform],
+    type: "pwa-node", // what VS Code runs "node" configurations with
+    runtimeExecutable: found.runtimeExecutable === "ductus" ? program : found.runtimeExecutable,
+    runtimeArgs: found.runtimeArgs.map(fill),
+    cwd: process.cwd(),
+  };
+}
+
 await initialize(parent);
-const launched = parent.send("launch", {
-  type: "pwa-node",
-  request: "launch",
-  name: "Ductus: debug these tests",
-  runtimeExecutable: program,
-  runtimeArgs: args,
-  attachSimplePort: 9229,
-  cwd: process.cwd(),
-  console: "internalConsole",
-  outputCapture: "std",
-});
+const launched = parent.send(
+  "launch",
+  DAP_CONFIG
+    ? fromLaunchJson()
+    : {
+        type: "pwa-node",
+        request: "launch",
+        name: "Ductus: debug these tests",
+        runtimeExecutable: program,
+        runtimeArgs: args,
+        attachSimplePort: 9229,
+        cwd: process.cwd(),
+        console: "internalConsole",
+        outputCapture: "std",
+      },
+);
 await parent.event("initialized");
 await breakpoint(parent);
 await parent.send("configurationDone");
 await launched;
 
 const c = await child;
+if (DAP_TRIGGER) {
+  const trigger = spawn(DAP_TRIGGER, { shell, stdio: ["ignore", "pipe", "pipe"] });
+  trigger.stdout.on("data", (d) => String(d).split("\n").filter(Boolean).forEach((l) => say(`trigger: ${l}`)));
+  trigger.stderr.on("data", (d) => String(d).split("\n").filter(Boolean).forEach((l) => say(`trigger: ${l}`)));
+}
 const stopped = await c.event("stopped");
 say(`stopped: ${stopped.body.reason}`);
 const { stackFrames } = await c.send("stackTrace", { threadId: stopped.body.threadId });
@@ -121,10 +170,21 @@ const { variables } = await c.send("variables", { variablesReference: local.vari
 say(`locals: ${variables.map((v) => `${v.name}=${v.value}`).join(", ")}`);
 const evaluated = await c.send("evaluate", { expression, frameId: top.id, context: "watch" });
 say(`${expression} = ${evaluated.result}`);
+if (DAP_WHILE_PAUSED) {
+  const out = execSync(DAP_WHILE_PAUSED, { shell, encoding: "utf8" });
+  out.split("\n").filter(Boolean).forEach((l) => say(`while paused: ${l}`));
+}
 // Once is enough: the breakpoint goes before the run does.
 await c.send("setBreakpoints", { source: { path: file }, breakpoints: [] });
 await c.send("continue", { threadId: stopped.body.threadId });
-await parent.event("terminated");
+if (DAP_STOP) {
+  execSync(DAP_STOP, { shell });
+  say("stopping the session");
+  await parent.send("terminate");
+}
+// A program that ends by itself: the parent session says so once its output is all through.
+// Stopped from here: the debugged session says so, the parent not always.
+await (DAP_STOP ? Promise.race([parent.event("terminated"), c.event("terminated")]) : parent.event("terminated"));
 say("terminated");
 dap.kill();
 process.exit(0);

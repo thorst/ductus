@@ -2,8 +2,10 @@
 
 When a test fails and the reason isn't obvious from the values it prints, stop the code where it
 goes wrong and look: the values of every variable, the call that led there, what an expression
-gives, one line at a time. `ductus test --inspect` runs an interface's tests under a debugger, and
-`ductus try --inspect` [one message](#one-message-ductus-try), a file or one the engine stored.
+gives, one line at a time. `ductus test --inspect` runs an interface's tests under a debugger,
+`ductus try --inspect` [one message](#one-message-ductus-try), a file or one the engine stored,
+and `ductus dev --inspect` [a running interface](#a-running-interface-ductus-dev---inspect), with
+messages arriving from its senders while the rest of your dev engine carries on.
 
 **No extension is needed.** The engine speaks the protocol every JavaScript debugger speaks (the
 Chrome DevTools Protocol, as Node and Deno do), so VS Code's built-in debugger, Chrome DevTools,
@@ -11,14 +13,14 @@ JetBrains IDEs and anything else that can attach to Node attach to Ductus too.
 
 | You use | What to do |
 |---|---|
-| **VS Code** | open a file of the interface (its code or a test), set breakpoints, Run and Debug → **Ductus: debug these tests**; or open a message file (a fixture) → **Ductus: debug this message** ([below](#vs-code)) |
-| **Chrome or Edge** | `ductus test --inspect --interface adt-in` in a terminal, then chrome://inspect → **inspect** ([below](#chrome-devtools)) |
+| **VS Code** | open a file of the interface (its code or a test), set breakpoints, Run and Debug → **Ductus: debug these tests**; or open a message file (a fixture) → **Ductus: debug this message**; or open its code → **Ductus: debug this interface**, a running dev engine ([below](#vs-code)) |
+| **Chrome or Edge** | `ductus test --inspect --interface adt-in` (or `ductus dev --inspect adt-in`) in a terminal, then chrome://inspect → **inspect** ([below](#chrome-devtools)) |
 | **JetBrains, Neovim, others** | `ductus test --inspect`, then attach to a Node.js process on 127.0.0.1:9229 ([below](#other-debuggers)) |
 
 ## VS Code
 
-`ductus types` (also run by every `ductus test` and `ductus validate`) adds two configurations to
-`.vscode/launch.json`: only added, beside your own, and never over one of the same name.
+`ductus types` (also run by every `ductus test` and `ductus validate`) adds three configurations
+to `.vscode/launch.json`: only added, beside your own, and never over one of the same name.
 
 ```text
 $ cat .vscode/launch.json
@@ -54,10 +56,39 @@ $ cat .vscode/launch.json
       "attachSimplePort": 9229,
       "console": "internalConsole",
       "outputCapture": "std"
+    },
+    {
+      "type": "node",
+      "request": "launch",
+      "name": "Ductus: debug this interface",
+      "runtimeExecutable": "ductus",
+      "runtimeArgs": [
+        "dev",
+        "--inspect",
+        "${fileDirname}"
+      ],
+      "attachSimplePort": 9229,
+      "console": "internalConsole",
+      "outputCapture": "std",
+      "timeout": 120000,
+      "killBehavior": "polite",
+      "windows": {
+        "killBehavior": "forceful"
+      }
     }
   ]
 }
 ```
+
+**Ductus: debug this interface** starts [`ductus dev`](../install/dev.md) with the interface
+whose file you have open under the debugger
+([below](#a-running-interface-ductus-dev---inspect)). Its `timeout` (120 s) is how long VS Code
+keeps trying to attach: `dev` starts its Postgres first, and the first run downloads it. Stopping
+the session (the red square) asks `dev` to stop, as Ctrl-C does, so it stops its Postgres too
+(`killBehavior: polite`). **On Windows** a program in the background can't be asked to stop that
+way, so there the session ends `dev` at once (`windows: { killBehavior: forceful }`, which VS Code
+uses on Windows) and the next `ductus dev` stops the Postgres it left
+([nuance](../nuances/debugging.md#on-windows-stopping-the-debug-session-leaves-devs-postgres-until-the-next-start-level-1)).
 
 **Ductus: debug this message** runs the file you have open as one message through its
 interface ([`ductus try`](#one-message-ductus-try)): open a fixture (`interfaces/adt-in/fixtures/a01.hl7`),
@@ -246,6 +277,114 @@ try-demo: message 20042988, received 2026-11-03 22:21:12 UTC, through the code a
 - **Not for interfaces that answer HTTP requests themselves** (`respond`): test their function
   with `ductus test`.
 
+## A running interface: `ductus dev --inspect`
+
+Some problems only show with the real thing: the sender's messages as they come, in their order,
+with the lookups and the other interfaces around them. `ductus dev --inspect adt-in` runs your
+[dev engine](../install/dev.md) as usual, with `adt-in`'s code under a debugger: a breakpoint
+stops the message being worked on, and you look at it as in a test.
+
+```sh
+ductus dev --inspect adt-in
+```
+
+**Only that interface waits.** It runs on a thread and JavaScript runtime of its own for the run,
+so while it's paused (or stepping, or looping under the debugger):
+
+- **its senders still get their ACKs**: the engine stores and ACKs a message before any code
+  runs, so they see nothing, and its messages queue up in order behind the one you're looking at;
+- **every other interface goes on**, receiving and sending as usual;
+- **when you continue, the queue drains** in order.
+
+Measured (`scripts/bench-inspect.sh`, [below](#what-it-costs)): another interface's throughput
+and delivery while the debugged one sat paused were what they were with no debugger at all.
+
+From VS Code: open the interface's code (`interfaces/adt-in/route.ts`), set breakpoints, **Run and
+Debug → Ductus: debug this interface**. VS Code starts `ductus dev --inspect` with that file's
+folder (the option takes a name, or a file or folder inside the interface's folder), attaches,
+and the Debug Console shows the engine's output. Send it a message (from the sender, with
+`ductus gen`, or resend one it has from the web UI) and it stops at your breakpoint. Here is the
+[debugging demo](#checked-in-ci) doing that through VS Code's debugger, with `other`, a second
+interface, taking and delivering 100 messages while `adt` is paused, and the session then stopped
+from the editor (the times at the start of each log line left out):
+
+```text
+configuration: Ductus: debug this interface: ductus dev --inspect ${fileDirname}
+output: debugger listening on 127.0.0.1:9229 for adt (VS Code: "Ductus: debug this interface"; Chrome: chrome://inspect)
+output: Postgres 18.6.0 is running for this project:
+output:   postgresql://postgres:…@127.0.0.1:40057/ductus
+output:   (data in ./.ductus/postgres/data; stops with the engine)
+output: INFO ductus_runtime::worker: on a thread of its own for debugging: attach with VS Code ("Ductus: debug this interface") or chrome://inspect interface=adt debugger=ws://127.0.0.1:9229/8d316ee1-4cff-5ac2-d9ca-05e7198538bc
+output: INFO ductus_runtime: started interfaces=2 mllp=2 http=0 files=0 schedules=0 internal=0 shared=1 pool_threads=8 dedicated_threads=0 debugged=1 console=info took=128.062457ms
+output: WARN ductus_runtime::worker: a debugger attached: this interface's code has no time limit until it detaches (its messages wait while it's paused; every other interface goes on) interface=adt
+trigger: sent 1 messages over 1 connection(s) in 0.0s (251/s), retries 0, rejected 0, refused 0, dropped 0, longest wait 3 ms
+stopped: breakpoint
+at: transform /tmp/tmp.wnWXPNzNZy/dev-project/interfaces/adt/route.ts:5
+locals: msg=Proxy(MessageImpl) {data: Array(4), index: Map(4), delimiters: {…}}, this=undefined, ward='4W'
+ward + " " + msg.get("MSH-9") = '4W ADT^A08'
+while paused: sent 100 messages over 1 connection(s) in 0.1s (1325/s), retries 0, rejected 0, refused 0, dropped 0, longest wait 5 ms
+while paused: other delivered 100; adt wrote 0
+stopping the session
+output: INFO ductus_runtime: stopping: taking no new messages, finishing the ones in hand why="SIGTERM" limit=30s
+output: INFO ductus_runtime::worker: the debugger detached: the time limit (`timeout`) applies again interface=adt
+output: INFO ductus_runtime: stopped took=3.835019ms
+output: Postgres stopped
+```
+
+From a terminal: `ductus dev --inspect adt-in`, then attach Chrome DevTools (chrome://inspect lists
+"adt-in (ductus dev)") or any other debugger on 127.0.0.1:9229. Unlike `test` and `try`, **`dev`
+doesn't wait** for a debugger: the engine starts and runs as usual, and you attach when you like.
+
+| Option | What it does |
+|---|---|
+| `--inspect adt-in` | the interface, by name or a file or folder inside its folder; again for another (`--inspect adt-in --inspect lab-out`) |
+| `--inspect-address 127.0.0.1:9230` (or `9230`) | another port: this machine only, as for `test` |
+
+- **An endless loop under the debugger holds only that interface.** No time limit while you're
+  attached, so a loop runs on (pause it to see where); its messages wait, everything else goes on.
+  The moment the debugger detaches, the limit applies again: the loop is stopped within the
+  interface's `timeout`, that message quarantined ("transform stopped: the script ran longer than
+  its 2s timeout"), and the messages behind it are delivered
+  ([nuance](../nuances/debugging.md#under-ductus-dev---inspect-only-the-debugged-interface-waits-level-2)).
+- **Stopping `dev` while paused** (the stop button, Ctrl-C) ends the debugging session itself: the
+  paused call goes on and `dev` stops at once. The message it was working on is sent at the next
+  start, as any message in hand when an engine stops
+  ([nuance](../nuances/debugging.md#stopping-ductus-dev-while-paused-leaves-that-message-for-the-next-start-level-2)).
+- **Several interfaces** (`--inspect a --inspect b`) are each a target on the one port: Chrome
+  DevTools lists them all; VS Code attaches to the first by name
+  ([nuance](../nuances/debugging.md#with-several---inspect-interfaces-vs-code-attaches-to-the-first-level-3)).
+- **A dedicated interface with several workers** runs them all on its one debugged thread for the
+  run, so they take turns.
+- **An interface that answers HTTP requests itself** (`respond`) can be debugged too; its callers
+  wait for their answer while it's paused, and may give up by their own timeout.
+- **Only in `dev`.** `ductus run` and the services have no debugger, ever.
+
+### What it costs
+
+Nothing you can measure. Without `--inspect`, `dev` runs as before. With it, the debugged
+interface's code runs on its own thread with the debugger's hooks on, and the other interfaces
+don't notice, even while it sits paused. `scripts/bench-inspect.sh` measured it on a development
+machine (WSL2, `ductus dev`'s own Postgres): 20,000 messages into a second interface (with a
+transform, on the shared pool) over 4 connections as fast as its ACKs came back, while the
+debugged one was as the first column says; two passes of three runs each (2026-11-04):
+
+| The debugged interface | Second interface: messages stored and ACKed per second | All 20,000 delivered after |
+|---|---|---|
+| no `--inspect` (the version before) | 6,103–6,790 | 10.2–10.8 s |
+| no `--inspect` | 5,970–6,788 | 9.5–10.8 s |
+| `--inspect`, no debugger attached | 6,659–6,975 | 9.7–10.9 s |
+| `--inspect`, paused at a breakpoint the whole time | 6,404–7,052 | 9.8–11.2 s |
+
+The differences are the spread between runs, in both directions. For scale: a busy feed sends
+tens of messages a second, so this is a hundredfold more than a dev engine usually sees. In the
+CLI test (20 messages a time into the second interface, each timed from send to its receiver), the
+longest wait was 9–27 ms with the debugged interface paused or looping, against 22–44 ms with it
+idle, and the paused interface's own senders got their ACKs in 0.5–2 ms.
+
+`dev`'s start with `--inspect` (5 starts each, twice): the engine's own start 133–242 ms against
+127–231 ms without, and from the command to "started" (its Postgres included) 335–473 ms against
+325–416 ms: the same, within the spread.
+
 ## The time limit while you debug
 
 Interface code is stopped when it runs past its `timeout` without pausing (5 s for tests), so an
@@ -259,9 +398,14 @@ debugger attached: no time limit on the tests while it is
 debugger detached: the time limit applies again
 ```
 
+(`ductus dev --inspect` says it in its log: "a debugger attached: this interface's code has no
+time limit until it detaches", "the debugger detached: the time limit (`timeout`) applies
+again".)
+
 The moment it detaches (you stop debugging, close the window, the connection drops), the limit
 applies again from then: code still in an endless loop is stopped within the timeout, the run
-ends and `ductus test` exits 1. An endless loop under a debugger therefore can't hang anything:
+ends and `ductus test` exits 1 (under `dev`, that message is quarantined and the interface goes
+on). An endless loop under a debugger therefore can't hang anything:
 pause it to see where it loops; stop debugging and it's stopped
 ([nuance](../nuances/debugging.md#the-time-limit-is-off-while-a-debugger-is-attached-level-2)).
 A test stopped this way ends its interface's run, with or without a debugger
@@ -277,10 +421,8 @@ debugging sessions, so `ductus validate` warns about each:
 interfaces/adt/route.ts:4:3 warning DX5: a `debugger;` statement: it pauses here in every debugging session (`ductus test --inspect`); remove it when you're done, and set a breakpoint in the editor instead
 ```
 
-## What it doesn't do (yet)
+## What it doesn't do
 
-- **A running dev engine** with one interface debugged (`ductus dev --inspect`) is the next part
-  of v0.7.
 - **Production is never debugged in place.** A paused interface would hold its real traffic, and a
   debugger's port runs any code beside patient data. Bring the message to the code instead:
   `ductus try --message ID --from https://ductus-prod:7700 --inspect` on your machine.
@@ -291,9 +433,16 @@ interfaces/adt/route.ts:4:3 warning DX5: a `debugger;` statement: it pauses here
 version pinned) the way VS Code does for the configuration above, on this guide's example project:
 it starts `ductus test --inspect`, stops at a breakpoint on a `.ts` line through the source map,
 reads the locals and an expression, and lets the test pass; then "Ductus: debug this message" on
-a fixture, stopping at the same line under `ductus try`. `scripts/demo-try.sh` tries a message an
+a fixture, stopping at the same line under `ductus try`; then "Ductus: debug this interface",
+read from the `launch.json` `ductus types` wrote: `ductus dev --inspect` with a message stopped at
+a breakpoint while another interface takes and delivers 100, and the session stopped as VS Code's
+stop button does (dev and its Postgres stop cleanly). `scripts/demo-try.sh` tries a message an
 engine stored, from its database and through its API, before and after a change to the code, and
 checks the receiver got nothing more. A CLI test attaches over the protocol directly, pauses at a
 `debugger;`, keeps an endless loop running past the time limit while attached, and checks it's
-stopped within the limit once it detaches. Chrome DevTools was checked by hand (2026-11-03): it
+stopped within the limit once it detaches. Another does the same under `ductus dev --inspect`
+with real traffic: senders of the debugged interface ACKed while it's paused and while it loops,
+a second interface's messages delivered meanwhile, the loop stopped within its 2 s limit once
+the debugger detaches (2.05 s), its message quarantined and the five behind it delivered, and
+`dev` stopped while paused without waiting. Chrome DevTools was checked by hand (2026-11-03): it
 lists the run, stops at `debugger;` in the `.ts` with its types and locals, and resumes.

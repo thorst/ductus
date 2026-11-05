@@ -30,7 +30,7 @@ INFO ductus_runtime: the engine's database database=plain, no TLS: the server do
 INFO ductus_runtime::alerts: alerts on channels=1 rules=2 heartbeat=false
 INFO ductus_runtime::certificates: no connection has a certificate: scheduled checks have nothing to do
 INFO ductus_runtime::api: REST API listening (/api/v1) host=127.0.0.1 port=7700 https=false
-INFO ductus_runtime: started interfaces=1 mllp=1 http=0 files=0 schedules=0 internal=0 shared=1 pool_threads=8 dedicated_threads=0 console=info took=299.820201ms
+INFO ductus_runtime: started interfaces=1 mllp=1 http=0 files=0 schedules=0 internal=0 shared=1 pool_threads=8 dedicated_threads=0 debugged=0 console=info took=299.820201ms
 WARN ductus_runtime::api::status: destination paused interface=adt-in destination=lab by="ops-probe" reason="lab system upgrade until 14:00, ticket CHG0042"
 INFO ductus_runtime::worker: paused: waiting to be resumed interface=adt-in destination=lab slot=0
 WARN ductus_runtime::api::status: destination resumed interface=adt-in destination=lab by="ops-probe"

@@ -125,8 +125,20 @@ enum Command {
         #[arg(long, requires = "reset")]
         yes: bool,
         /// Start only the Postgres, without the engine, and print its URL.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "inspect")]
         database_only: bool,
+        /// Let a debugger attach to this interface's code (its name, or a file or folder inside
+        /// its folder; again for another). It runs on a thread of its own for the run, so while
+        /// it's paused at a breakpoint (or looping under the debugger) only its messages wait:
+        /// receiving, ACKs and every other interface go on. No time limit while a debugger is
+        /// attached; it applies again when it detaches. The debugging guide shows VS Code's and
+        /// Chrome's setup.
+        #[arg(long, value_name = "INTERFACE")]
+        inspect: Vec<String>,
+        /// Where the debugger listens with `--inspect`: a port, or this machine's address and a
+        /// port (never another machine's).
+        #[arg(long, value_name = "ADDRESS", default_value = ductus_runtime::inspect::DEFAULT, requires = "inspect")]
+        inspect_address: String,
     },
     /// Run each interface's `*.test.ts` files.
     ///
@@ -1078,13 +1090,28 @@ async fn run(cli: Cli) -> Result<()> {
             let (root, database_url, options) = args.parts()?;
             exit_if_refused(ductus_runtime::run(&root, &database_url, options).await)
         }
-        Command::Dev { root, threads, env, api_listen, stop_timeout, port, reset, yes, database_only } => {
+        Command::Dev {
+            root,
+            threads,
+            env,
+            api_listen,
+            stop_timeout,
+            port,
+            reset,
+            yes,
+            database_only,
+            inspect,
+            inspect_address,
+        } => {
+            // Before Postgres starts: a wrong name or a port in use is said at once.
+            let inspect = dev::inspect(&root, &env, &inspect, &inspect_address)?;
             let defaults = ductus_runtime::EngineOptions::default();
             let engine = ductus_runtime::EngineOptions {
                 pool_threads: threads.unwrap_or(defaults.pool_threads),
                 env,
                 api_listen,
                 stop_timeout,
+                inspect,
                 ..defaults
             };
             dev::run(dev::Options { root, engine, port, reset, yes, database_only }).await

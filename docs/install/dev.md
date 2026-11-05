@@ -52,6 +52,7 @@ Web UI login: user `dev`, password `…` (kept in ./.ductus/dev-login)
 | `--port N` | Postgres's port, instead of the one kept from the last run (or a free one the first time). |
 | `--env NAME` | The environment's variables and secrets, as with `run` ([environments](../configure/environments.md)). |
 | `--api-listen HOST:PORT` | Where the web UI and API listen (`off` for neither). |
+| `--inspect INTERFACE` | Lets a debugger (VS Code, Chrome DevTools) attach to that interface's code while the engine runs; only its messages wait while it's paused ([debugging](../write/debugging.md#a-running-interface-ductus-dev---inspect)). |
 
 All of them are in the [reference](../reference/cli/dev.md).
 

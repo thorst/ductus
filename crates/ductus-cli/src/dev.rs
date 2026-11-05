@@ -139,6 +139,34 @@ pub async fn run(options: Options) -> Result<()> {
     result
 }
 
+/// `--inspect`: the interfaces named (by name, or a file or folder inside one, as an editor passes
+/// the open file), and the debugger's server listening already, so a debugger's first tries find
+/// it while Postgres starts (VS Code's waits up to its configuration's `timeout`).
+pub fn inspect(root: &Path, env: &str, chosen: &[String], address: &str) -> Result<Option<ductus_runtime::Inspect>> {
+    if chosen.is_empty() {
+        return Ok(None);
+    }
+    let addr = ductus_runtime::inspect::address(address)?;
+    let env = ductus_core::Environment::load(root, env)?;
+    let interfaces = crate::project::interface_dirs(root, &env)?;
+    let mut names = Vec::new();
+    for c in chosen {
+        let found = interfaces.iter().find(|i| crate::project::names_interface(root, c, i)).with_context(|| {
+            let all: Vec<String> = interfaces.iter().map(|i| i.label()).collect();
+            format!("`--inspect {c}` isn't an interface (there are: {})", all.join(", "))
+        })?;
+        if !names.contains(&found.label()) {
+            names.push(found.label());
+        }
+    }
+    let inspector = ductus_runtime::inspect::Inspector::listen(addr)?;
+    println!(
+        "debugger listening on {addr} for {} (VS Code: \"Ductus: debug this interface\"; Chrome: chrome://inspect)",
+        names.join(", ")
+    );
+    Ok(Some(ductus_runtime::Inspect { inspector: std::sync::Arc::new(inspector), interfaces: names }))
+}
+
 /// A dev database starts with no users, and nobody wants to run a command before seeing the UI:
 /// make a `dev` admin with a random password, kept in `.ductus/dev-login` (the database is local
 /// and holds only test data) so every start can say how to sign in.

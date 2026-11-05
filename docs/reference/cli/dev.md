@@ -19,4 +19,6 @@ ductus dev [OPTIONS]
 | `--reset` | Delete this project's dev database and start again. |  |  |
 | `--yes` | Don't ask before --reset deletes it. |  |  |
 | `--database-only` | Start only the Postgres, without the engine, and print its URL. |  |  |
+| `--inspect <INTERFACE>` | Let a debugger attach to this interface's code (its name, or a file or folder inside its folder; again for another). It runs on a thread of its own for the run, so while it's paused at a breakpoint (or looping under the debugger) only its messages wait: receiving, ACKs and every other interface go on. No time limit while a debugger is attached; it applies again when it detaches. The debugging guide shows VS Code's and Chrome's setup. |  |  |
+| `--inspect-address <ADDRESS>` | Where the debugger listens with `--inspect`: a port, or this machine's address and a port (never another machine's). | `127.0.0.1:9229` |  |
 
