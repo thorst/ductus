@@ -750,7 +750,7 @@ fn types_adds_the_debug_configuration_and_interface_takes_a_folder() {
 /// limit while the debugger is attached (pausing lands in it), the engine and `other` unharmed;
 /// once the debugger detaches it's stopped within the limit, its message quarantined, and the
 /// messages queued behind it are delivered. Stopping dev while paused doesn't wait for anyone to
-/// press "continue" (the message in hand stays pending, delivered at the next start). The
+/// press "continue" (the message in hand is sent then or at the next start, once). The
 /// debugger's handshake is answered while the interface is idle.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
@@ -912,9 +912,11 @@ async fn dev_inspect_holds_only_its_interface_and_an_endless_loop_ends_when_the_
     assert!(status.success() && took < std::time::Duration::from_secs(10), "{status:?} after {took:?}\n{}", read_log());
     let text = read_log();
     assert!(text.contains("Postgres stopped") && !text.contains("stopping anyway"), "{text}");
-    // Its function finished after the stop began, so it wasn't sent: it waits for the next start,
-    // as any message in hand at a stop.
-    assert_eq!(written(), 9, "{text}");
+    // Let go by the stop, its function finished either before the workers were told to stop (sent
+    // now) or after (left waiting for the next start, as any message in hand at a stop): once,
+    // either way.
+    let at_stop = written();
+    assert!(at_stop == 9 || at_stop == 10, "{at_stop}\n{text}");
     let file = std::fs::File::create(&log).unwrap();
     let mut again = Command::new(env!("CARGO_BIN_EXE_ductus"))
         .args(["dev", "--threads", "1", "--api-listen", "off"])
@@ -928,6 +930,7 @@ async fn dev_inspect_holds_only_its_interface_and_an_endless_loop_ends_when_the_
     assert!(eventually(async || written() == 10).await, "delivered at the next start: {}", written());
     stopper.kill(&[]);
     assert!(again.wait().unwrap().success(), "{}", read_log());
+    assert_eq!(written(), 10, "delivered once (it was {at_stop} at the stop)");
 }
 
 /// `ductus try` runs one message through every destination's function and sends nothing: what

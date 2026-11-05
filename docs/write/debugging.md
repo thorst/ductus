@@ -347,9 +347,10 @@ doesn't wait** for a debugger: the engine starts and runs as usual, and you atta
   its 2s timeout"), and the messages behind it are delivered
   ([nuance](../nuances/debugging.md#under-ductus-dev---inspect-only-the-debugged-interface-waits-level-2)).
 - **Stopping `dev` while paused** (the stop button, Ctrl-C) ends the debugging session itself: the
-  paused call goes on and `dev` stops at once. The message it was working on is sent at the next
-  start, as any message in hand when an engine stops
-  ([nuance](../nuances/debugging.md#stopping-ductus-dev-while-paused-leaves-that-message-for-the-next-start-level-2)).
+  paused call goes on and `dev` stops at once. The message it was working on is sent then if its
+  code finishes before the stop reaches the workers, or else at the next start, as any message in
+  hand when an engine stops: once either way
+  ([nuance](../nuances/debugging.md#stopping-ductus-dev-while-paused-may-leave-that-message-for-the-next-start-level-2)).
 - **Several interfaces** (`--inspect a --inspect b`) are each a target on the one port: Chrome
   DevTools lists them all; VS Code attaches to the first by name
   ([nuance](../nuances/debugging.md#with-several---inspect-interfaces-vs-code-attaches-to-the-first-level-3)).

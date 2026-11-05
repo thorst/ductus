@@ -107,7 +107,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A `console` line in code is written for every message](transforms.md#a-console-line-in-code-is-written-for-every-message-level-2) (Writing transforms)
 - [The time limit is off while a debugger is attached](debugging.md#the-time-limit-is-off-while-a-debugger-is-attached-level-2) (Debugging)
 - [Under `ductus dev --inspect`, only the debugged interface waits](debugging.md#under-ductus-dev---inspect-only-the-debugged-interface-waits-level-2) (Debugging)
-- [Stopping `ductus dev` while paused leaves that message for the next start](debugging.md#stopping-ductus-dev-while-paused-leaves-that-message-for-the-next-start-level-2) (Debugging)
+- [Stopping `ductus dev` while paused may leave that message for the next start](debugging.md#stopping-ductus-dev-while-paused-may-leave-that-message-for-the-next-start-level-2) (Debugging)
 - [A runaway test ends that interface's test run](debugging.md#a-runaway-test-ends-that-interfaces-test-run-level-2) (Debugging)
 - [`ductus try` sends nothing; lookups are made, writes aren't](debugging.md#ductus-try-sends-nothing-lookups-are-made-writes-arent-level-2) (Debugging)
 - [A message read with `--from` is in that engine's audit log](debugging.md#a-message-read-with---from-is-in-that-engines-audit-log-level-2) (Debugging)

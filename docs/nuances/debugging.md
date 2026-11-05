@@ -22,10 +22,10 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **Why:** a pause stops the thread the code runs on. In the shared pool that thread runs other interfaces too, so the debugged one gets its own: what you hold up is only what you're looking at.
 - **What to do:** watch the queue in the web UI if you pause for long (its messages are waiting, as they would behind a slow receiver). To find a loop, pause it: the debugger shows the line.
 
-## Stopping `ductus dev` while paused leaves that message for the next start (level 2)
-- **What:** stopping `dev` (VS Code's stop button, Ctrl-C) while the debugged interface is paused at a breakpoint ends the debugging session itself: the paused code goes on and `dev` stops at once, without waiting for anyone to press "continue". The message it was working on finished after the stop began, so it isn't sent: it stays waiting and is sent at the next start, as any message in hand when an engine stops.
+## Stopping `ductus dev` while paused may leave that message for the next start (level 2)
+- **What:** stopping `dev` (VS Code's stop button, Ctrl-C) while the debugged interface is paused at a breakpoint ends the debugging session itself: the paused code goes on and `dev` stops at once, without waiting for anyone to press "continue". The message it was working on is sent if its code finishes before the stop reaches the workers; otherwise it stays waiting and is sent at the next start, as any message in hand when an engine stops. Once either way.
 - **Why:** a stop must never depend on a person at a debugger; and a stopping engine starts no new sends.
-- **What to do:** nothing; the message isn't lost. Expect it to go through (and stop at your breakpoint again) at the next `ductus dev --inspect`.
+- **What to do:** nothing; the message isn't lost. If it wasn't sent, expect it to go through (and stop at your breakpoint again) at the next `ductus dev --inspect`.
 
 ## On Windows, stopping the debug session leaves dev's Postgres until the next start (level 1)
 - **What:** stopping "Ductus: debug this interface" in VS Code on Windows ends `ductus dev` at once rather than asking it to stop, so the Postgres it started keeps running (a few processes named `postgres.exe`) until the next `ductus dev` in that project, which stops it and starts cleanly. Messages aren't lost: one in hand when it ended is sent at the next start. On Linux and macOS the stop asks `dev` to stop, as Ctrl-C does, and it stops its Postgres itself.
