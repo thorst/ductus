@@ -42,7 +42,9 @@ test("the header and the overview say what is open, and the Alerts page lists it
   await badge.click();
   await expect(page.getByRole("heading", { level: 1 })).toHaveText("Alerts");
   const open = page.getByRole("region", { name: "Open alerts" });
-  const orders = open.getByRole("listitem").filter({ has: page.getByRole("link", { name: "orders → archive", exact: true }) });
+  const orders = open
+    .getByRole("listitem")
+    .filter({ has: page.getByRole("link", { name: "orders → archive", exact: true }) });
   await expect(orders).toContainText("Critical");
   await expect(orders).toContainText("error");
   await expect(orders).toContainText("quarantined");
@@ -57,7 +59,9 @@ test("an operator acknowledges one alert and silences another, then ends the sil
   await signInAs(page, operator, "/alerts");
   const open = page.getByRole("region", { name: "Open alerts" });
   await open.getByRole("button", { name: "Acknowledge the alert of orders → archive" }).click();
-  const orders = open.getByRole("listitem").filter({ has: page.getByRole("link", { name: "orders → archive", exact: true }) });
+  const orders = open
+    .getByRole("listitem")
+    .filter({ has: page.getByRole("link", { name: "orders → archive", exact: true }) });
   await expect(orders).toContainText(`acknowledged by ${operator.user}`);
   await expect(open.getByRole("button", { name: "Acknowledge the alert of orders → archive" })).toHaveCount(0);
 
