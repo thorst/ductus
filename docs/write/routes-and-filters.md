@@ -1,17 +1,18 @@
 # Routes and filters
 
 Which messages go where. In Ductus a route isn't a separate rule table: **every destination gets
-every message, and its own function decides** whether to send it, change it, or drop it. One
-interface with three destinations is three independent decisions on the same message.
+every message, and its own code decides** whether to send it, change it, or drop it. One
+interface with three destinations is three independent decisions on the same message, each in
+the destination's own file.
 
 ## Filtering: `null` and `kill`
 
 ```ts
-// interfaces/adt-in/route.ts, in part
+// interfaces/adt-in/lab.ts, in part
 /** The visit events the lab system takes. */
 const LAB_EVENTS = new Set(["A01", "A03", "A04", "A08"]);
 
-export function toLab(msg: Message) {
+export function transform(msg: Message) {
   if (!LAB_EVENTS.has(msg.MSH[9][2])) return null; // not for the lab: filtered, no reason needed
   if (msg.PID[3][1].startsWith("TEST")) return kill("test patient");
 ```
@@ -41,25 +42,29 @@ messages ([testing](testing.md)).
 destinations:
   lab:
     mllp: { host: ${LAB_HOST}, port: ${LAB_PORT} }
-    transform: toLab
+    script: lab.ts                  # each destination's code in a file of its own
+    application: Lab system
   billing:
     interface: adt-to-billing       # a route: into that interface's queue
-    transform: toBilling
+    script: billing.ts
 ```
 
 ```ts
-// interfaces/adt-in/route.ts, in part
-/** Billing wants admissions and discharges, as received. */
-export function toBilling(msg: Message) {
+// interfaces/adt-in/billing.ts
+import type { Message } from "@ductus/sdk";
+
+/** Billing's code: admissions and discharges, as received. */
+export function transform(msg: Message) {
   return ["A01", "A03"].includes(msg.MSH[9][2]) ? msg : null;
 }
 ```
 
-Each destination names its function with `transform:`. Both get the message **as it was
-received**: `toLab` changing the patient class and removing Z segments changes nothing for
-`toBilling` ([nuance](../nuances/destinations.md#each-destination-runs-its-own-function-on-the-original-message-level-2)).
-So "route ADT to the lab, and admissions and discharges to billing" is two functions of a few
-lines, each tested on its own, and a message can go to both, either or neither.
+Each destination names its file with `script:`, and each file exports `transform`. Both get the
+message **as it was received**: `lab.ts` changing the patient class and removing Z segments
+changes nothing for `billing.ts` ([nuance](../nuances/destinations.md#each-destination-runs-its-own-function-on-the-original-message-level-2)).
+So "route ADT to the lab, and admissions and discharges to billing" is two files of a few lines,
+each tested on its own (`lab.test.ts`, `billing.test.ts`), and a message can go to both, either
+or neither. Code both need goes in a file both import, as `lib/codes.ts` is here.
 
 What each destination has of its own, and why that's the point of routing this way:
 
@@ -87,8 +92,9 @@ source: internal                    # messages come only from another interface'
 script: billing.ts
 ordering: { key: PID-3.1 }
 output: json
-destination:
-  http: { api: billing, path: /encounters }
+destinations:
+  receiver:
+    http: { api: billing, path: /encounters }
 ```
 
 A destination with `interface: adt-to-billing` puts the message into that interface's queue, in

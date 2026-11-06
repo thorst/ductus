@@ -3,7 +3,7 @@
 What could surprise you here, why it is so, and what to do. Each entry has a level, 1 (day one) to 5 (expert): the [index](index.md) lists them all by level.
 
 ## A route is exactly once inside the engine, not beyond it (level 3)
-- **What:** `destination: { interface: lab }` stores the message in `lab` (which has `source: internal`) in the same database transaction that marks it sent here. A crash before that commit routes it again later; after it, never. Each routed message knows where it came from: `meta.origin` in code, `origin` in the API, `origin_id` in the table. What `lab` then sends to an outside system is at-least-once, as always.
+- **What:** `destinations: { lab: { interface: lab } }` stores the message in `lab` (which has `source: internal`) in the same database transaction that marks it sent here. A crash before that commit routes it again later; after it, never. Each routed message knows where it came from: `meta.origin` in code, `origin` in the API, `origin_id` in the table. What `lab` then sends to an outside system is at-least-once, as always.
 - **Why:** both sides are rows in the same database, so one commit covers both. There's no network hop and no ACK to lose.
 - **What to do:** nothing for the hop. Use `meta.id` (or `meta.origin`) as the idempotency key towards outside receivers, as usual.
 

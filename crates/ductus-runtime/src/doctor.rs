@@ -2421,7 +2421,7 @@ pub fn plan(
             Source::Schedule(_) | Source::Internal => {}
         }
         for (name, d) in c.destinations() {
-            let label = if c.destination.is_some() { c.name.clone() } else { format!("{} → {name}", c.name) };
+            let label = format!("{} → {name}", c.name);
             let resource = format!("{}/{name}", c.name);
             match &d.connector {
                 Destination::Mllp { host, port, tls, .. } => {

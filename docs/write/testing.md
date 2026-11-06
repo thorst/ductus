@@ -8,17 +8,17 @@ next person changing it knows they didn't break it.
 ```text
 $ ductus test
 adt-in
+  ✓ billing gets admissions and discharges only (3ms)
   ✓ the lab gets visits, with its own patient class and no Z segments (1ms)
   ✓ the lab doesn't get patient updates (A31) (0ms)
   ✓ test patients are dropped with a reason (0ms)
   ✓ an unknown patient class is quarantined, not guessed (1ms)
-  ✓ billing gets admissions and discharges only (0ms)
 adt-to-billing
-  ✓ an admission becomes an encounter, with the attending's NPI (1ms)
-  ✓ the NPI is looked up once an hour, not once a message (0ms)
-  ✓ a provider the database doesn't know is quarantined (1ms)
+  ✓ an admission becomes an encounter, with the attending's NPI (2ms)
+  ✓ the NPI is looked up once an hour, not once a message (2ms)
+  ✓ a provider the database doesn't know is quarantined (0ms)
 …
-17 passed, 0 failed
+21 passed, 0 failed
 ```
 
 It exits 1 when a test fails, so it belongs in the checks every change goes through (a pull
@@ -35,7 +35,7 @@ the code and checks the configuration against that environment.
 ```text
 $ ductus test --list --filter billing
 adt-in
-  billing gets admissions and discharges only  (interfaces/adt-in/route.test.ts:26:1)
+  billing gets admissions and discharges only  (interfaces/adt-in/billing.test.ts:4:1)
 remits-in
   the CSV the billing office gets  (interfaces/remits-in/remits.test.ts:21:1)
 
@@ -50,18 +50,18 @@ was mistyped as `I`:
 ```text
 $ ductus test --interface adt-in
 adt-in
-  ✗ the lab gets visits, with its own patient class and no Z segments  (interfaces/adt-in/route.test.ts:4:1)
+  ✓ billing gets admissions and discharges only (2ms)
+  ✗ the lab gets visits, with its own patient class and no Z segments  (interfaces/adt-in/lab.test.ts:4:1)
       expected "I", got "IN"
-      at interfaces/adt-in/route.test.ts:6:28
+      at interfaces/adt-in/lab.test.ts:6:28
   ✓ the lab doesn't get patient updates (A31) (0ms)
   ✓ test patients are dropped with a reason (0ms)
-  ✓ an unknown patient class is quarantined, not guessed (1ms)
-  ✓ billing gets admissions and discharges only (0ms)
+  ✓ an unknown patient class is quarantined, not guessed (0ms)
 
 4 passed, 1 failed
 ```
 
-- **The test's place** follows its name: `route.test.ts:4:1` is the `test(...)` call.
+- **The test's place** follows its name: `lab.test.ts:4:1` is the `test(...)` call. An interface's test files run in path order (`billing.test.ts`, then `lab.test.ts`).
 - **A failed `expect`** gives both values and the line and column of the `expect` that failed
   (`6:28`: the `toBe` on line 6), also after an `await`. A failed `toReject` points at the
   `await` of it.
@@ -81,14 +81,14 @@ from `ductus test`'s own text, and before the failure it led to:
 ```text
 $ ductus test
 adt-in
-  ✓ the lab gets the visit (1ms)
+  ✓ the lab gets the visit (2ms)
       │ class I for visit V9001
       │ sent {"segments":["MSH","PV1"]}
-  ✗ a visit without a class is still sent  (interfaces/adt-in/route.test.ts:12:1)
+  ✗ a visit without a class is still sent  (interfaces/adt-in/lab.test.ts:12:1)
       │ class  for visit V9001
       │ no patient class 41
       expected "IN", got ""
-      at interfaces/adt-in/route.test.ts:15:35
+      at interfaces/adt-in/lab.test.ts:15:45
 
 1 passed, 1 failed
 ```
@@ -111,16 +111,16 @@ adt-in
 ## A test
 
 ```ts
-// interfaces/adt-in/route.test.ts, in part
+// interfaces/adt-in/lab.test.ts, in part
 test("the lab gets visits, with its own patient class and no Z segments", () => {
-  const out = toLab(hl7("a01.hl7")) as Message;
+  const out = transform(hl7("a01.hl7")) as Message;
   expect(out.get("PV1-2")).toBe("IN");
   expect(out.get("MSH-5")).toBe("LAB");
   expect(out.segmentNames).toEqual(["MSH", "EVN", "PID", "PV1"]);
 });
 ```
 
-- **A test file sits next to the code** (`route.test.ts` beside `route.ts`), imports the functions
+- **A test file sits next to the code** (`lab.test.ts` beside `lab.ts`), imports the functions
   it tests, and registers tests with `test(name, fn)`. The name is a sentence saying what should
   happen: it's what a failing run prints.
 - **Tests run one at a time**, in the order written; an `async` test is awaited.
@@ -154,11 +154,11 @@ A test's messages are files in the interface's `fixtures/` folder:
 - **Change a fixture in the test** for a variation instead of keeping a file per case:
 
 ```ts
-// interfaces/adt-in/route.test.ts, in part
+// interfaces/adt-in/lab.test.ts, in part
 test("an unknown patient class is quarantined, not guessed", () => {
   const msg = hl7("a01.hl7");
   msg.set("PV1-2", "X");
-  expect(() => toLab(msg)).toThrow('unknown patient class "X"');
+  expect(() => transform(msg)).toThrow('unknown patient class "X"');
 });
 ```
 
@@ -201,13 +201,13 @@ test("an admission becomes an encounter, with the attending's NPI", async () => 
 
 ### Filters, kills and quarantines
 
-- **Filtered**: `expect(toLab(hl7("a31.hl7"))).toBeNull()`.
+- **Filtered**: `expect(transform(hl7("a31.hl7"))).toBeNull()`.
 - **Killed with a reason**: the result is a `Kill`; check its reason:
 
 ```ts
-// interfaces/adt-in/route.test.ts, in part
+// interfaces/adt-in/lab.test.ts, in part
 test("test patients are dropped with a reason", () => {
-  const out = toLab(hl7("test-patient.hl7"));
+  const out = transform(hl7("test-patient.hl7"));
   expect(out instanceof Kill && out.reason).toBe("test patient");
 });
 ```
@@ -221,7 +221,7 @@ A function that reads `meta` gets one from the test: a plain object with the fie
 
 ```ts
 // interfaces/adt-to-billing/billing.test.ts, in part
-const meta: Meta = { id: 41, receivedAt: "2026-10-31T13:30:00Z", destination: "default", origin: 7 };
+const meta: Meta = { id: 41, receivedAt: "2026-10-31T13:30:00Z", destination: "billing", origin: 7 };
 ```
 
 ## Mocks: databases, APIs, variables and secrets
@@ -272,17 +272,17 @@ summary last. The exit code is the same as without `--json`.
 
 ```text
 $ ductus test --interface adt-in --filter "visits" --json
-{"type":"test","interface":"adt-in","name":"the lab gets visits, with its own patient class and no Z segments","file":"interfaces/adt-in/route.test.ts","line":4,"column":1,"error":"expected \"I\", got \"IN\"","failure":{"file":"interfaces/adt-in/route.test.ts","line":6,"column":28},"expected":"\"I\"","actual":"\"IN\"","ok":false,"ms":3}
-{"type":"summary","passed":0,"failed":1,"ms":36}
+{"type":"test","interface":"adt-in","name":"the lab gets visits, with its own patient class and no Z segments","file":"interfaces/adt-in/lab.test.ts","line":4,"column":1,"error":"expected \"I\", got \"IN\"","failure":{"file":"interfaces/adt-in/lab.test.ts","line":6,"column":28},"expected":"\"I\"","actual":"\"IN\"","ok":false,"ms":2}
+{"type":"summary","passed":0,"failed":1,"ms":40}
 ```
 
 The tests above that log ([`console`](#seeing-what-the-code-did-console)) carry what they wrote:
 
 ```text
 $ ductus test --json
-{"type":"test","interface":"adt-in","name":"the lab gets the visit","file":"interfaces/adt-in/route.test.ts","line":6,"column":1,"output":"class I for visit V9001\nsent {\"segments\":[\"MSH\",\"PV1\"]}\n","ok":true,"ms":1}
-{"type":"test","interface":"adt-in","name":"a visit without a class is still sent","file":"interfaces/adt-in/route.test.ts","line":12,"column":1,"output":"class  for visit V9001\nno patient class 41\n","error":"expected \"IN\", got \"\"","failure":{"file":"interfaces/adt-in/route.test.ts","line":15,"column":35},"expected":"\"IN\"","actual":"\"\"","ok":false,"ms":1}
-{"type":"summary","passed":1,"failed":1,"ms":25}
+{"type":"test","interface":"adt-in","name":"the lab gets the visit","file":"interfaces/adt-in/lab.test.ts","line":6,"column":1,"output":"class I for visit V9001\nsent {\"segments\":[\"MSH\",\"PV1\"]}\n","ok":true,"ms":2}
+{"type":"test","interface":"adt-in","name":"a visit without a class is still sent","file":"interfaces/adt-in/lab.test.ts","line":12,"column":1,"output":"class  for visit V9001\nno patient class 41\n","error":"expected \"IN\", got \"\"","failure":{"file":"interfaces/adt-in/lab.test.ts","line":15,"column":45},"expected":"\"IN\"","actual":"\"\"","ok":false,"ms":3}
+{"type":"summary","passed":1,"failed":1,"ms":38}
 ```
 
 | Field | On | What it is |
@@ -303,11 +303,11 @@ With `--list`, test lines have no `ok`, `ms` or failure: nothing ran.
 
 ```text
 $ ductus test --list --interface adt-in --json
-{"type":"test","interface":"adt-in","name":"the lab gets visits, with its own patient class and no Z segments","file":"interfaces/adt-in/route.test.ts","line":4,"column":1}
-{"type":"test","interface":"adt-in","name":"the lab doesn't get patient updates (A31)","file":"interfaces/adt-in/route.test.ts","line":11,"column":1}
-{"type":"test","interface":"adt-in","name":"test patients are dropped with a reason","file":"interfaces/adt-in/route.test.ts","line":15,"column":1}
-{"type":"test","interface":"adt-in","name":"an unknown patient class is quarantined, not guessed","file":"interfaces/adt-in/route.test.ts","line":20,"column":1}
-{"type":"test","interface":"adt-in","name":"billing gets admissions and discharges only","file":"interfaces/adt-in/route.test.ts","line":26,"column":1}
+{"type":"test","interface":"adt-in","name":"billing gets admissions and discharges only","file":"interfaces/adt-in/billing.test.ts","line":4,"column":1}
+{"type":"test","interface":"adt-in","name":"the lab gets visits, with its own patient class and no Z segments","file":"interfaces/adt-in/lab.test.ts","line":4,"column":1}
+{"type":"test","interface":"adt-in","name":"the lab doesn't get patient updates (A31)","file":"interfaces/adt-in/lab.test.ts","line":11,"column":1}
+{"type":"test","interface":"adt-in","name":"test patients are dropped with a reason","file":"interfaces/adt-in/lab.test.ts","line":15,"column":1}
+{"type":"test","interface":"adt-in","name":"an unknown patient class is quarantined, not guessed","file":"interfaces/adt-in/lab.test.ts","line":20,"column":1}
 {"type":"summary","tests":5}
 ```
 
@@ -352,14 +352,14 @@ $ ductus validate --json
       "severity": "warning",
       "code": "DUC204",
       "source": "ductus",
-      "message": "adt-to-billing: has `source: internal` but no interface routes to it (`destination: { interface: adt-to-billing }`)",
+      "message": "adt-to-billing: has `source: internal` but no interface routes to it (`destinations: { adt-to-billing: { interface: adt-to-billing } }`)",
       "file": "interfaces/adt-to-billing/interface.yaml",
       "line": 6,
       "column": 1,
       "end_line": 6,
       "end_column": 7,
       "interface": "adt-to-billing",
-      "hint": "route to it from another interface: `destination: { interface: adt-to-billing }`"
+      "hint": "route to it from another interface: `destinations: { adt-to-billing: { interface: adt-to-billing } }`"
     },
     {
       "severity": "note",

@@ -128,9 +128,8 @@ resources.yaml with the address and login ([SFTP servers](resources.md#sftp-serv
 # interfaces/nightly-census/interface.yaml
 name: nightly-census
 source: { schedule: { cron: "0 2 * * *" } }   # 02:00 every day, the server's local time
-script: census.ts
 format: csv
-destination: { sftp: { server: quest, dir: census } }
+destinations: { quest: { sftp: { server: quest, dir: census }, script: census.ts } }
 ```
 
 No input: the code runs on the timer and what it returns becomes the message. `every: 15m` runs
@@ -145,12 +144,11 @@ and runs missed while the engine was down are made up by one run, not one per mi
 # interfaces/adt-to-billing/interface.yaml
 name: adt-to-billing
 source: internal
-script: billing.ts
-destination: { http: { api: billing, path: /charges } }
+destinations: { billing: { http: { api: billing, path: /charges }, script: billing.ts } }
 ```
 
 An interface with `source: internal` receives what other interfaces route to it with
-`destination: { interface: adt-to-billing }`: stored in the same transaction that marks it sent
+`destinations: { adt-to-billing: { interface: adt-to-billing } }`: stored in the same transaction that marks it sent
 there, so nothing is lost or sent twice between the two
 ([routes](destinations.md#to-another-interface)).
 

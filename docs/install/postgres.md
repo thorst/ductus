@@ -147,7 +147,7 @@ latency). For scale: a million HL7 messages a day averages 12 a second.
 **Space** is roughly: messages a day × their average size × the days kept (retention: 7, 21 or
 49 days; [retention](../reference/config/ductus.md#retention)), plus a small row per destination
 per message (its delivery and status), the indexes, what destinations keep with
-[`save_output`](../reference/config/interface.md#destinationsave_output) (about 1.15 GB per
+[`save_output`](../reference/config/interface.md#destinationsnamesave_output) (about 1.15 GB per
 million deliveries, measured), and anything waiting or quarantined past its window (kept until
 it's resolved: [the held area](../nuances/retention.md#pending-messages-are-never-purged-past-the-window-theyre-held-level-2)).
 Measure it on your own traffic after a week: `SELECT pg_size_pretty(pg_database_size('ductus'))`.

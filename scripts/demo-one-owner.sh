@@ -37,12 +37,12 @@ wait_for() { # wait_for <seconds> '<condition, evaluated each time>'
 mkdir -p "$P/interfaces/one-owner-adt" "$O/interfaces/one-owner-billing"
 printf 'api: { listen: 127.0.0.1:%s }\n' "$API" >"$P/ductus.yaml"
 adt() { # adt <partitions>
-  printf 'name: one-owner-adt\nsource: { mllp: { port: 6731 } }\nordering: { key: PID-3.1, partitions: %s }\ndestination: { mllp: { host: 127.0.0.1, port: 6732, timeout_ms: 500 } }\n' "$1" \
+  printf 'name: one-owner-adt\nsource: { mllp: { port: 6731 } }\nordering: { key: PID-3.1, partitions: %s }\ndestinations: { receiver: { mllp: { host: 127.0.0.1, port: 6732, timeout_ms: 500 } } }\n' "$1" \
     >"$P/interfaces/one-owner-adt/interface.yaml"
 }
 adt 64
 # Another server's interfaces, on the same database.
-printf 'name: one-owner-billing\nsource: { mllp: { port: 6733 } }\ndestination: { file: { dir: out } }\n' \
+printf 'name: one-owner-billing\nsource: { mllp: { port: 6733 } }\ndestinations: { files: { file: { dir: out } } }\n' \
   >"$O/interfaces/one-owner-billing/interface.yaml"
 
 # Earlier runs' messages (one killed before its cleanup): start clean.
@@ -121,7 +121,7 @@ lanes=$(q "SELECT count(DISTINCT d.partition_key) FILTER (WHERE d.partition_key 
 echo "   $(waiting) waiting, in $lanes lanes at 32 or above"
 adt 32
 check=$("$BIN" validate --root "$P" 2>&1) && fail+=" validate-passed"
-grep '^✗ one-owner-adt → default' <<<"$check" | sed 's/^/   validate: /'
+grep '^✗ one-owner-adt → receiver' <<<"$check" | sed 's/^/   validate: /'
 code=0
 refused=$("$BIN" run --root "$P" 2>&1) || code=$?
 sed 's/^/   | /' <<<"$refused"

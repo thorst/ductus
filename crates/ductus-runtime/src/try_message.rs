@@ -58,6 +58,8 @@ pub struct Options {
     pub env: String,
     pub interface: String,
     pub message: Message,
+    /// Only this destination's code (`--destination`); None: every destination.
+    pub destination: Option<String>,
     /// Under a debugger listening here (loopback; `inspect::address`).
     pub inspect: Option<SocketAddr>,
     /// Told the debugger's WebSocket URL once it waits for one.
@@ -115,6 +117,12 @@ pub async fn run(options: Options) -> Result<Trial> {
             config.name
         );
     }
+    if let Some(wanted) = &options.destination
+        && !config.destinations.contains_key(wanted)
+    {
+        let names: Vec<&str> = config.destinations().map(|(n, _)| n).collect();
+        bail!("`{}` has no destination named `{wanted}` (it has: {})", config.name, names.join(", "));
+    }
     // An interface that uses no database or API can be tried without the environment's secrets:
     // without resources.yaml, its code runs with none, and a lookup fails saying why.
     let (resources, without) = match ductus_core::Resources::load(&options.root, &env) {
@@ -162,7 +170,13 @@ async fn tried(
     isolate.set_clock(at.timestamp_millis() as f64, 0)?;
 
     let mut server = None; // the debugger's, serving until the message is through
-    if let (Some(addr), Some(script)) = (options.inspect, config.script_path()) {
+    // The debugger's target is named by the file the tried code starts from.
+    let tried_module = options.destination.as_ref().and_then(|d| {
+        let i = config.destinations().position(|(n, _)| n == d)?;
+        config.functions().into_iter().nth(i)?.map(|f| f.module)
+    });
+    let first = tried_module.or_else(|| config.modules().into_iter().next());
+    if let (Some(addr), Some(script)) = (options.inspect, first) {
         let inspector = Inspector::listen(addr)?;
         let target = inspector.add(Target {
             title: format!("{} (ductus try)", config.name),
@@ -175,13 +189,12 @@ async fn tried(
         isolate.wait_for_debugger();
         server = Some(inspector);
     }
-    let (functions, files) = match config.script_path() {
-        None => (None, Ok(Vec::new())),
-        Some(path) => {
-            let functions = config.functions();
-            let functions: Vec<(&str, &str)> = functions.iter().map(|(n, f)| (n.as_str(), f.as_str())).collect();
-            let loaded = isolate.add_functions(&path, &functions, config.timeout).await?.1;
-            (Some(loaded), isolate.code_files(&path))
+    let functions = config.functions();
+    let (functions, files) = match functions.iter().any(Option::is_some) {
+        false => (None, Ok(Vec::new())),
+        true => {
+            let loaded = isolate.add_functions(&ductus_script::Function::all(&functions), config.timeout).await?.1;
+            (Some(loaded), isolate.code_files(&config.modules()))
         }
     };
     // As a start computes it, so it can be held against the version a record names.
@@ -191,15 +204,18 @@ async fn tried(
     let mut recorded = message.recorded.clone();
     let mut destinations = Vec::new();
     // By name, as the engine makes its workers and the replay runs them (module state sees that
-    // sequence).
+    // sequence); with `--destination` only that one (seeded as among all of them).
     for (i, (destination, _)) in config.destinations().enumerate() {
-        let (decision, looked_up) = match &functions {
+        if options.destination.as_deref().is_some_and(|d| d != destination) {
+            continue;
+        }
+        let (decision, looked_up) = match functions.as_ref().and_then(|ids| ids[i]) {
             None => (Decision::Sent { output: message.payload.clone() }, false),
-            Some(ids) => {
+            Some(function) => {
                 isolate.set_clock(at.timestamp_millis() as f64, seed(id, i))?;
                 *calls.borrow_mut() = Calls::default();
                 let meta = worker::meta(MessageRef { id, received_at: at }, destination, message.origin);
-                let result = isolate.call_function(ids[i], &message.payload, Some(&meta)).await;
+                let result = isolate.call_function(function, &message.payload, Some(&meta)).await;
                 let calls = std::mem::take(&mut *calls.borrow_mut());
                 match decide(&message.payload, result, calls, config.project_root()) {
                     (Decision::NotComparable { why }, looked) => {

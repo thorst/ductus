@@ -3,4 +3,4 @@ name: quest-results
 source: { sftp: { server: quest, dir: outbound, pattern: "*.csv", after: delete, split: records } }
 format: csv
 output: json
-destination: { http: { api: results } }
+destinations: { receiver: { http: { api: results } } }

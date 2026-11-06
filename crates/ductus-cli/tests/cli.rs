@@ -217,7 +217,7 @@ fn validate_and_ports_say_how_sql_server_is_protected() {
     let dir = project(&[
         (
             "interfaces/adt/interface.yaml",
-            "name: adt\nsource: { mllp: { port: 6661 } }\ndestination: { file: { dir: out } }\n",
+            "name: adt\nsource: { mllp: { port: 6661 } }\ndestinations: { files: { file: { dir: out } } }\n",
         ),
         (
             "resources.yaml",
@@ -333,7 +333,7 @@ fn a_fixture_read_as_the_test_file_loads_says_to_read_it_in_a_test() {
     let dir = project(&[
         (
             "interfaces/a/interface.yaml",
-            "name: a\nsource: { mllp: { port: 6661 } }\nscript: t.ts\ndestination: { file: { dir: out } }\n",
+            "name: a\nsource: { mllp: { port: 6661 } }\nscript: t.ts\ndestinations: { files: { file: { dir: out } } }\n",
         ),
         (
             "interfaces/a/t.ts",
@@ -355,7 +355,7 @@ fn tested() -> tempfile::TempDir {
     project(&[
         (
             "interfaces/adt/interface.yaml",
-            "name: adt\nsource: { mllp: { port: 6661 } }\nscript: route.ts\ndestination: { file: { dir: out } }\n",
+            "name: adt\nsource: { mllp: { port: 6661 } }\nscript: route.ts\ndestinations: { files: { file: { dir: out } } }\n",
         ),
         (
             "interfaces/adt/route.ts",
@@ -462,7 +462,7 @@ fn logging() -> tempfile::TempDir {
     project(&[
         (
             "interfaces/adt/interface.yaml",
-            "name: adt\nsource: { mllp: { port: 6661 } }\nscript: route.ts\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestination: { file: { dir: out } }\n",
+            "name: adt\nsource: { mllp: { port: 6661 } }\nscript: route.ts\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestinations: { files: { file: { dir: out } } }\n",
         ),
         (
             "interfaces/adt/route.ts",
@@ -609,7 +609,7 @@ fn test_inspect_pauses_for_a_debugger_and_an_endless_loop_ends_when_it_detaches(
     let dir = project(&[
         (
             "interfaces/dbg/interface.yaml",
-            "name: dbg\nsource: { mllp: { port: 6661 } }\ndestination: { file: { dir: out } }\n",
+            "name: dbg\nsource: { mllp: { port: 6661 } }\ndestinations: { files: { file: { dir: out } } }\n",
         ),
         (
             "interfaces/dbg/dbg.test.ts",
@@ -763,10 +763,10 @@ async fn dev_inspect_holds_only_its_interface_and_an_endless_loop_ends_when_the_
     let (dbg_port, other_port, receiver, inspector) = (free_port(), free_port(), free_port(), free_port());
     let code = "import type { Message } from \"@ductus/sdk\";\n\nexport function transform(m: Message) {\n  const id = m.get(\"MSH-10\");\n  if (id === \"PAUSE\") {\n    debugger;\n  }\n  if (id === \"LOOP\") {\n    let i = 0;\n    while (true) i++;\n  }\n  return m;\n}\n";
     let dbg = format!(
-        "name: dbg\nscript: route.ts\ntimeout: 2s\nsource: {{ mllp: {{ host: 127.0.0.1, port: {dbg_port} }} }}\ndestination: {{ file: {{ dir: out }} }}\n"
+        "name: dbg\nscript: route.ts\ntimeout: 2s\nsource: {{ mllp: {{ host: 127.0.0.1, port: {dbg_port} }} }}\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n"
     );
     let other = format!(
-        "name: other\nsource: {{ mllp: {{ host: 127.0.0.1, port: {other_port} }} }}\ndestination: {{ mllp: {{ host: 127.0.0.1, port: {receiver} }} }}\n"
+        "name: other\nsource: {{ mllp: {{ host: 127.0.0.1, port: {other_port} }} }}\ndestinations: {{ receiver: {{ mllp: {{ host: 127.0.0.1, port: {receiver} }} }} }}\n"
     );
     let dir = project(&[
         ("interfaces/dbg/interface.yaml", dbg.as_str()),
@@ -1128,16 +1128,16 @@ fn validate_json_places_each_finding_in_its_file() {
         ("interfaces/a/t.ts", "export function transform(m: string) {\n  const n: number = \"x\";\n  return m;\n}\n"),
         (
             "interfaces/b/interface.yaml",
-            "name: b\nsource: { mllp: { port: 7001 } }\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestination:\n  mllp: { host: localhost, port: 70000 }\n",
+            "name: b\nsource: { mllp: { port: 7001 } }\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestinations:\n  receiver:\n    mllp: { host: localhost, port: 70000 }\n",
         ),
         (
             "interfaces/c/interface.yaml",
-            "name: c\nsource: { mllp: { port: 7003 } }\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestination:\n  mllp: { host: \"${LAB_HOST}\", port: 7004 }\n",
+            "name: c\nsource: { mllp: { port: 7003 } }\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestinations:\n  receiver:\n    mllp: { host: \"${LAB_HOST}\", port: 7004 }\n",
         ),
         ("interfaces/d/interface.yaml", "name: d\nsource: { mllp: { port: 7005 }\n"),
         (
             "interfaces/e/interface.yaml",
-            "name: e\nsource: { mllp: { port: 7001 } }\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestination: { mllp: { host: localhost, port: 7006 } }\nworkers: 2\n",
+            "name: e\nsource: { mllp: { port: 7001 } }\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestinations: { receiver: { mllp: { host: localhost, port: 7006 } } }\nworkers: 2\n",
         ),
     ]);
     let (ok, text) = without_a_database(dir.path(), &["validate"]);
@@ -1165,10 +1165,10 @@ fn validate_json_places_each_finding_in_its_file() {
         (&code["interface"], &code["source"], &code["severity"]),
         (&"a".into(), &"ductus".into(), &"error".into())
     );
-    assert_eq!(place(find("DUC122")), at("interfaces/b/interface.yaml", 5, 28), "port: 70000");
+    assert_eq!(place(find("DUC122")), at("interfaces/b/interface.yaml", 6, 30), "port: 70000");
     let reference = find("DUC121");
-    assert_eq!(place(reference), at("interfaces/c/interface.yaml", 5, 18), "${{LAB_HOST}}");
-    assert_eq!((&reference["end_line"], &reference["end_column"]), (&5.into(), &29.into()));
+    assert_eq!(place(reference), at("interfaces/c/interface.yaml", 6, 20), "${{LAB_HOST}}");
+    assert_eq!((&reference["end_line"], &reference["end_column"]), (&6.into(), &31.into()));
     let syntax = find("DUC120");
     assert_eq!((syntax["file"].as_str(), &syntax["line"]), (Some("interfaces/d/interface.yaml"), &3.into()));
     assert_eq!(place(find("DUC123")), at("interfaces/e/interface.yaml", 5, 1), "workers without dedicated");
@@ -1190,11 +1190,15 @@ fn validate_json_places_cross_interface_problems_in_the_interface_they_re_about(
     let dir = project(&[
         (
             "interfaces/a/interface.yaml",
-            &format!("name: a\nsource: {{ mllp: {{ port: 7001 }} }}\n{about}destination: {{ interface: nowhere }}\n"),
+            &format!(
+                "name: a\nsource: {{ mllp: {{ port: 7001 }} }}\n{about}destinations: {{ nowhere: {{ interface: nowhere }} }}\n"
+            ),
         ),
         (
             "interfaces/b/interface.yaml",
-            &format!("name: b\n{about}source:\n  mllp:\n    port: 7001\ndestination: {{ file: {{ dir: out }} }}\n"),
+            &format!(
+                "name: b\n{about}source:\n  mllp:\n    port: 7001\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n"
+            ),
         ),
     ]);
     let (ok, out) = without_a_database(dir.path(), &["validate", "--json"]);
@@ -1220,7 +1224,7 @@ fn generated_interfaces_pass_test_and_validate_as_generated() {
         ("ductus.yaml", "ports:\n  mllp: 7000-7002\n"),
         (
             "interfaces/old/interface.yaml",
-            "name: old\nsource: { mllp: { port: ${OLD_PORT} } }\ndestination: { file: { dir: out } }\n",
+            "name: old\nsource: { mllp: { port: ${OLD_PORT} } }\ndestinations: { files: { file: { dir: out } } }\n",
         ),
         ("resources.yaml", "sftp:\n  lab: { host: sftp.lab, user: u, password: x, host_key: any }\n"),
     ]);
@@ -1307,7 +1311,7 @@ about:
   to: { application: Sunquest Lab, vendor: Sunquest }
 source: { mllp: { port: 6661 } }
 script: transform.ts
-destination: { mllp: { host: 10.50.0.7, port: 6662 } }
+destinations: { receiver: { mllp: { host: 10.50.0.7, port: 6662 } } }
 "#,
         ),
         (
@@ -1453,11 +1457,11 @@ fn ports_lists_listeners_and_connections_per_environment_and_flags_conflicts() {
         ("environments/prod.yaml", "variables:\n  ADT_PORT: 7661\n  EPIC: epic.local\n"),
         (
             "interfaces/adt/interface.yaml",
-            "name: adt\nsource: { mllp: { port: ${ADT_PORT} } }\ndestination: { mllp: { host: ${EPIC}, port: 5000 } }\n",
+            "name: adt\nsource: { mllp: { port: ${ADT_PORT} } }\ndestinations: { receiver: { mllp: { host: ${EPIC}, port: 5000 } } }\n",
         ),
         (
             "interfaces/api/interface.yaml",
-            "name: api\nsource: { http: { port: 8080, path: '/patients/{mrn}', method: GET } }\ndestination: { file: { dir: out } }\n",
+            "name: api\nsource: { http: { port: 8080, path: '/patients/{mrn}', method: GET } }\ndestinations: { files: { file: { dir: out } } }\n",
         ),
         ("resources.yaml", "databases:\n  pdb: { postgres: { host: db1, database: p, user: u } }\n"),
     ]);
@@ -1479,7 +1483,7 @@ Listening
 Connects to
   HOST        PORT  PROTOCOL  USED BY{}TLS
   db1         5432  Postgres  resources.yaml: pdb  TLS if offered, not verified (prefer)
-  epic.local  5000  MLLP      adt{}none
+  epic.local  5000  MLLP      adt → receiver{}none
 
 ✓ no port conflicts
 ",
@@ -1487,7 +1491,7 @@ Connects to
             pad(45),
             pad(22),
             pad(14),
-            pad(18)
+            pad(7)
         )
     );
 
@@ -1500,7 +1504,7 @@ Connects to
     .unwrap();
     std::fs::write(
         dir.path().join("interfaces/adt/interface.yaml"),
-        "name: adt\nsource: { mllp: { port: ${ADT_PORT}, tls: { certificate: web, clients: { ca: hie-ca } }, allow: [10.1.20.0/24, epic-bridge01] } }\ndestination: { mllp: { host: ${EPIC}, port: 5000, tls: { ca: hie-ca } } }\n",
+        "name: adt\nsource: { mllp: { port: ${ADT_PORT}, tls: { certificate: web, clients: { ca: hie-ca } }, allow: [10.1.20.0/24, epic-bridge01] } }\ndestinations: { receiver: { mllp: { host: ${EPIC}, port: 5000, tls: { ca: hie-ca } } } }\n",
     )
     .unwrap();
     std::fs::write(
@@ -1529,18 +1533,21 @@ Connects to
         words(line("7700")),
         ["7700", "HTTPS", "0.0.0.0", "(engine REST API)", "/api/v1", "presents web", "127.0.0.1"]
     );
-    assert_eq!(words(line("epic.local")), ["epic.local", "5000", "MLLP over TLS", "adt", "TLS: hie-ca trusted"]);
+    assert_eq!(
+        words(line("epic.local")),
+        ["epic.local", "5000", "MLLP over TLS", "adt → receiver", "TLS: hie-ca trusted"]
+    );
     std::fs::remove_file(dir.path().join("ductus.yaml")).unwrap();
     std::fs::write(
         dir.path().join("interfaces/adt/interface.yaml"),
-        "name: adt\nsource: { mllp: { port: ${ADT_PORT} } }\ndestination: { mllp: { host: ${EPIC}, port: 5000 } }\n",
+        "name: adt\nsource: { mllp: { port: ${ADT_PORT} } }\ndestinations: { receiver: { mllp: { host: ${EPIC}, port: 5000 } } }\n",
     )
     .unwrap();
 
     // Dev's ADT port collides with another MLLP listener.
     std::fs::write(
         dir.path().join("interfaces/api/interface.yaml"),
-        "name: api\nsource: { mllp: { port: 6661 } }\ndestination: { file: { dir: out } }\n",
+        "name: api\nsource: { mllp: { port: 6661 } }\ndestinations: { files: { file: { dir: out } } }\n",
     )
     .unwrap();
     let (ok, out) = ductus(dir.path(), &["ports"]);
@@ -1560,11 +1567,11 @@ fn owners_lists_and_reassigns_in_place() {
         ("interfaces/adt/interface.yaml", adt),
         (
             "interfaces/orders/interface.yaml",
-            "name: orders\nsource: { mllp: { port: 6662 } }\nabout: { owner: ann smith }\ndestination: { file: { dir: out } }\n",
+            "name: orders\nsource: { mllp: { port: 6662 } }\nabout: { owner: ann smith }\ndestinations: { files: { file: { dir: out } } }\n",
         ),
         (
             "interfaces/nightly/interface.yaml",
-            "name: nightly\nsource: { schedule: { every: 1h } }\nscript: t.ts\ndestination: { file: { dir: out } }\n",
+            "name: nightly\nsource: { schedule: { every: 1h } }\nscript: t.ts\ndestinations: { files: { file: { dir: out } } }\n",
         ),
         ("interfaces/nightly/t.ts", "export function transform() { return {}; }\n"),
         (
@@ -1638,7 +1645,7 @@ fn owners_are_matched_to_accounts() {
         (
             format!("interfaces/{name}/interface.yaml"),
             format!(
-                "name: {name}\nsource: {{ mllp: {{ port: {} }} }}\nabout: {{ owner: \"{owner}\" }}\ndestination: {{ file: {{ dir: out }} }}\n",
+                "name: {name}\nsource: {{ mllp: {{ port: {} }} }}\nabout: {{ owner: \"{owner}\" }}\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n",
                 free_port()
             ),
         )
@@ -1749,7 +1756,7 @@ fn doctor_checks_what_the_project_uses_and_saves_a_report() {
         "name: adt\nsource: {{ mllp: {{ host: 127.0.0.1, port: {down} }} }}\ndestinations:\n  lab: {{ mllp: {{ host: 127.0.0.1, port: {up} }} }}\n  files: {{ file: {{ dir: out }} }}\n"
     );
     let lookup = format!(
-        "name: lookup\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\nscript: t.ts\ndestination: {{ mllp: {{ host: 127.0.0.1, port: {up} }} }}\n",
+        "name: lookup\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\nscript: t.ts\ndestinations: {{ receiver: {{ mllp: {{ host: 127.0.0.1, port: {up} }} }} }}\n",
         down + 1
     );
     let dir = project(&[
@@ -1771,7 +1778,7 @@ fn doctor_checks_what_the_project_uses_and_saves_a_report() {
     let (ok, out) = ductus(dir.path(), &["doctor", &db, "--timeout", "2s", "--report", "r.json"]);
     assert!(!ok, "{out}");
     assert!(
-        out.contains(&format!("✓ MLLP destination  127.0.0.1:{up} MLLP\n    used by  adt → lab, lookup\n")),
+        out.contains(&format!("✓ MLLP destination  127.0.0.1:{up} MLLP\n    used by  adt → lab, lookup → receiver\n")),
         "one check for both: {out}"
     );
     assert!(out.contains("✗ api empi") && out.contains("used by  lookup (code)"), "{out}");
@@ -2172,7 +2179,7 @@ async fn a_paused_destination_waits_until_resumed() {
     let (ok, out) = cli(&["pause", &name, "lab"]);
     assert!(ok && out.contains("paused by") && out.contains("no reason yet"), "{out}");
     let (ok, out) = cli(&["pause", &name]);
-    assert!(!ok && out.contains("no destination `default` (it has archive, lab)"), "{out}");
+    assert!(!ok && out.contains("has several destinations: name one (archive, lab)"), "{out}");
 
     let mut sender = ductus_mllp::Client::new(format!("127.0.0.1:{mllp}"), std::time::Duration::from_secs(5));
     for n in 1..=3 {
@@ -2543,7 +2550,7 @@ async fn the_ui_is_served_and_a_browser_signs_in_with_a_session() {
     let name = format!("session-test-{nanos}");
     let dir = project(&[(
         format!("interfaces/{name}/interface.yaml").as_str(),
-        format!("name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestination: {{ file: {{ dir: out }} }}\n", free_port()).as_str(),
+        format!("name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n", free_port()).as_str(),
     )]);
     let run = |args: &[&str]| {
         let out =
@@ -2613,7 +2620,7 @@ async fn the_ui_is_served_and_a_browser_signs_in_with_a_session() {
     let get = |path: &str| http.get(format!("{base}{path}")).header("cookie", &cookie).send();
     let interfaces: serde_json::Value = get("/interfaces").await.unwrap().json().await.unwrap();
     assert!(interfaces.to_string().contains(&name), "{interfaces}");
-    let pause = format!("{base}/interfaces/{name}/destinations/default/pause");
+    let pause = format!("{base}/interfaces/{name}/destinations/files/pause");
     let refused = http.post(&pause).header("cookie", &cookie).send().await.unwrap();
     assert_eq!(refused.status(), 403);
     assert!(refused.text().await.unwrap().contains("X-Ductus"));
@@ -2653,7 +2660,7 @@ async fn people_sign_in_with_passwords_and_are_kept_in_check() {
     let admin = people.name("test-user-cli");
     let dir = project(&[(
         "interfaces/people/interface.yaml",
-        format!("name: people\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestination: {{ file: {{ dir: out }} }}\n", free_port()).as_str(),
+        format!("name: people\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n", free_port()).as_str(),
     )]);
     let root = dir.path().to_string_lossy().to_string();
     let run = |args: &[&str], stdin: Option<&str>| {
@@ -2786,7 +2793,7 @@ async fn people_sign_in_with_passwords_and_are_kept_in_check() {
     // What a viewer may not do.
     assert_eq!(call(M::GET, &vcookie, "/users", None).await.unwrap().status(), 403);
     assert_eq!(
-        call(M::POST, &vcookie, "/interfaces/people/destinations/default/pause", None).await.unwrap().status(),
+        call(M::POST, &vcookie, "/interfaces/people/destinations/files/pause", None).await.unwrap().status(),
         403
     );
 
@@ -3033,7 +3040,7 @@ fn validate_checks_company_defined_fields_and_docs_lists_them() {
     ] {
         assert!(out.contains(line), "{line}\n{out}");
     }
-    assert!(!out.contains("adt-in.default: custom.baa"), "a destination isn't asked for interface fields: {out}");
+    assert!(!out.contains("adt-in.receiver: custom.baa"), "a destination isn't asked for interface fields: {out}");
 
     // Wrong values say what's allowed; typos get a hint; fields stay where they apply.
     let adt = root.join("interfaces/adt-in/interface.yaml");
@@ -3044,8 +3051,8 @@ fn validate_checks_company_defined_fields_and_docs_lists_them() {
     );
     edit(
         &adt,
-        "destination: { mllp: { host: 10.50.0.7, port: 6662 } }",
-        "destination: { mllp: { host: 10.50.0.7, port: 6662 }, custom: { go_live: 2026-10-13, runbook: wiki } }",
+        "destinations: { receiver: { mllp: { host: 10.50.0.7, port: 6662 } } }",
+        "destinations: { receiver: { mllp: { host: 10.50.0.7, port: 6662 }, custom: { go_live: 2026-10-13, runbook: wiki } } }",
     );
     let (ok, out) = ductus(root, &["validate"]);
     assert!(!ok, "{out}");
@@ -3053,8 +3060,8 @@ fn validate_checks_company_defined_fields_and_docs_lists_them() {
         "✗ adt-in: custom.data_classification is `phi`; allowed: PHI, Internal, Public (case matters: write `PHI`)",
         "✗ adt-in: custom.go_live `13/10/2026` isn't a date; write it as 2026-10-13",
         "✗ adt-in: custom.runbok isn't declared in docs-schema.yaml (did you mean `runbook`?)",
-        "✗ adt-in.default: custom.go_live doesn't apply to a destination (it applies to: interface)",
-        "✗ adt-in.default: custom.runbook `wiki` isn't an http(s) address",
+        "✗ adt-in.receiver: custom.go_live doesn't apply to a destination (it applies to: interface)",
+        "✗ adt-in.receiver: custom.runbook `wiki` isn't an http(s) address",
     ] {
         assert!(out.contains(line), "{line}\n{out}");
     }
@@ -3123,10 +3130,10 @@ async fn listeners_speak_tls_with_the_certificates_resources_yaml_names() {
     let name = format!("tls-test-{nanos}");
     let (mllp, http, api) = (free_port(), free_port(), free_port());
     let config = format!(
-        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp}, tls: {{ certificate: engine }} }} }}\ndestination: {{ file: {{ dir: out }} }}\n"
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp}, tls: {{ certificate: engine }} }} }}\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n"
     );
     let orders = format!(
-        "name: {name}-orders\nsource: {{ http: {{ host: 127.0.0.1, port: {http}, path: /orders, tls: {{ certificate: engine }} }} }}\nformat: json\ndestination: {{ file: {{ dir: out }} }}\n"
+        "name: {name}-orders\nsource: {{ http: {{ host: 127.0.0.1, port: {http}, path: /orders, tls: {{ certificate: engine }} }} }}\nformat: json\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n"
     );
     let dir = project(&[
         (format!("interfaces/{name}/interface.yaml").as_str(), config.as_str()),
@@ -3222,10 +3229,10 @@ async fn mllp_destinations_send_over_tls_with_a_client_certificate() {
     let name = format!("tls-out-{nanos}");
     let (inbound, relay) = (free_port(), free_port());
     let sender = format!(
-        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {inbound} }} }}\ndestination: {{ mllp: {{ host: localhost, port: {relay}, tls: {{ ca: engine-ca, certificate: client }} }} }}\n"
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {inbound} }} }}\ndestinations: {{ receiver: {{ mllp: {{ host: localhost, port: {relay}, tls: {{ ca: engine-ca, certificate: client }} }} }} }}\n"
     );
     let receiver = format!(
-        "name: {name}-relay\nsource: {{ mllp: {{ host: 127.0.0.1, port: {relay}, tls: {{ certificate: engine, clients: {{ ca: client-ca, subjects: ['CN=ductus-client'] }} }} }} }}\ndestination: {{ file: {{ dir: out }} }}\n"
+        "name: {name}-relay\nsource: {{ mllp: {{ host: 127.0.0.1, port: {relay}, tls: {{ certificate: engine, clients: {{ ca: client-ca, subjects: ['CN=ductus-client'] }} }} }} }}\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n"
     );
     let dir = project(&[
         (format!("interfaces/{name}/interface.yaml").as_str(), sender.as_str()),
@@ -3250,7 +3257,7 @@ async fn mllp_destinations_send_over_tls_with_a_client_certificate() {
     assert!(!ok, "{out}");
     assert!(
         out.contains(&format!(
-            "✗ interface `{name}` destination `default`: ca: `client` is a certificate with its key"
+            "✗ interface `{name}` destination `receiver`: ca: `client` is a certificate with its key"
         )),
         "{out}"
     );
@@ -3481,7 +3488,7 @@ async fn an_interface_runs_on_one_engine_at_a_time() {
     let (name, other) = (format!("owner-test-{nanos}"), format!("owner-other-{nanos}"));
     let interface = |name: &str| {
         format!(
-            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestination: {{ file: {{ dir: out }} }}\n",
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n",
             free_port()
         )
     };
@@ -3547,7 +3554,7 @@ async fn a_directory_that_is_down_never_delays_the_start() {
     let make = |name: &str, ldap: bool| {
         // An owner email that reaches nobody: the round has someone to look up, so it connects.
         let interface = format!(
-            "name: {name}\nabout: {{ owner: owner-{nanos}@example.org }}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestination: {{ file: {{ dir: out }} }}\n",
+            "name: {name}\nabout: {{ owner: owner-{nanos}@example.org }}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n",
             free_port()
         );
         let mut files = vec![(format!("interfaces/{name}/interface.yaml"), interface)];
@@ -3594,7 +3601,7 @@ async fn lanes_that_would_strand_messages_refuse_the_start() {
     let (mllp, receiver) = (free_port(), free_port()); // nothing listens on `receiver`: messages wait
     let config = |ordering: &str| {
         format!(
-            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\n{ordering}destination: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 200 }} }}\n"
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\n{ordering}destinations: {{ receiver: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 200 }} }} }}\n"
         )
     };
     let file = format!("interfaces/{name}/interface.yaml");
@@ -3602,7 +3609,7 @@ async fn lanes_that_would_strand_messages_refuse_the_start() {
     let yaml = dir.path().join(&file);
 
     let store = ductus_store::Store::connect(&db, 2).await.unwrap();
-    let ids = store.destination_ids(&[(name.clone(), "default".to_string())]).await.unwrap();
+    let ids = store.destination_ids(&[(name.clone(), "receiver".to_string())]).await.unwrap();
     let mut waiting = Vec::new();
     for lane in [5, 40, 63] {
         let m = ductus_store::NewMessage {
@@ -3621,7 +3628,7 @@ async fn lanes_that_would_strand_messages_refuse_the_start() {
     std::fs::write(&yaml, config("ordering: { key: PID-3.1, partitions: 32 }\n")).unwrap();
     let (code, out) = run_to_end(dir.path(), &db);
     assert_eq!(code, Some(3), "{out}");
-    let line = format!("{name} → default: 2 messages waiting in lanes 40–63; {name} now has 32 lanes");
+    let line = format!("{name} → receiver: 2 messages waiting in lanes 40–63; {name} now has 32 lanes");
     assert!(out.contains(&line) && out.contains("ductus drain --wait"), "{out}");
     let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
     assert!(!ok && out.contains(&format!("✗ {line}")) && out.contains("would refuse to start"), "{out}");
@@ -3702,7 +3709,7 @@ async fn a_handover_refuses_nothing_and_a_failed_one_leaves_the_engine_running()
     let (mllp, receiver, api) = (free_port(), free_port(), free_port());
     let config = |lanes: u32| {
         format!(
-            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\nordering: {{ key: PID-3.1, partitions: {lanes} }}\ndestination: {{ mllp: {{ host: 127.0.0.1, port: {receiver} }} }}\n"
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\nordering: {{ key: PID-3.1, partitions: {lanes} }}\ndestinations: {{ receiver: {{ mllp: {{ host: 127.0.0.1, port: {receiver} }} }} }}\n"
         )
     };
     let file = format!("interfaces/{name}/interface.yaml");
@@ -3855,7 +3862,7 @@ async fn history_tells_who_changed_what_and_why() {
     let root = repo.path().join("integrations");
     let yaml = |owner: &str| {
         format!(
-            "name: {name}\nabout: {{ owner: {owner} }}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\nscript: transform.ts\ndestination: {{ file: {{ dir: out }} }}\n"
+            "name: {name}\nabout: {{ owner: {owner} }}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\nscript: transform.ts\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n"
         )
     };
     let write = |path: &str, text: &str| {

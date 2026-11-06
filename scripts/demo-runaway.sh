@@ -26,7 +26,7 @@ name: $1
 source: { mllp: { port: $2 } }
 script: transform.ts
 timeout: $3
-destination: { mllp: { host: 127.0.0.1, port: 6662 } }
+destinations: { receiver: { mllp: { host: 127.0.0.1, port: 6662 } } }
 EOF
   printf 'import type { Message } from "@ductus/sdk";\n%s\n' "$4" >"$P/interfaces/$1/transform.ts"
 }

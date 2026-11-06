@@ -133,7 +133,7 @@ pub fn impact<'a>(
         // Each destination.
         let mut covered = BTreeSet::new();
         for (name, d) in c.destinations() {
-            let role = if c.destination.is_some() { "destination".to_string() } else { format!("destination {name}") };
+            let role = format!("destination {name}");
             let own = d.system();
             let mut reasons: Vec<String> = if own.is_known() {
                 system_reason(&role, &own).into_iter().collect()
@@ -269,7 +269,7 @@ pub fn about_gaps(c: &InterfaceConfig, resources: &Resources) -> Vec<crate::yaml
         let text = format!("about.from: add the {who} system's `application` or `vendor`");
         gaps.push(Problem::new(text, &c.name, &["about", "from"]));
     }
-    let several = c.destination.is_none();
+    let several = c.destinations.len() > 1;
     for (name, d) in c.destinations().filter(|(_, d)| d.route().is_none()) {
         let through = d.resource().map(|(kind, r)| resources.system(kind, r).is_known()).unwrap_or(false);
         if !(d.system().is_known() || c.about.to.is_known() || through) {
@@ -306,7 +306,7 @@ about:
   owner: Integration team
   from: { application: Epic, vendor: Epic Systems, hosts: [10.20.30.0/24] }
   to: { application: Sunquest Lab, vendor: Sunquest }
-destination: { mllp: { host: 10.50.0.7, port: 6662 } }
+destinations: { receiver: { mllp: { host: 10.50.0.7, port: 6662 } } }
 "#,
             ),
             config(
@@ -325,7 +325,7 @@ name: nightly
 source: { schedule: { every: 1h } }
 script: t.ts
 format: csv
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 "#,
             ),
         ];
@@ -398,7 +398,7 @@ apis:
         );
         assert_eq!(
             run(Query::Application("sunquest lab".into())),
-            strings(&[("adt-in", "destination", "about.to: Sunquest Lab (Sunquest)")])
+            strings(&[("adt-in", "destination receiver", "about.to: Sunquest Lab (Sunquest)")])
         );
     }
 
@@ -412,7 +412,7 @@ apis:
                 ("nightly", "database patient_db", "database `patient_db` in resources.yaml at: 10.20.30.9"),
             ])
         );
-        assert_eq!(host("10.50.0.7"), strings(&[("adt-in", "destination", "host: 10.50.0.7")]));
+        assert_eq!(host("10.50.0.7"), strings(&[("adt-in", "destination receiver", "host: 10.50.0.7")]));
         assert_eq!(
             host("SFTP.quest.example.com"),
             strings(&[("results", "source", "sftp server `quest` in resources.yaml at: sftp.quest.example.com")])
@@ -452,11 +452,11 @@ apis:
                 "name: front\nsource: { mllp: { port: 1 } }\nabout: { from: { vendor: Epic Systems } }\ndestinations: { a: { interface: lab }, b: { interface: other } }\n",
             ),
             config(
-                "name: lab\nsource: internal\nabout: { owner: Lab team }\ndestination: { interface: lab-archive }\n",
+                "name: lab\nsource: internal\nabout: { owner: Lab team }\ndestinations: { lab-archive: { interface: lab-archive } }\n",
             ),
-            config("name: lab-archive\nsource: internal\ndestination: { file: { dir: o } }\n"),
-            config("name: other\nsource: internal\ndestination: { file: { dir: o } }\n"),
-            config("name: unrelated\nsource: { mllp: { port: 2 } }\ndestination: { file: { dir: o } }\n"),
+            config("name: lab-archive\nsource: internal\ndestinations: { files: { file: { dir: o } } }\n"),
+            config("name: other\nsource: internal\ndestinations: { files: { file: { dir: o } } }\n"),
+            config("name: unrelated\nsource: { mllp: { port: 2 } }\ndestinations: { files: { file: { dir: o } } }\n"),
         ];
         let hits =
             impact(&configs, &Resources::default(), &CodeUses::new(), &Query::Vendor("epic systems".into()), &no_dns);

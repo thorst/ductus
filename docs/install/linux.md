@@ -48,7 +48,7 @@ configured yet. It prints what to do next, which is the rest of this page.
 **The sandbox.** The unit lets the engine use the network and its own folder, and nothing else:
 the rest of the file system is read-only to it (`ProtectSystem=strict`), home folders are
 hidden (`ProtectHome=yes`), and it has no capabilities. That's on purpose: one bad interface
-can't write anywhere on the server. It means a [file destination](../reference/config/interface.md#destinationfile)
+can't write anywhere on the server. It means a [file destination](../reference/config/interface.md#destinationsnamefile)
 or a file source that moves files must work in a folder you give it:
 
 ```sh

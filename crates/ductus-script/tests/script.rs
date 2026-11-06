@@ -1,4 +1,4 @@
-use ductus_script::{Cause, DEFAULT_FORMATS, Isolate, Runaway};
+use ductus_script::{Cause, DEFAULT_FORMATS, Function, Isolate, Runaway};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -112,7 +112,7 @@ fn code_files_are_everything_an_interface_imports() {
     let names = |files: &[ductus_script::CodeFile]| -> Vec<String> {
         files.iter().map(|f| f.path.strip_prefix(&root).unwrap().to_string_lossy().replace('\\', "/")).collect()
     };
-    let files = isolate.code_files(&a).unwrap();
+    let files = isolate.code_files(std::slice::from_ref(&a)).unwrap();
     assert_eq!(
         names(&files),
         ["interfaces/a/later.ts", "interfaces/a/shape.ts", "interfaces/a/transform.ts", "lib/tag.ts", "lib/words.ts"]
@@ -123,13 +123,13 @@ fn code_files_are_everything_an_interface_imports() {
     assert!(words.text.starts_with("export"), "no byte order mark");
     use sha2::Digest;
     assert_eq!(transform.hash, <[u8; 32]>::from(sha2::Sha256::digest(transform.text.as_bytes())));
-    assert_eq!(names(&isolate.code_files(&b).unwrap()), ["interfaces/b/transform.ts"]);
+    assert_eq!(names(&isolate.code_files(std::slice::from_ref(&b)).unwrap()), ["interfaces/b/transform.ts"]);
 
     // Forgotten after asking: a file read later (the dynamic import running) is recorded then.
     isolate.forget_code_files();
     let a01 = ADT.replace("ADT^A08", "ADT^A01");
     rt.block_on(isolate.transform(&a01)).unwrap();
-    let after = names(&isolate.code_files(&a).unwrap());
+    let after = names(&isolate.code_files(std::slice::from_ref(&a)).unwrap());
     assert_eq!(after.len(), 5, "still found from disk: {after:?}");
 }
 
@@ -229,9 +229,11 @@ export function toBilling(m: Message, meta: Meta) {
     let mut host = Isolate::host();
     let module = dir.path().join("adt/transform.ts");
     let json = r#"{"input":{"kind":"hl7"},"output":{"kind":"json"}}"#;
+    let function = |name, formats| Some(Function { module: &module, name, formats });
     let (interface, f) = rt
-        .block_on(host.add_functions(&module, &[("transform", DEFAULT_FORMATS), ("toBilling", json)], SECOND))
+        .block_on(host.add_functions(&[function("transform", DEFAULT_FORMATS), function("toBilling", json)], SECOND))
         .unwrap();
+    let f: Vec<_> = f.into_iter().map(Option::unwrap).collect();
     assert_eq!((host.interface_of(f[0]), host.interface_of(f[1])), (interface, interface));
 
     let mut run = |function, raw: &str, destination: &str| {
@@ -250,8 +252,62 @@ export function toBilling(m: Message, meta: Meta) {
 
     // A function the config names but the module doesn't export fails the load, by name.
     let fax = dir.path().join("fax/transform.ts");
-    let err = rt.block_on(host.add_functions(&fax, &[("toFax", DEFAULT_FORMATS)], SECOND)).unwrap_err();
+    let missing = Some(Function { module: &fax, name: "toFax", formats: DEFAULT_FORMATS });
+    let err = rt.block_on(host.add_functions(&[missing], SECOND)).unwrap_err();
     assert!(format!("{err:#}").contains("must export a function named `toFax`"), "{err:#}");
+}
+
+/// Each destination in a file of its own (0.7.4.1): one interface, a function per file, a
+/// destination without code (None), and state: each file's own, a file both import shared.
+#[test]
+fn each_destination_in_a_file_of_its_own() {
+    let dir = project(&[
+        ("adt/shared.ts", "let seen = 0;\nexport function count(): number { return ++seen; }"),
+        (
+            "adt/lab.ts",
+            r#"import type { Message } from "@ductus/sdk";
+import { count } from "./shared.ts";
+let mine = 0;
+export function transform(m: Message) { m.add("ZLB", [String(++mine), String(count())]); return m; }"#,
+        ),
+        (
+            "adt/billing.ts",
+            r#"import type { Message } from "@ductus/sdk";
+import { count } from "./shared.ts";
+let mine = 0;
+export function toBilling(m: Message) { return { mine: ++mine, shared: count() }; }"#,
+        ),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let (lab, billing) = (dir.path().join("adt/lab.ts"), dir.path().join("adt/billing.ts"));
+    let json = r#"{"input":{"kind":"hl7"},"output":{"kind":"json"}}"#;
+    let functions = [
+        None, // `archive`: no code, messages as they came
+        Some(Function { module: &billing, name: "toBilling", formats: json }),
+        Some(Function { module: &lab, name: "transform", formats: DEFAULT_FORMATS }),
+    ];
+    let (interface, f) = rt.block_on(host.add_functions(&functions, SECOND)).unwrap();
+    assert!(f[0].is_none());
+    let (billing_f, lab_f) = (f[1].unwrap(), f[2].unwrap());
+    assert_eq!((host.interface_of(billing_f), host.interface_of(lab_f)), (interface, interface));
+    let mut run = |function| match host.begin_function(function, ADT, None).unwrap() {
+        ductus_script::Call::Done(out) => out.unwrap(),
+        ductus_script::Call::Pending(_) => panic!("sync functions finish at once"),
+    };
+    let first = run(lab_f);
+    assert!(first.trim_end().ends_with("ZLB|1|1"), "{first}");
+    let billed: serde_json::Value = serde_json::from_str(&run(billing_f)).unwrap();
+    assert_eq!(billed, serde_json::json!({ "mine": 1, "shared": 2 }), "its own state; the imported file's shared");
+    // Every file both destinations run, the shared one once.
+    let files: Vec<String> = host
+        .code_files(&[lab.clone(), billing.clone()])
+        .unwrap()
+        .iter()
+        .map(|f| f.path.file_name().unwrap().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(files, ["billing.ts", "lab.ts", "shared.ts"]);
 }
 
 const SECOND: Duration = Duration::from_secs(1);
@@ -280,10 +336,12 @@ export async function transform(m: Message) {
     host.pin_clock().unwrap();
     host.set_clock(1_000.0, 0).unwrap();
     let module = dir.path().join("adt/transform.ts");
-    let (_, f) = rt.block_on(host.add_functions(&module, &[("transform", DEFAULT_FORMATS)], SECOND)).unwrap();
+    let transform = Some(Function { module: &module, name: "transform", formats: DEFAULT_FORMATS });
+    let (_, f) = rt.block_on(host.add_functions(&[transform], SECOND)).unwrap();
+    let f0 = f[0].unwrap();
     let mut run = |ms: f64, seed: u32| {
         host.set_clock(ms, seed).unwrap();
-        let out = rt.block_on(host.call_function(f[0], ADT, None)).unwrap().unwrap();
+        let out = rt.block_on(host.call_function(f0, ADT, None)).unwrap().unwrap();
         out.lines().flat_map(|l| l.split('\r')).find(|s| s.starts_with("ZCL")).unwrap().to_string()
     };
     let at = 1_793_016_000_000.0; // 2026-10-26T12:00:00Z

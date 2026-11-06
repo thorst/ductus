@@ -42,7 +42,7 @@ name: lookup
 source: { mllp: { port: 6671 } }
 script: transform.ts
 ordering: { key: PID-3.1 }
-destination: { mllp: { host: 127.0.0.1, port: 6662 } }
+destinations: { receiver: { mllp: { host: 127.0.0.1, port: 6662 } } }
 EOF
 cat >"$P/interfaces/lookup/transform.ts" <<'EOF'
 import { db, env, kill, quarantine, type Message } from "@ductus/sdk";

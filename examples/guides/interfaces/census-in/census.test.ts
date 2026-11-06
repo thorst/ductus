@@ -1,7 +1,7 @@
 import { expect, fixture, Kill, type Message, type Meta, parseCsv, test } from "@ductus/sdk";
 import { transform } from "./census.ts";
 
-const meta: Meta = { id: 501, receivedAt: "2026-10-31T13:30:00Z", destination: "default" };
+const meta: Meta = { id: 501, receivedAt: "2026-10-31T13:30:00Z", destination: "ehr" };
 
 // With `split: records` the engine gives `transform` one row at a time, and so does `input()`:
 // the fixture's first row. For a file of several rows, parse it and pick one. Fixtures can be

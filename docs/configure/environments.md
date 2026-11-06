@@ -52,7 +52,7 @@ a variable:
 # interfaces/orders-to-lab/interface.yaml
 name: orders-to-lab
 source: { mllp: { port: ${EPIC_PORT} } }
-destination: { mllp: { host: ${LAB_HOST}, port: ${LAB_PORT} } }
+destinations: { lab: { mllp: { host: ${LAB_HOST}, port: ${LAB_PORT} } } }
 ```
 
 - **A value that is only a reference keeps the variable's type**: `port: ${LAB_PORT}` is the

@@ -165,11 +165,12 @@ per connection:
 
 ```yaml
 # interfaces/orders-to-lab/interface.yaml, in part
-destination:
-  mllp:
-    host: ${LAB_HOST}
-    port: ${LAB_PORT}
-    tls: { ca: hospital-ca, certificate: ductus-mllp }
+destinations:
+  lab:
+    mllp:
+      host: ${LAB_HOST}
+      port: ${LAB_PORT}
+      tls: { ca: hospital-ca, certificate: ductus-mllp }
 ```
 
 - **`tls: true`** on an MLLP destination: TLS, trusting this server's CAs. **`ca:`** also trusts

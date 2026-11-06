@@ -62,12 +62,17 @@ pub fn project_files(
     Ok(shared)
 }
 
-/// The `db()`/`api()` calls reachable from an interface's script (through its imports).
+/// The `db()`/`api()` calls reachable from an interface's code (its script and each
+/// destination's, through their imports): one per resource, as `references_from` gives them.
 pub fn code_references<'a>(
     config: &InterfaceConfig,
     analysis: &'a ductus_script::Analysis,
 ) -> Vec<&'a ductus_script::ResourceReference> {
-    config.script_path().map(|s| analysis.references_from(&key(&s))).unwrap_or_default()
+    let mut out: Vec<&ductus_script::ResourceReference> =
+        config.modules().iter().flat_map(|m| analysis.references_from(&key(m))).collect();
+    out.sort_by(|a, b| (&a.kind, &a.name).cmp(&(&b.kind, &b.name)));
+    out.dedup_by(|a, b| (&a.kind, &a.name) == (&b.kind, &b.name));
+    out
 }
 
 /// The resource kind an SDK function names (`db` → database, `api` → API).

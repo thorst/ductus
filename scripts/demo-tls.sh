@@ -28,7 +28,7 @@ IFACE=tls-demo
 q() { psql -tA "$DB" -c "$1"; }
 psql -q "$DB" -c "DELETE FROM alert_events WHERE key LIKE 'cert:engine-tls:%' OR key LIKE 'cert:engine-client:%' OR key LIKE '%$IFACE%'" \
   -c "DELETE FROM alert_state WHERE key LIKE 'cert:engine-tls:%' OR key LIKE 'cert:engine-client:%' OR key LIKE '%$IFACE%'" \
-  -c "DELETE FROM certificate_status WHERE resource IN ('engine-tls', 'engine-client', '$IFACE/default')"
+  -c "DELETE FROM certificate_status WHERE resource IN ('engine-tls', 'engine-client', '$IFACE/receiver')"
 fail=""
 cd "$P"
 mkdir -p ca tls "interfaces/$IFACE"
@@ -94,7 +94,7 @@ source:
     port: 6741
     tls: { certificate: engine-tls, clients: { ca: hospital-ca, subjects: ["CN=sender.demo.org"] } }
 ordering: { key: PID-3.1 }
-destination: { mllp: { host: 127.0.0.1, port: 6742, tls: { ca: hospital-ca, certificate: engine-client } } }
+destinations: { receiver: { mllp: { host: 127.0.0.1, port: 6742, tls: { ca: hospital-ca, certificate: engine-client } } } }
 EOF
 "$BIN" validate >validate.txt || { cat validate.txt; fail+=" validate"; }
 

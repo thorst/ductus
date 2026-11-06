@@ -133,8 +133,7 @@ source:
     tls:
       certificate: ductus-mllp
       clients: { ca: hospital-ca, subjects: ["CN=epic.hospital.org"] }
-script: transform.ts
-destination: { mllp: { host: 127.0.0.1, port: 6662 } }
+destinations: { lab: { mllp: { host: 127.0.0.1, port: 6662 }, script: archive.ts } }
 EOF
 docker cp "$WORK/resources.yaml" ductus-v06:/var/lib/ductus/project/resources.yaml >/dev/null
 docker cp "$WORK/interface.yaml" ductus-v06:/var/lib/ductus/project/interfaces/adt-in/interface.yaml >/dev/null

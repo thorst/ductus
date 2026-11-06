@@ -2,4 +2,4 @@
 name: adt-in
 source: { file: { dir: in } }
 format: edi
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }

@@ -216,10 +216,14 @@ ordering: { key: mrn }
 isolation: dedicated
 workers: 2
 dedicated_pools: { patient_db: 2 }
-script: transform.ts
-destination: { file: { dir: stored } }   # a JSON copy of each stored row, for audit
+destinations:
+  audit:                            # a JSON copy of each stored row, for audit
+    file: { dir: stored }
+    script: store.ts
 EOF
-cat >interfaces/lab-results/transform.ts <<'EOF'
+# Its code is the destination's own file (the generated archive.ts made way for it).
+rm interfaces/lab-results/archive.ts interfaces/lab-results/archive.test.ts
+cat >interfaces/lab-results/store.ts <<'EOF'
 import { type CsvRecord, db } from "@ductus/sdk";
 
 export async function transform(row: CsvRecord) {
@@ -231,9 +235,9 @@ export async function transform(row: CsvRecord) {
   return row;
 }
 EOF
-cat >interfaces/lab-results/transform.test.ts <<'EOF'
+cat >interfaces/lab-results/store.test.ts <<'EOF'
 import { type CsvRecord, expect, mock, test } from "@ductus/sdk";
-import { transform } from "./transform.ts";
+import { transform } from "./store.ts";
 
 test("stores the row", async () => {
   const calls = mock.db("patient_db", () => 1);

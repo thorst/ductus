@@ -202,21 +202,17 @@ impl Replay {
                 self.send(Event::Interface { interface, skipped, outputs, code_version: None }).await?;
                 continue;
             }
-            let (functions, files) = match config.script_path() {
-                None => (None, Ok(Vec::new())),
-                Some(path) => {
-                    let functions = config.functions();
-                    let functions: Vec<(&str, &str)> =
-                        functions.iter().map(|(n, f)| (n.as_str(), f.as_str())).collect();
-                    match isolate.add_functions(&path, &functions, config.timeout).await {
-                        Ok((_, ids)) => (Some(ids), isolate.code_files(&path)),
-                        Err(e) => {
-                            let skipped = Some(format!("its code doesn't load: {e:#}"));
-                            self.send(Event::Interface { interface, skipped, outputs, code_version: None }).await?;
-                            continue;
-                        }
+            let functions = config.functions();
+            let (functions, files) = match functions.iter().any(Option::is_some) {
+                false => (None, Ok(Vec::new())),
+                true => match isolate.add_functions(&ductus_script::Function::all(&functions), config.timeout).await {
+                    Ok((_, ids)) => (Some(ids), isolate.code_files(&config.modules())),
+                    Err(e) => {
+                        let skipped = Some(format!("its code doesn't load: {e:#}"));
+                        self.send(Event::Interface { interface, skipped, outputs, code_version: None }).await?;
+                        continue;
                     }
-                }
+                },
             };
             let code_version = version_of(&self.options.root, config, files);
             let started_interface =
@@ -254,14 +250,14 @@ impl Replay {
                     // In the config's order, as the engine's workers are made: module state a
                     // function keeps sees the same sequence in both versions.
                     for (i, destination) in destinations.iter().enumerate() {
-                        let (decision, looked_up) = match &functions {
+                        let (decision, looked_up) = match functions.as_ref().and_then(|ids| ids[i]) {
                             None => (Decision::Sent { output: input.to_string() }, false),
-                            Some(ids) => {
+                            Some(id) => {
                                 isolate
                                     .set_clock(message.received_at.timestamp_millis() as f64, seed(message.id, i))?;
                                 *calls.borrow_mut() = Calls::default();
                                 let meta = worker::meta(reference, destination, message.origin);
-                                let result = isolate.call_function(ids[i], &input, Some(&meta)).await;
+                                let result = isolate.call_function(id, &input, Some(&meta)).await;
                                 let calls = std::mem::take(&mut *calls.borrow_mut());
                                 decide(&input, result, calls, config.project_root())
                             }

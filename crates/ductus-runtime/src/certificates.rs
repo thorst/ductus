@@ -382,12 +382,12 @@ mod tests {
     fn ours_are_one_target_per_pair() {
         let configs = [
             config(
-                "name: adt\nabout: { owner: ADT Team }\nsource: { mllp: { port: 6661, tls: { certificate: web } } }\ndestination: { mllp: { host: hie, port: 7443, tls: { certificate: client } } }\n",
+                "name: adt\nabout: { owner: ADT Team }\nsource: { mllp: { port: 6661, tls: { certificate: web } } }\ndestinations: { receiver: { mllp: { host: hie, port: 7443, tls: { certificate: client } } } }\n",
             ),
             config(
-                "name: orders\nsource: { http: { port: 8443, path: /o, tls: { certificate: web } } }\ndestination: { file: { dir: o } }",
+                "name: orders\nsource: { http: { port: 8443, path: /o, tls: { certificate: web } } }\ndestinations: { files: { file: { dir: o } } }",
             ),
-            config("name: plain\nsource: { mllp: { port: 6662 } }\ndestination: { file: { dir: o } }"),
+            config("name: plain\nsource: { mllp: { port: 6662 } }\ndestinations: { files: { file: { dir: o } } }"),
         ];
         let configs: Vec<&InterfaceConfig> = configs.iter().collect();
         let resources: ductus_core::Resources = serde_yaml_ng::from_str(

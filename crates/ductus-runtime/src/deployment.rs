@@ -439,7 +439,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join("interfaces").join("a");
         std::fs::create_dir_all(&folder).unwrap();
-        let yaml = "name: a\nsource: { mllp: { port: 6661 } }\ndestination: { file: { dir: out } }\n";
+        let yaml = "name: a\nsource: { mllp: { port: 6661 } }\ndestinations: { files: { file: { dir: out } } }\n";
         std::fs::write(folder.join("interface.yaml"), yaml).unwrap();
         std::fs::write(folder.join("t.ts"), "export const x = 1;\n").unwrap();
         let env = ductus_core::Environment::load(dir.path(), "dev").unwrap();

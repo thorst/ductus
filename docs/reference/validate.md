@@ -26,9 +26,9 @@ Codes are stable: a check keeps its code, a new check gets a new one, and a reti
 | `DUC120` | error | **An interface.yaml isn't YAML.** It doesn't parse: the line and column are where the parser stopped. |
 | `DUC121` | error | **An interface.yaml uses a value the environment doesn't have.** A `${NAME}` or `${secret:NAME}` has no value in this environment: the place is the first one missing. Add it to `environments/<env>.yaml` (or the secret). |
 | `DUC122` | error | **An interface.yaml has a setting it doesn't know, or a value of the wrong kind.** The place is the setting (an unknown key itself, a port of 70000). |
-| `DUC123` | error | **An interface.yaml breaks a rule.** Settings that parse but don't go together, or a value out of range (`workers` without `isolation: dedicated`, a destination name with capitals): the place is the setting the message names. |
+| `DUC123` | error | **An interface.yaml breaks a rule.** Settings that parse but don't go together, or a value out of range (`workers` without `isolation: dedicated`, a destination name with capitals, the singular `destination:` removed in 0.7.4: the message says what to write instead): the place is the setting the message names. |
 | `DUC124` | error | **An interface.yaml can't be read.** The file exists but can't be read (permissions). |
-| `DUC125` | error | **An interface's code doesn't load.** Its `script` doesn't load the way the engine loads it, or doesn't export a function a destination names (`transform: toLab`): the place is the `transform` (or `script`) that names it. |
+| `DUC125` | error | **An interface's code doesn't load.** Its code (a destination's own `script`, or the interface's) doesn't load the way the engine loads it, or doesn't export the function a destination runs (`transform`, or the one `transform:` names): the place is the destination's `transform` or `script`, else the interface's `script`. |
 | `DUC130` | error | **ductus.yaml isn't YAML.** It doesn't parse: the line and column are where the parser stopped. |
 | `DUC131` | error | **ductus.yaml's alerts use a value the environment doesn't have.** A `${NAME}` or `${secret:NAME}` under `alerts:` has no value in this environment. |
 | `DUC132` | error | **ductus.yaml has a setting it doesn't know, or a value of the wrong kind.** The place is the setting. |
@@ -36,7 +36,7 @@ Codes are stable: a check keeps its code, a new check gets a new one, and a reti
 | `DUC134` | error | **ductus.yaml can't be read.** The file exists but can't be read (permissions). |
 | `DUC150` | warning | **The Windows service's account can't log in where the project needs it.** Shown on Windows only: the service's account and the SQL Server logins that use it (`ductus service account`). |
 | `DUC200` | error | **Interfaces want the same port.** Two MLLP listeners on one port, MLLP and HTTP on one port, two interfaces handling the same HTTP method and path, or HTTP interfaces on one port with a different `tls` or `allow`. The place is the second interface's source. |
-| `DUC201` | error | **A route between interfaces can't work.** A route (`destination: { interface: b }`) to an interface that doesn't exist or doesn't have `source: internal`, in a format the target doesn't read, or in a loop. |
+| `DUC201` | error | **A route between interfaces can't work.** A route (`destinations: { b: { interface: b } }`) to an interface that doesn't exist or doesn't have `source: internal`, in a format the target doesn't read, or in a loop. |
 | `DUC202` | error | **An interface names a resource resources.yaml doesn't have.** An SFTP server, database or API named in interface.yaml: add it to resources.yaml, or fix the name (the message lists those defined). |
 | `DUC203` | error | **Code names a resource resources.yaml doesn't have.** `db("name")` or `api("name")` in TypeScript: the place is the call. |
 | `DUC204` | warning | **An internal interface gets nothing.** It has `source: internal` but no interface routes to it. |

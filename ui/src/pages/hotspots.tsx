@@ -23,9 +23,7 @@ export function HotspotsPage() {
   const [allLanes, setAllLanes] = useState(false);
   const query = useQuery({ ...hotspots(search.interface, allLanes ? 1000 : 20), placeholderData: keepPreviousData });
   const shown = (query.data ?? []).filter((d) => !search.destination || d.destination === search.destination);
-  const what = search.interface
-    ? `${search.interface}${search.destination && search.destination !== "default" ? ` → ${search.destination}` : ""}`
-    : null;
+  const what = search.interface ? `${search.interface}${search.destination ? ` → ${search.destination}` : ""}` : null;
   return (
     <>
       <PageHeader
@@ -71,7 +69,7 @@ export function HotspotsPage() {
 }
 
 function DestinationHotspots({ d, onAllLanes }: { d: Schemas["DestinationHotspots"]; onAllLanes?: () => void }) {
-  const name = d.destination === "default" ? d.interface : `${d.interface} → ${d.destination}`;
+  const name = `${d.interface} → ${d.destination}`;
   const more = d.findings.filter((f) => !d.summary.includes(f.text));
   return (
     <Card aria-label={name}>
@@ -146,7 +144,7 @@ function Lanes({ d, onAllLanes }: { d: Schemas["DestinationHotspots"]; onAllLane
   const more = d.lanes_waiting - d.lanes.length;
   return (
     <>
-      <Table aria-label={`Lanes waiting for ${d.destination === "default" ? d.interface : d.destination}`}>
+      <Table aria-label={`Lanes waiting for ${d.destination}`}>
         <thead>
           <tr>
             <Th className="text-right">Lane</Th>

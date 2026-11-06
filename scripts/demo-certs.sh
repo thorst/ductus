@@ -77,7 +77,7 @@ cat >"$P/interfaces/certs-demo/interface.yaml" <<'EOF'
 name: certs-demo
 source: { mllp: { port: 6736, tls: { certificate: certs-demo-mllp } } }
 script: transform.ts
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 cat >"$P/interfaces/certs-demo/transform.ts" <<'EOF'
 import type { Message } from "@ductus/sdk";

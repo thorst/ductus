@@ -11,7 +11,7 @@ correction start from.
 |---|---|---|
 | **The message** | as received, byte for byte, with when it arrived, its ordering key (the MRN) and MSH-10 | the retention window ([retention](retention.md)) |
 | **Each destination's delivery** | its status, attempts, last error, when it changed | the same window |
-| **What was sent** | only for destinations with [`save_output: true`](../reference/config/interface.md#destinationsave_output); otherwise it's made again by running the code when you look | the same window |
+| **What was sent** | only for destinations with [`save_output: true`](../reference/config/interface.md#destinationsnamesave_output); otherwise it's made again by running the code when you look | the same window |
 | **What people did** | every resend, replay, edit, dismissal and payload read, with who and why | `audit.keep`, six years by default |
 
 **Only the original is stored by default.** "What did the lab get?" is answered by running the

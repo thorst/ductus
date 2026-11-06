@@ -20,6 +20,7 @@ ductus try [OPTIONS] <INTERFACE> [FILE]
 | `--fixture <FIXTURE>` | A file in the interface's `fixtures/` folder instead. |  |  |
 | `--message <MESSAGE>` | A stored message, by id: read from the database (DUCTUS_DATABASE_URL), or from the running engine at `--from` through its API. |  |  |
 | `--from <FROM>` | With `--message`: the engine's REST API to read it from (`https://ductus-prod:7700`): a token with the `payloads` permission (DUCTUS_API_TOKEN), and the read is in that engine's audit log. |  |  |
+| `--destination <DESTINATION>` | Only this destination's code (by its name in interface.yaml), when the others don't matter or aren't ready: the rest aren't run. |  |  |
 | `--token <TOKEN>` | The token for `--from`. |  | `DUCTUS_API_TOKEN` |
 | `--database-url <DATABASE_URL>` | With `--message` and no `--from`: the database. |  | `DUCTUS_DATABASE_URL` |
 | `--root <ROOT>` | The project folder: the one with `interfaces/` and ductus.yaml. | `.` |  |

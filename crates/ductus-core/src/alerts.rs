@@ -994,11 +994,11 @@ pub struct Notice<'a> {
 }
 
 impl Notice<'_> {
-    /// `adt-relay → lab`, or `adt-relay` (its own alert, or its only destination).
+    /// `adt-relay → lab`, or `adt-relay` (the interface's own alert).
     pub fn subject(&self) -> String {
         match self.destination {
-            Some(d) if d != crate::config::DEFAULT_DESTINATION => format!("{} → {d}", self.interface),
-            _ => self.interface.to_string(),
+            Some(d) => format!("{} → {d}", self.interface),
+            None => self.interface.to_string(),
         }
     }
 

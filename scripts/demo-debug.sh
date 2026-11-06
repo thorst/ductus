@@ -30,8 +30,8 @@ cd "$P"
 "$BIN" types >/dev/null
 echo "== .vscode/launch.json, as ductus types wrote it"
 cat .vscode/launch.json
-echo "== VS Code's debugger: a breakpoint on interfaces/adt-in/route.ts line 18"
-CODE=$P/interfaces/adt-in/route.ts
+echo "== VS Code's debugger: a breakpoint on interfaces/adt-in/lab.ts line 18"
+CODE=$P/interfaces/adt-in/lab.ts
 timeout 90 node "$CLIENT" "$SERVER" "$CODE" 18 'msg.PV1[2] + " for a " + msg.MSH[9][2]' \
   "$BIN" test --inspect --interface "$P/interfaces/adt-in" --filter "the lab gets visits" | tee "$P/session.log"
 
@@ -46,11 +46,11 @@ echo "   a message sent; while it's paused another interface takes and sends 100
 # `other` beside it on the shared pool.
 D=$P/dev-project
 mkdir -p "$D/interfaces/adt" "$D/interfaces/other"
-printf 'name: adt\nscript: route.ts\nsource: { mllp: { host: 127.0.0.1, port: 6681 } }\ndestination: { file: { dir: out } }\n' \
+printf 'name: adt\nsource: { mllp: { host: 127.0.0.1, port: 6681 } }\ndestinations: { lab: { file: { dir: out }, script: route.ts } }\n' \
   >"$D/interfaces/adt/interface.yaml"
 printf 'import type { Message } from "@ductus/sdk";\n\nexport function transform(msg: Message) {\n  const ward = msg.get("PV1-3.1");\n  msg.set("MSH-5", "LAB");\n  return msg;\n}\n' \
   >"$D/interfaces/adt/route.ts"
-printf 'name: other\nsource: { mllp: { host: 127.0.0.1, port: 6682 } }\ndestination: { file: { dir: out } }\n' \
+printf 'name: other\nsource: { mllp: { host: 127.0.0.1, port: 6682 } }\ndestinations: { archive: { file: { dir: out } } }\n' \
   >"$D/interfaces/other/interface.yaml"
 cat >"$D/while-paused.sh" <<EOF
 "$BIN" gen --to 127.0.0.1:6682 --count 100 | tail -n 1
@@ -79,12 +79,12 @@ for _ in $(seq 1 50); do [ -f "$D/.ductus/postgres/data/postmaster.pid" ] || bre
 grep -q '^terminated$' "$P/dev.log" || fail+=" dev-not-ended"
 [ "$(ls "$D/interfaces/adt/out" | wc -l)" = 1 ] || fail+=" dev-message-not-written"
 grep -q '^stopped: breakpoint$' "$P/message.log" || fail+=" try-not-stopped"
-grep -q "^at: toLab $CODE:18$" "$P/message.log" || fail+=" try-wrong-line"
+grep -q "^at: transform $CODE:18$" "$P/message.log" || fail+=" try-wrong-line"
 grep -q "^msg.get(\"MSH-10\") = 'MSG00001'$" "$P/message.log" || fail+=" try-evaluate"
 grep -q '^output:   lab: sent$' "$P/message.log" || fail+=" try-not-sent"
 grep -q '^terminated$' "$P/message.log" || fail+=" try-not-ended"
 grep -q '^stopped: breakpoint$' "$P/session.log" || fail+=" not-stopped"
-grep -q "^at: toLab $CODE:18$" "$P/session.log" || fail+=" wrong-line"
+grep -q "^at: transform $CODE:18$" "$P/session.log" || fail+=" wrong-line"
 grep -q '^locals: msg=Proxy(MessageImpl)' "$P/session.log" || fail+=" locals"
 grep -q "^msg.PV1\[2\] + \" for a \" + msg.MSH\[9\]\[2\] = 'IN for a A01'$" "$P/session.log" || fail+=" evaluate"
 # The program's output can arrive in pieces (one `output:` event each; CI split this line at

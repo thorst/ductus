@@ -63,7 +63,7 @@ name: billing-api
 about: { from: { application: Ductus }, to: { application: Billing } }
 source: { http: { port: 8091, path: /charges } }
 format: json
-destination: { file: { dir: out/charges } }
+destinations: { files: { file: { dir: out/charges } } }
 EOF
 
 cd "$P"

@@ -37,7 +37,7 @@ pub async fn project(dir: &Path) -> Result<()> {
     let shown = dir.display();
     let git = if dir.join(".git").exists() { String::new() } else { "  git init\n".into() };
     println!(
-        "\nnew project in {shown}: {}\n\nnext:\n  cd {shown}\n{git}  ductus test         # runs interfaces/{FIRST}/transform.test.ts\n  ductus validate     # types, config, ports\n  ductus dev          # runs it all with a Postgres of its own (downloaded once)
+        "\nnew project in {shown}: {}\n\nnext:\n  cd {shown}\n{git}  ductus test         # runs interfaces/{FIRST}/archive.test.ts\n  ductus validate     # types, config, ports\n  ductus dev          # runs it all with a Postgres of its own (downloaded once)
   ductus run          # for a real Postgres: needs DUCTUS_DATABASE_URL, e.g.
                       #   postgres://ductus@db1/ductus?sslmode=verify-full&sslrootcert=/path/ca.pem",
         FILES.iter().map(|(f, _)| *f).collect::<Vec<_>>().join(", ")
@@ -146,8 +146,9 @@ out/
 # Integration project
 
 Interfaces for the [Ductus](https://getductus.com) engine. Each folder in `interfaces/` is one
-interface: `interface.yaml` (where messages come from and go), `transform.ts` (what happens to
-them), tests and sample messages.
+interface: `interface.yaml` (where messages come from and the destinations they go to, by
+name), each destination's code in a file of its own (`archive.ts`: what happens to them on the
+way there), tests and sample messages.
 
 | | |
 |---|---|

@@ -25,24 +25,25 @@ hospital/
 ├── interfaces/
 │   └── adt-in/              one interface: HL7 over MLLP on port 6661, written to files
 │       ├── interface.yaml   where messages come from and go
-│       ├── transform.ts     what happens to each one
-│       ├── transform.test.ts
+│       ├── archive.ts       what happens to each one on its way to the destination `archive`
+│       ├── archive.test.ts
 │       └── fixtures/sample.hl7
 ├── .ductus/, tsconfig.json, .vscode/settings.json    for your editor (below)
 ├── .gitignore, README.md
 ```
 
 Open the folder in VS Code. With Red Hat's YAML extension, every setting in the YAML files
-completes as you type and shows its description on hover; in `transform.ts`, hovering
+completes as you type and shows its description on hover; in `archive.ts`, hovering
 `msg.get("PID-5")` shows *PID-5 Patient Name*. The schemas and typings in `.ductus/` come from
 the `ductus` you have installed, so they match it ([editor support](configure/index.md#in-your-editor)).
 
 ## 2. The interface
 
-`interfaces/adt-in/interface.yaml`, as generated (its comments show what else you could write):
+`interfaces/adt-in/interface.yaml`, as generated (without its last lines, comments about
+`monitor:`):
 
 ```yaml
-# interfaces/adt-in/interface.yaml
+# interfaces/adt-in/interface.yaml, in part
 name: adt-in
 about:
   description: ""
@@ -50,25 +51,39 @@ about:
   from: { application: "", vendor: "", hosts: [] }   # hosts: where senders connect from (IPs or subnets)
   to: { application: "", vendor: "" }
 source: { mllp: { port: 6661 } }
-script: transform.ts
-destination: { file: { dir: out/adt-in } }
+destinations:
+  archive:                      # named for where it goes: rename it (and its file) when it sends elsewhere
+    file: { dir: out/adt-in }
+    # or: mllp: { host: receiver.example.org, port: 5000 }
+    # or: http: { url: https://api.example.org/messages }
+    script: archive.ts           # its code: one file per destination
+  # another, with its own queue and its own code:
+  # billing: { http: { api: billing, path: /charges }, script: billing.ts, output: json, vendor: Experian }
 ```
 
 - [`source`](reference/config/interface.md#sourcemllp): listen for HL7 over MLLP on port 6661.
   Each message is stored before its ACK goes back to the sender.
-- [`script`](reference/config/interface.md#script): run `transform.ts` on each message.
-- [`destination`](reference/config/interface.md#destinationfile): write each result as a file.
-  The folder is relative to the interface's own folder, so the files land in
-  `interfaces/adt-in/out/adt-in/`.
+- [`destinations`](reference/config/interface.md#destinations): where messages go, each by a
+  name: the web UI, alerts and `ductus pause` call it that. This one, `archive`, writes each result as a file
+  ([`file`](reference/config/interface.md#destinationsnamefile)); the folder is relative to the
+  interface's own folder, so the files land in `interfaces/adt-in/out/adt-in/`. Its
+  [`script`](reference/config/interface.md#destinationsnamescript), `archive.ts`, runs on each
+  message on its way there. Each destination is named for where it goes and has its code in a
+  file of its own ([destinations](configure/destinations.md#named-destinations-each-with-its-own-code)).
 - [`about`](reference/config/interface.md#about): what the interface is for, who owns it, and
   the systems on each side. Nothing here changes how messages flow; it's what `ductus impact`
   and the web UI read.
 
-The code, `transform.ts`, gets each message and returns what to send:
+The code, `archive.ts`, gets each message and returns what to send:
 
 ```ts
 import type { Message } from "@ductus/sdk";
 
+/**
+ * adt-in: called once per message.
+ * Return what to send on, null to drop it, kill("reason") to drop it with a reason,
+ * or throw quarantine("reason") to hold it for review.
+ */
 export function transform(msg: Message) {
   // Example: set the receiving application.
   msg.set("MSH-5", "RECEIVER");
@@ -84,7 +99,7 @@ quarantine it for a person to look at ([nuance](nuances/transforms.md#return-nul
 ```text
 $ ductus test
 adt-in
-  ✓ sets the receiving application and keeps the patient (0ms)
+  ✓ sets the receiving application and keeps the patient (2ms)
 
 1 passed, 0 failed
 ```
@@ -118,8 +133,10 @@ about:
   from: { application: Epic, vendor: Epic Systems, hosts: [10.20.30.0/24] }
   to: { application: Lab archive, vendor: In-house }
 source: { mllp: { port: 6661 } }
-script: transform.ts
-destination: { file: { dir: out/adt-in } }
+destinations:
+  archive:
+    file: { dir: out/adt-in }
+    script: archive.ts
 ```
 
 `ductus validate` now has no warnings.
@@ -159,7 +176,7 @@ name, what was received, and what happened at each destination.
 ## 5. Change it
 
 Make the code do something of its own: say the lab wants patient names in capitals. In
-`transform.ts`:
+`archive.ts`:
 
 ```ts
 import type { Message } from "@ductus/sdk";
@@ -171,11 +188,11 @@ export function transform(msg: Message) {
 }
 ```
 
-and say so in its test, `transform.test.ts`:
+and say so in its test, `archive.test.ts`:
 
 ```ts
 import { expect, input, type Message, test } from "@ductus/sdk";
-import { transform } from "./transform.ts";
+import { transform } from "./archive.ts";
 
 test("addresses the lab and capitalizes the family name", () => {
   const out = transform(input<Message>("sample.hl7"));
@@ -273,8 +290,7 @@ source:
     tls:
       certificate: ductus-mllp
       clients: { ca: test-ca, subjects: ["CN=sender.test"] }
-script: transform.ts
-destination: { file: { dir: out/adt-in } }
+destinations: { archive: { file: { dir: out/adt-in }, script: archive.ts } }
 ```
 
 `ductus validate` checks the certificates as the engine's start will (a certificate it can't use
@@ -408,7 +424,8 @@ $ cp /root/hospital-ca/ca.pem tls/hospital-ca.pem
 ```
 
 The certificates by name, and the interface sending to the lab system's receiver instead of
-files (a service writes only where its unit lets it):
+files (a service writes only where its unit lets it): a destination named `lab` now, running the
+code `ductus init` wrote (`archive.ts`; a file's name needn't match its destination's):
 
 ```yaml
 # resources.yaml
@@ -431,8 +448,7 @@ source:
     tls:
       certificate: ductus-mllp
       clients: { ca: hospital-ca, subjects: ["CN=epic.hospital.org"] }
-script: transform.ts
-destination: { mllp: { host: 127.0.0.1, port: 6662 } }
+destinations: { lab: { mllp: { host: 127.0.0.1, port: 6662 }, script: archive.ts } }
 ```
 
 **Check before starting**, with the service's own settings (`--env-file` reads `ductus.env` as

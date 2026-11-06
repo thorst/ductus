@@ -905,7 +905,7 @@ pub struct PauseStatus {
 /// with a reason adds it). Survives restarts. Operator.
 #[utoipa::path(
     post, path = "/interfaces/{name}/destinations/{destination}/pause", tag = "engine",
-    params(("name" = String, Path, description = "Interface name"), ("destination" = String, Path, description = "Destination name (`default` for one given with `destination:`)")),
+    params(("name" = String, Path, description = "Interface name"), ("destination" = String, Path, description = "Destination name (its name under `destinations:`)")),
     request_body(content = PauseRequest, content_type = "application/json"),
     responses((status = 200, body = PauseStatus), (status = 403, body = super::ErrorBody), (status = 404, body = super::ErrorBody))
 )]

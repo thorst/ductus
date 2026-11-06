@@ -32,13 +32,13 @@ cat >"$P/interfaces/adt/interface.yaml" <<'EOF'
 name: adt
 source: { mllp: { port: 6693 } }
 ordering: { key: PID-3.1 }
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 retention: 7w
 EOF
 cat >"$P/interfaces/lab/interface.yaml" <<'EOF'
 name: lab
 source: { mllp: { port: 6694 } }
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 
 cd "$P"
@@ -77,7 +77,7 @@ history() {
               convert_to('MSH|history|' || g, 'UTF8'), $status, $tier
        FROM generate_series(1, $n) g RETURNING id, received_at)
      INSERT INTO deliveries (message_id, received_at, destination_id, partition_key, status, tier)
-     SELECT id, received_at, (SELECT id FROM destinations WHERE interface = '$interface' AND name = 'default'), 0, $status, $tier FROM m" >/dev/null
+     SELECT id, received_at, (SELECT id FROM destinations WHERE interface = '$interface' AND name = 'files'), 0, $status, $tier FROM m" >/dev/null
 }
 
 echo "== first start registers the interfaces; then history is written straight to the tables"

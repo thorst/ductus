@@ -15,7 +15,7 @@ for what's left:
 | You want to | Without code | Page |
 |---|---|---|
 | Send each message to several places, each with its own queue and retries | [`destinations`](../reference/config/interface.md#destinations) | [Destinations](../configure/destinations.md) |
-| Pass a feed into another team's interface | [`destination.interface`](../reference/config/interface.md#destinationinterface) and `source: internal` | [Routes and filters](routes-and-filters.md#to-another-interface) |
+| Pass a feed into another team's interface | [`destination.interface`](../reference/config/interface.md#destinationsnameinterface) and `source: internal` | [Routes and filters](routes-and-filters.md#to-another-interface) |
 | Keep one patient's messages in order | [`ordering.key`](../reference/config/interface.md#orderingkey): `PID-3.1` | [Delivery](../configure/delivery.md) |
 | Ignore a sender's repeat after a lost ACK | [`dedupe.keys`](../reference/config/interface.md#dedupekeys): `[MSH-10]` | [Delivery](../configure/delivery.md) |
 | Read CSV, fixed-width, JSON or XML; write another of them | [`format`](../reference/config/interface.md#format) and [`output`](../reference/config/interface.md#output) | [Formats](formats.md) |
@@ -57,16 +57,18 @@ again is the failure people find months later. Quarantine it, with a reason a pe
 ## The functions
 
 ```ts
-// interfaces/adt-in/route.ts, in part
-export function toLab(msg: Message) {
+// interfaces/adt-in/lab.ts, in part
+export function transform(msg: Message) {
   if (!LAB_EVENTS.has(msg.MSH[9][2])) return null; // not for the lab: filtered, no reason needed
   if (msg.PID[3][1].startsWith("TEST")) return kill("test patient");
 ```
 
-- **`transform(msg, meta)`** is the function a destination calls unless it names another with
-  [`transform:`](../reference/config/interface.md#destinationtransform). With several
-  destinations, export one function per destination (`toLab`, `toBilling`) and name each; one
-  file can hold them all.
+- **`transform(msg, meta)`** is the function a destination calls, exported by its own file
+  ([`script:`](../reference/config/interface.md#destinationsnamescript) on the destination): one file
+  per destination (`lab.ts`, `billing.ts`), so each reads on its own however many there are, with
+  shared helpers in a file they import. Several destinations can instead share the interface's
+  `script`, each naming its function with
+  [`transform:`](../reference/config/interface.md#destinationsnametransform) (`toLab`, `toBilling`).
 - **The first argument** is the message parsed by [`format`](../reference/config/interface.md#format):
   a `Message` for HL7, an object or array for JSON, an `XmlElement` for XML, a record (or a list
   of them) for CSV and fixed-width, a string for `text` ([formats](formats.md)).
@@ -140,6 +142,6 @@ editor knows the new version ([nuance](../nuances/dev.md#your-editors-help-is-th
 
 The code on these pages is from a small project in the repository, `examples/guides`: ADT routed
 to a lab and to billing, results to a FHIR server, an X12 835 to CSV, a census file to HL7. A
-code block that starts with a file's path, such as `// interfaces/adt-in/route.ts`, is a piece
+code block that starts with a file's path, such as `// interfaces/adt-in/lab.ts`, is a piece
 of that file, and the docs' tests check that the page and the file agree and that the project's
 own tests pass. Copy it, run `ductus test` in it, and change it.

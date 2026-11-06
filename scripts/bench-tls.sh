@@ -45,7 +45,7 @@ certificates:
 EOF
 iface() { # name port tls
   mkdir -p "interfaces/$1"
-  printf 'name: %s\nsource: { mllp: { port: %s%s } }\nordering: { key: PID-3.1 }\ndestination: { file: { dir: out } }\n' \
+  printf 'name: %s\nsource: { mllp: { port: %s%s } }\nordering: { key: PID-3.1 }\ndestinations: { files: { file: { dir: out } } }\n' \
     "$1" "$2" "${3:+, tls: $3}" >"interfaces/$1/interface.yaml"
 }
 iface bench-plain 6761 ""

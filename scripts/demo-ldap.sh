@@ -89,7 +89,7 @@ name: ldap-demo
 about: { owner: nina@example.org }
 source: { mllp: { port: 6737 } }
 script: transform.ts
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 cat >"$P/interfaces/ldap-demo/transform.ts" <<'EOF'
 import type { Message } from "@ductus/sdk";

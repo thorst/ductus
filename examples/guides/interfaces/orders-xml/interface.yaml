@@ -6,5 +6,4 @@ about:
   to: { application: Equipment supplier }
 source: { http: { port: 8080, path: /orders } }
 format: xml
-script: orders.ts
-destination: { file: { dir: out } }
+destinations: { supplier: { file: { dir: out }, script: orders.ts } }

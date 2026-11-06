@@ -996,7 +996,7 @@
           {
             "name": "destination",
             "in": "path",
-            "description": "Destination name (`default` for one given with `destination:`)",
+            "description": "Destination name (its name under `destinations:`)",
             "required": true,
             "schema": {
               "type": "string"

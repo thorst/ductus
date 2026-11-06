@@ -5,16 +5,15 @@ sample messages. The YAML says where messages come from, what they are, where th
 they're delivered, kept and watched; the code says what happens to each one on the way.
 
 Only three things are required: a [`name`](../reference/config/interface.md#name), a
-[`source`](../reference/config/interface.md#source), and a
-[`destination`](../reference/config/interface.md#destination) (or several,
-[`destinations`](../reference/config/interface.md#destinations)). Everything else has a default
-that's safe to start with:
+[`source`](../reference/config/interface.md#source), and its
+[`destinations`](../reference/config/interface.md#destinations), each by a name (one or several:
+written the same way). Everything else has a default that's safe to start with:
 
 ```yaml
 # interfaces/adt-relay/interface.yaml
 name: adt-relay
 source: { mllp: { port: 6662 } }
-destination: { mllp: { host: ${LAB_HOST}, port: ${LAB_PORT} } }
+destinations: { lab: { mllp: { host: ${LAB_HOST}, port: ${LAB_PORT} } } }
 ```
 
 That relays HL7 from whoever connects on port 6662 to the lab, as received: no code, every
@@ -35,15 +34,15 @@ source:
   mllp:
     port: ${EPIC_PORT}
     allow: [10.20.30.0/24]
-script: transform.ts
 timeout: 500ms
 ordering: { key: PID-3.1 }
 destinations:
   lab:
     mllp: { host: ${LAB_HOST}, port: ${LAB_PORT}, tls: true }
+    script: lab.ts
   billing:
     http: { api: billing, path: /charges }
-    transform: toBilling
+    script: billing.ts
     output: json
 retention: 3w
 monitor:
@@ -56,7 +55,7 @@ alert: { to: [lab-team] }
 | Part | Settings | Page |
 |---|---|---|
 | Where messages come from, what they are, who may send | `source`, `format`, `output`, `allow` | [Sources and formats](sources.md) |
-| Where they go | `destination`, `destinations` | [Destinations](destinations.md) |
+| Where they go, and the code each runs | `destinations` (with `script`, `transform`, `output`) | [Destinations](destinations.md) |
 | How they're delivered | `ordering`, `retry`, `dedupe`, `rate_limit`, `durability`, `isolation`, `workers`, `dedicated_pools` | [Delivery](delivery.md) |
 | How long they're kept, what's expected, who hears | `retention`, `quarantined`, `monitor`, `alert` | [Keeping and watching](keeping-and-watching.md) |
 | What it is and who owns it | `about`, `custom` | [About and owners](about.md) |
@@ -72,14 +71,17 @@ name, and anything still waiting there is sent by nobody.
 
 ## The code
 
-[`script`](../reference/config/interface.md#script) is the TypeScript file, relative to the
-interface's folder, that exports `transform(msg, meta)` (and any function a destination names
-with `transform:`). `ductus validate` type-checks it, and the engine loads it at start.
+Each destination's code is a TypeScript file of its own, relative to the interface's folder,
+named by `script:` on the destination and exporting `transform(msg, meta)`: `lab.ts` for the lab,
+`billing.ts` for billing ([destinations](destinations.md#named-destinations-each-with-its-own-code)).
+`ductus validate` type-checks every file, and the engine loads them at start. The interface's own
+[`script`](../reference/config/interface.md#script) is for code several destinations share by
+function name (`transform: toBilling`), and for an HTTP source in `respond` mode, whose code makes
+the answer.
 
-- **Without a script**, messages go to their destinations as they came. That's right for a
-  relay; most interfaces have one.
-- **A `schedule` source, and an HTTP source in `respond` mode, need one**: there, the code makes
-  the message or the answer.
+- **Without code**, messages go to a destination as they came. That's right for a relay or an
+  archive; most destinations have some.
+- **A `schedule` source needs code for each destination**: its code makes the message.
 - What the code returns decides: a message to send, `null` to filter it (kept, with the reason),
   or a thrown error to quarantine it for a person
   ([nuance](../nuances/transforms.md#return-null-filters-throwing-quarantines-level-1)).

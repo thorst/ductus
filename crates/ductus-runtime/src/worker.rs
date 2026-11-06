@@ -26,7 +26,7 @@ use crate::stats::{self, DestinationStats, InterfaceStats};
 use anyhow::{Context, Result, anyhow};
 use ductus_core::InterfaceConfig;
 use ductus_core::config::Retry;
-use ductus_script::{Call, FunctionId, InterfaceId, Isolate, Runaway};
+use ductus_script::{Call, Function, FunctionId, InterfaceId, Isolate, Runaway};
 use ductus_store::{DestinationId, Done, MessageRef, Pending, Status, Store};
 use std::cell::RefCell;
 use std::path::Path;
@@ -133,14 +133,12 @@ pub fn spawn_thread(
                 for job in jobs {
                     let config = &job.config;
                     let mut files = Vec::new();
-                    let script = match config.script_path() {
-                        Some(path) => {
-                            let functions = config.functions();
-                            let functions: Vec<(&str, &str)> =
-                                functions.iter().map(|(name, formats)| (name.as_str(), formats.as_str())).collect();
-                            match host.add_functions(&path, &functions, config.timeout).await {
+                    let functions = config.functions();
+                    let script = match functions.iter().any(Option::is_some) {
+                        true => {
+                            match host.add_functions(&Function::all(&functions), config.timeout).await {
                                 Ok(loaded) => {
-                                    files = host.code_files(&path).unwrap_or_else(|e| {
+                                    files = host.code_files(&config.modules()).unwrap_or_else(|e| {
                                         tracing::warn!(interface = %config.name, error = %format!("{e:#}"), "couldn't tell which files its code loaded: its code version counts its interface.yaml only");
                                         Vec::new()
                                     });
@@ -152,7 +150,7 @@ pub fn spawn_thread(
                                 }
                             }
                         }
-                        None => None,
+                        false => None,
                     };
                     let _ = ready.send((job.config.name.clone(), Ok(files)));
                     loaded.push((job, script));
@@ -166,12 +164,14 @@ pub fn spawn_thread(
                 tokio::task::spawn_local(drive_event_loop(name, host.clone(), kick.clone(), interrupted.clone()));
                 let mut tasks = Vec::new();
                 for (mut job, script) in loaded {
-                    // The script's functions, in `config.functions()` order: one per destination.
+                    // The functions, in `config.functions()` order: one per destination (None for
+                    // one without code).
                     let script = |i: usize| {
-                        script.as_ref().map(|(interface, functions)| Script {
+                        let (interface, functions) = script.as_ref()?;
+                        Some(Script {
                             host: host.clone(),
                             interface: *interface,
-                            function: functions[i],
+                            function: functions[i]?,
                             kick: kick.clone(),
                             interrupted: interrupted.clone(),
                         })
@@ -203,7 +203,9 @@ pub fn spawn_thread(
 /// Offer the thread's isolate (one interface's: `ductus dev --inspect`) to debuggers, and say in
 /// the log where to attach and when one does.
 fn offer(inspector: &Inspector, host: &mut Isolate, config: &InterfaceConfig) {
-    let (Some(sessions), Some(script)) = (host.inspector_sessions(), config.script_path()) else { return };
+    let (Some(sessions), Some(script)) = (host.inspector_sessions(), config.modules().into_iter().next()) else {
+        return;
+    };
     let interface = config.name.clone();
     let say = move |what: Attach| match what {
         Attach::Attached => tracing::warn!(
@@ -831,13 +833,11 @@ mod tests {
         let _guard = rt.enter();
         let mut isolate = Isolate::host();
         let formats = ductus_script::DEFAULT_FORMATS;
+        let function = |name| Some(Function { module: &module, name, formats });
         let (_, ids) = rt
-            .block_on(isolate.add_functions(
-                &module,
-                &[("transform", formats), ("later", formats)],
-                Duration::from_secs(1),
-            ))
+            .block_on(isolate.add_functions(&[function("transform"), function("later")], Duration::from_secs(1)))
             .unwrap();
+        let ids: Vec<_> = ids.into_iter().map(Option::unwrap).collect();
         let adt = "MSH|^~\\&|EPIC|HOSP|LAB|HOSP|20261101120000||ADT^A01|1|P|2.5\rPID|1||123^^^MRN\r";
         let mut reason =
             |id| match Outcome::of(adt, Some(rt.block_on(isolate.call_function(id, adt, None))), root.path()) {

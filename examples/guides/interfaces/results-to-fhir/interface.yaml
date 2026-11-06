@@ -5,8 +5,9 @@ about:
   from: { application: Lab system }
   to: { application: FHIR server }
 source: { mllp: { port: 6662 } }
-script: to-fhir.ts
 ordering: { key: PID-3.1 }
 output: json
-destination:
-  http: { api: fhir, path: / }      # a transaction Bundle is posted to the server's base URL
+destinations:
+  fhir:
+    http: { api: fhir, path: / }      # a transaction Bundle is posted to the server's base URL
+    script: to-fhir.ts

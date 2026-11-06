@@ -72,7 +72,7 @@ output: csv
 ordering: { key: patient.mrn }
 dedupe: { keys: [orderId] }
 script: transform.ts
-destination: { http: { url: "http://127.0.0.1:${API_PORT}/inbox" } }
+destinations: { receiver: { http: { url: "http://127.0.0.1:${API_PORT}/inbox" } } }
 EOF
 cat >"$P/interfaces/orders/transform.ts" <<'EOF'
 interface Order { orderId: string; patient: { mrn: string }; tests: string[] }
@@ -85,7 +85,7 @@ cat >"$P/interfaces/inbox/interface.yaml" <<'EOF'
 name: inbox
 source: { http: { port: ${API_PORT}, path: /inbox } }
 format: csv
-destination: { file: { dir: received } }
+destinations: { files: { file: { dir: received } } }
 EOF
 
 cd "$P"

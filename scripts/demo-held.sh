@@ -41,7 +41,7 @@ EOF
 cat >"$P/interfaces/orders/interface.yaml" <<'EOF'
 name: orders
 source: { mllp: { port: 6698 } }
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 retention: 1w
 quarantined: purge
 EOF

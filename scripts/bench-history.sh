@@ -39,7 +39,7 @@ for i in $(seq 0 $((COUNT - 1))); do
   d="$WORK/interfaces/v-$i"
   mkdir -p "$d"
   l=$((i % 10))
-  printf 'name: v-%d\nsource: { mllp: { host: 127.0.0.1, port: %d } }\nscript: transform.ts\ndestination: { mllp: { host: 127.0.0.1, port: 19999 } }\n' \
+  printf 'name: v-%d\nsource: { mllp: { host: 127.0.0.1, port: %d } }\nscript: transform.ts\ndestinations: { receiver: { mllp: { host: 127.0.0.1, port: 19999 } } }\n' \
     "$i" $((20000 + i)) >"$d/interface.yaml"
   printf 'export function clean(s: string): string {\n  return s.trim().toUpperCase();\n}\n' >"$d/map.ts"
   cat >"$d/transform.ts" <<EOF
@@ -140,7 +140,7 @@ END \$\$;
 INSERT INTO audit_log (at, actor_kind, actor_name, action, subject, interface, message_id, outcome)
 SELECT now() - g * interval '1 minute', 'user', 'person ' || (g % 9),
        CASE WHEN g % 200 = 0 THEN 'destination.pause' ELSE 'message.payload.read' END,
-       CASE WHEN g % 200 = 0 THEN 'v-' || (g % 20) || '/default' END,
+       CASE WHEN g % 200 = 0 THEN 'v-' || (g % 20) || '/receiver' END,
        'v-' || (g % 20), CASE WHEN g % 200 <> 0 THEN g END, 'ok'
 FROM generate_series(1, $AUDIT) g;
 ANALYZE;

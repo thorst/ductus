@@ -56,7 +56,7 @@ source: internal
 ordering: { key: PID-3.1 }
 isolation: dedicated
 workers: 2
-destination: { mllp: { host: 127.0.0.1, port: 6692 } }
+destinations: { receiver: { mllp: { host: 127.0.0.1, port: 6692 } } }
 EOF
 cat >"$P/interfaces/billing/interface.yaml" <<'EOF'
 name: billing
@@ -87,7 +87,7 @@ name: audit
 about: { to: { application: Audit store } }
 source: internal
 format: json
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 
 cd "$P"
@@ -95,7 +95,7 @@ echo "== validate"
 "$BIN" validate >/dev/null || { "$BIN" validate; echo "FAIL: validation"; exit 1; }
 # A loop is refused: audit routing back to adt.
 cp interfaces/audit/interface.yaml "$P/audit.yaml"
-sed -i 's/^destination: .*/destination: { interface: billing }/' interfaces/audit/interface.yaml
+sed -i 's/^destinations: .*/destinations: { billing: { interface: billing } }/' interfaces/audit/interface.yaml
 loop=$("$BIN" validate 2>&1 || true)
 cp "$P/audit.yaml" interfaces/audit/interface.yaml
 grep "✗ routes loop: audit → billing → audit" <<<"$loop" | sed 's/^/   refused: /' || true

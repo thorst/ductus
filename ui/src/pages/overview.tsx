@@ -228,8 +228,7 @@ function Attention({ all }: { all: Schemas["InterfaceStatus"][] }) {
               <HealthBadge state={p.state} />
               <Link to="/interfaces/$name" params={{ name: p.iface }} className="font-medium">
                 {p.iface}
-                {/* An interface with one destination calls it `default`: nothing to add. */}
-                {p.destination && p.destination !== "default" && <span className="text-muted"> → {p.destination}</span>}
+                {p.destination && <span className="text-muted"> → {p.destination}</span>}
               </Link>
               <span className="text-sm text-muted">{p.summary}</span>
             </li>

@@ -3,9 +3,14 @@
 What could surprise you here, why it is so, and what to do. Each entry has a level, 1 (day one) to 5 (expert): the [index](index.md) lists them all by level.
 
 ## Each destination runs its own function on the original message (level 2)
-- **What:** with `destinations:`, every destination calls its function (`transform` unless it names another with `transform: toBilling`) on the message as received, not on another destination's result. Three destinations using `transform` run it three times, and each run makes its own `db()` and `fetch()` calls.
+- **What:** every destination calls its function (its own file's `transform`, or the function `transform:` names) on the message as received, not on another destination's result. Three destinations sharing a helper run it three times, and each run makes its own `db()` and `fetch()` calls.
 - **Why:** each destination works through its own queue at its own pace (one can be hours behind), and outputs aren't stored, so nothing can be handed from one to the other.
-- **What to do:** put shared preparation in a helper the functions call. Keep lookups in the functions that need them. Module-level state is shared by all of an interface's functions (one module), so a bounded cache can save repeated lookups.
+- **What to do:** put shared preparation in a helper the destinations' files import. Keep lookups in the code that needs them.
+
+## A destination's own file has its own module-level values (level 3)
+- **What:** each file is loaded once per engine thread, and its top-level `let`/`const` belong to it. A cache declared in `lab.ts` is the lab's alone; one declared in a file `lab.ts` and `billing.ts` both import (`shared.ts`) is shared by both, and by any other interface on the thread that imports that file. Destinations that share one file (the interface's `script` with `transform:` names) share its values, as before 0.7.4.
+- **Why:** a module's values live in the module, and the engine loads each file once per thread ([shared library files](shared-pool.md#a-shared-library-file-is-one-copy-per-thread-not-one-per-project-level-4)).
+- **What to do:** put a cache where the destinations that should share it can import it; keep per-destination state in that destination's file.
 
 ## One destination down holds up only itself (level 2)
 - **What:** each destination has its own queue, order and retries. While the lab is down, billing and the archive keep receiving; the lab's messages wait, in order, and go once it's back. A message's overall status stays `pending` until every destination is done with it. Then it's `quarantined` if any destination quarantined it, `sent` if any destination got it, and `filtered` if all of them filtered it. The status per destination says which (`ductus status` lists them).
@@ -25,6 +30,7 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 ## Adding, removing or renaming a destination (level 3)
 - **What:** at startup the engine matches stored deliveries to `interface.yaml`. A **new** destination also gets the messages still in flight (pending for any destination), not older ones. A **removed** destination's waiting messages are marked filtered ("destination `x` was removed from interface.yaml") and logged. A **rename** is both: the new name gets everything in flight, including what the old name had waiting, and may re-send some the old name had already sent.
 - **What to do:** rename only when the destination is caught up. Removing a destination by mistake can't be undone by putting it back: its waiting messages were already filtered.
+- **Before 0.7.4** an interface could have one unnamed `destination:`, stored as `default`. It's refused now (`ductus validate` says what to write); moving it under `destinations:` with a name is a rename, so do it when nothing waits for `default`.
 
 ## Many destinations on one interface: when to split (level 3)
 - **What:** every destination adds a delivery row per message, written in the same statement as the message and updated when it's sent. So a message with 25 destinations costs the database about 25 small writes on the way in and 25 on the way out, and senders wait for the first part before their ACK.
@@ -32,7 +38,7 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **What to do:**
   - Up to ~10 destinations per interface: nothing to plan, at any realistic volume.
   - More than that: multiply your peak messages/s by the number of destinations and compare with the deliveries/s your server measures (~15,000 on a laptop; `ductus bench` will measure it, v0.6). Under a third of it is comfortable: that leaves room for a burst of 3x and for catching up after a receiver's outage. Over that, a burst builds a backlog that clears only as fast as the spare capacity allows.
-  - If it doesn't fit: split the feed. Route to a few internal interfaces (`destination: { interface: adt_out_a }`) that each fan out to a share of the receivers, or give low-priority receivers (archives, analytics) their own interface fed from a route. The sender's ACK then waits for a few delivery rows instead of dozens; in exchange, each hop stores one more copy of the message, so total writes grow a little.
+  - If it doesn't fit: split the feed. Route to a few internal interfaces (`destinations: { adt_out_a: { interface: adt_out_a } }`) that each fan out to a share of the receivers, or give low-priority receivers (archives, analytics) their own interface fed from a route. The sender's ACK then waits for a few delivery rows instead of dozens; in exchange, each hop stores one more copy of the message, so total writes grow a little.
 
 ## A runaway is blamed on the interface, not the destination (level 5)
 - **What:** when code runs away after an `await`, the engine knows which interface's code it was, not which function. Every call of that interface in flight on the thread is quarantined, so another destination's message can be quarantined with it. Each one counts towards stopping the interface.

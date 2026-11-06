@@ -58,7 +58,7 @@ Every destination the engine has been configured with. Deliveries refer to it by
 |---|---|---|
 | `id` | integer | Identity. |
 | `interface` | text | The interface's name. |
-| `name` | text | The destination's name (`default` for a single `destination:`). |
+| `name` | text | The destination's name, as under `destinations:` (`default` on databases that ran an interface with the singular `destination:` before 0.7.4). |
 
 Indexes: primary key `id`; unique `(interface, name)`.
 

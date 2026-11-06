@@ -4,8 +4,9 @@ about:
   owner: revenue-cycle-team
   to: { application: Billing, vendor: Experian }
 source: internal                    # messages come only from another interface's route
-script: billing.ts
 ordering: { key: PID-3.1 }
 output: json
-destination:
-  http: { api: billing, path: /encounters }
+destinations:
+  billing:
+    http: { api: billing, path: /encounters }
+    script: billing.ts

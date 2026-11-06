@@ -30,6 +30,8 @@ pub struct Args {
     /// Its name, or a file or folder inside its folder.
     pub interface: String,
     pub source: Source,
+    /// Only this destination's code; None: every destination.
+    pub destination: Option<String>,
     pub json: bool,
     pub inspect: Option<std::net::SocketAddr>,
 }
@@ -64,6 +66,7 @@ pub async fn run(args: Args) -> Result<()> {
         env: args.env.clone(),
         interface: name.clone(),
         message,
+        destination: args.destination.clone(),
         inspect: args.inspect,
         waiting: Arc::new(move |url| {
             eprintln!(

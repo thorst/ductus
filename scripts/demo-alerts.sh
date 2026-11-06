@@ -46,7 +46,7 @@ name: alerts-demo
 source: { mllp: { port: 6726 } }
 script: transform.ts
 about: { owner: Lab Systems }
-destination: { mllp: { host: 127.0.0.1, port: 6727 } }
+destinations: { receiver: { mllp: { host: 127.0.0.1, port: 6727 } } }
 EOF
 cat >"$P/interfaces/alerts-demo/transform.ts" <<'EOF'
 import type { Message } from "@ductus/sdk";
@@ -101,16 +101,16 @@ echo "   waiting for the stall (a minute with nothing sent) and the alert..."
 wait_for 180 '[ "$(mails)" -ge 2 ]' || fail+=" no-alert-mail"
 echo "   alerted after $((SECONDS - started)) s:"
 sed 's/^/   | /' "$P/mail.log" | grep -v "^   | *$" | head -12
-grep "^mail [12] .*to interfaces-oncall@hospital.example: \[Ductus dev\] CRITICAL alerts-demo is stalled" "$P/mail.log" >/dev/null || fail+=" oncall-mail"
-grep "^mail [12] .*to lab-systems@hospital.example: \[Ductus dev\] CRITICAL alerts-demo is stalled" "$P/mail.log" >/dev/null || fail+=" owner-mail"
-wait_for 10 'grep "POST /chat: .*CRITICAL alerts-demo is stalled" "$P/hook.log" >/dev/null' || fail+=" chat-webhook"
+grep "^mail [12] .*to interfaces-oncall@hospital.example: \[Ductus dev\] CRITICAL alerts-demo → receiver is stalled" "$P/mail.log" >/dev/null || fail+=" oncall-mail"
+grep "^mail [12] .*to lab-systems@hospital.example: \[Ductus dev\] CRITICAL alerts-demo → receiver is stalled" "$P/mail.log" >/dev/null || fail+=" owner-mail"
+wait_for 10 'grep "POST /chat: .*CRITICAL alerts-demo → receiver is stalled" "$P/hook.log" >/dev/null' || fail+=" chat-webhook"
 sleep 16 # another judgement: still stalled, nobody is told twice
 [ "$(mails)" = 2 ] || fail+=" told-twice($(mails))"
 
 echo "== ductus alerts, acknowledge, silence"
 "$BIN" alerts | sed 's/^/   /'
-"$BIN" alerts | grep "CRITICAL  alerts-demo: stalled" >/dev/null || fail+=" cli-list"
-ID=$(q "SELECT id FROM alert_state WHERE key = 'dest:alerts-demo/default'")
+"$BIN" alerts | grep "CRITICAL  alerts-demo → receiver: stalled" >/dev/null || fail+=" cli-list"
+ID=$(q "SELECT id FROM alert_state WHERE key = 'dest:alerts-demo/receiver'")
 VIEWER=$("$BIN" token create "alerts-demo-viewer-$$" --role viewer 2>/dev/null)
 as_viewer() { curl -s -o /dev/null -w '%{http_code}' -X "$1" -H "Authorization: Bearer $VIEWER" "$DUCTUS_API_URL/api/v1$2"; }
 [ "$(as_viewer GET /alerts)" = 200 ] && [ "$(as_viewer POST "/alerts/$ID/ack")" = 403 ] || fail+=" viewer-acks"
@@ -120,7 +120,7 @@ acked=$(api POST "/alerts/$ID/ack")
 silenced=$(api POST "/alerts/$ID/silence" '{"for": "1h", "reason": "lab vendor is restarting their interface engine"}')
 [ "$(js "$silenced" "d['silence_reason']")" = "lab vendor is restarting their interface engine" ] || fail+=" silence($silenced)"
 api DELETE "/alerts/$ID/silence" >/dev/null
-logged=$(q "SELECT string_agg(action, ',' ORDER BY id) FROM audit_log WHERE subject = 'dest:alerts-demo/default' AND actor_name = 'alerts-demo-ops-$$'")
+logged=$(q "SELECT string_agg(action, ',' ORDER BY id) FROM audit_log WHERE subject = 'dest:alerts-demo/receiver' AND actor_name = 'alerts-demo-ops-$$'")
 echo "   audit log: $logged"
 [ "$logged" = "alert.ack,alert.silence,alert.unsilence" ] || fail+=" audit($logged)"
 metrics=$(curl -s -H "Authorization: Bearer $OPS" "$DUCTUS_API_URL/api/v1/metrics")
@@ -133,9 +133,9 @@ recovered=$SECONDS
 wait_for 120 '[ "$(mails)" -ge 4 ]' || fail+=" no-recovery-mail"
 echo "   recovered and told after $((SECONDS - recovered)) s:"
 grep "^mail [34] " "$P/mail.log" | sed 's/^/   | /'
-[ "$(grep -c "RECOVERED alerts-demo: no longer stalled" "$P/mail.log")" = 2 ] || fail+=" recovery-mails"
+[ "$(grep -c "RECOVERED alerts-demo → receiver: no longer stalled" "$P/mail.log")" = 2 ] || fail+=" recovery-mails"
 wait_for 10 'grep "POST /chat: .*RECOVERED alerts-demo" "$P/hook.log" >/dev/null' || fail+=" recovery-webhook"
-events=$(q "SELECT string_agg(kind, ',' ORDER BY id) FROM alert_events WHERE key = 'dest:alerts-demo/default'")
+events=$(q "SELECT string_agg(kind, ',' ORDER BY id) FROM alert_events WHERE key = 'dest:alerts-demo/receiver'")
 echo "   alert history: $events"
 [ "$events" = "fired,acknowledged,silenced,unsilenced,recovered" ] || fail+=" history($events)"
 metrics=$(curl -s -H "Authorization: Bearer $OPS" "$DUCTUS_API_URL/api/v1/metrics")

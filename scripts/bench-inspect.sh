@@ -32,13 +32,13 @@ name: other
 script: route.ts
 source: { mllp: { host: 127.0.0.1, port: $OTHER } }
 ordering: { key: PID-3.1 }
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 cat >"$P/interfaces/dbg/interface.yaml" <<EOF
 name: dbg
 script: route.ts
 source: { mllp: { host: 127.0.0.1, port: $DBG } }
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 printf 'import type { Message } from "@ductus/sdk";\n\nexport function transform(m: Message) {\n  m.set("MSH-3", "BENCH");\n  return m;\n}\n' >"$P/interfaces/other/route.ts"
 printf 'import type { Message } from "@ductus/sdk";\n\nexport function transform(m: Message) {\n  debugger;\n  return m;\n}\n' >"$P/interfaces/dbg/route.ts"

@@ -26,7 +26,7 @@ echo "== a project with $COUNT MLLP interfaces (in $WORK)"
 for i in $(seq 0 $((COUNT - 1))); do
   name=$(printf '%s-%04d' "$PREFIX" "$i")
   mkdir -p "$WORK/interfaces/$name"
-  printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: %d } }\nordering: { key: PID-3.1, partitions: 8 }\ndestination: { mllp: { host: 127.0.0.1, port: %d } }\n' \
+  printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: %d } }\nordering: { key: PID-3.1, partitions: 8 }\ndestinations: { receiver: { mllp: { host: 127.0.0.1, port: %d } } }\n' \
     "$name" $((BASE + i)) "$SINK" >"$WORK/interfaces/$name/interface.yaml"
 done
 

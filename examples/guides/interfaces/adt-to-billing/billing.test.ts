@@ -1,7 +1,7 @@
 import { expect, hl7, type Meta, mock, test } from "@ductus/sdk";
 import { transform } from "./billing.ts";
 
-const meta: Meta = { id: 41, receivedAt: "2026-10-31T13:30:00Z", destination: "default", origin: 7 };
+const meta: Meta = { id: 41, receivedAt: "2026-10-31T13:30:00Z", destination: "billing", origin: 7 };
 
 test("an admission becomes an encounter, with the attending's NPI", async () => {
   const calls = mock.db("provider_db", () => [{ npi: "1093817465" }]);

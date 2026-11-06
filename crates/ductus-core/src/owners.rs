@@ -742,9 +742,11 @@ destinations:
         let configs = [
             config(YAML),
             config(
-                "name: adt\nsource: { mllp: { port: 1 } }\nabout: { owner: billing TEAM }\ndestination: { file: { dir: o } }",
+                "name: adt\nsource: { mllp: { port: 1 } }\nabout: { owner: billing TEAM }\ndestinations: { files: { file: { dir: o } } }",
             ),
-            config("name: nightly\nsource: { schedule: { every: 1h } }\ndestination: { file: { dir: o }, owner: Ops }"),
+            config(
+                "name: nightly\nsource: { schedule: { every: 1h } }\ndestinations: { files: { file: { dir: o }, owner: Ops } }",
+            ),
         ];
         let resources: Resources = serde_yaml_ng::from_str(RESOURCES).unwrap();
         let groups: Vec<(String, Vec<String>)> = by_owner(owned(&configs, &resources))
@@ -757,7 +759,7 @@ destinations:
                 ("Ann Smith".to_string(), vec!["results".to_string(), "database patients".into()]),
                 ("Billing team".into(), vec!["results → billing".into(), "adt".into(), "api billing".into()]),
                 ("Directory Services".into(), vec!["directory corp-ad".into()]),
-                ("Ops".into(), vec!["nightly → default".into()]),
+                ("Ops".into(), vec!["nightly → files".into()]),
                 ("".into(), vec!["nightly".into()]),
             ],
             "emr and archive say the interface's owner (in other case), so they aren't listed apart; \
@@ -1048,12 +1050,18 @@ ldap:
         assert_eq!(patch("x.yaml", YAML, YAML), "", "nothing changed, no patch");
 
         // Far apart: two hunks. No newline at the end: said the way git says it.
-        let far =
-            format!("about:\n  owner: Ann\n{}destination: {{ file: {{ dir: o }}, owner: Ann }}", "# -\n".repeat(8));
+        let far = format!(
+            "about:\n  owner: Ann\n{}destinations: {{ files: {{ file: {{ dir: o }}, owner: Ann }} }}",
+            "# -\n".repeat(8)
+        );
         let (out, _) = reassign(&far, "Ann", "Bob").unwrap();
         let diff = patch("i.yaml", &far, &out);
         assert_eq!(diff.matches("@@ -").count(), 2, "{diff}");
-        assert!(diff.ends_with("+destination: { file: { dir: o }, owner: Bob }\n\\ No newline at end of file\n"));
+        assert!(
+            diff.ends_with(
+                "+destinations: { files: { file: { dir: o }, owner: Bob } }\n\\ No newline at end of file\n"
+            )
+        );
 
         // A Windows checkout has CRLF (Git for Windows sets core.autocrlf): the edit and the patch
         // keep the file's own line endings, the only patch `git apply` takes with autocrlf on or off.
@@ -1095,8 +1103,7 @@ ldap:
     #[test]
     fn refuses_an_edit_it_cant_verify() {
         // A header named `owner` in flow style looks like an owner line but isn't one.
-        let yaml =
-            "name: x\nabout: { owner: Ann }\ndestination:\n  http: { url: 'http://h', headers: { owner: Ann } }\n";
+        let yaml = "name: x\nabout: { owner: Ann }\ndestinations:\n  receiver:\n    http: { url: 'http://h', headers: { owner: Ann } }\n";
         let err = reassign(yaml, "Ann", "Bob").unwrap_err().to_string();
         assert!(err.contains("change `owner: Ann` by hand"), "{err}");
         // Environment references survive.

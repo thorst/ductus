@@ -26,8 +26,8 @@ lines of code. Both are below, with what's planned.
 ## HL7 v2
 
 ```ts
-// interfaces/adt-in/route.ts, in part
-export function toLab(msg: Message) {
+// interfaces/adt-in/lab.ts, in part
+export function transform(msg: Message) {
   if (!LAB_EVENTS.has(msg.MSH[9][2])) return null; // not for the lab: filtered, no reason needed
   if (msg.PID[3][1].startsWith("TEST")) return kill("test patient");
 ```
@@ -93,11 +93,12 @@ about:
   from: { application: Lab system }
   to: { application: FHIR server }
 source: { mllp: { port: 6662 } }
-script: to-fhir.ts
 ordering: { key: PID-3.1 }
 output: json
-destination:
-  http: { api: fhir, path: / }      # a transaction Bundle is posted to the server's base URL
+destinations:
+  fhir:
+    http: { api: fhir, path: / }      # a transaction Bundle is posted to the server's base URL
+    script: to-fhir.ts
 ```
 
 ```ts
@@ -143,7 +144,7 @@ What it shows, and why each part is there:
   a person to read ([destinations](../configure/destinations.md#http)).
 - **Content type**: JSON goes out as `application/json`, which FHIR servers accept. One that
   insists on `application/fhir+json` gets it from the destination's
-  [`headers`](../reference/config/interface.md#destinationhttpheaders), which win over the
+  [`headers`](../reference/config/interface.md#destinationsnamehttpheaders), which win over the
   default: `http: { api: fhir, path: /, headers: { Content-Type: application/fhir+json } }`.
 - **Tokens**: the FHIR server's base URL and token live on its `apis:` entry in resources.yaml,
   never in code ([resources](../configure/resources.md#http-apis)). Servers that want OAuth2
@@ -205,9 +206,8 @@ about:
 source:
   file: { dir: inbound, pattern: "census_*.csv", split: records }   # each row is a message
 format: csv
-script: census.ts
 output: hl7
-destination: { file: { dir: out } }
+destinations: { ehr: { file: { dir: out }, script: census.ts } }
 ```
 
 - **Records are objects by column name** (`row.mrn`), from the header line. Without one,

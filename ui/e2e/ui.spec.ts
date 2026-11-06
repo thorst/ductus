@@ -93,7 +93,8 @@ test("the overview says what needs attention", async ({ page }) => {
   await expect(attention.getByRole("listitem").filter({ hasText: "adt → lab" })).toContainText("Behind");
   await expect(attention.getByRole("listitem").filter({ hasText: "orders" })).toContainText("Errors");
   await expect(attention.getByRole("listitem").filter({ hasText: "billing" })).toContainText("Paused");
-  await expect(attention).not.toContainText("→ default");
+  // Every destination by its name, the only one too (no `default` left out).
+  await expect(attention.getByRole("listitem").filter({ hasText: "billing → invoices" })).toContainText("Paused");
   await expect(page.getByRole("definition").filter({ hasText: /^4$/ })).toBeVisible();
   await expect(page.getByText("Live", { exact: true })).toBeVisible();
   for (const t of ["light", "dark", "contrast"]) {

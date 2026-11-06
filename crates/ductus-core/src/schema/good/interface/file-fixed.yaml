@@ -16,6 +16,7 @@ format:
       - { name: amount, width: 10, align: right, pad: "0" }
       - { name: code, start: 41, width: 8, align: left, pad: " " }
     trim: true
-destination:
-  file: { dir: out }
-  output: { fixed: { fields: [{ name: mrn, width: 10 }], trim: false } }
+destinations:
+  files:
+    file: { dir: out }
+    output: { fixed: { fields: [{ name: mrn, width: 10 }], trim: false } }

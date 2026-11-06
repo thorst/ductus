@@ -1,4 +1,4 @@
-# The least an interface needs: a name, a source and a destination.
+# The least an interface needs: a name, a source and a destination (by a name of your choosing).
 name: adt-in
 source: { mllp: { port: 6661 } }
-destination: { file: { dir: out } }
+destinations: { archive: { file: { dir: out } } }

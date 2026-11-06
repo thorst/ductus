@@ -144,7 +144,7 @@ source: { mllp: { port: 6722, tls: { certificate: orders-tls, clients: { ca: sen
 script: transform.ts
 about: { description: Orders checked against the order system, owner: Orders team }
 custom: { data_classification: Internal }
-destination: { file: { dir: out/orders } }
+destinations: { archive: { file: { dir: out/orders } } }
 EOF
 cat >"$P/interfaces/orders/transform.ts" <<'EOF'
 import { quarantine, type Message } from "@ductus/sdk";
@@ -159,7 +159,7 @@ source: { mllp: { port: 6723 } }
 retention: 1w
 about: { owner: Finance }
 custom: { data_classification: PHI, baa_signed: "no" }
-destination: { file: { dir: out/billing } }
+destinations: { invoices: { file: { dir: out/billing } } }
 EOF
 # As if billing had kept 7 weeks until now: its shorter 1w waits for someone to confirm it.
 psql -q "$DB" -c "DELETE FROM retention WHERE interface IN ('adt', 'orders', 'billing')" \
@@ -239,7 +239,7 @@ echo "== another engine on this database, and this project started twice"
 # lists the other. The same project started again is refused (exit 3): the audit log says why.
 N=$P/neighbour
 mkdir -p "$N/interfaces/ui-neighbour"
-printf 'name: ui-neighbour\nsource: { mllp: { port: 6726 } }\ndestination: { file: { dir: out } }\n' \
+printf 'name: ui-neighbour\nsource: { mllp: { port: 6726 } }\ndestinations: { archive: { file: { dir: out } } }\n' \
   >"$N/interfaces/ui-neighbour/interface.yaml"
 "$BIN" run --root "$N" --api-listen off >"$N/run.log" 2>&1 &
 NEIGHBOUR=$!

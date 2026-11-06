@@ -29,7 +29,7 @@ name: orders
 source: { mllp: { port: 6724 } }
 ordering: { key: PID-3.1 }
 script: transform.ts
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 cat >"$P/interfaces/orders/transform.ts" <<'EOF'
 import { quarantine, type Message } from "@ductus/sdk";
@@ -117,7 +117,7 @@ refused=$(api "$READER" GET "/messages/$SECOND")
 echo "   with the log unwritable: HTTP $(status "$refused"): $(body "$refused")"
 [ "$(status "$refused")" = 503 ] || fail+=" read-not-refused"
 grep '"payload":"MSH' <<<"$(body "$refused")" >/dev/null && fail+=" payload-leaked"
-paused=$(api "$OPS" POST "/interfaces/orders/destinations/default/pause" '{}')
+paused=$(api "$OPS" POST "/interfaces/orders/destinations/files/pause" '{}')
 [ "$(status "$paused")" = 503 ] || fail+=" pause-not-refused"
 [ "$(api "$OPS" GET /interfaces/orders | tail -n1)" = 200 ] && echo "   (reading the status needs no row: it still works)"
 psql -q "$DB" -c "DROP TRIGGER audit_demo_refuse ON audit_log" -c "DROP FUNCTION audit_demo_refuse()"

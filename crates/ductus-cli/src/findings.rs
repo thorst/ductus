@@ -379,14 +379,14 @@ pub const CODES: &[Code] = &[
         "DUC123",
         "error",
         "An interface.yaml breaks a rule",
-        "Settings that parse but don't go together, or a value out of range (`workers` without `isolation: dedicated`, a destination name with capitals): the place is the setting the message names.",
+        "Settings that parse but don't go together, or a value out of range (`workers` without `isolation: dedicated`, a destination name with capitals, the singular `destination:` removed in 0.7.4: the message says what to write instead): the place is the setting the message names.",
     ),
     code("DUC124", "error", "An interface.yaml can't be read", "The file exists but can't be read (permissions)."),
     code(
         "DUC125",
         "error",
         "An interface's code doesn't load",
-        "Its `script` doesn't load the way the engine loads it, or doesn't export a function a destination names (`transform: toLab`): the place is the `transform` (or `script`) that names it.",
+        "Its code (a destination's own `script`, or the interface's) doesn't load the way the engine loads it, or doesn't export the function a destination runs (`transform`, or the one `transform:` names): the place is the destination's `transform` or `script`, else the interface's `script`.",
     ),
     code(
         "DUC130",
@@ -429,7 +429,7 @@ pub const CODES: &[Code] = &[
         "DUC201",
         "error",
         "A route between interfaces can't work",
-        "A route (`destination: { interface: b }`) to an interface that doesn't exist or doesn't have `source: internal`, in a format the target doesn't read, or in a loop.",
+        "A route (`destinations: { b: { interface: b } }`) to an interface that doesn't exist or doesn't have `source: internal`, in a format the target doesn't read, or in a loop.",
     ),
     code(
         "DUC202",

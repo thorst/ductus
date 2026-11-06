@@ -6,6 +6,5 @@ about:
   to: { application: Billing office }
 source: { file: { dir: inbound, pattern: "*.835" } }
 format: text                        # X12 has no format of its own yet: read it as text
-script: remits.ts
 output: csv
-destination: { file: { dir: out } }
+destinations: { billing-office: { file: { dir: out }, script: remits.ts } }

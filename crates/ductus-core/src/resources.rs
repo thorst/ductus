@@ -1473,16 +1473,16 @@ mod tests {
         assert!(!format!("{:?}", r.sftp["lab"]).contains("hunter2"), "credentials stay out of logs");
 
         let config: InterfaceConfig = serde_yaml_ng::from_str(
-            "name: x\nsource: { sftp: { server: lab, dir: out } }\ndestination: { sftp: { server: emr, dir: in } }\n",
+            "name: x\nsource: { sftp: { server: lab, dir: out } }\ndestinations: { receiver: { sftp: { server: emr, dir: in } } }\n",
         )
         .unwrap();
         assert_eq!(
             r.missing_references([&config]),
-            ["interface `x`: destination `default`: no sftp server named `emr` in resources.yaml (defined: lab)"]
+            ["interface `x`: destination `receiver`: no sftp server named `emr` in resources.yaml (defined: lab)"]
         );
 
         let config: InterfaceConfig = serde_yaml_ng::from_str(
-            "name: y\nsource: { mllp: { port: 1 } }\ndestination: { mllp: { host: h, port: 2 } }\nisolation: dedicated\ndedicated_pools: { billing: 2 }\n",
+            "name: y\nsource: { mllp: { port: 1 } }\ndestinations: { receiver: { mllp: { host: h, port: 2 } } }\nisolation: dedicated\ndedicated_pools: { billing: 2 }\n",
         )
         .unwrap();
         assert_eq!(

@@ -515,7 +515,7 @@ mod tests {
             SharedServices::new(Environment::with_variables("dev", &[]), &resources, &Default::default()).unwrap(),
         );
         let config: InterfaceConfig = serde_yaml_ng::from_str(
-            "name: x\nsource: { mllp: { port: 1 } }\ndestination: { file: { dir: o } }\nisolation: dedicated\ndedicated_pools: { db: 1 }\n",
+            "name: x\nsource: { mllp: { port: 1 } }\ndestinations: { files: { file: { dir: o } } }\nisolation: dedicated\ndedicated_pools: { db: 1 }\n",
         )
         .unwrap();
         let busy = EngineServices::new(shared.clone(), Default::default());

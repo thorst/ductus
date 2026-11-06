@@ -46,7 +46,7 @@ output: json
 ordering: { key: mrn }
 dedupe: { keys: [id] }
 script: transform.ts
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 cat >"$P/interfaces/rows/transform.ts" <<'EOF'
 import type { CsvRecord } from "@ductus/sdk";
@@ -59,7 +59,7 @@ cat >"$P/interfaces/lab-batch/interface.yaml" <<'EOF'
 name: lab-batch
 source: { file: { dir: in, pattern: "*.hl7", poll: 500ms, split: records, after: delete } }
 ordering: { key: PID-3.1 }
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 
 cat >"$P/interfaces/big/interface.yaml" <<'EOF'
@@ -68,7 +68,7 @@ source: { file: { dir: in, poll: 500ms, split: records } }
 format: csv
 durability: relaxed
 script: transform.ts
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 # Ingest is what's being shown: the transform filters every row.
 echo 'export function transform() { return null; }' >"$P/interfaces/big/transform.ts"
@@ -78,7 +78,7 @@ name: nightly
 source: { schedule: { every: 1s } }
 format: csv
 script: transform.ts
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 cat >"$P/interfaces/nightly/transform.ts" <<'EOF'
 import type { ScheduledRun } from "@ductus/sdk";
@@ -127,12 +127,12 @@ EOF
   cat >"$P/interfaces/sftp-relay/interface.yaml" <<EOF
 name: sftp-relay
 source: { sftp: { server: lab, dir: $R/outbound, pattern: "*.hl7", poll: 500ms, split: records } }
-destination: { sftp: { server: lab, dir: $R/inbound } }
+destinations: { receiver: { sftp: { server: lab, dir: $R/inbound } } }
 EOF
   cat >"$P/interfaces/sftp-unpinned/interface.yaml" <<EOF
 name: sftp-unpinned
 source: { sftp: { server: lab_unpinned, dir: $R/outbound, pattern: "*.never", poll: 500ms } }
-destination: { file: { dir: out } }
+destinations: { files: { file: { dir: out } } }
 EOF
 fi
 

@@ -382,19 +382,31 @@ pub async fn resume(remote: Remote) -> Result<()> {
     Ok(())
 }
 
-/// The API path of a destination's pause. One given with `destination:` is named `default`.
-fn pause_path(interface: &str, destination: Option<&str>) -> String {
-    let destination = destination.unwrap_or(ductus_core::config::DEFAULT_DESTINATION);
-    format!("/interfaces/{}/destinations/{}/pause", urlencoding(interface), urlencoding(destination))
+/// The API path of a destination's pause: the one named, or the interface's only destination
+/// (asked of the engine; with several, refused with their names).
+async fn pause_path(remote: &Remote, interface: &str, destination: Option<&str>) -> Result<(String, String)> {
+    let destination = match destination {
+        Some(d) => d.to_string(),
+        None => {
+            let detail =
+                remote.call(reqwest::Method::GET, &format!("/interfaces/{}", urlencoding(interface)), None).await?;
+            let names: Vec<&str> =
+                detail["destinations"].as_array().into_iter().flatten().filter_map(|d| d["name"].as_str()).collect();
+            match names.as_slice() {
+                [only] => only.to_string(),
+                [] => bail!("`{interface}` has no destinations (it answers HTTP requests itself)"),
+                several => bail!("`{interface}` has several destinations: name one ({})", several.join(", ")),
+            }
+        }
+    };
+    let path = format!("/interfaces/{}/destinations/{}/pause", urlencoding(interface), urlencoding(&destination));
+    Ok((path, destination))
 }
 
-/// "`adt` destination `lab`" (or "`adt`" for its only destination).
+/// "`adt` destination `lab`".
 fn destination_label(status: &Value) -> String {
     let (interface, destination) = (status["interface"].as_str().unwrap_or("?"), status["destination"].as_str());
-    match destination {
-        Some(d) if d != ductus_core::config::DEFAULT_DESTINATION => format!("`{interface}` destination `{d}`"),
-        _ => format!("`{interface}`"),
-    }
+    format!("`{interface}` destination `{}`", destination.unwrap_or("?"))
 }
 
 fn local_time(value: &Value) -> String {
@@ -408,21 +420,20 @@ fn local_time(value: &Value) -> String {
 /// `ductus pause <interface> [destination] [--reason]`.
 pub async fn pause(remote: Remote, interface: &str, destination: Option<&str>, reason: Option<&str>) -> Result<()> {
     let body = serde_json::json!({ "reason": reason });
-    let status = remote.call(reqwest::Method::POST, &pause_path(interface, destination), Some(body)).await?;
+    let (path, destination) = pause_path(&remote, interface, destination).await?;
+    let status = remote.call(reqwest::Method::POST, &path, Some(body)).await?;
     let paused = &status["paused"];
     let pending = status["pending"].as_i64().unwrap_or(0);
     println!(
-        "{} paused by {} at {}: nothing is sent until `ductus resume {interface}{}` ({pending} waiting)",
+        "{} paused by {} at {}: nothing is sent until `ductus resume {interface} {destination}` ({pending} waiting)",
         destination_label(&status),
         paused["by"].as_str().unwrap_or("?"),
         local_time(&paused["at"]),
-        destination.map(|d| format!(" {d}")).unwrap_or_default(),
     );
     match paused["reason"].as_str() {
         Some(reason) => println!("reason: {reason}"),
         None => println!(
-            "no reason yet: add one when you can with `ductus pause {interface}{} --reason \"...\"`",
-            destination.map(|d| format!(" {d}")).unwrap_or_default()
+            "no reason yet: add one when you can with `ductus pause {interface} {destination} --reason \"...\"`"
         ),
     }
     Ok(())
@@ -430,7 +441,8 @@ pub async fn pause(remote: Remote, interface: &str, destination: Option<&str>, r
 
 /// `ductus resume <interface> [destination]`: end a destination's pause.
 pub async fn unpause(remote: Remote, interface: &str, destination: Option<&str>) -> Result<()> {
-    let status = remote.call(reqwest::Method::DELETE, &pause_path(interface, destination), None).await?;
+    let (path, _) = pause_path(&remote, interface, destination).await?;
+    let status = remote.call(reqwest::Method::DELETE, &path, None).await?;
     let pending = status["pending"].as_i64().unwrap_or(0);
     match status["paused"].as_object() {
         Some(_) => println!(
@@ -552,10 +564,7 @@ pub async fn hotspots(remote: Remote, interface: Option<&str>, lanes: Option<usi
             println!();
         }
         let destination = d["destination"].as_str().unwrap_or("?");
-        let name = match destination {
-            ductus_core::config::DEFAULT_DESTINATION => d["interface"].as_str().unwrap_or("?").to_string(),
-            _ => format!("{} → {destination}", d["interface"].as_str().unwrap_or("?")),
-        };
+        let name = format!("{} → {destination}", d["interface"].as_str().unwrap_or("?"));
         println!("{name}: {}", d["summary"].as_str().unwrap_or("?"));
         let workers = d["workers"].as_array().cloned().unwrap_or_default();
         if int(&d["workers_total"]) > 1 {
@@ -607,10 +616,8 @@ pub async fn alerts(remote: Remote) -> Result<()> {
     }
     let all = report["alerts"].as_array().cloned().unwrap_or_default();
     let name = |a: &Value| match a["destination"].as_str() {
-        Some(d) if d != ductus_core::config::DEFAULT_DESTINATION => {
-            format!("{} → {d}", a["interface"].as_str().unwrap_or("?"))
-        }
-        _ => a["interface"].as_str().unwrap_or("?").to_string(),
+        Some(d) => format!("{} → {d}", a["interface"].as_str().unwrap_or("?")),
+        None => a["interface"].as_str().unwrap_or("?").to_string(),
     };
     let open: Vec<&Value> = all.iter().filter(|a| a["state"] != "ok").collect();
     if open.is_empty() {

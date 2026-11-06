@@ -22,7 +22,7 @@ use std::time::Duration;
 #[serde(deny_unknown_fields)]
 pub struct InterfaceConfig {
     /// The interface's name, as the database, the web UI, logs, alerts and routes
-    /// (`destination: { interface: <name> }`) know it. Use the folder's name, as `ductus new
+    /// (`destinations: { <name>: { interface: <name> } }`) know it. Use the folder's name, as `ductus new
     /// interface` does, and keep it short and stable: lower-case words joined by `-`.
     ///
     /// Messages are stored under the name, so a renamed interface is a new one: the old name's
@@ -35,13 +35,16 @@ pub struct InterfaceConfig {
     #[serde(with = "serde_yaml_ng::with::singleton_map")]
     #[cfg_attr(test, schemars(with = "Source"))]
     pub source: Source,
-    /// The TypeScript file with the interface's code, relative to its folder. It exports
-    /// `transform(msg, meta)`, plus any function a destination names with `transform:`.
+    /// The TypeScript file with the interface's code, relative to its folder, for the
+    /// destinations that have no `script:` of their own: it exports `transform(msg, meta)`, plus
+    /// any function a destination names with `transform:`.
     ///
-    /// `ductus validate` type-checks it and the engine loads it at start. Without a script,
-    /// messages go to the destinations as they came. A `schedule` source and an HTTP source in
-    /// `respond` mode need one: there, the code makes the message or the answer. Example:
-    /// `script: transform.ts`.
+    /// Most interfaces give each destination a file of its own instead (`script:` on the
+    /// destination), sharing helpers by importing them; this one is then left out, or kept for
+    /// what several destinations run. An HTTP source in `respond` mode needs it: its function
+    /// makes the answer. `ductus validate` type-checks it and the engine loads it at start. A
+    /// destination with no code anywhere gets messages as they came. Example: `script:
+    /// transform.ts`.
     #[serde(default)]
     pub script: Option<PathBuf>,
     /// What the messages are, so the code gets them parsed and keys can be read: `hl7`, `json`,
@@ -116,24 +119,23 @@ pub struct InterfaceConfig {
     /// flushes. Default: `strict`. Example: `durability: relaxed`.
     #[serde(default)]
     pub durability: Durability,
-    /// Where messages go, when they go to one place: one connector (`mllp`, `file`, `sftp`,
-    /// `http` or `interface`) and its options. Its name is `default` (in the web UI, alerts and
-    /// `ductus pause adt-in default`).
-    ///
-    /// Use `destinations` instead to send to several places. An HTTP source in `respond` mode has
-    /// none: its answer is the result. Required otherwise (this or `destinations`). Example:
-    /// `destination: { mllp: { host: lab.hospital.org, port: 7001 } }`.
-    #[serde(default)]
-    pub destination: Option<DestinationConfig>,
-    /// Several places messages go, by a name you choose (lower-case letters, digits, `-` and `_`).
-    /// Each gets every message and is delivered independently: its own queue, order, retries and
-    /// pause, so one that's down holds up only itself. Each runs its own function on the
-    /// original message (`transform:`, default `transform`).
+    /// The `destination:` of versions before 0.7.4, read only to refuse it with what to write
+    /// instead (`destinations:`, with a name). Not in the schema.
+    #[serde(default, rename = "destination")]
+    #[cfg_attr(test, schemars(skip))]
+    pub removed_destination: Option<serde_yaml_ng::Value>,
+    /// Where messages go, each by a name you choose (lower-case letters, digits, `-` and `_`):
+    /// the name the web UI, alerts, `ductus pause adt-in lab` and the history show. Each gets
+    /// every message and is delivered independently: its own queue, order, retries and pause, so
+    /// one that's down holds up only itself. Each prepares the original message with its own code
+    /// (`script:` on the destination, or the interface's `script` and its `transform:` function).
     ///
     /// A message is finished once every destination is done with it. Adding a destination later
-    /// gives it only the messages still in flight, not older ones; removing one filters what was
-    /// waiting for it. Use instead of `destination`, not with it. Example: `destinations: { lab:
-    /// { mllp: { host: lab.hospital.org, port: 7001 } }, archive: { file: { dir: archive } } }`.
+    /// gives it only the messages still in flight, not older ones; removing one, or renaming it,
+    /// filters what was waiting for it. Choose names that say where it goes (`lab`, `billing`),
+    /// not `default` or `out`. An HTTP source in `respond` mode has none: its answer is the
+    /// result. Required otherwise. Example: `destinations: { lab: { mllp: { host:
+    /// lab.hospital.org, port: 7001 } }, archive: { file: { dir: archive } } }`.
     #[serde(default)]
     pub destinations: BTreeMap<String, DestinationConfig>,
     /// How a delivery that fails for a reason that may pass (a receiver down, a timeout, a
@@ -314,7 +316,7 @@ pub enum Source {
     /// skipped while the previous one is still waiting. Needs a `script`. Example: `source: {
     /// schedule: { cron: "0 2 * * *" } }`.
     Schedule(Schedule),
-    /// Messages routed from other interfaces (`destination: { interface: <this one> }`), with no
+    /// Messages routed from other interfaces (`destinations: { <this one>: { interface: <this one> } }`), with no
     /// listener of its own. Each is stored in the same transaction that marks it sent at the
     /// other interface, so nothing is lost or doubled between them. Use it to split a busy feed
     /// or to share one feed's preparation among several. Example: `source: internal`.
@@ -507,7 +509,7 @@ pub fn check_endpoints<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig
     problems
 }
 
-/// Problems with routes between interfaces (`destination: { interface: b }`): a target that
+/// Problems with routes between interfaces (`destinations: { b: { interface: b } }`): a target that
 /// doesn't exist or doesn't have `source: internal`, a format the target doesn't read, and
 /// loops (a message would go round forever).
 pub fn check_routes<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>) -> Vec<Problem> {
@@ -597,8 +599,66 @@ pub enum HttpMode {
     Respond,
 }
 
-/// Name of the destination given with `destination:` (rather than `destinations:`).
-pub const DEFAULT_DESTINATION: &str = "default";
+/// One function the engine calls: where it is and the formats it's called with.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Function {
+    /// The file that exports it (the interface's `script`, or the destination's).
+    pub module: PathBuf,
+    /// Its exported name.
+    pub name: String,
+    /// `InterfaceConfig::format_spec` for it.
+    pub formats: String,
+}
+
+/// What to write instead of a `destination:` (removed in 0.7.4): its settings under
+/// `destinations:` with a name. Names only keys, never values: they may hold secrets.
+fn removed_destination(config: &InterfaceConfig, old: &serde_yaml_ng::Value) -> String {
+    let keys: Vec<String> = match old {
+        serde_yaml_ng::Value::Mapping(m) => m.keys().filter_map(|k| k.as_str().map(|k| format!("`{k}`"))).collect(),
+        _ => Vec::new(),
+    };
+    let name = suggested_name(config, old);
+    let held = if keys.is_empty() { String::new() } else { format!(" ({})", keys.join(", ")) };
+    // The two lines' comments in one column.
+    let (first, second) = (format!("    {name}:"), "      ...".to_string());
+    let width = first.len().max(second.len()) + 3;
+    format!(
+        "`destination:` is no longer read: every destination has a name (shown in the web UI, alerts, `ductus pause` and the history). Write `destinations:` with a name, and what `destination:` held{held} one level under it:\n\n  destinations:\n{first:width$}# a name of your choosing: where it goes\n{second:width$}# the settings `destination:` had, unchanged\n\nMessages still waiting for the old name (`default`) in a database are filtered at the next start, as for any removed destination."
+    )
+}
+
+/// A name for a destination being moved from `destination:`: where it routes, the receiving
+/// application, or its host's first label; else `receiver`.
+fn suggested_name(config: &InterfaceConfig, old: &serde_yaml_ng::Value) -> String {
+    let slug = |s: &str| {
+        let s: String = s
+            .trim()
+            .to_ascii_lowercase()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() || c == '_' { c } else { '-' })
+            .collect();
+        let s = s.split('-').filter(|p| !p.is_empty()).collect::<Vec<_>>().join("-");
+        (!s.is_empty() && s.len() <= 64).then_some(s)
+    };
+    let get = |path: &[&str]| -> Option<String> {
+        let mut v = old;
+        for p in path {
+            v = v.get(p)?;
+        }
+        v.as_str().map(str::to_string)
+    };
+    let host = |h: String| {
+        let first = h.split('.').next().unwrap_or_default().to_string();
+        (h.parse::<std::net::IpAddr>().is_err() && first != "localhost").then_some(first)
+    };
+    get(&["interface"])
+        .or_else(|| config.about.to.application.clone().filter(|a| !a.trim().is_empty()))
+        .or_else(|| get(&["mllp", "host"]).and_then(host))
+        .or_else(|| get(&["sftp", "server"]))
+        .or_else(|| get(&["http", "api"]))
+        .and_then(|s| slug(&s))
+        .unwrap_or_else(|| "receiver".into())
+}
 
 /// One destination: where to (`connector`) and how messages are prepared for it. What each
 /// setting means is on `RawDestination`, the destination as written.
@@ -606,6 +666,8 @@ pub const DEFAULT_DESTINATION: &str = "default";
 #[serde(try_from = "RawDestination")]
 pub struct DestinationConfig {
     pub connector: Destination,
+    /// Its own code file, relative to the interface's folder.
+    pub script: Option<PathBuf>,
     pub transform: Option<String>,
     pub output: Option<Format>,
     pub retry: Option<Retry>,
@@ -707,10 +769,20 @@ struct RawDestination {
     #[serde(default)]
     #[cfg_attr(test, schemars(skip))]
     interface: Option<serde_yaml_ng::Value>,
-    /// The function in the interface's `script` that prepares messages for this destination: its
-    /// exported name. Each destination runs its function on the message as it was received, not
-    /// on another destination's result, so `toLab` and `toBilling` can each shape it for their
-    /// receiver. Default: `transform`. Example: `transform: toBilling`.
+    /// This destination's code: a TypeScript file relative to the interface's folder, exporting
+    /// `transform(msg, meta)` (or the function `transform:` names). The standard shape: one file
+    /// per destination, so each destination's code reads on its own however many there are;
+    /// helpers they share go in another file both import (module-level values in a destination's
+    /// own file are its own). Each destination runs its code on the message as it was received,
+    /// never on another destination's result.
+    ///
+    /// Without it, the destination runs the interface's `script`, or gets messages as they came
+    /// when there's none. Default: none. Example: `script: lab.ts`.
+    #[serde(default)]
+    script: Option<PathBuf>,
+    /// The exported function that prepares messages for this destination, in its `script` (or
+    /// the interface's): for several destinations sharing one file, or a name that says more.
+    /// Default: `transform`. Example: `transform: toBilling`.
     #[serde(default)]
     transform: Option<String>,
     /// The format this destination's results are written in, when it differs from the
@@ -785,6 +857,7 @@ impl TryFrom<RawDestination> for DestinationConfig {
                 .map_err(|e| e.to_string())?;
         Ok(Self {
             connector,
+            script: raw.script,
             transform: raw.transform,
             output: raw.output,
             retry: raw.retry,
@@ -1242,16 +1315,15 @@ impl InterfaceConfig {
                 self.format.name()
             );
         }
-        if self.destination.is_some() && !self.destinations.is_empty() {
-            refuse!(["destinations"], "use either `destination` (one) or `destinations` (several, by name), not both");
+        if let Some(old) = &self.removed_destination {
+            refuse!(["destination"], "{}", removed_destination(self, old));
         }
-        let has_destination = self.destinations().next().is_some();
-        let destination_key = if self.destination.is_some() { "destination" } else { "destinations" };
+        let has_destination = !self.destinations.is_empty();
         match (self.responds(), has_destination) {
             (true, true) => {
                 refuse!(
-                    [destination_key],
-                    "an HTTP source in `respond` mode answers with the transform's result; remove `destination`"
+                    ["destinations"],
+                    "an HTTP source in `respond` mode answers with the transform's result; remove `destinations`"
                 )
             }
             (true, false) if self.script.is_none() => {
@@ -1263,7 +1335,10 @@ impl InterfaceConfig {
             (true, false) if self.quarantined.is_some() => {
                 refuse!(["quarantined"], "an HTTP source in `respond` mode stores no messages; remove `quarantined`")
             }
-            (false, false) => refuse!([], "`destination` is required (or `destinations`, to send to several places)"),
+            (false, false) => refuse!(
+                [],
+                "`destinations` is required: where messages go, each by a name (`destinations: {{ lab: {{ mllp: {{ host: lab.example.org, port: 7001 }} }} }}`)"
+            ),
             _ => {}
         }
         for (name, d) in self.destinations() {
@@ -1282,12 +1357,18 @@ impl InterfaceConfig {
                 if !function.chars().all(identifier) {
                     refuse!(key(&["transform"]), "{}: `transform: {function}` isn't a function name", what());
                 }
-                if self.script.is_none() {
+                if self.script.is_none() && d.script.is_none() {
                     refuse!(
                         key(&["transform"]),
-                        "{}: `transform: {function}` needs a `script` that exports it",
+                        "{}: `transform: {function}` needs a `script` that exports it (on the destination, or the interface's)",
                         what()
                     );
+                }
+            }
+            if let Some(script) = &d.script {
+                let path = self.dir.join(script);
+                if script.as_os_str().is_empty() || !path.is_file() {
+                    refuse!(key(&["script"]), "{}: script not found: {}", what(), path.display());
                 }
             }
             if let Destination::Sftp { server, .. } = &d.connector
@@ -1400,8 +1481,13 @@ impl InterfaceConfig {
             }
             Source::Schedule(s) => {
                 at(&["source", "schedule"], crate::schedule::Timing::new(s))?;
-                if self.script.is_none() {
-                    refuse!(["source"], "a schedule source needs a `script`: its transform produces the messages");
+                if let Some((name, _)) =
+                    self.destinations.iter().find(|(_, d)| self.script.is_none() && d.script.is_none())
+                {
+                    refuse!(
+                        ["destinations", name],
+                        "a schedule source's code produces the messages: destination `{name}` needs a `script` (its own, or the interface's)"
+                    );
                 }
                 if self.ordering.key.is_some() || self.dedupe.is_some() {
                     refuse!(
@@ -1418,36 +1504,65 @@ impl InterfaceConfig {
         Ok(())
     }
 
-    /// Where a destination is written in interface.yaml: `destination` for the one given that way,
-    /// else `destinations.<name>`.
+    /// Where a destination is written in interface.yaml: `destinations.<name>`.
     pub fn destination_key<'a>(&self, name: &'a str) -> Vec<&'a str> {
-        if self.destination.is_some() { vec!["destination"] } else { vec!["destinations", name] }
+        vec!["destinations", name]
     }
 
-    /// Every destination with its name (`default` for one given with `destination:`).
+    /// Every destination with its name, by name.
     pub fn destinations(&self) -> impl Iterator<Item = (&str, &DestinationConfig)> {
-        let single = self.destination.iter().map(|d| (DEFAULT_DESTINATION, d));
-        single.chain(self.destinations.iter().map(|(name, d)| (name.as_str(), d)))
+        self.destinations.iter().map(|(name, d)| (name.as_str(), d))
     }
 
-    /// "`adt` destination `lab`" (or "`adt`" when it has just one destination), for messages.
+    /// "`adt` destination `lab`", for messages.
     pub fn label_destination(&self, name: &str) -> String {
-        if self.destination.is_some() {
-            format!("`{}`", self.name)
-        } else {
-            format!("`{}` destination `{name}`", self.name)
-        }
+        format!("`{}` destination `{name}`", self.name)
     }
 
-    /// The functions the engine calls, each with its formats (see `format_spec`): one per
-    /// destination, or `transform` for respond mode. Same order as `destinations()`.
-    pub fn functions(&self) -> Vec<(String, String)> {
+    /// The functions the engine calls, each in its module and with its formats (see
+    /// `format_spec`): one per destination (None for one without code: it gets messages as they
+    /// came), or `transform` for respond mode. Same order as `destinations()`.
+    pub fn functions(&self) -> Vec<Option<Function>> {
         if self.responds() {
-            return vec![("transform".into(), self.format_spec())];
+            let module = self.script_path();
+            return vec![module.map(|module| Function {
+                module,
+                name: "transform".into(),
+                formats: self.format_spec(),
+            })];
         }
         self.destinations()
-            .map(|(_, d)| (d.function().to_string(), self.format_spec_with(Some(self.output_for(d)))))
+            .map(|(_, d)| {
+                let module = d.script.as_ref().map(|s| self.dir.join(s)).or_else(|| self.script_path())?;
+                Some(Function {
+                    module,
+                    name: d.function().to_string(),
+                    formats: self.format_spec_with(Some(self.output_for(d))),
+                })
+            })
             .collect()
+    }
+
+    /// Every file of its own the interface's code starts from (its `script` first, then each
+    /// destination's, by name), once each; empty when it has no code.
+    pub fn modules(&self) -> Vec<PathBuf> {
+        let mut out: Vec<PathBuf> = Vec::new();
+        for f in self.functions().into_iter().flatten() {
+            if !out.contains(&f.module) {
+                out.push(f.module);
+            }
+        }
+        // The interface's script first even when no destination runs it (validate still loads it).
+        if let Some(s) = self.script_path() {
+            out.retain(|m| *m != s);
+            out.insert(0, s);
+        }
+        out
+    }
+
+    /// Whether any of its destinations (or its answer) runs code.
+    pub fn has_code(&self) -> bool {
+        !self.modules().is_empty()
     }
 
     /// A destination's retry settings: its own, or the interface's.
@@ -1574,7 +1689,7 @@ script: transform.ts
 ordering: { key: PID-3.1, partitions: 8 }
 isolation: dedicated
 workers: 2
-destination: { mllp: { host: 127.0.0.1, port: 6662 } }
+destinations: { receiver: { mllp: { host: 127.0.0.1, port: 6662 } } }
 retry: { max_attempts: 3 }
 "#;
         let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
@@ -1589,7 +1704,7 @@ retry: { max_attempts: 3 }
     #[test]
     fn script_timeout_has_a_safe_default_and_range() {
         let load = |extra: &str| -> InterfaceConfig {
-            let dest = "destination: { file: { dir: o } }";
+            let dest = "destinations: { files: { file: { dir: o } } }";
             serde_yaml_ng::from_str(&format!("name: a\nsource: {{ mllp: {{ port: 6661 }} }}\n{dest}\n{extra}")).unwrap()
         };
         assert_eq!(load("").timeout, Duration::from_secs(5));
@@ -1607,32 +1722,32 @@ retry: { max_attempts: 3 }
             "name: api\nsource: { http: { port: 8080, path: '/patients/{mrn}', method: GET, mode: respond } }\nscript: t.ts\nformat: json\n",
         )
         .unwrap();
-        assert!(respond.responds() && respond.destination.is_none());
+        assert!(respond.responds() && respond.destinations.is_empty());
         assert!(respond.format_spec().contains(r#""http":true"#));
 
         let queue: InterfaceConfig = serde_yaml_ng::from_str(
-            "name: orders\nsource: { http: { port: 8080, path: /orders } }\nformat: json\ndestination: { http: { url: 'https://x/api', headers: { Authorization: Bearer t } } }\n",
+            "name: orders\nsource: { http: { port: 8080, path: /orders } }\nformat: json\ndestinations: { receiver: { http: { url: 'https://x/api', headers: { Authorization: Bearer t } } } }\n",
         )
         .unwrap();
         assert!(!queue.responds());
         assert!(matches!(&queue.source, Source::Http { method, mode: HttpMode::Queue, .. } if method == "POST"));
         assert!(
-            matches!(&queue.destination.as_ref().unwrap().connector, Destination::Http { headers, .. } if headers["Authorization"] == "Bearer t")
+            matches!(&queue.destinations.values().next().unwrap().connector, Destination::Http { headers, .. } if headers["Authorization"] == "Bearer t")
         );
         assert!(queue.validate().is_ok());
 
         let mut bad = respond.clone();
         bad.script = None; // no script file in this test; the destination check comes first
-        bad.destination = queue.destination.clone();
-        assert!(bad.validate().unwrap_err().to_string().contains("remove `destination`"));
+        bad.destinations = queue.destinations.clone();
+        assert!(bad.validate().unwrap_err().to_string().contains("remove `destinations`"));
         let mut bad = queue.clone();
-        bad.destination = None;
+        bad.destinations.clear();
         assert!(bad.validate().unwrap_err().to_string().contains("required"));
 
         // `ca` and `certificate`: for an https URL; an API brings its own.
         let with = |http: &str| {
             let c: InterfaceConfig = serde_yaml_ng::from_str(&format!(
-                "name: orders\nsource: {{ http: {{ port: 8080, path: /orders }} }}\nformat: json\ndestination: {{ http: {{ {http} }} }}\n"
+                "name: orders\nsource: {{ http: {{ port: 8080, path: /orders }} }}\nformat: json\ndestinations: {{ receiver: {{ http: {{ {http} }} }} }}\n"
             ))
             .unwrap();
             c.validate().map_err(|e| e.to_string())
@@ -1646,7 +1761,7 @@ retry: { max_attempts: 3 }
     fn retention_is_one_of_the_fixed_windows() {
         let load = |extra: &str| {
             serde_yaml_ng::from_str::<InterfaceConfig>(&format!(
-                "name: a\nsource: {{ mllp: {{ port: 6661 }} }}\ndestination: {{ file: {{ dir: o }} }}\n{extra}"
+                "name: a\nsource: {{ mllp: {{ port: 6661 }} }}\ndestinations: {{ files: {{ file: {{ dir: o }} }} }}\n{extra}"
             ))
         };
         assert_eq!(load("").unwrap().retention, None, "ductus.yaml's applies");
@@ -1673,7 +1788,7 @@ retry: { max_attempts: 3 }
     #[test]
     fn finds_port_conflicts() {
         let load = |yaml: &str| -> InterfaceConfig { serde_yaml_ng::from_str(yaml).unwrap() };
-        let dest = "destination: { file: { dir: o } }";
+        let dest = "destinations: { files: { file: { dir: o } } }";
         let a = load(&format!("name: a\nsource: {{ mllp: {{ port: 6661 }} }}\n{dest}"));
         let b = load(&format!("name: b\nsource: {{ mllp: {{ port: 6661 }} }}\n{dest}"));
         let c = load(&format!("name: c\nsource: {{ http: {{ port: 8080, path: /x }} }}\nformat: json\n{dest}"));
@@ -1727,13 +1842,13 @@ retry: { max_attempts: 3 }
         let yaml = r#"
 name: device
 source: { mllp: { port: 1 } }
-destination: { mllp: { host: h, port: 2, ack: none, on_reject: retry } }
+destinations: { receiver: { mllp: { host: h, port: 2, ack: none, on_reject: retry } } }
 dedupe: { keys: [PID-3.1, EVN-2], window: 30m }
 rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
 "#;
         let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert!(matches!(
-            c.destination.as_ref().unwrap().connector,
+            c.destinations.values().next().unwrap().connector,
             Destination::Mllp { ack: AckMode::None, on_reject: OnReject::Retry, .. }
         ));
         let d = c.dedupe.unwrap();
@@ -1743,11 +1858,11 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
         assert_eq!((r.per_minute, r.burst, r.mode, r.over_limit), (100, Some(500), RateMode::Average, OverLimit::Drop));
 
         let defaults: InterfaceConfig = serde_yaml_ng::from_str(
-            "name: x\nsource: { mllp: { port: 1 } }\ndestination: { mllp: { host: h, port: 2 } }\ndedupe: {}\n",
+            "name: x\nsource: { mllp: { port: 1 } }\ndestinations: { receiver: { mllp: { host: h, port: 2 } } }\ndedupe: {}\n",
         )
         .unwrap();
         assert!(matches!(
-            defaults.destination.as_ref().unwrap().connector,
+            defaults.destinations.values().next().unwrap().connector,
             Destination::Mllp { ack: AckMode::Wait, on_reject: OnReject::Quarantine, .. }
         ));
         assert_eq!(defaults.dedupe.unwrap().keys, ["MSH-10"]);
@@ -1756,7 +1871,7 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
     #[test]
     fn shared_interfaces_have_one_slot_with_every_lane() {
         let shared: InterfaceConfig = serde_yaml_ng::from_str(
-            "name: x\nsource: { mllp: { port: 1 } }\nordering: { key: PID-3.1, partitions: 4 }\ndestination: { file: { dir: o } }\n",
+            "name: x\nsource: { mllp: { port: 1 } }\nordering: { key: PID-3.1, partitions: 4 }\ndestinations: { files: { file: { dir: o } } }\n",
         )
         .unwrap();
         assert_eq!(shared.isolation, Isolation::Shared);
@@ -1771,7 +1886,7 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
     #[test]
     fn dedicated_pools_need_a_dedicated_interface() {
         let mut c: InterfaceConfig = serde_yaml_ng::from_str(
-            "name: x\nsource: { mllp: { port: 1 } }\ndestination: { file: { dir: o } }\ndedicated_pools: { patient_db: 4 }\n",
+            "name: x\nsource: { mllp: { port: 1 } }\ndestinations: { files: { file: { dir: o } } }\ndedicated_pools: { patient_db: 4 }\n",
         )
         .unwrap();
         assert!(c.validate().unwrap_err().to_string().contains("dedicated_pools needs `isolation: dedicated`"));
@@ -1797,7 +1912,7 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
             c.validate()?;
             Ok(c)
         };
-        let dest = "destination: { file: { dir: out } }";
+        let dest = "destinations: { files: { file: { dir: out } } }";
         let csv = load(&format!(
             "name: a\nsource: {{ file: {{ dir: in, pattern: '*.csv', poll: 2s, split: records }} }}\nformat: csv\n{dest}"
         ))
@@ -1811,12 +1926,12 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
         assert!(!whole.format_spec().contains("record"));
 
         let sftp = load(
-            "name: c\nsource: { sftp: { server: lab, dir: /out, after: delete } }\ndestination: { sftp: { server: emr, dir: inbound } }\n",
+            "name: c\nsource: { sftp: { server: lab, dir: /out, after: delete } }\ndestinations: { receiver: { sftp: { server: emr, dir: inbound } } }\n",
         )
         .unwrap();
         assert_eq!(
             sftp.resource_references(),
-            [(Kind::Sftp, "lab", "source".into()), (Kind::Sftp, "emr", "destination `default`".into())]
+            [(Kind::Sftp, "lab", "source".into()), (Kind::Sftp, "emr", "destination `receiver`".into())]
         );
 
         let err = |yaml: &str| format!("{:#}", load(yaml).unwrap_err());
@@ -1868,18 +1983,21 @@ destinations:
         assert_eq!((c.retry_for(billing).max_attempts, c.retry_for(lab).max_attempts), (Some(2), Some(9)));
         assert!(c.rate_limit_for(billing).is_some() && c.rate_limit_for(lab).is_none());
         assert_eq!((c.output_for(billing), c.output_for(lab)), (&Format::Json, &Format::Hl7));
-        let functions = c.functions();
-        assert_eq!(functions[0].0, "toBilling");
-        assert!(functions[0].1.contains(r#""output":{"kind":"json"}"#), "{}", functions[0].1);
-        assert!(functions[1].1.contains(r#""output":{"kind":"hl7"}"#));
+        let functions: Vec<Function> = c.functions().into_iter().map(Option::unwrap).collect();
+        assert_eq!(functions[0].name, "toBilling");
+        assert!(functions[0].formats.contains(r#""output":{"kind":"json"}"#), "{}", functions[0].formats);
+        assert!(functions[1].formats.contains(r#""output":{"kind":"hl7"}"#));
+        assert!(functions.iter().all(|f| f.module == Path::new("transform.ts")), "the interface's script");
 
         let single: InterfaceConfig = serde_yaml_ng::from_str(
-            "name: x\nsource: { mllp: { port: 1 } }\ndestination: { file: { dir: o }, save_output: true }\n",
+            "name: x\nsource: { mllp: { port: 1 } }\ndestinations: { files: { file: { dir: o }, save_output: true } }\n",
         )
         .unwrap();
         let (name, d) = single.destinations().next().unwrap();
-        assert_eq!(name, DEFAULT_DESTINATION);
+        assert_eq!(name, "files");
         assert!(d.save_output && matches!(d.connector, Destination::File { .. }));
+        assert_eq!(single.functions(), [None], "no code: messages as they came");
+        assert!(single.modules().is_empty() && !single.has_code());
 
         let err = |yaml: &str| match serde_yaml_ng::from_str::<InterfaceConfig>(yaml) {
             Ok(c) => format!("{:#}", c.validate().unwrap_err()),
@@ -1893,12 +2011,6 @@ destinations:
         );
         assert!(err(&format!("{head}destinations: {{ a: {{ file: {{ dir: o }}, bogus: 1 }} }}")).contains("bogus"));
         assert!(err(&format!("{head}destinations: {{ a: {{ file: {{ dir: o, bogus: 1 }} }} }}")).contains("bogus"));
-        assert!(
-            err(&format!(
-                "{head}destination: {{ file: {{ dir: o }} }}\ndestinations: {{ a: {{ file: {{ dir: o }} }} }}"
-            ))
-            .contains("not both")
-        );
         assert!(err(&format!("{head}destinations: {{ Lab: {{ file: {{ dir: o }} }} }}")).contains("lower-case"));
         assert!(
             err(&format!("{head}destinations: {{ a: {{ file: {{ dir: o }}, transform: to-x }} }}"))
@@ -1913,6 +2025,88 @@ destinations:
                 .contains("destination `a`")
         );
         assert!(err(&format!("{head}destinations: {{}}")).contains("is required"));
+    }
+
+    /// `destination:` (before 0.7.4) is refused with what to write instead: a name suggested from
+    /// where it goes, the keys it held, never their values (they may be secrets).
+    #[test]
+    fn the_old_single_destination_is_refused_with_what_to_write() {
+        let refused = |yaml: &str| {
+            let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
+            format!("{:#}", c.validate().unwrap_err())
+        };
+        let head = "name: x\nsource: { mllp: { port: 1 } }\n";
+        let text = refused(&format!(
+            "{head}destination: {{ mllp: {{ host: lab.hospital.org, port: 2, password: s3cret }}, transform: toLab }}\n"
+        ));
+        assert!(text.contains("`destination:` is no longer read"), "{text}");
+        assert!(text.contains("destinations:\n    lab:"), "the host's first label: {text}");
+        assert!(text.contains("(`mllp`, `transform`)") && !text.contains("s3cret"), "{text}");
+        let named = |yaml: &str| {
+            let text = refused(&format!("{head}{yaml}"));
+            text.split("destinations:\n    ").nth(1).unwrap().split(':').next().unwrap().to_string()
+        };
+        assert_eq!(named("destination: { interface: billing-in }\n"), "billing-in");
+        assert_eq!(
+            named("about: { to: { application: Sunquest Lab } }\ndestination: { file: { dir: o } }\n"),
+            "sunquest-lab"
+        );
+        assert_eq!(named("destination: { mllp: { host: 10.1.2.3, port: 2 } }\n"), "receiver");
+        // With `destinations:` beside it, it's still the old key that's refused.
+        let both = refused(&format!(
+            "{head}destination: {{ file: {{ dir: o }} }}\ndestinations: {{ a: {{ file: {{ dir: o }} }} }}\n"
+        ));
+        assert!(both.contains("no longer read"), "{both}");
+    }
+
+    /// Each destination's code in a file of its own (0.7.4.1): `script:` on the destination, the
+    /// interface's for the others, none for a destination without code.
+    #[test]
+    fn a_destination_s_own_script() {
+        let dir = tempfile::tempdir().unwrap();
+        let interface = dir.path().join("interfaces/adt");
+        std::fs::create_dir_all(&interface).unwrap();
+        for file in ["lab.ts", "billing.ts", "shared.ts"] {
+            std::fs::write(interface.join(file), "export function transform(m: unknown) { return m; }\n").unwrap();
+        }
+        let load = |yaml: &str| -> Result<InterfaceConfig> {
+            std::fs::write(interface.join("interface.yaml"), yaml)?;
+            InterfaceConfig::load_in(&interface, &crate::Environment::default())
+        };
+        let head = "name: adt\nsource: { mllp: { port: 1 } }\n";
+        let c = load(&format!(
+            "{head}script: shared.ts\ndestinations:\n  lab: {{ mllp: {{ host: lab, port: 2 }}, script: lab.ts }}\n  billing: {{ file: {{ dir: o }}, script: billing.ts, transform: toBilling }}\n  archive: {{ file: {{ dir: a }} }}\n"
+        ))
+        .unwrap();
+        let functions = c.functions();
+        let file = |i: usize| functions[i].as_ref().map(|f| (f.module.file_name().unwrap().to_owned(), f.name.clone()));
+        // By name: archive, billing, lab.
+        assert_eq!(file(0), Some(("shared.ts".into(), "transform".into())), "the interface's script");
+        assert_eq!(file(1), Some(("billing.ts".into(), "toBilling".into())));
+        assert_eq!(file(2), Some(("lab.ts".into(), "transform".into())));
+        let modules: Vec<_> = c.modules().iter().map(|m| m.file_name().unwrap().to_owned()).collect();
+        assert_eq!(modules, ["shared.ts", "billing.ts", "lab.ts"], "the interface's first, then by destination");
+
+        // Without the interface's script, a destination without its own runs no code.
+        let c = load(&format!("{head}destinations:\n  lab: {{ mllp: {{ host: lab, port: 2 }}, script: lab.ts }}\n  archive: {{ file: {{ dir: a }} }}\n")).unwrap();
+        assert_eq!(c.functions().iter().map(Option::is_some).collect::<Vec<_>>(), [false, true]);
+        assert!(c.has_code());
+
+        let refused = |yaml: &str| format!("{:#}", load(yaml).unwrap_err());
+        let missing =
+            refused(&format!("{head}destinations: {{ lab: {{ mllp: {{ host: lab, port: 2 }}, script: nope.ts }} }}\n"));
+        assert!(missing.contains("destination `lab`: script not found"), "{missing}");
+        // `transform:` with a destination's own script needs no interface script.
+        load(&format!(
+            "{head}destinations: {{ b: {{ file: {{ dir: o }}, script: billing.ts, transform: toBilling }} }}\n"
+        ))
+        .unwrap();
+        // A schedule's code makes the messages: every destination needs some.
+        let schedule = "name: adt\nsource: { schedule: { every: 1h } }\nformat: json\n";
+        let text = refused(&format!(
+            "{schedule}destinations:\n  lab: {{ file: {{ dir: o }}, script: lab.ts }}\n  archive: {{ file: {{ dir: a }} }}\n"
+        ));
+        assert!(text.contains("destination `archive` needs a `script`"), "{text}");
     }
 
     #[test]
@@ -1945,23 +2139,29 @@ destinations:
             format!("{:#}", c.validate().unwrap_err())
         };
         let head = "name: x\nsource: { mllp: { port: 1 } }\n";
-        assert!(err(&format!("{head}destination: {{ http: {{ method: PUT }} }}")).contains("either `url` or `api`"));
         assert!(
-            err(&format!("{head}destination: {{ http: {{ url: 'https://a/b', api: b }} }}"))
+            err(&format!("{head}destinations: {{ receiver: {{ http: {{ method: PUT }} }} }}"))
                 .contains("either `url` or `api`")
         );
         assert!(
-            err(&format!("{head}destination: {{ http: {{ url: 'https://a/b', path: /c }} }}"))
+            err(&format!("{head}destinations: {{ receiver: {{ http: {{ url: 'https://a/b', api: b }} }} }}"))
+                .contains("either `url` or `api`")
+        );
+        assert!(
+            err(&format!("{head}destinations: {{ receiver: {{ http: {{ url: 'https://a/b', path: /c }} }} }}"))
                 .contains("goes with `api`")
         );
-        assert!(err(&format!("{head}destination: {{ http: {{ url: 'ftp://a/b' }} }}")).contains("http(s) URL"));
         assert!(
-            err(&format!("{head}destination: {{ file: {{ dir: o }} }}\nabout: {{ from: {{ hosts: [10.1.2.0/40] }} }}"))
+            err(&format!("{head}destinations: {{ receiver: {{ http: {{ url: 'ftp://a/b' }} }} }}"))
+                .contains("http(s) URL")
+        );
+        assert!(
+            err(&format!("{head}destinations: {{ files: {{ file: {{ dir: o }} }} }}\nabout: {{ from: {{ hosts: [10.1.2.0/40] }} }}"))
                 .contains("about.from.hosts")
         );
         assert!(
             serde_yaml_ng::from_str::<InterfaceConfig>(&format!(
-                "{head}destination: {{ file: {{ dir: o }} }}\nabout: {{ to: {{ hosts: [h] }} }}"
+                "{head}destinations: {{ files: {{ file: {{ dir: o }} }} }}\nabout: {{ to: {{ hosts: [h] }} }}"
             ))
             .is_err(),
             "hosts are for the sending side"
@@ -1978,9 +2178,11 @@ destinations:
         let front = load(
             "name: front\nsource: { mllp: { port: 1 } }\ndestinations:\n  lab: { interface: lab }\n  billing: { interface: billing, output: json }\n",
         );
-        let lab = load("name: lab\nsource: internal\ndestination: { file: { dir: o } }\n");
-        let billing = load("name: billing\nsource: internal\nformat: json\ndestination: { interface: archive }\n");
-        let archive = load("name: archive\nsource: internal\nformat: json\ndestination: { file: { dir: o } }\n");
+        let lab = load("name: lab\nsource: internal\ndestinations: { files: { file: { dir: o } } }\n");
+        let billing =
+            load("name: billing\nsource: internal\nformat: json\ndestinations: { archive: { interface: archive } }\n");
+        let archive =
+            load("name: archive\nsource: internal\nformat: json\ndestinations: { files: { file: { dir: o } } }\n");
         assert!(matches!(lab.source, Source::Internal));
         assert_eq!(front.destinations().map(|(_, d)| d.route()).collect::<Vec<_>>(), [Some("billing"), Some("lab")]);
         assert!(check_routes([&front, &lab, &billing, &archive]).is_empty());
@@ -1990,12 +2192,13 @@ destinations:
         assert!(check_endpoints([&front, &lab]).is_empty());
 
         // A target that's missing, has another source, or reads another format.
-        let wrong_format = load("name: lab\nsource: internal\nformat: json\ndestination: { file: { dir: o } }\n");
-        let outside = load("name: lab\nsource: { mllp: { port: 2 } }\ndestination: { file: { dir: o } }\n");
+        let wrong_format =
+            load("name: lab\nsource: internal\nformat: json\ndestinations: { files: { file: { dir: o } } }\n");
+        let outside = load("name: lab\nsource: { mllp: { port: 2 } }\ndestinations: { files: { file: { dir: o } } }\n");
         assert_eq!(
             check_routes([&front, &wrong_format, &billing]),
             [
-                "`billing`: no interface named `archive`",
+                "`billing` destination `archive`: no interface named `archive`",
                 "`front` destination `lab` sends hl7 but `lab` reads json: set `output:` on the destination or `format:` on `lab`",
             ]
         );
@@ -2005,16 +2208,19 @@ destinations:
         );
 
         // Loops, each reported once.
-        let a = load("name: a\nsource: internal\ndestination: { interface: b }\n");
+        let a = load("name: a\nsource: internal\ndestinations: { b: { interface: b } }\n");
         let b = load("name: b\nsource: internal\ndestinations: { x: { interface: c }, y: { interface: a } }\n");
-        let c = load("name: c\nsource: internal\ndestination: { interface: a }\n");
+        let c = load("name: c\nsource: internal\ndestinations: { a: { interface: a } }\n");
         assert_eq!(check_routes([&a, &b, &c]), ["routes loop: a → b → a", "routes loop: a → b → c → a"]);
 
         let err = |yaml: &str| {
             format!("{:#}", serde_yaml_ng::from_str::<InterfaceConfig>(yaml).unwrap().validate().unwrap_err())
         };
-        assert!(err("name: a\nsource: internal\ndestination: { interface: a }\n").contains("route to itself"));
-        assert!(err("name: a\nsource: internal\ndestination: { interface: ' ' }\n").contains("needs the name"));
+        assert!(err("name: a\nsource: internal\ndestinations: { a: { interface: a } }\n").contains("route to itself"));
+        assert!(
+            err("name: a\nsource: internal\ndestinations: { receiver: { interface: ' ' } }\n")
+                .contains("needs the name")
+        );
         assert!(err("name: a\nsource: internal\n").contains("is required"));
     }
 
@@ -2050,14 +2256,17 @@ destinations:
         assert!(respond.validate().unwrap_err().to_string().contains("`respond` mode has none"));
         let head = "name: x\nsource: { mllp: { port: 1 } }\n";
         assert!(
-            err(&format!("{head}destination: {{ file: {{ dir: o }}, monitor: {{ active_within: 5m }} }}"))
-                .contains("active_within")
+            err(&format!(
+                "{head}destinations: {{ files: {{ file: {{ dir: o }}, monitor: {{ active_within: 5m }} }} }}"
+            ))
+            .contains("active_within")
         );
     }
 
     #[test]
     fn rejects_unknown_fields() {
-        let yaml = "name: x\nsource: { mllp: { port: 1 } }\ndestination: { file: { dir: out } }\nbogus: 1\n";
+        let yaml =
+            "name: x\nsource: { mllp: { port: 1 } }\ndestinations: { files: { file: { dir: out } } }\nbogus: 1\n";
         assert!(serde_yaml_ng::from_str::<InterfaceConfig>(yaml).is_err());
     }
 }

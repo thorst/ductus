@@ -81,7 +81,7 @@ export interface Meta {
   id: number;
   /** When the message was received (ISO 8601). */
   receivedAt: string;
-  /** The destination this call prepares the message for (`default` with a single `destination:`). */
+  /** The destination this call prepares the message for: its name under `destinations:`. */
   destination: string;
   /** Routed from another interface (`source: internal`): the `id` of the message there. Absent
    *  for messages received from outside. */

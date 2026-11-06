@@ -35,7 +35,7 @@ export function isCertificate(a: { key: string }) {
 export function alertName(a: { key: string; interface: string; destination?: string | null }) {
   if (isCertificate(a) && a.key.endsWith(":0")) return `our certificate ${a.interface} (on ${a.destination ?? "?"})`;
   if (isCertificate(a)) return `certificate of ${a.destination ?? "?"} (${a.interface})`;
-  return a.destination && a.destination !== "default" ? `${a.interface} → ${a.destination}` : a.interface;
+  return a.destination ? `${a.interface} → ${a.destination}` : a.interface;
 }
 
 /** The alert's name, linking to where it's about: the interface, or the Connections page for a certificate. */

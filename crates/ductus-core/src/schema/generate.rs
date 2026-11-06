@@ -622,7 +622,7 @@ fn whole(kind: &str, part: serde_yaml_ng::Value) -> Result<serde_yaml_ng::Value,
     let V::Mapping(part) = part else { return Err("an example `in part` must be settings (`key: value`)".into()) };
     let mut base = match kind {
         "interface" => serde_yaml_ng::from_str::<serde_yaml_ng::Mapping>(
-            "name: example\nsource: { mllp: { port: 6661 } }\ndestination: { file: { dir: out } }",
+            "name: example\nsource: { mllp: { port: 6661 } }\ndestinations: { files: { file: { dir: out } } }",
         )
         .unwrap(),
         _ => serde_yaml_ng::Mapping::new(),

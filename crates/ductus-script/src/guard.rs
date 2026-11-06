@@ -48,12 +48,15 @@ pub(crate) struct Trip {
     pub interface: Option<usize>,
 }
 
+/// An interface's modules' URLs (its script, each destination's) and its folder (with a
+/// trailing `/`), to recognize its code on the stack.
+pub(crate) type Modules = (Vec<String>, String);
+
 /// What the guard knows about each interface in the isolate (indexed like `InterfaceId`).
 struct Interface {
     timeout: Duration,
-    /// Its module URL and folder (with a trailing `/`), to recognize its code on the stack.
     /// None for test suites.
-    module: Option<(String, String)>,
+    module: Option<Modules>,
 }
 
 /// State shared between an isolate, the watchdog thread and the interrupts.
@@ -148,8 +151,8 @@ impl Guard {
         DebugSwitch(self.shared.clone())
     }
 
-    /// Register the next interface (`module`: its URL and folder) and its time budget.
-    pub fn add(&self, module: Option<(String, String)>, timeout: Duration) {
+    /// Register the next interface (`module`: its modules' URLs and its folder) and its time budget.
+    pub fn add(&self, module: Option<Modules>, timeout: Duration) {
         self.shared.interfaces().push(Interface { timeout, module });
     }
 
@@ -224,15 +227,16 @@ impl Shared {
         }
     }
 
-    /// The innermost interface on the stack: its module file first, then anything in its folder.
+    /// The innermost interface on the stack: its module files first, then anything in its folder.
     fn whose(&self, scripts: &[String]) -> Option<usize> {
         let interfaces = self.interfaces();
-        let find = |matches: &dyn Fn(&str, &(String, String)) -> bool| {
+        let find = |matches: &dyn Fn(&str, &Modules) -> bool| {
             scripts.iter().find_map(|script| {
                 interfaces.iter().position(|i| i.module.as_ref().is_some_and(|m| matches(script, m)))
             })
         };
-        find(&|script, (url, _)| script == url).or_else(|| find(&|script, (_, folder)| script.starts_with(folder)))
+        find(&|script, (urls, _)| urls.iter().any(|u| u == script))
+            .or_else(|| find(&|script, (_, folder)| script.starts_with(folder)))
     }
 }
 

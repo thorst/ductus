@@ -159,7 +159,7 @@ From 0.7.3.3, one timeline per interface, newest first, from four sources:
 |---|---|---|
 | **git** | Each commit that changed one of its files: its `interface.yaml`, its code and the shared files it imports, every version's ([nuance](../nuances/deployments.md#history-lists-the-commits-on-the-files-an-interfaces-versions-named-level-3)) | `committed 3c6d0d4dd062: adt-in: PV1-3 for the wards (interfaces/adt-in/transform.ts (modified))` |
 | **Deployments** | Each start or handover that changed its code: from which version to which, by whom, why, from which commit, and a ⚠ when it may have undone someone else's change ([below](#two-people-one-server)) | `deployed 36792608ed03 → e5b6cc1310d6 by a handover: lab wants MSH-5 set (commit 8225dd3b602b)` |
-| **The audit log** | What people (and the engine) did to it: pauses, resends, corrections, dismissals, retention changes, alerts acknowledged or silenced | `paused adt-in/default: vendor maintenance` |
+| **The audit log** | What people (and the engine) did to it: pauses, resends, corrections, dismissals, retention changes, alerts acknowledged or silenced | `paused adt-in/lab: vendor maintenance` |
 | **Its documentation** | Each change of its documentation fields (`about:`, `custom:`, its destinations' `custom:`), with the deployment that brought it | `documentation changed: custom.baa_signed: no → yes` |
 
 **Why one timeline:** "it broke Tuesday afternoon" needs the commit, the deploy that ran it, and

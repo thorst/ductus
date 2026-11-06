@@ -7,6 +7,5 @@ about:
 source:
   file: { dir: inbound, pattern: "census_*.csv", split: records }   # each row is a message
 format: csv
-script: census.ts
 output: hl7
-destination: { file: { dir: out } }
+destinations: { ehr: { file: { dir: out }, script: census.ts } }

@@ -21,7 +21,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The store (Postgres)](store.md) (2)
 - [Several engines on one database](engines.md) (4)
 - [Retention](retention.md) (7)
-- [Several destinations](destinations.md) (7)
+- [Several destinations](destinations.md) (8)
 - [Order, retries and durability](ordering.md) (7)
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
@@ -187,7 +187,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (76)
+## Level 3: Professional (77)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
@@ -196,6 +196,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Losing the database connection pauses sending, not receiving](engines.md#losing-the-database-connection-pauses-sending-not-receiving-level-3) (Several engines on one database)
 - [PgBouncer in transaction mode can't hold the engine's lock](engines.md#pgbouncer-in-transaction-mode-cant-hold-the-engines-lock-level-3) (Several engines on one database)
 - [One retention change at a time per interface](retention.md#one-retention-change-at-a-time-per-interface-level-3) (Retention)
+- [A destination's own file has its own module-level values](destinations.md#a-destinations-own-file-has-its-own-module-level-values-level-3) (Several destinations)
 - [Adding, removing or renaming a destination](destinations.md#adding-removing-or-renaming-a-destination-level-3) (Several destinations)
 - [Many destinations on one interface: when to split](destinations.md#many-destinations-on-one-interface-when-to-split-level-3) (Several destinations)
 - [Order is per key, and one stuck message holds up its key](ordering.md#order-is-per-key-and-one-stuck-message-holds-up-its-key-level-3) (Order, retries and durability)

@@ -3503,7 +3503,7 @@ export interface operations {
             path: {
                 /** @description Interface name */
                 name: string;
-                /** @description Destination name (`default` for one given with `destination:`) */
+                /** @description Destination name (its name under `destinations:`) */
                 destination: string;
             };
             cookie?: never;

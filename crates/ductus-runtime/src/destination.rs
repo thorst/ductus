@@ -210,13 +210,13 @@ mod tests {
         .unwrap();
         let config = |path: &str| -> InterfaceConfig {
             serde_yaml_ng::from_str(&format!(
-                "name: x\nsource: {{ mllp: {{ port: 1 }} }}\ndestination: {{ http: {{ api: billing, path: {path}, headers: {{ X-Mine: dest, X-Both: dest }} }} }}\n"
+                "name: x\nsource: {{ mllp: {{ port: 1 }} }}\ndestinations: {{ receiver: {{ http: {{ api: billing, path: {path}, headers: {{ X-Mine: dest, X-Both: dest }} }} }} }}\n"
             ))
             .unwrap()
         };
         let api = resources.apis.get("billing").cloned();
         let send = |config: InterfaceConfig| {
-            let d = config.destination.clone().unwrap();
+            let d = config.destinations.values().next().cloned().unwrap();
             let mut sender = Sender::new(&config, &d, None, api.clone(), None).unwrap();
             async move { sender.send(1, b"MSH|").await }
         };
@@ -263,10 +263,10 @@ mod tests {
         ack: &str,
     ) -> Result<(), String> {
         let config: InterfaceConfig = serde_yaml_ng::from_str(&format!(
-            "name: x\nsource: {{ mllp: {{ port: 1 }} }}\ndestination: {{ mllp: {{ host: localhost, port: {port}, timeout_ms: 2000, ack: {ack} }} }}\n"
+            "name: x\nsource: {{ mllp: {{ port: 1 }} }}\ndestinations: {{ receiver: {{ mllp: {{ host: localhost, port: {port}, timeout_ms: 2000, ack: {ack} }} }} }}\n"
         ))
         .unwrap();
-        let d = config.destination.clone().unwrap();
+        let d = config.destinations.values().next().cloned().unwrap();
         let tls = tls.map(|t| certificates.client(&t).unwrap());
         let mut sender = Sender::new(&config, &d, None, None, tls).unwrap();
         outcome(sender.send(1, b"MSH|^~\\&|A||||||ADT^A01|1|P|2.5\r").await)
@@ -353,10 +353,10 @@ mod tests {
 
         let send = |names: &str| {
             let config: InterfaceConfig = serde_yaml_ng::from_str(&format!(
-                "name: x\nsource: {{ mllp: {{ port: 1 }} }}\ndestination: {{ http: {{ url: 'https://localhost:{port}/orders'{names} }} }}\n"
+                "name: x\nsource: {{ mllp: {{ port: 1 }} }}\ndestinations: {{ receiver: {{ http: {{ url: 'https://localhost:{port}/orders'{names} }} }} }}\n"
             ))
             .unwrap();
-            let d = config.destination.clone().unwrap();
+            let d = config.destinations.values().next().cloned().unwrap();
             let Destination::Http { ca, certificate, .. } = &d.connector else { panic!("an HTTP destination") };
             let tls = certificates.named(&ConnectTls::new(ca, certificate)).unwrap();
             let mut sender = Sender::new(&config, &d, None, None, tls).unwrap();

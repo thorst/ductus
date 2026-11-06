@@ -63,7 +63,7 @@ reads it (`every_yaml_example_in_the_guides_is_valid`, ductus-core):
 # interfaces/adt-in/interface.yaml
 name: adt-in
 source: { mllp: { port: 6661 } }
-destination: { file: { dir: out } }
+destinations: { archive: { file: { dir: out } } }
 ```
 ````
 

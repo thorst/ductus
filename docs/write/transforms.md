@@ -10,7 +10,7 @@ For most HL7 receivers, the message you send is the one you received with a few 
 Change it and return it:
 
 ```ts
-// interfaces/adt-in/route.ts, in part
+// interfaces/adt-in/lab.ts, in part
   msg.PV1[2] = translate(PATIENT_CLASS, msg.PV1[2], "patient class");
   for (const name of new Set(msg.segmentNames)) {
     if (name.startsWith("Z")) msg.remove(name); // the EHR's own segments mean nothing to the lab

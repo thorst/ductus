@@ -10,7 +10,7 @@ Schema for editors: `docs/schema/interface.json` (written into a project by `duc
 
 **Type:** text · **Required**
 
-The interface's name, as the database, the web UI, logs, alerts and routes (`destination: { interface: <name> }`) know it. Use the folder's name, as `ductus new interface` does, and keep it short and stable: lower-case words joined by `-`.
+The interface's name, as the database, the web UI, logs, alerts and routes (`destinations: { <name>: { interface: <name> } }`) know it. Use the folder's name, as `ductus new interface` does, and keep it short and stable: lower-case words joined by `-`.
 
 Messages are stored under the name, so a renamed interface is a new one: the old name's history stays under the old name, and messages still waiting there are sent by nobody. Rename only when nothing is waiting. Required. Example: `name: adt-epic-to-lab`.
 
@@ -214,9 +214,9 @@ Run at the times a five-field cron expression gives (minute, hour, day of month,
 
 **Type:** text
 
-The TypeScript file with the interface's code, relative to its folder. It exports `transform(msg, meta)`, plus any function a destination names with `transform:`.
+The TypeScript file with the interface's code, relative to its folder, for the destinations that have no `script:` of their own: it exports `transform(msg, meta)`, plus any function a destination names with `transform:`.
 
-`ductus validate` type-checks it and the engine loads it at start. Without a script, messages go to the destinations as they came. A `schedule` source and an HTTP source in `respond` mode need one: there, the code makes the message or the answer. Example: `script: transform.ts`.
+Most interfaces give each destination a file of its own instead (`script:` on the destination), sharing helpers by importing them; this one is then left out, or kept for what several destinations run. An HTTP source in `respond` mode needs it: its function makes the answer. `ductus validate` type-checks it and the engine loads it at start. A destination with no code anywhere gets messages as they came. Example: `script: transform.ts`.
 
 ### `format`
 
@@ -362,25 +362,33 @@ When a sender gets its acknowledgement (ACK, or HTTP 202): after the message is 
 
 Use `relaxed` only where one connection's peak is more than the disk allows and a lost message can be recovered another way (a resend from the source system, a nightly reconciliation). Before that, try a faster disk or more sender connections, which share flushes. Default: `strict`. Example: `durability: relaxed`.
 
-### `destination`
+### `destinations`
 
-**Type:** a connector (mllp, file, sftp, http, interface) and options
+**Type:** names, each with a connector (mllp, file, sftp, http, interface) and options
 
-Where messages go, when they go to one place: one connector (`mllp`, `file`, `sftp`, `http` or `interface`) and its options. Its name is `default` (in the web UI, alerts and `ductus pause adt-in default`).
+Where messages go, each by a name you choose (lower-case letters, digits, `-` and `_`): the name the web UI, alerts, `ductus pause adt-in lab` and the history show. Each gets every message and is delivered independently: its own queue, order, retries and pause, so one that's down holds up only itself. Each prepares the original message with its own code (`script:` on the destination, or the interface's `script` and its `transform:` function).
 
-Use `destinations` instead to send to several places. An HTTP source in `respond` mode has none: its answer is the result. Required otherwise (this or `destinations`). Example: `destination: { mllp: { host: lab.hospital.org, port: 7001 } }`.
+A message is finished once every destination is done with it. Adding a destination later gives it only the messages still in flight, not older ones; removing one, or renaming it, filters what was waiting for it. Choose names that say where it goes (`lab`, `billing`), not `default` or `out`. An HTTP source in `respond` mode has none: its answer is the result. Required otherwise. Example: `destinations: { lab: { mllp: { host: lab.hospital.org, port: 7001 } }, archive: { file: { dir: archive } } }`.
 
-### `destination.transform`
+### `destinations.<name>.script`
 
 **Type:** text
 
-The function in the interface's `script` that prepares messages for this destination: its exported name. Each destination runs its function on the message as it was received, not on another destination's result, so `toLab` and `toBilling` can each shape it for their receiver. Default: `transform`. Example: `transform: toBilling`.
+This destination's code: a TypeScript file relative to the interface's folder, exporting `transform(msg, meta)` (or the function `transform:` names). The standard shape: one file per destination, so each destination's code reads on its own however many there are; helpers they share go in another file both import (module-level values in a destination's own file are its own). Each destination runs its code on the message as it was received, never on another destination's result.
 
-### `destination.output`
+Without it, the destination runs the interface's `script`, or gets messages as they came when there's none. Default: none. Example: `script: lab.ts`.
+
+### `destinations.<name>.transform`
+
+**Type:** text
+
+The exported function that prepares messages for this destination, in its `script` (or the interface's): for several destinations sharing one file, or a name that says more. Default: `transform`. Example: `transform: toBilling`.
+
+### `destinations.<name>.output`
 
 **Type:** hl7, json, xml, text, csv, or { csv | fixed: options }
 
-### `destination.output.csv`
+### `destinations.<name>.output.csv`
 
 **Type:** settings, below
 
@@ -388,7 +396,7 @@ Delimited text with its options (`delimiter`, `header`). `format: csv` alone mea
 
 Its settings are those of [`format.csv`](#formatcsv).
 
-### `destination.output.fixed`
+### `destinations.<name>.output.fixed`
 
 **Type:** settings, below
 
@@ -396,39 +404,39 @@ Fixed-length records: each field at a set column and width, listed in `fields`. 
 
 Its settings are those of [`format.fixed`](#formatfixed).
 
-### `destination.retry`
+### `destinations.<name>.retry`
 
 **Type:** settings, below
 
-### `destination.retry.max_attempts`
+### `destinations.<name>.retry.max_attempts`
 
 **Type:** number
 
 Give up after this many failed delivery attempts and quarantine the message ("gave up after N attempts: …"). While a message is being retried it holds up its lane, so set this where a person looking at it beats waiting for the receiver (a receiver that refuses some messages for good with errors that look temporary). Leave it unset where every message must get there once the receiver is back. The code's own temporary errors (a database down) are always retried. Default: no limit. Example: `max_attempts: 10`.
 
-### `destination.retry.initial_backoff_ms`
+### `destinations.<name>.retry.initial_backoff_ms`
 
 **Type:** number
 
 The first wait after a failure, in milliseconds; each later one doubles, up to `max_backoff_ms`. Default: `1000`. Example: `initial_backoff_ms: 5000`.
 
-### `destination.retry.max_backoff_ms`
+### `destinations.<name>.retry.max_backoff_ms`
 
 **Type:** number
 
 The longest wait between tries, in milliseconds: how soon after a receiver comes back the waiting messages start moving, at worst. Default: `60000`. Example: `max_backoff_ms: 300000`.
 
-### `destination.rate_limit`
+### `destinations.<name>.rate_limit`
 
 **Type:** settings, below
 
-### `destination.rate_limit.per_minute`
+### `destinations.<name>.rate_limit.per_minute`
 
 **Type:** number · **Required**
 
 How many messages a minute the destination may be sent, at least 1: what the receiver (or its vendor's quota) allows. Required. Example: `per_minute: 600` (10 a second).
 
-### `destination.rate_limit.mode`
+### `destinations.<name>.rate_limit.mode`
 
 **Type:** `average`, `hard`
 
@@ -437,95 +445,95 @@ How many messages a minute the destination may be sent, at least 1: what the rec
 
 Default: `average`. Example: `mode: hard`.
 
-### `destination.rate_limit.burst`
+### `destinations.<name>.rate_limit.burst`
 
 **Type:** number
 
 With `mode: average`: how many may go at once after a quiet spell. Lower it for a receiver that can't take a burst at all. Default: `per_minute`. Example: `burst: 20`.
 
-### `destination.rate_limit.over_limit`
+### `destinations.<name>.rate_limit.over_limit`
 
 **Type:** `wait`, `drop`
 
 What happens to messages over the limit: `wait` (they're held, in order, until they're allowed) or `drop` (they're filtered, with the reason, and never sent). Drop only what is worthless late, such as frequent status updates where the next one replaces the last. Default: `wait`. Example: `over_limit: drop`.
 
-### `destination.save_output`
+### `destinations.<name>.save_output`
 
 **Type:** `true` or `false`
 
-### `destination.application`
+### `destinations.<name>.application`
 
 **Type:** text
 
 The receiving application, when this destination's differs from `about.to` (an interface that sends to several systems). `ductus impact` and the web UI use it. Default: `about.to.application`. Example: `application: Sunquest Lab`.
 
-### `destination.vendor`
+### `destinations.<name>.vendor`
 
 **Type:** text
 
 The receiving application's vendor, when this destination's differs from `about.to`. Default: `about.to.vendor`. Example: `vendor: Sunquest`.
 
-### `destination.owner`
+### `destinations.<name>.owner`
 
 **Type:** text
 
 Who to ask about this destination, when it isn't the interface's `about.owner` (its code or its receiver is another team's): best written as an email address. Alert rules that send to `owner` reach them for this destination's alerts. Default: `about.owner`. Example: `owner: billing-it@hospital.org`.
 
-### `destination.monitor`
+### `destinations.<name>.monitor`
 
 **Type:** settings, below
 
 A destination's own expectations (`monitor:` on the destination).
 
-### `destination.monitor.behind`
+### `destinations.<name>.monitor.behind`
 
 **Type:** messages, age, or { messages, age }
 
 When this destination's queue counts as behind, in place of the interface's `monitor.behind`: `500`, `10m`, or `{ messages: 500, age: 10m }`. Default: the interface's. Example: `behind: 2h`.
 
-### `destination.monitor.behind.messages`
+### `destinations.<name>.monitor.behind.messages`
 
 **Type:** number
 
 Behind once this many messages wait for the destination, at least 1. Default: no count limit. Example: `messages: 500`.
 
-### `destination.monitor.behind.age`
+### `destinations.<name>.monitor.behind.age`
 
 **Type:** text
 
 Behind once the oldest waiting message has waited this long, at least `1s`. Default: no age limit. Example: `age: 10m`.
 
-### `destination.custom`
+### `destinations.<name>.custom`
 
 **Type:** names and values of your own
 
 Your company's documentation fields for this destination (those whose `applies_to` in `docs-schema.yaml` includes `destination`). Default: none. Example: `custom: { analyst: ana@hospital.org }`.
 
-### `destination.mllp`
+### `destinations.<name>.mllp`
 
 **Type:** settings, below
 
 Send each message over MLLP to a receiver (a lab system, another interface engine) and wait for its ACK: AA is delivered, AE is tried again, AR follows `on_reject`. One connection, kept open between messages. Example: `mllp: { host: lab.hospital.org, port: 7001 }`.
 
-### `destination.mllp.host`
+### `destinations.<name>.mllp.host`
 
 **Type:** text · **Required**
 
 The receiver's host name or address. With `tls`, its certificate must be for this name. Required. Example: `host: lab.hospital.org`.
 
-### `destination.mllp.port`
+### `destinations.<name>.mllp.port`
 
 **Type:** number · **Required**
 
 The receiver's port. Required. Example: `port: 7001`.
 
-### `destination.mllp.timeout_ms`
+### `destinations.<name>.mllp.timeout_ms`
 
 **Type:** number
 
 How long one send may take, in milliseconds: connecting if needed, sending, and waiting for the ACK. Past it the connection is dropped and the message tried again later (it may have arrived: receivers that dedupe on MSH-10 take care of the repeat). Raise it for a receiver that is slow to answer; on Windows keep it above 2000. Default: `10000`. Example: `timeout_ms: 30000`.
 
-### `destination.mllp.ack`
+### `destinations.<name>.mllp.ack`
 
 **Type:** `wait`, `none`
 
@@ -534,129 +542,119 @@ How long one send may take, in milliseconds: connecting if needed, sending, and 
 
 Default: `wait`. Example: `ack: none`.
 
-### `destination.mllp.on_reject`
+### `destinations.<name>.mllp.on_reject`
 
 **Type:** `quarantine`, `retry`
 
 What an AR (the receiver rejects the message) does: `quarantine` it for a person to look at, or `retry` it like an AE, for receivers that answer AR when they're busy or half-down. A message that keeps being refused holds up its lane while it's retried. AE is always tried again. Default: `quarantine`. Example: `on_reject: retry`.
 
-### `destination.mllp.tls`
+### `destinations.<name>.mllp.tls`
 
 **Type:** true, or { ca, certificate }
 
 Send over TLS. `true` trusts the certificates this server trusts (the system's store); `{ ca, certificate }` also trusts the CA named by `ca`, and presents the client certificate named by `certificate`, both `certificates:` entries in resources.yaml. A receiver whose certificate isn't trusted or isn't for `host` is refused and tried again later, with the reason in the log and on the destination. Default: plain MLLP. Example: `tls: { ca: hie-ca, certificate: ductus-client }`.
 
-### `destination.mllp.tls.ca`
+### `destinations.<name>.mllp.tls.ca`
 
 **Type:** text
 
 A CA to trust for this receiver besides the ones this server trusts: a `certificates:` entry in resources.yaml holding the CA's certificate, for a receiver whose certificate comes from a private CA. Default: the system's trusted CAs only. Example: `ca: hie-ca`.
 
-### `destination.mllp.tls.certificate`
+### `destinations.<name>.mllp.tls.certificate`
 
 **Type:** text
 
 The client certificate to present, for receivers that ask for one (mutual TLS): a `certificates:` entry with its key. Renewing its files takes effect without a restart. Default: none. Example: `certificate: ductus-client`.
 
-### `destination.file`
+### `destinations.<name>.file`
 
 **Type:** settings, below
 
 Write each message as a file in a folder of this server (or a share it mounts), named by the message's id and the output format (`1234.hl7`). Files are written under a hidden temporary name and renamed when complete, so a reader never sees half a file. Example: `file: { dir: outbound }`.
 
-### `destination.file.dir`
+### `destinations.<name>.file.dir`
 
 **Type:** text · **Required**
 
 The folder to write to, made if missing. Relative to the interface's folder unless written whole. Required. Example: `dir: /data/outbound/lab`.
 
-### `destination.sftp`
+### `destinations.<name>.sftp`
 
 **Type:** settings, below
 
 Write each message as a file on an SFTP server, named like the `file` destination's. Files are written under a temporary name and renamed when complete, so a reader on the server never sees half a file. Example: `sftp: { server: lab_server, dir: inbound }`.
 
-### `destination.sftp.server`
+### `destinations.<name>.sftp.server`
 
 **Type:** text · **Required**
 
 The SFTP server: an `sftp:` entry in resources.yaml, which holds its address and login. Required. Example: `server: lab_server`.
 
-### `destination.sftp.dir`
+### `destinations.<name>.sftp.dir`
 
 **Type:** text · **Required**
 
 The folder on the server to write to, relative to the folder the login starts in unless written whole. Required. Example: `dir: inbound/adt`.
 
-### `destination.http`
+### `destinations.<name>.http`
 
 **Type:** settings, below
 
 Send each message as an HTTP request (POST unless `method` says otherwise) to a `url`, or to a `path` under an API from resources.yaml (`api: billing`, which brings its URL, headers, timeout and TLS). A 2xx answer is delivered; 408, 429, 5xx and network errors are tried again; any other 4xx is quarantined (the receiver refused this message). Example: `http: { api: billing, path: /charges }`.
 
-### `destination.http.url`
+### `destinations.<name>.http.url`
 
 **Type:** text
 
 The address to send to, `https://` or `http://`. Give this or `api`, not both. A token in it, or in `headers`, belongs in a secret: `${secret:NAME}`. Example: `url: "https://lab.example.org/api/orders"`.
 
-### `destination.http.api`
+### `destinations.<name>.http.api`
 
 **Type:** text
 
 An `apis:` entry in resources.yaml to send through: it brings the base URL, headers (an `Authorization` token) and timeout, so the same API is set up once for every interface and each environment. Give this or `url`. Example: `api: billing`.
 
-### `destination.http.path`
+### `destinations.<name>.http.path`
 
 **Type:** text
 
 With `api`: the path under its URL (`/charges` under `https://billing/api/v2`). Default: the API's URL itself. Example: `path: /charges`.
 
-### `destination.http.method`
+### `destinations.<name>.http.method`
 
 **Type:** text
 
 The HTTP method: `POST`, `PUT`, `PATCH`, or any other the receiver expects. Default: `POST`. Example: `method: PUT`.
 
-### `destination.http.headers`
+### `destinations.<name>.http.headers`
 
 **Type:** names, each with text
 
 Headers sent with every request, added to the API's (and replacing an API header of the same name). Put tokens in secrets. Default: none (the API's, with `api`). Example: `headers: { X-Facility: north }`.
 
-### `destination.http.timeout_ms`
+### `destinations.<name>.http.timeout_ms`
 
 **Type:** number
 
 How long a request may take, in milliseconds, before it's given up and tried again later. Default: the API's `timeout`, else `10000`. Example: `timeout_ms: 30000`.
 
-### `destination.http.ca`
+### `destinations.<name>.http.ca`
 
 **Type:** text
 
 With an `https://` `url`: a CA to trust for this server besides the system's (a `certificates:` entry), when the receiver's certificate comes from a private CA. With `api`, the API's own `ca` applies instead. Example: `ca: lab-ca`.
 
-### `destination.http.certificate`
+### `destinations.<name>.http.certificate`
 
 **Type:** text
 
 With an `https://` `url`: the client certificate to present (a `certificates:` entry with its key), for receivers that ask for one (mutual TLS). With `api`, the API's own applies instead. Example: `certificate: ductus-client`.
 
-### `destination.interface`
+### `destinations.<name>.interface`
 
 **Type:** text
 
 Put each message into another interface's queue: name an interface that has `source: internal`. It's stored there in the same transaction that marks it sent here: no network hop, nothing lost or sent twice between the two. The other interface's `format` must be what this destination outputs, and routes can't form a loop (`ductus validate` checks both). Example: `interface: adt-to-billing`.
-
-### `destinations`
-
-**Type:** names, each with a connector (mllp, file, sftp, http, interface) and options
-
-Several places messages go, by a name you choose (lower-case letters, digits, `-` and `_`). Each gets every message and is delivered independently: its own queue, order, retries and pause, so one that's down holds up only itself. Each runs its own function on the original message (`transform:`, default `transform`).
-
-A message is finished once every destination is done with it. Adding a destination later gives it only the messages still in flight, not older ones; removing one filters what was waiting for it. Use instead of `destination`, not with it. Example: `destinations: { lab: { mllp: { host: lab.hospital.org, port: 7001 } }, archive: { file: { dir: archive } } }`.
-
-Its settings are those of [`destination`](#destination).
 
 ### `retry`
 

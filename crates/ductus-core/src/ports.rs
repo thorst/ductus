@@ -144,7 +144,7 @@ pub fn outbound<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>, reso
     for c in configs {
         for (name, d) in c.destinations() {
             if let Some(e) = destination_endpoint(&d.connector) {
-                let used_by = if c.destination.is_some() { c.name.clone() } else { format!("{} → {name}", c.name) };
+                let used_by = format!("{} → {name}", c.name);
                 let tls = match &d.connector {
                     Destination::Mllp { tls, .. } => connect_tls(tls.as_ref()),
                     Destination::Http { ca, certificate, .. } if e.protocol == "HTTPS" => {
@@ -214,18 +214,22 @@ mod tests {
         let configs = [
             config("name: api\nsource: { http: { port: 8080, path: '/patients/{mrn}', method: get, mode: respond } }"),
             config(
-                "name: adt\nsource: { mllp: { port: 6661, allow: [10.1.20.0/24, epic-bridge01] } }\ndestination: { mllp: { host: epic.local, port: 5000 } }",
+                "name: adt\nsource: { mllp: { port: 6661, allow: [10.1.20.0/24, epic-bridge01] } }\ndestinations: { receiver: { mllp: { host: epic.local, port: 5000 } } }",
             ),
             config(
-                "name: secure\nsource: { mllp: { port: 6662, tls: { certificate: c } } }\ndestination: { file: { dir: o } }",
+                "name: secure\nsource: { mllp: { port: 6662, tls: { certificate: c } } }\ndestinations: { files: { file: { dir: o } } }",
             ),
             config(
-                "name: hook\nsource: { http: { port: 8080, path: /orders } }\ndestination: { http: { url: 'https://lab.example.org/api' } }",
+                "name: hook\nsource: { http: { port: 8080, path: /orders } }\ndestinations: { receiver: { http: { url: 'https://lab.example.org/api' } } }",
             ),
-            config("name: files\nsource: { file: { dir: in } }\ndestination: { sftp: { server: lab, dir: out } }"),
-            config("name: charges\nsource: { file: { dir: in } }\ndestination: { http: { api: billing_api } }"),
             config(
-                "name: hie\nsource: { file: { dir: in } }\ndestination: { mllp: { host: hie.example.org, port: 7443, tls: true } }",
+                "name: files\nsource: { file: { dir: in } }\ndestinations: { receiver: { sftp: { server: lab, dir: out } } }",
+            ),
+            config(
+                "name: charges\nsource: { file: { dir: in } }\ndestinations: { receiver: { http: { api: billing_api } } }",
+            ),
+            config(
+                "name: hie\nsource: { file: { dir: in } }\ndestinations: { receiver: { mllp: { host: hie.example.org, port: 7443, tls: true } } }",
             ),
         ];
         let l = listeners(&configs);
@@ -265,9 +269,9 @@ mod tests {
                 ("billing.example.org", 8443, "HTTPS", "resources.yaml: billing_api"),
                 ("db1", 5432, "Postgres", "resources.yaml: pdb"),
                 ("dc1.hospital.org", 636, "LDAPS", "resources.yaml: ad"),
-                ("epic.local", 5000, "MLLP", "adt"),
-                ("hie.example.org", 7443, "MLLP over TLS", "hie"),
-                ("lab.example.org", 443, "HTTPS", "hook"),
+                ("epic.local", 5000, "MLLP", "adt → receiver"),
+                ("hie.example.org", 7443, "MLLP over TLS", "hie → receiver"),
+                ("lab.example.org", 443, "HTTPS", "hook → receiver"),
                 ("sftp.lab", 22, "SFTP", "resources.yaml: lab"),
                 (
                     "sql1",

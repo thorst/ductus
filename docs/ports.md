@@ -59,7 +59,7 @@ unit file says which two lines to add with `systemctl edit ductus`. Above 1024 n
 | To | Port | When |
 |---|---|---|
 | Its PostgreSQL | 5432 (or the URL's) | Always. |
-| Receivers of MLLP destinations | as configured | For each `destination: { mllp: … }`. |
+| Receivers of MLLP destinations | as configured | For each destination with `mllp:`. |
 | HTTP destinations, APIs (`api()`, `fetch()`), webhooks, the heartbeat | 443 (or the URL's) | For each one configured. |
 | Databases interfaces query (`db()`) | Postgres 5432; SQL Server 1433, **and UDP 1434** for a named instance (the SQL Server Browser) | For each `databases:` entry. |
 | SFTP servers | 22 (or the entry's) | For each `sftp:` entry. |

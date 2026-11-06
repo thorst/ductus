@@ -27,7 +27,7 @@ ordering: { key: PID-3.1 }
 isolation: dedicated
 workers: 4
 dedupe: {}
-destination: { mllp: { host: 127.0.0.1, port: 6662 } }
+destinations: { receiver: { mllp: { host: 127.0.0.1, port: 6662 } } }
 EOF
 cat >"$WORK/interfaces/epic-adt/transform.ts" <<'EOF'
 import type { Message } from "@ductus/sdk";
@@ -45,7 +45,7 @@ source: { mllp: { port: $((20000 + i)) } }
 script: transform.ts
 ordering: { key: PID-3.1 }
 dedupe: {}
-destination: { mllp: { host: 127.0.0.1, port: 6662 } }
+destinations: { receiver: { mllp: { host: 127.0.0.1, port: 6662 } } }
 EOF
   cat >"$d/transform.ts" <<EOF
 import type { Message } from "@ductus/sdk";

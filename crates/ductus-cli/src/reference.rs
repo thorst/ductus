@@ -1065,7 +1065,9 @@ mod tests {
             pages().iter().filter(|(p, _)| guide(p)).flat_map(|(_, t)| config_links(t)).collect();
         let subjects = super::subjects().unwrap();
         // Top-level settings and connectors alike, or the walk has stopped seeing one kind.
-        for expected in ["retention", "source.mllp", "destination.http", "databases.<name>.postgres", "format.csv"] {
+        for expected in
+            ["retention", "source.mllp", "destinations.<name>.http", "databases.<name>.postgres", "format.csv"]
+        {
             assert!(subjects.iter().any(|(_, p)| p == expected), "`{expected}` isn't among the settings to explain");
         }
         let mut orphans = Vec::new();

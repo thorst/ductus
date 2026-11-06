@@ -7,7 +7,9 @@
 #      code, with the record beside it;
 #   3. through the running engine's API (`--from`): a token with `payloads` reads it (the read is in
 #      the engine's audit log); a token without is refused in words;
-#   4. nothing was sent: the receiver got the one message, once.
+#   4. `--destination billing`: only billing's code runs;
+#   5. nothing was sent: the receiver got the one message, once.
+# Each destination's code is a file of its own (0.7.4.1).
 # Each record names the code version that decided it (0.7.3.2): the same as the code tried at first
 # (nothing said), another once the code changed (said under each `then:`, from the database and
 # through the API alike).
@@ -27,23 +29,25 @@ printf 'api: { listen: 127.0.0.1:7796 }\n' >"$P/ductus.yaml"
 cat >"$P/interfaces/adt/interface.yaml" <<EOF
 name: $NAME
 source: { mllp: { port: 6726 } }
-script: route.ts
 destinations:
   lab:
     mllp: { host: 127.0.0.1, port: 6727 }
-    transform: toLab
+    script: lab.ts
     save_output: true
   billing:
     file: { dir: out }
-    transform: toBilling
+    script: billing.ts
 EOF
-cat >"$P/interfaces/adt/route.ts" <<'EOF'
+cat >"$P/interfaces/adt/lab.ts" <<'EOF'
 import type { Message } from "@ductus/sdk";
-export function toLab(msg: Message) {
+export function transform(msg: Message) {
   msg.set("MSH-5", "LAB");
   return msg;
 }
-export function toBilling(msg: Message) {
+EOF
+cat >"$P/interfaces/adt/billing.ts" <<'EOF'
+import type { Message } from "@ductus/sdk";
+export function transform(msg: Message) {
   return msg;
 }
 EOF
@@ -69,8 +73,11 @@ echo "== the engine took message $ID; ductus try --message $ID (from the databas
 "$BIN" try interfaces/adt --message "$ID" | tee "$P/1.txt"
 
 echo "== the code changed: billing drops patient updates (A08) now"
-sed -i 's|^export function toBilling(msg: Message) {$|export function toBilling(msg: Message) {\n  if (msg.MSH[9][2] === "A08") return null;|' interfaces/adt/route.ts
+sed -i 's|^export function transform(msg: Message) {$|export function transform(msg: Message) {\n  if (msg.MSH[9][2] === "A08") return null;|' interfaces/adt/billing.ts
 "$BIN" try interfaces/adt --message "$ID" | tee "$P/2.txt"
+
+echo "== only billing's code (--destination billing)"
+"$BIN" try interfaces/adt --message "$ID" --destination billing | tee "$P/5.txt"
 
 echo "== through the engine's API (--from), with a token that may read payloads"
 READER=$("$BIN" token create "try-demo-reader-$SUFFIX" --role viewer --permission payloads 2>/dev/null)
@@ -90,6 +97,8 @@ grep -q "^    then: sent$" "$P/2.txt" || fail+=" changed-then-sent"
 grep -q "^$NAME: message $ID from http://127.0.0.1:7796, received " "$P/3.txt" || fail+=" api-header"
 grep -q "^    then: sent, the same output$" "$P/3.txt" || fail+=" api-recorded"
 grep -q "the token may not read payloads" "$P/4.txt" || fail+=" viewer-not-refused"
+grep -q "^  billing: filtered$" "$P/5.txt" || fail+=" one-destination-billing"
+grep "^  lab:" "$P/5.txt" >/dev/null && fail+=" one-destination-ran-lab"
 OTHER='^          decided by code version [0-9a-f]\{12\}, not this one ([0-9a-f]\{12\})$'
 grep -q "through the code as it is now (code version [0-9a-f]\{12\}); nothing sent$" "$P/1.txt" || fail+=" no-version"
 grep "decided by code version" "$P/1.txt" >/dev/null && fail+=" same-code-said-other"

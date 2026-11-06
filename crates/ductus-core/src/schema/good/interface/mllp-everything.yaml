@@ -1,5 +1,6 @@
 # An MLLP interface with every interface-level setting, and destinations of every kind with
-# every destination setting. Values from the environment (${PORT}) are fine where a number is
+# every destination setting (`lab` with its code in a file of its own, the others running the
+# interface's `script`). Values from the environment (${PORT}) are fine where a number is
 # expected: they're filled in before the engine reads the file.
 name: adt-epic
 source:
@@ -27,6 +28,7 @@ destinations:
       ack: wait
       on_reject: retry
       tls: { ca: hie-ca, certificate: ductus-client }
+    script: lab.ts
     transform: toLab
     output: hl7
     retry: { max_attempts: 10, initial_backoff_ms: 5000, max_backoff_ms: 300000 }

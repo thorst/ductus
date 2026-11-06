@@ -110,8 +110,10 @@ impl Inspect {
                     "`--inspect {name}`: no such interface (there are: {})",
                     configs.iter().map(|c| c.name.as_str()).collect::<Vec<_>>().join(", ")
                 ),
-                Some(c) if c.script_path().is_none() => {
-                    bail!("`--inspect {name}`: it has no code to debug (no `script:` in its interface.yaml)")
+                Some(c) if !c.has_code() => {
+                    bail!(
+                        "`--inspect {name}`: it has no code to debug (no `script:` in its interface.yaml, on it or its destinations)"
+                    )
                 }
                 Some(_) => {}
             }

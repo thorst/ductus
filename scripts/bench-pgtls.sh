@@ -39,7 +39,7 @@ VERIFIED=$(url "sslmode=verify-full&sslrootcert=$PG/ca.pem")
 
 cd "$P"
 mkdir -p interfaces/bench-db
-printf 'name: bench-db\nsource: { mllp: { port: 6767 } }\nordering: { key: PID-3.1 }\ndestination: { file: { dir: out } }\n' \
+printf 'name: bench-db\nsource: { mllp: { port: 6767 } }\nordering: { key: PID-3.1 }\ndestinations: { files: { file: { dir: out } } }\n' \
   >interfaces/bench-db/interface.yaml
 start() { # url
   DUCTUS_DATABASE_URL=$1 "$BIN" run --api-listen off >run.log 2>&1 &

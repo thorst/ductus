@@ -24,7 +24,7 @@ use deno_core::error::JsError;
 use deno_core::{JsRuntime, ModuleId, ModuleSpecifier, PollEventLoopOptions, RuntimeOptions, v8};
 use guard::{Guard, Trip};
 use std::future::Future;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::rc::Rc;
 use std::task::{Context as TaskContext, Poll};
@@ -130,6 +130,27 @@ pub struct InterfaceId(usize);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FunctionId(usize);
 
+/// One function of an interface to load (`Isolate::add_functions`): the file exporting it, its
+/// name, and its formats as JSON (`InterfaceConfig::format_spec`).
+#[derive(Debug, Clone, Copy)]
+pub struct Function<'a> {
+    pub module: &'a Path,
+    pub name: &'a str,
+    pub formats: &'a str,
+}
+
+impl<'a> Function<'a> {
+    /// From the config's form (`InterfaceConfig::functions`).
+    pub fn of(f: &'a ductus_core::config::Function) -> Self {
+        Self { module: &f.module, name: &f.name, formats: &f.formats }
+    }
+
+    /// Each of `functions`, borrowed (`InterfaceConfig::functions`).
+    pub fn all(functions: &'a [Option<ductus_core::config::Function>]) -> Vec<Option<Self>> {
+        functions.iter().map(|f| f.as_ref().map(Self::of)).collect()
+    }
+}
+
 /// A callable entry point and the interface it belongs to.
 struct Entry {
     function: v8::Global<v8::Function>,
@@ -220,12 +241,12 @@ impl Isolate {
         Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard, clock: None, inspector, loaded }
     }
 
-    /// The project files `module`'s code runs: itself and everything it imports, through shared
-    /// files too (the SDK aside), in path order, with each one's text as the loader read it. An
-    /// `import("...")` that hasn't run yet is read from disk now. Call it after loading `module`
-    /// (`add_functions`) and before `forget_code_files`.
-    pub fn code_files(&self, module: &Path) -> Result<Vec<CodeFile>> {
-        let mut todo = vec![file_url(module)?.to_string()];
+    /// The project files the code of `modules` runs: each of them and everything they import,
+    /// through shared files too (the SDK aside), once each, in path order, with each one's text
+    /// as the loader read it. An `import("...")` that hasn't run yet is read from disk now. Call
+    /// it after loading them (`add_functions`) and before `forget_code_files`.
+    pub fn code_files(&self, modules: &[PathBuf]) -> Result<Vec<CodeFile>> {
+        let mut todo = modules.iter().map(|m| Ok(file_url(m)?.to_string())).collect::<Result<Vec<_>>>()?;
         let mut seen = std::collections::BTreeSet::new();
         let mut files = Vec::new();
         while let Some(url) = todo.pop() {
@@ -335,39 +356,57 @@ impl Isolate {
         formats_json: &str,
         timeout: Duration,
     ) -> Result<InterfaceId> {
-        Ok(self.add_functions(module, &[("transform", formats_json)], timeout).await?.0)
+        let function = Function { module, name: "transform", formats: formats_json };
+        Ok(self.add_functions(&[Some(function)], timeout).await?.0)
     }
 
-    /// Load an interface module and the functions the engine calls in it, each with its
-    /// formats (`InterfaceConfig::functions`): e.g. one per destination. The module is loaded
-    /// once, so its functions share its module-level state. Each call may run for `timeout`
-    /// without pausing before it's stopped.
+    /// Load one interface's functions, each from its module with its formats
+    /// (`InterfaceConfig::functions`): one per destination, None for a destination without code
+    /// (its id is None too). Each module is loaded once: functions in one file share its
+    /// module-level state, and files imported by several share theirs. Each call may run for
+    /// `timeout` without pausing before it's stopped.
     pub async fn add_functions(
         &mut self,
-        module: &Path,
-        functions: &[(&str, &str)],
+        functions: &[Option<Function<'_>>],
         timeout: Duration,
-    ) -> Result<(InterfaceId, Vec<FunctionId>)> {
-        if functions.is_empty() {
-            bail!("no functions to load from {}", module.display());
+    ) -> Result<(InterfaceId, Vec<Option<FunctionId>>)> {
+        let mut modules: Vec<&Path> = Vec::new();
+        for f in functions.iter().flatten() {
+            if !modules.contains(&f.module) {
+                modules.push(f.module);
+            }
         }
-        let url = file_url(module)?;
-        // The glue module sits beside the interface, so each interface gets a unique one.
-        let glue_url = file_url(&module.with_extension("ts.__ductus__.js"))?;
+        let Some(first) = modules.first() else { bail!("no functions to load") };
+        // The glue module sits beside the interface's first file, numbered by interface, so each
+        // interface gets a unique one even when two start from the same file.
+        let glue_url = file_url(&first.with_extension(format!("ts.__ductus__.{}.js", self.interfaces.len())))?;
         let quote = |s: &str| serde_json::to_string(s).expect("strings serialize");
-        let mut glue = format!(
-            r#"import * as entry from "{url}";
-import {{ __invoke }} from "@ductus/sdk";
-const bind = (name, formats) => {{
+        let mut urls = Vec::with_capacity(modules.len());
+        let mut glue = String::new();
+        for (i, module) in modules.iter().enumerate() {
+            let url = file_url(module)?;
+            glue.push_str(&format!("import * as entry{i} from \"{url}\";\n"));
+            urls.push(url.to_string());
+        }
+        glue.push_str(
+            r#"import { __invoke } from "@ductus/sdk";
+const bind = (entry, file, name, formats) => {
   const f = entry[name];
-  if (typeof f !== "function") throw new Error(`${{{file}}} must export a function named \`${{name}}\``);
+  if (typeof f !== "function") throw new Error(`${file} must export a function named \`${name}\``);
   return (raw, meta) => __invoke(f, raw, formats, meta);
-}};
+};
 "#,
-            file = quote(&module.display().to_string()),
         );
-        for (i, (name, formats_json)) in functions.iter().enumerate() {
-            glue.push_str(&format!("export const run{i} = bind({}, {formats_json});\n", quote(name)));
+        for (i, f) in functions.iter().enumerate() {
+            if let Some(f) = f {
+                let entry = modules.iter().position(|m| *m == f.module).expect("listed above");
+                glue.push_str(&format!(
+                    "export const run{i} = bind(entry{entry}, {}, {}, {});\n",
+                    quote(&f.module.display().to_string()),
+                    quote(f.name),
+                    f.formats
+                ));
+            }
         }
         let id = self.runtime.load_side_es_module_from_code(&glue_url, glue).await.map_err(|e| anyhow!("{e}"))?;
         self.evaluate(id, timeout).await?;
@@ -375,7 +414,11 @@ const bind = (name, formats) => {{
         let namespace = self.runtime.get_module_namespace(id).map_err(|e| anyhow!("{e}"))?;
         let interface = InterfaceId(self.interfaces.len());
         let mut ids = Vec::with_capacity(functions.len());
-        for i in 0..functions.len() {
+        for (i, f) in functions.iter().enumerate() {
+            if f.is_none() {
+                ids.push(None);
+                continue;
+            }
             let function = {
                 deno_core::scope!(scope, &mut self.runtime);
                 let namespace = v8::Local::new(scope, namespace.clone());
@@ -385,13 +428,13 @@ const bind = (name, formats) => {{
                     v8::Local::<v8::Function>::try_from(value).map_err(|_| anyhow!("glue export is not a function"))?;
                 v8::Global::new(scope, function)
             };
-            ids.push(FunctionId(self.entries.len()));
+            ids.push(Some(FunctionId(self.entries.len())));
             self.entries.push(Entry { function, interface });
         }
-        let folder = file_url(module.parent().unwrap_or(Path::new(".")))?.to_string();
+        let folder = file_url(first.parent().unwrap_or(Path::new(".")))?.to_string();
         let folder = if folder.ends_with('/') { folder } else { folder + "/" };
-        self.guard.add(Some((url.to_string(), folder)), timeout);
-        self.interfaces.push(ids[0]);
+        self.guard.add(Some((urls, folder)), timeout);
+        self.interfaces.push(ids.iter().flatten().copied().next().expect("at least one function"));
         Ok((interface, ids))
     }
 

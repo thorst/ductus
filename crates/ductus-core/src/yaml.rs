@@ -462,14 +462,13 @@ about:
 
     #[test]
     fn a_value_refused_inside_a_destination_points_at_its_key() {
-        // serde's path stops at `destination` (its connector is a flattened field): the value it
-        // quotes is found under it.
-        let text =
-            "name: y\nsource: { mllp: { port: 7001 } }\ndestination:\n  mllp: { host: localhost, port: 70000 }\n";
+        // serde's path stops at the destination (its connector is a flattened field): the value
+        // it quotes is found under it.
+        let text = "name: y\nsource: { mllp: { port: 7001 } }\ndestinations:\n  receiver:\n    mllp: { host: localhost, port: 70000 }\n";
         let e = from_value::<crate::InterfaceConfig>(parse(text).unwrap()).unwrap_err();
         let located = Located::of(&e).unwrap();
-        assert_eq!(located.key, ["destination"], "{e:#}");
-        assert_eq!(located.span(text).map(|s| (s.start.line, s.start.column)), Some((4, 28)));
+        assert_eq!(located.key, ["destinations", "receiver"], "{e:#}");
+        assert_eq!(located.span(text).map(|s| (s.start.line, s.start.column)), Some((5, 30)));
     }
 
     #[test]

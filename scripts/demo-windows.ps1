@@ -135,7 +135,7 @@ try {
     & $exe init "$data\project" | Out-Null
     # The sample interface writes files; a service can't write in the project, so send to a receiver.
     $yaml = "$data\project\interfaces\adt-in\interface.yaml"
-    (Get-Content $yaml -Raw) -replace 'destination: \{ file: \{ dir: out/adt-in \} \}', 'destination: { mllp: { host: 127.0.0.1, port: 6662 } }' | Set-Content $yaml -Encoding utf8
+    (Get-Content $yaml -Raw) -replace 'file: \{ dir: out/adt-in \}', 'mllp: { host: 127.0.0.1, port: 6662 }' | Set-Content $yaml -Encoding utf8
     Add-Content "$data\ductus.env" "`nDUCTUS_DATABASE_URL=$DatabaseUrl`n# marker kept across the upgrade"
     # The receiver and sender run from a copy: an upgrade replaces the installed ductus.exe, and
     # Restart Manager closes whatever runs it, here with the console it shares with this script.

@@ -22,9 +22,9 @@
 //! connected to. `certificate` is presented as the client certificate (mTLS).
 //!
 //! ```yaml
-//! destination: { mllp: { host: hie.example.org, port: 7443, tls: true } }       # the platform's roots
-//! destination: { mllp: { host: hie.example.org, port: 7443, tls: { ca: hie-ca, certificate: ductus-client } } }
-//! destination: { http: { url: "https://lab.example.org/orders", ca: lab-ca, certificate: ductus-client } }
+//! destinations: { receiver: { mllp: { host: hie.example.org, port: 7443, tls: true } } }       # the platform's roots
+//! destinations: { receiver: { mllp: { host: hie.example.org, port: 7443, tls: { ca: hie-ca, certificate: ductus-client } } } }
+//! destinations: { receiver: { http: { url: "https://lab.example.org/orders", ca: lab-ca, certificate: ductus-client } } }
 //! apis: { empi: { url: "https://empi.local/api", ca: hospital-ca, certificate: ductus-client } }   # resources.yaml
 //! ```
 
@@ -356,7 +356,7 @@ pub fn presented<'a>(
                 _ => continue,
             };
             if let Some(certificate) = &tls.certificate {
-                let label = if c.destination.is_some() { c.name.clone() } else { format!("{} → {name}", c.name) };
+                let label = format!("{} → {name}", c.name);
                 add(certificate, format!("client certificate to {to} ({label})"), Some(&c.name));
             }
         }
@@ -508,10 +508,10 @@ mod tests {
     fn mllp_destinations_take_tls_true_or_names() {
         let destination = |tls: &str| -> std::result::Result<Destination, String> {
             let yaml = format!(
-                "name: x\nsource: {{ mllp: {{ port: 1 }} }}\ndestination: {{ mllp: {{ host: h, port: 2{tls} }} }}\n"
+                "name: x\nsource: {{ mllp: {{ port: 1 }} }}\ndestinations: {{ receiver: {{ mllp: {{ host: h, port: 2{tls} }} }} }}\n"
             );
             serde_yaml_ng::from_str::<InterfaceConfig>(&yaml)
-                .map(|c| c.destination.unwrap().connector)
+                .map(|c| c.destinations.into_values().next().unwrap().connector)
                 .map_err(|e| e.to_string())
         };
         let tls = |d: Destination| match d {
@@ -584,12 +584,12 @@ mod tests {
                 "name: adt\nsource: { mllp: { port: 6661, tls: { certificate: mllp, clients: { ca: ca } } } }\ndestinations:\n  hie: { mllp: { host: hie.org, port: 7443, tls: { certificate: client } } }\n  lab: { mllp: { host: lab, port: 1, tls: true } }\n",
             ),
             config(
-                "name: orders\nsource: { http: { port: 8443, path: /o, tls: { certificate: mllp } } }\ndestination: { file: { dir: o } }",
+                "name: orders\nsource: { http: { port: 8443, path: /o, tls: { certificate: mllp } } }\ndestinations: { files: { file: { dir: o } } }",
             ),
             config(
-                "name: results\nsource: { http: { port: 8443, path: /r, tls: { certificate: mllp } } }\ndestination: { file: { dir: o } }",
+                "name: results\nsource: { http: { port: 8443, path: /r, tls: { certificate: mllp } } }\ndestinations: { files: { file: { dir: o } } }",
             ),
-            config("name: plain\nsource: { mllp: { port: 6662 } }\ndestination: { file: { dir: o } }"),
+            config("name: plain\nsource: { mllp: { port: 6662 } }\ndestinations: { files: { file: { dir: o } } }"),
         ];
         let alerts: AlertSettings = serde_yaml_ng::from_str(
             "smtp: { host: m, from: d@example.org, certificate: client }\nheartbeat: { url: 'https://hb/x', every: 1m }\n",

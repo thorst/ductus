@@ -5,9 +5,9 @@
   "type": "object",
   "properties": {
     "name": {
-      "description": "The interface's name, as the database, the web UI, logs, alerts and routes (`destination: { interface: <name> }`) know it. Use the folder's name, as `ductus new interface` does, and keep it short and stable: lower-case words joined by `-`.\n\nMessages are stored under the name, so a renamed interface is a new one: the old name's history stays under the old name, and messages still waiting there are sent by nobody. Rename only when nothing is waiting. Required. Example: `name: adt-epic-to-lab`.",
+      "description": "The interface's name, as the database, the web UI, logs, alerts and routes (`destinations: { <name>: { interface: <name> } }`) know it. Use the folder's name, as `ductus new interface` does, and keep it short and stable: lower-case words joined by `-`.\n\nMessages are stored under the name, so a renamed interface is a new one: the old name's history stays under the old name, and messages still waiting there are sent by nobody. Rename only when nothing is waiting. Required. Example: `name: adt-epic-to-lab`.",
       "type": "string",
-      "markdownDescription": "The interface's name, as the database, the web UI, logs, alerts and routes (`destination: { interface: <name> }`) know it. Use the folder's name, as `ductus new interface` does, and keep it short and stable: lower-case words joined by `-`.\n\nMessages are stored under the name, so a renamed interface is a new one: the old name's history stays under the old name, and messages still waiting there are sent by nobody. Rename only when nothing is waiting. Required. Example: `name: adt-epic-to-lab`."
+      "markdownDescription": "The interface's name, as the database, the web UI, logs, alerts and routes (`destinations: { <name>: { interface: <name> } }`) know it. Use the folder's name, as `ductus new interface` does, and keep it short and stable: lower-case words joined by `-`.\n\nMessages are stored under the name, so a renamed interface is a new one: the old name's history stays under the old name, and messages still waiting there are sent by nobody. Rename only when nothing is waiting. Required. Example: `name: adt-epic-to-lab`."
     },
     "source": {
       "description": "Where messages come from: exactly one of `mllp`, `http`, `file`, `sftp`, `schedule` or `internal`, each with its own settings. Required. Example: `source: { mllp: { port: 6661 } }`.",
@@ -19,12 +19,12 @@
       "markdownDescription": "Where messages come from: exactly one of `mllp`, `http`, `file`, `sftp`, `schedule` or `internal`, each with its own settings. Required. Example: `source: { mllp: { port: 6661 } }`."
     },
     "script": {
-      "description": "The TypeScript file with the interface's code, relative to its folder. It exports `transform(msg, meta)`, plus any function a destination names with `transform:`.\n\n`ductus validate` type-checks it and the engine loads it at start. Without a script, messages go to the destinations as they came. A `schedule` source and an HTTP source in `respond` mode need one: there, the code makes the message or the answer. Example: `script: transform.ts`.",
+      "description": "The TypeScript file with the interface's code, relative to its folder, for the destinations that have no `script:` of their own: it exports `transform(msg, meta)`, plus any function a destination names with `transform:`.\n\nMost interfaces give each destination a file of its own instead (`script:` on the destination), sharing helpers by importing them; this one is then left out, or kept for what several destinations run. An HTTP source in `respond` mode needs it: its function makes the answer. `ductus validate` type-checks it and the engine loads it at start. A destination with no code anywhere gets messages as they came. Example: `script: transform.ts`.",
       "type": [
         "string",
         "null"
       ],
-      "markdownDescription": "The TypeScript file with the interface's code, relative to its folder. It exports `transform(msg, meta)`, plus any function a destination names with `transform:`.\n\n`ductus validate` type-checks it and the engine loads it at start. Without a script, messages go to the destinations as they came. A `schedule` source and an HTTP source in `respond` mode need one: there, the code makes the message or the answer. Example: `script: transform.ts`."
+      "markdownDescription": "The TypeScript file with the interface's code, relative to its folder, for the destinations that have no `script:` of their own: it exports `transform(msg, meta)`, plus any function a destination names with `transform:`.\n\nMost interfaces give each destination a file of its own instead (`script:` on the destination), sharing helpers by importing them; this one is then left out, or kept for what several destinations run. An HTTP source in `respond` mode needs it: its function makes the answer. `ductus validate` type-checks it and the engine loads it at start. A destination with no code anywhere gets messages as they came. Example: `script: transform.ts`."
     },
     "format": {
       "description": "What the messages are, so the code gets them parsed and keys can be read: `hl7`, `json`, `xml`, `text`, `csv` or `fixed` (fixed-length records, with their fields' widths).\n\n`hl7` gives the code segments and fields (`msg.get(\"PID-3.1\")`); `json` and `xml` a document; `csv` rows (objects by column name with a header line); `fixed` an object per record; `text` the payload as a string. An MLLP source always carries HL7. What the code returns is written in this format too, unless `output` says otherwise. Default: `hl7`. Example: `format: { csv: { delimiter: \"|\" } }`.",
@@ -114,25 +114,13 @@
       ],
       "markdownDescription": "When a sender gets its acknowledgement (ACK, or HTTP 202): after the message is safely on the database's disk, or as soon as the database has it.\n\n- `strict`: the ACK waits until the database has flushed the message to disk. Once a sender has its ACK, the message survives a crash or power loss of any machine.\n- `relaxed`: the ACK goes out without waiting for the flush. One sender connection can go much faster: with `strict` it can't send faster than one message per disk flush (about 400 a second at 2.4 ms a flush; `ductus doctor` measures yours). The cost: if the *database server* crashes or loses power, the last fraction of a second of acknowledged messages is lost, and the sender won't resend them because it has its ACK. An engine crash alone loses nothing in either mode.\n\nUse `relaxed` only where one connection's peak is more than the disk allows and a lost message can be recovered another way (a resend from the source system, a nightly reconciliation). Before that, try a faster disk or more sender connections, which share flushes. Default: `strict`. Example: `durability: relaxed`."
     },
-    "destination": {
-      "description": "Where messages go, when they go to one place: one connector (`mllp`, `file`, `sftp`, `http` or `interface`) and its options. Its name is `default` (in the web UI, alerts and `ductus pause adt-in default`).\n\nUse `destinations` instead to send to several places. An HTTP source in `respond` mode has none: its answer is the result. Required otherwise (this or `destinations`). Example: `destination: { mllp: { host: lab.hospital.org, port: 7001 } }`.",
-      "anyOf": [
-        {
-          "$ref": "#/definitions/Destination"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "markdownDescription": "Where messages go, when they go to one place: one connector (`mllp`, `file`, `sftp`, `http` or `interface`) and its options. Its name is `default` (in the web UI, alerts and `ductus pause adt-in default`).\n\nUse `destinations` instead to send to several places. An HTTP source in `respond` mode has none: its answer is the result. Required otherwise (this or `destinations`). Example: `destination: { mllp: { host: lab.hospital.org, port: 7001 } }`."
-    },
     "destinations": {
-      "description": "Several places messages go, by a name you choose (lower-case letters, digits, `-` and `_`). Each gets every message and is delivered independently: its own queue, order, retries and pause, so one that's down holds up only itself. Each runs its own function on the original message (`transform:`, default `transform`).\n\nA message is finished once every destination is done with it. Adding a destination later gives it only the messages still in flight, not older ones; removing one filters what was waiting for it. Use instead of `destination`, not with it. Example: `destinations: { lab: { mllp: { host: lab.hospital.org, port: 7001 } }, archive: { file: { dir: archive } } }`.",
+      "description": "Where messages go, each by a name you choose (lower-case letters, digits, `-` and `_`): the name the web UI, alerts, `ductus pause adt-in lab` and the history show. Each gets every message and is delivered independently: its own queue, order, retries and pause, so one that's down holds up only itself. Each prepares the original message with its own code (`script:` on the destination, or the interface's `script` and its `transform:` function).\n\nA message is finished once every destination is done with it. Adding a destination later gives it only the messages still in flight, not older ones; removing one, or renaming it, filters what was waiting for it. Choose names that say where it goes (`lab`, `billing`), not `default` or `out`. An HTTP source in `respond` mode has none: its answer is the result. Required otherwise. Example: `destinations: { lab: { mllp: { host: lab.hospital.org, port: 7001 } }, archive: { file: { dir: archive } } }`.",
       "type": "object",
       "additionalProperties": {
         "$ref": "#/definitions/Destination"
       },
-      "markdownDescription": "Several places messages go, by a name you choose (lower-case letters, digits, `-` and `_`). Each gets every message and is delivered independently: its own queue, order, retries and pause, so one that's down holds up only itself. Each runs its own function on the original message (`transform:`, default `transform`).\n\nA message is finished once every destination is done with it. Adding a destination later gives it only the messages still in flight, not older ones; removing one filters what was waiting for it. Use instead of `destination`, not with it. Example: `destinations: { lab: { mllp: { host: lab.hospital.org, port: 7001 } }, archive: { file: { dir: archive } } }`."
+      "markdownDescription": "Where messages go, each by a name you choose (lower-case letters, digits, `-` and `_`): the name the web UI, alerts, `ductus pause adt-in lab` and the history show. Each gets every message and is delivered independently: its own queue, order, retries and pause, so one that's down holds up only itself. Each prepares the original message with its own code (`script:` on the destination, or the interface's `script` and its `transform:` function).\n\nA message is finished once every destination is done with it. Adding a destination later gives it only the messages still in flight, not older ones; removing one, or renaming it, filters what was waiting for it. Choose names that say where it goes (`lab`, `billing`), not `default` or `out`. An HTTP source in `respond` mode has none: its answer is the result. Required otherwise. Example: `destinations: { lab: { mllp: { host: lab.hospital.org, port: 7001 } }, archive: { file: { dir: archive } } }`."
     },
     "retry": {
       "description": "How a delivery that fails for a reason that may pass (a receiver down, a timeout, a database unreachable from the code) is tried again: waits doubling from `initial_backoff_ms` to `max_backoff_ms`, and given up only after `max_attempts`, if set. A destination can set its own. Default: retry forever, 1 s doubling to 60 s.",
@@ -487,10 +475,10 @@
           ]
         },
         {
-          "description": "Messages routed from other interfaces (`destination: { interface: <this one> }`), with no listener of its own. Each is stored in the same transaction that marks it sent at the other interface, so nothing is lost or doubled between them. Use it to split a busy feed or to share one feed's preparation among several. Example: `source: internal`.",
+          "description": "Messages routed from other interfaces (`destinations: { <this one>: { interface: <this one> } }`), with no listener of its own. Each is stored in the same transaction that marks it sent at the other interface, so nothing is lost or doubled between them. Use it to split a busy feed or to share one feed's preparation among several. Example: `source: internal`.",
           "type": "string",
           "const": "internal",
-          "markdownDescription": "Messages routed from other interfaces (`destination: { interface: <this one> }`), with no listener of its own. Each is stored in the same transaction that marks it sent at the other interface, so nothing is lost or doubled between them. Use it to split a busy feed or to share one feed's preparation among several. Example: `source: internal`."
+          "markdownDescription": "Messages routed from other interfaces (`destinations: { <this one>: { interface: <this one> } }`), with no listener of its own. Each is stored in the same transaction that marks it sent at the other interface, so nothing is lost or doubled between them. Use it to split a busy feed or to share one feed's preparation among several. Example: `source: internal`."
         }
       ]
     },
@@ -986,6 +974,9 @@
         {
           "type": "object",
           "properties": {
+            "script": {
+              "$ref": "#/definitions/DestinationOptions/properties/script"
+            },
             "transform": {
               "$ref": "#/definitions/DestinationOptions/properties/transform"
             },
@@ -1120,6 +1111,9 @@
         {
           "type": "object",
           "properties": {
+            "script": {
+              "$ref": "#/definitions/DestinationOptions/properties/script"
+            },
             "transform": {
               "$ref": "#/definitions/DestinationOptions/properties/transform"
             },
@@ -1175,6 +1169,9 @@
         {
           "type": "object",
           "properties": {
+            "script": {
+              "$ref": "#/definitions/DestinationOptions/properties/script"
+            },
             "transform": {
               "$ref": "#/definitions/DestinationOptions/properties/transform"
             },
@@ -1236,6 +1233,9 @@
         {
           "type": "object",
           "properties": {
+            "script": {
+              "$ref": "#/definitions/DestinationOptions/properties/script"
+            },
             "transform": {
               "$ref": "#/definitions/DestinationOptions/properties/transform"
             },
@@ -1356,6 +1356,9 @@
         {
           "type": "object",
           "properties": {
+            "script": {
+              "$ref": "#/definitions/DestinationOptions/properties/script"
+            },
             "transform": {
               "$ref": "#/definitions/DestinationOptions/properties/transform"
             },
@@ -1404,13 +1407,21 @@
       "description": "A destination as written: exactly one connector key (`mllp`, `file`, `sftp`, `http`) next to the options. Read through this so unknown keys are still errors.",
       "type": "object",
       "properties": {
-        "transform": {
-          "description": "The function in the interface's `script` that prepares messages for this destination: its exported name. Each destination runs its function on the message as it was received, not on another destination's result, so `toLab` and `toBilling` can each shape it for their receiver. Default: `transform`. Example: `transform: toBilling`.",
+        "script": {
+          "description": "This destination's code: a TypeScript file relative to the interface's folder, exporting `transform(msg, meta)` (or the function `transform:` names). The standard shape: one file per destination, so each destination's code reads on its own however many there are; helpers they share go in another file both import (module-level values in a destination's own file are its own). Each destination runs its code on the message as it was received, never on another destination's result.\n\nWithout it, the destination runs the interface's `script`, or gets messages as they came when there's none. Default: none. Example: `script: lab.ts`.",
           "type": [
             "string",
             "null"
           ],
-          "markdownDescription": "The function in the interface's `script` that prepares messages for this destination: its exported name. Each destination runs its function on the message as it was received, not on another destination's result, so `toLab` and `toBilling` can each shape it for their receiver. Default: `transform`. Example: `transform: toBilling`."
+          "markdownDescription": "This destination's code: a TypeScript file relative to the interface's folder, exporting `transform(msg, meta)` (or the function `transform:` names). The standard shape: one file per destination, so each destination's code reads on its own however many there are; helpers they share go in another file both import (module-level values in a destination's own file are its own). Each destination runs its code on the message as it was received, never on another destination's result.\n\nWithout it, the destination runs the interface's `script`, or gets messages as they came when there's none. Default: none. Example: `script: lab.ts`."
+        },
+        "transform": {
+          "description": "The exported function that prepares messages for this destination, in its `script` (or the interface's): for several destinations sharing one file, or a name that says more. Default: `transform`. Example: `transform: toBilling`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The exported function that prepares messages for this destination, in its `script` (or the interface's): for several destinations sharing one file, or a name that says more. Default: `transform`. Example: `transform: toBilling`."
         },
         "output": {
           "description": "The format this destination's results are written in, when it differs from the interface's `output` (one receiver wants HL7, another JSON). Same values as `format`. Default: the interface's `output`, else its `format`. Example: `output: json`.",

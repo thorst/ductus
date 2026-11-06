@@ -88,7 +88,7 @@ Pause a destination at once: nothing is sent or retried until it's resumed (a se
 | | In | Type | |
 |---|---|---|---|
 | `name` (required) | path | text | Interface name. |
-| `destination` (required) | path | text | Destination name (`default` for one given with `destination:`). |
+| `destination` (required) | path | text | Destination name (its name under `destinations:`). |
 
 **Body** (application/json): [`PauseRequest`](#pauserequest)
 

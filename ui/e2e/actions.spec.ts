@@ -30,7 +30,7 @@ test("an operator corrects a quarantined message: a copy goes, the original is r
 
   await page.getByRole("button", { name: "Edit and resend" }).click();
   const dialog = page.getByRole("dialog", { name: /Edit and resend/ });
-  await expect(dialog.getByLabel("default (quarantined)")).toBeChecked();
+  await expect(dialog.getByLabel("archive (quarantined)")).toBeChecked();
   const { violations } = await new AxeBuilder({ page }).include("[role=dialog]").analyze();
   expect(violations.map((v) => v.id)).toEqual([]);
   const editor = dialog.getByLabel(/Message/);

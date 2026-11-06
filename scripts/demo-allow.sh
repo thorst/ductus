@@ -35,12 +35,12 @@ cat >interfaces/allow-mllp/interface.yaml <<'EOF'
 name: allow-mllp
 about: { from: { application: Epic, hosts: [127.0.0.1, 10.1.40.0/24] } }
 source: { mllp: { port: 6751, allow: [127.0.0.1, localhost] } }
-destination: { file: { dir: ../../out-mllp } }
+destinations: { files: { file: { dir: ../../out-mllp } } }
 EOF
 cat >interfaces/allow-tls/interface.yaml <<'EOF'
 name: allow-tls
 source: { mllp: { port: 6752, tls: { certificate: listener }, allow: [127.0.0.1] } }
-destination: { file: { dir: ../../out-tls } }
+destinations: { files: { file: { dir: ../../out-tls } } }
 EOF
 
 echo "== validate: the list against the senders \`about\` names"

@@ -3,4 +3,4 @@ name: nightly-census
 source: { schedule: { cron: "0 2 * * *" } }
 script: census.ts
 format: { csv: }
-destination: { sftp: { server: state, dir: census } }
+destinations: { receiver: { sftp: { server: state, dir: census } } }

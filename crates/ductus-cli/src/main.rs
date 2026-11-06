@@ -205,6 +205,10 @@ enum Command {
         /// engine's audit log.
         #[arg(long, requires = "message")]
         from: Option<String>,
+        /// Only this destination's code (by its name in interface.yaml), when the others don't matter
+        /// or aren't ready: the rest aren't run.
+        #[arg(long)]
+        destination: Option<String>,
         /// The token for `--from`.
         #[arg(long, env = "DUCTUS_API_TOKEN", hide_env_values = true)]
         token: Option<String>,
@@ -1172,7 +1176,20 @@ async fn run(cli: Cli) -> Result<()> {
             };
             exit_on_failure(project::test(&root, &env, options).await)
         }
-        Command::Try { interface, file, fixture, message, from, token, database_url, root, env, inspect, json } => {
+        Command::Try {
+            interface,
+            file,
+            fixture,
+            message,
+            from,
+            destination,
+            token,
+            database_url,
+            root,
+            env,
+            inspect,
+            json,
+        } => {
             let inspect = inspect.as_deref().map(ductus_runtime::inspect::address).transpose()?;
             let source = match (file, fixture, message) {
                 (Some(file), _, _) => trying::Source::File(file),
@@ -1180,7 +1197,7 @@ async fn run(cli: Cli) -> Result<()> {
                 (_, _, Some(id)) => trying::Source::Stored { id, api: from.map(|url| (url, token)), database_url },
                 _ => anyhow::bail!("give the message: a file, `--fixture NAME`, or `--message ID`"),
             };
-            trying::run(trying::Args { root, env, interface, source, json, inspect }).await
+            trying::run(trying::Args { root, env, interface, source, destination, json, inspect }).await
         }
         Command::History { interface, all, limit, before, json, database_url, root, env } => {
             history::run(history::Args { root, env, interface, database_url, all, limit, before, json }).await

@@ -1,44 +1,55 @@
 # Destinations
 
-Where an interface's messages go: one place with
-[`destination`](../reference/config/interface.md#destination), or several, each by a name you
-choose, with [`destinations`](../reference/config/interface.md#destinations).
+Where an interface's messages go:
+[`destinations`](../reference/config/interface.md#destinations), each by a name you choose. One
+destination or ten, it's written the same way, and the name is what the web UI, alerts,
+`ductus pause` and the history call it.
 
 | Connector | Sends each message | Delivered when |
 |---|---|---|
-| [`mllp`](../reference/config/interface.md#destinationmllp) | Over MLLP to a receiver, one connection kept open | The receiver answers AA |
-| [`http`](../reference/config/interface.md#destinationhttp) | As an HTTP request to a URL, or a path under an API from resources.yaml | A 2xx answer |
-| [`file`](../reference/config/interface.md#destinationfile) | As a file in a folder of this server or a share | The file is complete under its name |
-| [`sftp`](../reference/config/interface.md#destinationsftp) | As a file on an SFTP server | The same, on the server |
-| [`interface`](../reference/config/interface.md#destinationinterface) | Into another interface's queue | It's stored there, in the same transaction |
+| [`mllp`](../reference/config/interface.md#destinationsnamemllp) | Over MLLP to a receiver, one connection kept open | The receiver answers AA |
+| [`http`](../reference/config/interface.md#destinationsnamehttp) | As an HTTP request to a URL, or a path under an API from resources.yaml | A 2xx answer |
+| [`file`](../reference/config/interface.md#destinationsnamefile) | As a file in a folder of this server or a share | The file is complete under its name |
+| [`sftp`](../reference/config/interface.md#destinationsnamesftp) | As a file on an SFTP server | The same, on the server |
+| [`interface`](../reference/config/interface.md#destinationsnameinterface) | Into another interface's queue | It's stored there, in the same transaction |
 
-## One or several
+## Named destinations, each with its own code
 
 ```yaml
 # interfaces/adt-to-lab/interface.yaml, in part
 destinations:
   lab:
     mllp: { host: ${LAB_HOST}, port: ${LAB_PORT} }
+    script: lab.ts
   billing:
     http: { api: billing, path: /charges }
-    transform: toBilling
+    script: billing.ts
     output: json
   archive:
     file: { dir: ${OUTBOUND_DIR} }
 ```
 
+- **Name each for where it goes** (`lab`, `billing`, `archive`): lower-case letters, digits, `-`
+  and `_`. The name is how people find it in the web UI, alerts, `ductus pause adt-to-lab lab` and
+  the history, so `default` or `out` tell them nothing. Renaming one later is removing it and
+  adding another ([nuance](../nuances/destinations.md#adding-removing-or-renaming-a-destination-level-3)).
 - **Each destination gets every message and is delivered independently**: its own queue, order,
   retries and pause. One that's down holds up only itself; the others carry on
   ([nuance](../nuances/destinations.md#one-destination-down-holds-up-only-itself-level-2)).
-- **Each runs its own function on the original message**, the one named by `transform:` (default
-  `transform`), not on another destination's result: `toLab` and `toBilling` each shape it for
-  their receiver ([nuance](../nuances/destinations.md#each-destination-runs-its-own-function-on-the-original-message-level-2)).
-  `output:` sets the format that destination's result is written in.
+- **Each destination's code is a file of its own** (`script:`, relative to the interface's
+  folder, exporting `transform`): the standard shape, so each reads on its own however many
+  destinations there are. Helpers they share go in a file both import (`import { visit } from
+  "./shared.ts"`), and so do values they should share
+  ([nuance](../nuances/destinations.md#a-destinations-own-file-has-its-own-module-level-values-level-3)).
+  Each runs on the original message, never on another destination's result:
+  what `lab.ts` changes, `billing.ts` never sees
+  ([nuance](../nuances/destinations.md#each-destination-runs-its-own-function-on-the-original-message-level-2)).
+  A destination without `script:` runs the interface's `script` if it has one (with `transform:`
+  naming its function, for several destinations sharing one file), else gets messages as they
+  came, like `archive` above. `output:` sets the format that destination's result is written in.
 - **A message is finished** once every destination is done with it: sent, filtered or
   quarantined. Filtering and quarantine are per destination too
   ([nuance](../nuances/destinations.md#filtering-and-quarantine-are-per-destination-level-2)).
-- `destination:` (one) is the same as a single destination named `default`. Use one or the
-  other, not both.
 - **Adding a destination later** gives it only messages that arrive from then on (and those
   still in flight), not older ones; removing one filters what was waiting for it
   ([nuance](../nuances/destinations.md#adding-removing-or-renaming-a-destination-level-3)).
@@ -55,7 +66,7 @@ destination was sent is reproduced by running its code again when you look
 must be able to prove exactly what was sent, `save_output: true` on that destination keeps it
 with its delivery (about 1.15 GB per million deliveries, measured).
 
-Each destination runs its own function, but code that runs away after an `await` can be blamed
+Each destination runs its own code, but code that runs away after an `await` can be blamed
 only on its interface: every call of that interface in flight on the thread is quarantined,
 whichever destination it was for ([nuance](../nuances/destinations.md#a-runaway-is-blamed-on-the-interface-not-the-destination-level-5)).
 
@@ -63,13 +74,14 @@ whichever destination it was for ([nuance](../nuances/destinations.md#a-runaway-
 
 ```yaml
 # interfaces/orders-to-lab/interface.yaml, in part
-destination:
-  mllp:
-    host: ${LAB_HOST}
-    port: ${LAB_PORT}
-    timeout_ms: 10000       # the default: connect, send and wait for the ACK
-    on_reject: quarantine   # the default: an AR is for a person to look at
-    tls: true               # TLS, trusting this server's CAs
+destinations:
+  lab:
+    mllp:
+      host: ${LAB_HOST}
+      port: ${LAB_PORT}
+      timeout_ms: 10000       # the default: connect, send and wait for the ACK
+      on_reject: quarantine   # the default: an AR is for a person to look at
+      tls: true               # TLS, trusting this server's CAs
 ```
 
 The engine sends a message and waits for the ACK before the next one, on one connection it keeps
@@ -93,11 +105,12 @@ nothing then tells the engine a message was refused or lost.
 
 ```yaml
 # interfaces/results-to-portal/interface.yaml, in part
-destination:
-  http:
-    api: portal             # an apis: entry: its URL, token, timeout and TLS
-    path: /results
-    method: POST            # the default
+destinations:
+  portal:
+    http:
+      api: portal             # an apis: entry: its URL, token, timeout and TLS
+      path: /results
+      method: POST            # the default
 output: json
 ```
 

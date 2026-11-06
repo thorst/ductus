@@ -32,7 +32,7 @@ for i in $(seq 0 $((COUNT - 1))); do
   d="$WORK/interfaces/v-$i"
   mkdir -p "$d"
   l=$((i % 10))
-  printf 'name: v-%d\nsource: { mllp: { host: 127.0.0.1, port: %d } }\nscript: transform.ts\ndestination: { mllp: { host: 127.0.0.1, port: 19999 } }\n' \
+  printf 'name: v-%d\nsource: { mllp: { host: 127.0.0.1, port: %d } }\nscript: transform.ts\ndestinations: { receiver: { mllp: { host: 127.0.0.1, port: 19999 } } }\n' \
     "$i" $((20000 + i)) >"$d/interface.yaml"
   printf 'export const UPPER = ["last", "first"];\nexport function clean(s: string): string {\n  return s.trim().toUpperCase();\n}\n' >"$d/map.ts"
   cat >"$d/transform.ts" <<EOF

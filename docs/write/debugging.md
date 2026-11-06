@@ -95,8 +95,8 @@ interface ([`ductus try`](#one-message-ductus-try)): open a fixture (`interfaces
 set breakpoints in the interface's code, F5. The file names its interface by the folder it's in,
 so `${file}` is both.
 
-1. **Open a file of the interface** you want to debug: its code (`route.ts`) or a test
-   (`route.test.ts`). `${fileDirname}` is that file's folder, and `--interface` takes a folder
+1. **Open a file of the interface** you want to debug: a destination's code (`lab.ts`) or a test
+   (`lab.test.ts`). `${fileDirname}` is that file's folder, and `--interface` takes a folder
    inside an interface's as that interface.
 2. **Set breakpoints** in the gutter of your `.ts` files, the code or the tests.
 3. **Run and Debug** (Ctrl+Shift+D), choose **Ductus: debug these tests**, and start (F5).
@@ -108,11 +108,11 @@ Console. When the run ends, the session does.
 
 Here is what VS Code's debugger sees, from the [debugging demo](#checked-in-ci): CI drives VS
 Code's debugger the way VS Code does, on this guide's example project, with a breakpoint on the
-`msg.set("MSH-5", "LAB")` line (18) of the lab's function and `--filter` choosing one test:
+`msg.set("MSH-5", "LAB")` line (18) of the lab's code and `--filter` choosing one test:
 
 ```ts
-// interfaces/adt-in/route.ts, in part
-export function toLab(msg: Message) {
+// interfaces/adt-in/lab.ts, in part
+export function transform(msg: Message) {
   if (!LAB_EVENTS.has(msg.MSH[9][2])) return null; // not for the lab: filtered, no reason needed
   if (msg.PID[3][1].startsWith("TEST")) return kill("test patient");
 
@@ -126,15 +126,15 @@ export function toLab(msg: Message) {
 ```
 
 ```text
-output: adt-in: waiting for a debugger on 127.0.0.1:9229 (ws://127.0.0.1:9229/bd56edfb-61cf-3e4d-6d6b-42c579c4fa14): VS Code's "Ductus: debug these tests", or chrome://inspect in Chrome
+output: adt-in: waiting for a debugger on 127.0.0.1:9229 (ws://127.0.0.1:9229/e9e37c3a-8b43-2ef6-fe82-2be27b331b98): VS Code's "Ductus: debug these tests", or chrome://inspect in Chrome
 output: debugger attached: no time limit on the tests while it is
 stopped: breakpoint
-at: toLab /tmp/tmp.5yF9PBXEgK/interfaces/adt-in/route.ts:18
+at: transform /tmp/tmp.lAROGGR2k8/interfaces/adt-in/lab.ts:18
 locals: msg=Proxy(MessageImpl) {data: Array(4), index: null, delimiters: {…}}, this=undefined
 msg.PV1[2] + " for a " + msg.MSH[9][2] = 'IN for a A01'
 output: debugger detached: the time limit applies again
 output: adt-in
-output:   ✓ the lab gets visits, with its own patient class and no Z segments (192ms)
+output:   ✓ the lab gets visits, with its own patient class and no Z segments (215ms)
 output: 1 passed, 0 failed
 ```
 
@@ -210,7 +210,7 @@ change, for a message a sender complains about, for one that was quarantined.
 
 ```text
 $ ductus try adt-in --fixture a01.hl7
-adt-in: fixture a01.hl7, received 2026-11-05 14:57:58 UTC, through the code as it is now (code version 593b53e3a495); nothing sent
+adt-in: fixture a01.hl7, received 2026-11-06 16:12:24 UTC, through the code as it is now (code version ad5be9a31773); nothing sent
   (without databases and APIs: resources.yaml in ./resources.yaml: missing in environment `dev`: secret:BILLING_TOKEN, secret:EMPI_TOKEN, secret:FHIR_TOKEN, secret:PROVIDER_DB_PASSWORD)
   billing: sent
       MSH|^~\&|EHR|HOSP|ADT|HOSP|20261031083000-0500||ADT^A01^ADT_A01|MSG00001|P|2.5
@@ -232,6 +232,15 @@ adt-in: fixture a01.hl7, received 2026-11-05 14:57:58 UTC, through the code as i
 | one the engine stored, from its database | `ductus try adt-in --message 20042988` (DUCTUS_DATABASE_URL) |
 | one a running engine stored, through its API | `ductus try adt-in --message 20042988 --from https://ductus-prod:7700` (a token with `payloads` in DUCTUS_API_TOKEN) |
 
+**One destination's code** with `--destination NAME` (with any of the above): only that
+destination runs, when the others don't matter or aren't ready. A name the interface doesn't
+have is refused with the ones it has:
+
+```text
+$ ductus try adt-in --fixture a01.hl7 --destination archive
+Error: `adt-in` has no destination named `archive` (it has: billing, lab)
+```
+
 The interface is its name or a file or folder inside its folder, as for `ductus test`. `--env`
 chooses whose values and resources the code uses (default `dev`); `--json` gives one document
 (the `code_version` tried; each destination's `decision`, `output` or `reason`, `console`,
@@ -244,18 +253,18 @@ decides now: here the code was changed after the message went through, so billin
 today (from the [try demo](#checked-in-ci)):
 
 ```text
-$ ductus try interfaces/adt --message 21198140
-try-demo: message 21198140, received 2026-11-05 14:57:56 UTC, through the code as it is now (code version ae5123af1d2c); nothing sent
+$ ductus try interfaces/adt --message 23012627
+try-demo: message 23012627, received 2026-11-06 21:13:47 UTC, through the code as it is now (code version 8b568114009e); nothing sent
   billing: filtered
     then: sent
-          decided by code version 07cd7ba85180, not this one (ae5123af1d2c)
+          decided by code version c699b75b430d, not this one (8b568114009e)
   lab: sent
-      MSH|^~\&|EPIC|HOSP|LAB|HOSP|20261105095756||ADT^A08|1|P|2.5
-      EVN|A08|20261105095756
+      MSH|^~\&|EPIC|HOSP|LAB|HOSP|20261106161347||ADT^A08|1|P|2.5
+      EVN|A08|20261106161347
       PID|1||100001^^^MRN||JOHNSON^JAMES||19010101|M
       PV1|1|I|4W^401^A
     then: sent, the same output
-          decided by code version 07cd7ba85180, not this one (ae5123af1d2c)
+          decided by code version c699b75b430d, not this one (8b568114009e)
 ```
 
 `then: sent, the same output` compares the output too, for a destination that keeps what it sent
@@ -307,7 +316,7 @@ so while it's paused (or stepping, or looping under the debugger):
 Measured (`scripts/bench-inspect.sh`, [below](#what-it-costs)): another interface's throughput
 and delivery while the debugged one sat paused were what they were with no debugger at all.
 
-From VS Code: open the interface's code (`interfaces/adt-in/route.ts`), set breakpoints, **Run and
+From VS Code: open the interface's code (`interfaces/adt-in/lab.ts`), set breakpoints, **Run and
 Debug → Ductus: debug this interface**. VS Code starts `ductus dev --inspect` with that file's
 folder (the option takes a name, or a file or folder inside the interface's folder), attaches,
 and the Debug Console shows the engine's output. Send it a message (from the sender, with

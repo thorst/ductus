@@ -970,8 +970,8 @@ async fn check_project(
                 continue;
             }
             Ok(config) => {
-                if let Some(script) = config.script_path()
-                    && let Err(e) = load_functions(config, &script).await
+                if config.has_code()
+                    && let Err(e) = load_functions(config).await
                 {
                     let text = format!("{e:#}");
                     let finding = Finding::error("DUC125", format!("{label}: {}", first_line(&text))).interface(&label);
@@ -998,10 +998,10 @@ async fn check_project(
         let finding = Finding::warning(
             "DUC204",
             format!(
-                "{name}: has `source: internal` but no interface routes to it (`destination: {{ interface: {name} }}`)"
+                "{name}: has `source: internal` but no interface routes to it (`destinations: {{ {name}: {{ interface: {name} }} }}`)"
             ),
         )
-        .hint(format!("route to it from another interface: `destination: {{ interface: {name} }}`"))
+        .hint(format!("route to it from another interface: `destinations: {{ {name}: {{ interface: {name} }} }}`"))
         .interface(name);
         let finding = match places.file(name) {
             Some(file) => report.at_key(finding, file, &["source"]),
@@ -1215,16 +1215,30 @@ async fn check_project(
     Ok(())
 }
 
-/// Where in interface.yaml a code loading error points: the destination whose `transform` names
-/// the function the module doesn't export, else `script`.
+/// Where in interface.yaml a code loading error points: the destination whose function its file
+/// doesn't export (its `transform`, else its `script`), the destination whose own file the error
+/// names (its `script`), else the interface's `script`.
 fn function_key<'a>(config: &'a InterfaceConfig, error: &str) -> Vec<&'a str> {
     let missing = error.split_once("must export a function named `").and_then(|(_, rest)| rest.split('`').next());
-    let Some(missing) = missing else { return vec!["script"] };
-    config
-        .destinations()
-        .find(|(_, d)| d.transform.as_deref() == Some(missing))
-        .map(|(name, _)| [config.destination_key(name), vec!["transform"]].concat())
-        .unwrap_or_else(|| vec!["script"])
+    let functions = config.functions();
+    let destinations: Vec<_> = config.destinations().zip(functions.iter()).collect();
+    for &((name, d), f) in &destinations {
+        let Some(f) = f else { continue };
+        if missing == Some(f.name.as_str()) && error.contains(&f.module.display().to_string()) {
+            let key = if d.transform.is_some() { "transform" } else { "script" };
+            if d.transform.is_some() || d.script.is_some() {
+                return [config.destination_key(name), vec![key]].concat();
+            }
+        }
+    }
+    for &((name, d), _) in &destinations {
+        let named =
+            d.script.as_ref().and_then(|s| s.file_name()).is_some_and(|f| error.contains(&*f.to_string_lossy()));
+        if named {
+            return [config.destination_key(name), vec!["script"]].concat();
+        }
+    }
+    vec!["script"]
 }
 
 /// `validate` against a database, reading only (it may run with a newer binary than the engines
@@ -1756,13 +1770,15 @@ fn indent(text: &str, n: usize) -> String {
 }
 
 /// Load an interface's code the way the engine does: every function its destinations name
-/// must be exported.
-async fn load_functions(config: &ductus_core::InterfaceConfig, script: &Path) -> Result<()> {
+/// must be exported by its file (the destination's own, or the interface's).
+async fn load_functions(config: &ductus_core::InterfaceConfig) -> Result<()> {
     let functions = config.functions();
-    let functions: Vec<(&str, &str)> = functions.iter().map(|(n, f)| (n.as_str(), f.as_str())).collect();
+    if functions.iter().all(Option::is_none) {
+        return Ok(()); // a `script:` no destination runs: nothing the engine loads
+    }
     let mut isolate = Isolate::host();
     isolate.capture_console(); // top-level `console` lines: never among validate's output
-    isolate.add_functions(script, &functions, config.timeout).await.map(drop)
+    isolate.add_functions(&ductus_script::Function::all(&functions), config.timeout).await.map(drop)
 }
 
 pub(crate) fn first_line(text: &str) -> &str {
