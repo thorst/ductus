@@ -32,6 +32,20 @@ export const iface = (name: string) =>
     refetchInterval: HEALTH_REFRESH_MS,
   });
 
+/** An interface's timeline (commits, deployments, the audit log, documentation), newest first, a page at a time. */
+export const history = (name: string, all: boolean) =>
+  infiniteQueryOptions({
+    queryKey: ["history", name, all],
+    queryFn: async ({ pageParam }) =>
+      unwrap(
+        await api.GET("/interfaces/{name}/history", {
+          params: { path: { name }, query: { before: pageParam ?? undefined, limit: 50, all } },
+        }),
+      ),
+    initialPageParam: null as string | null,
+    getNextPageParam: (page) => page.next_before ?? null,
+  });
+
 export const STATUSES = ["pending", "sent", "filtered", "quarantined", "duplicate"] as const;
 export type MessageStatus = (typeof STATUSES)[number];
 

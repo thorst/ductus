@@ -70,6 +70,35 @@ impl Version {
     }
 }
 
+/// What `config`'s interface would run if the engine started now from the project at `root`: its
+/// code loaded as a start loads it (no services: top-level code that calls a database fails here,
+/// said), on a thread of its own. What `ductus history` adds to the files the recorded versions name.
+pub fn current(root: &Path, config: &InterfaceConfig, heap_mb: usize) -> Result<Version> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+                let files = tokio::task::LocalSet::new().block_on(&runtime, async {
+                    let Some(path) = config.script_path() else { return Ok(Vec::new()) };
+                    let mut isolate = ductus_script::Isolate::new(None, heap_mb);
+                    isolate.capture_console();
+                    let functions = config.functions();
+                    let functions: Vec<(&str, &str)> =
+                        functions.iter().map(|(n, f)| (n.as_str(), f.as_str())).collect();
+                    isolate
+                        .add_functions(&path, &functions, config.timeout)
+                        .await
+                        .with_context(|| format!("loading `{}`'s code", config.name))?;
+                    isolate.code_files(&path)
+                })?;
+                let root = ductus_script::loaded_path(root).with_context(|| format!("finding {}", root.display()))?;
+                Version::of(&root, config, &files)
+            })
+            .join()
+            .map_err(|_| anyhow::anyhow!("loading `{}`'s code panicked", config.name))?
+    })
+}
+
 /// The version's hash: see the module's documentation.
 fn hash(interface: &str, files: &[File]) -> [u8; 32] {
     let mut text = format!("ductus code version 1\ninterface {interface}\n");

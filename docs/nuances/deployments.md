@@ -47,6 +47,31 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **Why:** without a limit, one long report on `deliveries` would hold every sender's ACK for as long as it ran.
 - **What to do:** upgrade when no long report runs (`ductus upgrade --check` lists the migration); if the start says so, let the query finish or end it (`pg_cancel_backend`), then start again. Under systemd the service starts again by itself.
 
+## Two people deploying from their own checkouts get a warning, not a refusal (level 2)
+- **What:** a start or handover that changes an interface whose running version someone else deployed from a commit this project's history doesn't have, or from files never committed, says so (⚠ in `ductus handover`'s answer, a WARN line in the log, and on the deployment in `ductus history` and the History tab), and deploys all the same. "Someone else" is told by name: a start by the service, and `systemctl reload` (`systemd (systemctl reload)`), count as someone else, so two people who both deploy that way are warned about each other's work and their own. Without git on either deployment there's nothing to compare: no warning.
+- **Why:** with the code in a folder on the server (`git pull` deploys), the last deploy wins: a colleague's change that isn't in your checkout is replaced by what you have. Refusing it needs releases (0.7.4), which know what each deploy replaces; until then the warning makes it visible at the moment it happens.
+- **What to do:** when you see it, read `ductus history <interface>`: the deployment it names, by whom, and from which commit. Pull their commit (or ask them to push it) and deploy again. To stop it happening: one checkout on the server, deployed only by `git pull` from the shared branch, and `sudo ductus handover -m "why"` so the record says who.
+
+## History lists the commits on the files an interface's versions named (level 3)
+- **What:** `ductus history` (and the History tab) ask git about exactly the files the interface's recorded code versions named (its `interface.yaml`, its code, the shared files it imports, every version's: a file since moved or deleted is asked about under its old path too) plus, from the command line, what the project runs now. A commit that changed only files no version named (a test, a README, a file it imported before 0.7.3 recorded versions) isn't listed. Commits are listed as `git log` lists them: a merge only when it changed those files differently from every parent; the commit on the branch is the change.
+- **Why:** the interface's history is the history of what it runs; a whole-folder history would list every test and README change.
+- **What to do:** for everything else, `git log -- interfaces/<folder>` in the checkout.
+
+## History shows unchanged starts, reads and refusals only when asked for everything (level 3)
+- **What:** by default an interface's history has the deployments that changed it and the audit log's changes (pauses, resends, retention); `--all` (or `all=true` in the API, "Everything" on the tab) adds the starts and handovers that ran it as it was, payload reads and refused attempts. Through the API, reads and refused attempts need the `audit` permission (admins have it), as the audit log does. Starts recorded before 0.7.3.3 kept no list of what they ran unchanged: those don't show, even with `--all`.
+- **Why:** "who changed what" is the question most of the time; every restart and every look at a message would bury it.
+- **What to do:** use `--all` to see restarts beside deploys, or who read a message's payload around a change.
+
+## The first history read after a deploy walks git; later ones don't (level 4)
+- **What:** an interface's git history is worked out by walking every commit since HEAD (gitoxide, in the engine and the command): about 0.2 s for 1,000 commits at 1,001 interfaces, measured. The engine keeps the result until HEAD moves (a `git pull`), so the History tab's next pages and refreshes take milliseconds. `ductus history` walks each time it's run (it's one command).
+- **Why:** git has no index by file; `git log -- path` walks too (it took 0.04 s on the same repository).
+- **What to do:** nothing for a few thousand commits. For much more, `git gc` keeps the pack small; a very long history costs proportionally more on the first read.
+
+## The documentation snapshot is saved just after a start, with its deployment (level 3)
+- **What:** since 0.7.3.3 `docs_snapshot` is written with the start's deployment, in the same transaction, beside the start (milliseconds after `started`), not in it; each change adds a `docs_history` row naming that deployment. A SQL report run in that moment reads the previous snapshot. If the deployment can't be recorded, the snapshot is still saved (its history rows then name no deployment). Engines on one database save their snapshots one at a time.
+- **Why:** the documentation's history follows the same timeline as the code's, so a change is tied to the deployment that brought it; and the start doesn't wait for a report table.
+- **What to do:** nothing; a report that must see a deploy's documentation can wait for the `deployed:` log line.
+
 ## `import()` with a computed name isn't counted (level 4)
 - **What:** `import("./" + name + ".ts")` can't be followed without running the code, so the files it loads don't count in the version until they've been loaded at a start before the version is computed (they usually haven't).
 - **Why:** the version is computed from the code as written, before any message runs.

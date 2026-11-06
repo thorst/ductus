@@ -10,6 +10,7 @@ import { AlertItem, isCertificate } from "@/components/alerts";
 import { AllowList } from "@/components/allow-list";
 import { DocFields } from "@/components/docs-values";
 import { HealthBadge } from "@/components/health-badge";
+import { HistoryList } from "@/components/history-list";
 import { MessageList } from "@/components/message-list";
 import { OwnerReach, ownerGroup } from "@/components/owner";
 import { Field, Loaded, PageHeader } from "@/components/page";
@@ -45,12 +46,15 @@ export function InterfacePage() {
           <Tabs
             value={tab ?? "overview"}
             onValueChange={(value) =>
-              void navigate({ search: (s) => ({ ...s, tab: value === "messages" ? "messages" : undefined }) })
+              void navigate({
+                search: (s) => ({ ...s, tab: value === "messages" || value === "history" ? value : undefined }),
+              })
             }
           >
             <TabsList className="mb-6">
               <TabsTrigger value="overview">Overview</TabsTrigger>
               <TabsTrigger value="messages">Messages</TabsTrigger>
+              <TabsTrigger value="history">History</TabsTrigger>
             </TabsList>
             <TabsContent value="overview">
               <Overview i={i} />
@@ -61,6 +65,9 @@ export function InterfacePage() {
                 status={status}
                 onStatus={(s) => void navigate({ search: (prev) => ({ ...prev, status: s }) })}
               />
+            </TabsContent>
+            <TabsContent value="history">
+              <HistoryList name={i.name} />
             </TabsContent>
           </Tabs>
         </>

@@ -4,6 +4,12 @@
 # reload` runs). Reports per handover how long the new engine took to be ready (it receives
 # beside the old one meanwhile), the old one's stop, and how long sending paused; and what the
 # sender saw over all three (refused, dropped, longest wait). Then that every message arrived once.
+#
+# WARN=1 (0.7.3.3): the project is in a git repository of 1,000 commits, and before each handover
+# the last commit is rewritten (as a colleague's checkout would have it) with one interface changed,
+# and a different person asks: every handover then warns that it may undo someone else's change
+# (`ductus handover` prints it), which the new engine works out before it's ready, outside the
+# sending pause. Run it with a binary before 0.7.3.3 too (BIN=...) to compare the pause.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
@@ -23,6 +29,19 @@ for i in $(seq 0 $((COUNT - 1))); do
   printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: %d } }\nordering: { key: PID-3.1, partitions: 8 }\ndestination: { mllp: { host: 127.0.0.1, port: %d } }\n' \
     "$name" $((BASE + i)) "$SINK" >"$WORK/interfaces/$name/interface.yaml"
 done
+
+FIRST=$WORK/interfaces/$PREFIX-0000/interface.yaml
+if [ "${WARN:-0}" = 1 ]; then
+  git -C "$WORK" init -q -b main
+  git -C "$WORK" add .
+  git -C "$WORK" -c user.name=ann -c user.email=ann@example.org commit -qm "the project"
+  awk 'BEGIN { for (i = 1; i <= 1000; i++) { msg = "change " i; body = "change " i "\n"
+    print "commit refs/heads/main"; print "committer ann <ann@example.org> " (1700000000 + i) " +0000"
+    print "data " length(msg); print msg; if (i == 1) print "from refs/heads/main^0"
+    print "M 100644 inline NOTES"; print "data " length(body); printf "%s", body; print "" } }' |
+    git -C "$WORK" fast-import --quiet
+  git -C "$WORK" reset -q --hard main
+fi
 
 cleanup() {
   pkill -INT -f "ductus sink --port $SINK" || true
@@ -44,9 +63,18 @@ TOTAL=$((ROUNDS * 4 * 200 + 1200)) # 200 msg/s for each round's 4 s, and a littl
 SENDER=$!
 sleep 3
 for round in $(seq 1 "$ROUNDS"); do
+  asker=()
+  if [ "${WARN:-0}" = 1 ]; then
+    echo "# round $round" >>"$FIRST"
+    git -C "$WORK" -c user.name=bob -c user.email=bob@example.org commit -qa --amend -m "round $round"
+    asker=(env "SUDO_USER=person-$round")
+  fi
   started=$(date +%s.%N)
-  out=$("$BIN" handover --control "$WORK/control")
+  out=$("${asker[@]}" "$BIN" handover --control "$WORK/control")
   took=$(echo "$(date +%s.%N) - $started" | bc)
+  if grep '⚠' <<<"$out" >/dev/null; then
+    echo "   handover $round warned: $(grep '⚠' <<<"$out" | sed -n 1p | cut -c1-110)…"
+  fi
   ready=$(grep -o 'ready after [0-9.]* m*s' <<<"$out" | sed 's/ready after //')
   stop=$(grep -o 'stopped in [0-9.]* m*s' <<<"$out" | sed 's/stopped in //')
   paused=$(grep -o 'sending paused [0-9.]* m*s' <<<"$out" | sed 's/sending paused //')

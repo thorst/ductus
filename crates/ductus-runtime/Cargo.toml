@@ -20,7 +20,7 @@ ductus-store = { path = "../ductus-store" }
 futures-util = "0.3"
 # The project's git commit at each start (`git.rs`): reading `.git` only, SHA-1 repositories, no
 # network or `status` (+2.1 MB, measured 2026-11-04; decisions.md "0.7.3 answers").
-gix = { version = "0.90.0", default-features = false, features = ["sha1"] }
+gix = { version = "0.90.0", default-features = false, features = ["sha1", "pack-cache-lru-static"] }
 ldap3 = { version = "0.12.1", default-features = false, features = ["tls-rustls-aws-lc-rs"] }
 rcgen = { version = "0.14.10", default-features = false, features = ["aws_lc_rs", "crypto", "pem"] }
 lettre = { version = "0.11.23", default-features = false, features = ["smtp-transport", "pool", "builder", "hostname", "tokio1", "tokio1-rustls", "rustls-platform-verifier", "aws-lc-rs"] }

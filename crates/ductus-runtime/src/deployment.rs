@@ -109,6 +109,114 @@ pub async fn save(store: Store, versions: Option<Arc<Vec<Version>>>, saving: Sav
     saving.send_replace(Some(Arc::new(Saved { ids, by_interface })));
 }
 
+/// Warnings for the interfaces a start changes, by interface (`check`).
+pub type Warnings = Arc<HashMap<String, String>>;
+
+/// Where `check` says what it found: None until it has (then a map, empty when nothing's wrong).
+pub fn warnings_channel() -> (watch::Sender<Option<Warnings>>, watch::Receiver<Option<Warnings>>) {
+    watch::channel(None)
+}
+
+/// The warnings once `check` has them; empty when it couldn't (said) or the start ended first.
+pub async fn warnings(rx: &watch::Receiver<Option<Warnings>>) -> Warnings {
+    let mut rx = rx.clone();
+    rx.wait_for(Option::is_some).await.ok().and_then(|w| w.clone()).unwrap_or_default()
+}
+
+/// Folder mode, two people (0.7.3.3): for each interface this start changes, whether the version it
+/// replaces is someone else's work that this one may undo: it came from a commit that isn't in this
+/// project's history (their checkout had commits this one hasn't pulled), or it ran files never
+/// committed, and someone else deployed it. Refusing needs releases (0.7.4); this warns, in the
+/// log, the deployment's record and `ductus handover`'s answer. Beside the start, before a
+/// takeover is ready (so never in its sending pause); reads only.
+pub async fn check(
+    store: Store,
+    root: std::path::PathBuf,
+    versions: Arc<Vec<Version>>,
+    who: Who,
+    tx: watch::Sender<Option<Warnings>>,
+) {
+    let started = std::time::Instant::now();
+    let names: Vec<&str> = versions.iter().map(|v| v.interface.as_str()).collect();
+    let current = match store.current_versions(&names).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "couldn't read what the interfaces ran before: no warning for changes over someone else's");
+            tx.send_replace(Some(Arc::default()));
+            return;
+        }
+    };
+    let hashes: HashMap<&str, &[u8]> = versions.iter().map(|v| (v.interface.as_str(), v.hash.as_slice())).collect();
+    // Replaced, by someone else, with something to say about where it came from.
+    let suspects: Vec<&ductus_store::Current> = current
+        .iter()
+        .filter(|c| hashes.get(c.interface.as_str()).is_some_and(|h| *h != c.version.as_slice()))
+        .filter(|c| !same_person(&who, c))
+        .filter(|c| c.git_commit.is_some() || !dirty(c).is_empty())
+        .collect();
+    let ancestry = if suspects.iter().any(|c| c.git_commit.is_some()) {
+        let root = root.clone();
+        match tokio::task::spawn_blocking(move || crate::git::ancestry(&root)).await {
+            Ok(Some(Ok(a))) => Some(a),
+            Ok(Some(Err(e))) => {
+                tracing::warn!(error = %format!("{e:#}"), "couldn't read the project's git history: no warning for changes from commits it doesn't have");
+                None
+            }
+            _ => None,
+        }
+    } else {
+        None
+    };
+    let found: HashMap<String, String> =
+        suspects.iter().filter_map(|c| Some((c.interface.clone(), judge(c, ancestry.as_ref())?))).collect();
+    tracing::debug!(took = ?started.elapsed(), warnings = found.len(), "checked what the changes replace");
+    tx.send_replace(Some(Arc::new(found)));
+}
+
+/// The same person deployed it: both are people (not a service manager) with the same name.
+fn same_person(who: &Who, before: &ductus_store::Current) -> bool {
+    let person = |how: &str, by: &str| how != "service" && !by.starts_with("systemd");
+    person(who.how, &who.by) && person(&before.how, &before.by) && who.by == before.by
+}
+
+/// Files the version replaced ran that weren't committed when it was deployed.
+fn dirty(before: &ductus_store::Current) -> Vec<&str> {
+    let uncommitted = before.uncommitted.as_deref().unwrap_or_default();
+    before.files.iter().filter(|f| uncommitted.contains(f)).map(String::as_str).collect()
+}
+
+/// Why replacing `before` may undo someone's work, in words; None when it can't.
+fn judge(before: &ductus_store::Current, ancestry: Option<&crate::git::Ancestry>) -> Option<String> {
+    let mut why = Vec::new();
+    if let (Some(commit), Some(ancestry)) = (&before.git_commit, ancestry)
+        && ancestry.head.is_some()
+        && !ancestry.contains(commit)
+    {
+        why.push(format!(
+            "came from commit {}, which this project's history doesn't have",
+            &commit[..commit.len().min(12)]
+        ));
+    }
+    let dirty = dirty(before);
+    match dirty.len() {
+        0 => {}
+        1 => why.push(format!("ran a file never committed ({})", dirty[0])),
+        n => why.push(format!("ran {n} files never committed ({}, …)", dirty[0])),
+    }
+    if why.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "replaces {} (deployed {} by {} on {}): it {}, so their change may be undone (`ductus history {}`)",
+        code::short(&before.version),
+        before.at.format("%Y-%m-%d %H:%M UTC"),
+        before.by,
+        before.host,
+        why.join(" and "),
+        before.interface
+    ))
+}
+
 /// Who started this engine and why.
 #[derive(Debug, Clone)]
 pub struct Who {
@@ -178,24 +286,41 @@ pub fn commit(root: &Path, versions: &[Version]) -> Option<crate::git::Commit> {
     }
 }
 
-/// Read the project's commit (`commit`), record the deployment of `versions` by `who` once they're
-/// saved (`decided`), and say so in the log. None when it couldn't be recorded (said). Beside the
-/// start, once the engine holds its interfaces (a takeover's after it took over).
-pub async fn record(
-    engine: &crate::control::Engine,
-    host: &str,
-    who: &Who,
-    versions: Arc<Vec<Version>>,
-    decided: Decided,
-    root: std::path::PathBuf,
-) -> Option<Deployment> {
+/// What a recording needs besides the engine: the versions, their ids once saved, the warnings
+/// once checked, the project's folder and its documentation.
+pub struct Recording {
+    pub versions: Arc<Vec<Version>>,
+    pub decided: Decided,
+    pub warned: watch::Receiver<Option<Warnings>>,
+    pub root: std::path::PathBuf,
+    pub docs: Vec<ductus_store::DocsRow>,
+}
+
+/// Save the documentation without a deployment (when it can't be recorded): history rows name none.
+pub async fn docs_alone(store: &Store, docs: &[ductus_store::DocsRow]) {
+    if let Err(e) = store.save_docs_snapshot(docs).await {
+        tracing::warn!(error = format!("{e:#}"), "could not save the documentation snapshot");
+    }
+}
+
+/// Read the project's commit (`commit`), record the deployment of the versions by `who` once
+/// they're saved (`decided`) and checked (`check`), with the project's documentation (its snapshot
+/// and history: in the same transaction), and say so in the log. None when it couldn't be recorded
+/// (said; the documentation is saved alone then). Beside the start, once the engine holds its
+/// interfaces (a takeover's after it took over).
+pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: Recording) -> Option<Deployment> {
     let started = std::time::Instant::now();
+    let Recording { versions, decided, warned, root, docs } = r;
     let reading = versions.clone();
     let commit = tokio::task::spawn_blocking(move || self::commit(&root, &reading)).await.ok().flatten();
     let commit = commit.as_ref();
     let store: &Store = &engine.store;
     // Not saved: `save` said why.
-    let saved = decided.saved().await.filter(|s| !s.by_interface.is_empty() || versions.is_empty())?;
+    let Some(saved) = decided.saved().await.filter(|s| !s.by_interface.is_empty() || versions.is_empty()) else {
+        docs_alone(store, &docs).await;
+        return None;
+    };
+    let warnings = self::warnings(&warned).await;
     let new = new_versions(&versions);
     let deployment = NewDeployment {
         environment: &engine.environment,
@@ -208,6 +333,8 @@ pub async fn record(
         git_commit: commit.and_then(|c| c.id.as_deref()),
         uncommitted: commit.map(|c| c.uncommitted.as_slice()),
         versions: &new,
+        warnings: &warnings,
+        docs: Some(&docs),
     };
     let recorded = match store.record_deployment(&deployment, &saved.ids).await.context("recording the deployment") {
         Ok(r) => r,
@@ -216,9 +343,13 @@ pub async fn record(
                 error = %format!("{e:#}"),
                 "this start's deployment (what each interface runs) wasn't recorded; the engine runs all the same"
             );
+            docs_alone(store, &docs).await;
             return None;
         }
     };
+    for (interface, warning) in warnings.iter() {
+        tracing::warn!(%interface, deployment = recorded.id, "deployed over someone else's change: {warning}");
+    }
     let changed = recorded.changed();
     let named: Vec<String> = recorded
         .interfaces

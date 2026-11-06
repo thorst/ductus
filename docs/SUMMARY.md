@@ -111,6 +111,7 @@
     - [ductus dev](reference/cli/dev.md)
     - [ductus test](reference/cli/test.md)
     - [ductus try](reference/cli/try.md)
+    - [ductus history](reference/cli/history.md)
     - [ductus validate](reference/cli/validate.md)
     - [ductus upgrade](reference/cli/upgrade.md)
     - [ductus replay](reference/cli/replay.md)

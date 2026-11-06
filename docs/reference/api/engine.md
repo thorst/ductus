@@ -117,6 +117,27 @@ Resume a paused destination: it sends its backlog in order. Operator.
 - `403` (application/json): [`ErrorBody`](#errorbody)
 - `404` (application/json): [`ErrorBody`](#errorbody)
 
+## `GET /api/v1/interfaces/{name}/history`
+
+One timeline of who changed what and why for an interface, newest first: the git commits that changed its files (its interface.yaml, its code and the shared files it imports), the deployments that changed its code, the audit log's entries naming it and its documentation's changes.
+
+**Who may call it:** anyone signed in (a person or a token).
+
+**Parameters**
+
+| | In | Type | |
+|---|---|---|---|
+| `name` (required) | path | text | Interface name. |
+| `before` | query | text | Entries older than this one (the previous page's `next_before`). |
+| `limit` | query | number | Page size, at most 200 (default 50). |
+| `all` | query | true or false | Every start that ran it, not only those that changed it; with the `audit` permission, also payload reads and refused attempts from the audit log. |
+
+**Answers**
+
+- `200` (application/json): [`HistoryPage`](#historypage)
+- `400` (application/json): [`ErrorBody`](#errorbody)
+- `404` (application/json): [`ErrorBody`](#errorbody)
+
 ## `GET /api/v1/metrics`
 
 Metrics in Prometheus's text format: messages received and delivered, retries, timings (receipt to sent, sends, transforms, respond-mode requests, database and API calls), queue sizes, stopped interfaces, drain state.
@@ -303,6 +324,99 @@ The first message waiting in a lane: the next one its worker handles.
 |---|---|---|
 | `drain` | text | `accepting`, `draining` or `drained`: a load balancer can stop sending when it isn't `accepting`. |
 | `status` | text | Always `ok` when the engine answers. |
+
+### `HistoryAudit`
+
+| Field | Type | |
+|---|---|---|
+| `action` | text | `destination.pause`, `message.replay`, …. |
+| `detail` (optional) | object or null |  |
+| `id` | number |  |
+| `message` (optional) | number or null |  |
+| `outcome` | text | `ok`, `denied` or `failed`. |
+| `subject` (optional) | text or null |  |
+
+### `HistoryCommit`
+
+| Field | Type | |
+|---|---|---|
+| `email` | text |  |
+| `files` | list of [`HistoryFile`](#historyfile) | The interface's files it changed. |
+| `id` | text | The commit, in hex. |
+| `summary` | text | The message's first line. |
+
+### `HistoryDeployment`
+
+| Field | Type | |
+|---|---|---|
+| `changed` | true or false | It changed this interface's code (false: it ran it as it was; `all` only). |
+| `environment` | text |  |
+| `from` (optional) | text or null | The code version before (12 hex characters); none when new here, or unchanged. |
+| `git_commit` (optional) | text or null | The project's commit then (hex); none without git. |
+| `host` | text |  |
+| `how` | text | `start`, `service` or `handover`. |
+| `id` | number |  |
+| `reason` (optional) | text or null |  |
+| `to` (optional) | text or null | The code version from then; none when unchanged. |
+| `uncommitted` (optional) | list of text or null | Files it ran that weren't the commit's; none without git. |
+| `version` | text | The binary's version. |
+| `warning` (optional) | text or null | Why this change may undo someone else's (folder mode), when it may. |
+
+### `HistoryDocumentation`
+
+| Field | Type | |
+|---|---|---|
+| `deployment` (optional) | number or null | The deployment that changed it; none for the snapshot taken at the upgrade to 0.7.3.3. |
+| `fields` | list of [`HistoryField`](#historyfield) | The fields that changed, each with its value before and after. |
+| `removed` | true or false | The interface left the project (or the first row, as the snapshot was at the upgrade). |
+
+### `HistoryEntry`
+
+One entry of the timeline.
+
+| Field | Type | |
+|---|---|---|
+| `at` | time (RFC 3339) |  |
+| `audit` (optional) | [`HistoryAudit`](#historyaudit) or null |  |
+| `by` | text | Who: a commit's author, who deployed (or asked for the handover), who acted. |
+| `commit` (optional) | [`HistoryCommit`](#historycommit) or null |  |
+| `deployment` (optional) | [`HistoryDeployment`](#historydeployment) or null |  |
+| `documentation` (optional) | [`HistoryDocumentation`](#historydocumentation) or null |  |
+| `key` | text | This entry's place in the timeline: pass it as `before` to read what's older. |
+| `kind` | [`HistoryKind`](#historykind) |  |
+| `what` | text | What happened, in one line. |
+
+### `HistoryField`
+
+| Field | Type | |
+|---|---|---|
+| `after` (optional) | object or null |  |
+| `before` (optional) | object or null |  |
+| `field` | text | `owner`, `custom.baa_signed`, `destinations.lab.custom.contact`. |
+
+### `HistoryFile`
+
+| Field | Type | |
+|---|---|---|
+| `change` | text | `added`, `modified` or `deleted`. |
+| `path` | text | Relative to the project, with `/`. |
+
+### `HistoryKind`
+
+Where an entry comes from.
+
+`commit`, `audit`, `documentation`, `deployment`
+
+### `HistoryPage`
+
+A page of the timeline.
+
+| Field | Type | |
+|---|---|---|
+| `entries` | list of [`HistoryEntry`](#historyentry) | Newest first. |
+| `interface` | text |  |
+| `next_before` (optional) | text or null | Pass as `before` for the next (older) page; absent on the last one. |
+| `notes` | list of text | What the timeline lacks, in words: no git repository, a database not read, …. |
 
 ### `InterfaceCounts`
 

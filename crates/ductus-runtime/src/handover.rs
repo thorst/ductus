@@ -113,8 +113,15 @@ pub struct HandedOver {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum ToOld {
-    /// Loaded, intake open on the inherited sockets: the old engine may let go.
-    Ready { pid: u32, version: String, took_ms: u64 },
+    /// Loaded, intake open on the inherited sockets: the old engine may let go. `warnings`: changes
+    /// that may undo someone else's (0.7.3.3; absent from engines before), for the asker.
+    Ready {
+        pid: u32,
+        version: String,
+        took_ms: u64,
+        #[serde(default)]
+        warnings: Vec<String>,
+    },
     /// It can't take over, and exits: why.
     Failed(String),
     /// It holds the interfaces and sends.
@@ -253,7 +260,7 @@ impl Takeover {
     pub async fn predecessor(&self) -> Result<Predecessor> {
         match *self {}
     }
-    pub async fn ready(&self, _took: Duration) -> Result<()> {
+    pub async fn ready(&self, _took: Duration, _warnings: Vec<String>) -> Result<()> {
         match *self {}
     }
     pub async fn released(&self) -> Option<Duration> {
@@ -604,7 +611,10 @@ mod linux {
         let limit = Duration::from_secs(requested.request.timeout_secs.max(1));
         let said = tokio::time::timeout(limit, spawned.pair.receive::<ToOld>()).await;
         let failure = match said {
-            Ok(Ok(Some(ToOld::Ready { pid, version, .. }))) => {
+            Ok(Ok(Some(ToOld::Ready { pid, version, warnings, .. }))) => {
+                for warning in warnings {
+                    requested.say(warning).await;
+                }
                 requested
                     .say(format!(
                         "ductus {version} (pid {pid}) is ready after {} and receives beside this one: stopping this one",
@@ -679,12 +689,13 @@ mod linux {
                 .cloned()
         }
 
-        /// Ready: the old engine stops now.
-        pub async fn ready(&self, took: Duration) -> Result<()> {
+        /// Ready: the old engine stops now (and tells the asker `warnings` first).
+        pub async fn ready(&self, took: Duration, warnings: Vec<String>) -> Result<()> {
             let ready = ToOld::Ready {
                 pid: std::process::id(),
                 version: env!("CARGO_PKG_VERSION").into(),
                 took_ms: took.as_millis() as u64,
+                warnings,
             };
             self.pair.lock().await.send(&ready).await.context("telling the engine to take over from")
         }

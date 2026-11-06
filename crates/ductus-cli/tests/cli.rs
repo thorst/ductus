@@ -3837,6 +3837,201 @@ async fn a_handover_refuses_nothing_and_a_failed_one_leaves_the_engine_running()
     assert!(received.contains("unique 601 |"), "every message once (and the last one): {received}");
 }
 
+/// One timeline of who changed what and why (0.7.3.3), folder mode with two people: Ann's commit
+/// is deployed by a start; Bob's checkout rewrote it (his own commit in its place) and changes the
+/// shared file and the owner; his handover says ⚠ that it replaces a version from a commit his
+/// history doesn't have, deployed by someone else, and so do the log and `history`. `history`
+/// lists git's commits on exactly the interface's files (an unrelated one isn't), the deployments
+/// that changed it (`--all` adds the one that didn't), the documentation's change, in text, JSON,
+/// through the API a page at a time, and git only without a database.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn history_tells_who_changed_what_and_why() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("history-test-{nanos}");
+    let (mllp, api) = (free_port(), free_port());
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path().join("integrations");
+    let yaml = |owner: &str| {
+        format!(
+            "name: {name}\nabout: {{ owner: {owner} }}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\nscript: transform.ts\ndestination: {{ file: {{ dir: out }} }}\n"
+        )
+    };
+    let write = |path: &str, text: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    // Each commit a minute after the last, hours ago: before every deployment, in a known order.
+    let minute = std::sync::atomic::AtomicI64::new(nanos as i64 / 1_000_000_000 - 3 * 3600);
+    let git = |who: &str, args: &[&str]| {
+        let date = format!("@{} +0000", minute.fetch_add(60, std::sync::atomic::Ordering::Relaxed));
+        let out = Command::new("git")
+            .args(["-c", "core.autocrlf=false", "-c", &format!("user.name={who}")])
+            .args(["-c", &format!("user.email={}@example.org", who.to_lowercase())])
+            .args(args)
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    let transform = "import { tag } from \"../../lib/codes.ts\";\nexport function transform(m: any) { m.set(\"MSH-8\", tag); return m; }\n";
+    write(&format!("interfaces/{name}/interface.yaml"), &yaml("ann@example.org"));
+    write(&format!("interfaces/{name}/transform.ts"), transform);
+    write("lib/codes.ts", "export const tag = \"ann\";\n");
+    write("lib/unrelated.ts", "export const nobody = 1;\n");
+    std::fs::write(repo.path().join("README.md"), "the hospital's integrations\n").unwrap();
+    git("Ann", &["init", "-q"]);
+    git("Ann", &["add", "README.md"]);
+    git("Ann", &["commit", "-qm", "a repository"]);
+    git("Ann", &["add", "-A"]);
+    git("Ann", &["commit", "-qm", "Ann's codes"]);
+
+    let control = repo.path().join("control");
+    let control = control.to_str().unwrap();
+    let log = repo.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let mut old = Child(
+        Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["run", "--root", &root.to_string_lossy(), "--threads", "1"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", control)
+            .env_remove("SUDO_USER")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(wait_for_log(&log, "deployed:", 60), "{}", read_log());
+
+    // Bob's checkout: Ann's commit rewritten as his, the shared file and the owner changed, then
+    // the code too in a commit of its own; and a commit elsewhere in the project.
+    write("lib/codes.ts", "export const tag = \"bob\";\n");
+    write(&format!("interfaces/{name}/interface.yaml"), &yaml("bob@example.org"));
+    git("Bob", &["commit", "-qa", "--amend", "--reset-author", "-m", "Bob's codes"]);
+    write(&format!("interfaces/{name}/transform.ts"), &transform.replace("MSH-8", "MSH-9"));
+    git("Bob", &["commit", "-qam", "tag in MSH-9"]);
+    write("lib/unrelated.ts", "export const nobody = 2;\n");
+    git("Bob", &["commit", "-qam", "elsewhere"]);
+    let handover = |reason: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["handover", "--control", control, "-m", reason])
+            .env("SUDO_USER", "bob-test")
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let (ok, out) = handover("Bob's codes");
+    assert!(ok, "{out}\n{}", read_log());
+    let warned = format!("⚠ {name}: replaces ");
+    assert!(out.contains(&warned) && out.contains("which this project's history doesn't have"), "{out}");
+    assert!(out.find(&warned) < out.find("is ready after"), "said before the old engine stops: {out}");
+    tokio::task::spawn_blocking(move || old.0.wait()).await.unwrap().unwrap();
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let engines = store.live_engines().await.unwrap();
+    let new = Terminate(engines.iter().find(|e| e.interfaces.contains(&name)).expect("an engine runs it").pid as u32);
+    let deployed = |n: usize| read_log().matches("deployed:").count() >= n;
+    for _ in 0..100 {
+        if deployed(2) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let logged = read_log();
+    assert!(logged.contains("deployed over someone else's change"), "{logged}");
+    // Nothing changed: a start that ran it as it was (`--all` only).
+    let (ok, out) = handover("again");
+    assert!(ok && !out.contains('⚠'), "{out}");
+    for _ in 0..100 {
+        if deployed(3) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+
+    let history = |args: &[&str], database: bool| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ductus"));
+        command.arg("history").arg(&name).args(args).arg("--root").arg(&root);
+        command.env_remove("DUCTUS_PROJECT").env_remove("DUCTUS_ENV").env_remove("DUCTUS_DATABASE_URL");
+        if database {
+            command.args(["--database-url", &db]);
+        }
+        let out = command.output().unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "{said}");
+        said
+    };
+    let text = history(&[], true);
+    let lines: Vec<&str> = text.lines().collect();
+    let line = |all: &[&str]| {
+        lines.iter().position(|l| all.iter().all(|w| l.contains(w))).unwrap_or_else(|| panic!("{all:?}: {text}"))
+    };
+    let (by_bob, tag, codes, by_ann) = (
+        line(&["by a handover: Bob's codes"]),
+        line(&["committed", "tag in MSH-9"]),
+        line(&["committed", "Bob's codes"]),
+        line(&["(new here)"]),
+    );
+    assert!(by_bob < by_ann && by_ann < tag && tag < codes, "newest first: {text}");
+    assert!(lines[by_bob].contains("bob-test") && text.contains("⚠ replaces "), "{text}");
+    assert!(lines[tag].contains("Bob  ") && lines[tag].contains(&format!("interfaces/{name}/transform.ts (modified)")));
+    assert!(lines[codes].contains("lib/codes.ts (added)"), "{text}");
+    assert!(!text.contains("Ann's codes") && !text.contains("elsewhere"), "not in its files' history: {text}");
+    assert!(text.contains("documentation changed: owner: ann@example.org → bob@example.org"), "{text}");
+    assert!(!text.contains("ran it unchanged"), "{text}");
+    assert!(history(&["--all"], true).contains("ran it unchanged (handover): again"), "--all");
+
+    let json: serde_json::Value = serde_json::from_str(&history(&["--json"], true)).unwrap();
+    let entries = json["entries"].as_array().unwrap();
+    let deployment = entries.iter().find(|e| e["kind"] == "deployment").unwrap();
+    assert_eq!(deployment["deployment"]["how"], "handover", "{deployment}");
+    assert!(deployment["deployment"]["warning"].as_str().unwrap().contains("by "), "{deployment}");
+    let commit = entries.iter().find(|e| e["kind"] == "commit").unwrap();
+    assert_eq!(commit["commit"]["email"], "bob@example.org", "{commit}");
+    assert!(json["notes"].as_array().unwrap().is_empty(), "{json}");
+
+    // Git only, without a database: the commits, and a note saying so.
+    let git_only = history(&[], false);
+    assert!(git_only.contains("tag in MSH-9") && !git_only.contains("deployed"), "{git_only}");
+    assert!(git_only.contains("note: no database read"), "{git_only}");
+
+    // The API, a page at a time.
+    let token_name = format!("{name}-viewer");
+    let (ok, token) = ductus(&root, &["token", "create", &token_name, "--role", "viewer"]);
+    assert!(ok, "{token}");
+    let token = token.lines().next().unwrap().to_string();
+    let get = async |path: &str| {
+        let url = format!("http://127.0.0.1:{api}/api/v1{path}");
+        let response = reqwest::Client::new().get(url).bearer_auth(&token).send().await.unwrap();
+        (response.status().as_u16(), response.json::<serde_json::Value>().await.unwrap_or_default())
+    };
+    let (status, all) = get(&format!("/interfaces/{name}/history")).await;
+    assert_eq!(status, 200, "{all}");
+    let count = all["entries"].as_array().unwrap().len();
+    assert_eq!(count, entries.len(), "the API's timeline is the CLI's: {all}");
+    let (_, first) = get(&format!("/interfaces/{name}/history?limit=2")).await;
+    let next = first["next_before"].as_str().expect("more").to_string();
+    let (_, second) = get(&format!("/interfaces/{name}/history?limit=50&before={next}")).await;
+    let keys = |page: &serde_json::Value| -> Vec<String> {
+        page["entries"].as_array().unwrap().iter().map(|e| e["key"].as_str().unwrap().to_string()).collect()
+    };
+    let mut paged = keys(&first);
+    paged.extend(keys(&second));
+    assert_eq!(paged, keys(&all), "two pages are the whole");
+    assert_eq!(get("/interfaces/nobody-has-this/history").await.0, 404);
+    assert_eq!(get(&format!("/interfaces/{name}/history?before=yesterday")).await.0, 400);
+    let _ = ductus(&root, &["token", "revoke", &token_name]);
+    drop(new);
+}
+
 /// `ductus upgrade --check` on a new database, on one a migration behind (the migration and what
 /// it does are listed; ready), with a project whose test fails (exit 1, the failure shown, the same
 /// in `--json`), and on one where an applied migration differs from this build's (exit 1).
@@ -3862,7 +4057,9 @@ async fn upgrade_check_reads_the_database_and_the_project() {
         )
     };
     let last = ductus_store::migrations::embedded().unwrap().pop().unwrap();
-    let listed = format!("✓ {:04} {}", last.version, last.what);
+    // ⚠ when its header names tables it works through (`Heavy:`), ✓ when it names none.
+    let mark = if last.heavy.is_empty() { "✓" } else { "⚠" };
+    let listed = format!("{mark} {:04} {}", last.version, last.what);
 
     // A schema of this test's own holds the migrations table (the shared one stays as it is).
     let schema = ductus_store::testing::TestSchema::new(&db, "upgrade").await.unwrap();

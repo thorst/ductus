@@ -4,6 +4,7 @@ mod dev;
 mod doctor;
 mod envfile;
 mod findings;
+mod history;
 mod init;
 mod new;
 mod owners;
@@ -224,6 +225,40 @@ enum Command {
         /// recorded then.
         #[arg(long)]
         json: bool,
+    },
+    /// One timeline of who changed an interface, what and why, newest first: the git commits that
+    /// changed its files (its interface.yaml, its code and the shared files it imports, every
+    /// version's), the deployments that changed its code (who, why, from which commit, and a ⚠
+    /// when one may have undone someone else's change), the audit log's entries naming it (pauses,
+    /// resends, retention) and its documentation's changes. Reads the project and, with
+    /// DUCTUS_DATABASE_URL, the database (read-only); without it, git only.
+    History {
+        /// The interface: its name, or a file or folder inside its folder. One no longer in the
+        /// project is found by name in what was recorded.
+        interface: String,
+        /// Everything: also the starts that ran it unchanged, payload reads and refused attempts.
+        #[arg(long)]
+        all: bool,
+        /// How many entries, newest first.
+        #[arg(long, default_value_t = 50)]
+        limit: usize,
+        /// Entries older than this one: the `--before` the previous page ends with.
+        #[arg(long)]
+        before: Option<String>,
+        /// One JSON document: every entry with its time, kind, who, what, and its details (the
+        /// commit and files, the deployment, the audit row, the documentation fields changed).
+        #[arg(long)]
+        json: bool,
+        /// The database (read-only) for deployments, the audit log and documentation; git only
+        /// without it.
+        #[arg(long, env = "DUCTUS_DATABASE_URL", hide_env_values = true)]
+        database_url: Option<String>,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// The environment its interface.yaml is read in.
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
     },
     /// Check configs, code loading and TypeScript types for an environment (exits 1 on problems).
     Validate {
@@ -1146,6 +1181,9 @@ async fn run(cli: Cli) -> Result<()> {
                 _ => anyhow::bail!("give the message: a file, `--fixture NAME`, or `--message ID`"),
             };
             trying::run(trying::Args { root, env, interface, source, json, inspect }).await
+        }
+        Command::History { interface, all, limit, before, json, database_url, root, env } => {
+            history::run(history::Args { root, env, interface, database_url, all, limit, before, json }).await
         }
         Command::Validate { root, env, database_url, json, read_only } => {
             exit_on_failure(project::validate(&root, &env, database_url, read_only, json).await)

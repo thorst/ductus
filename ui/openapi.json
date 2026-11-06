@@ -1100,6 +1100,83 @@
         }
       }
     },
+    "/interfaces/{name}/history": {
+      "get": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "One timeline of who changed what and why for an interface, newest first: the git commits that\nchanged its files (its interface.yaml, its code and the shared files it imports), the\ndeployments that changed its code, the audit log's entries naming it and its documentation's\nchanges.",
+        "operationId": "interface_history",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Interface name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Entries older than this one (the previous page's `next_before`).",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "Page size, at most 200 (default 50).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          {
+            "name": "all",
+            "in": "query",
+            "description": "Every start that ran it, not only those that changed it; with the `audit` permission, also\npayload reads and refused attempts from the audit log.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HistoryPage"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/interfaces/{name}/messages": {
       "get": {
         "tags": [
@@ -4933,6 +5010,342 @@
           "quarantined": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "HistoryAudit": {
+        "type": "object",
+        "required": [
+          "id",
+          "action",
+          "outcome"
+        ],
+        "properties": {
+          "action": {
+            "type": "string",
+            "description": "`destination.pause`, `message.replay`, …"
+          },
+          "detail": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "message": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "outcome": {
+            "type": "string",
+            "description": "`ok`, `denied` or `failed`."
+          },
+          "subject": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        }
+      },
+      "HistoryCommit": {
+        "type": "object",
+        "required": [
+          "id",
+          "email",
+          "summary",
+          "files"
+        ],
+        "properties": {
+          "email": {
+            "type": "string"
+          },
+          "files": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryFile"
+            },
+            "description": "The interface's files it changed."
+          },
+          "id": {
+            "type": "string",
+            "description": "The commit, in hex."
+          },
+          "summary": {
+            "type": "string",
+            "description": "The message's first line."
+          }
+        }
+      },
+      "HistoryDeployment": {
+        "type": "object",
+        "required": [
+          "id",
+          "how",
+          "host",
+          "environment",
+          "version",
+          "changed"
+        ],
+        "properties": {
+          "changed": {
+            "type": "boolean",
+            "description": "It changed this interface's code (false: it ran it as it was; `all` only)."
+          },
+          "environment": {
+            "type": "string"
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The code version before (12 hex characters); none when new here, or unchanged."
+          },
+          "git_commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project's commit then (hex); none without git."
+          },
+          "host": {
+            "type": "string"
+          },
+          "how": {
+            "type": "string",
+            "description": "`start`, `service` or `handover`."
+          },
+          "id": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The code version from then; none when unchanged."
+          },
+          "uncommitted": {
+            "type": [
+              "array",
+              "null"
+            ],
+            "items": {
+              "type": "string"
+            },
+            "description": "Files it ran that weren't the commit's; none without git."
+          },
+          "version": {
+            "type": "string",
+            "description": "The binary's version."
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why this change may undo someone else's (folder mode), when it may."
+          }
+        }
+      },
+      "HistoryDocumentation": {
+        "type": "object",
+        "required": [
+          "removed",
+          "fields"
+        ],
+        "properties": {
+          "deployment": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The deployment that changed it; none for the snapshot taken at the upgrade to 0.7.3.3."
+          },
+          "fields": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryField"
+            },
+            "description": "The fields that changed, each with its value before and after."
+          },
+          "removed": {
+            "type": "boolean",
+            "description": "The interface left the project (or the first row, as the snapshot was at the upgrade)."
+          }
+        }
+      },
+      "HistoryEntry": {
+        "type": "object",
+        "description": "One entry of the timeline.",
+        "required": [
+          "at",
+          "kind",
+          "by",
+          "what",
+          "key"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "audit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HistoryAudit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "by": {
+            "type": "string",
+            "description": "Who: a commit's author, who deployed (or asked for the handover), who acted."
+          },
+          "commit": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HistoryCommit"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "deployment": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HistoryDeployment"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "documentation": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/HistoryDocumentation"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "key": {
+            "type": "string",
+            "description": "This entry's place in the timeline: pass it as `before` to read what's older."
+          },
+          "kind": {
+            "$ref": "#/components/schemas/HistoryKind"
+          },
+          "what": {
+            "type": "string",
+            "description": "What happened, in one line."
+          }
+        }
+      },
+      "HistoryField": {
+        "type": "object",
+        "required": [
+          "field"
+        ],
+        "properties": {
+          "after": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "before": {
+            "type": [
+              "object",
+              "null"
+            ]
+          },
+          "field": {
+            "type": "string",
+            "description": "`owner`, `custom.baa_signed`, `destinations.lab.custom.contact`."
+          }
+        }
+      },
+      "HistoryFile": {
+        "type": "object",
+        "required": [
+          "path",
+          "change"
+        ],
+        "properties": {
+          "change": {
+            "type": "string",
+            "description": "`added`, `modified` or `deleted`.",
+            "example": "modified"
+          },
+          "path": {
+            "type": "string",
+            "description": "Relative to the project, with `/`."
+          }
+        }
+      },
+      "HistoryKind": {
+        "type": "string",
+        "description": "Where an entry comes from.",
+        "enum": [
+          "commit",
+          "audit",
+          "documentation",
+          "deployment"
+        ]
+      },
+      "HistoryPage": {
+        "type": "object",
+        "description": "A page of the timeline.",
+        "required": [
+          "interface",
+          "entries",
+          "notes"
+        ],
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryEntry"
+            },
+            "description": "Newest first."
+          },
+          "interface": {
+            "type": "string"
+          },
+          "next_before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Pass as `before` for the next (older) page; absent on the last one."
+          },
+          "notes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the timeline lacks, in words: no git repository, a database not read, …"
           }
         }
       },

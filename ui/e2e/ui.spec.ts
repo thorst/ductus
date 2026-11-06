@@ -29,6 +29,7 @@ const AXE_PAGES = [
   "/interfaces",
   "/interfaces/adt",
   "/interfaces/orders?tab=messages",
+  "/interfaces/billing?tab=history",
   "/quarantine",
   "/hotspots",
   "/hotspots?interface=adt&destination=lab",
@@ -128,6 +129,24 @@ test("a destination's state, its last error and a pause with its reason", async 
 
   await page.goto("/interfaces/billing");
   await expect(page.getByText("invoice system upgrade tonight")).toBeVisible();
+});
+
+test("an interface's history: who changed it, what and why", async ({ page }) => {
+  await signIn(page, "/interfaces/billing");
+  await page.getByRole("tab", { name: "History" }).click();
+  await expect(page).toHaveURL(/tab=history/);
+  const history = page.getByRole("region", { name: "History" });
+  // The demo paused billing after its start: the newest change, with who and why.
+  const newest = history.getByRole("listitem").first();
+  await expect(newest).toContainText("Audit log");
+  await expect(newest).toContainText("paused billing");
+  await expect(newest).toContainText("invoice system upgrade tonight");
+  // The demo's project isn't in git: said, not hidden.
+  await expect(page.getByText("the project isn't in a git repository: no commits")).toBeVisible();
+  // Everything: this run's start too, changed or not.
+  await page.getByLabel(/Everything/).check();
+  await expect(history.getByRole("listitem").filter({ hasText: "Deployed" }).first()).toBeVisible();
+  await page.screenshot({ path: "test-results/interface-history.png", fullPage: true });
 });
 
 test("a quarantined message: why, what each destination did, and its HL7 fields", async ({ page }) => {
@@ -395,6 +414,7 @@ test("a phone-sized screen gets the navigation on top and no sideways page scrol
     "/interfaces",
     "/interfaces/adt",
     "/interfaces/orders?tab=messages",
+    "/interfaces/billing?tab=history",
     "/quarantine",
     "/hotspots",
     "/impact?vendor=Epic%20Systems",

@@ -18,6 +18,7 @@ pub mod gate;
 pub mod git;
 pub mod handover;
 pub mod health;
+pub mod history;
 mod http;
 mod ingest;
 pub mod inspect;
@@ -310,15 +311,12 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let destinations: Vec<(String, String)> =
         configs.iter().flat_map(|c| c.destinations().map(|(name, _)| (c.name.clone(), name.to_string()))).collect();
     let all_ids = store.destination_ids(&destinations).await?;
-    let charge = Charge {
-        snapshot: ductus_core::docs::snapshot(&configs, &resources)
-            .into_iter()
-            .map(|(kind, name, docs)| ductus_store::DocsRow { kind, name, docs: docs.to_string() })
-            .collect(),
-        destinations,
-        ids: all_ids.clone(),
-        queued,
-    };
+    // Saved with the deployment (its history names it), beside the start.
+    let snapshot: Vec<ductus_store::DocsRow> = ductus_core::docs::snapshot(&configs, &resources)
+        .into_iter()
+        .map(|(kind, name, docs)| ductus_store::DocsRow { kind, name, docs: docs.to_string() })
+        .collect();
+    let charge = Charge { destinations, ids: all_ids.clone(), queued };
     // Each interface's retention, before anything is stored: intake needs the tier.
     let configured: Vec<retention::Configured> = configs
         .iter()
@@ -337,9 +335,14 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     // Each interface's code version id, saved once computed (below): workers record it with every
     // decision, and wait for it before saving their first.
     let (saving, decided) = deployment::Decided::channel();
+    // Who started it and why: a takeover's is who asked the engine it takes over from.
+    let who = match &takeover {
+        Some(t) => deployment::Who::handover(&t.predecessor().await?.asked),
+        None => deployment::Who::start(service),
+    };
     if takeover.is_none() {
         let _ = waiting.set(take_charge(&store, &charge, &mut phases).await?);
-        settle_in(&store, &charge, &retention, &mut phases).await?;
+        settle_in(&retention, &mut phases).await?;
     }
     let mut ids = all_ids.into_iter();
     let (stopped_tx, stopped_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -583,6 +586,12 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     };
     let code = code.map(Arc::new);
     tokio::spawn(deployment::save(store.clone(), code.clone(), saving));
+    // Whether a change undoes someone else's (folder mode): read beside the start, and before a
+    // takeover is ready, so never in its sending pause.
+    let (warning, warned) = deployment::warnings_channel();
+    if let Some(versions) = &code {
+        tokio::spawn(deployment::check(store.clone(), root.to_path_buf(), versions.clone(), who.clone(), warning));
+    }
     phases.mark("code versions computed");
     if let Some(resolving) = resolving {
         resolving.await.context("looking up the host names in `allow:` lists")?;
@@ -674,12 +683,25 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     });
     // Recorded beside the start, not in its way (tens of milliseconds at a thousand interfaces, the
     // first time far more): a task that ends once it's written. The API shows it from then on.
-    let record = |engine: &Arc<control::Engine>, who: deployment::Who| {
-        let Some(versions) = code.clone() else { return };
-        let (engine, root, decided) = (engine.clone(), root.to_path_buf(), decided.clone());
+    let record = |engine: &Arc<control::Engine>| {
+        let engine = engine.clone();
+        let docs = snapshot.clone();
+        let Some(versions) = code.clone() else {
+            // No versions, no deployment: the documentation is saved all the same.
+            tokio::spawn(async move { deployment::docs_alone(&engine.store, &docs).await });
+            return;
+        };
+        let recording = deployment::Recording {
+            versions,
+            decided: decided.clone(),
+            warned: warned.clone(),
+            root: root.to_path_buf(),
+            docs,
+        };
+        let who = who.clone();
         tokio::spawn(async move {
             let host = audit::host_name();
-            let recorded = deployment::record(&engine, &host, &who, versions, decided, root).await;
+            let recorded = deployment::record(&engine, &host, &who, recording).await;
             if let Some(d) = recorded {
                 let _ = engine.deployment.set(d);
             }
@@ -690,7 +712,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     {
         start(&engine).await;
         phases.mark("audit log and alerts started");
-        record(&engine, deployment::Who::start(service));
+        record(&engine);
     }
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
@@ -706,7 +728,13 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     // A takeover: ready, receiving beside the engine it takes over from. Once that one stopped and
     // let go, take the interfaces as a start does, and send.
     if let Some(t) = &takeover {
-        t.ready(phases.total()).await?;
+        // What the changes replace, told to whoever asked for the handover: read while the old
+        // engine still sends (milliseconds); not waited for past a moment.
+        let warnings = tokio::time::timeout(Duration::from_secs(2), deployment::warnings(&warned)).await;
+        let told: Vec<String> = warnings
+            .map(|w| w.iter().map(|(interface, warning)| format!("⚠ {interface}: {warning}")).collect())
+            .unwrap_or_default();
+        t.ready(phases.total(), told).await?;
         tracing::info!("ready: receiving beside the engine being taken over, which stops now");
         let stop_took = t.released().await;
         let released = std::time::Instant::now();
@@ -720,7 +748,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         owner.hold();
         let sending_paused = stop_took.unwrap_or_default() + released.elapsed();
         phases.mark("sending");
-        settle_in(&store, &charge, &engine.retention, &mut phases).await?;
+        settle_in(&engine.retention, &mut phases).await?;
         if let Some(start) = background.take() {
             start(&engine).await;
         }
@@ -732,7 +760,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             "took over: receiving never stopped"
         );
         audit::handed_over(&engine, &handed).await;
-        record(&engine, deployment::Who::handover(&handed.from.asked));
+        record(&engine);
         let _ = engine.handed_over.set(handed);
         t.running(sending_paused).await;
     }
@@ -923,7 +951,6 @@ async fn log_database_security(store: &Store, database_url: &str) {
 
 /// What `take_charge` works on.
 struct Charge {
-    snapshot: Vec<ductus_store::DocsRow>,
     /// Every destination as `(interface, destination)`, with its id.
     destinations: Vec<(String, String)>,
     ids: Vec<ductus_store::DestinationId>,
@@ -962,19 +989,10 @@ async fn take_charge(store: &Store, charge: &Charge, phases: &mut Phases) -> Res
 }
 
 /// The rest of what a start changes for its interfaces, which sending needn't wait for (a
-/// takeover sends first): the documentation snapshot, the configured retention applied (a change
-/// runs beside sending anyway; until then messages go to the tier stored, as the engine taken over
-/// from stored them).
-async fn settle_in(
-    store: &Store,
-    charge: &Charge,
-    retention: &Arc<retention::Retention>,
-    phases: &mut Phases,
-) -> Result<()> {
-    if let Err(e) = store.save_docs_snapshot(&charge.snapshot).await {
-        tracing::warn!(error = format!("{e:#}"), "could not save the documentation snapshot");
-    }
-    phases.mark("documentation snapshot saved");
+/// takeover sends first): the configured retention applied (a change runs beside sending anyway;
+/// until then messages go to the tier stored, as the engine taken over from stored them). The
+/// documentation snapshot is saved with the deployment, beside the start.
+async fn settle_in(retention: &Arc<retention::Retention>, phases: &mut Phases) -> Result<()> {
     retention.apply().await.context("applying retention")?;
     phases.mark("retention applied");
     Ok(())

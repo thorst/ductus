@@ -214,7 +214,8 @@ pub struct AuditFilter<'a> {
     pub limit: i64,
 }
 
-const COLUMNS: &str = "id, at, actor_kind, actor_id, user_id, actor_name, via, host(ip) AS ip, action, subject,
+pub(crate) const COLUMNS: &str =
+    "id, at, actor_kind, actor_id, user_id, actor_name, via, host(ip) AS ip, action, subject,
     interface, message_id, outcome, detail::text AS detail";
 
 /// Write a row inside the caller's transaction.

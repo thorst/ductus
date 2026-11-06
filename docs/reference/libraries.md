@@ -8,7 +8,7 @@ that only run while the binary is compiled (macros, build scripts), since they s
 Nothing on this page is downloaded when Ductus runs, except Postgres for `ductus dev` (below). The binary
 needs only the operating system's C library on Linux (glibc 2.34 or later).
 
-- Rust crates: **631** (604 in the Linux build, 614 in the Windows build)
+- Rust crates: **633** (606 in the Linux build, 616 in the Windows build)
 - npm packages in the web UI: **102**
 - TypeScript **6.0.3** (Microsoft, Apache-2.0), inside the binary: `ductus validate` and `ductus types` type-check interface code with it
 
@@ -57,7 +57,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 
 | License | Rust crates | npm packages |
 |---|---|---|
-| MIT OR Apache-2.0 | 308 |  |
+| MIT OR Apache-2.0 | 309 |  |
 | MIT | 112 | 98 |
 | Apache-2.0 OR MIT | 61 |  |
 | Apache-2.0 | 43 | 1 |
@@ -74,6 +74,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | 0BSD | 1 | 1 |
 | Apache-2.0 OR BSL-1.0 | 2 |  |
 | MIT OR Zlib OR Apache-2.0 | 2 |  |
+| MPL-2.0 | 2 |  |
 | Zlib | 2 |  |
 | Zlib OR Apache-2.0 OR MIT | 2 |  |
 | (Apache-2.0 OR MIT) AND BSD-3-Clause | 1 |  |
@@ -88,7 +89,6 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | ISC AND (Apache-2.0 OR ISC) | 1 |  |
 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | 1 |  |
 | MIT AND BSD-3-Clause | 1 |  |
-| MPL-2.0 | 1 |  |
 | MPL-2.0+ | 1 |  |
 | Unlicense |  | 1 |
 
@@ -114,6 +114,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `argon2` | 0.5.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `argon2` | 0.6.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `arraydeque` | 0.5.1 | MIT/Apache-2.0 | ✓ | ✓ |
+| `arrayvec` | 0.7.8 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ascii` | 1.1.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `asn1-rs` | 0.7.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `asn1-rs-derive` | 0.6.0 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -659,6 +660,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `tungstenite` | 0.29.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `typed-path` | 0.12.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `uluru` | 3.1.0 | MPL-2.0 | ✓ | ✓ |
 | `unicode-bidi` | 0.3.18 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `unicode-bom` | 2.0.3 | Apache-2.0 | ✓ | ✓ |
 | `unicode-id-start` | 1.5.0 | (MIT OR Apache-2.0) AND Unicode-3.0 | ✓ | ✓ |
@@ -842,6 +844,6 @@ The packages its production build bundles (the build tools and test tools aren't
 Made by `scripts/dev/dependencies.sh` from these files (a test fails when either changes and this page
 isn't made again):
 
-<!-- made from: Cargo.lock bb436225d9e8e440e02829cabc77b616641ffafe874f21ae712f90234b06156f ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
-- `Cargo.lock`, SHA-256 `bb436225d9e8e440e02829cabc77b616641ffafe874f21ae712f90234b06156f`
+<!-- made from: Cargo.lock 93dd003201819481b5bec791ea6960ccb6cbddf86113318ca4dd55464b7539ad ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
+- `Cargo.lock`, SHA-256 `93dd003201819481b5bec791ea6960ccb6cbddf86113318ca4dd55464b7539ad`
 - `ui/package-lock.json`, SHA-256 `aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5`

@@ -148,8 +148,117 @@ changes.
   ORDER BY d.id DESC LIMIT 10;
   ```
 
-A timeline per interface (`ductus history`, an interface's **History** tab) comes with the next
-part of 0.7.3.
+- **A timeline per interface**: `ductus history`, the interface's **History** tab and
+  `GET /interfaces/{name}/history` ([below](#history-who-changed-what-and-why)).
+
+## History: who changed what and why
+
+From 0.7.3.3, one timeline per interface, newest first, from four sources:
+
+| Source | What it adds | Example |
+|---|---|---|
+| **git** | Each commit that changed one of its files: its `interface.yaml`, its code and the shared files it imports, every version's ([nuance](../nuances/deployments.md#history-lists-the-commits-on-the-files-an-interfaces-versions-named-level-3)) | `committed 3c6d0d4dd062: adt-in: PV1-3 for the wards (interfaces/adt-in/transform.ts (modified))` |
+| **Deployments** | Each start or handover that changed its code: from which version to which, by whom, why, from which commit, and a ⚠ when it may have undone someone else's change ([below](#two-people-one-server)) | `deployed 36792608ed03 → e5b6cc1310d6 by a handover: lab wants MSH-5 set (commit 8225dd3b602b)` |
+| **The audit log** | What people (and the engine) did to it: pauses, resends, corrections, dismissals, retention changes, alerts acknowledged or silenced | `paused adt-in/default: vendor maintenance` |
+| **Its documentation** | Each change of its documentation fields (`about:`, `custom:`, its destinations' `custom:`), with the deployment that brought it | `documentation changed: custom.baa_signed: no → yes` |
+
+**Why one timeline:** "it broke Tuesday afternoon" needs the commit, the deploy that ran it, and
+what people did around it, side by side; each lives somewhere else (git, the engine's records, the
+audit log), and reading them apart is how a cause gets missed.
+
+### From the command line
+
+`ductus history <interface>` reads the project folder for git, and the database (read-only, a
+read-only login is enough) when `DUCTUS_DATABASE_URL` is set or `--database-url` is given. The
+same lab as above, extended: Ann deploys a second change (`lab wants MSH-5 set`); Bob, whose
+checkout doesn't have Ann's last commit, commits his own change and hands over:
+
+```text
+$ ductus history adt-in
+adt-in
+2026-11-06 01:46  deployed  bob  deployed e5b6cc1310d6 → 11de331fea89 by a handover: wards need PV1-3 (commit 3c6d0d4dd062) ⚠
+                  ⚠ replaces e5b6cc1310d6 (deployed 2026-11-06 01:46 UTC by todd on DESKTOP-GCT6E6V): it came from commit 8225dd3b602b, which this project's history doesn't have, so their change may be undone (`ductus history adt-in`)
+2026-11-06 01:46  commit    Bob Ray  committed 3c6d0d4dd062: adt-in: PV1-3 for the wards (interfaces/adt-in/transform.ts (modified))
+2026-11-06 01:46  deployed  todd  deployed 36792608ed03 → e5b6cc1310d6 by a handover: lab wants MSH-5 set (commit 8225dd3b602b)
+2026-11-06 01:46  deployed  todd  deployed 36792608ed03 (new here) (commit f07506d047cd)
+2026-11-06 01:46  commit    Ann Lee  committed f07506d047cd: adt-in: relay ADT to the lab (interfaces/adt-in/interface.yaml (added), interfaces/adt-in/transform.ts (added))
+```
+
+Ann's "MSH-5 for the lab" commit isn't listed: it isn't in this checkout's history any more,
+which is exactly what Bob's deploy undid. Her deployment of it is, with its commit.
+
+| Option | What it does | Default |
+|---|---|---|
+| `--all` | Also the starts that ran it unchanged, payload reads and refused attempts ([nuance](../nuances/deployments.md#history-shows-unchanged-starts-reads-and-refusals-only-when-asked-for-everything-level-3)) | changes only |
+| `--limit N` | How many entries | 50 |
+| `--before KEY` | What's older than an entry: the last line of a full page prints the command | the newest |
+| `--json` | One document: each entry's time, kind, who, what, and its details (the commit and its files, the deployment, the audit row, the documentation fields changed) | text |
+
+Without a database it shows git's commits only, of the files the project runs now, and says so
+(`note: no database read`). An interface no longer in the project is found by name in what was
+recorded. [`ductus history`](../reference/cli/history.md) has every option.
+
+### In the web UI and the API
+
+- **The History tab** on an interface's page: the same timeline, a page of 50 at a time
+  ("Older"), each commit's files and each documentation change's fields under it, the ⚠ in a
+  box; "Everything" is `--all`.
+- **[`GET /interfaces/{name}/history`](../reference/api/engine.md)** (`before`, `limit` up to 200,
+  `all`): a page of `entries` and `next_before`. Any signed-in person or token may read it; with
+  `all=true`, payload reads and refused attempts are added only for those with the `audit`
+  permission, as the audit log is theirs.
+
+### Two people, one server
+
+Folder mode (the code in a git checkout on the server, deployed with `git pull` and a handover)
+has one trap: the last deploy wins. If Bob deploys from a checkout that doesn't have Ann's latest
+commit, Ann's change stops running, and nothing said so. From 0.7.3.3 a start or handover warns
+when an interface it changes runs a version **someone else** deployed **from a commit this
+project's history doesn't have, or from files never committed**:
+
+```text
+$ sudo ductus handover -m "wards need PV1-3"
+started /home/todd/target/release/ductus (pid 1208): it reads the project, migrates the database and loads every interface's code while this one runs
+⚠ adt-in: replaces e5b6cc1310d6 (deployed 2026-11-06 01:46 UTC by todd on DESKTOP-GCT6E6V): it came from commit 8225dd3b602b, which this project's history doesn't have, so their change may be undone (`ductus history adt-in`)
+ductus 0.7.0-dev (pid 1208) is ready after 291 ms and receives beside this one: stopping this one
+this engine stopped in 1 ms and let go of its interfaces: the new one takes them
+handed over to ductus 0.7.0-dev (pid 1208): receiving never stopped, sending paused 20 ms
+```
+
+The same text is a WARN line in the engine's log (`deployed over someone else's change`), and is
+kept with the deployment (`deployment_changes.warning`), so `ductus history` and the History tab
+show it from then on. It **warns and deploys all the same**: refusing needs releases (0.7.4),
+which know what each deploy replaces
+([nuance](../nuances/deployments.md#two-people-deploying-from-their-own-checkouts-get-a-warning-not-a-refusal-level-2)).
+When you see it, read the history, get their commit into your checkout (or theirs pushed), and
+deploy again.
+
+It's worked out before the new engine says it's ready, while the old one still sends: reading
+what each changed interface ran, and HEAD's history once (about 40 ms more before the new engine
+is ready, at 1,001 interfaces and 1,000 commits), so the handover's sending pause doesn't grow
+([what it costs](#what-it-costs)).
+
+### The documentation's history
+
+The company's documentation fields ([documentation fields](../configure/documentation-fields.md)) are kept as a
+snapshot for SQL reports (`docs_snapshot`); from 0.7.3.3 each change of an entry is also a row of
+`docs_history`, with the deployment that brought it ([schema](../schema.md#docs_history)). The
+upgrade copies the snapshot as it is then, so each entry's history starts at the upgrade. The
+snapshot is now saved with the deployment, just after the start
+([nuance](../nuances/deployments.md#the-documentation-snapshot-is-saved-just-after-a-start-with-its-deployment-level-3)).
+For a report of who changed a field when:
+
+```sql
+SELECT h.at, d.by_name, d.reason, h.docs->'custom'->>'baa_signed' AS baa_signed
+FROM docs_history h LEFT JOIN deployments d ON d.id = h.deployment_id
+WHERE h.kind = 'interface' AND h.name = 'adt-in'
+ORDER BY h.id;
+```
+
+**Upgrading to 0.7.3.3** (migration 0028) adds the tables and columns above and four indexes,
+one of them on the audit log (built once: what the audit log records waits meanwhile, a few
+seconds per million rows; messages don't), and copies the documentation snapshot. Nothing waits
+on `messages` or `deliveries`. `ductus upgrade --check` shows the tables' sizes first.
 
 ## Which code decided each delivery
 
@@ -230,3 +339,29 @@ interfaces the whole start was 761–972 ms before and 756–927 ms after; the v
 44–52 ms after they're computed when nothing changed (mostly one statement carrying a thousand
 hashes), 212–267 ms the first time a project's files are stored. Only a decision that comes
 before that waits for it (messages waiting at the start); nothing a sender waits for does.
+
+**History** (0.7.3.3), measured with `scripts/bench-history.sh` on WSL: 1,001 interfaces with
+code in a git repository of 1,001 commits (121 of them on the measured interface's files), 1,000
+deployments that changed it (its documentation with each), and an audit log of a million rows
+(50,000 naming it, 45,000 of those payload reads):
+
+| | min / median / max of 7 |
+|---|---|
+| `ductus history v-0` (loads its code, walks git, reads the database) | 366 / 386 / 417 ms |
+| the same with `--json` / `--all` | 373 / 384 / 411 ms / 382 / 398 / 507 ms |
+| without a database (git only) | 251 / 299 / 343 ms |
+| `GET /interfaces/v-0/history`, the first request (git walked) | 188 ms |
+| the same, later (the walk kept until HEAD moves): first page / `all=true` / 800 entries deep | 9 / 11 / 12 ms, 8 / 9 / 10 ms, 7 / 8 / 10 ms |
+| `git log` over the same five files, for comparison | 32 / 41 / 74 ms |
+
+The database's part is 6–8 ms a page: each of its four reads takes under a millisecond through an
+index (the audit log's through one that leaves payload reads out: without it, a page of changes
+read through every read naming the interface). The git walk is most of a first read
+([nuance](../nuances/deployments.md#the-first-history-read-after-a-deploy-walks-git-later-ones-dont-level-4)).
+
+**The warning at a handover** (`scripts/bench-handover.sh` with `WARN=1`: 1,001 interfaces, a
+repository of 1,000 commits, each handover by a different person after the last commit was
+rewritten, so every one warned; nine handovers each, against 0.7.3.2's binary): sending paused
+371–434 ms (median 398) with the warning, 347–473 ms (median 421) before it: the same. The check
+runs before the new engine is ready: "ready after" was 579–643 ms, 541–613 ms before (+~40 ms,
+while the old engine still sends). Nothing refused either way.

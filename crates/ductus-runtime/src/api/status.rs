@@ -23,9 +23,64 @@ pub fn routes() -> OpenApiRouter<Shared> {
         .routes(routes!(engine))
         .routes(routes!(interfaces))
         .routes(routes!(interface))
+        .routes(routes!(history))
         .routes(routes!(drain_status, drain, resume))
         .routes(routes!(pause, unpause))
         .routes(routes!(events))
+}
+
+/// How much history to read.
+#[derive(Deserialize, utoipa::IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct HistoryQuery {
+    /// Entries older than this one (the previous page's `next_before`).
+    before: Option<String>,
+    /// Page size, at most 200 (default 50).
+    limit: Option<usize>,
+    /// Every start that ran it, not only those that changed it; with the `audit` permission, also
+    /// payload reads and refused attempts from the audit log.
+    all: Option<bool>,
+}
+
+/// One timeline of who changed what and why for an interface, newest first: the git commits that
+/// changed its files (its interface.yaml, its code and the shared files it imports), the
+/// deployments that changed its code, the audit log's entries naming it and its documentation's
+/// changes.
+#[utoipa::path(
+    get, path = "/interfaces/{name}/history", tag = "engine", operation_id = "interface_history",
+    params(("name" = String, Path, description = "Interface name"), HistoryQuery),
+    responses(
+        (status = 200, body = crate::history::Page),
+        (status = 400, body = super::ErrorBody),
+        (status = 404, body = super::ErrorBody)
+    )
+)]
+async fn history(
+    engine: Eng,
+    caller: Caller,
+    Path(name): Path<String>,
+    axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
+) -> ApiResult<crate::history::Page> {
+    if engine.interface(&name).is_none() {
+        return Err(ApiError::not_found(format!("no interface named `{name}`")));
+    }
+    let all = q.all.unwrap_or(false);
+    let query = crate::history::Query {
+        interface: name,
+        before: q.before.filter(|b| !b.trim().is_empty()),
+        limit: q.limit.unwrap_or(50).clamp(1, 200),
+        all,
+        reads: all && caller.can("audit"),
+    };
+    let sources = crate::history::Sources { store: Some(&engine.store), root: &engine.root, paths: Default::default() };
+    let page = crate::history::read(sources, &query).await.map_err(|e| {
+        if query.before.is_some() && format!("{e:#}").contains("isn't a place in the timeline") {
+            ApiError::bad_request(format!("{e:#}"))
+        } else {
+            ApiError::from(e)
+        }
+    })?;
+    Ok(Json(page))
 }
 
 #[derive(Serialize, ToSchema)]

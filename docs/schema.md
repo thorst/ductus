@@ -224,7 +224,7 @@ Who did what, to what, from where, and how it ended. Written in the transaction 
 | `outcome` | text | `ok`, `denied` or `failed`. |
 | `detail` | jsonb | More, by action: the reason, the messages and destinations of a bulk request, the version and previous run for `engine.start`. Never a password, token or payload. |
 
-Indexes: primary key `id`; `audit_log_at (at)`; `audit_log_actor (actor_kind, actor_id, at)`; `audit_log_user (user_id, at)`; `audit_log_action (action, at)`; `audit_log_interface (interface, at)`; `audit_log_message (message_id)`.
+Indexes: primary key `id`; `audit_log_at (at)`; `audit_log_actor (actor_kind, actor_id, at)`; `audit_log_user (user_id, at)`; `audit_log_action (action, at)`; `audit_log_interface (interface, at)`; `audit_log_interface_changes (interface, at)` where the row names an interface, isn't a payload read and was allowed (migration 0028: what `ductus history` reads, without reading through an interface's payload reads); `audit_log_message (message_id)`.
 
 ## `retention`
 
@@ -321,7 +321,7 @@ Index: primary key `destination_id`.
 
 ## `docs_snapshot`
 
-The project's documentation as the company wrote it, for SQL reports and BI tools ("which interfaces have no signed BAA": `SELECT name FROM docs_snapshot WHERE kind = 'interface' AND docs->'custom'->>'baa_signed' = 'no'`). One row per interface and per resources.yaml entry. The YAML in Git is the source of truth: every engine start makes the table match the project (changed rows are rewritten, entries the project no longer has are removed), so it is as current as the last start. Its history comes with 0.7.3's history (a later part); what each start ran is in `deployments`.
+The project's documentation as the company wrote it, for SQL reports and BI tools ("which interfaces have no signed BAA": `SELECT name FROM docs_snapshot WHERE kind = 'interface' AND docs->'custom'->>'baa_signed' = 'no'`). One row per interface and per resources.yaml entry. The YAML in Git is the source of truth: every engine start makes the table match the project (changed rows are rewritten, entries the project no longer has are removed), so it is as current as the last start. Since 0.7.3.3 it's saved with the start's deployment, beside the start (in the same transaction, one engine at a time), and each change is a row of `docs_history`.
 
 | column | type | |
 |---|---|---|
@@ -331,6 +331,21 @@ The project's documentation as the company wrote it, for SQL reports and BI tool
 | `updated_at` | timestamptz | When the row last changed. |
 
 Indexes: primary key `(kind, name)`; `docs_snapshot_docs` (GIN on `docs`).
+
+## `docs_history`
+
+Every change of `docs_snapshot` (migration 0028, 0.7.3.3): a row each time an entry's documentation changed, appeared or left the project, with the deployment that did it. What `ductus history` and the History tab show as "documentation changed: custom.baa_signed: no → yes". The upgrade copied the snapshot as it was then (rows without a deployment), so each entry's history starts there. Kept.
+
+| column | type | |
+|---|---|---|
+| `id` | bigint | From a sequence: an entry's rows in order. |
+| `deployment_id` | integer | `deployments.id` that saved it; null for the copy made at the upgrade, or a start whose deployment couldn't be recorded (set null if that deployment row is deleted). |
+| `at` | timestamptz | When it was saved. |
+| `kind` | text | `interface` or `resource`, as in `docs_snapshot`. |
+| `name` | text | As in `docs_snapshot`. |
+| `docs` | jsonb | The documentation from then on, as in `docs_snapshot`; null: the entry left the project. What it was before is the entry's previous row. |
+
+Indexes: primary key `id`; `docs_history_entry (kind, name, id)`.
 
 ## `deployments`
 
@@ -351,8 +366,21 @@ One row per engine start and handover (migration 0026, 0.7.3), whether or not an
 | `uncommitted` | text[] | Files the interfaces run that aren't the commit's (changed since, or never committed), as `code_versions.files` names them; null without git, empty when everything is committed. |
 | `interfaces` | integer | How many interfaces it runs. |
 | `changed` | integer | How many of them run a code version they didn't run before it. |
+| `interface_set` | integer | `interface_sets.id`: which interfaces it ran, changed or not (migration 0028); null for deployments recorded before 0.7.3.3 or by an older engine. |
 
-Indexes: primary key `id`; `deployments_at (at)`.
+Indexes: primary key `id`; `deployments_at (at)`; `deployments_interface_set (interface_set, id)`.
+
+## `interface_sets`
+
+Which interfaces a deployment ran (migration 0028, 0.7.3.3), once per distinct set: a start that runs what the last one ran adds nothing. It's how `ductus history --all` shows the starts that ran an interface without changing it (`deployment_changes` names only those that changed it), and keeps engines with different projects on one database apart. Kept.
+
+| column | type | |
+|---|---|---|
+| `id` | integer | From a sequence. |
+| `hash` | bytea | SHA-256 of the names, sorted, each followed by a line feed. Unique. |
+| `interfaces` | text[] | The interfaces' names, sorted. |
+
+Indexes: primary key `id`; unique `hash`; `interface_sets_interfaces` (GIN on `interfaces`).
 
 ## `deployment_changes`
 
@@ -364,6 +392,7 @@ The interfaces a deployment changed (migration 0026): one row each, none for int
 | `interface` | text | The interface's name. |
 | `from_version` | integer | `code_versions.id` it ran before; null when it's new on this database. |
 | `to_version` | integer | `code_versions.id` it runs from this deployment. |
+| `warning` | text | Why this change may undo someone else's (migration 0028, 0.7.3.3; folder mode, two people deploying from their own checkouts): the version it replaced was deployed by someone else and came from a commit not in this deployment's commit's history, or ran files never committed. Null when there's nothing to say. The same text is in the log and in `ductus handover`'s answer. |
 
 Indexes: primary key `(deployment_id, interface)`; `deployment_changes_interface (interface, deployment_id)`.
 
@@ -391,7 +420,7 @@ Each distinct version of an interface's code (migration 0026): a start that chan
 | `files` | jsonb | `[{"path": "interfaces/adt/interface.yaml", "hash": "<hex>"}, ...]` in path order: paths relative to the project with `/`, each file's SHA-256 (its text in `code_files`). |
 | `first_seen` | timestamptz | When a start first ran it. |
 
-Indexes: primary key `id`; unique `hash`.
+Indexes: primary key `id`; unique `hash`; `code_versions_interface (interface)` (migration 0028: `history` reads every version an interface ran, for the files they named).
 
 ## `code_files`
 

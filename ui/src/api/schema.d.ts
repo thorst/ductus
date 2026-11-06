@@ -406,6 +406,28 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/interfaces/{name}/history": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One timeline of who changed what and why for an interface, newest first: the git commits that
+         *     changed its files (its interface.yaml, its code and the shared files it imports), the
+         *     deployments that changed its code, the audit log's entries naming it and its documentation's
+         *     changes.
+         */
+        get: operations["interface_history"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/interfaces/{name}/messages": {
         parameters: {
             query?: never;
@@ -1831,6 +1853,107 @@ export interface components {
             pending: number;
             /** Format: int64 */
             quarantined: number;
+        };
+        HistoryAudit: {
+            /** @description `destination.pause`, `message.replay`, … */
+            action: string;
+            detail?: Record<string, never> | null;
+            /** Format: int64 */
+            id: number;
+            /** Format: int64 */
+            message?: number | null;
+            /** @description `ok`, `denied` or `failed`. */
+            outcome: string;
+            subject?: string | null;
+        };
+        HistoryCommit: {
+            email: string;
+            /** @description The interface's files it changed. */
+            files: components["schemas"]["HistoryFile"][];
+            /** @description The commit, in hex. */
+            id: string;
+            /** @description The message's first line. */
+            summary: string;
+        };
+        HistoryDeployment: {
+            /** @description It changed this interface's code (false: it ran it as it was; `all` only). */
+            changed: boolean;
+            environment: string;
+            /** @description The code version before (12 hex characters); none when new here, or unchanged. */
+            from?: string | null;
+            /** @description The project's commit then (hex); none without git. */
+            git_commit?: string | null;
+            host: string;
+            /** @description `start`, `service` or `handover`. */
+            how: string;
+            /** Format: int32 */
+            id: number;
+            reason?: string | null;
+            /** @description The code version from then; none when unchanged. */
+            to?: string | null;
+            /** @description Files it ran that weren't the commit's; none without git. */
+            uncommitted?: string[] | null;
+            /** @description The binary's version. */
+            version: string;
+            /** @description Why this change may undo someone else's (folder mode), when it may. */
+            warning?: string | null;
+        };
+        HistoryDocumentation: {
+            /**
+             * Format: int32
+             * @description The deployment that changed it; none for the snapshot taken at the upgrade to 0.7.3.3.
+             */
+            deployment?: number | null;
+            /** @description The fields that changed, each with its value before and after. */
+            fields: components["schemas"]["HistoryField"][];
+            /** @description The interface left the project (or the first row, as the snapshot was at the upgrade). */
+            removed: boolean;
+        };
+        /** @description One entry of the timeline. */
+        HistoryEntry: {
+            /** Format: date-time */
+            at: string;
+            audit?: components["schemas"]["HistoryAudit"] | null;
+            /** @description Who: a commit's author, who deployed (or asked for the handover), who acted. */
+            by: string;
+            commit?: components["schemas"]["HistoryCommit"] | null;
+            deployment?: components["schemas"]["HistoryDeployment"] | null;
+            documentation?: components["schemas"]["HistoryDocumentation"] | null;
+            /** @description This entry's place in the timeline: pass it as `before` to read what's older. */
+            key: string;
+            kind: components["schemas"]["HistoryKind"];
+            /** @description What happened, in one line. */
+            what: string;
+        };
+        HistoryField: {
+            after?: Record<string, never> | null;
+            before?: Record<string, never> | null;
+            /** @description `owner`, `custom.baa_signed`, `destinations.lab.custom.contact`. */
+            field: string;
+        };
+        HistoryFile: {
+            /**
+             * @description `added`, `modified` or `deleted`.
+             * @example modified
+             */
+            change: string;
+            /** @description Relative to the project, with `/`. */
+            path: string;
+        };
+        /**
+         * @description Where an entry comes from.
+         * @enum {string}
+         */
+        HistoryKind: "commit" | "audit" | "documentation" | "deployment";
+        /** @description A page of the timeline. */
+        HistoryPage: {
+            /** @description Newest first. */
+            entries: components["schemas"]["HistoryEntry"][];
+            interface: string;
+            /** @description Pass as `before` for the next (older) page; absent on the last one. */
+            next_before?: string | null;
+            /** @description What the timeline lacks, in words: no git repository, a database not read, … */
+            notes: string[];
         };
         ImpactHit: {
             /** @description Hosts and ports, listening ports, folders to look at. */
@@ -3440,6 +3563,54 @@ export interface operations {
                 };
             };
             403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    interface_history: {
+        parameters: {
+            query?: {
+                /** @description Entries older than this one (the previous page's `next_before`). */
+                before?: string;
+                /** @description Page size, at most 200 (default 50). */
+                limit?: number;
+                /**
+                 * @description Every start that ran it, not only those that changed it; with the `audit` permission, also
+                 *     payload reads and refused attempts from the audit log.
+                 */
+                all?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description Interface name */
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HistoryPage"];
+                };
+            };
+            400: {
                 headers: {
                     [name: string]: unknown;
                 };

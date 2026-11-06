@@ -94,7 +94,7 @@ const interfaces = createRoute({
 });
 
 export interface InterfaceSearch {
-  tab?: "messages";
+  tab?: "messages" | "history";
   status?: MessageStatus;
 }
 
@@ -102,7 +102,7 @@ const iface = createRoute({
   getParentRoute: () => app,
   path: "/interfaces/$name",
   validateSearch: (search: Record<string, unknown>): InterfaceSearch => ({
-    tab: search.tab === "messages" ? "messages" : undefined,
+    tab: search.tab === "messages" || search.tab === "history" ? search.tab : undefined,
     status: STATUSES.find((s) => s === search.status),
   }),
   component: InterfacePage,

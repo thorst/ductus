@@ -21,7 +21,7 @@ use std::time::Duration;
 /// Whether the engine owning `e.lock_key` (an `engines` row aliased `e`) still holds its lock.
 /// A bigint advisory lock shows in `pg_locks` as its high half in `classid` and its low half in
 /// `objid` (keys are positive and below 2^62, so the high half never reaches the sign bit).
-const ALIVE: &str = "EXISTS (SELECT 1 FROM pg_locks l
+pub(crate) const ALIVE: &str = "EXISTS (SELECT 1 FROM pg_locks l
      WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
        AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
        AND ((l.classid::bigint << 32) | l.objid::bigint) = e.lock_key)";

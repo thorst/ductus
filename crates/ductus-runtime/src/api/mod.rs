@@ -119,6 +119,7 @@ pub const ACCESS: &[(&str, &str, &str)] = &[
     ("GET", "/metrics", "signed"),
     ("GET", "/interfaces", "signed"),
     ("GET", "/interfaces/{name}", "signed"),
+    ("GET", "/interfaces/{name}/history", "signed"),
     ("GET", "/interfaces/{name}/messages", "signed"),
     ("GET", "/messages/{id}", "signed"),
     ("GET", "/quarantine", "signed"),
@@ -328,6 +329,11 @@ impl Caller {
 
     pub fn name(&self) -> &str {
         &self.who.name
+    }
+
+    /// Whether the caller was given `permission` (admins have them all).
+    pub fn can(&self, permission: &str) -> bool {
+        self.who.can(permission)
     }
 
     /// The signed-in person, for what only a person has (a password, sessions, settings).

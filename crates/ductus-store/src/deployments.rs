@@ -33,6 +33,31 @@ pub struct NewDeployment<'a> {
     pub uncommitted: Option<&'a [String]>,
     /// Every interface the engine runs.
     pub versions: &'a [NewVersion<'a>],
+    /// Warnings for interfaces it changes, by interface (`deployment_changes.warning`): the
+    /// version replaced may be someone else's work this one undoes.
+    pub warnings: &'a HashMap<String, String>,
+    /// The project's documentation, saved with the deployment (`docs_snapshot`, and a
+    /// `docs_history` row for each entry that changed); None leaves both alone.
+    pub docs: Option<&'a [crate::DocsRow]>,
+}
+
+/// What an interface runs now, as recorded (`interface_versions`), with the deployment it came
+/// with: what a new deployment is held against before it replaces it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Current {
+    pub interface: String,
+    pub version: Vec<u8>,
+    /// The paths its files had (`code_versions.files`).
+    pub files: Vec<String>,
+    pub deployment: i32,
+    pub at: DateTime<Utc>,
+    /// `start`, `service` or `handover`.
+    pub how: String,
+    pub by: String,
+    pub host: String,
+    pub git_commit: Option<String>,
+    /// Null without git.
+    pub uncommitted: Option<Vec<String>>,
 }
 
 /// The deployment an interface's running version came with.
@@ -188,10 +213,11 @@ impl Store {
         .collect();
         let changed: Vec<&NewVersion> =
             d.versions.iter().filter(|v| current.get(v.interface).is_none_or(|(id, ..)| *id != ids[v.hash])).collect();
+        let set = interface_set(&mut tx, &names).await?;
         let (id, at): (i32, DateTime<Utc>) = sqlx::query_as(
             "INSERT INTO deployments (environment, instance, host, version, how, by_name, reason, git_commit,
-                                      uncommitted, interfaces, changed)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                                      uncommitted, interfaces, changed, interface_set)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
              RETURNING id, at",
         )
         .bind(d.environment)
@@ -205,6 +231,7 @@ impl Store {
         .bind(d.uncommitted)
         .bind(d.versions.len() as i32)
         .bind(changed.len() as i32)
+        .bind(set)
         .fetch_one(&mut *tx)
         .await
         .context("saving the deployment")?;
@@ -214,14 +241,17 @@ impl Store {
             let interfaces: Vec<&str> = changed.iter().map(|v| v.interface).collect();
             let from: Vec<Option<i32>> = changed.iter().map(|v| current.get(v.interface).map(|(id, ..)| *id)).collect();
             let to: Vec<i32> = changed.iter().map(|v| ids[v.hash]).collect();
+            let warnings: Vec<Option<&str>> =
+                changed.iter().map(|v| d.warnings.get(v.interface).map(String::as_str)).collect();
             sqlx::query(
-                "INSERT INTO deployment_changes (deployment_id, interface, from_version, to_version)
-                 SELECT $1, * FROM unnest($2::text[], $3::int[], $4::int[])",
+                "INSERT INTO deployment_changes (deployment_id, interface, from_version, to_version, warning)
+                 SELECT $1, * FROM unnest($2::text[], $3::int[], $4::int[], $5::text[])",
             )
             .bind(id)
             .bind(&interfaces)
             .bind(&from)
             .bind(&to)
+            .bind(&warnings)
             .execute(&mut *tx)
             .await
             .context("saving what the deployment changed")?;
@@ -238,6 +268,9 @@ impl Store {
             .execute(&mut *tx)
             .await
             .context("saving what the interfaces run")?;
+        }
+        if let Some(docs) = d.docs {
+            crate::docs::save(&mut tx, docs, Some(id)).await?;
         }
         tx.commit().await.context("committing the deployment")?;
         let here = Since {
@@ -267,6 +300,76 @@ impl Store {
             .collect();
         Ok(Deployed { id, at, interfaces })
     }
+
+    /// What `names` run now, as recorded, with the deployments their versions came with (the
+    /// interfaces never run here are absent). Read before a deployment replaces them, to tell when
+    /// that may undo someone else's work.
+    pub async fn current_versions(&self, names: &[&str]) -> Result<Vec<Current>> {
+        type Row =
+            (String, Vec<u8>, String, i32, DateTime<Utc>, String, String, String, Option<String>, Option<Vec<String>>);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT i.interface, v.hash, v.files::text, d.id, d.at, d.how, d.by_name, d.host, d.git_commit, d.uncommitted
+             FROM interface_versions i
+             JOIN code_versions v ON v.id = i.version_id
+             JOIN deployments d ON d.id = i.deployment_id
+             WHERE i.interface = ANY($1)
+             ORDER BY i.interface",
+        )
+        .bind(names)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading what the interfaces run")?;
+        Ok(rows
+            .into_iter()
+            .map(|(interface, version, files, deployment, at, how, by, host, git_commit, uncommitted)| Current {
+                interface,
+                version,
+                files: paths(&files),
+                deployment,
+                at,
+                how,
+                by,
+                host,
+                git_commit,
+                uncommitted,
+            })
+            .collect())
+    }
+}
+
+/// The paths of a `code_versions.files` value (as text).
+pub(crate) fn paths(files: &str) -> Vec<String> {
+    let files: serde_json::Value = serde_json::from_str(files).unwrap_or_default();
+    files
+        .as_array()
+        .map(|a| a.iter().filter_map(|f| f["path"].as_str().map(str::to_string)).collect())
+        .unwrap_or_default()
+}
+
+/// The id of the set of `names` (`interface_sets`), saved the first time it's seen.
+async fn interface_set(tx: &mut sqlx::PgConnection, names: &[&str]) -> Result<i32> {
+    use sha2::Digest;
+    let mut sorted = names.to_vec();
+    sorted.sort_unstable();
+    sorted.dedup();
+    let mut hash = sha2::Sha256::new();
+    for name in &sorted {
+        hash.update(name.as_bytes());
+        hash.update(b"\n");
+    }
+    let hash = hash.finalize().to_vec();
+    let find = || sqlx::query_scalar::<_, i32>("SELECT id FROM interface_sets WHERE hash = $1").bind(&hash);
+    if let Some(id) = find().fetch_optional(&mut *tx).await.context("reading the set of interfaces")? {
+        return Ok(id);
+    }
+    // Another engine may save the same set at once: whoever comes first, both read it back.
+    sqlx::query("INSERT INTO interface_sets (hash, interfaces) VALUES ($1, $2) ON CONFLICT (hash) DO NOTHING")
+        .bind(&hash)
+        .bind(&sorted)
+        .execute(&mut *tx)
+        .await
+        .context("saving the set of interfaces")?;
+    find().fetch_one(&mut *tx).await.context("reading the set of interfaces saved")
 }
 
 fn hex(bytes: &[u8]) -> String {

@@ -1748,6 +1748,10 @@ async fn drop_test_partitions(pool: &sqlx::PgPool) {
 /// other's timing (an urgent maintenance waiting behind one test's read queues the other's inserts).
 static LONG_LOCKS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+/// Tests that save the documentation snapshot take this: a save removes every entry it wasn't
+/// given, the other test's too.
+static DOCS: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 /// A long read of `messages` (a big report, say) must not make inserts, and so ACKs, wait
 /// behind partition maintenance. Creating a partition needs a lock that waits for the report;
 /// while it waits, every later statement on the table queues behind it. Maintenance gives up
@@ -2337,7 +2341,10 @@ async fn everything_at_once_without_lock_errors() {
         })
     };
     // Starts and handovers recording what they run (0.7.3), two engines at once with the same new
-    // version now and then (each writes what it hasn't seen; shared files are written once).
+    // version now and then (each writes what it hasn't seen; shared files are written once), and
+    // two engines with projects of their own at once (0.7.3.3): each its own set of interfaces, a
+    // warning on what it changes, its documentation and its history, removing the other's entries.
+    let _docs = DOCS.lock().await;
     let deploy_env = format!("test-deploy-stress-{}", t.name);
     let deployer = {
         let (store, t, stop, env) = (store.clone(), t.clone(), stop.clone(), deploy_env.clone());
@@ -2351,6 +2358,25 @@ async fn everything_at_once_without_lock_errors() {
                 let v = TestVersion::new(&interface, &[("t.ts", &own), ("lib.ts", &shared)]);
                 let versions = [&v];
                 let (x, y) = tokio::join!(deploy(&store, &env, "x", &versions), deploy(&store, &env, "y", &versions));
+                x.unwrap();
+                y.unwrap();
+                let project = |p: &str| {
+                    let name = format!("{env}-{p}");
+                    let v = TestVersion::new(&name, &[("t.ts", &format!("// {name} round {rounds}\n"))]);
+                    let warnings = std::collections::HashMap::from([(name.clone(), format!("round {rounds}"))]);
+                    let docs = [ductus_store::DocsRow {
+                        kind: "interface",
+                        name: name.clone(),
+                        docs: format!(r#"{{"custom": {{"round": {rounds}}}}}"#),
+                    }];
+                    (name, v, warnings, docs)
+                };
+                let (px, py) = (project("x"), project("y"));
+                let (vx, vy) = ([&px.1], [&py.1]);
+                let (x, y) = tokio::join!(
+                    deploy_with(&store, &env, &px.0, &vx, &px.2, Some(&px.3)),
+                    deploy_with(&store, &env, &py.0, &vy, &py.2, Some(&py.3))
+                );
                 x.unwrap();
                 y.unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
@@ -3484,51 +3510,93 @@ async fn expired_unfinished_messages_move_to_the_held_area() {
 }
 
 /// The documentation snapshot matches the project exactly: changed rows are rewritten, unchanged
-/// ones keep their time, entries that left the project are removed.
+/// ones keep their time, entries that left the project are removed. Each of those is a history
+/// row (0.7.3.3); an unchanged entry adds none.
 #[tokio::test]
 async fn the_docs_snapshot_follows_the_project() {
     let Some(url) = std::env::var("DUCTUS_TEST_DATABASE_URL").ok() else { return };
     let store = store().await.unwrap();
     let pool = sqlx::PgPool::connect(&url).await.unwrap();
+    let _docs = DOCS.lock().await;
+    // Names of its own: other tests' engines write the snapshot too.
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let p = format!("test-docs-{}-{nanos}", std::process::id());
+    let (adt, api, lab, orders) = (format!("{p}-adt"), format!("api {p}"), format!("{p}-lab"), format!("{p}-orders"));
     let row = |kind, name: &str, docs: &str| ductus_store::DocsRow { kind, name: name.into(), docs: docs.into() };
     let read = || async {
         sqlx::query_as::<_, (String, String, String, chrono::DateTime<chrono::Utc>)>(
-            "SELECT kind, name, docs::text, updated_at FROM docs_snapshot ORDER BY kind, name",
+            "SELECT kind, name, docs::text, updated_at FROM docs_snapshot WHERE name LIKE '%' || $1 || '%'
+             ORDER BY kind, name",
         )
+        .bind(&p)
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+    };
+    let history = || async {
+        sqlx::query_as::<_, (String, Option<String>, Option<i32>)>(
+            "SELECT name, docs::text, deployment_id FROM docs_history WHERE name LIKE '%' || $1 || '%' ORDER BY id",
+        )
+        .bind(&p)
         .fetch_all(&pool)
         .await
         .unwrap()
     };
     store
         .save_docs_snapshot(&[
-            row("interface", "adt", r#"{"custom": {"baa_signed": "no"}}"#),
-            row("resource", "api empi", r#"{"custom": {}}"#),
-            row("interface", "lab", r#"{"custom": {"baa_signed": "yes"}}"#),
+            row("interface", &adt, r#"{"custom": {"baa_signed": "no"}}"#),
+            row("resource", &api, r#"{"custom": {}}"#),
+            row("interface", &lab, r#"{"custom": {"baa_signed": "yes"}}"#),
         ])
         .await
         .unwrap();
     let first = read().await;
     assert_eq!(first.len(), 3);
     assert_eq!(first[0].2, r#"{"custom": {"baa_signed": "no"}}"#, "stored as jsonb: {first:?}");
+    assert_eq!(history().await.len(), 3, "each new entry starts its history");
 
     // adt changes, lab stays, the api is gone, a new interface appears.
     store
         .save_docs_snapshot(&[
-            row("interface", "adt", r#"{"custom": {"baa_signed": "yes"}}"#),
-            row("interface", "lab", r#"{"custom":   {"baa_signed": "yes"}}"#),
-            row("interface", "orders", r#"{"custom": {}}"#),
+            row("interface", &adt, r#"{"custom": {"baa_signed": "yes"}}"#),
+            row("interface", &lab, r#"{"custom":   {"baa_signed": "yes"}}"#),
+            row("interface", &orders, r#"{"custom": {}}"#),
         ])
         .await
         .unwrap();
     let second = read().await;
     let names: Vec<_> = second.iter().map(|r| r.1.as_str()).collect();
-    assert_eq!(names, ["adt", "lab", "orders"], "{second:?}");
+    assert_eq!(names, [adt.as_str(), lab.as_str(), orders.as_str()], "{second:?}");
     assert_eq!(second[0].2, r#"{"custom": {"baa_signed": "yes"}}"#);
     assert!(second[0].3 > first[0].3, "a changed row gets a new time");
     assert_eq!(second[1].3, first[2].3, "an unchanged row is left alone (same jsonb, spacing aside)");
+    let changes = history().await;
+    let added: Vec<(&str, Option<&str>)> = changes[3..].iter().map(|(n, d, _)| (n.as_str(), d.as_deref())).collect();
+    assert_eq!(
+        added,
+        [
+            (adt.as_str(), Some(r#"{"custom": {"baa_signed": "yes"}}"#)),
+            (orders.as_str(), Some(r#"{"custom": {}}"#)),
+            (api.as_str(), None),
+        ],
+        "changed and new, then gone; lab unchanged adds nothing"
+    );
+    assert!(changes.iter().all(|(.., deployment)| deployment.is_none()), "no deployment named: {changes:?}");
+    // An interface another live engine runs stays (engines with projects of their own on one
+    // database); once that engine is gone, a save without it removes it.
+    let other = unique("docs-other");
+    let held = lock(&store, &other, "host-other").await;
+    assert!(store.claim(&other, std::slice::from_ref(&lab)).await.unwrap().is_empty());
+    store.save_docs_snapshot(&[row("interface", &adt, r#"{"custom": {"baa_signed": "yes"}}"#)]).await.unwrap();
+    let names: Vec<String> = read().await.into_iter().map(|r| r.1).collect();
+    assert_eq!(names, [adt.clone(), lab.clone()], "orders went, lab is the other engine's");
+    store.release_engine(&other).await.unwrap();
+    held.release().await;
+    store.forget_engine(&other).await.unwrap();
     // An empty project empties the table.
     store.save_docs_snapshot(&[]).await.unwrap();
     assert!(read().await.is_empty());
+    sqlx::query("DELETE FROM docs_history WHERE name LIKE '%' || $1 || '%'").bind(&p).execute(&pool).await.unwrap();
 }
 
 /// A code version made up for a test: `(interface, [(path, text)])`, hashed as the engine would
@@ -3571,6 +3639,18 @@ async fn deploy(
     by: &str,
     versions: &[&TestVersion],
 ) -> anyhow::Result<ductus_store::Deployed> {
+    deploy_with(store, env, by, versions, &Default::default(), None).await
+}
+
+/// `deploy`, with warnings for the interfaces it changes and the documentation saved with it.
+async fn deploy_with(
+    store: &Store,
+    env: &str,
+    by: &str,
+    versions: &[&TestVersion],
+    warnings: &std::collections::HashMap<String, String>,
+    docs: Option<&[ductus_store::DocsRow]>,
+) -> anyhow::Result<ductus_store::Deployed> {
     let versions: Vec<_> = versions.iter().map(|v| v.borrow()).collect();
     let d = ductus_store::NewDeployment {
         environment: env,
@@ -3583,6 +3663,8 @@ async fn deploy(
         git_commit: None,
         uncommitted: None,
         versions: &versions,
+        warnings,
+        docs,
     };
     let ids = store.save_versions(&versions).await?;
     store.record_deployment(&d, &ids).await
@@ -3594,7 +3676,12 @@ async fn forget_deployments(pool: &sqlx::PgPool, env: &str) {
     for statement in [
         "DELETE FROM interface_versions WHERE deployment_id IN (SELECT id FROM deployments WHERE environment LIKE $1)",
         "DELETE FROM deployment_changes WHERE deployment_id IN (SELECT id FROM deployments WHERE environment LIKE $1)",
+        "DELETE FROM docs_history WHERE deployment_id IN (SELECT id FROM deployments WHERE environment LIKE $1)
+            OR name LIKE $1",
+        "DELETE FROM docs_snapshot WHERE name LIKE $1",
         "DELETE FROM deployments WHERE environment LIKE $1",
+        "DELETE FROM interface_sets s WHERE EXISTS (SELECT 1 FROM unnest(s.interfaces) n WHERE n LIKE $1)
+            AND NOT EXISTS (SELECT 1 FROM deployments d WHERE d.interface_set = s.id)",
         "DELETE FROM code_files f USING code_versions v, jsonb_array_elements(v.files) e
          WHERE v.interface LIKE $1 AND f.hash = decode(e->>'hash', 'hex')",
         "DELETE FROM code_versions WHERE interface LIKE $1",
@@ -3662,6 +3749,91 @@ async fn deployments_record_what_changed() {
         .await
         .unwrap();
     assert_eq!(versions, 1);
+    forget_deployments(&pool, &env).await;
+}
+
+/// What `ductus history` reads for one interface (0.7.3.3): the deployments that changed it (all
+/// that ran it with `all`, never one that didn't run it), with what they replaced and any warning;
+/// the audit log's changes naming it (reads and refusals with `all`); its documentation's changes
+/// with what each replaced and the deployment that made it; the files its versions named; what it
+/// runs now.
+#[tokio::test]
+async fn history_reads_one_interface() {
+    use ductus_store::HistoryPage;
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let env = format!("test-history-{}-{nanos}", std::process::id());
+    let (a, b) = (format!("{env}-a"), format!("{env}-b"));
+    let ya = format!("name: a # {env}\n");
+    let a1 = TestVersion::new(&a, &[("interfaces/a/interface.yaml", &ya), ("lib/old.ts", &format!("// {env}\n"))]);
+    let a2 = TestVersion::new(&a, &[("interfaces/a/interface.yaml", &ya), ("lib/new.ts", &format!("// {env} 2\n"))]);
+    let b1 = TestVersion::new(&b, &[("interfaces/b/interface.yaml", &format!("name: b # {env}\n"))]);
+    let docs = |x: &str| {
+        [ductus_store::DocsRow { kind: "interface", name: a.clone(), docs: format!(r#"{{"custom": {{"x": "{x}"}}}}"#) }]
+    };
+    let none = Default::default();
+    let _docs = DOCS.lock().await;
+
+    let d1 = deploy_with(&store, &env, "ann", &[&a1, &b1], &none, Some(&docs("1"))).await.unwrap();
+    let d2 = deploy_with(&store, &env, "ann", &[&a1, &b1], &none, Some(&docs("1"))).await.unwrap();
+    let warned = std::collections::HashMap::from([(a.clone(), "replaces ann's change".to_string())]);
+    let d3 = deploy_with(&store, &env, "bob", &[&a2, &b1], &warned, Some(&docs("2"))).await.unwrap();
+    let d4 = deploy(&store, &env, "bob", &[&b1]).await.unwrap(); // `a` not run
+    let page = HistoryPage { interface: &a, until: None, limit: 50 };
+
+    let changed = store.history_deployments(page, false).await.unwrap();
+    let ids: Vec<i32> = changed.iter().map(|d| d.id).collect();
+    assert_eq!(ids, [d3.id, d1.id], "only those that changed it, newest first");
+    assert_eq!(changed[0].from_version.as_deref(), Some(a1.hash.as_slice()));
+    assert_eq!(changed[0].to_version.as_deref(), Some(a2.hash.as_slice()));
+    assert_eq!((changed[0].by_name.as_str(), changed[0].warning.as_deref()), ("bob", Some("replaces ann's change")));
+    assert_eq!((changed[1].from_version.as_ref(), changed[1].warning.as_ref()), (None, None), "new here");
+    let all = store.history_deployments(page, true).await.unwrap();
+    let ids: Vec<(i32, bool)> = all.iter().map(|d| (d.id, d.changed)).collect();
+    assert_eq!(ids, [(d3.id, true), (d2.id, false), (d1.id, true)], "{d4:?} didn't run it");
+    let older = HistoryPage { until: Some(d2.at), ..page };
+    let ids: Vec<i32> = store.history_deployments(older, true).await.unwrap().iter().map(|d| d.id).collect();
+    assert_eq!(ids, [d2.id, d1.id], "up to a time, that time included");
+
+    for (who, action, outcome) in
+        [("ops", "destination.pause", "ok"), ("ops", "message.payload.read", "ok"), ("eve", "message.replay", "denied")]
+    {
+        sqlx::query(
+            "INSERT INTO audit_log (actor_kind, actor_name, action, interface, outcome) VALUES ('user', $1, $2, $3, $4)",
+        )
+        .bind(who)
+        .bind(action)
+        .bind(&a)
+        .bind(outcome)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let changes: Vec<String> = store.history_audit(page, false).await.unwrap().into_iter().map(|r| r.action).collect();
+    assert_eq!(changes, ["destination.pause"], "no reads, nothing refused");
+    assert_eq!(store.history_audit(page, true).await.unwrap().len(), 3);
+
+    let docs = store.history_docs(page).await.unwrap();
+    let seen: Vec<(Option<i32>, Option<&str>, Option<&str>)> =
+        docs.iter().map(|d| (d.deployment_id, d.docs.as_deref(), d.before.as_deref())).collect();
+    assert_eq!(
+        seen,
+        [
+            (Some(d3.id), Some(r#"{"custom": {"x": "2"}}"#), Some(r#"{"custom": {"x": "1"}}"#)),
+            (Some(d1.id), Some(r#"{"custom": {"x": "1"}}"#), None),
+        ],
+        "d2 changed nothing"
+    );
+
+    let paths: Vec<String> = store.version_paths(&a).await.unwrap().into_iter().collect();
+    assert_eq!(paths, ["interfaces/a/interface.yaml", "lib/new.ts", "lib/old.ts"], "every version's files");
+    let now = store.current_versions(&[a.as_str(), "nobody-ran-this"]).await.unwrap();
+    assert_eq!(now.len(), 1);
+    assert_eq!((now[0].version.as_slice(), now[0].deployment, now[0].by.as_str()), (a2.hash.as_slice(), d3.id, "bob"));
+    assert_eq!(now[0].files, ["interfaces/a/interface.yaml", "lib/new.ts"]);
+
+    sqlx::query("DELETE FROM audit_log WHERE interface = $1").bind(&a).execute(&pool).await.unwrap();
     forget_deployments(&pool, &env).await;
 }
 
