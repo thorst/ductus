@@ -3936,8 +3936,12 @@ async fn history_tells_who_changed_what_and_why() {
     assert!(out.find(&warned) < out.find("is ready after"), "said before the old engine stops: {out}");
     tokio::task::spawn_blocking(move || old.0.wait()).await.unwrap().unwrap();
     let store = ductus_store::Store::connect(&db, 2).await.unwrap();
-    let engines = store.live_engines().await.unwrap();
-    let new = Terminate(engines.iter().find(|e| e.interfaces.contains(&name)).expect("an engine runs it").pid as u32);
+    // The engine that runs it now (each handover replaces it: stopped at the end, or if the test fails).
+    let running = async || {
+        let engines = store.live_engines().await.unwrap();
+        Terminate(engines.iter().find(|e| e.interfaces.contains(&name)).expect("an engine runs it").pid as u32)
+    };
+    let mut new = running().await;
     let deployed = |n: usize| read_log().matches("deployed:").count() >= n;
     for _ in 0..100 {
         if deployed(2) {
@@ -3950,6 +3954,15 @@ async fn history_tells_who_changed_what_and_why() {
     // Nothing changed: a start that ran it as it was (`--all` only).
     let (ok, out) = handover("again");
     assert!(ok && !out.contains('⚠'), "{out}");
+    // The second engine stopped; the third runs it (left running, it would hold the interface on
+    // the shared database: CI's one-owner demo saw it).
+    for _ in 0..100 {
+        if !new.alive() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    new = running().await;
     for _ in 0..100 {
         if deployed(3) {
             break;

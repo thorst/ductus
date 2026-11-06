@@ -87,7 +87,10 @@ grep -q '^stopped: breakpoint$' "$P/session.log" || fail+=" not-stopped"
 grep -q "^at: toLab $CODE:18$" "$P/session.log" || fail+=" wrong-line"
 grep -q '^locals: msg=Proxy(MessageImpl)' "$P/session.log" || fail+=" locals"
 grep -q "^msg.PV1\[2\] + \" for a \" + msg.MSH\[9\]\[2\] = 'IN for a A01'$" "$P/session.log" || fail+=" evaluate"
-grep -q 'waiting for a debugger on 127.0.0.1:9229' "$P/session.log" || fail+=" no-waiting-line"
+# The program's output can arrive in pieces (one `output:` event each; CI split this line at
+# "127.0.0.1"): read them joined.
+sed ':a;N;$!ba;s/\noutput: //g' "$P/session.log" | grep 'waiting for a debugger on 127.0.0.1:9229' >/dev/null ||
+  fail+=" no-waiting-line"
 grep -q '1 passed, 0 failed' "$P/session.log" || fail+=" test-not-passed"
 grep -q '^terminated$' "$P/session.log" || fail+=" not-ended"
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi
