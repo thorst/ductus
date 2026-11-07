@@ -4272,6 +4272,36 @@ async fn history_by_source_and_destination() {
     drop(engine);
 }
 
+/// What the start doesn't need runs beside it (0.7.4.2's follow-up): with the database refusing
+/// this interface's retention, the engine starts all the same, says so in an ERROR line, and takes
+/// messages (before, the start stopped there).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_start_runs_when_its_retention_is_refused() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("refused-retention-{nanos}");
+    let port = free_port();
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("interfaces").join(&name);
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::write(
+        folder.join("interface.yaml"),
+        format!("name: {name}\nretention: 3w\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\ndestinations: {{ archive: {{ file: {{ dir: out }} }} }}\n"),
+    )
+    .unwrap();
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let refused = ductus_store::testing::RefusedRetention::new(&store, &name).await.unwrap();
+    let (engine, log) = start_engine(dir.path(), &db, None, "engine.log");
+    let read = || std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", read());
+    assert!(wait_for_log(&log, "couldn't apply the interfaces' retention", 15), "{}", read());
+    // It takes messages all the same.
+    let (ok, out) = ductus(dir.path(), &["gen", "--to", &format!("127.0.0.1:{port}"), "--count", "3"]);
+    assert!(ok && out.contains("sent 3"), "{out}\n{}", read());
+    drop(engine);
+    refused.allow(&store).await.unwrap();
+}
+
 /// `ductus upgrade --check` on a new database, on one a migration behind (the migration and what
 /// it does are listed; ready), with a project whose test fails (exit 1, the failure shown, the same
 /// in `--json`), and on one where an applied migration differs from this build's (exit 1).

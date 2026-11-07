@@ -42,9 +42,17 @@ cd "$P"
 
 ENGINE=""
 start_engine() {
+  local before
+  before=$(q "SELECT count(*) FROM audit_log WHERE action = 'engine.start'")
   "$BIN" run >"$P/run-$1.log" 2>&1 &
   ENGINE=$!
   until grep "started interfaces=" "$P/run-$1.log" 2>/dev/null >/dev/null; do kill -0 $ENGINE || { cat "$P/run-$1.log"; exit 1; }; sleep 0.2; done
+  # Its `engine.start` row (and the "did not stop cleanly" line) is written beside the start, just
+  # after `started`, not in its way.
+  for _ in $(seq 1 100); do
+    [ "$(q "SELECT count(*) FROM audit_log WHERE action = 'engine.start'")" -gt "$before" ] && break
+    sleep 0.1
+  done
 }
 cleanup() {
   kill -INT $ENGINE 2>/dev/null || true

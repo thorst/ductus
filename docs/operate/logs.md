@@ -27,10 +27,10 @@ From a real engine, a start, a pause and resume, then a receiver that went down 
 
 ```text
 INFO ductus_runtime: the engine's database database=plain, no TLS: the server doesn't offer it (sslmode=prefer)
-INFO ductus_runtime::alerts: alerts on channels=1 rules=2 heartbeat=false
-INFO ductus_runtime::certificates: no connection has a certificate: scheduled checks have nothing to do
 INFO ductus_runtime::api: REST API listening (/api/v1) host=127.0.0.1 port=7700 https=false
 INFO ductus_runtime: started interfaces=1 mllp=1 http=0 files=0 schedules=0 internal=0 shared=1 pool_threads=8 dedicated_threads=0 debugged=0 console=info took=299.820201ms
+INFO ductus_runtime::alerts: alerts on channels=1 rules=2 heartbeat=false
+INFO ductus_runtime::certificates: no connection has a certificate: scheduled checks have nothing to do
 WARN ductus_runtime::api::status: destination paused interface=adt-in destination=lab by="ops-probe" reason="lab system upgrade until 14:00, ticket CHG0042"
 INFO ductus_runtime::worker: paused: waiting to be resumed interface=adt-in destination=lab slot=0
 WARN ductus_runtime::api::status: destination resumed interface=adt-in destination=lab by="ops-probe"
@@ -50,7 +50,8 @@ INFO ductus_runtime: stopped took=2.217222ms
 
 | Line | Means | Act when |
 |---|---|---|
-| `started interfaces=N … console=… took=` | every interface is up and taking messages; which of the code's `console` lines this environment logs ([below](#lines-from-interface-code)); how long the start took | never: it's the "ready" line (systemd's `status` says the same) |
+| `started interfaces=N … console=… took=` | every interface is up and taking messages; which of the code's `console` lines this environment logs ([below](#lines-from-interface-code)); how long the start took. The audit row, retention, alerts and certificate checks follow just after it ([nuance](../nuances/engines.md#started-comes-before-the-audit-row-retention-and-alerts-are-in-place-level-3)) | never: it's the "ready" line (systemd's `status` says the same) |
+| `couldn't apply the interfaces' retention … trying again in a minute` | the database refused the configured retention at a start; new messages keep the tier stored, nothing expired is dropped | at once: the database is refusing writes ([database](../troubleshooting.md)) |
 | `the engine's database database=…` | how the database connection is protected (TLS, verified or not) | it says plain or unverified in production: [TLS to the database](../install/postgres.md#tls-to-the-database) |
 | `delivery failed; retrying in Ns … attempts=N error=…` | a temporary failure; the wait doubles to `max_backoff_ms` | the same id keeps failing: [hotspots](monitoring.md#where-a-backlog-sits-hotspots) |
 | `destination rejected; quarantined … error=` | the receiver refused this message (an AR, a 4xx) | look at it the same day: [resend](resend.md) |

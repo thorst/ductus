@@ -240,3 +240,40 @@ pub async fn forget_version_parts(store: &Store, interface: &str) -> Result<u64>
         .context("forgetting the versions' parts")?;
     Ok(done.rows_affected())
 }
+
+/// While it lives, the database refuses `interface`'s retention row (a trigger on `retention` for
+/// that name only, so other tests' engines on the same database aren't touched): what a start
+/// does when it can't apply the configured retention. Drop it with `allow`.
+pub struct RefusedRetention {
+    trigger: String,
+}
+
+impl RefusedRetention {
+    pub async fn new(store: &Store, interface: &str) -> Result<Self> {
+        if !interface.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+            bail!("a test interface's name is letters, digits and `-`: {interface}");
+        }
+        let trigger = format!("test_refuse_{}", interface.replace('-', "_"));
+        let statements = [
+            "CREATE OR REPLACE FUNCTION ductus_test_refuse_retention() RETURNS trigger LANGUAGE plpgsql AS
+             $$ BEGIN RAISE EXCEPTION 'refused by a test'; END $$"
+                .to_string(),
+            format!(
+                "CREATE TRIGGER {trigger} BEFORE INSERT OR UPDATE ON retention FOR EACH ROW
+                 WHEN (NEW.interface = '{interface}') EXECUTE FUNCTION ductus_test_refuse_retention()"
+            ),
+        ];
+        for s in statements {
+            sqlx::query(sqlx::AssertSqlSafe(s)).execute(&store.pool).await.context("refusing a retention")?;
+        }
+        Ok(Self { trigger })
+    }
+
+    pub async fn allow(self, store: &Store) -> Result<()> {
+        sqlx::query(sqlx::AssertSqlSafe(format!("DROP TRIGGER IF EXISTS {} ON retention", self.trigger)))
+            .execute(&store.pool)
+            .await
+            .context("allowing a retention again")?;
+        Ok(())
+    }
+}

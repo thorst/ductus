@@ -344,7 +344,6 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     };
     if takeover.is_none() {
         let _ = waiting.set(take_charge(&store, &charge, &mut phases).await?);
-        settle_in(&retention, &mut phases).await?;
     }
     let mut ids = all_ids.into_iter();
     let (stopped_tx, stopped_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -685,12 +684,21 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     // to start (the engine may be all that is left to move messages), but it is an error. Then
     // alerts, the engine's own certificate checks and the directory's refresh. All once the
     // interfaces are this engine's: a takeover's only after it took over (two engines judging
-    // one interface's alerts would tell twice).
-    let mut background = Some(async move |engine: &Arc<control::Engine>| {
-        audit::start(engine, stopped_rx, retention_days).await;
-        alerts::start(engine).await;
-        certificates::start(engine, certificate_changes).await;
-        ldap::start(engine);
+    // one interface's alerts would tell twice). Beside the start, not in its way (since 0.7.4.2:
+    // its `engine.start` row lands just after `started`); a takeover's `engine.handover` row after
+    // `engine.start`, as before.
+    let mut background = Some(move |engine: Arc<control::Engine>, handed: Option<handover::HandedOver>| {
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            audit::start(&engine, stopped_rx, retention_days).await;
+            if let Some(handed) = &handed {
+                audit::handed_over(&engine, handed).await;
+            }
+            alerts::start(&engine).await;
+            certificates::start(&engine, certificate_changes).await;
+            ldap::start(&engine);
+            tracing::debug!(took = ?started.elapsed(), "audit log and alerts started beside the start");
+        });
     });
     // Recorded beside the start, not in its way (tens of milliseconds at a thousand interfaces, the
     // first time far more): a task that ends once it's written. The API shows it from then on.
@@ -718,8 +726,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     if takeover.is_none()
         && let Some(start) = background.take()
     {
-        start(&engine).await;
-        phases.mark("audit log and alerts started");
+        start(engine.clone(), None);
+        settle_in(engine.retention.clone());
         record(&engine);
     }
     let mut api_server = None;
@@ -756,10 +764,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         owner.hold();
         let sending_paused = stop_took.unwrap_or_default() + released.elapsed();
         phases.mark("sending");
-        settle_in(&engine.retention, &mut phases).await?;
-        if let Some(start) = background.take() {
-            start(&engine).await;
-        }
+        settle_in(engine.retention.clone());
         let handed = handover::HandedOver { from: t.predecessor().await?, at: chrono::Utc::now(), sending_paused };
         tracing::info!(
             from_pid = handed.from.pid,
@@ -767,7 +772,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             sending_paused = ?sending_paused,
             "took over: receiving never stopped"
         );
-        audit::handed_over(&engine, &handed).await;
+        if let Some(start) = background.take() {
+            start(engine.clone(), Some(handed.clone()));
+        }
         record(&engine);
         let _ = engine.handed_over.set(handed);
         t.running(sending_paused).await;
@@ -996,14 +1003,28 @@ async fn take_charge(store: &Store, charge: &Charge, phases: &mut Phases) -> Res
     Ok(waiting.into_iter().collect())
 }
 
-/// The rest of what a start changes for its interfaces, which sending needn't wait for (a
-/// takeover sends first): the configured retention applied (a change runs beside sending anyway;
-/// until then messages go to the tier stored, as the engine taken over from stored them). The
-/// documentation snapshot is saved with the deployment, beside the start.
-async fn settle_in(retention: &Arc<retention::Retention>, phases: &mut Phases) -> Result<()> {
-    retention.apply().await.context("applying retention")?;
-    phases.mark("retention applied");
-    Ok(())
+/// The rest of what a start changes for its interfaces, which nothing waits for: the configured
+/// retention applied, beside the start (since 0.7.4.2's follow-up; a takeover always sent first).
+/// Until then new messages go to the tier stored, as the engine before stored them; a change runs
+/// beside sending anyway. A database that refuses is no reason to stop an engine that's moving
+/// messages: it says so and tries again a minute later (not sooner: a change that just began is
+/// recorded in the audit log only within its first minute, so a retry never records it twice),
+/// and the retention tasks (changes, drops) start once it's applied. The documentation snapshot
+/// is saved with the deployment, beside the start too.
+fn settle_in(retention: Arc<retention::Retention>) {
+    tokio::spawn(async move {
+        let started = std::time::Instant::now();
+        loop {
+            match retention.apply().await {
+                Ok(()) => break,
+                Err(e) => {
+                    tracing::error!(error = %format!("{e:#}"), "couldn't apply the interfaces' retention (new messages keep their stored tier, nothing expired is dropped meanwhile): trying again in a minute");
+                    tokio::time::sleep(Duration::from_secs(60)).await;
+                }
+            }
+        }
+        tracing::debug!(took = ?started.elapsed(), "retention applied beside the start");
+    });
 }
 
 /// Stop in order, so nothing is left half done: close every interface's gate (listeners close,

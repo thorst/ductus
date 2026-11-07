@@ -19,7 +19,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 
 - [Messages and delivery](delivery.md) (5)
 - [The store (Postgres)](store.md) (2)
-- [Several engines on one database](engines.md) (4)
+- [Several engines on one database](engines.md) (5)
 - [Retention](retention.md) (7)
 - [Several destinations](destinations.md) (8)
 - [Order, retries and durability](ordering.md) (7)
@@ -188,11 +188,12 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (78)
+## Level 3: Professional (79)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
 - [Only the original is stored; outputs are recomputed](delivery.md#only-the-original-is-stored-outputs-are-recomputed-level-3) (Messages and delivery)
+- [`started` comes before the audit row, retention and alerts are in place](engines.md#started-comes-before-the-audit-row-retention-and-alerts-are-in-place-level-3) (Several engines on one database)
 - [A dead engine's interfaces are free at once; a vanished host's within ~25 s](engines.md#a-dead-engines-interfaces-are-free-at-once-a-vanished-hosts-within-25-s-level-3) (Several engines on one database)
 - [Losing the database connection pauses sending, not receiving](engines.md#losing-the-database-connection-pauses-sending-not-receiving-level-3) (Several engines on one database)
 - [PgBouncer in transaction mode can't hold the engine's lock](engines.md#pgbouncer-in-transaction-mode-cant-hold-the-engines-lock-level-3) (Several engines on one database)
