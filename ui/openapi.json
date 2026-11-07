@@ -1105,7 +1105,7 @@
         "tags": [
           "engine"
         ],
-        "summary": "One timeline of who changed what and why for an interface, newest first: the git commits that\nchanged its files (its interface.yaml, its code and the shared files it imports), the\ndeployments that changed its code, the audit log's entries naming it and its documentation's\nchanges.",
+        "summary": "One timeline of who changed what and why for an interface, newest first: the git commits that\nchanged its files (its interface.yaml, its code and the shared files it imports), the\ndeployments that changed its code, the audit log's entries naming it and its documentation's\nchanges. Each entry says which parts it touches (`touches`); `source=true` or\n`destination=NAME` returns only one part's.",
         "operationId": "interface_history",
         "parameters": [
           {
@@ -1143,6 +1143,24 @@
             "required": false,
             "schema": {
               "type": "boolean"
+            }
+          },
+          {
+            "name": "source",
+            "in": "query",
+            "description": "Only what touches its source (`source:`, `format`, `ordering`, `dedupe`, `durability`,\n`about.from`, `monitor`'s times; an HTTP `respond` interface's code). Not with `destination`.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          },
+          {
+            "name": "destination",
+            "in": "query",
+            "description": "Only what touches this destination (one of the page's `destinations`): its block in\ninterface.yaml, the interface's settings it has none of its own for, the files its code\nloads, its pauses, resends and alerts, its documentation.",
+            "required": false,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -5198,7 +5216,8 @@
           "kind",
           "by",
           "what",
-          "key"
+          "key",
+          "touches"
         ],
         "properties": {
           "at": {
@@ -5255,6 +5274,10 @@
           },
           "kind": {
             "$ref": "#/components/schemas/HistoryKind"
+          },
+          "touches": {
+            "$ref": "#/components/schemas/HistoryTouches",
+            "description": "Which parts of the interface it touches (none: the whole interface only)."
           },
           "what": {
             "type": "string",
@@ -5320,9 +5343,17 @@
         "required": [
           "interface",
           "entries",
-          "notes"
+          "notes",
+          "destinations"
         ],
         "properties": {
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The destinations it has or had (its configuration's, and every one an engine ran on this\ndatabase), by name: the parts a history can be narrowed to, besides its source."
+          },
           "entries": {
             "type": "array",
             "items": {
@@ -5346,6 +5377,37 @@
               "type": "string"
             },
             "description": "What the timeline lacks, in words: no git repository, a database not read, …"
+          }
+        }
+      },
+      "HistoryTouches": {
+        "type": "object",
+        "description": "The parts of the interface an entry touches. None of them: the interface as a whole only (its\nowner, its retention, its alerts' recipients), shown only when no part is picked.",
+        "required": [
+          "everything",
+          "source",
+          "destinations",
+          "unsure"
+        ],
+        "properties": {
+          "destinations": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The destinations it touches, by name, in name order."
+          },
+          "everything": {
+            "type": "boolean",
+            "description": "Every part alike: the interface came or went (or was renamed), its interface.yaml stopped or\nstarted parsing, a start ran it unchanged."
+          },
+          "source": {
+            "type": "boolean",
+            "description": "Where messages come from: `source:`, `format`, `ordering`, `dedupe`, `durability`,\n`about.from`, the `monitor` times; an HTTP `respond` interface's code."
+          },
+          "unsure": {
+            "type": "boolean",
+            "description": "Its code changed, but which part's wasn't recorded (a version saved before 0.7.4.2, or a\nfile only such versions named): it may touch any part, so every part's history shows it,\nmarked."
           }
         }
       },

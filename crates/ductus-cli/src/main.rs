@@ -234,12 +234,22 @@ enum Command {
     /// changed its files (its interface.yaml, its code and the shared files it imports, every
     /// version's), the deployments that changed its code (who, why, from which commit, and a ⚠
     /// when one may have undone someone else's change), the audit log's entries naming it (pauses,
-    /// resends, retention) and its documentation's changes. Reads the project and, with
-    /// DUCTUS_DATABASE_URL, the database (read-only); without it, git only.
+    /// resends, retention) and its documentation's changes. Each line ends with the parts it touches
+    /// (`[source, lab]`); `--source` or `--destination NAME` shows only one part's. Reads the
+    /// project and, with DUCTUS_DATABASE_URL, the database (read-only); without it, git only.
     History {
         /// The interface: its name, or a file or folder inside its folder. One no longer in the
         /// project is found by name in what was recorded.
         interface: String,
+        /// Only what touches its source: `source:`, `format`, `ordering`, `dedupe`, `durability`,
+        /// `about.from`, `monitor`'s times (and an HTTP `respond` interface's code).
+        #[arg(long, conflicts_with = "destination")]
+        source: bool,
+        /// Only what touches this destination: its block in interface.yaml, the interface's
+        /// settings it has none of its own for, the files its code loads (a shared file touches
+        /// each destination that loads it), its pauses, resends and alerts, its documentation.
+        #[arg(long, value_name = "NAME")]
+        destination: Option<String>,
         /// Everything: also the starts that ran it unchanged, payload reads and refused attempts.
         #[arg(long)]
         all: bool,
@@ -1199,8 +1209,13 @@ async fn run(cli: Cli) -> Result<()> {
             };
             trying::run(trying::Args { root, env, interface, source, destination, json, inspect }).await
         }
-        Command::History { interface, all, limit, before, json, database_url, root, env } => {
-            history::run(history::Args { root, env, interface, database_url, all, limit, before, json }).await
+        Command::History { interface, source, destination, all, limit, before, json, database_url, root, env } => {
+            let part = match (source, destination) {
+                (true, _) => Some(ductus_runtime::history::Part::Source),
+                (false, Some(name)) => Some(ductus_runtime::history::Part::Destination(name)),
+                (false, None) => None,
+            };
+            history::run(history::Args { root, env, interface, database_url, all, limit, before, json, part }).await
         }
         Command::Validate { root, env, database_url, json, read_only } => {
             exit_on_failure(project::validate(&root, &env, database_url, read_only, json).await)

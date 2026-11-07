@@ -114,6 +114,9 @@ pub struct CodeFile {
     pub hash: [u8; 32],
     /// Its text, normalized (`normalize`: no byte order mark, `\n` line ends).
     pub text: String,
+    /// The project files it imports, in `path`'s form: which files each destination's code loads
+    /// (history by destination, 0.7.4.2) follows them.
+    pub imports: Vec<std::path::PathBuf>,
 }
 
 /// Name of the global function the test and typegen glue modules install.
@@ -255,11 +258,10 @@ impl Isolate {
             }
             let Some(found) = self.loaded.get(&url).or_else(|| loader::read(&url)) else { continue };
             todo.extend(found.imports.iter().cloned());
-            let path = ModuleSpecifier::parse(&url)
-                .ok()
-                .and_then(|u| u.to_file_path().ok())
-                .with_context(|| format!("not a file: {url}"))?;
-            files.push(CodeFile { path, hash: found.hash, text: found.text });
+            let as_path = |url: &str| ModuleSpecifier::parse(url).ok().and_then(|u| u.to_file_path().ok());
+            let path = as_path(&url).with_context(|| format!("not a file: {url}"))?;
+            let imports = found.imports.iter().filter_map(|i| as_path(i)).collect();
+            files.push(CodeFile { path, hash: found.hash, text: found.text, imports });
         }
         files.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(files)

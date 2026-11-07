@@ -67,7 +67,7 @@ export function InterfacePage() {
               />
             </TabsContent>
             <TabsContent value="history">
-              <HistoryList name={i.name} />
+              <HistoryList name={i.name} destinations={i.destinations.map((d) => d.name)} />
             </TabsContent>
           </Tabs>
         </>

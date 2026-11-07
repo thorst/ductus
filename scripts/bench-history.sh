@@ -8,7 +8,15 @@
 # only) and `GET /interfaces/v-0/history` (first page, `all`, a page deep in the timeline), and the
 # plans of the database's reads.
 #
+# By part (0.7.4.2): v-0 has a second destination, `archive`, without code. Each deployment
+# changes `receiver`'s code (transform.ts); every 3rd also receiver's block in interface.yaml, every
+# 50th the source's (20 of 1,000: `--source` reads every deployment to fill a page, the worst
+# case). Timed: `--destination receiver`, `--source`, `--destination archive` (only the first
+# deployment and the commit that added the files), through the CLI and the API.
+#
 #   bash scripts/bench-history.sh            # COMMITS=1000 DEPLOYMENTS=1000 RUNS=7
+#   BASE=~/target-base/release/ductus bash scripts/bench-history.sh   # also an earlier binary's
+#                                            # `history v-0`, alternating with this one's
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
@@ -39,8 +47,14 @@ for i in $(seq 0 $((COUNT - 1))); do
   d="$WORK/interfaces/v-$i"
   mkdir -p "$d"
   l=$((i % 10))
-  printf 'name: v-%d\nsource: { mllp: { host: 127.0.0.1, port: %d } }\nscript: transform.ts\ndestinations: { receiver: { mllp: { host: 127.0.0.1, port: 19999 } } }\n' \
-    "$i" $((20000 + i)) >"$d/interface.yaml"
+  if [ "$i" = 0 ]; then
+    # The measured one: receiver's code in a file of its own, archive without code.
+    printf 'name: v-0\nsource: { mllp: { host: 127.0.0.1, port: 20000 } }\ndestinations: { receiver: { mllp: { host: 127.0.0.1, port: 19999 }, script: transform.ts }, archive: { file: { dir: archive } } }\n' \
+      >"$d/interface.yaml"
+  else
+    printf 'name: v-%d\nsource: { mllp: { host: 127.0.0.1, port: %d } }\nscript: transform.ts\ndestinations: { receiver: { mllp: { host: 127.0.0.1, port: 19999 } } }\n' \
+      "$i" $((20000 + i)) >"$d/interface.yaml"
+  fi
   printf 'export function clean(s: string): string {\n  return s.trim().toUpperCase();\n}\n' >"$d/map.ts"
   cat >"$d/transform.ts" <<EOF
 import type { Message } from "@ductus/sdk";
@@ -114,14 +128,31 @@ PGTZ=UTC psql "$URL" -q <<SQL
 DO \$\$
 DECLARE
   first   deployments%ROWTYPE;
-  files   jsonb := (SELECT files FROM code_versions WHERE interface = 'v-0' LIMIT 1);
+  base    jsonb := (SELECT files FROM code_versions WHERE interface = 'v-0' LIMIT 1);
+  parts   jsonb := (SELECT parts FROM code_versions WHERE interface = 'v-0' LIMIT 1);
+  yaml    text := (SELECT c.content FROM code_files c, jsonb_array_elements(base) e
+                   WHERE e->>'path' LIKE '%/interface.yaml' AND c.hash = decode(e->>'hash', 'hex'));
+  files   jsonb;
   before  integer := (SELECT version_id FROM interface_versions WHERE interface = 'v-0');
   version integer;
   d       integer;
 BEGIN
   SELECT * INTO first FROM deployments ORDER BY id LIMIT 1;
   FOR g IN 1..$DEPLOYMENTS - 1 LOOP
-    INSERT INTO code_versions (hash, interface, files) VALUES (sha256(('bench v-0 ' || g)::bytea), 'v-0', files)
+    -- receiver's code each time; its block in interface.yaml every 3rd; the source's every 50th.
+    IF g % 3 = 0 THEN
+      yaml := regexp_replace(yaml, 'port: [0-9]+ }, script', 'port: ' || (40000 + g) || ' }, script');
+    END IF;
+    IF g % 50 = 0 THEN
+      yaml := regexp_replace(yaml, 'source: \{ mllp: \{ host: 127.0.0.1, port: [0-9]+', 'source: { mllp: { host: 127.0.0.1, port: ' || (30000 + g));
+    END IF;
+    INSERT INTO code_files (hash, content) VALUES (sha256(convert_to(yaml, 'UTF8')), yaml) ON CONFLICT DO NOTHING;
+    files := (SELECT jsonb_agg(CASE
+                WHEN e->>'path' LIKE '%/transform.ts' THEN jsonb_build_object('path', e->>'path', 'hash', encode(sha256(('bench code ' || g)::bytea), 'hex'))
+                WHEN e->>'path' LIKE '%/interface.yaml' THEN jsonb_build_object('path', e->>'path', 'hash', encode(sha256(convert_to(yaml, 'UTF8')), 'hex'))
+                ELSE e END ORDER BY e->>'path')
+              FROM jsonb_array_elements(base) e);
+    INSERT INTO code_versions (hash, interface, files, parts) VALUES (sha256(('bench v-0 ' || g)::bytea), 'v-0', files, parts)
       RETURNING id INTO version;
     INSERT INTO deployments (at, environment, instance, host, version, how, by_name, reason, git_commit, uncommitted,
                              interfaces, changed, interface_set)
@@ -167,7 +198,31 @@ echo "   with the database:     $(times "$BIN" history v-0 --root "$WORK" --data
 echo "   --json:                $(times "$BIN" history v-0 --root "$WORK" --database-url "$URL" --json)"
 echo "   --all:                 $(times "$BIN" history v-0 --root "$WORK" --database-url "$URL" --all)"
 echo "   git only (no database): $(times env -u DUCTUS_DATABASE_URL "$BIN" history v-0 --root "$WORK")"
+echo "   --destination receiver: $(times "$BIN" history v-0 --root "$WORK" --database-url "$URL" --destination receiver)"
+echo "   --source:               $(times "$BIN" history v-0 --root "$WORK" --database-url "$URL" --source)"
+echo "   --destination archive:  $(times "$BIN" history v-0 --root "$WORK" --database-url "$URL" --destination archive)"
+if [ -n "${BASE:-}" ]; then
+  # An earlier binary (it reads the same database: history only reads), each run alternating with
+  # this one's, so a busy machine slows both alike.
+  BASE=$(realpath "$BASE")
+  new=() old=()
+  for _ in $(seq 1 "$RUNS"); do
+    for which in new old; do
+      bin=$BIN
+      [ "$which" = old ] && bin=$BASE
+      t0=$(date +%s%N)
+      "$bin" history v-0 --root "$WORK" --database-url "$URL" >/dev/null
+      t1=$(date +%s%N)
+      [ "$which" = old ] && old+=($(((t1 - t0) / 1000000))) || new+=($(((t1 - t0) / 1000000)))
+    done
+  done
+  stat() { printf '%s\n' "$@" | sort -n | awk '{ a[NR] = $1 } END { printf "%d / %d / %d ms\n", a[1], a[int((NR + 1) / 2)], a[NR] }'; }
+  echo "   alternating, BASE:      $(stat "${old[@]}")"
+  echo "   alternating, this one:  $(stat "${new[@]}")"
+fi
 "$BIN" history v-0 --root "$WORK" --database-url "$URL" --limit 8 | sed 's/^/   | /'
+echo "   --source, the first lines:"
+"$BIN" history v-0 --root "$WORK" --database-url "$URL" --source --limit 4 | sed 's/^/   | /'
 
 echo "== GET /interfaces/v-0/history (min / median / max of $RUNS)"
 "$BIN" token create bench-history --role viewer >"$WORK/token"
@@ -182,6 +237,10 @@ first=$(get '' | awk '{ printf "%d", $1 * 1000 }')
 echo "   the first request (git walked): $first ms"
 echo "   first page (50):        $(api '')"
 echo "   all=true:               $(api '?all=true')"
+echo "   destination=receiver:   $(api '?destination=receiver')"
+echo "   source=true:            $(api '?source=true')"
+echo "   destination=archive:    $(api '?destination=archive')"
+echo "   source=true&all=true:   $(api '?source=true&all=true')"
 deep=$(curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$API/api/v1/interfaces/v-0/history?limit=200" | sed 's/.*"next_before":"\([^"]*\)".*/\1/')
 for _ in 1 2 3; do
   deep=$(curl -sf -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$API/api/v1/interfaces/v-0/history?limit=200&before=$deep" | sed 's/.*"next_before":"\([^"]*\)".*/\1/')
@@ -198,6 +257,7 @@ plan() {
 plan deployments "SELECT d.id FROM deployment_changes c JOIN deployments d ON d.id = c.deployment_id JOIN code_versions t ON t.id = c.to_version LEFT JOIN code_versions f ON f.id = c.from_version WHERE c.interface = 'v-0' ORDER BY c.deployment_id DESC LIMIT 55"
 plan all "SELECT d.id FROM deployments d WHERE d.interface_set IN (SELECT id FROM interface_sets WHERE interfaces @> ARRAY['v-0']) AND NOT EXISTS (SELECT 1 FROM deployment_changes c WHERE c.deployment_id = d.id AND c.interface = 'v-0') ORDER BY d.id DESC LIMIT 55"
 plan audit "SELECT id FROM audit_log WHERE interface = 'v-0' AND (action <> 'message.payload.read' AND outcome = 'ok') ORDER BY at DESC, id DESC LIMIT 55"
+plan audit-receiver "SELECT id FROM audit_log WHERE interface = 'v-0' AND (action <> 'message.payload.read' AND outcome = 'ok') AND ((action IN ('destination.pause', 'destination.resume') AND subject = interface || '/receiver') OR (action LIKE 'alert.%' AND subject = 'dest:' || interface || '/receiver') OR (action IN ('message.release', 'message.replay', 'message.edit', 'message.dismiss') AND (EXISTS (SELECT 1 FROM message_actions m JOIN destinations x ON x.id = m.destination_id WHERE m.audit_id = audit_log.id AND x.name = 'receiver') OR NOT EXISTS (SELECT 1 FROM message_actions m WHERE m.audit_id = audit_log.id)))) ORDER BY at DESC, id DESC LIMIT 55"
 plan docs "SELECT h.id, (SELECT p.docs FROM docs_history p WHERE p.kind = h.kind AND p.name = h.name AND p.id < h.id ORDER BY p.id DESC LIMIT 1) FROM docs_history h WHERE h.kind = 'interface' AND h.name = 'v-0' ORDER BY h.id DESC LIMIT 55"
 plan paths "SELECT files FROM code_versions WHERE interface = 'v-0'"
 "$BIN" token revoke bench-history >/dev/null

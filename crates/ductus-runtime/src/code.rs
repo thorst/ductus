@@ -22,6 +22,7 @@ use anyhow::{Context, Result};
 use ductus_core::InterfaceConfig;
 use ductus_script::CodeFile;
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::Path;
 
 /// How many hex characters of a version are shown.
@@ -45,6 +46,25 @@ pub struct Version {
     pub hash: [u8; 32],
     /// In path order; its interface.yaml among them.
     pub files: Vec<File>,
+    /// Which of `files` each part runs. Not in the hash: it follows from the files.
+    pub parts: Parts,
+}
+
+/// Which of a version's files each part of the interface runs (0.7.4.2): what history by source and
+/// by destination (`ductus history --destination lab`) tells a change of code by. Saved with the
+/// version (`code_versions.parts`); versions saved before 0.7.4.2 have none until an engine runs
+/// them again.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Parts {
+    /// The source's code: an HTTP `respond` interface's script and every file it imports (its
+    /// function makes the answer); empty for every other interface.
+    #[serde(default)]
+    pub source: Vec<String>,
+    /// Each destination's code by name: the file its function is in (its own `script:` or the
+    /// interface's) and every file that imports, in path order; empty for a destination without
+    /// code. A file several destinations load (`lib/`, the interface's script) is in each list.
+    #[serde(default)]
+    pub destinations: BTreeMap<String, Vec<String>>,
 }
 
 impl Version {
@@ -61,12 +81,54 @@ impl Version {
         files.extend(loaded.iter().map(|f| File { path: relative(root, &f.path), hash: f.hash, text: f.text.clone() }));
         files.sort_by(|a, b| a.path.cmp(&b.path));
         files.dedup_by(|a, b| a.path == b.path);
-        Ok(Self { interface: config.name.clone(), hash: hash(&config.name, &files), files })
+        let parts = Parts::of(root, config, loaded);
+        Ok(Self { interface: config.name.clone(), hash: hash(&config.name, &files), files, parts })
     }
 
     /// The first `SHOWN` hex characters.
     pub fn short(&self) -> String {
         short(&self.hash)
+    }
+}
+
+impl Parts {
+    /// Each part's files: from the module each function is in, through the imports the loader
+    /// recorded (`loaded`, as `Version::of` takes them).
+    fn of(root: &Path, config: &InterfaceConfig, loaded: &[CodeFile]) -> Self {
+        // By path relative to the project, worked out from text alone: asking the file system
+        // for each module's canonical path cost ~10 ms a start at a thousand interfaces.
+        let imports: HashMap<String, Vec<String>> = loaded
+            .iter()
+            .map(|f| (relative(root, &f.path), f.imports.iter().map(|i| relative(root, i)).collect()))
+            .collect();
+        let folder = config.dir.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default();
+        let closure = |module: &Path| -> Vec<String> {
+            let script = module.strip_prefix(&config.dir).unwrap_or(module);
+            let start = lexical(&format!("interfaces/{folder}/{}", script.to_string_lossy().replace('\\', "/")));
+            let mut seen: BTreeSet<&str> = BTreeSet::new();
+            let mut todo: Vec<&str> = imports.get_key_value(&start).map(|(p, _)| p.as_str()).into_iter().collect();
+            while let Some(path) = todo.pop() {
+                if seen.insert(path) {
+                    let next = imports.get(path).map(Vec::as_slice).unwrap_or_default();
+                    todo.extend(next.iter().filter_map(|i| imports.get_key_value(i).map(|(p, _)| p.as_str())));
+                }
+            }
+            seen.into_iter().map(str::to_string).collect()
+        };
+        // Each function's module as `InterfaceConfig::functions` finds it (not called: it also
+        // writes every destination's formats, which costs more than all of this).
+        if config.responds() {
+            let source = config.script_path().map(|m| closure(&m)).unwrap_or_default();
+            return Self { source, destinations: BTreeMap::new() };
+        }
+        let destinations = config
+            .destinations()
+            .map(|(name, d)| {
+                let module = d.script.as_ref().map(|s| config.dir.join(s)).or_else(|| config.script_path());
+                (name.to_string(), module.map(|m| closure(&m)).unwrap_or_default())
+            })
+            .collect();
+        Self { source: Vec::new(), destinations }
     }
 }
 
@@ -97,6 +159,22 @@ pub fn current(root: &Path, config: &InterfaceConfig, heap_mb: usize) -> Result<
             .join()
             .map_err(|_| anyhow::anyhow!("loading `{}`'s code panicked", config.name))?
     })
+}
+
+/// A relative path with `.` and `..` worked out as text (`interfaces/a/../../lib/x.ts` →
+/// `lib/x.ts`), as the loader's canonical paths have them (no links in a project, by convention).
+fn lexical(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for part in path.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            p => out.push(p),
+        }
+    }
+    out.join("/")
 }
 
 /// The version's hash: see the module's documentation.
@@ -162,5 +240,12 @@ mod tests {
         let root = Path::new("/p");
         assert_eq!(relative(root, Path::new("/p/interfaces/a/t.ts")), "interfaces/a/t.ts");
         assert_eq!(relative(root, Path::new("/elsewhere/x.ts")), "/elsewhere/x.ts");
+    }
+
+    #[test]
+    fn script_paths_are_worked_out_as_text() {
+        assert_eq!(lexical("interfaces/a/lab.ts"), "interfaces/a/lab.ts");
+        assert_eq!(lexical("interfaces/a/./sub/../lab.ts"), "interfaces/a/lab.ts");
+        assert_eq!(lexical("interfaces/a/../../lib/shared.ts"), "lib/shared.ts");
     }
 }

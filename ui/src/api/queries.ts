@@ -32,14 +32,29 @@ export const iface = (name: string) =>
     refetchInterval: HEALTH_REFRESH_MS,
   });
 
-/** An interface's timeline (commits, deployments, the audit log, documentation), newest first, a page at a time. */
-export const history = (name: string, all: boolean) =>
+/** Which part of an interface a history shows: all of it, its source, or one destination. */
+export type HistoryPart = { kind: "whole" } | { kind: "source" } | { kind: "destination"; name: string };
+
+/**
+ * An interface's timeline (commits, deployments, the audit log, documentation), newest first, a page at a time;
+ * narrowed to one part when asked.
+ */
+export const history = (name: string, all: boolean, part: HistoryPart = { kind: "whole" }) =>
   infiniteQueryOptions({
-    queryKey: ["history", name, all],
+    queryKey: ["history", name, all, part],
     queryFn: async ({ pageParam }) =>
       unwrap(
         await api.GET("/interfaces/{name}/history", {
-          params: { path: { name }, query: { before: pageParam ?? undefined, limit: 50, all } },
+          params: {
+            path: { name },
+            query: {
+              before: pageParam ?? undefined,
+              limit: 50,
+              all,
+              source: part.kind === "source" ? true : undefined,
+              destination: part.kind === "destination" ? part.name : undefined,
+            },
+          },
         }),
       ),
     initialPageParam: null as string | null,

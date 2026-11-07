@@ -2347,7 +2347,7 @@ async fn everything_at_once_without_lock_errors() {
     let _docs = DOCS.lock().await;
     let deploy_env = format!("test-deploy-stress-{}", t.name);
     let deployer = {
-        let (store, t, stop, env) = (store.clone(), t.clone(), stop.clone(), deploy_env.clone());
+        let (store, t, stop, env, pool) = (store.clone(), t.clone(), stop.clone(), deploy_env.clone(), pool.clone());
         tokio::spawn(async move {
             let mut rounds = 0;
             while !stop.load(Relaxed) {
@@ -2357,6 +2357,16 @@ async fn everything_at_once_without_lock_errors() {
                 let own = format!("// {env} round {rounds}\n");
                 let v = TestVersion::new(&interface, &[("t.ts", &own), ("lib.ts", &shared)]);
                 let versions = [&v];
+                let (x, y) = tokio::join!(deploy(&store, &env, "x", &versions), deploy(&store, &env, "y", &versions));
+                x.unwrap();
+                y.unwrap();
+                // The same version as saved before 0.7.4.2 (no parts), run by two engines at once:
+                // both fill them in (0.7.4.2).
+                sqlx::query("UPDATE code_versions SET parts = NULL WHERE hash = $1")
+                    .bind(&v.hash)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
                 let (x, y) = tokio::join!(deploy(&store, &env, "x", &versions), deploy(&store, &env, "y", &versions));
                 x.unwrap();
                 y.unwrap();
@@ -3605,6 +3615,8 @@ struct TestVersion {
     interface: String,
     hash: Vec<u8>,
     files: Vec<(String, Vec<u8>, String)>,
+    /// `code_versions.parts`.
+    parts: String,
 }
 
 impl TestVersion {
@@ -3619,7 +3631,8 @@ impl TestVersion {
         for (_, hash, _) in &files {
             all.update(hash);
         }
-        Self { interface: interface.into(), hash: all.finalize().to_vec(), files }
+        let parts = r#"{"source": [], "destinations": {}}"#.into();
+        Self { interface: interface.into(), hash: all.finalize().to_vec(), files, parts }
     }
 
     fn borrow(&self) -> ductus_store::NewVersion<'_> {
@@ -3627,6 +3640,7 @@ impl TestVersion {
             interface: &self.interface,
             hash: &self.hash,
             files: self.files.iter().map(|(p, h, t)| (p.as_str(), h.as_slice(), t.as_str())).collect(),
+            parts: self.parts.clone(),
         }
     }
 }
@@ -3780,7 +3794,7 @@ async fn history_reads_one_interface() {
     let warned = std::collections::HashMap::from([(a.clone(), "replaces ann's change".to_string())]);
     let d3 = deploy_with(&store, &env, "bob", &[&a2, &b1], &warned, Some(&docs("2"))).await.unwrap();
     let d4 = deploy(&store, &env, "bob", &[&b1]).await.unwrap(); // `a` not run
-    let page = HistoryPage { interface: &a, until: None, limit: 50 };
+    let page = HistoryPage { interface: &a, until: None, limit: 50, below: None };
 
     let changed = store.history_deployments(page, false).await.unwrap();
     let ids: Vec<i32> = changed.iter().map(|d| d.id).collect();
@@ -3810,11 +3824,12 @@ async fn history_reads_one_interface() {
         .await
         .unwrap();
     }
-    let changes: Vec<String> = store.history_audit(page, false).await.unwrap().into_iter().map(|r| r.action).collect();
+    let changes: Vec<String> =
+        store.history_audit(page, false, None).await.unwrap().into_iter().map(|r| r.row.action).collect();
     assert_eq!(changes, ["destination.pause"], "no reads, nothing refused");
-    assert_eq!(store.history_audit(page, true).await.unwrap().len(), 3);
+    assert_eq!(store.history_audit(page, true, None).await.unwrap().len(), 3);
 
-    let docs = store.history_docs(page).await.unwrap();
+    let docs = store.history_docs(page, None).await.unwrap();
     let seen: Vec<(Option<i32>, Option<&str>, Option<&str>)> =
         docs.iter().map(|d| (d.deployment_id, d.docs.as_deref(), d.before.as_deref())).collect();
     assert_eq!(
@@ -3834,6 +3849,157 @@ async fn history_reads_one_interface() {
     assert_eq!(now[0].files, ["interfaces/a/interface.yaml", "lib/new.ts"]);
 
     sqlx::query("DELETE FROM audit_log WHERE interface = $1").bind(&a).execute(&pool).await.unwrap();
+    forget_deployments(&pool, &env).await;
+}
+
+/// History by part (0.7.4.2): each version keeps which files each part runs (a version saved
+/// before gets them the next time an engine runs it, once); a deployment's change comes with both
+/// versions' files and parts; the audit log narrowed to a destination (a pause by its subject, a
+/// resend by its message actions, one recorded without them under every destination) or to the
+/// source (raised lanes); documentation narrowed to a destination's fields.
+#[tokio::test]
+async fn history_reads_one_part() {
+    use ductus_store::{HistoryPage, Part};
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let env = format!("test-parts-{}-{nanos}", std::process::id());
+    let a = format!("{env}-a");
+    let yaml = |port: u32| format!("name: a # {env}\ndestinations: {{ lab: {{ mllp: {{ port: {port} }} }} }}\n");
+    let (y1, y2) = (yaml(1), yaml(2));
+    let mut v1 =
+        TestVersion::new(&a, &[("interfaces/a/interface.yaml", &y1), ("interfaces/a/lab.ts", &format!("// {env}\n"))]);
+    let parts = r#"{"source": [], "destinations": {"lab": ["interfaces/a/lab.ts"]}}"#;
+    v1.parts = parts.into();
+    let mut v2 =
+        TestVersion::new(&a, &[("interfaces/a/interface.yaml", &y2), ("interfaces/a/lab.ts", &format!("// {env}\n"))]);
+    v2.parts = parts.into();
+    let read_parts = |hash: Vec<u8>| {
+        let pool = pool.clone();
+        async move {
+            sqlx::query_scalar::<_, Option<String>>("SELECT parts::text FROM code_versions WHERE hash = $1")
+                .bind(hash)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        }
+    };
+
+    // v1 as an engine before 0.7.4.2 saved it: no parts; the next save fills them in.
+    deploy(&store, &env, "ann", &[&v1]).await.unwrap();
+    sqlx::query("UPDATE code_versions SET parts = NULL WHERE hash = $1").bind(&v1.hash).execute(&pool).await.unwrap();
+    assert_eq!(store.version_files(&a).await.unwrap()[0].parts, None);
+    let d2 = deploy(&store, &env, "bob", &[&v2]).await.unwrap();
+    assert!(read_parts(v1.hash.clone()).await.is_none(), "not run again: still none");
+    assert!(read_parts(v2.hash.clone()).await.unwrap().contains("lab.ts"));
+    deploy(&store, &env, "ann", &[&v1]).await.unwrap();
+    assert!(read_parts(v1.hash.clone()).await.unwrap().contains("lab.ts"), "run again: filled in");
+
+    let page = HistoryPage { interface: &a, until: None, limit: 50, below: None };
+    let changes = store.history_deployments(page, false).await.unwrap();
+    assert_eq!(changes.len(), 3);
+    let second = changes.iter().find(|d| d.id == d2.id).unwrap();
+    let (from, to) = (second.from.as_ref().unwrap(), second.to.as_ref().unwrap());
+    assert_eq!(from.files.len(), 2);
+    assert_ne!(from.files[0].1, to.files[0].1, "interface.yaml differs");
+    assert!(to.parts.as_deref().unwrap().contains("lab.ts"));
+    let below = HistoryPage { below: Some(i64::from(d2.id)), ..page };
+    assert_eq!(store.history_deployments(below, true).await.unwrap().len(), 1, "the batch below, no unchanged starts");
+    assert_eq!((second.from_yaml.as_ref(), second.to_yaml.as_ref()), (Some(&y1), Some(&y2)), "the two texts");
+    let third = changes.iter().find(|d| d.id != d2.id && d.from.is_some()).unwrap();
+    assert_eq!((third.from_yaml.as_ref(), third.to_yaml.as_ref()), (Some(&y2), Some(&y1)));
+    let first = changes.iter().find(|d| d.from.is_none()).unwrap();
+    assert_eq!(first.to_yaml, None, "new here: nothing to compare");
+    assert_eq!(store.version_files(&a).await.unwrap().len(), 2);
+
+    // The audit log, by part.
+    let lab: i32 = sqlx::query_scalar("INSERT INTO destinations (interface, name) VALUES ($1, 'lab') RETURNING id")
+        .bind(&a)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO destinations (interface, name) VALUES ($1, 'billing')")
+        .bind(&a)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert_eq!(store.destination_names(&a).await.unwrap(), ["billing", "lab"]);
+    let audit = |action: &'static str, subject: Option<String>| {
+        let (pool, a) = (pool.clone(), a.clone());
+        async move {
+            sqlx::query_scalar::<_, i64>(
+                "INSERT INTO audit_log (actor_kind, actor_name, action, subject, interface, outcome)
+                 VALUES ('user', 'ops', $1, $2, $3, 'ok') RETURNING id",
+            )
+            .bind(action)
+            .bind(subject)
+            .bind(&a)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    audit("destination.pause", Some(format!("{a}/lab"))).await;
+    audit("destination.pause", Some(format!("{a}/billing"))).await;
+    let resend = audit("message.replay", None).await;
+    sqlx::query(
+        "INSERT INTO message_actions (action, actor, message_id, received_at, interface, destination_id, audit_id)
+         VALUES ('resend', 'ops', 1, now(), $1, $2, $3)",
+    )
+    .bind(&a)
+    .bind(lab)
+    .bind(resend)
+    .execute(&pool)
+    .await
+    .unwrap();
+    audit("message.dismiss", None).await; // recorded without its actions
+    audit("interface.partitions_raised", None).await;
+    audit("retention.confirm", None).await;
+    let of = |part| {
+        let store = &store;
+        async move {
+            store
+                .history_audit(page, false, part)
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|r| (r.row.action, r.row.subject.unwrap_or_default(), r.acted_on))
+                .collect::<Vec<_>>()
+        }
+    };
+    let lab_rows = of(Some(Part::Destination("lab"))).await;
+    let actions: Vec<&str> = lab_rows.iter().map(|(a, ..)| a.as_str()).collect();
+    assert_eq!(actions, ["message.dismiss", "message.replay", "destination.pause"]);
+    assert_eq!(lab_rows[1].2, ["lab"], "the resend's destinations");
+    let billing: Vec<String> = of(Some(Part::Destination("billing"))).await.into_iter().map(|r| r.0).collect();
+    assert_eq!(billing, ["message.dismiss", "destination.pause"]);
+    let source: Vec<String> = of(Some(Part::Source)).await.into_iter().map(|r| r.0).collect();
+    assert_eq!(source, ["interface.partitions_raised"]);
+    assert_eq!(of(None).await.len(), 6);
+
+    // Documentation, by part.
+    let _docs = DOCS.lock().await;
+    for docs in [
+        r#"{"owner": "ann", "destinations": {"lab": {"custom": {"x": "1"}}}}"#,
+        r#"{"owner": "bob", "destinations": {"lab": {"custom": {"x": "1"}}}}"#,
+        r#"{"owner": "bob", "destinations": {"lab": {"custom": {"x": "2"}}}}"#,
+    ] {
+        sqlx::query("INSERT INTO docs_history (kind, name, docs) VALUES ('interface', $1, $2::jsonb)")
+            .bind(&a)
+            .bind(docs)
+            .execute(&pool)
+            .await
+            .unwrap();
+    }
+    assert_eq!(store.history_docs(page, None).await.unwrap().len(), 3);
+    let lab_docs = store.history_docs(page, Some(Part::Destination("lab"))).await.unwrap();
+    assert_eq!(lab_docs.len(), 2, "the first (lab's fields appear) and the third: not the owner's change");
+    assert!(store.history_docs(page, Some(Part::Source)).await.unwrap().is_empty());
+
+    sqlx::query("DELETE FROM docs_history WHERE name = $1").bind(&a).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM message_actions WHERE interface = $1").bind(&a).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM audit_log WHERE interface = $1").bind(&a).execute(&pool).await.unwrap();
+    sqlx::query("DELETE FROM destinations WHERE interface = $1").bind(&a).execute(&pool).await.unwrap();
     forget_deployments(&pool, &env).await;
 }
 

@@ -116,6 +116,17 @@ pub struct Change {
     pub summary: String,
     /// The files asked about it changed (against its first parent), in path order.
     pub files: Vec<(String, How)>,
+    /// Each `interface.yaml` among `files` as it was before and after (None: absent, or not text),
+    /// to tell which parts of the interface the commit changed (history by destination, 0.7.4.2).
+    pub yaml: Vec<Yaml>,
+}
+
+/// An interface.yaml a commit changed, before and after.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Yaml {
+    pub path: String,
+    pub before: Option<String>,
+    pub after: Option<String>,
 }
 
 /// The commits since HEAD that changed any of `paths` (relative to the project at `root`, with
@@ -193,20 +204,26 @@ fn walk(repository: &gix::Repository, root: &Path, paths: &BTreeSet<String>) -> 
             continue;
         }
         let before = theirs.first();
-        let files = paths
-            .iter()
-            .enumerate()
-            .filter_map(|(i, path)| {
-                let was = before.and_then(|b| b[i]);
-                let how = match (was, mine[i]) {
-                    (None, Some(_)) => How::Added,
-                    (Some(_), None) => How::Deleted,
-                    (Some(a), Some(b)) if a != b => How::Modified,
-                    _ => return None,
+        let mut yaml = Vec::new();
+        let mut files = Vec::new();
+        for (i, path) in paths.iter().enumerate() {
+            let was = before.and_then(|b| b[i]);
+            let how = match (was, mine[i]) {
+                (None, Some(_)) => How::Added,
+                (Some(_), None) => How::Deleted,
+                (Some(a), Some(b)) if a != b => How::Modified,
+                _ => continue,
+            };
+            if path.rsplit('/').next() == Some("interface.yaml") {
+                let text = |id: Option<gix::ObjectId>| -> Result<Option<String>> {
+                    let Some(id) = id else { return Ok(None) };
+                    let blob = repository.find_blob(id).context("reading a file of a commit")?;
+                    Ok(String::from_utf8(blob.data.clone()).ok())
                 };
-                Some((path.to_string(), how))
-            })
-            .collect();
+                yaml.push(Yaml { path: path.to_string(), before: text(was)?, after: text(mine[i])? });
+            }
+            files.push((path.to_string(), how));
+        }
         let commit = repository.find_commit(info.id).context("reading a commit")?;
         let author = commit.author().context("reading a commit's author")?;
         let time = commit.time().context("reading a commit's time")?;
@@ -218,6 +235,7 @@ fn walk(repository: &gix::Repository, root: &Path, paths: &BTreeSet<String>) -> 
             email: author.email.to_string().trim().to_string(),
             summary: message.lines().next().unwrap_or_default().trim().to_string(),
             files,
+            yaml,
         });
     }
     Ok(changes)

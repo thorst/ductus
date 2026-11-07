@@ -4052,6 +4052,226 @@ async fn history_tells_who_changed_what_and_why() {
     drop(new);
 }
 
+/// History by source and destination (0.7.4.2): an interface whose `lab` and `billing` each have a
+/// file of their own importing one shared file, and an `archive` without code. A deployment of
+/// lab's code is lab's; one of billing's block in interface.yaml is billing's; a commit on the
+/// shared file is both's, one on the source's port the source's; a pause is its destination's.
+/// `--destination` / `--source` show only those (the interface's first deployment, new here, in
+/// every one), in text and JSON and through the API; an unknown destination is refused naming the
+/// ones there are. A version recorded before 0.7.4.2 (no parts) makes its code change show under
+/// every part, marked, and a note says so.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn history_by_source_and_destination() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("parts-test-{nanos}");
+    let (mllp, mllp2, api) = (free_port(), free_port(), free_port());
+    let repo = tempfile::tempdir().unwrap();
+    let root = repo.path().to_path_buf();
+    let yaml = |port: u16, billing: &str| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\ndestinations:\n  \
+             lab: {{ file: {{ dir: lab }}, script: lab.ts }}\n  billing: {{ file: {{ dir: {billing} }}, script: billing.ts }}\n  \
+             archive: {{ file: {{ dir: archive }} }}\n"
+        )
+    };
+    let write = |path: &str, text: &str| {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    };
+    let minute = std::sync::atomic::AtomicI64::new(nanos as i64 / 1_000_000_000 - 3 * 3600);
+    let git = |args: &[&str]| {
+        let date = format!("@{} +0000", minute.fetch_add(60, std::sync::atomic::Ordering::Relaxed));
+        let out = Command::new("git")
+            .args(["-c", "core.autocrlf=false", "-c", "user.name=Ann", "-c", "user.email=ann@example.org"])
+            .args(args)
+            .env("GIT_AUTHOR_DATE", &date)
+            .env("GIT_COMMITTER_DATE", &date)
+            .current_dir(&root)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    let dir = format!("interfaces/{name}");
+    let code = |who: &str| {
+        format!(
+            "import {{ tag }} from \"../../lib/shared.ts\";\nexport function transform(m: any) {{ m.set(\"MSH-8\", tag + \"{who}\"); return m; }}\n"
+        )
+    };
+    write(&format!("{dir}/interface.yaml"), &yaml(mllp, "billing"));
+    write(&format!("{dir}/lab.ts"), &code("lab"));
+    write(&format!("{dir}/billing.ts"), &code("billing"));
+    write("lib/shared.ts", "export const tag = \"x\";\n");
+    git(&["init", "-q"]);
+    git(&["add", "-A"]);
+    git(&["commit", "-qm", "the interface"]);
+
+    let control = repo.path().join("control");
+    let control = control.to_str().unwrap().to_string();
+    let log = repo.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let old = Child(
+        Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["run", "--root", &root.to_string_lossy(), "--threads", "1"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", &control)
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(wait_for_log(&log, "deployed:", 60), "{}", read_log());
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    // Each handover deploys what's in the folder; the engine that runs it then is stopped at the end.
+    let mut deployments = 1;
+    let mut engine: Option<Terminate> = None;
+    let mut first = Some(old);
+    let mut handover = async |reason: &str| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["handover", "--control", &control, "-m", reason])
+            .env("SUDO_USER", "ann-test")
+            .output()
+            .unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "{said}\n{}", read_log());
+        if let Some(mut old) = first.take() {
+            tokio::task::spawn_blocking(move || old.0.wait()).await.unwrap().unwrap();
+        }
+        if let Some(previous) = &engine {
+            for _ in 0..100 {
+                if !previous.alive() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+        deployments += 1;
+        for _ in 0..100 {
+            if read_log().matches("deployed:").count() >= deployments {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        let engines = store.live_engines().await.unwrap();
+        engine = Some(Terminate(
+            engines.iter().find(|e| e.interfaces.contains(&name)).expect("an engine runs it").pid as u32,
+        ));
+    };
+
+    write(&format!("{dir}/lab.ts"), &code("lab2"));
+    git(&["commit", "-qam", "lab's code"]);
+    handover("lab's code").await;
+    write(&format!("{dir}/interface.yaml"), &yaml(mllp, "billing2"));
+    git(&["commit", "-qam", "billing's folder"]);
+    handover("billing's folder").await;
+    write("lib/shared.ts", "export const tag = \"y\";\n");
+    git(&["commit", "-qam", "the shared file"]);
+    write(&format!("{dir}/interface.yaml"), &yaml(mllp2, "billing2"));
+    git(&["commit", "-qam", "the source's port"]);
+
+    // A pause of lab, through the API.
+    let token_name = format!("{name}-operator");
+    let (ok, token) = ductus(&root, &["token", "create", &token_name, "--role", "operator"]);
+    assert!(ok, "{token}");
+    let token = token.lines().next().unwrap().to_string();
+    let client = reqwest::Client::new();
+    let pause = format!("http://127.0.0.1:{api}/api/v1/interfaces/{name}/destinations/lab/pause");
+    let response =
+        client.post(&pause).bearer_auth(&token).json(&serde_json::json!({"reason": "lab down"})).send().await.unwrap();
+    assert_eq!(response.status().as_u16(), 200);
+
+    let history = |args: &[&str]| {
+        let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .arg("history")
+            .arg(&name)
+            .args(args)
+            .arg("--root")
+            .arg(&root)
+            .args(["--database-url", &db])
+            .env_remove("DUCTUS_PROJECT")
+            .env_remove("DUCTUS_ENV")
+            .output()
+            .unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), said)
+    };
+    let shows = |text: &str, all: &[&str], none: &[&str]| {
+        for w in all {
+            assert!(text.contains(w), "{w:?} missing: {text}");
+        }
+        for w in none {
+            assert!(!text.contains(w), "{w:?} shown: {text}");
+        }
+    };
+    let (ok, whole) = history(&[]);
+    assert!(ok, "{whole}");
+    let line = |w: &str| whole.lines().find(|l| l.contains(w)).unwrap_or_else(|| panic!("{w}: {whole}")).to_string();
+    assert!(line("lab's code (").ends_with("[lab]"), "{whole}");
+    assert!(line("the shared file").ends_with("[billing, lab]"), "{whole}");
+    assert!(line("the source's port").ends_with("[source]"), "{whole}");
+    assert!(line("by a handover: billing's folder").ends_with("[billing]"), "{whole}");
+    assert!(line(&format!("paused {name}/lab")).ends_with("[lab]"), "{whole}");
+
+    let (ok, lab) = history(&["--destination", "lab"]);
+    assert!(ok && lab.starts_with(&format!("{name}, destination `lab`")), "{lab}");
+    shows(&lab, &["lab's code", "the shared file", "paused", "(new here)"], &["billing's folder", "the source's port"]);
+    let (_, billing) = history(&["--destination", "billing"]);
+    shows(&billing, &["billing's folder", "the shared file", "(new here)"], &["lab's code", "paused", "source's port"]);
+    let (_, archive) = history(&["--destination", "archive"]);
+    shows(&archive, &["(new here)", "the interface"], &["lab's code", "billing's folder", "shared file", "port"]);
+    let (_, source) = history(&["--source"]);
+    shows(&source, &["the source's port", "(new here)"], &["lab's code", "billing's folder", "shared file", "paused"]);
+    let (ok, nope) = history(&["--destination", "nope"]);
+    assert!(!ok && nope.contains("has no destination `nope`: it has `archive`, `billing`, `lab`"), "{nope}");
+    let (ok, both) = history(&["--source", "--destination", "lab"]);
+    assert!(!ok && both.contains("cannot be used with"), "{both}");
+
+    let (_, json) = history(&["--json", "--destination", "billing"]);
+    let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert_eq!(json["destinations"], serde_json::json!(["archive", "billing", "lab"]), "{json}");
+    let shared =
+        json["entries"].as_array().unwrap().iter().find(|e| e["what"].as_str().unwrap().contains("shared")).unwrap();
+    assert_eq!(shared["touches"]["destinations"], serde_json::json!(["billing", "lab"]), "{shared}");
+
+    // The API narrows the same way.
+    let get = async |query: &str| {
+        let url = format!("http://127.0.0.1:{api}/api/v1/interfaces/{name}/history{query}");
+        let response = client.get(url).bearer_auth(&token).send().await.unwrap();
+        (response.status().as_u16(), response.json::<serde_json::Value>().await.unwrap_or_default())
+    };
+    let whats = |page: &serde_json::Value| -> Vec<String> {
+        page["entries"].as_array().unwrap().iter().map(|e| e["what"].as_str().unwrap().to_string()).collect()
+    };
+    let (status, api_billing) = get("?destination=billing").await;
+    assert_eq!(status, 200, "{api_billing}");
+    let cli: Vec<String> = whats(&json);
+    // The API reads only what was recorded: the CLI adds the project's files now (the same here).
+    assert_eq!(whats(&api_billing), cli, "the API's billing history is the CLI's");
+    assert_eq!(get("?destination=nope").await.0, 400);
+    assert_eq!(get("?source=true&destination=lab").await.0, 400);
+
+    // Versions recorded before 0.7.4.2 have no parts: lab's code change can't be placed, so it
+    // shows under billing too, marked, and a note says why.
+    assert!(ductus_store::testing::forget_version_parts(&store, &name).await.unwrap() >= 3);
+    let (_, billing) = history(&["--destination", "billing"]);
+    let deployed =
+        billing.lines().find(|l| l.contains("by a handover: lab's code")).unwrap_or_else(|| panic!("{billing}"));
+    assert!(deployed.contains("[may not be destination `billing`"), "{billing}");
+    assert!(billing.contains("note: some of its versions were recorded before 0.7.4.2"), "{billing}");
+    assert!(
+        !billing.lines().any(|l| l.contains("committed") && l.contains("lab's code")),
+        "commits: what runs now says: {billing}"
+    );
+
+    let _ = client.delete(&pause).bearer_auth(&token).send().await;
+    let _ = ductus(&root, &["token", "revoke", &token_name]);
+    drop(engine);
+}
+
 /// `ductus upgrade --check` on a new database, on one a migration behind (the migration and what
 /// it does are listed; ready), with a project whose test fails (exit 1, the failure shown, the same
 /// in `--json`), and on one where an applied migration differs from this build's (exit 1).

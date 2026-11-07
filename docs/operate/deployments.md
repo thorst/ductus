@@ -189,6 +189,8 @@ which is exactly what Bob's deploy undid. Her deployment of it is, with its comm
 
 | Option | What it does | Default |
 |---|---|---|
+| `--destination NAME` | Only what touches that destination ([below](#one-destination-or-the-source)) | the whole interface |
+| `--source` | Only what touches its source | the whole interface |
 | `--all` | Also the starts that ran it unchanged, payload reads and refused attempts ([nuance](../nuances/deployments.md#history-shows-unchanged-starts-reads-and-refusals-only-when-asked-for-everything-level-3)) | changes only |
 | `--limit N` | How many entries | 50 |
 | `--before KEY` | What's older than an entry: the last line of a full page prints the command | the newest |
@@ -198,15 +200,87 @@ Without a database it shows git's commits only, of the files the project runs no
 (`note: no database read`). An interface no longer in the project is found by name in what was
 recorded. [`ductus history`](../reference/cli/history.md) has every option.
 
+### One destination, or the source
+
+From 0.7.4.2 every entry says which parts of the interface it touches: its **source** (where
+messages come from), which **destinations**, or neither (the interface as a whole: its owner, its
+retention). The text ends each line with them; `--destination NAME` and `--source` show only one
+part's. **Why:** the lab's analyst cares about what changed for the lab connection; billing's
+port moving, or a change to the code only billing runs, is noise to them.
+
+An interface whose `lab` and `billing` each have their own file (`lab.ts`, `billing.ts`), both
+importing `lib/codes.ts`, and an `archive` without code. Ann changed the lab's code, Bob billing's
+port, Ann the shared ward codes and the source's port, and someone paused the lab:
+
+```text
+$ ductus history adt-in
+adt-in
+2026-11-07 00:22  audit     docs-lab  paused adt-in/lab: lab system upgrade tonight  [lab]
+2026-11-07 00:22  deployed  ann  deployed 5c44068cbf69 → 5bf5ee94dc38 by a handover: trimmed wards, new port (commit bff2bf5f7232)  [source, billing, lab]
+2026-11-07 00:22  deployed  bob  deployed afa33226b3f7 → 5c44068cbf69 by a handover: billing's new server (commit 5ddd68044d58)  [billing]
+2026-11-07 00:22  deployed  ann  deployed af7f053e2669 → afa33226b3f7 by a handover: lab wants the ward twice (commit 9dd295511ce8)  [lab]
+2026-11-07 00:22  deployed  todd  deployed af7f053e2669 (new here) (commit c02c6689bc2b)
+2026-11-06 22:27  commit    Ann Lee  committed bff2bf5f7232: adt-in: listen on 16662 (interfaces/adt-in/interface.yaml (modified))  [source]
+2026-11-06 22:26  commit    Ann Lee  committed 898f2a90f36d: codes: trim ward codes (lib/codes.ts (modified))  [billing, lab]
+2026-11-06 22:25  commit    Bob Ray  committed 5ddd68044d58: adt-in: billing moved to port 17012 (interfaces/adt-in/interface.yaml (modified))  [billing]
+2026-11-06 22:24  commit    Ann Lee  committed 9dd295511ce8: adt-in: the ward in PV1-3.2 for the lab (interfaces/adt-in/lab.ts (modified))  [lab]
+2026-11-06 22:23  commit    Ann Lee  committed c02c6689bc2b: adt-in: ADT to the lab and billing (interfaces/adt-in/billing.ts (added), interfaces/adt-in/interface.yaml (added), interfaces/adt-in/lab.ts (added), lib/codes.ts (added))  [every part]
+
+$ ductus history adt-in --destination lab
+adt-in, destination `lab`
+2026-11-07 00:22  audit     docs-lab  paused adt-in/lab: lab system upgrade tonight
+2026-11-07 00:22  deployed  ann  deployed 5c44068cbf69 → 5bf5ee94dc38 by a handover: trimmed wards, new port (commit bff2bf5f7232)
+2026-11-07 00:22  deployed  ann  deployed af7f053e2669 → afa33226b3f7 by a handover: lab wants the ward twice (commit 9dd295511ce8)
+2026-11-07 00:22  deployed  todd  deployed af7f053e2669 (new here) (commit c02c6689bc2b)
+2026-11-06 22:26  commit    Ann Lee  committed 898f2a90f36d: codes: trim ward codes (lib/codes.ts (modified))
+2026-11-06 22:24  commit    Ann Lee  committed 9dd295511ce8: adt-in: the ward in PV1-3.2 for the lab (interfaces/adt-in/lab.ts (modified))
+2026-11-06 22:23  commit    Ann Lee  committed c02c6689bc2b: adt-in: ADT to the lab and billing (interfaces/adt-in/billing.ts (added), interfaces/adt-in/interface.yaml (added), interfaces/adt-in/lab.ts (added), lib/codes.ts (added))
+
+$ ductus history adt-in --source
+adt-in, the source
+2026-11-07 00:22  deployed  ann  deployed 5c44068cbf69 → 5bf5ee94dc38 by a handover: trimmed wards, new port (commit bff2bf5f7232)
+2026-11-07 00:22  deployed  todd  deployed af7f053e2669 (new here) (commit c02c6689bc2b)
+2026-11-06 22:27  commit    Ann Lee  committed bff2bf5f7232: adt-in: listen on 16662 (interfaces/adt-in/interface.yaml (modified))
+2026-11-06 22:23  commit    Ann Lee  committed c02c6689bc2b: adt-in: ADT to the lab and billing (interfaces/adt-in/billing.ts (added), interfaces/adt-in/interface.yaml (added), interfaces/adt-in/lab.ts (added), lib/codes.ts (added))
+
+$ ductus history adt-in --destination labs
+Error: `adt-in` has no destination `labs`: it has `archive`, `billing`, `lab`
+```
+
+The shared file's commit is both destinations'; Bob's port change and the source's port aren't
+the lab's. A destination it no longer has (removed, renamed, or `default` from the singular
+`destination:` before 0.7.4) can still be asked for: it's known from what the engine ran.
+
+How each kind of entry is told apart:
+
+| Entry | Tells its parts by | Example |
+|---|---|---|
+| A commit or deployment changing **interface.yaml** | Its blocks compared, as parsed (comments and spacing don't count): `destinations.<name>` is that destination's; `source`, `format`, `ordering`, `dedupe`, `durability`, `about.from` and `monitor`'s times the source's; `script`, `output`, `retry`, `rate_limit`, `monitor.behind` each destination's that has none of its own; `timeout`, `isolation`, `workers`, `dedicated_pools`, `about.to` every destination's; the owner, description, `custom`, `retention`, `quarantined`, `alert` the whole interface's only; `name` or a block it doesn't know every part's | Bob's `billing: { … port: 17012 }` → billing |
+| A commit or deployment changing **code** | The files each destination's code loads: its `script:` (or the interface's) and everything that imports. A file several destinations load (`lib/`, the interface's script) is each one's ([nuance](../nuances/deployments.md#history-by-destination-counts-a-shared-file-as-each-destinations-that-loads-it-level-3)); a file none loads is the whole interface's. An HTTP `respond` interface's code is its source's | `lib/codes.ts` → billing, lab |
+| **The audit log** | A pause, a resume or a destination's alert by its subject; a resend, correction or dismissal by the destinations it acted on; raised lanes (`ordering`) are the source's; retention, payload reads, an interface's own alerts are the whole interface's | `paused adt-in/lab` → lab |
+| **Documentation** | `destinations.<name>.…` fields are that destination's (and only those are shown); the description, owner and `custom:` the whole interface's | `destinations.lab.custom.contact` → lab |
+| The interface's first deployment, a start that ran it unchanged (`--all`) | Every part | `(new here)` |
+
+**Recorded before 0.7.4.2:** a code version saved by an earlier engine doesn't say which files
+each destination's code loads. A change of its code is then shown under every part, marked
+``[may not be destination `lab`: which part its code is wasn't recorded before 0.7.4.2]``, and a
+note says so; it's never guessed. interface.yaml changes are told exactly either way (both texts
+are kept). The first start after the upgrade records the running version's files, so every change
+from then on is exact
+([nuance](../nuances/deployments.md#history-before-0742-cant-say-which-destination-a-code-change-was-level-2)).
+
 ### In the web UI and the API
 
 - **The History tab** on an interface's page: the same timeline, a page of 50 at a time
   ("Older"), each commit's files and each documentation change's fields under it, the ⚠ in a
-  box; "Everything" is `--all`.
+  box; "Everything" is `--all`. **Show** picks the whole interface, its source or one
+  destination (those it has and had); each entry says what it touches ("Touches: billing, lab").
 - **[`GET /interfaces/{name}/history`](../reference/api/engine.md)** (`before`, `limit` up to 200,
-  `all`): a page of `entries` and `next_before`. Any signed-in person or token may read it; with
-  `all=true`, payload reads and refused attempts are added only for those with the `audit`
-  permission, as the audit log is theirs.
+  `all`, `source=true` or `destination=NAME`): a page of `entries` (each with `touches`:
+  `everything`, `source`, `destinations`, `unsure`), `next_before`, and `destinations` (the names
+  to pick from). An unknown destination is a 400 naming those it has. Any signed-in person or
+  token may read it; with `all=true`, payload reads and refused attempts are added only for those
+  with the `audit` permission, as the audit log is theirs.
 
 ### Two people, one server
 

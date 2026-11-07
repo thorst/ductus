@@ -419,6 +419,7 @@ Each distinct version of an interface's code (migration 0026): a start that chan
 | `interface` | text | The interface's name. |
 | `files` | jsonb | `[{"path": "interfaces/adt/interface.yaml", "hash": "<hex>"}, ...]` in path order: paths relative to the project with `/`, each file's SHA-256 (its text in `code_files`). |
 | `first_seen` | timestamptz | When a start first ran it. |
+| `parts` | jsonb | Which of `files` each part runs (migration 0029, 0.7.4.2): `{"source": [...], "destinations": {"lab": ["interfaces/adt/lab.ts", "lib/codes.ts"], "archive": []}}`: `source` an HTTP `respond` interface's code (empty otherwise), each destination the file its function is in and everything that imports (empty: no code). What history by destination tells a code change by. Null: saved before 0.7.4.2 and not run since (the first engine that runs it again fills it in, once). |
 
 Indexes: primary key `id`; unique `hash`; `code_versions_interface (interface)` (migration 0028: `history` reads every version an interface ran, for the files they named).
 

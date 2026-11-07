@@ -142,6 +142,15 @@ test("an interface's history: who changed it, what and why", async ({ page }) =>
   await expect(newest).toContainText("Audit log");
   await expect(newest).toContainText("paused billing");
   await expect(newest).toContainText("invoice system upgrade tonight");
+  await expect(newest).toContainText("Touches: invoices");
+  // One part at a time: the pause is its destination's, not the source's.
+  const show = page.getByRole("combobox", { name: "Show" });
+  await show.selectOption({ label: "Destination invoices" });
+  await expect(history.getByRole("listitem").first()).toContainText("paused billing");
+  await show.selectOption({ label: "Source" });
+  await expect(history.or(page.getByText("Nothing recorded yet.")).first()).toBeVisible();
+  await expect(history.getByRole("listitem").filter({ hasText: "paused billing" })).toHaveCount(0);
+  await show.selectOption({ label: "Whole interface" });
   // The demo's project isn't in git: said, not hidden.
   await expect(page.getByText("the project isn't in a git repository: no commits")).toBeVisible();
   // Everything: this run's start too, changed or not.

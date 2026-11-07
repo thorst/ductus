@@ -38,7 +38,7 @@ pub use deployments::{Current, Deployed, NewDeployment, NewVersion, Running, Sin
 pub use directory::{DirectoryAccount, DirectoryPerson, DirectoryUpdate};
 pub use docs::DocsRow;
 pub use engines::{EngineLock, EngineRow, NewEngine, Owned, Stranded};
-pub use history::{DeploymentEntry, DocsEntry, Page as HistoryPage};
+pub use history::{AuditEntry, DeploymentEntry, DocsEntry, Page as HistoryPage, Part, VersionFiles};
 pub use replay::{Original, Recorded};
 pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};
 pub use users::{

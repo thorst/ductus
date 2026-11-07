@@ -47,7 +47,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [People and access](people.md) (19)
 - [Local development](dev.md) (2)
 - [Upgrades](upgrades.md) (15)
-- [What runs, recorded](deployments.md) (15)
+- [What runs, recorded](deployments.md) (17)
 - [Windows](windows.md) (9)
 
 ## Level 1: Foundations (33)
@@ -86,7 +86,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (98)
+## Level 2: Practitioner (99)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -181,13 +181,14 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Interface code is kept in the database](deployments.md#interface-code-is-kept-in-the-database-level-2) (What runs, recorded)
 - [A delivery names the code that decided it, not the code that sent it again](deployments.md#a-delivery-names-the-code-that-decided-it-not-the-code-that-sent-it-again-level-2) (What runs, recorded)
 - [Two people deploying from their own checkouts get a warning, not a refusal](deployments.md#two-people-deploying-from-their-own-checkouts-get-a-warning-not-a-refusal-level-2) (What runs, recorded)
+- [History before 0.7.4.2 can't say which destination a code change was](deployments.md#history-before-0742-cant-say-which-destination-a-code-change-was-level-2) (What runs, recorded)
 - [The service's account: the default, a gMSA, or a named account](windows.md#the-services-account-the-default-a-gmsa-or-a-named-account-level-2) (Windows)
 - [An upgrade can't keep an account's password: the service waits for it](windows.md#an-upgrade-cant-keep-an-accounts-password-the-service-waits-for-it-level-2) (Windows)
 - [An upgrade starts the service again, unless it was stopped on purpose](windows.md#an-upgrade-starts-the-service-again-unless-it-was-stopped-on-purpose-level-2) (Windows)
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (77)
+## Level 3: Professional (78)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
@@ -263,6 +264,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Upgrading to 0.7.3.2 waits at most 2 s for the deliveries table](deployments.md#upgrading-to-0732-waits-at-most-2-s-for-the-deliveries-table-level-3) (What runs, recorded)
 - [History lists the commits on the files an interface's versions named](deployments.md#history-lists-the-commits-on-the-files-an-interfaces-versions-named-level-3) (What runs, recorded)
 - [History shows unchanged starts, reads and refusals only when asked for everything](deployments.md#history-shows-unchanged-starts-reads-and-refusals-only-when-asked-for-everything-level-3) (What runs, recorded)
+- [History by destination counts a shared file as each destination's that loads it](deployments.md#history-by-destination-counts-a-shared-file-as-each-destinations-that-loads-it-level-3) (What runs, recorded)
 - [The documentation snapshot is saved just after a start, with its deployment](deployments.md#the-documentation-snapshot-is-saved-just-after-a-start-with-its-deployment-level-3) (What runs, recorded)
 - ["Log on as a service": the installer grants it, Group Policy can take it away](windows.md#log-on-as-a-service-the-installer-grants-it-group-policy-can-take-it-away-level-3) (Windows)
 - [A refused connection takes about a second on Windows, and `localhost` may be `::1` first](windows.md#a-refused-connection-takes-about-a-second-on-windows-and-localhost-may-be-1-first-level-3) (Windows)

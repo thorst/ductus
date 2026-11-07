@@ -13,6 +13,8 @@ pub struct NewVersion<'a> {
     pub hash: &'a [u8],
     /// `(path, SHA-256, text)`, in path order.
     pub files: Vec<(&'a str, &'a [u8], &'a str)>,
+    /// Which files each part runs, as JSON (`code_versions.parts`, `ductus_runtime::code::Parts`).
+    pub parts: String,
 }
 
 /// A start or handover to record.
@@ -110,14 +112,35 @@ impl Store {
     pub async fn save_versions(&self, versions: &[NewVersion<'_>]) -> Result<VersionIds> {
         let mut tx = self.pool.begin().await.context("starting to save the code versions")?;
         let hashes: Vec<&[u8]> = versions.iter().map(|v| v.hash).collect();
-        let mut ids: VersionIds =
-            sqlx::query_as::<_, (Vec<u8>, i32)>("SELECT hash, id FROM code_versions WHERE hash = ANY($1)")
+        let known: Vec<(Vec<u8>, i32, bool)> =
+            sqlx::query_as("SELECT hash, id, parts IS NULL FROM code_versions WHERE hash = ANY($1)")
                 .bind(&hashes)
                 .fetch_all(&mut *tx)
                 .await
-                .context("reading the code versions")?
-                .into_iter()
-                .collect();
+                .context("reading the code versions")?;
+        // Versions saved before 0.7.4.2 get their parts the first time an engine runs them again:
+        // written once, then a start that changes nothing writes nothing again.
+        let mut without: Vec<&NewVersion> = versions
+            .iter()
+            .filter(|v| known.iter().any(|(hash, _, missing)| *missing && hash.as_slice() == v.hash))
+            .collect();
+        if !without.is_empty() {
+            without.sort_by(|a, b| a.hash.cmp(b.hash));
+            without.dedup_by(|a, b| a.hash == b.hash);
+            let hashes: Vec<&[u8]> = without.iter().map(|v| v.hash).collect();
+            let parts: Vec<&str> = without.iter().map(|v| v.parts.as_str()).collect();
+            sqlx::query(
+                "UPDATE code_versions v SET parts = u.parts::jsonb
+                 FROM unnest($1::bytea[], $2::text[]) AS u(hash, parts)
+                 WHERE v.hash = u.hash AND v.parts IS NULL",
+            )
+            .bind(&hashes)
+            .bind(&parts)
+            .execute(&mut *tx)
+            .await
+            .context("saving which files each destination's code loads")?;
+        }
+        let mut ids: VersionIds = known.into_iter().map(|(hash, id, _)| (hash, id)).collect();
         let new: Vec<&NewVersion> = versions.iter().filter(|v| !ids.contains_key(v.hash)).collect();
         if !new.is_empty() {
             // Their files: each text once (sorted, so engines writing the same ones at once lock
@@ -160,15 +183,18 @@ impl Store {
                     serde_json::Value::Array(files).to_string()
                 })
                 .collect();
+            let parts: Vec<&str> = sorted.iter().map(|v| v.parts.as_str()).collect();
             sqlx::query(
-                "INSERT INTO code_versions (hash, interface, files)
-                 SELECT hash, interface, files::jsonb FROM unnest($1::bytea[], $2::text[], $3::text[])
-                     AS u(hash, interface, files) ORDER BY hash
+                "INSERT INTO code_versions (hash, interface, files, parts)
+                 SELECT hash, interface, files::jsonb, parts::jsonb
+                 FROM unnest($1::bytea[], $2::text[], $3::text[], $4::text[]) AS u(hash, interface, files, parts)
+                 ORDER BY hash
                  ON CONFLICT (hash) DO NOTHING",
             )
             .bind(&hashes)
             .bind(&interfaces)
             .bind(&listed)
+            .bind(&parts)
             .execute(&mut *tx)
             .await
             .context("saving the code versions")?;

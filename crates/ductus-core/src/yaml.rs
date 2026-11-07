@@ -5,7 +5,8 @@
 
 use anyhow::Result;
 use serde::de::DeserializeOwned;
-use serde_yaml_ng::Value;
+/// A parsed project file (`parse`).
+pub use serde_yaml_ng::Value;
 
 /// How far loading a file got.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

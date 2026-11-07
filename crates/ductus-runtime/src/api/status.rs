@@ -40,12 +40,20 @@ pub struct HistoryQuery {
     /// Every start that ran it, not only those that changed it; with the `audit` permission, also
     /// payload reads and refused attempts from the audit log.
     all: Option<bool>,
+    /// Only what touches its source (`source:`, `format`, `ordering`, `dedupe`, `durability`,
+    /// `about.from`, `monitor`'s times; an HTTP `respond` interface's code). Not with `destination`.
+    source: Option<bool>,
+    /// Only what touches this destination (one of the page's `destinations`): its block in
+    /// interface.yaml, the interface's settings it has none of its own for, the files its code
+    /// loads, its pauses, resends and alerts, its documentation.
+    destination: Option<String>,
 }
 
 /// One timeline of who changed what and why for an interface, newest first: the git commits that
 /// changed its files (its interface.yaml, its code and the shared files it imports), the
 /// deployments that changed its code, the audit log's entries naming it and its documentation's
-/// changes.
+/// changes. Each entry says which parts it touches (`touches`); `source=true` or
+/// `destination=NAME` returns only one part's.
 #[utoipa::path(
     get, path = "/interfaces/{name}/history", tag = "engine", operation_id = "interface_history",
     params(("name" = String, Path, description = "Interface name"), HistoryQuery),
@@ -61,9 +69,17 @@ async fn history(
     Path(name): Path<String>,
     axum::extract::Query(q): axum::extract::Query<HistoryQuery>,
 ) -> ApiResult<crate::history::Page> {
-    if engine.interface(&name).is_none() {
+    let Some(running) = engine.interface(&name) else {
         return Err(ApiError::not_found(format!("no interface named `{name}`")));
-    }
+    };
+    let destinations = running.config.destinations().map(|(n, _)| n.to_string()).collect();
+    use crate::history::Part;
+    let part = match (q.source.unwrap_or(false), q.destination.filter(|d| !d.trim().is_empty())) {
+        (true, Some(_)) => return Err(ApiError::bad_request("`source` and `destination` can't be asked together")),
+        (true, None) => Some(Part::Source),
+        (false, Some(d)) => Some(Part::Destination(d)),
+        (false, None) => None,
+    };
     let all = q.all.unwrap_or(false);
     let query = crate::history::Query {
         interface: name,
@@ -71,10 +87,18 @@ async fn history(
         limit: q.limit.unwrap_or(50).clamp(1, 200),
         all,
         reads: all && caller.can("audit"),
+        part,
     };
-    let sources = crate::history::Sources { store: Some(&engine.store), root: &engine.root, paths: Default::default() };
+    let sources = crate::history::Sources {
+        store: Some(&engine.store),
+        root: &engine.root,
+        paths: Default::default(),
+        current: None,
+        destinations,
+    };
     let page = crate::history::read(sources, &query).await.map_err(|e| {
-        if query.before.is_some() && format!("{e:#}").contains("isn't a place in the timeline") {
+        let unknown = e.downcast_ref::<crate::history::UnknownPart>().is_some();
+        if unknown || (query.before.is_some() && format!("{e:#}").contains("isn't a place in the timeline")) {
             ApiError::bad_request(format!("{e:#}"))
         } else {
             ApiError::from(e)

@@ -119,7 +119,7 @@ Resume a paused destination: it sends its backlog in order. Operator.
 
 ## `GET /api/v1/interfaces/{name}/history`
 
-One timeline of who changed what and why for an interface, newest first: the git commits that changed its files (its interface.yaml, its code and the shared files it imports), the deployments that changed its code, the audit log's entries naming it and its documentation's changes.
+One timeline of who changed what and why for an interface, newest first: the git commits that changed its files (its interface.yaml, its code and the shared files it imports), the deployments that changed its code, the audit log's entries naming it and its documentation's changes. Each entry says which parts it touches (`touches`); `source=true` or `destination=NAME` returns only one part's.
 
 **Who may call it:** anyone signed in (a person or a token).
 
@@ -131,6 +131,8 @@ One timeline of who changed what and why for an interface, newest first: the git
 | `before` | query | text | Entries older than this one (the previous page's `next_before`). |
 | `limit` | query | number | Page size, at most 200 (default 50). |
 | `all` | query | true or false | Every start that ran it, not only those that changed it; with the `audit` permission, also payload reads and refused attempts from the audit log. |
+| `source` | query | true or false | Only what touches its source (`source:`, `format`, `ordering`, `dedupe`, `durability`, `about.from`, `monitor`'s times; an HTTP `respond` interface's code). Not with `destination`. |
+| `destination` | query | text | Only what touches this destination (one of the page's `destinations`): its block in interface.yaml, the interface's settings it has none of its own for, the files its code loads, its pauses, resends and alerts, its documentation. |
 
 **Answers**
 
@@ -384,6 +386,7 @@ One entry of the timeline.
 | `documentation` (optional) | [`HistoryDocumentation`](#historydocumentation) or null |  |
 | `key` | text | This entry's place in the timeline: pass it as `before` to read what's older. |
 | `kind` | [`HistoryKind`](#historykind) |  |
+| `touches` | [`HistoryTouches`](#historytouches) | Which parts of the interface it touches (none: the whole interface only). |
 | `what` | text | What happened, in one line. |
 
 ### `HistoryField`
@@ -413,10 +416,22 @@ A page of the timeline.
 
 | Field | Type | |
 |---|---|---|
+| `destinations` | list of text | The destinations it has or had (its configuration's, and every one an engine ran on this database), by name: the parts a history can be narrowed to, besides its source. |
 | `entries` | list of [`HistoryEntry`](#historyentry) | Newest first. |
 | `interface` | text |  |
 | `next_before` (optional) | text or null | Pass as `before` for the next (older) page; absent on the last one. |
 | `notes` | list of text | What the timeline lacks, in words: no git repository, a database not read, …. |
+
+### `HistoryTouches`
+
+The parts of the interface an entry touches. None of them: the interface as a whole only (its owner, its retention, its alerts' recipients), shown only when no part is picked.
+
+| Field | Type | |
+|---|---|---|
+| `destinations` | list of text | The destinations it touches, by name, in name order. |
+| `everything` | true or false | Every part alike: the interface came or went (or was renamed), its interface.yaml stopped or started parsing, a start ran it unchanged. |
+| `source` | true or false | Where messages come from: `source:`, `format`, `ordering`, `dedupe`, `durability`, `about.from`, the `monitor` times; an HTTP `respond` interface's code. |
+| `unsure` | true or false | Its code changed, but which part's wasn't recorded (a version saved before 0.7.4.2, or a file only such versions named): it may touch any part, so every part's history shows it, marked. |
 
 ### `InterfaceCounts`
 

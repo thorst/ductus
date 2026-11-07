@@ -417,7 +417,8 @@ export interface paths {
          * One timeline of who changed what and why for an interface, newest first: the git commits that
          *     changed its files (its interface.yaml, its code and the shared files it imports), the
          *     deployments that changed its code, the audit log's entries naming it and its documentation's
-         *     changes.
+         *     changes. Each entry says which parts it touches (`touches`); `source=true` or
+         *     `destination=NAME` returns only one part's.
          */
         get: operations["interface_history"];
         put?: never;
@@ -1922,6 +1923,8 @@ export interface components {
             /** @description This entry's place in the timeline: pass it as `before` to read what's older. */
             key: string;
             kind: components["schemas"]["HistoryKind"];
+            /** @description Which parts of the interface it touches (none: the whole interface only). */
+            touches: components["schemas"]["HistoryTouches"];
             /** @description What happened, in one line. */
             what: string;
         };
@@ -1947,6 +1950,11 @@ export interface components {
         HistoryKind: "commit" | "audit" | "documentation" | "deployment";
         /** @description A page of the timeline. */
         HistoryPage: {
+            /**
+             * @description The destinations it has or had (its configuration's, and every one an engine ran on this
+             *     database), by name: the parts a history can be narrowed to, besides its source.
+             */
+            destinations: string[];
             /** @description Newest first. */
             entries: components["schemas"]["HistoryEntry"][];
             interface: string;
@@ -1954,6 +1962,30 @@ export interface components {
             next_before?: string | null;
             /** @description What the timeline lacks, in words: no git repository, a database not read, … */
             notes: string[];
+        };
+        /**
+         * @description The parts of the interface an entry touches. None of them: the interface as a whole only (its
+         *     owner, its retention, its alerts' recipients), shown only when no part is picked.
+         */
+        HistoryTouches: {
+            /** @description The destinations it touches, by name, in name order. */
+            destinations: string[];
+            /**
+             * @description Every part alike: the interface came or went (or was renamed), its interface.yaml stopped or
+             *     started parsing, a start ran it unchanged.
+             */
+            everything: boolean;
+            /**
+             * @description Where messages come from: `source:`, `format`, `ordering`, `dedupe`, `durability`,
+             *     `about.from`, the `monitor` times; an HTTP `respond` interface's code.
+             */
+            source: boolean;
+            /**
+             * @description Its code changed, but which part's wasn't recorded (a version saved before 0.7.4.2, or a
+             *     file only such versions named): it may touch any part, so every part's history shows it,
+             *     marked.
+             */
+            unsure: boolean;
         };
         ImpactHit: {
             /** @description Hosts and ports, listening ports, folders to look at. */
@@ -3592,6 +3624,17 @@ export interface operations {
                  *     payload reads and refused attempts from the audit log.
                  */
                 all?: boolean;
+                /**
+                 * @description Only what touches its source (`source:`, `format`, `ordering`, `dedupe`, `durability`,
+                 *     `about.from`, `monitor`'s times; an HTTP `respond` interface's code). Not with `destination`.
+                 */
+                source?: boolean;
+                /**
+                 * @description Only what touches this destination (one of the page's `destinations`): its block in
+                 *     interface.yaml, the interface's settings it has none of its own for, the files its code
+                 *     loads, its pauses, resends and alerts, its documentation.
+                 */
+                destination?: string;
             };
             header?: never;
             path: {

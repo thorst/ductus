@@ -229,3 +229,14 @@ impl Drop for TestUsers {
         }
     }
 }
+
+/// Make `interface`'s code versions look as an engine before 0.7.4.2 saved them: without which
+/// files each part runs (`code_versions.parts`), as history then has to say it can't tell.
+pub async fn forget_version_parts(store: &Store, interface: &str) -> Result<u64> {
+    let done = sqlx::query("UPDATE code_versions SET parts = NULL WHERE interface = $1")
+        .bind(interface)
+        .execute(&store.pool)
+        .await
+        .context("forgetting the versions' parts")?;
+    Ok(done.rows_affected())
+}

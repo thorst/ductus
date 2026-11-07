@@ -68,6 +68,7 @@ fn new_versions(versions: &[Version]) -> Vec<NewVersion<'_>> {
             interface: &v.interface,
             hash: &v.hash,
             files: v.files.iter().map(|f| (f.path.as_str(), f.hash.as_slice(), f.text.as_str())).collect(),
+            parts: serde_json::to_string(&v.parts).unwrap_or_default(),
         })
         .collect()
 }
@@ -439,16 +440,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let folder = dir.path().join("interfaces").join("a");
         std::fs::create_dir_all(&folder).unwrap();
-        let yaml = "name: a\nsource: { mllp: { port: 6661 } }\ndestinations: { files: { file: { dir: out } } }\n";
+        let yaml = "name: a\nsource: { mllp: { port: 6661 } }\ndestinations: { files: { file: { dir: out }, script: t.ts }, archive: { file: { dir: a } } }\n";
         std::fs::write(folder.join("interface.yaml"), yaml).unwrap();
         std::fs::write(folder.join("t.ts"), "export const x = 1;\n").unwrap();
         let env = ductus_core::Environment::load(dir.path(), "dev").unwrap();
         let config = Arc::new(InterfaceConfig::load_in(&folder, &env).unwrap());
         let path = ductus_script::loaded_path(&folder.join("t.ts")).unwrap();
-        let file = CodeFile { path, hash: [0; 32], text: "export const x = 1;\n".into() };
+        let file = CodeFile { path, hash: [0; 32], text: "export const x = 1;\n".into(), imports: Vec::new() };
         let loaded = HashMap::from([("a".to_string(), vec![file])]);
         let versions = versions(dir.path(), &[config], &loaded).unwrap();
         let paths: Vec<&str> = versions[0].files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, ["interfaces/a/interface.yaml", "interfaces/a/t.ts"]);
+        // And which of them each destination runs (0.7.4.2), the same way.
+        let parts = &versions[0].parts;
+        assert_eq!(parts.destinations["files"], ["interfaces/a/t.ts"]);
+        assert!(parts.destinations["archive"].is_empty() && parts.source.is_empty());
     }
 }

@@ -62,6 +62,16 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **Why:** "who changed what" is the question most of the time; every restart and every look at a message would bury it.
 - **What to do:** use `--all` to see restarts beside deploys, or who read a message's payload around a change.
 
+## History by destination counts a shared file as each destination's that loads it (level 3)
+- **What:** `ductus history <interface> --destination lab` (and the History tab's **Show**) tells a code change by the files lab's code loads: its own file and everything that imports. A change of `lib/codes.ts`, or of the interface's `script` when several destinations run functions from it, is shown under each destination that loads it. A commit is placed by every version recorded: a file lab loaded in any of them counts as lab's. Settings in interface.yaml that destinations inherit (`retry`, `output`, `rate_limit`, `script`, `monitor.behind`) count for each destination without its own; `timeout`, `isolation`, `workers` for every destination. The owner, the description, `custom`, `retention`, `alert` are the whole interface's: not shown under any one part.
+- **Why:** a change to shared code can change what every destination that runs it sends; hiding it from one of them would hide a possible cause.
+- **What to do:** to keep a destination's history to itself, give it its own file and keep what's shared small and stable. To see the whole interface again, leave the option off (or pick "Whole interface").
+
+## History before 0.7.4.2 can't say which destination a code change was (level 2)
+- **What:** code versions recorded by an engine before 0.7.4.2 don't say which files each destination's code loads. A deployment that changed their code, or a commit on a file only they named, is shown under **every** part when one is picked, marked "may not be …", and a note says some versions were recorded before. interface.yaml changes are told exactly anyway (both texts are kept). The first start of 0.7.4.2 or later records the running version's files (once; a start that changes nothing writes nothing after that), so changes from then on are exact.
+- **Why:** guessing (say, "it has one destination, so it's that one's") would be wrong exactly when it matters, for a file no destination used; showing it everywhere, marked, never hides a cause.
+- **What to do:** nothing; read the marked entries' files (the commit's list, or `ductus history --json`) to see whose they were.
+
 ## The first history read after a deploy walks git; later ones don't (level 4)
 - **What:** an interface's git history is worked out by walking every commit since HEAD (gitoxide, in the engine and the command): about 0.2 s for 1,000 commits at 1,001 interfaces, measured. The engine keeps the result until HEAD moves (a `git pull`), so the History tab's next pages and refreshes take milliseconds. `ductus history` walks each time it's run (it's one command).
 - **Why:** git has no index by file; `git log -- path` walks too (it took 0.04 s on the same repository).
