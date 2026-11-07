@@ -4,7 +4,8 @@
 # own: 3,013 files), started ROUNDS times with BASE (a binary before 0.7.3) and BIN alternately,
 # on a database of its own. Reports each start's `took` and, for BIN, the phases 0.7.3 added
 # (code versions computed, saved: what the first decisions wait for (0.7.3.2), deployment
-# recorded); BIN's first start (every version and file new) separately.
+# recorded); BIN's first start (every version and file new) separately. Since 0.7.4.2 the versions
+# are computed beside the start, not in it: their time no longer counts in `start`.
 #
 #   BASE=~/target-base/release/ductus bash scripts/bench-versions.sh   # BASE: an earlier binary
 set -euo pipefail
@@ -78,7 +79,8 @@ start() {
   local took versions recorded loaded
   took=$(grep "started interfaces=" "$log" | grep -o 'took=[^ ]*' | sed 's/took=//')
   loaded=$(grep "start: interface code loaded" "$log" | grep -o 'took=[^ ]*' | sed 's/took=//' || true)
-  versions=$(grep "start: code versions computed" "$log" | grep -o 'took=[^ ]*' | sed 's/took=//' || true)
+  # A phase of the start before 0.7.4.2; since, computed beside it ("… beside the start"), not in it.
+  versions=$(grep -E "start: code versions computed|code versions computed beside the start" "$log" | grep -o 'took=[^ ]*' | sed 's/took=//' || true)
   # Recorded beside the start (after it, not in it): the `deployed:` line's own time.
   for _ in $(seq 1 100); do
     grep "deployed:" "$log" >/dev/null && break
@@ -91,6 +93,10 @@ start() {
   wait $pid || true
   printf '%-5s start %-10s code loaded %-10s versions %-10s saved %-10s recorded %s\n' "$2" "$took" "$loaded" \
     "${versions:--}" "${saved:--}" "${recorded:--}"
+  # PHASES=1: each phase of the start, as its debug lines time them.
+  if [ -n "${PHASES:-}" ]; then
+    { grep "start: " "$log" || true; } | sed -E 's/.*start: (.*) took=([^ ]*).*/      \2  \1/'
+  fi
 }
 
 echo "== a first start of each (migrations; for BIN every version and file is new)"

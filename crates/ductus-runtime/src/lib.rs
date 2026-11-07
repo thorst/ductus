@@ -569,32 +569,41 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         bail!("{}", failed.join("\n"));
     }
     phases.mark("interface code loaded, workers running");
-    // What each interface runs (in the start: every delivery records it), saved at once beside the
-    // start (the workers wait for the ids before saving a decision), recorded as a deployment once
-    // the interfaces are this engine's (below, beside the start).
-    let code = {
-        let (root, configs) = (root.to_path_buf(), interfaces.iter().map(|(c, ..)| c.clone()).collect::<Vec<_>>());
-        match tokio::task::spawn_blocking(move || deployment::versions(&root, &configs, &loaded)).await {
-            Ok(Ok(code)) => Some(code),
-            Ok(Err(e)) => {
-                tracing::error!(error = %format!("{e:#}"), "couldn't compute the interfaces' code versions: this start's deployment isn't recorded");
-                None
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "computing the code versions failed: this start's deployment isn't recorded");
-                None
-            }
-        }
-    };
-    let code = code.map(Arc::new);
-    tokio::spawn(deployment::save(store.clone(), code.clone(), saving));
-    // Whether a change undoes someone else's (folder mode): read beside the start, and before a
-    // takeover is ready, so never in its sending pause.
+    // What each interface runs (every delivery records it): computed, saved (the workers wait for
+    // the ids before saving a decision, not before deciding) and checked (folder mode: whether a
+    // change undoes someone else's) beside the start, never in its way; recorded as a deployment
+    // once the interfaces are this engine's (below, also beside the start). Nothing the start does
+    // waits for them, except a takeover's `ready`, for the check's warnings (at most 2 s).
+    let (computed, code) = tokio::sync::watch::channel(None::<Option<Arc<Vec<code::Version>>>>);
     let (warning, warned) = deployment::warnings_channel();
-    if let Some(versions) = &code {
-        tokio::spawn(deployment::check(store.clone(), root.to_path_buf(), versions.clone(), who.clone(), warning));
+    {
+        let (root, configs) = (root.to_path_buf(), interfaces.iter().map(|(c, ..)| c.clone()).collect::<Vec<_>>());
+        let (store, who) = (store.clone(), who.clone());
+        tokio::spawn(async move {
+            let started = std::time::Instant::now();
+            let reading = root.clone();
+            let versions = match tokio::task::spawn_blocking(move || deployment::versions(&reading, &configs, &loaded))
+                .await
+            {
+                Ok(Ok(code)) => Some(Arc::new(code)),
+                Ok(Err(e)) => {
+                    tracing::error!(error = %format!("{e:#}"), "couldn't compute the interfaces' code versions: this start's deployment isn't recorded");
+                    None
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "computing the code versions failed: this start's deployment isn't recorded");
+                    None
+                }
+            };
+            tracing::debug!(took = ?started.elapsed(), "code versions computed beside the start");
+            computed.send_replace(Some(versions.clone()));
+            match &versions {
+                Some(v) => drop(tokio::spawn(deployment::check(store.clone(), root, v.clone(), who, warning))),
+                None => drop(warning.send_replace(Some(Default::default()))), // nothing to warn about
+            }
+            deployment::save(store, versions, saving).await;
+        });
     }
-    phases.mark("code versions computed");
     if let Some(resolving) = resolving {
         resolving.await.context("looking up the host names in `allow:` lists")?;
         phases.mark("allow: host names looked up");
@@ -688,20 +697,17 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let record = |engine: &Arc<control::Engine>| {
         let engine = engine.clone();
         let docs = snapshot.clone();
-        let Some(versions) = code.clone() else {
-            // No versions, no deployment: the documentation is saved all the same.
-            tokio::spawn(async move { deployment::docs_alone(&engine.store, &docs).await });
-            return;
-        };
-        let recording = deployment::Recording {
-            versions,
-            decided: decided.clone(),
-            warned: warned.clone(),
-            root: root.to_path_buf(),
-            docs,
-        };
-        let who = who.clone();
+        let (mut code, decided, warned, root, who) =
+            (code.clone(), decided.clone(), warned.clone(), root.to_path_buf(), who.clone());
         tokio::spawn(async move {
+            // Once they're computed (beside the start).
+            let versions = code.wait_for(Option::is_some).await.ok().and_then(|v| v.clone().flatten());
+            let Some(versions) = versions else {
+                // No versions, no deployment: the documentation is saved all the same.
+                deployment::docs_alone(&engine.store, &docs).await;
+                return;
+            };
+            let recording = deployment::Recording { versions, decided, warned, root, docs };
             let host = audit::host_name();
             let recorded = deployment::record(&engine, &host, &who, recording).await;
             if let Some(d) = recorded {

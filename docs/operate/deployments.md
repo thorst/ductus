@@ -397,9 +397,10 @@ engine serving
 ## What it costs
 
 Measured at 1,001 interfaces with code in a git repository (3,013 files, `scripts/bench-versions.sh`,
-WSL): the start computes the versions in 14–16 ms; loading the code (which now hashes each
-file as it reads it) and the whole start were within run-to-run noise of the version before. The
-record is written beside the start, after it: 33–100 ms (the git comparison included), 389 ms the
+WSL): the versions are computed beside the start since 0.7.4.2, not in it (14–16 ms in it
+before; 20–110 ms beside it now, with which files each destination's code loads); loading the
+code (which hashes each file as it reads it) and the whole start were within run-to-run noise of
+the version before. The record is written beside the start, after it: 33–100 ms (the git comparison included), 389 ms the
 first time, when every version and file is new (848 kB of file text). Nothing runs in the
 background afterwards; one row per start or handover, plus the files that changed.
 
