@@ -312,6 +312,16 @@ fn debugged<'a>(root: &Path, interfaces: &'a [InterfaceDir], only: Option<&str>)
     }
 }
 
+/// One interface's tests, as `test` gathers them before running them.
+struct Suite {
+    label: String,
+    /// Its `*.test.ts` files; none: "no tests".
+    tests: Vec<PathBuf>,
+    /// Its fixtures as JSON (name → text), and its formats (`format_spec`).
+    fixtures: String,
+    formats: String,
+}
+
 /// One interface's tests, loaded and run: the runner's report (JSON), and what loading wrote to
 /// `console`. Under a debugger (`debugged`: where it listens, the interface) the isolate is
 /// offered to one and waits for it before any code loads.
@@ -435,6 +445,8 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
     // Every test's place only where it's shown (writing a stack costs ~30 µs a test).
     let runner_options = serde_json::json!({ "filter": filter, "list": list, "places": json }).to_string();
 
+    // Each interface's suite on this thread first (what to run, its fixtures read), in order.
+    let mut suites = Vec::new();
     for iface in &interfaces {
         let label = iface.label();
         if debugged.as_ref().is_some_and(|d| *d != label) || only.is_some_and(|o| !names_interface(root, o, iface)) {
@@ -442,9 +454,7 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
         }
         let tests = files_under(&iface.dir, &is_test);
         if tests.is_empty() {
-            if filter.is_none() {
-                say(format!("{label}: no tests"));
-            }
+            suites.push(Suite { label, tests, fixtures: String::new(), formats: String::new() });
             continue;
         }
         let fixtures_dir = iface.dir.join("fixtures");
@@ -453,32 +463,33 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
             let name = f.strip_prefix(&fixtures_dir).unwrap().to_string_lossy().replace('\\', "/");
             fixtures.insert(name, std::fs::read_to_string(&f).with_context(|| format!("reading {}", f.display()))?);
         }
-
-        let paths: Vec<&Path> = tests.iter().map(PathBuf::as_path).collect();
         let formats = iface
             .config
             .as_ref()
             .map(|c| c.format_spec())
             .unwrap_or_else(|_| ductus_script::DEFAULT_FORMATS.to_string());
-        // `loading`: what the test files and the code they import wrote to `console` while loading.
-        let fixtures = serde_json::to_string(&fixtures)?;
-        let (report, loading) = match inspect {
-            None => run_suite(&paths, &fixtures, &formats, &runner_options, None).await,
-            Some(addr) => {
-                // deno_core's inspector spawns tasks that must stay on the isolate's thread: a
-                // thread of its own with a single-threaded runtime, as the engine's workers have.
-                let owned: Vec<PathBuf> = tests.clone();
-                let (fixtures, formats, options, label) =
-                    (fixtures.clone(), formats.clone(), runner_options.clone(), label.clone());
-                std::thread::spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-                    let paths: Vec<&Path> = owned.iter().map(PathBuf::as_path).collect();
-                    let debugged = (addr, label.as_str());
-                    anyhow::Ok(runtime.block_on(run_suite(&paths, &fixtures, &formats, &options, Some(debugged))))
-                })
-                .join()
-                .map_err(|_| anyhow::anyhow!("the debugged tests' thread panicked"))??
+        suites.push(Suite { label, tests, fixtures: serde_json::to_string(&fixtures)?, formats });
+    }
+
+    // Then run, spread over threads (each suite in an isolate of its own, as before), and told in
+    // the same order. Under a debugger there's one suite: its thread is the one the inspector's
+    // tasks need (a single-threaded runtime of its own, as the engine's workers have).
+    let run = |runtime: &tokio::runtime::Runtime, _: &mut (), suite: &Suite| {
+        if suite.tests.is_empty() {
+            return None;
+        }
+        let paths: Vec<&Path> = suite.tests.iter().map(PathBuf::as_path).collect();
+        let debugged = inspect.map(|addr| (addr, suite.label.as_str()));
+        Some(runtime.block_on(run_suite(&paths, &suite.fixtures, &suite.formats, &runner_options, debugged)))
+    };
+    // `loading`: what the test files and the code they import wrote to `console` while loading.
+    crate::spread::in_order(&suites, crate::spread::threads(), run, |i, ran| {
+        let label = suites[i].label.clone();
+        let Some((report, loading)) = ran else {
+            if filter.is_none() {
+                say(format!("{label}: no tests"));
             }
+            return Ok(());
         };
         let report = match report {
             Ok(r) => r,
@@ -496,12 +507,12 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
                 }
                 emit(line);
                 failed += 1;
-                continue;
+                return Ok(());
             }
         };
         let results: Vec<TestReport> = serde_json::from_str(&report)?;
         if results.is_empty() && loading.is_empty() {
-            continue; // nothing matched the filter here
+            return Ok(()); // nothing matched the filter here
         }
         say(label.clone());
         if !loading.is_empty() {
@@ -554,7 +565,8 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
             }
             emit(line);
         }
-    }
+        Ok(())
+    })?;
 
     let unmatched = filter.filter(|_| found == 0 && failed == 0);
     if let Some(text) = unmatched {
@@ -960,7 +972,34 @@ async fn check_project(
 
     let interfaces = interface_dirs(root, &env)?;
     let places = Places::new(root, &interfaces);
-    for iface in &interfaces {
+    // The type check (~2.5 s alone at a thousand interfaces, reading every .ts file first) on a
+    // thread of its own while the code loads on others.
+    let type_check = {
+        let (root, dirs) = (root.to_path_buf(), interfaces.iter().map(|i| i.dir.clone()).collect::<Vec<_>>());
+        std::thread::spawn(move || -> Result<ductus_script::Analysis> {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
+            let _inside = runtime.enter(); // V8 posts its delayed tasks to the runtime
+            let dirs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+            let shared = ductus_runtime::project::project_files(&root, &dirs, &mut files)?;
+            ductus_script::analyze(&files, &shared, true)
+        })
+    };
+    // Each interface's code loaded in an isolate of its own, spread over threads. Not shared as a
+    // start shares them: then code that reads what another interface's code left in the global
+    // scope would pass or fail depending on which thread loaded what first.
+    let mut loaded: Vec<Option<Result<()>>> = Vec::with_capacity(interfaces.len());
+    let load = |runtime: &tokio::runtime::Runtime, _: &mut (), iface: &InterfaceDir| {
+        let config = iface.config.as_ref().ok().filter(|c| c.has_code())?;
+        Some(runtime.block_on(load_functions(config)))
+    };
+    // On half the CPUs (about the cores), leaving room for the type checker and V8's own threads:
+    // with every CPU loading, the type check took 6–7 s instead of 2.4. At a thousand interfaces
+    // (4 cores, 8 threads) 4 to 8 loaders measured alike within the noise, 2 slower.
+    crate::spread::in_order(&interfaces, (crate::spread::threads() / 2).max(1), load, |_, result| {
+        loaded.push(result);
+        Ok(())
+    })?;
+    for (iface, loaded) in interfaces.iter().zip(loaded) {
         let label = iface.label();
         let file = places.file(&label).unwrap_or_default().to_string();
         match &iface.config {
@@ -970,9 +1009,7 @@ async fn check_project(
                 continue;
             }
             Ok(config) => {
-                if config.has_code()
-                    && let Err(e) = load_functions(config).await
-                {
+                if let Some(Err(e)) = loaded {
                     let text = format!("{e:#}");
                     let finding = Finding::error("DUC125", format!("{label}: {}", first_line(&text))).interface(&label);
                     report.add(report.at_key(finding, &file, &function_key(config, &text)));
@@ -1010,8 +1047,7 @@ async fn check_project(
         report.add(finding);
     }
 
-    let shared = project_files(root, &interfaces, &mut files)?;
-    let analysis = ductus_script::analyze(&files, &shared, true)?;
+    let analysis = type_check.join().map_err(|_| anyhow::anyhow!("the type checker's thread panicked"))??;
 
     // Databases and APIs named in code must exist (each place reported once, even in a shared
     // library many interfaces import).
@@ -1462,17 +1498,6 @@ pub async fn test_alert(root: &Path, env: &str, channel: &str) -> Result<()> {
     alerts.test(channel).await?;
     println!("sent a test notification to `{channel}`");
     Ok(())
-}
-
-/// Every .ts file of the project into `files`; returns the shared modules (see
-/// `ductus_runtime::project::project_files`).
-fn project_files(
-    root: &Path,
-    interfaces: &[InterfaceDir],
-    files: &mut BTreeMap<String, String>,
-) -> Result<Vec<String>> {
-    let dirs: Vec<&Path> = interfaces.iter().map(|i| i.dir.as_path()).collect();
-    ductus_runtime::project::project_files(root, &dirs, files)
 }
 
 /// The databases and APIs each interface's code uses (`db("...")`, `api("...")`, through its

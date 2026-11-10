@@ -393,6 +393,86 @@ fn keys(v: &serde_json::Value) -> Vec<&str> {
     keys
 }
 
+/// `validate` and `test` spread interfaces over threads (0.7.4.3.1) and still say what one thread
+/// said: interfaces in their order (here the first ones' tests take longest, so they finish
+/// last), each interface's code and tests in an isolate of its own, so code that reads what
+/// another interface's code left in the global scope fails every run (sharing isolates as a start
+/// does made that pass or fail by which thread loaded what first).
+#[test]
+fn validate_and_test_on_threads_say_what_one_thread_said() {
+    let mut files: Vec<(String, String)> = Vec::new();
+    for i in 0..24 {
+        let name = format!("t-{i:02}");
+        files.push((
+            format!("interfaces/{name}/interface.yaml"),
+            format!(
+                "name: {name}\nsource: {{ mllp: {{ port: {} }} }}\nscript: route.ts\ndestinations: {{ out: {{ file: {{ dir: out }} }} }}\n",
+                7000 + i
+            ),
+        ));
+        files.push((
+            format!("interfaces/{name}/route.ts"),
+            "export function transform(m: unknown) {\n  return m;\n}\n".into(),
+        ));
+        // Interface i's test busy-waits (24 - i) × 8 ms.
+        files.push((
+            format!("interfaces/{name}/route.test.ts"),
+            format!(
+                "import {{ expect, test }} from \"@ductus/sdk\";\n\ntest(\"waits\", () => {{\n  const end = Date.now() + {};\n  while (Date.now() < end) {{}}\n  expect(\"{name}\").toBe(\"{name}\");\n}});\n",
+                (24 - i) * 8
+            ),
+        ));
+    }
+    // `sets` leaves a global at load; `reads` needs it at load, so it fails alone.
+    for (port, name, code) in [
+        (7100, "sets", "(globalThis as any).LAB = \"x\";\nexport function transform(m: unknown) {\n  return m;\n}\n"),
+        (
+            7101,
+            "reads",
+            "if (!(globalThis as any).LAB) {\n  throw new Error(\"LAB not set\");\n}\nexport function transform(m: unknown) {\n  return m;\n}\n",
+        ),
+    ] {
+        files.push((
+            format!("interfaces/{name}/interface.yaml"),
+            format!(
+                "name: {name}\nsource: {{ mllp: {{ port: {port} }} }}\nscript: route.ts\ndestinations: {{ out: {{ file: {{ dir: out }} }} }}\n"
+            ),
+        ));
+        files.push((format!("interfaces/{name}/route.ts"), code.into()));
+    }
+    let files: Vec<(&str, &str)> = files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect();
+    let dir = project(&files);
+
+    let (ok, out) = ductus(dir.path(), &["test", "--read-only"]);
+    assert!(ok, "{out}");
+    let told: Vec<&str> = out.lines().filter(|l| l.starts_with("t-")).collect();
+    let expected: Vec<String> = (0..24).map(|i| format!("t-{i:02}")).collect();
+    assert_eq!(told, expected, "interfaces in their order:\n{out}");
+    assert!(out.contains("reads: no tests") && out.contains("24 passed, 0 failed"), "{out}");
+    let (ok, json) = ductus(dir.path(), &["test", "--read-only", "--json"]);
+    assert!(ok, "{json}");
+    let order: Vec<String> =
+        json_lines(&json).iter().filter_map(|l| l["interface"].as_str().map(str::to_string)).collect();
+    assert_eq!(order, expected, "JSON lines in their order too");
+
+    let mut verdicts = Vec::new();
+    for _ in 0..3 {
+        let (ok, out) = without_a_database(dir.path(), &["validate", "--read-only", "--json"]);
+        assert!(!ok, "{out}");
+        let findings: serde_json::Value = serde_json::from_str(&out).unwrap();
+        let reads: Vec<String> = findings["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|f| f["interface"] == "reads")
+            .map(|f| format!("{} {}", f["code"], f["message"]))
+            .collect();
+        verdicts.push(reads);
+    }
+    assert!(verdicts[0].iter().any(|f| f.contains("DUC125") && f.contains("LAB not set")), "{verdicts:?}");
+    assert!(verdicts.iter().all(|v| *v == verdicts[0]), "the same every run: {verdicts:?}");
+}
+
 /// `ductus test --json` is a contract for editors and CI (fields are only ever added): one line
 /// per test with where it is, where it failed and both values, then a summary. Text output says
 /// where too; `--list` runs nothing; `--filter` chooses by name, and one that matches nothing fails.

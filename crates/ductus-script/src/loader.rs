@@ -134,11 +134,11 @@ impl ModuleLoader for Loader {
 fn load(specifier: &ModuleSpecifier, loaded: &Loaded) -> Result<ModuleSource, ModuleLoaderError> {
     let code = match specifier.scheme() {
         "ductus" => {
-            let (_, source) = SDK_FILES
+            let index = SDK_FILES
                 .iter()
-                .find(|(path, _)| *path == specifier.path())
+                .position(|(path, _)| *path == specifier.path())
                 .ok_or_else(|| JsErrorBox::generic(format!("no such SDK module: {specifier}")))?;
-            transpile(specifier, source).map_err(generic)?
+            sdk_javascript(index, specifier).map_err(generic)?
         }
         "file" => {
             let path =
@@ -169,6 +169,20 @@ fn load(specifier: &ModuleSpecifier, loaded: &Loaded) -> Result<ModuleSource, Mo
         }
     };
     Ok(ModuleSource::new(ModuleType::JavaScript, ModuleSourceCode::String(code.into()), specifier, None))
+}
+
+/// The SDK file `SDK_FILES[index]` as JavaScript: transpiled once per process, then shared by every
+/// isolate. Each new isolate used to transpile the SDK again (~8 ms, a third of what `validate` and
+/// `test` spent per interface, which make one isolate each).
+fn sdk_javascript(index: usize, specifier: &ModuleSpecifier) -> anyhow::Result<String> {
+    static JAVASCRIPT: [std::sync::OnceLock<String>; SDK_FILES.len()] =
+        [const { std::sync::OnceLock::new() }; SDK_FILES.len()];
+    if let Some(js) = JAVASCRIPT[index].get() {
+        return Ok(js.clone());
+    }
+    // Two threads may both transpile the first time: the same text, one kept.
+    let js = transpile(specifier, SDK_FILES[index].1)?;
+    Ok(JAVASCRIPT[index].get_or_init(|| js).clone())
 }
 
 /// A project file the loader hasn't read (yet): an `import("...")` that hasn't run. None when it
@@ -235,4 +249,21 @@ impl Visit for Specifiers {
 
 fn generic(e: anyhow::Error) -> JsErrorBox {
     JsErrorBox::generic(format!("{e:#}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_sdk_is_transpiled_once_and_as_before() {
+        for (index, (path, source)) in SDK_FILES.iter().enumerate() {
+            let specifier = ModuleSpecifier::parse(&format!("ductus://{path}")).unwrap();
+            let first = sdk_javascript(index, &specifier).unwrap();
+            assert_eq!(first, transpile(&specifier, source).unwrap(), "{path}: what transpiling gives");
+            // From a thread of its own (isolates on other threads share it): the same text.
+            let again = std::thread::spawn(move || sdk_javascript(index, &specifier).unwrap()).join().unwrap();
+            assert_eq!(again, first, "{path}");
+        }
+    }
 }

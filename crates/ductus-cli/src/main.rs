@@ -13,6 +13,7 @@ mod reference;
 mod replay;
 mod service;
 mod sinks;
+mod spread;
 mod tools;
 mod trying;
 mod upgrade;

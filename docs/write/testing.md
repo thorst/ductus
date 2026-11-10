@@ -123,7 +123,10 @@ test("the lab gets visits, with its own patient class and no Z segments", () => 
 - **A test file sits next to the code** (`lab.test.ts` beside `lab.ts`), imports the functions
   it tests, and registers tests with `test(name, fn)`. The name is a sentence saying what should
   happen: it's what a failing run prints.
-- **Tests run one at a time**, in the order written; an `async` test is awaited.
+- **An interface's tests run one at a time**, in the order written; an `async` test is awaited.
+  Different interfaces' tests run at the same time, each interface in a runtime of its own, and
+  are told in the interfaces' order: about 4 s for a thousand interfaces on four cores
+  ([nuance](../nuances/transforms.md#interfaces-tests-run-at-the-same-time-level-2)).
 - **Name what the receiver cares about**: a test per rule in the spec ("the lab doesn't get
   A31s"), not one per function.
 
@@ -314,7 +317,8 @@ $ ductus test --list --interface adt-in --json
 ### `ductus validate --json`
 
 One JSON document, after every check has run (validate takes about a second on a project of a few
-interfaces: most of it is the TypeScript type check). The text output is unchanged without
+interfaces, most of it the TypeScript type check, and 4–7 s at a thousand on four cores, with
+every interface's code loaded at the same time as the type check). The text output is unchanged without
 `--json`. Here `adt-in`'s port was mistyped as 66610 and the secrets weren't set:
 
 ```text

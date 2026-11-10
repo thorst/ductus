@@ -25,7 +25,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Order, retries and durability](ordering.md) (7)
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
-- [Writing transforms](transforms.md) (16)
+- [Writing transforms](transforms.md) (17)
 - [Debugging](debugging.md) (14)
 - [Shared pool](shared-pool.md) (3)
 - [Runaway scripts](runaway.md) (6)
@@ -86,7 +86,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (99)
+## Level 2: Practitioner (100)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -107,6 +107,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [With `split: records`, `input()` gives a fixture's first record](transforms.md#with-split-records-input-gives-a-fixtures-first-record-level-2) (Writing transforms)
 - [A place's precision in `validate --json` depends on the file](transforms.md#a-places-precision-in-validate---json-depends-on-the-file-level-2) (Writing transforms)
 - [A `console` line in code is written for every message](transforms.md#a-console-line-in-code-is-written-for-every-message-level-2) (Writing transforms)
+- [Interfaces' tests run at the same time](transforms.md#interfaces-tests-run-at-the-same-time-level-2) (Writing transforms)
 - [The time limit is off while a debugger is attached](debugging.md#the-time-limit-is-off-while-a-debugger-is-attached-level-2) (Debugging)
 - [Under `ductus dev --inspect`, only the debugged interface waits](debugging.md#under-ductus-dev---inspect-only-the-debugged-interface-waits-level-2) (Debugging)
 - [Stopping `ductus dev` while paused may leave that message for the next start](debugging.md#stopping-ductus-dev-while-paused-may-leave-that-message-for-the-next-start-level-2) (Debugging)

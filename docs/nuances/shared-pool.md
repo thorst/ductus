@@ -6,6 +6,8 @@ How the shared pool works: [The shared pool](../shared-pool.md).
 
 ## Interfaces share a global scope (level 2)
 - **What:** in the shared pool many interfaces run in one JavaScript engine. Writing to `globalThis` or changing built-in prototypes affects them all. `ductus validate` warns (DX1, DX2).
+- **When it bites:** code that *reads* what another interface's code put there works in the engine only when the two land on one thread, and the order they load in decides it: it can work for months and stop after a restart. `ductus validate` and `ductus test` load every interface in a runtime of its own, so such code fails there (`DUC125` with its error), the same every run.
+- **What to do:** share values by importing them from a file (`lib/codes.ts`), never through `globalThis`.
 
 ## A shared library file is one copy per thread, not one per project (level 4)
 - **What:** `lib/x.ts` imported by several interfaces is loaded once per isolate. Interfaces on the same pool thread share its top-level state (DX3); interfaces on different threads each see their own copy. A dedicated interface with `workers: 4` has four copies of its own module state too.

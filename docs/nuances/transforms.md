@@ -69,6 +69,12 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **When it's different:** a line written by a promise the test didn't `await`, after the test finished, lands under the next test (or nowhere, after the last): tests run one after another in one isolate.
 - **What to do:** `await` what a test starts. To see a value once, log it in the test and read it under the test's name.
 
+## Interfaces' tests run at the same time (level 2)
+- **What:** `ductus test` runs several interfaces' tests at once, one per CPU, each interface in a runtime of its own; an interface's own tests still run one after another, in the order written. The output is the same as one at a time: interfaces in their order, each test under its interface (`--json` lines too). `ductus validate` loads every interface's code the same way, on half the CPUs, while the type check runs beside it.
+- **Why:** each interface used to wait for the one before it: about 25 ms each, so 25 s apiece for `test` and `validate` at a thousand interfaces. Measured at 1,001 interfaces on 4 cores (8 threads): `test` 3.4–4.0 s (was 25–27), `validate` 4.3–7 s (was 28).
+- **When it's different:** a test that waits on the clock (a busy loop, a timer) takes longer while the machine is busy with the others, so one close to its interface's `timeout` (5 s by default) can be stopped where it passed alone. Nothing else is shared between interfaces' tests: one interface's code can't see what another's set.
+- **What to do:** keep tests well under their `timeout`; on a CI machine that runs other jobs at once, expect the time to grow with the load, not the results to change.
+
 ## A quoted number in an environment file is text (level 1)
 - **What:** a setting that's only a reference keeps the variable's type, so `port: ${LAB_PORT}` with `LAB_PORT: "6670"` in `environments/dev.yaml` is the text "6670", and the interface is refused: "invalid type: string "6670", expected u16". `LAB_PORT: 6670` is the number.
 - **What to do:** write numbers in environment files without quotes. Quote only what YAML would otherwise read wrongly (a value starting with `*`, `&`, `{` or `[`; `yes`/`no` meant as text; a time like `07:00`).
