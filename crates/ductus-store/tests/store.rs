@@ -4003,6 +4003,30 @@ async fn history_reads_one_part() {
     forget_deployments(&pool, &env).await;
 }
 
+/// A start records its deployment beside it (0.7.4.2), so its first decisions can be saved before
+/// the deployment's row is: such a delivery still names the deployment that brought its version
+/// (Windows CI found one that named none).
+#[tokio::test]
+async fn a_delivery_decided_before_its_deployment_was_recorded_names_it() {
+    let Some(store) = store().await else { return };
+    let t = Iface::new(&store, "early", &["lab"]).await;
+    let lab = t.id("lab");
+    let env = t.name.clone();
+    let v = TestVersion::new(&t.name, &[("interfaces/x/interface.yaml", &format!("name: {}\n", t.name))]);
+    let ids = store.save_versions(&[v.borrow()]).await.unwrap();
+    let id = ids[v.hash.as_slice()];
+    let a = store.insert(t.msg(0, b"a")).await.unwrap();
+    store.finish(lab, &[sent(a).by(Some(id))]).await.unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    let deployed = deploy(&store, &env, "todd", &[&v]).await.unwrap();
+    let decided = store.deliveries(a).await.unwrap();
+    assert_eq!(decided[0].code_version.as_deref(), Some(v.hash.as_slice()));
+    assert_eq!(decided[0].deployed_by.as_deref(), Some("todd"), "the deployment recorded just after");
+    assert_eq!(decided[0].deployed_at, Some(deployed.at));
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    forget_deployments(&pool, &env).await;
+}
+
 /// A delivery says which code version decided it, with the deployment that brought that version
 /// (0.7.3.2). Sending it again clears it and the resend's row keeps it; a person's decision (an
 /// edited copy, a dismissal) leaves none, its row keeping what decided it before.

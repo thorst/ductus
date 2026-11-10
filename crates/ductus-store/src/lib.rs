@@ -221,7 +221,8 @@ pub struct Delivery {
     /// decided it, or decided by an engine before 0.7.3.2.
     pub code_version: Option<Vec<u8>>,
     /// The deployment that brought that version to the interface (the last one before the
-    /// delivery was decided): when, by whom, why.
+    /// delivery was decided, or the first after when the start's record landed after its first
+    /// decisions): when, by whom, why.
     pub deployed_at: Option<DateTime<Utc>>,
     pub deployed_by: Option<String>,
     pub deployed_reason: Option<String>,
@@ -875,9 +876,14 @@ impl Store {
              FROM deliveries d JOIN destinations t ON t.id = d.destination_id
              LEFT JOIN code_versions v ON v.id = d.code_version
              LEFT JOIN LATERAL (
+                 -- The last deployment of that version before the decision; else the first after
+                 -- it: a start records its deployment beside it, so its first decisions can come
+                 -- milliseconds before the row does.
                  SELECT p.at, p.by_name, p.reason FROM deployment_changes c JOIN deployments p ON p.id = c.deployment_id
-                 WHERE c.interface = t.interface AND c.to_version = d.code_version AND p.at <= d.updated_at
-                 ORDER BY c.deployment_id DESC LIMIT 1
+                 WHERE c.interface = t.interface AND c.to_version = d.code_version
+                 ORDER BY p.at <= d.updated_at DESC,
+                          CASE WHEN p.at <= d.updated_at THEN -c.deployment_id ELSE c.deployment_id END
+                 LIMIT 1
              ) dep ON true
              WHERE d.message_id = $1 AND d.received_at = $2 ORDER BY t.name",
         )
