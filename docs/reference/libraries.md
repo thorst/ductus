@@ -8,7 +8,7 @@ that only run while the binary is compiled (macros, build scripts), since they s
 Nothing on this page is downloaded when Ductus runs, except Postgres for `ductus dev` (below). The binary
 needs only the operating system's C library on Linux (glibc 2.34 or later).
 
-- Rust crates: **633** (606 in the Linux build, 616 in the Windows build)
+- Rust crates: **637** (610 in the Linux build, 620 in the Windows build)
 - npm packages in the web UI: **102**
 - TypeScript **6.0.3** (Microsoft, Apache-2.0), inside the binary: `ductus validate` and `ductus types` type-check interface code with it
 
@@ -57,7 +57,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 
 | License | Rust crates | npm packages |
 |---|---|---|
-| MIT OR Apache-2.0 | 309 |  |
+| MIT OR Apache-2.0 | 313 |  |
 | MIT | 112 | 98 |
 | Apache-2.0 OR MIT | 61 |  |
 | Apache-2.0 | 43 | 1 |
@@ -285,6 +285,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `ghash` | 0.6.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `gix` | 0.90.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-actor` | 0.44.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-bitmap` | 0.6.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-chunk` | 0.10.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-command` | 0.12.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-commitgraph` | 0.42.0 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -298,6 +299,8 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `gix-glob` | 0.29.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-hash` | 0.28.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-hashtable` | 0.18.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-ignore` | 0.24.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-index` | 0.58.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-lock` | 26.0.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-macros` | 0.2.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-object` | 0.66.1 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -321,6 +324,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `gix-url` | 0.40.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-utils` | 0.5.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-validate` | 0.13.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `gix-worktree` | 0.59.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-zlib` | 0.4.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `glob` | 0.3.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `group` | 0.14.0 | MIT/Apache-2.0 | ✓ | ✓ |
@@ -844,6 +848,6 @@ The packages its production build bundles (the build tools and test tools aren't
 Made by `scripts/dev/dependencies.sh` from these files (a test fails when either changes and this page
 isn't made again):
 
-<!-- made from: Cargo.lock 93dd003201819481b5bec791ea6960ccb6cbddf86113318ca4dd55464b7539ad ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
-- `Cargo.lock`, SHA-256 `93dd003201819481b5bec791ea6960ccb6cbddf86113318ca4dd55464b7539ad`
+<!-- made from: Cargo.lock 2b88891630a7292e4f45a0b157a1f9a1525e2612fbea399eba85ee93bd87f40f ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
+- `Cargo.lock`, SHA-256 `2b88891630a7292e4f45a0b157a1f9a1525e2612fbea399eba85ee93bd87f40f`
 - `ui/package-lock.json`, SHA-256 `aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5`

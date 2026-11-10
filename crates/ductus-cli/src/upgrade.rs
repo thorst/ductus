@@ -24,7 +24,7 @@ pub struct Options {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Level {
+pub(crate) enum Level {
     Ok,
     Warning,
     Problem,
@@ -51,17 +51,22 @@ impl Level {
     }
 }
 
-/// The checks as they're made: printed at once as text, or kept for one JSON document.
-struct Report {
-    json: bool,
+/// The checks as they're made: printed at once as text, or kept for one JSON document (`upgrade
+/// --check`, `release check`).
+pub(crate) struct Report {
+    pub json: bool,
     section: &'static str,
-    checks: Vec<Value>,
-    details: serde_json::Map<String, Value>,
-    problems: usize,
+    pub checks: Vec<Value>,
+    pub details: serde_json::Map<String, Value>,
+    pub problems: usize,
 }
 
 impl Report {
-    fn section(&mut self, name: &'static str, title: &str) {
+    pub fn new(json: bool) -> Self {
+        Self { json, section: "", checks: Vec::new(), details: serde_json::Map::new(), problems: 0 }
+    }
+
+    pub fn section(&mut self, name: &'static str, title: &str) {
         self.section = name;
         if !self.json {
             println!("\n{title}");
@@ -69,7 +74,7 @@ impl Report {
     }
 
     /// One check, with lines under it (a table's size, a failing test's output).
-    fn add(&mut self, level: Level, text: impl Into<String>, more: Vec<String>) {
+    pub fn add(&mut self, level: Level, text: impl Into<String>, more: Vec<String>) {
         let text = text.into();
         if level == Level::Problem {
             self.problems += 1;
@@ -84,15 +89,14 @@ impl Report {
         }
     }
 
-    fn detail(&mut self, key: &str, value: Value) {
+    pub fn detail(&mut self, key: &str, value: Value) {
         self.details.insert(key.to_string(), value);
     }
 }
 
 pub async fn check(options: Options) -> Result<bool> {
     let started = Instant::now();
-    let mut report =
-        Report { json: options.json, section: "", checks: Vec::new(), details: serde_json::Map::new(), problems: 0 };
+    let mut report = Report::new(options.json);
     if !report.json {
         println!("ductus upgrade --check: what version {VERSION} would do here (nothing is changed)");
     }

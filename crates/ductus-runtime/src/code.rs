@@ -161,6 +161,40 @@ pub fn current(root: &Path, config: &InterfaceConfig, heap_mb: usize) -> Result<
     })
 }
 
+/// Whether a project file is one of the project's own (0.7.4.3.2): the settings, resources,
+/// environments, secrets and documentation fields every interface runs with, in no interface's
+/// code version. `path` is relative to the project, with `/`.
+pub fn is_project_file(path: &str) -> bool {
+    matches!(path, "ductus.yaml" | "resources.yaml" | "docs-schema.yaml")
+        || path.starts_with("environments/")
+        || path.starts_with("secrets/")
+}
+
+/// The project version (0.7.4.3.2): one hash over the project's own files (`is_project_file`), as
+/// a code version is over an interface's, so a release that changes `resources.yaml` is seen
+/// changing something even when every interface's code is the same. SHA-256 over:
+///
+/// ```text
+/// ductus project version 1
+/// <sha-256 of the file>  environments/prod.yaml
+/// <sha-256 of the file>  resources.yaml
+/// ```
+///
+/// `files` are (path, the file's SHA-256), texts normalized as for code versions; only the
+/// project's own are counted, in path order.
+pub fn project_version<'a>(files: impl IntoIterator<Item = (&'a str, &'a [u8; 32])>) -> ([u8; 32], Vec<String>) {
+    let mut own: Vec<(&str, &[u8; 32])> = files.into_iter().filter(|(p, _)| is_project_file(p)).collect();
+    own.sort_by(|a, b| a.0.cmp(b.0));
+    let mut text = String::from("ductus project version 1\n");
+    for (path, hash) in &own {
+        text.push_str(&hex(*hash));
+        text.push_str("  ");
+        text.push_str(path);
+        text.push('\n');
+    }
+    (Sha256::digest(text.as_bytes()).into(), own.into_iter().map(|(p, _)| p.to_string()).collect())
+}
+
 /// A relative path with `.` and `..` worked out as text (`interfaces/a/../../lib/x.ts` →
 /// `lib/x.ts`), as the loader's canonical paths have them (no links in a project, by convention).
 fn lexical(path: &str) -> String {
@@ -233,6 +267,24 @@ mod tests {
         let expected: [u8; 32] = Sha256::digest(text.as_bytes()).into();
         assert_eq!(hash("a", &files), expected);
         assert_eq!(short(&expected).len(), SHOWN);
+    }
+
+    #[test]
+    fn the_project_version_is_the_documented_text_over_the_project_s_own_files() {
+        let a: [u8; 32] = Sha256::digest(b"retention: {}\n").into();
+        let b: [u8; 32] = Sha256::digest(b"databases: {}\n").into();
+        let code: [u8; 32] = Sha256::digest(b"x\n").into();
+        let files = [("resources.yaml", &b), ("interfaces/a/t.ts", &code), ("ductus.yaml", &a)];
+        let (hash, own) = project_version(files);
+        assert_eq!(own, ["ductus.yaml", "resources.yaml"]);
+        let text = format!("ductus project version 1\n{}  ductus.yaml\n{}  resources.yaml\n", hex(&a), hex(&b));
+        assert_eq!(hash, <[u8; 32]>::from(Sha256::digest(text.as_bytes())));
+        for own in ["environments/prod.yaml", "secrets/prod.json", "docs-schema.yaml"] {
+            assert!(is_project_file(own), "{own}");
+        }
+        for not in ["lib/codes.ts", "tsconfig.json", "README.md", "interfaces/a/interface.yaml", "environments"] {
+            assert!(!is_project_file(not), "{not}");
+        }
     }
 
     #[test]

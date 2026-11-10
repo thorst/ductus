@@ -225,6 +225,9 @@ jobs:
       - name: Try demo (`ductus try` on a stored message from the database and through the API, the record beside the new decision, nothing sent again)
         run: BIN=target/release/ductus bash scripts/demo-try.sh
 
+      - name: Release demo (`ductus release` of a commit, the same id from a CRLF checkout, uncommitted files refused; `ductus release check` without and with the database, nothing changed after a start, a commit's change tested, an edited release refused, nothing written)
+        run: BIN=target/release/ductus bash scripts/demo-release.sh
+
       - name: One-owner demo (a second engine with the same interfaces refused, another project alongside, the lock lost and taken back, kill -9 then a start at once, lowered lanes with a backlog refused)
         run: BIN=target/release/ductus bash scripts/demo-one-owner.sh
 

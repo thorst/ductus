@@ -1739,6 +1739,7 @@ dependencies = [
  "sha2 0.10.9",
  "socket2",
  "sqlx",
+ "tar",
  "tempfile",
  "tiberius",
  "tokio",
@@ -2337,6 +2338,8 @@ dependencies = [
  "gix-glob",
  "gix-hash",
  "gix-hashtable",
+ "gix-ignore",
+ "gix-index",
  "gix-lock",
  "gix-note",
  "gix-object",
@@ -2358,6 +2361,7 @@ dependencies = [
  "gix-url",
  "gix-utils",
  "gix-validate",
+ "gix-worktree",
  "gix-worktree-stream",
  "gix-zlib",
  "nonempty",
@@ -2390,6 +2394,15 @@ dependencies = [
  "gix-trace",
  "smallvec",
  "unicode-bom",
+]
+
+[[package]]
+name = "gix-bitmap"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "422cd23418fd80e9e965595323975d72abd6364a66ff8f0daade5c105a7f35d2"
+dependencies = [
+ "gix-error",
 ]
 
 [[package]]
@@ -2581,6 +2594,48 @@ dependencies = [
  "gix-hash",
  "hashbrown 0.17.1",
  "parking_lot",
+]
+
+[[package]]
+name = "gix-ignore"
+version = "0.24.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "968f12fe42896873504f46127cd5bf0f9a34fc1479a781f43cf94b5d8d760a15"
+dependencies = [
+ "bstr",
+ "gix-glob",
+ "gix-path",
+ "gix-trace",
+ "unicode-bom",
+]
+
+[[package]]
+name = "gix-index"
+version = "0.58.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "06bfc736774a623307eda890c918d308ef5acd37402bde2d6768fccb1f6ecb5d"
+dependencies = [
+ "bitflags 2.13.2",
+ "bstr",
+ "filetime",
+ "fnv",
+ "gix-bitmap",
+ "gix-error",
+ "gix-fs",
+ "gix-hash",
+ "gix-lock",
+ "gix-object",
+ "gix-parallel",
+ "gix-trace",
+ "gix-traverse",
+ "gix-utils",
+ "gix-validate",
+ "hashbrown 0.17.1",
+ "itoa",
+ "libc",
+ "memmap2",
+ "rustix 1.1.5",
+ "smallvec",
 ]
 
 [[package]]
@@ -2927,6 +2982,23 @@ checksum = "02b617c17754bf37ee7a9b48e33ffb806abecbbed779ba415199ac1480acf699"
 dependencies = [
  "bstr",
  "gix-error",
+]
+
+[[package]]
+name = "gix-worktree"
+version = "0.59.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe92aec0a25cf073394492a6ee2aa4d27632acde91a653d34de0e4da6afb485d"
+dependencies = [
+ "bstr",
+ "gix-error",
+ "gix-fs",
+ "gix-glob",
+ "gix-hash",
+ "gix-ignore",
+ "gix-index",
+ "gix-object",
+ "gix-path",
 ]
 
 [[package]]

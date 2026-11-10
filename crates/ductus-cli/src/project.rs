@@ -262,8 +262,8 @@ fn vscode_schemas(root: &Path) -> Result<Mapped> {
 /// What `ductus test` runs and how it reports.
 #[derive(Default)]
 pub struct TestOptions<'a> {
-    /// Only this interface's tests.
-    pub interface: Option<&'a str>,
+    /// Only these interfaces' tests (none: every interface's).
+    pub interface: &'a [String],
     /// Only tests whose name contains this.
     pub filter: Option<&'a str>,
     /// List the tests (and where they are) without running them.
@@ -426,9 +426,14 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
     let env = Environment::load(root, env)?;
     let interfaces = interface_dirs(root, &env)?;
     let debugged = match inspect {
-        Some(_) => Some(debugged(root, &interfaces, only)?.label()),
+        Some(_) => Some(debugged(root, &interfaces, only.first().map(String::as_str))?.label()),
         None => None,
     };
+    // Every name given must be an interface: a typo would otherwise run nothing and pass.
+    if let Some(unknown) = only.iter().find(|o| !interfaces.iter().any(|i| names_interface(root, o, i))) {
+        let names: Vec<String> = interfaces.iter().map(|i| i.label()).collect();
+        bail!("`--interface {unknown}` isn't an interface of this project (they are: {})", names.join(", "));
+    }
     let project = &Root::new(root);
     let (mut passed, mut failed, mut found) = (0, 0, 0);
     let started = std::time::Instant::now();
@@ -449,7 +454,9 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
     let mut suites = Vec::new();
     for iface in &interfaces {
         let label = iface.label();
-        if debugged.as_ref().is_some_and(|d| *d != label) || only.is_some_and(|o| !names_interface(root, o, iface)) {
+        if debugged.as_ref().is_some_and(|d| *d != label)
+            || (!only.is_empty() && !only.iter().any(|o| names_interface(root, o, iface)))
+        {
             continue;
         }
         let tests = files_under(&iface.dir, &is_test);

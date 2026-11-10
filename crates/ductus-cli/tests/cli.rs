@@ -4718,3 +4718,293 @@ async fn replay_compares_a_change_with_the_record_kept_outputs_and_the_version_b
     assert_eq!(code, Some(1));
     assert!(out.is_empty());
 }
+
+/// `git` in `dir` as a test person, line ends as written.
+fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .args(["-c", "core.autocrlf=false", "-c", "user.name=Ann Example", "-c", "user.email=ann@example.org"])
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// `ductus release …` in `dir`, as JSON; panics with its output when it fails.
+fn release_json(dir: &Path, args: &[&str]) -> serde_json::Value {
+    let (ok, out) = without_a_database(dir, &[&["release", "--json"], args].concat());
+    assert!(ok, "{out}");
+    let start = out.find("{\n").unwrap_or_else(|| panic!("no JSON: {out}"));
+    serde_json::from_str(&out[start..]).unwrap_or_else(|e| panic!("{e}: {out}"))
+}
+
+/// A release project in git: one interface (`rel-<nanos>`, so the shared test database has no
+/// other) whose destination's code imports a shared file, with its tests and a fixture.
+fn release_project(port: u16) -> (tempfile::TempDir, String) {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("rel-{nanos}");
+    let yaml = format!(
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\ndestinations:\n  lab: {{ file: {{ dir: out/lab }}, script: lab.ts }}\n"
+    );
+    let dir = project(&[
+        (".gitignore", "out/\n*.key\n*.log\n"),
+        ("ductus.yaml", "{}\n"),
+        ("environments/dev.yaml", "variables: {}\n"),
+        ("environments/prod.yaml", "variables: {}\n"),
+        (format!("interfaces/{name}/interface.yaml").as_str(), yaml.as_str()),
+        (
+            format!("interfaces/{name}/lab.ts").as_str(),
+            "import type { Message } from \"@ductus/sdk\";\nimport { LAB } from \"../../lib/codes.ts\";\n\nexport function transform(m: Message) {\n  m.set(\"MSH-5\", LAB);\n  return m;\n}\n",
+        ),
+        (
+            format!("interfaces/{name}/lab.test.ts").as_str(),
+            "import { parse, test, expect } from \"@ductus/sdk\";\nimport { transform } from \"./lab.ts\";\n\ntest(\"sends to the lab\", () => {\n  expect(transform(parse(\"MSH|^~\\\\&|A|B|C|D|20260101||ADT^A01|1|P|2.5\\r\")).get(\"MSH-5\")).toBe(\"LAB\");\n});\n",
+        ),
+        (
+            format!("interfaces/{name}/fixtures/a01.hl7").as_str(),
+            "MSH|^~\\&|A|B|C|D|20260101||ADT^A01|1|P|2.5\rPID|1||42\r",
+        ),
+        ("lib/codes.ts", "export const LAB = \"LAB\";\n"),
+    ]);
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    (dir, name)
+}
+
+/// `ductus release` (0.7.4.3.2): HEAD's files, every interface's code version, the project
+/// version, the commit with its history, the tests' result, who and why; the same commit gives the
+/// same id; uncommitted files, a private key and code from outside the project are refused.
+#[test]
+fn a_release_is_the_commit_with_its_versions_and_tests() {
+    let (dir, name) = release_project(free_port());
+    let made = release_json(dir.path(), &["-m", "first release"]);
+    let id = made["id"].as_str().unwrap();
+    assert_eq!(id.len(), 64);
+    let file = std::path::PathBuf::from(made["file"].as_str().unwrap());
+    assert!(file.starts_with(std::fs::canonicalize(dir.path()).unwrap().join(".ductus").join("releases")), "{file:?}");
+    assert!(file.to_string_lossy().ends_with(&format!("-{}.tar.gz", &id[..12])));
+    assert_eq!(made["git"]["commit"], git(dir.path(), &["rev-parse", "HEAD"]));
+    assert_eq!(made["git"]["commits"], 1);
+    assert_eq!(made["made"]["reason"], "first release");
+    assert_eq!((made["tests"]["ran"].as_bool(), made["tests"]["passed"].as_u64()), (Some(true), Some(1)));
+    let interface = &made["interfaces"][&name];
+    let files: Vec<&str> = interface["files"].as_array().unwrap().iter().map(|f| f.as_str().unwrap()).collect();
+    assert_eq!(
+        files,
+        [format!("interfaces/{name}/interface.yaml"), format!("interfaces/{name}/lab.ts"), "lib/codes.ts".into()]
+    );
+    assert_eq!(interface["parts"]["destinations"]["lab"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        made["project_version"]["files"],
+        serde_json::json!(["ductus.yaml", "environments/dev.yaml", "environments/prod.yaml"])
+    );
+    // The version is the one `try` (and so a start) computes from the project folder.
+    let (_, tried) = without_a_database(dir.path(), &["try", &name, "--fixture", "a01.hl7", "--json"]);
+    let tried: serde_json::Value = serde_json::from_str(&tried).unwrap_or_else(|e| panic!("{e}: {tried}"));
+    assert_eq!(tried["trial"]["code_version"], interface["version"]);
+
+    // Read back, it carries exactly the commit's files, texts as written.
+    let bundle = ductus_runtime::release::read(&file).unwrap();
+    let carried: Vec<&str> = bundle.files.iter().map(|f| f.path.as_str()).collect();
+    assert_eq!(carried.len(), 9, "{carried:?}");
+    assert!(!carried.iter().any(|p| p.starts_with(".ductus")));
+    assert_eq!(bundle.ancestry.len(), 20);
+
+    // Made again, the same id (the manifest's time and the file's bytes may differ); `--out dist/`
+    // makes the folder.
+    let again = release_json(dir.path(), &["--no-tests", "--out", "dist/"]);
+    assert_eq!(again["id"], id);
+    assert!(again["file"].as_str().unwrap().starts_with("dist"), "{again:#}");
+    std::fs::remove_dir_all(dir.path().join("dist")).unwrap();
+
+    // A change not committed: refused, named; carried with --uncommitted, said.
+    edit(&dir.path().join("lib/codes.ts"), "\"LAB\"", "\"LAB2\"");
+    let (ok, out) = without_a_database(dir.path(), &["release"]);
+    assert!(!ok && out.contains("1 file(s) in the project aren't committed") && out.contains("lib/codes.ts"), "{out}");
+    assert!(out.contains("--uncommitted"), "{out}");
+    let (ok, out) = without_a_database(dir.path(), &["release", "--uncommitted", "--no-tests"]);
+    assert!(ok && out.contains("⚠ carries 1 uncommitted file(s)"), "{out}");
+    let dirty = release_json(dir.path(), &["--uncommitted", "--no-tests"]);
+    assert_ne!(dirty["id"], id);
+    assert_eq!(dirty["uncommitted"], serde_json::json!(["lib/codes.ts"]));
+    assert_ne!(dirty["interfaces"][&name]["version"], interface["version"]);
+    git(dir.path(), &["checkout", "--", "lib/codes.ts"]);
+
+    // A failing test: no release.
+    edit(&dir.path().join(format!("interfaces/{name}/lab.test.ts")), "toBe(\"LAB\")", "toBe(\"X\")");
+    git(dir.path(), &["commit", "-qam", "a failing test"]);
+    let (ok, out) = without_a_database(dir.path(), &["release"]);
+    assert!(!ok && out.contains("1 test(s) failed: no release made") && out.contains("sends to the lab"), "{out}");
+    git(dir.path(), &["revert", "--no-edit", "HEAD"]);
+
+    // A private key committed (forced past .gitignore): refused, named.
+    std::fs::write(dir.path().join("client.pem"), "-----BEGIN PRIVATE KEY-----\nMIIE\n-----END PRIVATE KEY-----\n")
+        .unwrap();
+    git(dir.path(), &["add", "client.pem"]);
+    git(dir.path(), &["commit", "-qm", "oops"]);
+    let (ok, out) = without_a_database(dir.path(), &["release"]);
+    assert!(!ok && out.contains("private key in the clear") && out.contains("client.pem"), "{out}");
+    git(dir.path(), &["rm", "-q", "client.pem"]);
+    git(dir.path(), &["commit", "-qm", "no key"]);
+
+    // A file the code imports, never added to git: new, so not committed; with --uncommitted it's
+    // carried. Ignored instead, the release can't load the code, and says why.
+    std::fs::write(dir.path().join("lib/extra.ts"), "export const E = 1;\n").unwrap();
+    let lab = dir.path().join(format!("interfaces/{name}/lab.ts"));
+    let original = std::fs::read_to_string(&lab).unwrap();
+    std::fs::write(&lab, format!("import {{ E }} from \"../../lib/extra.ts\";\nexport const e = E;\n{original}"))
+        .unwrap();
+    git(dir.path(), &["commit", "-qam", "imports extra"]);
+    let (ok, out) = without_a_database(dir.path(), &["release", "--no-tests"]);
+    assert!(!ok && out.contains("aren't committed") && out.contains("lib/extra.ts"), "{out}");
+    std::fs::write(dir.path().join(".gitignore"), "out/\n*.key\n*.log\nlib/extra.ts\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "ignore extra"]);
+    let (ok, out) = without_a_database(dir.path(), &["release", "--no-tests"]);
+    assert!(!ok && out.contains("a file it imports must be committed"), "{out}");
+    assert!(!out.contains("ductus-release-"), "the temporary copy's path shows: {out}");
+    std::fs::write(&lab, &original).unwrap();
+    std::fs::remove_file(dir.path().join("lib/extra.ts")).unwrap();
+    git(dir.path(), &["commit", "-qam", "no extra"]);
+
+    // Code imported from outside the project (by an absolute path, which loads anywhere here).
+    #[cfg(unix)]
+    {
+        let elsewhere = tempfile::tempdir().unwrap();
+        let shared = elsewhere.path().join("shared.ts");
+        std::fs::write(&shared, "export const X = 1;\n").unwrap();
+        let lab = dir.path().join(format!("interfaces/{name}/lab.ts"));
+        let text = std::fs::read_to_string(&lab).unwrap();
+        std::fs::write(&lab, format!("import {{ X }} from \"{}\";\nexport const y = X;\n{text}", shared.display()))
+            .unwrap();
+        git(dir.path(), &["commit", "-qam", "shared from elsewhere"]);
+        let (ok, out) = without_a_database(dir.path(), &["release", "--no-tests"]);
+        assert!(
+            !ok && out.contains("from outside the project") && out.contains(&shared.display().to_string()),
+            "{out}"
+        );
+    }
+}
+
+/// `ductus release check` (0.7.4.3.2), the gate: against the environment's database, the tests of
+/// what the release changes there (none when it changes nothing), validate reading only; nothing
+/// written into the project, the database or the temporary folder it used; a changed file found.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_gate_tests_what_a_release_changes_and_writes_nothing() {
+    let port = free_port();
+    let (dir, name) = release_project(port);
+    let bundle = release_json(dir.path(), &["-m", "first"]);
+    let file = bundle["file"].as_str().unwrap().to_string();
+
+    // Without a database: every test, said.
+    let (ok, out) = without_a_database(dir.path(), &["release", "check", &file, "--env", "prod"]);
+    assert!(ok, "{out}");
+    assert!(out.contains("no database (DUCTUS_DATABASE_URL)") && out.contains("1 passed"), "{out}");
+    assert!(out.contains("passes the gate for prod"), "{out}");
+
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let gate = |file: &str, extra: &[&str]| -> (bool, serde_json::Value) {
+        let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["release", "check", file, "--env", "prod", "--json"])
+            .args(extra)
+            .env("DUCTUS_DATABASE_URL", &db)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let doc = serde_json::from_slice(&out.stdout).unwrap_or_else(|e| {
+            panic!("{e}: {}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr))
+        });
+        (out.status.success(), doc)
+    };
+    let snapshot = |dir: &Path| -> Vec<(String, u64)> {
+        let mut seen = Vec::new();
+        let mut todo = vec![dir.to_path_buf()];
+        while let Some(d) = todo.pop() {
+            for e in std::fs::read_dir(&d).unwrap().flatten() {
+                if e.file_type().unwrap().is_dir() {
+                    todo.push(e.path());
+                } else {
+                    seen.push((e.path().display().to_string(), e.metadata().unwrap().len()));
+                }
+            }
+        }
+        seen.sort();
+        seen
+    };
+    let temporary = || -> usize {
+        std::fs::read_dir(std::env::temp_dir())
+            .unwrap()
+            .flatten()
+            .filter(|e| e.file_name().to_string_lossy().starts_with("ductus-release-"))
+            .count()
+    };
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+
+    // New there: its tests run.
+    let (before, temps) = (snapshot(dir.path()), temporary());
+    let (ok, doc) = gate(&file, &[]);
+    assert!(ok, "{doc:#}");
+    assert_eq!(doc["changes"]["new"], serde_json::json!([name]));
+    assert_eq!(doc["tested"], serde_json::json!([name]));
+    assert_eq!(snapshot(dir.path()), before, "the gate wrote into the project");
+    assert_eq!(temporary(), temps, "the gate left its temporary folder");
+
+    // Deployed (a start records what runs): the same release changes nothing, so no tests run.
+    let log = dir.path().join("engine.log");
+    let engine = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args([
+            "run",
+            "--root",
+            &dir.path().to_string_lossy(),
+            "--threads",
+            "1",
+            "--api-listen",
+            "off",
+            "--env",
+            "prod",
+        ])
+        .env("DUCTUS_DATABASE_URL", &db)
+        .stdout(std::fs::File::create(&log).unwrap())
+        .stderr(std::fs::File::create(dir.path().join("engine.err.log")).unwrap())
+        .spawn()
+        .unwrap();
+    let engine = Child(engine);
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
+    let mut recorded = false;
+    for _ in 0..100 {
+        if !store.current_versions(&[name.as_str()]).await.unwrap().is_empty() {
+            recorded = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(recorded, "{}", std::fs::read_to_string(&log).unwrap());
+    drop(engine);
+    let (ok, doc) = gate(&file, &[]);
+    assert!(ok, "{doc:#}");
+    assert_eq!(doc["changes"]["unchanged"], 1);
+    assert_eq!(doc["tested"], serde_json::json!([]));
+    assert!(doc["checks"].as_array().unwrap().iter().any(|c| c["text"].as_str().unwrap().contains("no tests to run")));
+    let (ok, doc) = gate(&file, &["--all-tests"]);
+    assert!(ok && doc["tested"] == serde_json::json!([name]), "{doc:#}");
+
+    // A release changing the code: its interface's tests run, and a failing one fails the gate.
+    edit(&dir.path().join("lib/codes.ts"), "\"LAB\"", "\"LAB2\"");
+    let changed = release_json(dir.path(), &["--uncommitted", "--no-tests"]);
+    git(dir.path(), &["checkout", "--", "lib/codes.ts"]);
+    let (ok, doc) = gate(changed["file"].as_str().unwrap(), &[]);
+    assert!(!ok, "{doc:#}");
+    assert_eq!(doc["changes"]["changed"], serde_json::json!([name]));
+    let tests = doc["checks"].as_array().unwrap().iter().find(|c| c["section"] == "tests").unwrap();
+    assert!(tests["text"].as_str().unwrap().contains("1 failed"), "{tests:#}");
+    assert!(!doc.to_string().contains("ductus-release-"), "the temporary copy's path shows: {doc:#}");
+
+    // A file changed after the release was made: refused before anything runs.
+    let mut damaged = ductus_runtime::release::read(Path::new(&file)).unwrap();
+    damaged.files[0].bytes.push(b'\n');
+    let path = dir.path().join("damaged.tar.gz");
+    ductus_runtime::release::write(&path, &damaged.manifest, &damaged.ancestry, &damaged.files).unwrap();
+    let (ok, out) = without_a_database(dir.path(), &["release", "check", &path.to_string_lossy(), "--env", "prod"]);
+    assert!(!ok && out.contains("don't match its id"), "{out}");
+}

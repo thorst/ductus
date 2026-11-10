@@ -10,6 +10,7 @@ mod new;
 mod owners;
 mod project;
 mod reference;
+mod release;
 mod replay;
 mod service;
 mod sinks;
@@ -153,9 +154,10 @@ enum Command {
         #[arg(long, default_value = ".")]
         root: PathBuf,
         /// Only this interface: its name, or a file or folder inside its folder
-        /// (`interfaces/adt-in/route.test.ts`), as an editor passes the open file.
+        /// (`interfaces/adt-in/route.test.ts`), as an editor passes the open file. Again for
+        /// another (`--interface adt-in --interface lab-out`).
         #[arg(long)]
-        interface: Option<String>,
+        interface: Vec<String>,
         /// Only the tests whose name contains this text (case matters): `--filter "A31"`.
         #[arg(long)]
         filter: Option<String>,
@@ -322,6 +324,21 @@ enum Command {
         /// compare it with the installed one (`ductus replay`).
         #[arg(long, value_name = "DURATION")]
         replay: Option<String>,
+    },
+    /// Make a release of the project: one file (a .tar.gz) holding exactly what HEAD's commit has
+    /// (the project's folder of it), every interface's code version, the project version, who
+    /// made it, why, from which commit (with its whole history) and the tests' result. Its id is
+    /// a hash of the files it carries, so the same commit gives the same id anywhere. Refuses files
+    /// that aren't committed (unless `--uncommitted`), a private key, and code imported from
+    /// outside the project; runs the tests first (on what the release carries) and refuses when one
+    /// fails. Writes `.ductus/releases/<project>-<id>.tar.gz`. `ductus release check` is the gate
+    /// before a deploy.
+    #[command(args_conflicts_with_subcommands = true, subcommand_negates_reqs = true)]
+    Release {
+        #[command(subcommand)]
+        action: Option<ReleaseAction>,
+        #[command(flatten)]
+        make: ReleaseArgs,
     },
     /// Run a period's messages through this version's code again, sending nothing, and compare what
     /// each destination's code decides (sent and what, filtered, quarantined) with the installed
@@ -820,6 +837,67 @@ enum AlertsAction {
     },
 }
 
+/// What `ductus release` takes to make one.
+#[derive(clap::Args)]
+struct ReleaseArgs {
+    /// Why: a sentence the release carries, shown wherever it goes (`-m "lab feed: new OBX mapping"`).
+    #[arg(short = 'm', long = "message", value_name = "WHY")]
+    reason: Option<String>,
+    /// Carry files that aren't committed as they are in the folder (changed, added, new and not
+    /// ignored; deleted ones left out), instead of refusing. The release lists them, and every
+    /// check of it says so: for trying a release out, not for production.
+    #[arg(long)]
+    uncommitted: bool,
+    /// The release this one replaces, by its whole id or its file: recorded, so a deploy can tell
+    /// whose work it would undo when the project isn't in git (in git, the commit's history says).
+    #[arg(long, value_name = "RELEASE")]
+    over: Option<String>,
+    /// Make it without running the tests; the release says they weren't run, and `ductus release
+    /// check` then runs every interface's.
+    #[arg(long)]
+    no_tests: bool,
+    /// Where to write it: a folder (made when missing if it ends with `/`), or the file's path
+    /// (default `.ductus/releases/` in the project).
+    #[arg(long, value_name = "PATH")]
+    out: Option<PathBuf>,
+    /// One JSON document: the manifest, with the file written, its size and how long it took.
+    #[arg(long)]
+    json: bool,
+    /// The project folder: the one with `interfaces/` and ductus.yaml.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+    /// The environment the tests run in and interface.yaml is read in (the release itself is the
+    /// same for every environment).
+    #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+    env: String,
+}
+
+#[derive(Subcommand)]
+enum ReleaseAction {
+    /// The gate: check a release against an environment before deploying it, changing nothing.
+    /// Unpacks it into a temporary folder (removed after), checks its files against its id, then
+    /// runs `ductus validate` for the environment against its database (reading only) and the
+    /// tests of the interfaces whose code differs from what runs there, each as a child process.
+    /// Exits 1 on any problem. A read-only login is enough (`pg_read_all_data`).
+    Check {
+        /// The release's file (`ductus release` printed it).
+        bundle: PathBuf,
+        /// The environment to check it for: its values, secrets (DUCTUS_SECRET_KEY) and database.
+        #[arg(long, env = "DUCTUS_ENV")]
+        env: String,
+        /// Run every interface's tests, not only those of what the release changes.
+        #[arg(long)]
+        all_tests: bool,
+        /// The environment's database (read-only): what runs there now, and validate's checks
+        /// against it. Without it every test runs and validate checks without a database (said).
+        #[arg(long, env = "DUCTUS_DATABASE_URL", hide_env_values = true)]
+        database_url: Option<String>,
+        /// One JSON document instead of the report.
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum NewCommand {
     /// A working interface (config, code, a test and a sample message) that passes
@@ -1126,7 +1204,8 @@ async fn run(cli: Cli) -> Result<()> {
             // Doctor's report says what failed; the TLS verifier would log each failure again.
             if matches!(cli.command, Command::Doctor { .. }) {
                 "warn,rustls_platform_verifier=off,tiberius=error".into()
-            } else if matches!(cli.command, Command::Upgrade { .. } | Command::Replay { .. }) {
+            } else if matches!(cli.command, Command::Upgrade { .. } | Command::Replay { .. } | Command::Release { .. })
+            {
                 // Their reports say what went wrong, and `--json` (or `--emit`'s lines) must be the
                 // only thing on stdout.
                 "off".into()
@@ -1177,8 +1256,11 @@ async fn run(cli: Cli) -> Result<()> {
             if inspect.is_some() && list {
                 anyhow::bail!("`--list` runs nothing to debug: leave out `--inspect`, or `--list`");
             }
+            if inspect.is_some() && interface.len() > 1 {
+                anyhow::bail!("a debugger attaches to one interface's tests at a time: give one `--interface`");
+            }
             let options = project::TestOptions {
-                interface: interface.as_deref(),
+                interface: &interface,
                 filter: filter.as_deref(),
                 list,
                 json,
@@ -1220,6 +1302,13 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Validate { root, env, database_url, json, read_only } => {
             exit_on_failure(project::validate(&root, &env, database_url, read_only, json).await)
+        }
+        Command::Release {
+            action: Some(ReleaseAction::Check { bundle, env, all_tests, database_url, json }), ..
+        } => exit_on_failure(release::check(release::Check { bundle, env, all_tests, database_url, json }).await),
+        Command::Release { action: None, make } => {
+            let ReleaseArgs { reason, uncommitted, over, no_tests, out, json, root, env } = make;
+            release::make(release::Make { root, env, reason, uncommitted, over, no_tests, out, json }).await
         }
         Command::Upgrade { check: _, json, root, env, database_url, replay } => {
             let options =

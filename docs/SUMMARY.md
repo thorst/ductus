@@ -56,6 +56,7 @@
   - [High availability and lanes](operate/high-availability.md)
   - [Retention and storage](operate/retention.md)
   - [What runs, recorded](operate/deployments.md)
+  - [Releases and the gate](operate/releases.md)
 
 # Upgrade and troubleshoot
 
@@ -97,6 +98,7 @@
   - [Local development](nuances/dev.md)
   - [Upgrades](nuances/upgrades.md)
   - [What runs, recorded](nuances/deployments.md)
+  - [Releases](nuances/releases.md)
   - [Windows](nuances/windows.md)
 - [The shared pool](shared-pool.md)
 - [Database schema](schema.md)
@@ -114,6 +116,7 @@
     - [ductus history](reference/cli/history.md)
     - [ductus validate](reference/cli/validate.md)
     - [ductus upgrade](reference/cli/upgrade.md)
+    - [ductus release](reference/cli/release.md)
     - [ductus replay](reference/cli/replay.md)
     - [ductus handover](reference/cli/handover.md)
     - [ductus new](reference/cli/new.md)

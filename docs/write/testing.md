@@ -27,7 +27,7 @@ the code and checks the configuration against that environment.
 
 | Option | Runs |
 |---|---|
-| `--interface adt-in` | one interface's tests |
+| `--interface adt-in` | one interface's tests; again for more (`--interface adt-in --interface lab-out`). A name that isn't an interface of the project exits 1, naming those there are |
 | `--filter "A31"` | the tests whose name contains the text, in every interface (or the one `--interface` names); case matters. A filter that matches nothing exits 1, so a typo in a CI script can't pass by running nothing ([nuance](../nuances/transforms.md#a-test-filter-matches-part-of-a-name-level-1)) |
 | `--list` | nothing: it lists the tests with where each is, and takes `--interface` and `--filter` too |
 | `--json` | the same, as JSON Lines for an editor or CI ([below](#for-editors-and-ci-json)) |

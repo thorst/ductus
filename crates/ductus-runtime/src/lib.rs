@@ -28,6 +28,7 @@ mod limiter;
 pub mod mssql;
 pub mod ownership;
 pub mod project;
+pub mod release;
 pub mod replay;
 pub mod retention;
 mod schedule;

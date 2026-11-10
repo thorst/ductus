@@ -87,7 +87,7 @@ fn slashes(path: &Path) -> String {
 }
 
 /// The project's folder in the repository's working folder, with `/` ("" at its top).
-fn project_prefix(repository: &gix::Repository, root: &Path) -> Result<String> {
+pub(crate) fn project_prefix(repository: &gix::Repository, root: &Path) -> Result<String> {
     let workdir = repository.workdir().context("the repository has no working folder (a bare repository)")?;
     let workdir = std::fs::canonicalize(workdir).with_context(|| format!("finding {}", workdir.display()))?;
     let root = std::fs::canonicalize(root).with_context(|| format!("finding {}", root.display()))?;
