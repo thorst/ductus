@@ -79,5 +79,5 @@ echo "ALL CHECKS PASSED"
 size_mb=$(du -sm "$CARGO_TARGET_DIR" 2>/dev/null | cut -f1)
 echo "build outputs: $CARGO_TARGET_DIR $(awk "BEGIN { printf \"%.1f\", ${size_mb:-0} / 1024 }") GB"
 if [ "${size_mb:-0}" -gt $((30 * 1024)) ]; then
-  echo "  over 30 GB: run \`cargo clean\` (the next check.sh builds everything again); in WSL, then compact its disk (CLAUDE.md, \"WSL's disk lives on D:\")"
+  echo "  over 30 GB: run \`cargo clean\` (the next check.sh builds everything again); in WSL, then compact its disk (dev-guide/scripts-ci-wsl.md, \"WSL's disk lives on D:\")"
 fi
