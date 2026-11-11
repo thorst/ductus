@@ -244,7 +244,7 @@ function NewUser({ onClose }: { onClose: () => void }) {
         </label>
       </div>
       <RolePicker value={role} onChange={setRole} name="new-user-role" />
-      <PermissionPicker value={permissions} onChange={setPermissions} isAdmin={role === "admin"} />
+      <PermissionPicker value={permissions} onChange={setPermissions} role={role} />
       <label className="block text-sm">
         <span className="text-muted">Temporary password</span>
         <Input
@@ -289,7 +289,7 @@ function EditUser({ user, onClose }: { user: Schemas["UserInfo"]; onClose: () =>
         </label>
       </div>
       <RolePicker value={role} onChange={setRole} name="edit-user-role" />
-      <PermissionPicker value={permissions} onChange={setPermissions} isAdmin={role === "admin"} />
+      <PermissionPicker value={permissions} onChange={setPermissions} role={role} />
     </ActionDialog>
   );
 }

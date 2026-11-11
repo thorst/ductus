@@ -43,6 +43,8 @@ export const ACTIONS: Record<string, string> = {
   "engine.refused": "Engine start refused",
   "interface.stopped": "Interface stopped",
   "interface.partitions_raised": "Interface lanes raised with messages waiting",
+  "release.store": "Stored a release",
+  "release.check": "Checked a release",
 };
 
 /** Why a start was refused, from its detail (`reason`: `owned` or `lanes`). */

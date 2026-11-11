@@ -116,7 +116,7 @@ function Tokens() {
           <Input className="mt-1" value={name} placeholder="monitoring" onChange={(e) => setName(e.target.value)} />
         </label>
         <RolePicker value={role} onChange={setRole} />
-        <PermissionPicker value={permissions} onChange={setPermissions} isAdmin={role === "admin"} />
+        <PermissionPicker value={permissions} onChange={setPermissions} role={role} />
       </ActionDialog>
       {created && <TokenSecret created={created} onClose={() => setCreated(null)} />}
       {revoking && (

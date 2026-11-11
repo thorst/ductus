@@ -470,53 +470,62 @@ pub fn write(path: &Path, manifest: &Manifest, ancestry: &[u8], files: &[File]) 
 /// recomputed from the files equal to the manifest's (else it was damaged or changed).
 pub fn read(path: &Path) -> Result<Bundle> {
     let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
-    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(std::io::BufReader::new(file)));
+    read_from(std::io::BufReader::new(file), &path.display().to_string())
+}
+
+/// `read`, of a release received whole (`POST /releases`); `name` says which in errors.
+pub fn read_bytes(bytes: &[u8], name: &str) -> Result<Bundle> {
+    read_from(bytes, name)
+}
+
+fn read_from(reader: impl Read, source: &str) -> Result<Bundle> {
+    let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(reader));
     let mut manifest: Option<Manifest> = None;
     let mut ancestry = Vec::new();
     let mut files = Vec::new();
     let mut seen = BTreeSet::new();
     let mut total = 0u64;
-    let not_a_release = || format!("{} isn't a Ductus release (made by `ductus release`)", path.display());
+    let not_a_release = || format!("{} isn't a Ductus release (made by `ductus release`)", source);
     for (n, entry) in archive.entries().with_context(not_a_release)?.enumerate() {
         let mut entry = entry.with_context(not_a_release)?;
-        let name = entry.path().with_context(not_a_release)?.to_string_lossy().replace('\\', "/");
+        let entry_name = entry.path().with_context(not_a_release)?.to_string_lossy().replace('\\', "/");
         // A folder carries nothing (`ductus release` writes none; `tar` does, packing one again).
         if entry.header().entry_type() == tar::EntryType::Directory && n > 0 {
             continue;
         }
         if entry.header().entry_type() != tar::EntryType::Regular {
-            bail!("{}: `{name}` isn't a plain file", path.display());
+            bail!("{}: `{entry_name}` isn't a plain file", source);
         }
         total += entry.size();
         if total > MAX_BYTES {
-            bail!("{}: more than {} MB unpacked: not a release this version reads", path.display(), MAX_BYTES >> 20);
+            bail!("{}: more than {} MB unpacked: not a release this version reads", source, MAX_BYTES >> 20);
         }
         let mut bytes = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut bytes).with_context(|| format!("reading `{name}` in {}", path.display()))?;
+        entry.read_to_end(&mut bytes).with_context(|| format!("reading `{entry_name}` in {}", source))?;
         if n == 0 {
-            if name != MANIFEST {
+            if entry_name != MANIFEST {
                 bail!("{}", not_a_release());
             }
             let m: Manifest = serde_json::from_slice(&bytes)
-                .with_context(|| format!("{}: reading its manifest ({MANIFEST})", path.display()))?;
+                .with_context(|| format!("{}: reading its manifest ({MANIFEST})", source))?;
             if m.format > FORMAT {
                 bail!(
                     "{}: release format {} is newer than this version reads ({FORMAT}): check it with the version that made it ({})",
-                    path.display(),
+                    source,
                     m.format,
                     m.made.binary
                 );
             }
             manifest = Some(m);
-        } else if name == ANCESTRY {
+        } else if entry_name == ANCESTRY {
             ancestry = bytes;
-        } else if let Some(relative) = name.strip_prefix(FILES) {
+        } else if let Some(relative) = entry_name.strip_prefix(FILES) {
             if !plain(relative) || !seen.insert(relative.to_string()) {
-                bail!("{}: `{name}` isn't a path a release carries (or is there twice)", path.display());
+                bail!("{}: `{entry_name}` isn't a path a release carries (or is there twice)", source);
             }
             files.push(File::new(relative, bytes));
         } else {
-            bail!("{}: unexpected `{name}` (not a release this version reads)", path.display());
+            bail!("{}: unexpected `{entry_name}` (not a release this version reads)", source);
         }
     }
     let manifest = manifest.with_context(not_a_release)?;
@@ -524,7 +533,7 @@ pub fn read(path: &Path) -> Result<Bundle> {
     if recomputed != manifest.id {
         bail!(
             "{}: its files don't match its id (the manifest says {}, the files are {}): the file was damaged or changed after it was made",
-            path.display(),
+            source,
             short(&manifest.id),
             short(&recomputed)
         );

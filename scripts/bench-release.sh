@@ -6,7 +6,10 @@
 #     the manifest's and the ancestry's;
 #   - `ductus release check --env prod`: before anything ran (every interface new: all tests),
 #     after a start ran the commit (nothing changes: no tests), and for a commit changing the shared
-#     code of a tenth of the interfaces (those tested).
+#     code of a tenth of the interfaces (those tested);
+#   - 0.7.4.3.3, releases stored on the engine (its API): `POST /releases` (new, the next commit
+#     beside it, one stored before), the database's growth, `POST /releases/{id}/check`, and the
+#     engine's intake (`ductus gen` to one interface) alone and while a check runs.
 #
 #   bash scripts/bench-release.sh                 # COUNT=1001 ROUNDS=3 by default
 set -euo pipefail
@@ -138,3 +141,51 @@ grep "interface(s) change" "$WORK/out" || true
 for r in $(seq 1 "$ROUNDS"); do
   timed "check, nothing changes, again #$r" "$BIN" release check "$FILE" --env prod
 done
+
+echo "== stored on the engine (POST /releases) and checked there"
+API=17762
+TOKEN=$("$BIN" token create bench-release --role operator --permission deploy 2>/dev/null)
+"$BIN" run --root "$P" --env prod --api-listen "127.0.0.1:$API" >"$WORK/api.log" 2>&1 &
+ENGINE=$!
+until grep "started interfaces=" "$WORK/api.log" >/dev/null 2>&1; do sleep 0.5; done
+sleep 2
+size() {
+  psql -tA "$URL" -c "SELECT sum(pg_total_relation_size(t)) FROM unnest(ARRAY['releases','release_folders','release_blobs','release_checks','code_files']::regclass[]) t"
+}
+post() {
+  local label=$1 file=$2 before
+  before=$(size)
+  curl -sS -o "$WORK/post.json" -w '%{http_code} %{time_total}\n' -H "Authorization: Bearer $TOKEN" \
+    -H "Content-Type: application/gzip" --data-binary @"$file" "http://127.0.0.1:$API/api/v1/releases" >"$WORK/post.time"
+  read -r code secs <"$WORK/post.time"
+  printf '%-34s %6.2f s  HTTP %s  database +%d bytes  %s\n' "$label" "$secs" "$code" $(($(size) - before)) \
+    "$(grep -o '"new_folders":[0-9]*,"new_files":[0-9]*' "$WORK/post.json")"
+}
+post "store the first commit's" "$FILE"
+post "store the next commit's" "$WORK/changed.tar.gz"
+post "store the first again (stored)" "$WORK/r.tar.gz"
+check() {
+  local label=$1 id=$2 query=${3:-}
+  curl -sS -o "$WORK/check.json" -w '%{time_total}\n' -X POST -H "Authorization: Bearer $TOKEN" \
+    "http://127.0.0.1:$API/api/v1/releases/$id/check$query" >"$WORK/check.time"
+  printf '%-34s %6.2f s  %s\n' "$label" "$(cat "$WORK/check.time")" "$(grep -o '"ok":[a-z]*,"problems":[0-9]*' "$WORK/check.json" | head -1)"
+}
+NEXT_ID=$(tar xzOf "$WORK/changed.tar.gz" release.json | sed -n 's/^{"format":1,"id":"\([0-9a-f]\{12\}\).*/\1/p')
+FIRST_ID=$(tar xzOf "$FILE" release.json | sed -n 's/^{"format":1,"id":"\([0-9a-f]\{12\}\).*/\1/p')
+for r in $(seq 1 "$ROUNDS"); do
+  check "API check, nothing changes #$r" "$NEXT_ID"
+  check "API check, a tenth changes #$r" "$FIRST_ID"
+  check "API check, --all-tests #$r" "$NEXT_ID" "?all_tests=true"
+done
+echo "-- the engine's intake (20,000 messages to v-0, 4 connections), alone and during a check"
+for r in $(seq 1 "$ROUNDS"); do
+  "$BIN" gen --to 127.0.0.1:20000 --count 20000 --connections 4 2>&1 | tail -1 | sed "s/^/alone #$r: /"
+  check_bg() { curl -sS -o /dev/null -X POST -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$API/api/v1/releases/$NEXT_ID/check?all_tests=true"; }
+  check_bg &
+  CHECK=$!
+  sleep 0.5
+  "$BIN" gen --to 127.0.0.1:20000 --count 20000 --connections 4 --offset $((r * 100000)) 2>&1 | tail -1 | sed "s/^/during a check #$r: /"
+  wait $CHECK
+done
+kill -INT $ENGINE
+wait $ENGINE || true

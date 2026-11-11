@@ -165,7 +165,9 @@ pub fn remember_executable() {
 }
 
 #[cfg(target_os = "linux")]
-fn executable() -> Result<PathBuf> {
+/// This binary's path, as it was started (after an upgrade replaced the file: the new binary,
+/// what the next start runs). Also what the API's release check runs (`api::releases`).
+pub fn executable() -> Result<PathBuf> {
     use anyhow::Context;
     match EXECUTABLE.get().cloned().flatten() {
         Some(path) => Ok(path),

@@ -3,7 +3,7 @@
 //! only keeps the hash.
 
 use crate::Store;
-use crate::api::{Role, clean_permissions};
+use crate::api::{Role, allowed_for, clean_permissions};
 use crate::audit::{self, Audit};
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
@@ -158,6 +158,7 @@ impl Store {
     pub async fn create_user(&self, new: &NewUser<'_>, audit: &Audit<'_>) -> Result<User> {
         let username = clean_username(new.username)?;
         let permissions = clean_permissions(new.permissions)?;
+        allowed_for(new.role, &permissions)?;
         let mut tx = self.pool.begin().await.context("creating user")?;
         let sql = format!(
             "INSERT INTO users (username, display_name, email, role, permissions, password_hash, must_change_password, source)
@@ -268,6 +269,8 @@ impl Store {
         if before > 0 && admins == 0 {
             bail!("that would leave no admin who can sign in: make another user an admin first");
         }
+        // The role and permissions as they would be (a demotion to viewer must drop `deploy` too).
+        allowed_for(user.role, &user.permissions)?;
         if let Some((display_name, email)) = old {
             if display_name != user.display_name {
                 keep_former(&mut tx, id, "display_name", &display_name).await?;

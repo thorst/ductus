@@ -6,11 +6,12 @@ interface's code version, who made it, why, from which commit, and whether its t
 and database) before anything deploys it, and changes nothing. This page is for whoever ships
 changes: a developer, a release manager, a CI pipeline.
 
-Releases are new in 0.7.4.3. Today you make them and check them from a shell or CI; storing them
-in the engine's database, deploying them with `ductus deploy` and promoting one from test to
-prod come next. Until then you deploy as before (`git pull` and
-`systemctl reload ductus`, [what runs, recorded](deployments.md)), and a release is the thing
-you check first and keep as the record of what you meant to ship.
+Releases are new in 0.7.4.3. Today you make them, check them from a shell or CI, and
+[store them on an engine](#store-a-release-on-an-engine) and have it check them against its own
+environment; deploying them with `ductus deploy` and promoting one from test to prod come next.
+Until then you deploy as before (`git pull` and `systemctl reload ductus`,
+[what runs, recorded](deployments.md)), and a release is the thing you check first and keep as
+the record of what you meant to ship.
 
 **When not to bother:** a project you deploy only to your own machine with `ductus dev`. A
 release earns its place once code goes through review, or to more than one environment.
@@ -304,6 +305,192 @@ configuration and code; it doesn't send a message anywhere. To compare what the 
 with what the running code decided on real traffic, run [`ductus replay`](../upgrade.md) as
 well.
 
+## Store a release on an engine
+
+An engine keeps releases in its database, so every engine on that database (and, soon, the web
+UI's Releases page) sees them, and deploying or rolling back will be choosing one. CI stores the
+release it made, then asks the engine to check it there:
+
+| Call | What it does | Who |
+|---|---|---|
+| `POST /api/v1/releases` | Stores the release file (the body, as `ductus release` wrote it) | `deploy` permission |
+| `GET /api/v1/releases` | The releases stored, newest first, each with its last check per environment | anyone signed in |
+| `GET /api/v1/releases/{id}` | One release (its id or first 12 characters): its manifest and every check, with reports | anyone signed in |
+| `POST /api/v1/releases/{id}/check` | The gate, run by the engine against its own environment and database | `deploy` permission |
+
+Every option and answer: the [REST API reference](../reference/api/releases.md).
+
+**The `deploy` permission** is for operators and admins, given like `payloads`
+([people](../configure/people.md#roles-and-permissions)): a CI token that ships changes, the
+people who release. A viewer can't have it:
+
+```text
+$ ductus token create ci-release --role viewer --permission deploy
+Error: `deploy` is for operators and admins, not viewers: make it an operator, or leave `deploy` out
+```
+
+(The demo's token names are its own; the outputs are what it printed.)
+
+### Store it
+
+```text
+$ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/gzip" --data-binary @.ductus/releases/integrations-212583ebcc72.tar.gz "$DUCTUS_URL/api/v1/releases" | python3 -m json.tool
+{
+    "new": true,
+    "id": "212583ebcc729254a9bb2366361180b55b372e46a383f5f7c03eacfd4dcbbef2",
+    "short": "212583ebcc72",
+    "project": "integrations",
+    "made_at": "2026-11-10T22:41:41Z",
+    "made_by": "todd",
+    "reason": "archive: MSH-6",
+    "commit": "d68fbc34cb4188c2c777b57d799de7a9bb24739c",
+    "interfaces": 1,
+    "files": 13,
+    "bytes": 7829,
+    "stored_at": "2026-11-10T22:41:44.079061Z",
+    "stored_by": "release-demo-deploy-4574",
+    "checks": [],
+    "new_folders": 4,
+    "new_files": 11
+}
+```
+
+The engine reads the release as `ductus release check` does: its files must match its id, or it's
+refused (400) before anything is stored; a release carrying a private key is refused too. It
+stores only what the database doesn't have yet: each text once (shared with the
+[code versions](deployments.md#the-code-version) engines record: 2 of these 13 files were there
+already, from the engine's start), each folder's list of files once. A release that changes ten
+interfaces of a thousand adds about ten folders and their changed files.
+
+**The same release again** (the same commit, made again with another reason) is the same id:
+stored once, said so (200, `"new": false`), nothing changed. It keeps the first one's manifest
+([nuance](../nuances/releases.md#the-same-release-stored-twice-is-stored-once-with-its-first-manifest-level-2)):
+
+```text
+$ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/gzip" --data-binary @/home/ann/again.tar.gz "$DUCTUS_URL/api/v1/releases" | python3 -m json.tool | head -4
+{
+    "new": false,
+    "id": "212583ebcc729254a9bb2366361180b55b372e46a383f5f7c03eacfd4dcbbef2",
+    "short": "212583ebcc72",
+```
+
+Without the permission:
+
+```text
+$ curl -sS -H "Authorization: Bearer $VIEWER" -H "Content-Type: application/gzip" --data-binary @.ductus/releases/integrations-212583ebcc72.tar.gz "$DUCTUS_URL/api/v1/releases"
+{"error":"`release-demo-viewer-4574` doesn't have the `deploy` permission: ask an admin for it"}
+```
+
+### Check it there
+
+`POST /releases/{id}/check` runs [the gate](#the-gate-ductus-release-check) on the engine's
+server, with the engine's environment, its secrets and its database: what `ductus release
+check --env prod` does on a prod server, without anyone logging in to one. `?all_tests=true` is
+`--all-tests`. It answers when the check ends, with the report `ductus release check --json`
+prints (here the engine already ran that commit, so nothing changes; `all_tests` ran its test
+anyway):
+
+```text
+$ curl -sS -X POST -H "Authorization: Bearer $TOKEN" "$DUCTUS_URL/api/v1/releases/212583ebcc72/check?all_tests=true" | python3 -m json.tool
+{
+    "id": 6,
+    "at": "2026-11-10T23:54:24.899551328Z",
+    "environment": "prod",
+    "instance": "18e6d43dc5f3ff0f-433b",
+    "host": "DESKTOP-GCT6E6V",
+    "by": "release-demo-deploy-16736",
+    "ok": true,
+    "problems": 0,
+    "seconds": 0.93,
+    "report": {
+        "release": "212583ebcc729254a9bb2366361180b55b372e46a383f5f7c03eacfd4dcbbef2",
+        "environment": "prod",
+        "ok": true,
+        "problems": 0,
+        "seconds": 0.92,
+        "checks": [
+            {
+                "section": "release",
+                "level": "ok",
+                "text": "13 file(s) match its id 212583ebcc729254a9bb2366361180b55b372e46a383f5f7c03eacfd4dcbbef2",
+                "more": []
+            },
+            {
+                "section": "release",
+                "level": "ok",
+                "text": "made by todd on DESKTOP-GCT6E6V at 2026-11-10T23:54:21Z with 0.7.0-dev: archive: MSH-6",
+                "more": []
+            },
+            {
+                "section": "release",
+                "level": "ok",
+                "text": "from commit 40fba69d6f06 (2 commit(s) of history)",
+                "more": []
+            },
+            {
+                "section": "release",
+                "level": "ok",
+                "text": "its tests passed when it was made (1 in environment dev)",
+                "more": []
+            },
+            {
+                "section": "environment",
+                "level": "ok",
+                "text": "0 interface(s) change, 0 new there, 1 as they run now",
+                "more": []
+            },
+            {
+                "section": "validate",
+                "level": "ok",
+                "text": "valid",
+                "more": [
+                    "\u26a0 release-demo-adt: about.from: add the sending system's `application` or `vendor`",
+                    "\u26a0 release-demo-adt: about.to: add the receiving system's `application` or `vendor`"
+                ]
+            },
+            {
+                "section": "tests",
+                "level": "ok",
+                "text": "every interface's (--all-tests): 1 passed in 0.0 s",
+                "more": []
+            }
+        ],
+        "tested": [
+            "release-demo-adt"
+        ],
+        "changes": {
+            "changed": [],
+            "new": [],
+            "unchanged": 1
+        },
+        "validate": {
+            "ok": true,
+            "output": "environment: prod\n\u2713 release-demo-adt: config and code load\n\u26a0 release-demo-adt: about.from: add the sending system's `application` or `vendor`\n\u26a0 release-demo-adt: about.to: add the receiving system's `application` or `vendor`\n  (warnings: `ductus impact` can't find what isn't named; `require_about: true` in ductus.yaml makes them errors)\n\u2713 database: TLS 1.3, not verified (sslmode=prefer): the server's certificate isn't checked (on this machine)\n\u2713 database: every interface's lanes reach the messages waiting for it\n\u2713 types: no errors\n\nvalid\n"
+        }
+    }
+}
+```
+
+`ok` is what CI decides on. The check is kept with the release (`GET /releases` shows the last one
+per environment, `GET /releases/{id}` every one with its report) and is in the audit log
+(`release.check`), as is storing one (`release.store`).
+
+- **It runs the release's code** on that server with that environment's secrets: hence the
+  `deploy` permission
+  ([nuance](../nuances/releases.md#checking-a-release-on-an-engine-runs-its-code-there-with-that-environments-secrets-level-2)).
+- **It shares the server with the engine** for those seconds: measured at a thousand interfaces,
+  one interface's intake fell from ~800 to ~650 messages a second over a run overlapping a check,
+  nothing refused. It **runs one at a time** per engine: a second check while one runs is refused
+  with 409 ([nuance](../nuances/releases.md#a-check-on-the-engine-slows-its-intake-while-it-runs-and-runs-one-at-a-time-level-3)).
+- **It changes nothing** but its own record: the engine's database is read-only to it, as for
+  `ductus release check`.
+- **Stored releases are kept**
+  ([nuance](../nuances/releases.md#stored-releases-are-kept-level-3)).
+
+In CI: `ductus release --json --out dist/` (its `id` and `file` are in the JSON), the two calls
+above with the environment's URL and a token that has `deploy`, then fail the job when the
+check's `ok` is false. Retry after a pause on 409 (another check is running there).
+
 ## Measured
 
 On a 4-core (8-thread) Linux machine, against a local Postgres (`scripts/bench-release.sh`;
@@ -319,9 +506,24 @@ What grows with the project is `validate`, which the gate always runs whole (abo
 gate at a thousand interfaces); the tests grow only with what the release changes. A release
 made on Windows from a CRLF checkout has the same id as one made on Linux (measured natively).
 
+Stored on an engine, the 1,001-interface project (the engine running the next commit):
+
+| | Time | The database grew by |
+|---|---|---|
+| `POST /releases`, the first release | 0.34 s | 1.3 MB |
+| `POST /releases`, the next commit (a shared file changed under 101 interfaces) | 0.17 s | 131 KB |
+| `POST /releases`, one stored before | 0.04 s | nothing |
+| `POST /releases/{id}/check`, nothing changes / a tenth changes / `all_tests` | 5.9–6.1 s / 6.3–6.5 s / 9.8–10.1 s | a check's row |
+
+The engine's intake on one interface (20,000 HL7 messages over 4 connections, the same machine
+and Postgres): 799–809 messages a second alone, 641–655 over a run during which one `all_tests`
+check ran; nothing refused or lost.
+
 ## Try it
 
 `scripts/demo-release.sh` does all of the above on a fresh `ductus init` project against your
 database: a release, the same id from a CRLF checkout, a change not committed refused, the gate
 without and with the database, nothing changed after a start, a commit's change tested, an edited
-release refused, and nothing written.
+release refused, and nothing written; then, on an engine, `deploy` refused to a viewer, the
+release stored, stored again (the same id), refused without the permission, checked by the engine,
+and listed.

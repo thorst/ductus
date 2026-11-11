@@ -31,4 +31,5 @@ A token acts with its own role, and a person's token never above that person. Re
 | [Alerts](alerts.md) | Alerts: what is wrong, acknowledging and silencing, and where notifications go. |
 | [Audit](audit.md) | Who did what: the audit log (the `audit` permission) and your own activity. |
 | [Retention](retention.md) | How long messages are kept, and changes to it. |
+| [Releases](releases.md) | Releases made by `ductus release`: stored here, and checked against this engine's environment (the `deploy` permission). |
 | [Tokens](tokens.md) | API tokens (admin). |

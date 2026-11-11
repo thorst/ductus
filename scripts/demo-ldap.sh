@@ -150,7 +150,7 @@ for who in ada olaf anna nested; do
   echo "   test-user-$who: $code, $(js "f\"{d['role']} {','.join(d['permissions']) or '-'}\"")"
 done
 as test-user-ada /session >/dev/null
-[ "$(js "d['role'], sorted(d['permissions'])")" = "admin ['audit', 'payloads']" ] || fail+=" ada($(cat "$P/answer"))"
+[ "$(js "d['role'], sorted(d['permissions'])")" = "admin ['audit', 'deploy', 'payloads']" ] || fail+=" ada($(cat "$P/answer"))"
 as test-user-nested /session >/dev/null
 [ "$(js "d['role']")" = operator ] || fail+=" nested-groups"
 # Nina's first sign-in is her account the engine made: one account, signed in now.

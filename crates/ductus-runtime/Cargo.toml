@@ -41,6 +41,8 @@ russh-sftp = "3.0.1"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 sha2 = "0.10.9"
+# A release check's archive (`api/releases.rs`); already in the tree (the CLI's).
+tempfile = "3.27.0"
 # Already in the tree through tokio: TCP keepalive on accepted connections (`allow::keepalive`).
 socket2 = "0.6.5"
 sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "json", "tls-rustls-aws-lc-rs"] }
@@ -71,4 +73,3 @@ flate2 = "1.1.10"
 # Its `testing` helpers: the throwaway TLS Postgres (`PgTls`).
 ductus-store = { path = "../ductus-store", features = ["testing"] }
 serde_yaml_ng = "0.10.0"
-tempfile = "3.27.0"

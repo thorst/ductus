@@ -221,8 +221,8 @@ pub struct LdapGroups {
     #[cfg_attr(test, schemars(with = "crate::schema::shapes::OneOrMany"))]
     pub viewer: Vec<String>,
     /// Groups that add a permission on top of the role: `payloads` (read message contents,
-    /// usually patient data) and `audit` (read the audit log). Admins have both anyway. Default:
-    /// none.
+    /// usually patient data), `audit` (read the audit log) and `deploy` (store and check
+    /// releases; operators and admins only). Admins have them all anyway. Default: none.
     #[serde(default)]
     pub permissions: LdapPermissionGroups,
 }
@@ -243,6 +243,14 @@ pub struct LdapPermissionGroups {
     #[serde(default, deserialize_with = "one_or_many")]
     #[cfg_attr(test, schemars(with = "crate::schema::shapes::OneOrMany"))]
     pub audit: Vec<String>,
+    /// The group or groups whose members may store releases on an engine and check them against
+    /// its environment (and, from 0.7.4.4, deploy them): what they deploy runs as interface code
+    /// with every secret and payload, so give it as carefully as `payloads`. Only operators and
+    /// admins get it: a viewer in this group doesn't. Default: none. Example: `deploy: "CN=Ductus
+    /// Release Managers,OU=Groups,DC=hospital,DC=org"`.
+    #[serde(default, deserialize_with = "one_or_many")]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::OneOrMany"))]
+    pub deploy: Vec<String>,
 }
 
 fn default_user_filter() -> String {
@@ -377,7 +385,7 @@ impl LdapGroups {
     /// Every DN named, as written.
     pub fn all(&self) -> impl Iterator<Item = &String> {
         let p = &self.permissions;
-        self.admin.iter().chain(&self.operator).chain(&self.viewer).chain(&p.payloads).chain(&p.audit)
+        self.admin.iter().chain(&self.operator).chain(&self.viewer).chain(&p.payloads).chain(&p.audit).chain(&p.deploy)
     }
 
     /// What membership of `groups` (normalized DNs, see `normalize_dn`) gives: the highest role
@@ -400,6 +408,10 @@ impl LdapGroups {
         }
         if any(&self.permissions.audit) {
             permissions.push("audit".to_string());
+        }
+        // `deploy` is for operators and above (`ductus_store::PERMISSIONS`).
+        if any(&self.permissions.deploy) && role != DirectoryRole::Viewer {
+            permissions.push("deploy".to_string());
         }
         Some(Access { role, permissions })
     }
@@ -549,12 +561,21 @@ mod tests {
     #[test]
     fn the_highest_role_group_wins_and_permissions_only_add() {
         let a = auth(&format!(
-            "{BASE}groups:\n  admin: CN=Admins,DC=h\n  operator:\n    - CN=Ops,DC=h\n    - CN=Night Ops,DC=h\n  viewer: CN=Viewers,DC=h\n  permissions:\n    payloads: CN=PHI,DC=h\n    audit: ['CN=Audit,DC=h']\n"
+            "{BASE}groups:\n  admin: CN=Admins,DC=h\n  operator:\n    - CN=Ops,DC=h\n    - CN=Night Ops,DC=h\n  viewer: CN=Viewers,DC=h\n  permissions:\n    payloads: CN=PHI,DC=h\n    audit: ['CN=Audit,DC=h']\n    deploy: CN=Release,DC=h\n"
         ))
         .unwrap();
         let set = |dns: &[&str]| dns.iter().map(|d| normalize_dn(d)).collect::<BTreeSet<_>>();
         let access = |dns: &[&str]| a.groups.access(&set(dns));
         assert_eq!(access(&["cn=viewers,dc=h"]), Some(Access { role: DirectoryRole::Viewer, permissions: vec![] }));
+        assert_eq!(
+            access(&["CN=Viewers,DC=h", "CN=Release,DC=h"]),
+            Some(Access { role: DirectoryRole::Viewer, permissions: vec![] }),
+            "deploy is for operators and above"
+        );
+        assert_eq!(
+            access(&["CN=Ops,DC=h", "CN=Release,DC=h"]),
+            Some(Access { role: DirectoryRole::Operator, permissions: vec!["deploy".into()] })
+        );
         assert_eq!(
             access(&["CN=Viewers, DC=h", "CN=Night Ops,DC=h", "CN=PHI,DC=h"]),
             Some(Access { role: DirectoryRole::Operator, permissions: vec!["payloads".into()] })
@@ -566,7 +587,7 @@ mod tests {
         assert_eq!(access(&["CN=PHI,DC=h", "CN=Audit,DC=h"]), None, "permissions without a role give nothing");
         assert_eq!(access(&["CN=Other,DC=h"]), None);
         assert_eq!(access(&[]), None);
-        assert_eq!(a.groups.all().count(), 6);
+        assert_eq!(a.groups.all().count(), 7);
     }
 
     #[test]

@@ -4099,3 +4099,141 @@ async fn a_delivery_names_the_code_that_decided_it() {
     assert_eq!((last.action.as_str(), last.previous_code_version.as_deref()), ("dismiss", Some(v.hash.as_slice())));
     forget_deployments(&pool, &env).await;
 }
+
+/// A test release's files: unique texts (a `code_files` row is shared by content), a binary file,
+/// files in two interface folders, `lib/` and the top.
+fn release_files(tag: &str, lab: &str) -> Vec<(String, Vec<u8>, bool)> {
+    vec![
+        ("ductus.yaml".into(), format!("# {tag}\n").into_bytes(), false),
+        ("lib/codes.ts".into(), format!("export const tag = \"{tag}\";\n").into_bytes(), false),
+        ("interfaces/adt/interface.yaml".into(), format!("name: adt-{tag}\n").into_bytes(), false),
+        ("interfaces/adt/fixtures/logo.png".into(), [b"\x89PNG\0".as_slice(), tag.as_bytes()].concat(), true),
+        ("interfaces/lab/lab.ts".into(), format!("// {tag} {lab}\n").into_bytes(), false),
+    ]
+}
+
+async fn store_test_release(
+    store: &Store,
+    id: &[u8],
+    files: &[(String, Vec<u8>, bool)],
+    reason: &str,
+) -> ductus_store::ReleaseStored {
+    use sha2::Digest;
+    let hashes: Vec<Vec<u8>> = files.iter().map(|(_, b, _)| sha2::Sha256::digest(b).to_vec()).collect();
+    let files: Vec<ductus_store::ReleaseFile> = files
+        .iter()
+        .zip(&hashes)
+        .map(|((path, bytes, binary), hash)| ductus_store::ReleaseFile { path, hash, bytes, binary: *binary })
+        .collect();
+    let manifest = serde_json::json!({ "id": "test", "made": { "reason": reason } });
+    let new = ductus_store::NewRelease {
+        id,
+        project: "integrations",
+        manifest: &manifest,
+        made_at: Some(chrono::Utc::now()),
+        made_by: "ann",
+        reason: Some(reason),
+        git_commit: None,
+        interfaces: 2,
+        ancestry: &[7u8; 40],
+        files: &files,
+        by: "test-ci",
+    };
+    store.store_release(&new, &quiet()).await.unwrap()
+}
+
+async fn forget_release(pool: &sqlx::PgPool, id: &[u8]) {
+    sqlx::query("DELETE FROM release_checks WHERE release_id = $1").bind(id).execute(pool).await.unwrap();
+    sqlx::query("DELETE FROM releases WHERE id = $1").bind(id).execute(pool).await.unwrap();
+}
+
+/// A release is stored once, by folder: a second release that changes one interface adds one
+/// folder and one file; reading it back gives every file as it was, binary ones byte for byte.
+#[tokio::test]
+async fn releases_are_stored_once_by_folder_and_read_back_whole() {
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let tag = format!("{}-{nanos}", std::process::id());
+    let (first, second) = ([1u8; 32].map(|b| b ^ (nanos as u8)), [2u8; 32].map(|b| b ^ (nanos as u8)));
+    forget_release(&pool, &first).await;
+    forget_release(&pool, &second).await;
+
+    let files = release_files(&tag, "v1");
+    let stored = store_test_release(&store, &first, &files, "first").await;
+    assert!(stored.new);
+    assert_eq!((stored.new_folders, stored.new_files, stored.by.as_str()), (4, 5, "test-ci"));
+    let again = store_test_release(&store, &first, &files, "made again").await;
+    assert!(!again.new, "the same id is stored once");
+    assert_eq!((again.at, again.by.as_str(), again.new_folders), (stored.at, "test-ci", 0));
+
+    let changed = release_files(&tag, "v2");
+    let next = store_test_release(&store, &second, &changed, "second").await;
+    assert_eq!((next.new, next.new_folders, next.new_files), (true, 1, 1), "only interfaces/lab changed");
+
+    let back = store.release_contents(&first).await.unwrap().unwrap();
+    let mut expected = files.clone();
+    expected.sort();
+    assert_eq!(back.files, expected);
+    assert_eq!(back.ancestry, vec![7u8; 40]);
+    assert_eq!(back.manifest["made"]["reason"], "first");
+
+    let found = store.find_release(&ductus_store_hex(&second)[..12]).await.unwrap();
+    assert_eq!(found.as_deref(), Some(second.as_slice()));
+    assert!(store.find_release("0g").await.is_err(), "not hex");
+
+    let report = serde_json::json!({ "ok": true, "checks": [] });
+    let check = ductus_store::NewCheck {
+        release: &second,
+        environment: "prod",
+        instance: "i-1",
+        host: "box",
+        by: "test-ci",
+        ok: true,
+        problems: 0,
+        seconds: 1.5,
+        report: &report,
+    };
+    store.record_check(&check, &quiet()).await.unwrap();
+    store.record_check(&ductus_store::NewCheck { ok: false, problems: 2, ..check.clone() }, &quiet()).await.unwrap();
+    let listed = store.releases(None, 500).await.unwrap();
+    let row = listed.iter().find(|r| r.id == second).expect("listed");
+    assert_eq!((row.files, row.interfaces, row.reason.as_deref()), (5, 2, Some("second")));
+    assert_eq!(row.checks.len(), 1, "the last check per environment");
+    assert!(!row.checks[0].ok && row.checks[0].report.is_null(), "lists leave reports out");
+    let (one, manifest) = store.release(&second).await.unwrap().unwrap();
+    assert_eq!(one.checks.len(), 2);
+    assert_eq!(one.checks[1].report["ok"], true, "every check, newest first, with its report");
+    assert_eq!(manifest["made"]["reason"], "second");
+    assert_eq!(store.release_summary(&first).await.unwrap().unwrap().checks.len(), 0);
+
+    forget_release(&pool, &first).await;
+    forget_release(&pool, &second).await;
+}
+
+fn ductus_store_hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// `deploy` is for operators and above: refused on a viewer when given, and worth nothing to a
+/// viewer however it got there.
+#[test]
+fn deploy_is_for_operators_and_admins() {
+    let deploy = vec!["deploy".to_string()];
+    let refused = ductus_store::allowed_for(Role::Viewer, &deploy).unwrap_err().to_string();
+    assert!(refused.contains("operators and admins, not viewers"), "{refused}");
+    ductus_store::allowed_for(Role::Operator, &deploy).unwrap();
+    ductus_store::allowed_for(Role::Viewer, &["payloads".to_string()]).unwrap();
+    let who = |role| ductus_store::Principal {
+        user_id: None,
+        token_id: Some(1),
+        name: "t".into(),
+        role,
+        permissions: deploy.clone(),
+        must_change_password: false,
+    };
+    assert!(!who(Role::Viewer).can("deploy"));
+    assert!(who(Role::Operator).can("deploy"));
+    assert!(ductus_store::Principal { permissions: vec![], ..who(Role::Admin) }.can("deploy"));
+    assert!(!ductus_store::Principal { permissions: vec![], ..who(Role::Operator) }.can("deploy"));
+}

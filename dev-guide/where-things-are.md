@@ -16,7 +16,7 @@ crates/ductus-store    Postgres store + migrations (crates/ductus-store/migratio
                        sign-in bookkeeping, sessions, appearance); api.rs (tokens, sessions, `Principal`, the message browser);
                        audit.rs (the audit log: `Audit`, `By`, reads, trimming); alerts.rs (alert state, events, the outbox);
                        certificates.rs (certificate_status, doctor_runs); directory.rs (directory accounts: save, refuse, who to check);
-                       engines.rs (the engine lock, interface claims, lanes: stranded and applied)
+                       engines.rs (the engine lock, interface claims, lanes: stranded and applied); releases.rs (releases stored by folder, their checks)
 crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker, errors.rs (an error from interface code as people read it) (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup, its phases timed), code.rs (code versions), git.rs (the project's commit
                        and uncommitted files, gix; an interface's commits; HEAD's ancestry), deployment.rs (who and why; recording each start's deployment; the folder-mode warning), release.rs (a release's files from git, its id, the manifest, the archive), history.rs (one timeline per interface: git, deployments, audit, documentation), ownership.rs (one engine per interface: lock, claims, the
@@ -28,7 +28,7 @@ crates/ductus-runtime  engine: lib.rs (startup, its phases timed), code.rs (code
                        certificates.rs (the engine's own connection checks on `doctor.schedule`, what has a certificate),
                        ldap.rs (directory sign-in: connect, find, bind, groups; the refresh task; tests/ldap.rs against slapd),
                        api/ (REST API: status, messages, actions (resend, edit, quarantine), alerts, reports (impact, owners + reassign
-                       preview, doctor), retention, tokens, users, me (own account), metrics, hotspots,
+                       preview, doctor), retention, releases (stored, listed, checked by running `release check`), tokens, users, me (own account), metrics, hotspots,
                        session (browser sign-in), ui (serves the embedded web UI; build.rs embeds ui/dist)),
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,

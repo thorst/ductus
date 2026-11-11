@@ -2294,6 +2294,228 @@
         }
       }
     },
+    "/releases": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "The releases stored on this database, newest first, each with its last check per environment.",
+        "operationId": "list_releases",
+        "parameters": [
+          {
+            "name": "before",
+            "in": "query",
+            "description": "Releases stored before this time (the previous page's last `stored_at`).",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "description": "How many, newest first (default 50, at most 500).",
+            "required": false,
+            "schema": {
+              "type": "integer",
+              "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ReleaseInfo"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Store a release made by `ductus release` (the `.tar.gz` file as the body). Its id is\nrecomputed from its files (a damaged or changed file is refused); one stored already is said\nso (200) and nothing changes; a new one is 201. Refused when it carries a private key. Needs\nthe `deploy` permission.",
+        "operationId": "store_release",
+        "requestBody": {
+          "description": "The release file (`ductus release` wrote it)",
+          "content": {
+            "application/gzip": {
+              "schema": {
+                "$ref": "#/components/schemas/ReleaseArchive"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Stored before: nothing changed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Stored"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Stored"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Not a release, damaged, or carrying a private key",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/releases/{id}": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "One release: what it is, its manifest, and every check of it (newest first, with reports).",
+        "operationId": "get_release",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The release id, or its first 12 characters (at least 4)",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseDetail"
+                }
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/releases/{id}/check": {
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Check a stored release against this engine's environment: `ductus release check` runs here,\nwith this engine's settings, secrets and database (read-only), as a child process at a lower\nCPU priority. `validate`, then the tests of the interfaces the release changes here. Nothing\nis changed but the check's record (and an audit row). One check at a time per engine (409\nwhile one runs). Answers when it ends (seconds at a thousand interfaces); `ok` says whether it\npassed. Needs the `deploy` permission: the release's code runs with this environment's secrets.",
+        "operationId": "check_release",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The release id, or its first 12 characters",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "all_tests",
+            "in": "query",
+            "description": "Run every interface's tests, not only those of what the release changes here.",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The check ran: `ok` says whether it passed",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckInfo"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Another check is running on this engine",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/retention": {
       "get": {
         "tags": [
@@ -3838,6 +4060,60 @@
           "what": {
             "type": "string",
             "description": "`database patient_db`, `api empi`, `destination adt → lab`, `listener`."
+          }
+        }
+      },
+      "CheckInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "at",
+          "environment",
+          "instance",
+          "host",
+          "by",
+          "ok",
+          "problems",
+          "seconds",
+          "report"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "by": {
+            "type": "string"
+          },
+          "environment": {
+            "type": "string",
+            "description": "The environment checked against, and the engine and server that ran it."
+          },
+          "host": {
+            "type": "string"
+          },
+          "id": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "instance": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "It passed the gate: no problem found."
+          },
+          "problems": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "report": {
+            "type": "object",
+            "description": "`ductus release check --json`'s document (without the manifest: it's the release's); null in lists."
+          },
+          "seconds": {
+            "type": "number",
+            "format": "float"
           }
         }
       },
@@ -6959,6 +7235,111 @@
           }
         }
       },
+      "ReleaseArchive": {
+        "type": "string",
+        "format": "binary",
+        "description": "A release made by `ductus release`: the `.tar.gz` file's bytes, as they are."
+      },
+      "ReleaseDetail": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReleaseInfo"
+          },
+          {
+            "type": "object",
+            "required": [
+              "manifest"
+            ],
+            "properties": {
+              "manifest": {
+                "type": "object",
+                "description": "The release's manifest (`release.json`): every interface's code version and files, the\nproject version, the tests' result when it was made, who made it and why."
+              }
+            }
+          }
+        ]
+      },
+      "ReleaseInfo": {
+        "type": "object",
+        "required": [
+          "id",
+          "short",
+          "project",
+          "made_by",
+          "interfaces",
+          "files",
+          "bytes",
+          "stored_at",
+          "stored_by",
+          "checks"
+        ],
+        "properties": {
+          "bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its files' bytes, unpacked."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckInfo"
+            },
+            "description": "In a list: the last check against each environment (without its report). In a release's\nown page: every check, newest first, with their reports."
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The git commit it was made from (none: made without git)."
+          },
+          "files": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "id": {
+            "type": "string",
+            "description": "The release id (SHA-256 over its files), in hex."
+          },
+          "interfaces": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "made_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "When and by whom it was made (`ductus release`), and why (`-m`)."
+          },
+          "made_by": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string",
+            "description": "The project's folder name."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "short": {
+            "type": "string",
+            "description": "Its first 12 characters, as `ductus release` shows it."
+          },
+          "stored_at": {
+            "type": "string",
+            "format": "date-time",
+            "description": "When it was stored here, and by whom."
+          },
+          "stored_by": {
+            "type": "string"
+          }
+        }
+      },
       "Report": {
         "type": "object",
         "description": "The whole report: what `ductus doctor` prints and `--report` saves.",
@@ -7475,6 +7856,36 @@
           }
         }
       },
+      "Stored": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/ReleaseInfo"
+          },
+          {
+            "type": "object",
+            "required": [
+              "new",
+              "new_folders",
+              "new_files"
+            ],
+            "properties": {
+              "new": {
+                "type": "boolean",
+                "description": "False: it was stored before (by `stored_by`, at `stored_at`); nothing changed."
+              },
+              "new_files": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "new_folders": {
+                "type": "integer",
+                "description": "Folders and files this release added to the database (the rest were there already).",
+                "minimum": 0
+              }
+            }
+          }
+        ]
+      },
       "SystemInfo": {
         "type": "object",
         "properties": {
@@ -7808,6 +8219,10 @@
     {
       "name": "retention",
       "description": "How long messages are kept, and changes to it"
+    },
+    {
+      "name": "releases",
+      "description": "Releases made by `ductus release`: stored here, and checked against this engine's environment (the `deploy` permission)"
     },
     {
       "name": "tokens",

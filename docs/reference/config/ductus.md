@@ -268,7 +268,7 @@ The group or groups whose members are viewers: they see interfaces, health, queu
 
 **Type:** settings, below
 
-Groups that add a permission on top of the role: `payloads` (read message contents, usually patient data) and `audit` (read the audit log). Admins have both anyway. Default: none.
+Groups that add a permission on top of the role: `payloads` (read message contents, usually patient data), `audit` (read the audit log) and `deploy` (store and check releases; operators and admins only). Admins have them all anyway. Default: none.
 
 ### `auth.ldap.groups.permissions.payloads`
 
@@ -281,6 +281,12 @@ The group or groups whose members may read message payloads (and edit them, as o
 **Type:** text, or a list
 
 The group or groups whose members may read and export the audit log: compliance and security staff. Default: none. Example: `audit: "CN=Ductus Auditors,OU=Groups,DC=hospital,DC=org"`.
+
+### `auth.ldap.groups.permissions.deploy`
+
+**Type:** text, or a list
+
+The group or groups whose members may store releases on an engine and check them against its environment (and, from 0.7.4.4, deploy them): what they deploy runs as interface code with every secret and payload, so give it as carefully as `payloads`. Only operators and admins get it: a viewer in this group doesn't. Default: none. Example: `deploy: "CN=Ductus Release Managers,OU=Groups,DC=hospital,DC=org"`.
 
 ### `auth.ldap.nested`
 

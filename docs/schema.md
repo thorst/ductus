@@ -217,7 +217,7 @@ Who did what, to what, from where, and how it ended. Written in the transaction 
 | `actor_name` | text | The user's or token's name at the time (a snapshot). |
 | `via` | text | `session` (the web UI), `token`, `cli`, `engine`; none for rows made from `message_actions` when this table was added. |
 | `ip` | inet | The address the connection came from (a proxy's address behind one). |
-| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create` (also a directory account's first sign-in, by `directory`), `user.update`, `user.disable`, `user.unlock`, `user.directory_change` (the directory changed an account's role, permissions, name or email, or let it back in), `user.directory_refused` (the directory said no to an account: its sessions ended), `token.create`, `token.revoke`, `message.payload.read`, `message.release` (a resend that put back only quarantined deliveries, whether or not it named their destinations), `message.replay` (one that sent again a delivery that had finished as sent or filtered), `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `engine.handover` (this engine took over from another: `systemctl reload`, an upgrade or a deploy; `detail.from` and `detail.to` with version, pid and instance, `detail.sending_paused_ms`), `engine.refused` (a start refused: another live engine runs some of its interfaces, or its lanes would strand waiting messages, or a handover would lower lanes; `detail.reason` is `owned`, `lanes` or `handover_lanes`), `interface.stopped`, `interface.partitions_raised` (an interface started with more lanes while messages waited: a key's new messages may pass its older ones until those are sent). |
+| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create` (also a directory account's first sign-in, by `directory`), `user.update`, `user.disable`, `user.unlock`, `user.directory_change` (the directory changed an account's role, permissions, name or email, or let it back in), `user.directory_refused` (the directory said no to an account: its sessions ended), `token.create`, `token.revoke`, `message.payload.read`, `message.release` (a resend that put back only quarantined deliveries, whether or not it named their destinations), `message.replay` (one that sent again a delivery that had finished as sent or filtered), `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `engine.handover` (this engine took over from another: `systemctl reload`, an upgrade or a deploy; `detail.from` and `detail.to` with version, pid and instance, `detail.sending_paused_ms`), `engine.refused` (a start refused: another live engine runs some of its interfaces, or its lanes would strand waiting messages, or a handover would lower lanes; `detail.reason` is `owned`, `lanes` or `handover_lanes`), `interface.stopped`, `interface.partitions_raised` (an interface started with more lanes while messages waited: a key's new messages may pass its older ones until those are sent), `release.store` (a release stored with `POST /releases`; `subject` its short id, `detail` its project, commit, maker and reason), `release.check` (a stored release checked against this engine's environment; `detail.environment`, `detail.ok`, `detail.problems`). |
 | `subject` | text | What it was done to: a username, a token name, `interface/destination`. |
 | `interface` | text | The interface it concerns. |
 | `message_id` | bigint | The message, when the request was about exactly one. |
@@ -433,6 +433,73 @@ Every file any code version has had, once by its content (migration 0026), so th
 | `content` | text | The text as hashed: without a byte order mark, lines ending in `\n`. |
 
 Index: primary key `hash`.
+
+Since 0.7.4.3.3 the text files of stored releases are kept here too (the same text, the same hash: a release and a start share them).
+
+## `releases`
+
+Each release stored on this database with `POST /releases` (migration 0030, 0.7.4.3.3): made by `ductus release`, its id recomputed from its files when it was stored. Kept (a release is what a deploy and a rollback choose from); a release's files are kept by folder, each folder's list once (`release_folders`), so a release that changed ten interfaces adds about ten folders and their changed files.
+
+| column | type | |
+|---|---|---|
+| `id` | bytea | The release id (32 bytes): SHA-256 over its files' hashes and paths ([how](operate/releases.md#the-release-id)). Shown as its first 12 hex characters. |
+| `project` | text | The project's folder name. |
+| `manifest` | jsonb | Its `release.json` as received: every interface's code version and files, the project version, the tests' result, who made it and why. Hundreds of KB at a thousand interfaces: lists read the columns below instead. |
+| `made_at` | timestamptz | When `ductus release` made it (null when the manifest's time doesn't read as one). |
+| `made_by` | text | Who made it (the account that ran `ductus release`). |
+| `reason` | text | Why (`ductus release -m`); null when nobody said. |
+| `git_commit` | text | The commit it was made from (hex); null when made without git. |
+| `interfaces` | integer | How many interfaces it carries. |
+| `files` | integer | How many files it carries. |
+| `bytes` | bigint | Their bytes, unpacked. |
+| `ancestry` | bytea | The commit's history: 20-byte commit ids, sorted (empty without git). What the "replaces" check of a deploy (0.7.4.4) reads. 20 KB per 1,000 commits. |
+| `folders` | bytea[] | Its folders (`release_folders.hash`), in path order. |
+| `stored_at` | timestamptz | When it was stored here. |
+| `stored_by` | text | Who stored it (a person's or a token's name, as the audit log names them). |
+
+Indexes: primary key `id`; `releases_stored_at (stored_at)`.
+
+## `release_folders`
+
+A folder's files in a release, once by the list's content (migration 0030): an interface's folder (`interfaces/<name>`, its subfolders included), a folder at the project's top (`lib`, `environments`, `secrets`), or the top's own files (`ductus.yaml`, `resources.yaml`). Kept.
+
+| column | type | |
+|---|---|---|
+| `hash` | bytea | SHA-256 of the list as stored. |
+| `files` | jsonb | `[{"path": "interfaces/adt/interface.yaml", "hash": "<hex>"}, {"path": "...", "hash": "...", "binary": true}]` in path order, paths relative to the project: a text's content is in `code_files`, a file marked `binary` in `release_blobs`. |
+
+Index: primary key `hash`.
+
+## `release_blobs`
+
+Files releases carry that aren't text (a NUL byte, or not UTF-8: an image, a spreadsheet), once by their content, byte for byte (migration 0030). Kept.
+
+| column | type | |
+|---|---|---|
+| `hash` | bytea | SHA-256 of `content`. |
+| `content` | bytea | The file's bytes. |
+
+Index: primary key `hash`.
+
+## `release_checks`
+
+Each check of a stored release against an environment (`POST /releases/{id}/check`, migration 0030): the gate's report, kept with the release.
+
+| column | type | |
+|---|---|---|
+| `id` | integer | Identity. |
+| `release_id` | bytea | `releases.id`. |
+| `at` | timestamptz | When it ended. |
+| `environment` | text | The environment checked against (the engine's). |
+| `instance` | text | The engine run that checked it (as `engines` and the audit log name it). |
+| `host` | text | Its server. |
+| `by_name` | text | Who asked. |
+| `ok` | boolean | It passed: no problem found. |
+| `problems` | integer | How many problems. |
+| `seconds` | real | How long it took. |
+| `report` | jsonb | `ductus release check --json`'s document, without the manifest (the release's own). |
+
+Indexes: primary key `id`; `release_checks_release (release_id, at)`.
 
 ## `alert_state`
 

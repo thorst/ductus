@@ -470,7 +470,7 @@ function TokensCard({ me }: { me: Schemas["Session"] }) {
           value={permissions}
           onChange={setPermissions}
           allowed={me.role === "admin" ? undefined : me.permissions}
-          isAdmin={role === "admin"}
+          role={role}
         />
       </ActionDialog>
       {created && <TokenSecret created={created} onClose={() => setCreated(null)} />}

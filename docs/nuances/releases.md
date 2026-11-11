@@ -41,3 +41,22 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **What:** `ductus release` runs the tests with `--env dev` unless you say `--env`: `${...}` in interface.yaml are filled from `environments/dev.yaml` for them. The release itself is the same for every environment (code versions count interface.yaml as written).
 - **Why:** tests run without databases and connections; the environment only fills values in.
 - **What to do:** when a test depends on an environment's values, make the release with that `--env`, or rely on the gate, which runs the changed interfaces' tests in the environment it checks.
+
+## Checking a release on an engine runs its code there, with that environment's secrets (level 2)
+- **What:** `POST /releases/{id}/check` runs `ductus release check` on the engine's server, as the engine's account, with its environment's values, its secret key and its database (read-only): `validate` loads every interface's code and the tests of what changes run it. It needs the `deploy` permission, which only operators and admins can have (giving it to a viewer is refused; a directory group can't give it to one either).
+- **Why:** a check is only worth something where the environment is: its secrets, its certificates, its database. That also means whoever may check a release may run code with prod's secrets, which is what deploying will be.
+- **What to do:** give `deploy` to the people and the CI token that ship changes, as carefully as `payloads`. Every check is in the audit log (`release.check`) and kept with the release.
+
+## A check on the engine slows its intake while it runs, and runs one at a time (level 3)
+- **What:** the check runs on the engine's server as a separate process, spread over every CPU as `validate` and `test` are, for seconds (at a thousand interfaces: 6 s, 10 s with every test). Measured on a 4-core machine, one interface's intake fell from ~800 to ~650 messages a second over a run that overlapped one check, and to about half while checks ran back to back; ACKs waited up to ~0.1 s instead of ~0.03 s. Nothing was refused or lost. The process runs at a lower CPU priority (nice 10 on Linux, below normal on Windows), which made no measurable difference there. A second check while one runs on the same engine is refused with 409 ("try again when it ends"). The call answers when the check ends.
+- **Why:** a check is only worth something where the environment is, and `validate` at scale needs the CPUs it uses. Half of ~800 a second is still far above what a busy feed sends (a large hospital's ADT feed: tens a second at its peak), so messages wait milliseconds, not minutes.
+- **What to do:** nothing for most sites. On an engine that runs near its limits, check against a test engine sharing prod's configuration, or run `ductus release check` on another machine given prod's database (read-only) and secret key. In CI, retry on 409 after a pause, or check one environment at a time.
+## The same release stored twice is stored once, with its first manifest (level 2)
+- **What:** `POST /releases` with a release whose id is stored already answers 200 with `"new": false`, who stored it and when, and changes nothing: a second archive of the same commit made with another `-m` reason keeps the first one's manifest (who made it, why).
+- **Why:** the id is the files ([above](#the-same-commit-gives-the-same-release-id-whatever-the-reason-or-the-machine-level-2)); a release is what it carries, and storing it twice would give one release two stories.
+- **What to do:** say why a change ships where it ships: in the deploy's reason (0.7.4.4), not in a second `ductus release -m`.
+
+## Stored releases are kept (level 3)
+- **What:** releases stored on a database stay there, with their checks: nothing deletes them. A release adds only what earlier ones and the engines' code versions don't already hold (each text once, each folder's file list once), plus its manifest (hundreds of KB at a thousand interfaces) and its commit history (20 KB per 1,000 commits).
+- **Why:** a deploy, a rollback and "what did prod run in March" choose among stored releases; what's measured is small next to messages.
+- **What to do:** nothing at the sizes measured ([releases](../operate/releases.md#measured)). A repository with a very long history (100,000 commits) adds 2 MB a release: tell us if that matters to you.

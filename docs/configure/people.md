@@ -13,7 +13,7 @@ audit log, by name.
 | `operator` | What viewers can, and act: resend, replay, edit and dismiss messages, pause and resume, drain, run connection checks. |
 | `admin` | What operators can, and manage accounts and tokens; has every permission. |
 
-Two **permissions** go on top of a role, given only to the people who need them:
+Three **permissions** go on top of a role, given only to the people who need them:
 
 - **`payloads`**: read message contents, which is usually patient data (and edit them, as an
   operator). Without it the message page shows status, destinations and errors, and says the
@@ -21,6 +21,16 @@ Two **permissions** go on top of a role, given only to the people who need them:
   ([nuance](../nuances/people.md#reading-payloads-is-a-permission-not-part-of-a-role-level-4)).
 - **`audit`**: read and export the audit log. For compliance and security staff, not operators
   ([nuance](../nuances/people.md#the-audit-log-records-who-did-what-and-what-it-leaves-out-level-2)).
+- **`deploy`**: store [releases](../operate/releases.md#store-a-release-on-an-engine) on an
+  engine and check them against its environment (and, in a coming version, deploy them). A
+  release's code runs there with that environment's secrets and every payload it receives, so
+  give it as carefully as `payloads`: to the people and the CI token that ship changes. **Operators
+  and admins only**: giving it to a viewer is refused
+  ([nuance](../nuances/releases.md#checking-a-release-on-an-engine-runs-its-code-there-with-that-environments-secrets-level-2)).
+
+```sh
+ductus token create ci-release --role operator --permission deploy
+```
 
 ## Accounts
 
@@ -111,6 +121,7 @@ auth:
       permissions:
         payloads: "CN=Ductus PHI,OU=Groups,DC=hospital,DC=org"
         audit: "CN=Ductus Auditors,OU=Groups,DC=hospital,DC=org"
+        deploy: "CN=Ductus Release Managers,OU=Groups,DC=hospital,DC=org"
     refresh: 15m
 ```
 
@@ -123,7 +134,8 @@ auth:
 - **Who may sign in**: people under `user_base`, found by `user_filter`
   (`(sAMAccountName={username})` by default; `(uid={username})` for OpenLDAP and FreeIPA), and in
   at least one role group. The highest role their groups give wins; `permissions` groups add to
-  it. Someone in no role group is told they have no access
+  it (`deploy` only to operators and admins: a viewer in that group doesn't get it). Someone in no
+  role group is told they have no access
   ([nuance](../nuances/people.md#signing-in-with-the-directory-local-names-first-groups-decide-the-role-level-2)).
 - **Write several groups one per line**, as above, never `[a, b]`: DNs have commas
   ([nuance](../nuances/people.md#write-several-group-dns-one-per-line-not-a-b-level-2)).

@@ -40,3 +40,5 @@ The audit log records who did what, to what, from where, and how it ended: on th
 | `engine.refused` | A start was refused: another live engine runs some of its interfaces, its lanes would strand waiting messages, or a handover would lower lanes. |
 | `interface.stopped` | An interface's code was stopped (it ran away or ran out of memory): its messages wait. |
 | `interface.partitions_raised` | An interface started with more lanes while messages waited: a key's new messages may pass its older ones until those are sent. |
+| `release.store` | Someone stored a release on this database (`POST /releases`), with its project, commit and why it was made. |
+| `release.check` | Someone checked a stored release against this engine's environment (`POST /releases/{id}/check`): its code was validated and tested with that environment's settings and secrets. |

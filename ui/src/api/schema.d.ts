@@ -835,6 +835,70 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/releases": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** The releases stored on this database, newest first, each with its last check per environment. */
+        get: operations["list_releases"];
+        put?: never;
+        /**
+         * Store a release made by `ductus release` (the `.tar.gz` file as the body). Its id is
+         *     recomputed from its files (a damaged or changed file is refused); one stored already is said
+         *     so (200) and nothing changes; a new one is 201. Refused when it carries a private key. Needs
+         *     the `deploy` permission.
+         */
+        post: operations["store_release"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/releases/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** One release: what it is, its manifest, and every check of it (newest first, with reports). */
+        get: operations["get_release"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/releases/{id}/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check a stored release against this engine's environment: `ductus release check` runs here,
+         *     with this engine's settings, secrets and database (read-only), as a child process at a lower
+         *     CPU priority. `validate`, then the tests of the interfaces the release changes here. Nothing
+         *     is changed but the check's record (and an audit row). One check at a time per engine (409
+         *     while one runs). Answers when it ends (seconds at a thousand interfaces); `ok` says whether it
+         *     passed. Needs the `deploy` permission: the release's code runs with this environment's secrets.
+         */
+        post: operations["check_release"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/retention": {
         parameters: {
             query?: never;
@@ -1388,6 +1452,25 @@ export interface components {
             used_by: string[];
             /** @description `database patient_db`, `api empi`, `destination adt → lab`, `listener`. */
             what: string;
+        };
+        CheckInfo: {
+            /** Format: date-time */
+            at: string;
+            by: string;
+            /** @description The environment checked against, and the engine and server that ran it. */
+            environment: string;
+            host: string;
+            /** Format: int32 */
+            id: number;
+            instance: string;
+            /** @description It passed the gate: no problem found. */
+            ok: boolean;
+            /** Format: int32 */
+            problems: number;
+            /** @description `ductus release check --json`'s document (without the manifest: it's the release's); null in lists. */
+            report: Record<string, never>;
+            /** Format: float */
+            seconds: number;
         };
         /** @description What an interface runs, and the deployment it came with. */
         CodeInfo: {
@@ -2528,6 +2611,55 @@ export interface components {
             /** @description The new owner. */
             to: string;
         };
+        /**
+         * Format: binary
+         * @description A release made by `ductus release`: the `.tar.gz` file's bytes, as they are.
+         */
+        ReleaseArchive: string;
+        ReleaseDetail: components["schemas"]["ReleaseInfo"] & {
+            /**
+             * @description The release's manifest (`release.json`): every interface's code version and files, the
+             *     project version, the tests' result when it was made, who made it and why.
+             */
+            manifest: Record<string, never>;
+        };
+        ReleaseInfo: {
+            /**
+             * Format: int64
+             * @description Its files' bytes, unpacked.
+             */
+            bytes: number;
+            /**
+             * @description In a list: the last check against each environment (without its report). In a release's
+             *     own page: every check, newest first, with their reports.
+             */
+            checks: components["schemas"]["CheckInfo"][];
+            /** @description The git commit it was made from (none: made without git). */
+            commit?: string | null;
+            /** Format: int32 */
+            files: number;
+            /** @description The release id (SHA-256 over its files), in hex. */
+            id: string;
+            /** Format: int32 */
+            interfaces: number;
+            /**
+             * Format: date-time
+             * @description When and by whom it was made (`ductus release`), and why (`-m`).
+             */
+            made_at?: string | null;
+            made_by: string;
+            /** @description The project's folder name. */
+            project: string;
+            reason?: string | null;
+            /** @description Its first 12 characters, as `ductus release` shows it. */
+            short: string;
+            /**
+             * Format: date-time
+             * @description When it was stored here, and by whom.
+             */
+            stored_at: string;
+            stored_by: string;
+        };
         /** @description The whole report: what `ductus doctor` prints and `--report` saves. */
         Report: {
             checks: components["schemas"]["Check"][];
@@ -2707,6 +2839,13 @@ export interface components {
             detail: string;
             name: string;
             outcome: components["schemas"]["Outcome"];
+        };
+        Stored: components["schemas"]["ReleaseInfo"] & {
+            /** @description False: it was stored before (by `stored_by`, at `stored_at`); nothing changed. */
+            new: boolean;
+            new_files: number;
+            /** @description Folders and files this release added to the database (the rest were there already). */
+            new_folders: number;
         };
         SystemInfo: {
             application?: string | null;
@@ -4530,6 +4669,170 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_releases: {
+        parameters: {
+            query?: {
+                /** @description Releases stored before this time (the previous page's last `stored_at`). */
+                before?: string;
+                /** @description How many, newest first (default 50, at most 500). */
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReleaseInfo"][];
+                };
+            };
+        };
+    };
+    store_release: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** @description The release file (`ductus release` wrote it) */
+        requestBody: {
+            content: {
+                "application/gzip": components["schemas"]["ReleaseArchive"];
+            };
+        };
+        responses: {
+            /** @description Stored before: nothing changed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Stored"];
+                };
+            };
+            /** @description Stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Stored"];
+                };
+            };
+            /** @description Not a release, damaged, or carrying a private key */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_release: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The release id, or its first 12 characters (at least 4) */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReleaseDetail"];
+                };
+            };
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    check_release: {
+        parameters: {
+            query?: {
+                /** @description Run every interface's tests, not only those of what the release changes here. */
+                all_tests?: boolean;
+            };
+            header?: never;
+            path: {
+                /** @description The release id, or its first 12 characters */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The check ran: `ok` says whether it passed */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckInfo"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Another check is running on this engine */
+            409: {
                 headers: {
                     [name: string]: unknown;
                 };

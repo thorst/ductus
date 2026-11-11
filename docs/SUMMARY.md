@@ -153,6 +153,7 @@
     - [Alerts](reference/api/alerts.md)
     - [Audit](reference/api/audit.md)
     - [Retention](reference/api/retention.md)
+    - [Releases](reference/api/releases.md)
     - [Tokens](reference/api/tokens.md)
   - [Configuration files](reference/config/index.md)
     - [interface.yaml](reference/config/interface.md)

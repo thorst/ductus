@@ -44,8 +44,23 @@ impl TryFrom<i16> for Role {
     }
 }
 
-/// Permissions a role doesn't say (admins have them all).
-pub const PERMISSIONS: [&str; 2] = ["payloads", "audit"];
+/// Permissions a role doesn't say (admins have them all). `deploy` (0.7.4.3.3: store and check
+/// releases; deploy them from 0.7.4.4) is for operators and above (`allowed_for`): what it
+/// deploys runs with every secret and payload.
+pub const PERMISSIONS: [&str; 3] = ["payloads", "audit", "deploy"];
+
+/// The permissions only operators and above may hold.
+const OPERATORS_ONLY: [&str; 1] = ["deploy"];
+
+/// Refuse `permissions` a holder with `role` can't have (`deploy` on a viewer), saying the fix.
+pub fn allowed_for(role: Role, permissions: &[String]) -> Result<()> {
+    if role < Role::Operator
+        && let Some(p) = permissions.iter().find(|p| OPERATORS_ONLY.contains(&p.as_str()))
+    {
+        bail!("`{p}` is for operators and admins, not viewers: make it an operator, or leave `{p}` out");
+    }
+    Ok(())
+}
 
 /// `list` as a sorted set of known permissions, or what is wrong with it.
 pub fn clean_permissions(list: &[String]) -> Result<Vec<String>> {
@@ -95,8 +110,12 @@ pub struct Principal {
 }
 
 impl Principal {
-    /// Admins may do everything; others only what they were given.
+    /// Admins may do everything; others only what they were given (and `deploy` only from
+    /// operator up, however it was given: a person's token made a viewer keeps none).
     pub fn can(&self, permission: &str) -> bool {
+        if OPERATORS_ONLY.contains(&permission) && self.role < Role::Operator {
+            return false;
+        }
         self.role == Role::Admin || self.permissions.iter().any(|p| p == permission)
     }
 }
@@ -288,6 +307,7 @@ impl Store {
             bail!("a token needs a name (who or what uses it, e.g. `ci` or `monitoring`)");
         }
         let permissions = clean_permissions(permissions)?;
+        allowed_for(role, &permissions)?;
         let secret = random_secret(TOKEN_PREFIX);
         let mut tx = self.pool.begin().await.context("creating token")?;
         let sql = format!(

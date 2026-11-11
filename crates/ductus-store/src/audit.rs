@@ -81,6 +81,14 @@ pub const ACTIONS: &[(&str, &str)] = &[
         "interface.partitions_raised",
         "An interface started with more lanes while messages waited: a key's new messages may pass its older ones until those are sent.",
     ),
+    (
+        "release.store",
+        "Someone stored a release on this database (`POST /releases`), with its project, commit and why it was made.",
+    ),
+    (
+        "release.check",
+        "Someone checked a stored release against this engine's environment (`POST /releases/{id}/check`): its code was validated and tested with that environment's settings and secrets.",
+    ),
 ];
 
 /// Who did it, and how they came.

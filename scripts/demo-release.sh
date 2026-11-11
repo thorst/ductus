@@ -13,6 +13,12 @@
 #      versions before and after), its tests run;
 #   8. a release changed after it was made (a file edited, archived again): refused;
 #   9. the gate wrote nothing: the project's files are as they were, and no temporary folder is left.
+# 0.7.4.3.3, releases stored on an engine (its REST API):
+#  10. `deploy` refused on a viewer token; the engine started with its API on the second commit;
+#  11. `POST /releases` with a token that has `deploy`: stored (new); the same commit made again
+#      with another reason: the same id, stored before; a viewer: refused;
+#  12. `POST /releases/{id}/check?all_tests=true`: the gate ran by the engine, recorded, audited;
+#  13. `GET /releases` lists it with its check; `GET /releases/{id}` has its manifest.
 # `TRANSCRIPT=file` keeps what each step printed (docs/operate/releases.md shows it).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
@@ -39,14 +45,35 @@ step() {
   echo >>"$OUT"
 }
 code() { cat "$W/$1.code"; }
+# A step written as a pipeline: shown as written (variables unexpanded), run by bash.
+pipe() {
+  local name=$1 command=$2
+  echo "\$ $command" | sed "s|$W|/home/ann|g" >>"$OUT"
+  set +e
+  (cd "$P" && bash -o pipefail -c "$command") >"$W/$name.txt" 2>&1
+  echo $? >"$W/$name.code"
+  set -e
+  sed "s|$W|/home/ann|g" "$W/$name.txt" | tee -a "$OUT"
+  echo >>"$OUT"
+}
+API_PORT=17761
+TOKENS=(release-demo-deploy-$$ release-demo-viewer-$$ release-demo-refused-$$)
+# This demo's releases (the same files give the same id every run): forgotten before and after.
+forget_releases() {
+  for id in ${FULL:-} ${NEXT_ID:-}; do
+    q "DELETE FROM release_checks WHERE release_id = decode('$id', 'hex'); DELETE FROM releases WHERE id = decode('$id', 'hex')" >/dev/null
+  done
+}
 # The project's files with their hashes (git's own aside, and the releases `ductus release` writes).
 files() { (cd "$P" && find . -path ./.git -prune -o -path ./.ductus/releases -prune -o -type f -print | sort | xargs sha256sum); }
 # Steps run `ductus` as a person types it.
 mkdir "$W/bin" && ln -s "$BIN" "$W/bin/ductus"
 export PATH="$W/bin:$PATH"
 cleanup() {
-  [ -n "${ENGINE:-}" ] && kill -INT "$ENGINE" 2>/dev/null || true
+  [ -n "${ENGINE:-}" ] && kill -INT "$ENGINE" 2>/dev/null && wait "$ENGINE" 2>/dev/null || true
   q "DELETE FROM interface_versions WHERE interface = '$NAME'" >/dev/null 2>&1 || true
+  forget_releases 2>/dev/null || true
+  for t in "${TOKENS[@]}"; do "$BIN" token revoke "$t" >/dev/null 2>&1 || true; done
   rm -rf "$W"
 }
 trap cleanup EXIT
@@ -133,5 +160,49 @@ step edited ductus release check "$W/edited.tar.gz" --env prod
 echo "== 9. the gate wrote nothing"
 [ "$(files)" = "$BEFORE" ] && echo "the project's files: as they were" || fail+=" project-written"
 [ "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'ductus-release-*' | wc -l)" = "$TEMPS" ] && echo "temporary folders: none left" || fail+=" temp-left"
+
+echo "== 10. the deploy permission; the engine with its API"
+NEXT_ID=$(tar xzOf "$NEXT" release.json | sed -n 's/^{"format":1,"id":"\([0-9a-f]\{64\}\)".*/\1/p')
+NEXT_SHORT=${NEXT_ID:0:12}
+NEXT_REL=.ductus/releases/$(basename "$NEXT")
+forget_releases
+step viewer-deploy ductus token create "${TOKENS[2]}" --role viewer --permission deploy
+[ "$(code viewer-deploy)" = 1 ] && grep -q "operators and admins, not viewers" "$W/viewer-deploy.txt" || fail+=" viewer-deploy"
+DEPLOY=$("$BIN" token create "${TOKENS[0]}" --role operator --permission deploy 2>/dev/null)
+VIEWER=$("$BIN" token create "${TOKENS[1]}" --role viewer 2>/dev/null)
+"$BIN" run --root "$P" --env prod --api-listen "127.0.0.1:$API_PORT" >"$W/api.log" 2>&1 &
+ENGINE=$!
+until grep "started interfaces=" "$W/api.log" >/dev/null 2>&1; do kill -0 $ENGINE || { cat "$W/api.log"; exit 1; }; sleep 0.2; done
+export DUCTUS_URL=http://127.0.0.1:$API_PORT TOKEN=$DEPLOY VIEWER
+
+echo "== 11. stored (POST /releases): new, then the same id again, then a viewer"
+pipe store 'curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/gzip" --data-binary @'"$NEXT_REL"' "$DUCTUS_URL/api/v1/releases" | python3 -m json.tool'
+grep -q '"new": true' "$W/store.txt" && grep -q "\"id\": \"$NEXT_ID\"" "$W/store.txt" || fail+=" store"
+(cd "$P" && "$BIN" release -m "the same commit, made again" --no-tests --out "$W/again.tar.gz" >/dev/null 2>&1) || fail+=" again-made"
+cmp -s "$NEXT" "$W/again.tar.gz" && fail+=" again-same-bytes"
+pipe again 'curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/gzip" --data-binary @'"$W"'/again.tar.gz "$DUCTUS_URL/api/v1/releases" | python3 -m json.tool | head -4'
+grep -q '"new": false' "$W/again.txt" || fail+=" again-not-known"
+pipe viewer 'curl -sS -H "Authorization: Bearer $VIEWER" -H "Content-Type: application/gzip" --data-binary @'"$NEXT_REL"' "$DUCTUS_URL/api/v1/releases"'
+grep -q "doesn't have the \`deploy\` permission" "$W/viewer.txt" || fail+=" viewer-stored"
+[ "$(q "SELECT count(*) FROM releases WHERE id = decode('$NEXT_ID', 'hex')")" = 1 ] || fail+=" stored-rows"
+[ "$(q "SELECT count(*) FROM audit_log WHERE action = 'release.store' AND actor_name = '${TOKENS[0]}'")" = 1 ] || fail+=" store-audit"
+
+echo "== 12. checked by the engine against its environment"
+CHECKS=$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'ductus-check-*' | wc -l)
+pipe check 'curl -sS -X POST -H "Authorization: Bearer $TOKEN" "$DUCTUS_URL/api/v1/releases/'"$NEXT_SHORT"'/check?all_tests=true" | python3 -m json.tool'
+grep -q '"ok": true' "$W/check.txt" && grep -q '"environment": "prod"' "$W/check.txt" || fail+=" check"
+grep -q "every interface's (--all-tests): 1 passed" "$W/check.txt" || fail+=" check-tests"
+grep -q "0 interface(s) change, 0 new there, 1 as they run now" "$W/check.txt" || fail+=" check-changes"
+[ "$(q "SELECT count(*) FROM release_checks WHERE release_id = decode('$NEXT_ID', 'hex') AND ok")" = 1 ] || fail+=" check-row"
+[ "$(q "SELECT count(*) FROM audit_log WHERE action = 'release.check' AND actor_name = '${TOKENS[0]}'")" = 1 ] || fail+=" check-audit"
+[ "$(find "${TMPDIR:-/tmp}" -maxdepth 1 -name 'ductus-check-*' | wc -l)" = "$CHECKS" ] || fail+=" check-temp-left"
+
+echo "== 13. listed, and read"
+pipe list 'curl -sS -H "Authorization: Bearer $VIEWER" "$DUCTUS_URL/api/v1/releases?limit=1" | python3 -m json.tool'
+grep -q "\"short\": \"$NEXT_SHORT\"" "$W/list.txt" && grep -q '"ok": true' "$W/list.txt" || fail+=" list"
+curl -sS -H "Authorization: Bearer $VIEWER" "$DUCTUS_URL/api/v1/releases/$NEXT_SHORT" >"$W/one.json"
+grep -q "\"interfaces\":{\"$NAME\"" "$W/one.json" || fail+=" one-manifest"
+kill -INT $ENGINE && wait $ENGINE 2>/dev/null || true
+ENGINE=
 
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

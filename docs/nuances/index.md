@@ -48,7 +48,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Local development](dev.md) (2)
 - [Upgrades](upgrades.md) (15)
 - [What runs, recorded](deployments.md) (17)
-- [Releases](releases.md) (8)
+- [Releases](releases.md) (12)
 - [Windows](windows.md) (9)
 
 ## Level 1: Foundations (35)
@@ -89,7 +89,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (103)
+## Level 2: Practitioner (105)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -189,13 +189,15 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The same commit gives the same release id, whatever the reason or the machine](releases.md#the-same-commit-gives-the-same-release-id-whatever-the-reason-or-the-machine-level-2) (Releases)
 - [Code imported from outside the project refuses the release](releases.md#code-imported-from-outside-the-project-refuses-the-release-level-2) (Releases)
 - [The gate tests what the release changes there, by code version](releases.md#the-gate-tests-what-the-release-changes-there-by-code-version-level-2) (Releases)
+- [Checking a release on an engine runs its code there, with that environment's secrets](releases.md#checking-a-release-on-an-engine-runs-its-code-there-with-that-environments-secrets-level-2) (Releases)
+- [The same release stored twice is stored once, with its first manifest](releases.md#the-same-release-stored-twice-is-stored-once-with-its-first-manifest-level-2) (Releases)
 - [The service's account: the default, a gMSA, or a named account](windows.md#the-services-account-the-default-a-gmsa-or-a-named-account-level-2) (Windows)
 - [An upgrade can't keep an account's password: the service waits for it](windows.md#an-upgrade-cant-keep-an-accounts-password-the-service-waits-for-it-level-2) (Windows)
 - [An upgrade starts the service again, unless it was stopped on purpose](windows.md#an-upgrade-starts-the-service-again-unless-it-was-stopped-on-purpose-level-2) (Windows)
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (82)
+## Level 3: Professional (84)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
@@ -277,6 +279,8 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Texts are carried normalized; other files byte for byte](releases.md#texts-are-carried-normalized-other-files-byte-for-byte-level-3) (Releases)
 - ["What runs there" is what the engines recorded, not what the folder holds](releases.md#what-runs-there-is-what-the-engines-recorded-not-what-the-folder-holds-level-3) (Releases)
 - [The tests at release time run in `dev`](releases.md#the-tests-at-release-time-run-in-dev-level-3) (Releases)
+- [A check on the engine slows its intake while it runs, and runs one at a time](releases.md#a-check-on-the-engine-slows-its-intake-while-it-runs-and-runs-one-at-a-time-level-3) (Releases)
+- [Stored releases are kept](releases.md#stored-releases-are-kept-level-3) (Releases)
 - ["Log on as a service": the installer grants it, Group Policy can take it away](windows.md#log-on-as-a-service-the-installer-grants-it-group-policy-can-take-it-away-level-3) (Windows)
 - [A refused connection takes about a second on Windows, and `localhost` may be `::1` first](windows.md#a-refused-connection-takes-about-a-second-on-windows-and-localhost-may-be-1-first-level-3) (Windows)
 

@@ -6,8 +6,9 @@
 //! Every call but `health` and `openapi.json` needs a token (`Authorization: Bearer dux_...`,
 //! made with `ductus token create`) or a browser session (`session.rs`: a user's, signed in with a
 //! password, or a token's). Roles: viewer reads, operator also drains, pauses, resends and
-//! corrects messages and runs connection checks, admin also manages users and tokens. Two
-//! permissions go beyond a role: `payloads` (read message payloads) and `audit`.
+//! corrects messages and runs connection checks, admin also manages users and tokens. Three
+//! permissions go beyond a role: `payloads` (read message payloads), `audit`, and `deploy` (store
+//! and check releases; operators and above).
 //!
 //! The same listener serves the web UI (`ui.rs`) at every path outside `/api`.
 
@@ -19,6 +20,7 @@ mod hotspots;
 mod me;
 mod messages;
 mod metrics;
+mod releases;
 mod reports;
 mod retention;
 mod session;
@@ -67,6 +69,7 @@ pub type Shared = Arc<Engine>;
         (name = "alerts", description = "Alerts: what is wrong, acknowledging and silencing, and where notifications go"),
         (name = "audit", description = "Who did what: the audit log (the `audit` permission) and your own activity"),
         (name = "retention", description = "How long messages are kept, and changes to it"),
+        (name = "releases", description = "Releases made by `ductus release`: stored here, and checked against this engine's environment (the `deploy` permission)"),
         (name = "tokens", description = "API tokens (admin)")
     )
 )]
@@ -97,6 +100,7 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
         .merge(audit::routes())
         .merge(certificates::routes())
         .merge(metrics::routes())
+        .merge(releases::routes())
         .merge(reports::routes())
         .merge(retention::routes())
         .merge(tokens::routes())
@@ -107,7 +111,8 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
 /// way round: a test), so an endpoint can't ship without someone deciding its access, and the
 /// reference pages (`ductus reference`) say it: `public` needs nothing, `signed` any signed-in
 /// caller (a person or a token), `user` a person signed in with a password, `operator` and
-/// `admin` that role at least, `audit` the `audit` permission (admins have it). Behaviour is
+/// `admin` that role at least, `audit` the `audit` permission and `deploy` the `deploy` permission
+/// (operators and admins only; admins have both). Behaviour is
 /// covered by the tests that call the engine (`cargo test -p ductus --test cli`, `demo-ui.sh`).
 pub const ACCESS: &[(&str, &str, &str)] = &[
     ("GET", "/health", "public"),
@@ -174,6 +179,10 @@ pub const ACCESS: &[(&str, &str, &str)] = &[
     ("PATCH", "/users/{id}", "admin"),
     ("POST", "/users/{id}/password", "admin"),
     ("POST", "/users/{id}/unlock", "admin"),
+    ("GET", "/releases", "signed"),
+    ("POST", "/releases", "deploy"),
+    ("GET", "/releases/{id}", "signed"),
+    ("POST", "/releases/{id}/check", "deploy"),
 ];
 
 pub use metrics::{METRICS, Metric};
@@ -479,7 +488,7 @@ mod tests {
         );
         for (method, path, access) in ACCESS {
             assert!(
-                ["public", "signed", "user", "operator", "admin", "audit"].contains(access),
+                ["public", "signed", "user", "operator", "admin", "audit", "deploy"].contains(access),
                 "{method} {path}: {access}"
             );
         }

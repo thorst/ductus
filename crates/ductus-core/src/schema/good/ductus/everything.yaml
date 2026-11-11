@@ -30,6 +30,7 @@ auth:
       permissions:
         payloads: "CN=Ductus PHI,OU=Groups,DC=hospital,DC=org"
         audit: "CN=Ductus Auditors,OU=Groups,DC=hospital,DC=org"
+        deploy: "CN=Ductus Release Managers,OU=Groups,DC=hospital,DC=org"
     nested: true
     group_base: "OU=Groups,DC=hospital,DC=org"
     refresh: 5m
