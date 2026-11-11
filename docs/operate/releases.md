@@ -478,10 +478,32 @@ per environment, `GET /releases/{id}` every one with its report) and is in the a
 - **It runs the release's code** on that server with that environment's secrets: hence the
   `deploy` permission
   ([nuance](../nuances/releases.md#checking-a-release-on-an-engine-runs-its-code-there-with-that-environments-secrets-level-2)).
-- **It shares the server with the engine** for those seconds: measured at a thousand interfaces,
-  one interface's intake fell from ~800 to ~650 messages a second over a run overlapping a check,
-  nothing refused. It **runs one at a time** per engine: a second check while one runs is refused
-  with 409 ([nuance](../nuances/releases.md#a-check-on-the-engine-slows-its-intake-while-it-runs-and-runs-one-at-a-time-level-3)).
+- **It runs one at a time** per engine: a second check while one runs is refused with 409.
+
+> **⚠ A check slows the engine while it runs.** It shares the engine's server: CPUs, memory,
+> disk and the database. What it does, at a thousand interfaces:
+>
+> | Part | Time | What it uses |
+> |---|---|---|
+> | The release read back from the database, its id checked | a few tenths of a second | one CPU, a few database reads |
+> | `validate`: every interface's code loaded, the type check, the database checks | ~5 s, every check | half the CPUs, ~290 MB, read-only queries |
+> | The tests of what the release changes there | none to ~4 s | every CPU |
+> | The report recorded | milliseconds | one row, one audit row |
+>
+> Measured on a 4-core machine: one interface's intake fell from ~800 to ~650 messages a second
+> over a run overlapping one check, and to about half while checks ran back to back; ACKs waited
+> up to ~0.1 s instead of ~0.03 s; nothing was refused or lost. Speed is back the moment the check
+> ends. The check runs at a lower CPU priority, which made no measurable difference there
+> ([nuance](../nuances/releases.md#a-check-on-the-engine-slows-its-intake-while-it-runs-and-runs-one-at-a-time-level-3)).
+>
+> **This is true of anything you add to a running engine**, not only checks: reports, exports,
+> replays, connection checks, frequent API polling by a monitoring tool. Each one is a trade: what
+> it tells you against what it costs the messages flowing meanwhile. Decide how often each is
+> worth running, as you would for a monitoring schedule (a check every 15 minutes means a problem
+> waits 7 minutes on average to be seen; every minute costs fifteen times as much). For checks:
+> run one per release you mean to ship, not on every commit; on an engine that runs near its
+> limits, check against a test engine sharing prod's configuration, or run `ductus release check`
+> on another machine given prod's database (read-only) and secret key.
 - **It changes nothing** but its own record: the engine's database is read-only to it, as for
   `ductus release check`.
 - **Stored releases are kept**
