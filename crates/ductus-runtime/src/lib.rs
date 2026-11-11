@@ -9,6 +9,7 @@ pub mod cert_show;
 pub mod certificates;
 pub mod code;
 pub mod control;
+pub mod deploy;
 pub mod deployment;
 mod destination;
 pub mod doctor;
@@ -91,6 +92,9 @@ pub struct EngineOptions {
     pub takeover: Option<Arc<handover::Takeover>>,
     /// `ductus dev --inspect`: interfaces a debugger may attach to (never `ductus run`).
     pub inspect: Option<Inspect>,
+    /// Release mode (`ductus run --releases DIR`, 0.7.4.4): run the release deployed here, not
+    /// the project folder `run` is given.
+    pub releases: Option<deploy::Mode>,
 }
 
 /// Interfaces a debugger may attach to, served by `inspector`. Each gets a thread and isolate of
@@ -136,6 +140,7 @@ impl Default for EngineOptions {
             control: false,
             takeover: None,
             inspect: None,
+            releases: None,
         }
     }
 }
@@ -161,6 +166,24 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
 
 async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions) -> Result<()> {
     let mut phases = Phases::new();
+    // Release mode: the release to run comes from the database (a deploy's handover names it),
+    // unpacked into its folder the first time; that folder is the project from here on. The
+    // database is connected (and migrated) first for it, once.
+    let (root, releases, connected) = match &options.releases {
+        None => (root.to_path_buf(), None, None),
+        Some(mode) => {
+            let store = Store::connect(database_url, options.db_connections).await?;
+            let asked = match &options.takeover {
+                Some(t) => t.predecessor().await?.asked.release,
+                None => None,
+            };
+            let (root, releases) = deploy::resolve(&store, &options.env, mode, asked.as_deref()).await?;
+            phases.mark("release mode: release found and unpacked");
+            (root, Some(releases), Some(store))
+        }
+    };
+    let root = root.as_path();
+    let running_release = releases.as_ref().and_then(|r| r.running.clone());
     let env = Environment::load(root, &options.env)?;
     // Said in the start's line: which of the code's `console` lines this environment logs.
     let console = env.console().as_str();
@@ -172,7 +195,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let alert_settings = settings.alerts(&env)?;
     let heap_mb = settings.isolates.heap_mb;
     let api_address = settings.api.address(options.api_listen.as_deref())?;
-    if configs.is_empty() {
+    // Release mode before the first deploy runs none, waiting for one.
+    let waiting_for_a_release = releases.as_ref().is_some_and(|r| r.running.is_none());
+    if configs.is_empty() && !waiting_for_a_release {
         bail!("no interfaces found under {}", root.join("interfaces").display());
     }
     // Started by a service manager (the deployment's `how`): the Windows service, or systemd (which
@@ -281,7 +306,10 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         list.map(|a| allow::Admission::new(listener, host, port, a, names.clone())).transpose()
     };
     phases.mark("project loaded and checked");
-    let store = Store::connect(database_url, options.db_connections).await?;
+    let store = match connected {
+        Some(store) => store,
+        None => Store::connect(database_url, options.db_connections).await?,
+    };
     phases.mark("database connected and migrated");
     log_database_security(&store, database_url).await;
     // Before anything is changed for an interface (deliveries reconciled, retention applied,
@@ -579,6 +607,10 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     {
         let (root, configs) = (root.to_path_buf(), interfaces.iter().map(|(c, ..)| c.clone()).collect::<Vec<_>>());
         let (store, who) = (store.clone(), who.clone());
+        let source = match &running_release {
+            Some(r) => r.source(),
+            None => deploy::Source::Folder(root.clone()),
+        };
         tokio::spawn(async move {
             let started = std::time::Instant::now();
             let reading = root.clone();
@@ -598,7 +630,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             tracing::debug!(took = ?started.elapsed(), "code versions computed beside the start");
             computed.send_replace(Some(versions.clone()));
             match &versions {
-                Some(v) => drop(tokio::spawn(deployment::check(store.clone(), root, v.clone(), who, warning))),
+                Some(v) => drop(tokio::spawn(deployment::check(store.clone(), source, v.clone(), who, warning))),
                 None => drop(warning.send_replace(Some(Default::default()))), // nothing to warn about
             }
             deployment::save(store, versions, saving).await;
@@ -679,6 +711,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             allow: settings.api.allow.clone(),
         }),
         host: audit::host_name(),
+        releases: releases.clone(),
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse
@@ -708,6 +741,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         let docs = snapshot.clone();
         let (mut code, decided, warned, root, who) =
             (code.clone(), decided.clone(), warned.clone(), root.to_path_buf(), who.clone());
+        let release = running_release.clone();
         tokio::spawn(async move {
             // Once they're computed (beside the start).
             let versions = code.wait_for(Option::is_some).await.ok().and_then(|v| v.clone().flatten());
@@ -716,7 +750,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 deployment::docs_alone(&engine.store, &docs).await;
                 return;
             };
-            let recording = deployment::Recording { versions, decided, warned, root, docs };
+            let recording = deployment::Recording { versions, decided, warned, root, docs, release };
             let host = audit::host_name();
             let recorded = deployment::record(&engine, &host, &who, recording).await;
             if let Some(d) = recorded {
@@ -840,8 +874,17 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             None => std::future::pending().await,
         }
     };
+    // Unpacked releases no longer needed, beside the start.
+    if let (Some(r), Some(running)) = (&releases, &running_release) {
+        let (dir, keep) = (r.mode.dir.clone(), running.hex());
+        tokio::task::spawn_blocking(move || deploy::tidy(&dir, &keep));
+    }
     owner.watch(store.clone(), stopping.clone());
     let mut control = handover::Control::listen(options.control);
+    // A deploy (`POST /deployments`) asks for its handover here, as `ductus handover` does.
+    if let Some(asker) = control.asker() {
+        let _ = engine.asker.set(asker);
+    }
     let mut successor = None;
     let why = tokio::select! {
         signal = stop_signal() => signal,

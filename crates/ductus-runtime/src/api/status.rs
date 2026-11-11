@@ -221,6 +221,9 @@ pub struct DeploymentInfo {
     uncommitted: Option<Vec<String>>,
     /// Interfaces whose code version is new for them with this deployment.
     changed: usize,
+    /// Release mode (`ductus run --releases`): the release it runs, in hex; none in folder mode.
+    /// Its commit and files not committed are then the release's.
+    release: Option<String>,
 }
 
 /// What an interface runs, and the deployment it came with.
@@ -255,6 +258,7 @@ impl DeploymentInfo {
             git_commit: d.git_commit.clone(),
             uncommitted: d.uncommitted.clone(),
             changed: d.changed,
+            release: d.release.clone(),
         }
     }
 }

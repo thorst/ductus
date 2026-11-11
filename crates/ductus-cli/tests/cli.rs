@@ -4887,6 +4887,171 @@ fn a_release_is_the_commit_with_its_versions_and_tests() {
     }
 }
 
+/// Deploys (0.7.4.4.1): an engine in release mode starts with nothing deployed (no interfaces, its
+/// API up); `ductus deploy` stores Ann's release, runs the gate and hands over to an engine running
+/// it. Bob's release (Ann's commit in its history) deploys over hers. Ann's next release, from a
+/// branch without Bob's commit, is refused naming his work; checked, then forced, it reuses that
+/// check (the pre-run) and the new engine records the warning. A folder-mode engine refuses
+/// deploys, saying how to switch.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (mllp, api) = (free_port(), free_port());
+    let (dir, name) = release_project(mllp);
+    let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let work = tempfile::tempdir().unwrap();
+    let (control, releases) = (work.path().join("control"), work.path().join("releases"));
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let token = |who: &str| {
+        let token_name = format!("{name}-{who}");
+        let args = ["token", "create", &token_name, "--role", "operator", "--permission", "deploy"];
+        let (ok, out) = ductus(dir.path(), &args);
+        assert!(ok, "{out}");
+        out.lines().next().unwrap().to_string()
+    };
+    let (ann, bob) = (token("ann"), token("bob"));
+    let to = format!("http://127.0.0.1:{api}");
+    let deploy = |token: &str, args: &[&str]| -> (bool, String) {
+        let out = Command::new(bin)
+            .arg("deploy")
+            .args(args)
+            .args(["--to", &to])
+            .env("DUCTUS_API_TOKEN", token)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    // The engine running the interface now (a deploy's handover started it, not this test).
+    let running = async || -> Terminate {
+        for _ in 0..100 {
+            let engines = store.live_engines().await.unwrap();
+            if let Some(e) = engines.iter().find(|e| e.interfaces.contains(&name)) {
+                return Terminate(e.pid as u32);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("no engine runs {name}");
+    };
+
+    let log = work.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let mut first = Child(
+        Command::new(bin)
+            .args(["run", "--releases", &releases.to_string_lossy(), "--release-project", &project_name])
+            .args(["--env", "prod", "--threads", "1", "--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", &control)
+            .env_remove("DUCTUS_PROJECT")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "started interfaces=0", 60), "{}", read(&log));
+    assert!(read(&log).contains("nothing is deployed to this environment yet"), "{}", read(&log));
+
+    // Ann's first release: stored, gated, handed over.
+    let a = release_json(dir.path(), &["-m", "first"]);
+    let a_file = a["file"].as_str().unwrap();
+    let (ok, out) = deploy(&ann, &[a_file]);
+    assert!(!ok && out.contains("say why"), "{out}");
+    let (ok, out) = deploy(&ann, &[a_file, "-m", "first deploy"]);
+    assert!(ok, "{out}\n{}", read(&log));
+    assert!(out.contains("release ") && out.contains("was stored on the engine before"), "{out}");
+    assert!(out.contains("gate: passed") && out.contains("✓ handed over to ductus"), "{out}");
+    assert!(out.contains(&format!("  {name} new here")), "{out}");
+    let exited = tokio::task::spawn_blocking(move || first.0.wait()).await.unwrap().unwrap();
+    assert!(exited.success(), "the engine before stops cleanly: {exited}");
+    let engine = running().await;
+    let a_id = a["id"].as_str().unwrap();
+    assert!(releases.join(a_id).join(".ductus-release").is_file(), "unpacked, with its marker");
+    let got: serde_json::Value = reqwest::Client::new()
+        .get(format!("{to}/api/v1/engine"))
+        .bearer_auth(&ann)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let d = &got["deployment"];
+    assert_eq!((d["release"].as_str(), d["reason"].as_str()), (Some(a_id), Some("first deploy")), "{got}");
+    assert_eq!(d["by"], format!("{name}-ann"), "{got}");
+    assert_eq!(d["git_commit"], a["git"]["commit"], "the release's commit: {got}");
+
+    // Bob's change, on a branch from Ann's commit: deployed over hers, no warning.
+    git(dir.path(), &["checkout", "-qb", "bob"]);
+    std::fs::write(dir.path().join("lib/codes.ts"), "export const LAB = \"LAB\"; // bob\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "bob's change"]);
+    let b = release_json(dir.path(), &["-m", "bob"]);
+    let (ok, out) = deploy(&bob, &[b["file"].as_str().unwrap(), "-m", "bob's change"]);
+    assert!(ok && !out.contains("⚠"), "{out}\n{}", read(&log));
+    drop(engine); // stopped by the handover already; nothing to do
+    let engine = running().await;
+
+    // Ann's next release, from main without Bob's commit: refused, naming his work.
+    git(dir.path(), &["checkout", "-q", "main"]);
+    std::fs::write(dir.path().join("lib/codes.ts"), "export const LAB = \"LAB\"; // ann\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "ann's change"]);
+    let c = release_json(dir.path(), &["-m", "ann again"]);
+    let c_file = c["file"].as_str().unwrap();
+    let (ok, out) = deploy(&ann, &[c_file, "-m", "ann's change"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains(&format!("✗ would undo {name}:")) && out.contains(&format!("by {name}-bob")), "{out}");
+    assert!(out.contains("which this release's history doesn't have") && out.contains("✗ refused"), "{out}");
+    assert!(!out.contains("gate:"), "refused before the gate runs: {out}");
+    assert!(engine.alive(), "the engine goes on");
+
+    // Checked, then forced: the check is reused, the warning recorded.
+    let check: serde_json::Value = reqwest::Client::new()
+        .post(format!("{to}/api/v1/releases/{}/check", c["id"].as_str().unwrap()))
+        .bearer_auth(&ann)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(check["ok"], true, "{check:#}");
+    let (ok, out) = deploy(&ann, &[c_file, "--force", "-m", "bob's change goes out next week", "--json"]);
+    assert!(ok, "{out}\n{}", read(&log));
+    let report: serde_json::Value = serde_json::from_str(&out[out.find("{\n").unwrap()..]).unwrap();
+    assert_eq!(
+        (report["forced"].as_bool(), report["gate"]["reused"].as_bool()),
+        (Some(true), Some(true)),
+        "{report:#}"
+    );
+    assert_eq!(report["gate"]["check"]["id"], check["id"], "{report:#}");
+    let warning = report["changes"][0]["warning"].as_str().unwrap_or_default();
+    assert!(warning.contains(&format!("by {name}-bob")), "{report:#}");
+    drop(engine);
+    let engine = running().await;
+    drop(engine);
+    let unpacked = std::fs::read_dir(&releases).unwrap().flatten().filter(|e| e.file_name().len() == 64).count();
+    assert!(unpacked <= 3, "the running release and the two used last are kept: {unpacked}");
+
+    // A folder-mode engine refuses deploys, saying how to switch.
+    let (folder, folder_log) = start_engine(dir.path(), &db, Some(api), "folder.log");
+    assert!(wait_for_log(&folder_log, "started interfaces=", 60), "{}", read(&folder_log));
+    let (ok, out) = deploy(&ann, &[a_id, "-m", "again"]);
+    assert!(!ok && out.contains("(folder mode)") && out.contains("DUCTUS_RELEASES"), "{out}");
+    drop(folder);
+
+    for who in ["ann", "bob"] {
+        let _ = ductus(dir.path(), &["token", "revoke", &format!("{name}-{who}")]);
+    }
+    let ids: Vec<Vec<u8>> =
+        [&a, &b, &c].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
+    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
+}
+
 /// `ductus release check` (0.7.4.3.2), the gate: against the environment's database, the tests of
 /// what the release changes there (none when it changes nothing), validate reading only; nothing
 /// written into the project, the database or the temporary folder it used; a changed file found.
@@ -4904,11 +5069,14 @@ async fn the_gate_tests_what_a_release_changes_and_writes_nothing() {
     assert!(out.contains("passes the gate for prod"), "{out}");
 
     let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    // Its own temporary folder: other tests' gates (a deploy's) make theirs in the shared one meanwhile.
+    let tmp = tempfile::tempdir().unwrap();
     let gate = |file: &str, extra: &[&str]| -> (bool, serde_json::Value) {
         let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
             .args(["release", "check", file, "--env", "prod", "--json"])
             .args(extra)
             .env("DUCTUS_DATABASE_URL", &db)
+            .env("TMPDIR", tmp.path())
             .current_dir(dir.path())
             .output()
             .unwrap();
@@ -4933,7 +5101,7 @@ async fn the_gate_tests_what_a_release_changes_and_writes_nothing() {
         seen
     };
     let temporary = || -> usize {
-        std::fs::read_dir(std::env::temp_dir())
+        std::fs::read_dir(tmp.path())
             .unwrap()
             .flatten()
             .filter(|e| e.file_name().to_string_lossy().starts_with("ductus-release-"))

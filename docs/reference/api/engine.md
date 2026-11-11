@@ -184,6 +184,7 @@ What an interface runs, and the deployment it came with.
 | `how` | text | `start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`. |
 | `id` | number | The deployment's id (`deployments.id`). |
 | `reason` (optional) | text or null | Why (`ductus handover -m`); none when nobody said. |
+| `release` (optional) | text or null | Release mode (`ductus run --releases`): the release it runs, in hex; none in folder mode. Its commit and files not committed are then the release's. |
 | `uncommitted` (optional) | list of text or null | Files the interfaces run that aren't the commit's (changed since, or not in it); none without git. |
 
 ### `DeploymentRef`

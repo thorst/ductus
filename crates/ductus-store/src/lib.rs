@@ -35,13 +35,14 @@ pub use api::{
 };
 pub use audit::{ACTIONS as AUDIT_ACTIONS, Audit, AuditFilter, AuditRow, By, PreviousRun};
 pub use certificates::{CertificateRow, DOCTOR_RUNS_KEPT, DoctorRunRow};
-pub use deployments::{Current, Deployed, NewDeployment, NewVersion, Running, Since, VersionIds};
+pub use deployments::{Changed, Current, Deployed, NewDeployment, NewVersion, Running, Since, VersionIds};
 pub use directory::{DirectoryAccount, DirectoryPerson, DirectoryUpdate};
 pub use docs::DocsRow;
 pub use engines::{EngineLock, EngineRow, NewEngine, Owned, Stranded};
 pub use history::{AuditEntry, DeploymentEntry, DocsEntry, Page as HistoryPage, Part, VersionFiles};
 pub use releases::{
-    CheckRow, NewCheck, NewRelease, ReleaseContents, ReleaseFile, ReleaseRow, ReleaseStored, folder_of,
+    CheckRow, LastDeployed, NewCheck, NewRelease, ProjectRunning, ReleaseContents, ReleaseFile, ReleaseRow,
+    ReleaseStored, folder_of,
 };
 pub use replay::{Original, Recorded};
 pub use retention::{Expired, HELD, HeldArea, HeldInterface, HeldMonth, Kept, RetentionState, Step, TIERS, Tier};

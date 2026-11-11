@@ -105,6 +105,35 @@ pub struct NewCheck<'a> {
     pub problems: i32,
     pub seconds: f32,
     pub report: &'a serde_json::Value,
+    /// The Ductus version that ran it: a deploy reuses only a check this version ran (the pre-run).
+    pub ductus_version: &'a str,
+}
+
+/// The release last deployed to an environment for a project: what an engine in release mode runs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LastDeployed {
+    pub project: String,
+    pub release: Vec<u8>,
+    /// The deployment that ran it last, when and by whom.
+    pub deployment: i32,
+    pub at: DateTime<Utc>,
+    pub by: String,
+}
+
+/// The files outside every interface as an environment runs them now (the last deployment that
+/// recorded a project version: release mode), with that deployment: what a deploy holds a new
+/// project version against.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectRunning {
+    pub version: Vec<u8>,
+    pub deployment: i32,
+    pub at: DateTime<Utc>,
+    pub how: String,
+    pub by: String,
+    pub host: String,
+    pub git_commit: Option<String>,
+    pub uncommitted: Option<Vec<String>>,
+    pub release: Option<Vec<u8>>,
 }
 
 /// A stored release's contents, read back: what `ductus_runtime::release` writes an archive from.
@@ -501,8 +530,9 @@ impl Store {
     pub async fn record_check(&self, c: &NewCheck<'_>, audit: &Audit<'_>) -> Result<i32> {
         let mut tx = self.pool.begin().await.context("starting to record the check")?;
         let id: i32 = sqlx::query_scalar(
-            "INSERT INTO release_checks (release_id, environment, instance, host, by_name, ok, problems, seconds, report)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb) RETURNING id",
+            "INSERT INTO release_checks (release_id, environment, instance, host, by_name, ok, problems, seconds, report,
+                                         ductus_version)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10) RETURNING id",
         )
         .bind(c.release)
         .bind(c.environment)
@@ -513,6 +543,7 @@ impl Store {
         .bind(c.problems)
         .bind(c.seconds)
         .bind(c.report.to_string())
+        .bind(c.ductus_version)
         .fetch_one(&mut *tx)
         .await
         .context("saving the check")?;
@@ -521,6 +552,104 @@ impl Store {
         audit::insert(&mut tx, &Audit { subject: Some(short), detail: Some(detail), ..audit.clone() }).await?;
         tx.commit().await.context("committing the check")?;
         Ok(id)
+    }
+
+    /// The pre-run (0.7.4.4): the newest check of `release` a deploy may reuse instead of running
+    /// the gate again. It passed, against `environment`, on this database (the row is here), by
+    /// `ductus_version`, at or after `since`, and **no deployment of any kind** has been recorded
+    /// in that environment since it ran (a start or a handover changes what the gate would see).
+    pub async fn reusable_check(
+        &self,
+        release: &[u8],
+        environment: &str,
+        ductus_version: &str,
+        since: DateTime<Utc>,
+    ) -> Result<Option<CheckRow>> {
+        let found: Option<Check> = sqlx::query_as(
+            "SELECT c.id, c.release_id, c.at, c.environment, c.instance, c.host, c.by_name, c.ok, c.problems, c.seconds,
+                    c.report::text
+             FROM release_checks c
+             WHERE c.release_id = $1 AND c.environment = $2 AND c.ductus_version = $3 AND c.at >= $4 AND c.ok
+               AND NOT EXISTS (SELECT 1 FROM deployments d WHERE d.environment = $2 AND d.at > c.at)
+             ORDER BY c.at DESC, c.id DESC LIMIT 1",
+        )
+        .bind(release)
+        .bind(environment)
+        .bind(ductus_version)
+        .bind(since)
+        .fetch_optional(&self.pool)
+        .await
+        .context("reading the checks a deploy may reuse")?;
+        Ok(found.map(|c| check_row(c).1))
+    }
+
+    /// The release last deployed to `environment` for each project deployed there, newest first:
+    /// what an engine in release mode runs (`ductus run --releases`).
+    pub async fn last_deployed(&self, environment: &str) -> Result<Vec<LastDeployed>> {
+        type Last = (String, Vec<u8>, i32, DateTime<Utc>, String);
+        let mut rows: Vec<Last> = sqlx::query_as(
+            "SELECT DISTINCT ON (r.project) r.project, d.release_id, d.id, d.at, d.by_name
+             FROM deployments d JOIN releases r ON r.id = d.release_id
+             WHERE d.environment = $1 AND d.release_id IS NOT NULL
+             ORDER BY r.project, d.id DESC",
+        )
+        .bind(environment)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the releases deployed")?;
+        rows.sort_by_key(|a| std::cmp::Reverse(a.2));
+        Ok(rows
+            .into_iter()
+            .map(|(project, release, deployment, at, by)| LastDeployed { project, release, deployment, at, by })
+            .collect())
+    }
+
+    /// A stored release's manifest and ancestry (20-byte commit ids, sorted; empty without git),
+    /// without its files or checks.
+    pub async fn release_manifest(&self, id: &[u8]) -> Result<Option<(serde_json::Value, Vec<u8>)>> {
+        let row: Option<(String, Vec<u8>)> =
+            sqlx::query_as("SELECT manifest::text, ancestry FROM releases WHERE id = $1")
+                .bind(id)
+                .fetch_optional(&self.pool)
+                .await
+                .context("reading the release")?;
+        row.map(|(m, a)| Ok((serde_json::from_str(&m).context("reading the release's manifest")?, a))).transpose()
+    }
+
+    /// The project version `project` runs now in `environment` (release mode records one), with the
+    /// deployment it came with: the first deployment of that version since the last that ran
+    /// another (who brought it, not who restarted it since).
+    pub async fn project_running(&self, environment: &str, project: &str) -> Result<Option<ProjectRunning>> {
+        type Found =
+            (Vec<u8>, i32, DateTime<Utc>, String, String, String, Option<String>, Option<Vec<String>>, Option<Vec<u8>>);
+        let found: Option<Found> = sqlx::query_as(
+            "WITH mine AS (
+                 SELECT d.* FROM deployments d JOIN releases r ON r.id = d.release_id
+                 WHERE d.environment = $1 AND d.release_id IS NOT NULL AND r.project = $2),
+             last AS (SELECT project_version FROM mine ORDER BY id DESC LIMIT 1),
+             changed AS (
+                 SELECT coalesce(max(m.id), 0) AS id FROM mine m, last WHERE m.project_version <> last.project_version)
+             SELECT m.project_version, m.id, m.at, m.how, m.by_name, m.host, m.git_commit, m.uncommitted, m.release_id
+             FROM mine m, last, changed
+             WHERE m.project_version = last.project_version AND m.id > changed.id
+             ORDER BY m.id LIMIT 1",
+        )
+        .bind(environment)
+        .bind(project)
+        .fetch_optional(&self.pool)
+        .await
+        .context("reading the project version that runs")?;
+        Ok(found.map(|(version, deployment, at, how, by, host, git_commit, uncommitted, release)| ProjectRunning {
+            version,
+            deployment,
+            at,
+            how,
+            by,
+            host,
+            git_commit,
+            uncommitted,
+            release,
+        }))
     }
 }
 

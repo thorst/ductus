@@ -30,8 +30,9 @@ const MAX_UPLOAD: usize = 256 << 20;
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_PAGE: i64 = 500;
 
-/// One check at a time per engine: each one spreads `validate` and the tests over every CPU.
-static CHECKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// One check at a time per engine: each one spreads `validate` and the tests over every CPU. A
+/// deploy holds it too, from its gate to its end (`api::deployments`).
+pub(super) static CHECKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 pub fn routes() -> OpenApiRouter<Shared> {
     OpenApiRouter::new()
@@ -75,7 +76,7 @@ pub struct ReleaseInfo {
 
 #[derive(Serialize, ToSchema)]
 pub struct CheckInfo {
-    id: i32,
+    pub(super) id: i32,
     at: DateTime<Utc>,
     /// The environment checked against, and the engine and server that ran it.
     environment: String,
@@ -83,7 +84,7 @@ pub struct CheckInfo {
     host: String,
     by: String,
     /// It passed the gate: no problem found.
-    ok: bool,
+    pub(super) ok: bool,
     problems: i32,
     seconds: f32,
     /// `ductus release check --json`'s document (without the manifest: it's the release's); null in lists.
@@ -131,7 +132,7 @@ fn info(r: ductus_store::ReleaseRow) -> ReleaseInfo {
     }
 }
 
-fn check_info(c: ductus_store::CheckRow) -> CheckInfo {
+pub(super) fn check_info(c: ductus_store::CheckRow) -> CheckInfo {
     CheckInfo {
         id: c.id,
         at: c.at,
@@ -228,7 +229,7 @@ async fn list(engine: Eng, _caller: Caller, Query(q): Query<ReleasesQuery>) -> A
 
 /// The release whose id starts with `id` (12 characters are enough): 404 when none, 400 when
 /// several do.
-async fn find(engine: &Shared, id: &str) -> Result<Vec<u8>, ApiError> {
+pub(super) async fn find(engine: &Shared, id: &str) -> Result<Vec<u8>, ApiError> {
     match engine.store.find_release(id).await {
         Ok(Some(found)) => Ok(found),
         Ok(None) => Err(ApiError::not_found(format!(
@@ -286,16 +287,28 @@ async fn check(
     let Ok(_one_at_a_time) = CHECKING.try_lock() else {
         return Err(ApiError::new(
             StatusCode::CONFLICT,
-            "another release check is running on this engine: try again when it ends",
+            "another release check or deploy is running on this engine: try again when it ends",
         ));
     };
+    Ok(Json(run_check(&engine, &caller, &id, q.all_tests).await?))
+}
+
+/// Run the gate on stored release `id` against this engine's environment and record the check
+/// (with its `release.check` audit row). The caller holds `CHECKING`.
+pub(super) async fn run_check(
+    engine: &Shared,
+    caller: &Caller,
+    id: &[u8],
+    all_tests: bool,
+) -> Result<CheckInfo, ApiError> {
+    let id = id.to_vec();
     let contents = engine
         .store
         .release_contents(&id)
         .await?
         .ok_or_else(|| ApiError::not_found("that release is no longer stored"))?;
     let started = Instant::now();
-    let report = gate(&engine, &id, contents, q.all_tests).await?;
+    let report = gate(engine, &id, contents, all_tests).await?;
     // Hundredths, as `ductus release check --json` says them.
     let seconds = (started.elapsed().as_secs_f32() * 100.0).round() / 100.0;
     let ok = report["ok"] == true;
@@ -311,9 +324,10 @@ async fn check(
         problems,
         seconds,
         report: &report,
+        ductus_version: env!("CARGO_PKG_VERSION"),
     };
     let check_id = engine.store.record_check(&new, &caller.audit("release.check")).await?;
-    Ok(Json(CheckInfo {
+    Ok(CheckInfo {
         id: check_id,
         at: Utc::now(),
         environment: engine.environment.clone(),
@@ -324,7 +338,7 @@ async fn check(
         problems,
         seconds,
         report,
-    }))
+    })
 }
 
 /// Write the stored release as an archive again (its id checked) and run `ductus release check

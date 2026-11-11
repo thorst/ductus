@@ -155,6 +155,31 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/deployments": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Deploy a stored release to this engine (release mode): the "replaces" check, the gate (or a
+         *     recent passing check reused), then the handover to an engine running it. Answers when the new
+         *     engine sends, or when it couldn't (this one goes on): seconds, plus the gate's time when it
+         *     runs. 200: deployed. 409: refused before anything ran (folder mode, another deploy or check
+         *     running, the release already runs, its "replaces" check names someone's work), the report
+         *     says why. 422: the gate found problems. 500: the new engine couldn't take over (this one goes
+         *     on). Needs the `deploy` permission. One deploy or check at a time per engine.
+         */
+        post: operations["deploy_release"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/docs": {
         parameters: {
             query?: never;
@@ -1508,6 +1533,72 @@ export interface components {
             /** @description `pending`, `sent`, `filtered` or `quarantined`. */
             status: string;
         };
+        DeployChange: {
+            /** @description The code version before (12 hex characters); null: new here. */
+            from?: string | null;
+            interface: string;
+            to: string;
+            /** @description The "replaces" check's text, when deployed over someone else's work (`force`). */
+            warning?: string | null;
+        };
+        DeployGate: {
+            check: components["schemas"]["CheckInfo"];
+            /** @description A recent passing check reused instead of running the gate again (the pre-run). */
+            reused: boolean;
+            /** @description Why no check could be reused (when one ran). */
+            why_not_reused?: string | null;
+        };
+        /** @description What a deploy did, or why it didn't. */
+        DeployReport: {
+            changes: components["schemas"]["DeployChange"][];
+            /**
+             * Format: int32
+             * @description The deployment the new engine recorded and what it changed (absent if it wasn't recorded
+             *     within seconds: `GET /engine` shows it then).
+             */
+            deployment?: number | null;
+            environment: string;
+            /** @description Deployed over the work `replaces` names. */
+            forced: boolean;
+            gate?: components["schemas"]["DeployGate"] | null;
+            /** @description The new release runs here. */
+            ok: boolean;
+            /** @description What happened, in a sentence. */
+            outcome: string;
+            project: string;
+            /** @description The release, in hex, and its first 12 characters. */
+            release: string;
+            /**
+             * @description Each interface (and "the project's own files") whose running version is someone else's work
+             *     this release would undo, with why. A deploy is refused when any is named, unless forced.
+             */
+            replaces: {
+                [key: string]: string;
+            };
+            short: string;
+            /** @description What the handover said as it went. */
+            steps: string[];
+        };
+        DeployRequest: {
+            /**
+             * @description Run every interface's tests in the gate, not only those of what the release changes here
+             *     (a passing check is reused only when it ran them all too: never, then).
+             */
+            all_tests?: boolean;
+            /**
+             * @description Deploy over someone else's work the "replaces" check names: their change is undone. The
+             *     interfaces and whose work go into the audit log (`release.force`) and the deployment's
+             *     history.
+             */
+            force?: boolean;
+            /**
+             * @description Why: required, except in an environment named `dev`. Recorded with the deployment, in its
+             *     history and in the audit log.
+             */
+            reason?: string | null;
+            /** @description The release: its id, or its first 12 characters. Store it first (`POST /releases`). */
+            release: string;
+        };
         /** @description When a version was deployed, by whom and why. */
         Deployed: {
             /** Format: date-time */
@@ -1536,6 +1627,11 @@ export interface components {
             id: number;
             /** @description Why (`ductus handover -m`); none when nobody said. */
             reason?: string | null;
+            /**
+             * @description Release mode (`ductus run --releases`): the release it runs, in hex; none in folder mode.
+             *     Its commit and files not committed are then the release's.
+             */
+            release?: string | null;
             /**
              * @description Files the interfaces run that aren't the commit's (changed since, or not in it); none
              *     without git.
@@ -3285,6 +3381,74 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CertificatesOverview"];
+                };
+            };
+        };
+    };
+    deploy_release: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["DeployRequest"];
+            };
+        };
+        responses: {
+            /** @description Deployed: the release runs here */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeployReport"];
+                };
+            };
+            /** @description No reason given, or no such release */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused before anything ran: `outcome` says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeployReport"];
+                };
+            };
+            /** @description The gate found problems: `gate.check.report` */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeployReport"];
+                };
+            };
+            /** @description The new engine couldn't take over: this one goes on */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["DeployReport"];
                 };
             };
         };

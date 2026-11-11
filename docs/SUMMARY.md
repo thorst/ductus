@@ -117,6 +117,7 @@
     - [ductus validate](reference/cli/validate.md)
     - [ductus upgrade](reference/cli/upgrade.md)
     - [ductus release](reference/cli/release.md)
+    - [ductus deploy](reference/cli/deploy.md)
     - [ductus replay](reference/cli/replay.md)
     - [ductus handover](reference/cli/handover.md)
     - [ductus new](reference/cli/new.md)

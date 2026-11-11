@@ -10,7 +10,10 @@ ductus run [OPTIONS]
 
 | | What it does | Default | Environment |
 |---|---|---|---|
-| `--root <ROOT>` | Project folder containing `interfaces/`. | `.` | `DUCTUS_PROJECT` |
+| `--root <ROOT>` | Project folder containing `interfaces/` (folder mode; default: the current folder). |  | `DUCTUS_PROJECT` |
+| `--releases <FOLDER>` | Release mode: run the release deployed to this environment (`ductus deploy`), unpacked from the database into this folder, instead of a project folder. Not with `--root` (DUCTUS_PROJECT). Example: `/var/lib/ductus/releases`. |  | `DUCTUS_RELEASES` |
+| `--release-project <NAME>` | Release mode: the project this engine runs, when several are deployed to its environment on one database (default: the only one). |  | `DUCTUS_RELEASE_PROJECT` |
+| `--deploy-reuse-check <DEPLOY_REUSE_CHECK>` | Release mode: how long a deploy may reuse a passing check of the same release here instead of running the gate again (only when nothing was deployed since, by the same Ductus version); `0` runs the gate at every deploy. | `1h` | `DUCTUS_DEPLOY_REUSE_CHECK` |
 | `--database-url <DATABASE_URL>` | The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`. |  | `DUCTUS_DATABASE_URL` |
 | `--threads <THREADS>` | Threads in the shared worker pool (default: one per CPU core). |  | `DUCTUS_THREADS` |
 | `--db-connections <DB_CONNECTIONS>` | Maximum PostgreSQL connections. | `32` | `DUCTUS_DB_CONNECTIONS` |

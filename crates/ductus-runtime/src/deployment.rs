@@ -124,98 +124,30 @@ pub async fn warnings(rx: &watch::Receiver<Option<Warnings>>) -> Warnings {
     rx.wait_for(Option::is_some).await.ok().and_then(|w| w.clone()).unwrap_or_default()
 }
 
-/// Folder mode, two people (0.7.3.3): for each interface this start changes, whether the version it
-/// replaces is someone else's work that this one may undo: it came from a commit that isn't in this
-/// project's history (their checkout had commits this one hasn't pulled), or it ran files never
-/// committed, and someone else deployed it. Refusing needs releases (0.7.4); this warns, in the
-/// log, the deployment's record and `ductus handover`'s answer. Beside the start, before a
-/// takeover is ready (so never in its sending pause); reads only.
+/// Two people (0.7.3.3): for each interface this start changes, whether the version it replaces is
+/// someone else's work that this one may undo (`deploy::replaced`: from a commit that isn't in
+/// this project's history, or the release's, or from files never committed). This warns, in the
+/// log, the deployment's record and `ductus handover`'s answer; a deploy (0.7.4.4) refuses before
+/// it gets here unless forced, so a forced one's warnings are what's recorded. Beside the start,
+/// before a takeover is ready (so never in its sending pause); reads only.
 pub async fn check(
     store: Store,
-    root: std::path::PathBuf,
+    source: crate::deploy::Source,
     versions: Arc<Vec<Version>>,
     who: Who,
     tx: watch::Sender<Option<Warnings>>,
 ) {
     let started = std::time::Instant::now();
-    let names: Vec<&str> = versions.iter().map(|v| v.interface.as_str()).collect();
-    let current = match store.current_versions(&names).await {
-        Ok(c) => c,
+    let pairs: Vec<(&str, &[u8])> = versions.iter().map(|v| (v.interface.as_str(), v.hash.as_slice())).collect();
+    let found = match crate::deploy::replaced(&store, &source, &pairs, &who).await {
+        Ok(found) => found.into_iter().collect::<HashMap<_, _>>(),
         Err(e) => {
             tracing::warn!(error = %format!("{e:#}"), "couldn't read what the interfaces ran before: no warning for changes over someone else's");
-            tx.send_replace(Some(Arc::default()));
-            return;
+            Default::default()
         }
     };
-    let hashes: HashMap<&str, &[u8]> = versions.iter().map(|v| (v.interface.as_str(), v.hash.as_slice())).collect();
-    // Replaced, by someone else, with something to say about where it came from.
-    let suspects: Vec<&ductus_store::Current> = current
-        .iter()
-        .filter(|c| hashes.get(c.interface.as_str()).is_some_and(|h| *h != c.version.as_slice()))
-        .filter(|c| !same_person(&who, c))
-        .filter(|c| c.git_commit.is_some() || !dirty(c).is_empty())
-        .collect();
-    let ancestry = if suspects.iter().any(|c| c.git_commit.is_some()) {
-        let root = root.clone();
-        match tokio::task::spawn_blocking(move || crate::git::ancestry(&root)).await {
-            Ok(Some(Ok(a))) => Some(a),
-            Ok(Some(Err(e))) => {
-                tracing::warn!(error = %format!("{e:#}"), "couldn't read the project's git history: no warning for changes from commits it doesn't have");
-                None
-            }
-            _ => None,
-        }
-    } else {
-        None
-    };
-    let found: HashMap<String, String> =
-        suspects.iter().filter_map(|c| Some((c.interface.clone(), judge(c, ancestry.as_ref())?))).collect();
     tracing::debug!(took = ?started.elapsed(), warnings = found.len(), "checked what the changes replace");
     tx.send_replace(Some(Arc::new(found)));
-}
-
-/// The same person deployed it: both are people (not a service manager) with the same name.
-fn same_person(who: &Who, before: &ductus_store::Current) -> bool {
-    let person = |how: &str, by: &str| how != "service" && !by.starts_with("systemd");
-    person(who.how, &who.by) && person(&before.how, &before.by) && who.by == before.by
-}
-
-/// Files the version replaced ran that weren't committed when it was deployed.
-fn dirty(before: &ductus_store::Current) -> Vec<&str> {
-    let uncommitted = before.uncommitted.as_deref().unwrap_or_default();
-    before.files.iter().filter(|f| uncommitted.contains(f)).map(String::as_str).collect()
-}
-
-/// Why replacing `before` may undo someone's work, in words; None when it can't.
-fn judge(before: &ductus_store::Current, ancestry: Option<&crate::git::Ancestry>) -> Option<String> {
-    let mut why = Vec::new();
-    if let (Some(commit), Some(ancestry)) = (&before.git_commit, ancestry)
-        && ancestry.head.is_some()
-        && !ancestry.contains(commit)
-    {
-        why.push(format!(
-            "came from commit {}, which this project's history doesn't have",
-            &commit[..commit.len().min(12)]
-        ));
-    }
-    let dirty = dirty(before);
-    match dirty.len() {
-        0 => {}
-        1 => why.push(format!("ran a file never committed ({})", dirty[0])),
-        n => why.push(format!("ran {n} files never committed ({}, …)", dirty[0])),
-    }
-    if why.is_empty() {
-        return None;
-    }
-    Some(format!(
-        "replaces {} (deployed {} by {} on {}): it {}, so their change may be undone (`ductus history {}`)",
-        code::short(&before.version),
-        before.at.format("%Y-%m-%d %H:%M UTC"),
-        before.by,
-        before.host,
-        why.join(" and "),
-        before.interface
-    ))
 }
 
 /// Who started this engine and why.
@@ -258,6 +190,8 @@ pub struct Deployment {
     pub uncommitted: Option<Vec<String>>,
     /// Interfaces whose version is new for them here.
     pub changed: usize,
+    /// Release mode: the release it runs, in hex.
+    pub release: Option<String>,
     /// By interface.
     pub interfaces: BTreeMap<String, Running>,
 }
@@ -295,6 +229,9 @@ pub struct Recording {
     pub warned: watch::Receiver<Option<Warnings>>,
     pub root: std::path::PathBuf,
     pub docs: Vec<ductus_store::DocsRow>,
+    /// Release mode: the release it runs (its commit and files not committed are the release's,
+    /// since its folder has no git).
+    pub release: Option<Arc<crate::deploy::Running>>,
 }
 
 /// Save the documentation without a deployment (when it can't be recorded): history rows name none.
@@ -311,10 +248,20 @@ pub async fn docs_alone(store: &Store, docs: &[ductus_store::DocsRow]) {
 /// interfaces (a takeover's after it took over).
 pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: Recording) -> Option<Deployment> {
     let started = std::time::Instant::now();
-    let Recording { versions, decided, warned, root, docs } = r;
-    let reading = versions.clone();
-    let commit = tokio::task::spawn_blocking(move || self::commit(&root, &reading)).await.ok().flatten();
+    let Recording { versions, decided, warned, root, docs, release } = r;
+    let commit = match &release {
+        Some(r) => r
+            .manifest
+            .git
+            .as_ref()
+            .map(|g| crate::git::Commit { id: Some(g.commit.clone()), uncommitted: r.manifest.uncommitted.clone() }),
+        None => {
+            let reading = versions.clone();
+            tokio::task::spawn_blocking(move || self::commit(&root, &reading)).await.ok().flatten()
+        }
+    };
     let commit = commit.as_ref();
+    let project_version = release.as_ref().and_then(|r| r.project_version());
     let store: &Store = &engine.store;
     // Not saved: `save` said why.
     let Some(saved) = decided.saved().await.filter(|s| !s.by_interface.is_empty() || versions.is_empty()) else {
@@ -336,6 +283,8 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
         versions: &new,
         warnings: &warnings,
         docs: Some(&docs),
+        release: release.as_ref().map(|r| r.id.as_slice()),
+        project_version: project_version.as_deref(),
     };
     let recorded = match store.record_deployment(&deployment, &saved.ids).await.context("recording the deployment") {
         Ok(r) => r,
@@ -364,6 +313,7 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
         .collect();
     let more = changed.saturating_sub(NAMED);
     let git = match commit {
+        None if release.is_some() => "a release made without git".to_string(),
         None => "no git repository".to_string(),
         Some(c) => {
             let id = c.id.as_deref().map_or("no commit yet".into(), |id| format!("commit {}", &id[..id.len().min(12)]));
@@ -381,6 +331,7 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
         by = %who.by,
         how = who.how,
         reason = who.reason.as_deref(),
+        release = release.as_ref().map(|r| crate::release::short(&r.hex()).to_string()),
         git = %git,
         took = ?started.elapsed(),
         "deployed: {}{}",
@@ -396,6 +347,7 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
         git_commit: commit.and_then(|c| c.id.clone()),
         uncommitted: commit.map(|c| c.uncommitted.clone()),
         changed,
+        release: release.as_ref().map(|r| r.hex()),
         interfaces: recorded.interfaces.into_iter().map(|i| (i.interface.clone(), i)).collect(),
     })
 }

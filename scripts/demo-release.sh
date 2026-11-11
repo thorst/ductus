@@ -19,6 +19,11 @@
 #      with another reason: the same id, stored before; a viewer: refused;
 #  12. `POST /releases/{id}/check?all_tests=true`: the gate ran by the engine, recorded, audited;
 #  13. `GET /releases` lists it with its check; `GET /releases/{id}` has its manifest.
+# 0.7.4.4.1, deploys (release mode, the handover):
+#  14. an engine in release mode (`ductus run --releases`) with nothing deployed: no interfaces;
+#  15. `ductus deploy <file> -m why`: stored, the gate run, handed over: the interface new there;
+#  16. the next release checked on the engine, then deployed: the check reused (the pre-run);
+#  17. the first release again, by someone else: refused, it would undo the other's work.
 # `TRANSCRIPT=file` keeps what each step printed (docs/operate/releases.md shows it).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
@@ -57,11 +62,22 @@ pipe() {
   echo >>"$OUT"
 }
 API_PORT=17761
-TOKENS=(release-demo-deploy-$$ release-demo-viewer-$$ release-demo-refused-$$)
-# This demo's releases (the same files give the same id every run): forgotten before and after.
+TOKENS=(release-demo-deploy-$$ release-demo-viewer-$$ release-demo-refused-$$ release-demo-ops-$$)
+# The engine running the demo's interface (a handover starts it, not this script): its pid.
+running() { q "SELECT e.pid FROM engines e JOIN interface_owners o ON o.instance = e.instance WHERE o.interface = '$NAME' AND e.stopped_at IS NULL"; }
+stop_running() {
+  local pid
+  pid=$(running 2>/dev/null) || return 0
+  [ -n "$pid" ] || return 0
+  kill -INT "$pid" 2>/dev/null || return 0
+  for _ in $(seq 1 100); do kill -0 "$pid" 2>/dev/null || return 0; sleep 0.1; done
+}
+# This demo's releases (the same files give the same id every run): forgotten before and after,
+# and the deployments that ran them (an earlier run's) unnamed, or the next run's engine in
+# release mode would start on one of them as soon as it's stored again.
 forget_releases() {
   for id in ${FULL:-} ${NEXT_ID:-}; do
-    q "DELETE FROM release_checks WHERE release_id = decode('$id', 'hex'); DELETE FROM releases WHERE id = decode('$id', 'hex')" >/dev/null
+    q "UPDATE deployments SET release_id = NULL, project_version = NULL WHERE release_id = decode('$id', 'hex'); DELETE FROM release_checks WHERE release_id = decode('$id', 'hex'); DELETE FROM releases WHERE id = decode('$id', 'hex')" >/dev/null
   done
 }
 # The project's files with their hashes (git's own aside, and the releases `ductus release` writes).
@@ -71,6 +87,7 @@ mkdir "$W/bin" && ln -s "$BIN" "$W/bin/ductus"
 export PATH="$W/bin:$PATH"
 cleanup() {
   [ -n "${ENGINE:-}" ] && kill -INT "$ENGINE" 2>/dev/null && wait "$ENGINE" 2>/dev/null || true
+  stop_running || true
   q "DELETE FROM interface_versions WHERE interface = '$NAME'" >/dev/null 2>&1 || true
   forget_releases 2>/dev/null || true
   for t in "${TOKENS[@]}"; do "$BIN" token revoke "$t" >/dev/null 2>&1 || true; done
@@ -204,5 +221,42 @@ curl -sS -H "Authorization: Bearer $VIEWER" "$DUCTUS_URL/api/v1/releases/$NEXT_S
 grep -q "\"interfaces\":{\"$NAME\"" "$W/one.json" || fail+=" one-manifest"
 kill -INT $ENGINE && wait $ENGINE 2>/dev/null || true
 ENGINE=
+
+echo "== 14. an engine in release mode, nothing deployed yet"
+# What ran in folder mode above is forgotten: the deploys below start from nothing there.
+q "DELETE FROM interface_versions WHERE interface = '$NAME'" >/dev/null
+OPS=$("$BIN" token create "${TOKENS[3]}" --role operator --permission deploy 2>/dev/null)
+DUCTUS_CONTROL=$W/control "$BIN" run --releases "$W/releases" --env prod --api-listen "127.0.0.1:$API_PORT" >"$W/releases.log" 2>&1 &
+ENGINE=$!
+until grep "started interfaces=" "$W/releases.log" >/dev/null 2>&1; do kill -0 $ENGINE || { cat "$W/releases.log"; exit 1; }; sleep 0.2; done
+grep -o "release mode: nothing is deployed to this environment yet.*" "$W/releases.log" | sed 's/ environment=.*//' | tee -a "$OUT"
+grep -q "started interfaces=0" "$W/releases.log" || fail+=" release-mode-empty"
+export DUCTUS_API_URL=$DUCTUS_URL DUCTUS_API_TOKEN=$DEPLOY
+FIRST_REL=.ductus/releases/$(basename "$FILE")
+
+echo "== 15. deployed: stored, the gate, the handover"
+step deploy ductus deploy "$FIRST_REL" -m "first release"
+[ "$(code deploy)" = 0 ] && grep -q "gate: passed" "$W/deploy.txt" && grep -q "^✓ handed over to ductus" "$W/deploy.txt" || fail+=" deploy"
+grep -q "^  $NAME new here [0-9a-f]\{12\}$" "$W/deploy.txt" || fail+=" deploy-changes"
+wait $ENGINE 2>/dev/null || fail+=" deploy-old-engine-exit"
+ENGINE=
+[ -f "$W/releases/$FULL/.ductus-release" ] || fail+=" deploy-unpacked"
+[ "$(q "SELECT count(*) FROM deployments WHERE release_id = decode('$FULL', 'hex') AND by_name = '${TOKENS[0]}' AND reason = 'first release'")" = 1 ] || fail+=" deploy-recorded"
+
+echo "== 16. the next release checked there, then deployed: the check reused"
+curl -sS -X POST -H "Authorization: Bearer $DEPLOY" "$DUCTUS_URL/api/v1/releases/$NEXT_SHORT/check" >"$W/check2.json"
+grep -q '"ok":true' "$W/check2.json" || fail+=" check2"
+step next-deploy ductus deploy "$NEXT_SHORT" -m "archive: MSH-6"
+[ "$(code next-deploy)" = 0 ] && grep -q "^gate: reused check #" "$W/next-deploy.txt" || fail+=" next-deploy"
+grep -q "^  $NAME [0-9a-f]\{12\} → [0-9a-f]\{12\}$" "$W/next-deploy.txt" || fail+=" next-deploy-changes"
+[ "$(q "SELECT count(*) FROM audit_log WHERE action = 'release.deploy' AND actor_name = '${TOKENS[0]}' AND detail->>'ok' = 'true'")" = 2 ] || fail+=" deploy-audit"
+
+echo "== 17. the first release again, by someone else: refused"
+export OPS
+pipe undo 'DUCTUS_API_TOKEN=$OPS ductus deploy '"$ID"' -m "back to the first"'
+[ "$(code undo)" = 1 ] && grep -q "^✗ would undo $NAME: replaces .* by ${TOKENS[0]} " "$W/undo.txt" || fail+=" undo-not-refused"
+grep -q "which this release's history doesn't have" "$W/undo.txt" && ! grep -q "^gate:" "$W/undo.txt" || fail+=" undo-why"
+[ -n "$(running)" ] || fail+=" undo-engine-gone"
+stop_running
 
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

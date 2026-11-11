@@ -495,6 +495,86 @@
         }
       }
     },
+    "/deployments": {
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Deploy a stored release to this engine (release mode): the \"replaces\" check, the gate (or a\nrecent passing check reused), then the handover to an engine running it. Answers when the new\nengine sends, or when it couldn't (this one goes on): seconds, plus the gate's time when it\nruns. 200: deployed. 409: refused before anything ran (folder mode, another deploy or check\nrunning, the release already runs, its \"replaces\" check names someone's work), the report\nsays why. 422: the gate found problems. 500: the new engine couldn't take over (this one goes\non). Needs the `deploy` permission. One deploy or check at a time per engine.",
+        "operationId": "deploy_release",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DeployRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Deployed: the release runs here",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeployReport"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "No reason given, or no such release",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused before anything ran: `outcome` says why",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeployReport"
+                }
+              }
+            }
+          },
+          "422": {
+            "description": "The gate found problems: `gate.check.report`",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeployReport"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The new engine couldn't take over: this one goes on",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DeployReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/docs": {
       "get": {
         "tags": [
@@ -4230,6 +4310,170 @@
           }
         }
       },
+      "DeployChange": {
+        "type": "object",
+        "required": [
+          "interface",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The code version before (12 hex characters); null: new here."
+          },
+          "interface": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          },
+          "warning": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The \"replaces\" check's text, when deployed over someone else's work (`force`)."
+          }
+        }
+      },
+      "DeployGate": {
+        "type": "object",
+        "required": [
+          "reused",
+          "check"
+        ],
+        "properties": {
+          "check": {
+            "$ref": "#/components/schemas/CheckInfo"
+          },
+          "reused": {
+            "type": "boolean",
+            "description": "A recent passing check reused instead of running the gate again (the pre-run)."
+          },
+          "why_not_reused": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why no check could be reused (when one ran)."
+          }
+        }
+      },
+      "DeployReport": {
+        "type": "object",
+        "description": "What a deploy did, or why it didn't.",
+        "required": [
+          "ok",
+          "outcome",
+          "release",
+          "short",
+          "project",
+          "environment",
+          "replaces",
+          "forced",
+          "steps",
+          "changes"
+        ],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DeployChange"
+            }
+          },
+          "deployment": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The deployment the new engine recorded and what it changed (absent if it wasn't recorded\nwithin seconds: `GET /engine` shows it then)."
+          },
+          "environment": {
+            "type": "string"
+          },
+          "forced": {
+            "type": "boolean",
+            "description": "Deployed over the work `replaces` names."
+          },
+          "gate": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/DeployGate",
+                "description": "The gate: a check run now, or the passing check reused (`reused`)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "The new release runs here."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "What happened, in a sentence."
+          },
+          "project": {
+            "type": "string"
+          },
+          "release": {
+            "type": "string",
+            "description": "The release, in hex, and its first 12 characters."
+          },
+          "replaces": {
+            "type": "object",
+            "description": "Each interface (and \"the project's own files\") whose running version is someone else's work\nthis release would undo, with why. A deploy is refused when any is named, unless forced.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "short": {
+            "type": "string"
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the handover said as it went."
+          }
+        }
+      },
+      "DeployRequest": {
+        "type": "object",
+        "required": [
+          "release"
+        ],
+        "properties": {
+          "all_tests": {
+            "type": "boolean",
+            "description": "Run every interface's tests in the gate, not only those of what the release changes here\n(a passing check is reused only when it ran them all too: never, then)."
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Deploy over someone else's work the \"replaces\" check names: their change is undone. The\ninterfaces and whose work go into the audit log (`release.force`) and the deployment's\nhistory."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why: required, except in an environment named `dev`. Recorded with the deployment, in its\nhistory and in the audit log."
+          },
+          "release": {
+            "type": "string",
+            "description": "The release: its id, or its first 12 characters. Store it first (`POST /releases`)."
+          }
+        }
+      },
       "Deployed": {
         "type": "object",
         "description": "When a version was deployed, by whom and why.",
@@ -4298,6 +4542,13 @@
               "null"
             ],
             "description": "Why (`ductus handover -m`); none when nobody said."
+          },
+          "release": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Release mode (`ductus run --releases`): the release it runs, in hex; none in folder mode.\nIts commit and files not committed are then the release's."
           },
           "uncommitted": {
             "type": [

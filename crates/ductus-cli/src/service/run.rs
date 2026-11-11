@@ -222,7 +222,12 @@ fn mark_stopped(stopped: bool) {
 /// What the Event Log's start event says besides the version: where the project and database are.
 fn context(args: &RunArgs) -> String {
     let database = args.database_url.as_deref().map(without_login).unwrap_or_else(|| "(not set)".into());
-    format!("project: {}\ndatabase: {database}\nenvironment: {}", args.root.display(), args.env)
+    let project = match (&args.releases, &args.root) {
+        (Some(releases), _) => format!("releases deployed here, unpacked into {}", releases.display()),
+        (None, Some(root)) => root.display().to_string(),
+        (None, None) => ".".into(),
+    };
+    format!("project: {project}\ndatabase: {database}\nenvironment: {}", args.env)
 }
 
 /// A database URL without its user and password: `postgres://host:5432/db`.

@@ -41,6 +41,10 @@ pub struct NewDeployment<'a> {
     /// The project's documentation, saved with the deployment (`docs_snapshot`, and a
     /// `docs_history` row for each entry that changed); None leaves both alone.
     pub docs: Option<&'a [crate::DocsRow]>,
+    /// The release it runs (`ductus run --releases`); None in folder mode.
+    pub release: Option<&'a [u8]>,
+    /// The release's project version (the files outside every interface); None in folder mode.
+    pub project_version: Option<&'a [u8]>,
 }
 
 /// What an interface runs now, as recorded (`interface_versions`), with the deployment it came
@@ -60,6 +64,8 @@ pub struct Current {
     pub git_commit: Option<String>,
     /// Null without git.
     pub uncommitted: Option<Vec<String>>,
+    /// The release that deployment ran (release mode).
+    pub release: Option<Vec<u8>>,
 }
 
 /// The deployment an interface's running version came with.
@@ -242,8 +248,8 @@ impl Store {
         let set = interface_set(&mut tx, &names).await?;
         let (id, at): (i32, DateTime<Utc>) = sqlx::query_as(
             "INSERT INTO deployments (environment, instance, host, version, how, by_name, reason, git_commit,
-                                      uncommitted, interfaces, changed, interface_set)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+                                      uncommitted, interfaces, changed, interface_set, release_id, project_version)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
              RETURNING id, at",
         )
         .bind(d.environment)
@@ -258,6 +264,8 @@ impl Store {
         .bind(d.versions.len() as i32)
         .bind(changed.len() as i32)
         .bind(set)
+        .bind(d.release)
+        .bind(d.project_version)
         .fetch_one(&mut *tx)
         .await
         .context("saving the deployment")?;
@@ -331,10 +339,22 @@ impl Store {
     /// interfaces never run here are absent). Read before a deployment replaces them, to tell when
     /// that may undo someone else's work.
     pub async fn current_versions(&self, names: &[&str]) -> Result<Vec<Current>> {
-        type Row =
-            (String, Vec<u8>, String, i32, DateTime<Utc>, String, String, String, Option<String>, Option<Vec<String>>);
+        type Row = (
+            String,
+            Vec<u8>,
+            String,
+            i32,
+            DateTime<Utc>,
+            String,
+            String,
+            String,
+            Option<String>,
+            Option<Vec<String>>,
+            Option<Vec<u8>>,
+        );
         let rows: Vec<Row> = sqlx::query_as(
-            "SELECT i.interface, v.hash, v.files::text, d.id, d.at, d.how, d.by_name, d.host, d.git_commit, d.uncommitted
+            "SELECT i.interface, v.hash, v.files::text, d.id, d.at, d.how, d.by_name, d.host, d.git_commit, d.uncommitted,
+                    d.release_id
              FROM interface_versions i
              JOIN code_versions v ON v.id = i.version_id
              JOIN deployments d ON d.id = i.deployment_id
@@ -347,19 +367,70 @@ impl Store {
         .context("reading what the interfaces run")?;
         Ok(rows
             .into_iter()
-            .map(|(interface, version, files, deployment, at, how, by, host, git_commit, uncommitted)| Current {
-                interface,
-                version,
-                files: paths(&files),
-                deployment,
-                at,
-                how,
-                by,
-                host,
-                git_commit,
-                uncommitted,
+            .map(|(interface, version, files, deployment, at, how, by, host, git_commit, uncommitted, release)| {
+                Current {
+                    interface,
+                    version,
+                    files: paths(&files),
+                    deployment,
+                    at,
+                    how,
+                    by,
+                    host,
+                    git_commit,
+                    uncommitted,
+                    release,
+                }
             })
             .collect())
+    }
+}
+
+/// An interface a deployment changed (`deployment_changes`), with the versions' hashes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Changed {
+    pub interface: String,
+    /// None: new here.
+    pub from: Option<Vec<u8>>,
+    pub to: Vec<u8>,
+    /// The "replaces" check's warning (folder mode, or a forced deploy).
+    pub warning: Option<String>,
+}
+
+impl Store {
+    /// The first deployment in `environment` of `release` recorded at or after `since`, and what it
+    /// changed: a deploy's answer reads it once the new engine has recorded it.
+    pub async fn deployment_of_release(
+        &self,
+        environment: &str,
+        release: &[u8],
+        since: DateTime<Utc>,
+    ) -> Result<Option<(i32, Vec<Changed>)>> {
+        let id: Option<i32> = sqlx::query_scalar(
+            "SELECT id FROM deployments WHERE environment = $1 AND release_id = $2 AND at >= $3 ORDER BY id LIMIT 1",
+        )
+        .bind(environment)
+        .bind(release)
+        .bind(since)
+        .fetch_optional(&self.pool)
+        .await
+        .context("reading the deployment")?;
+        let Some(id) = id else { return Ok(None) };
+        type Row = (String, Option<Vec<u8>>, Vec<u8>, Option<String>);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT c.interface, f.hash, t.hash, c.warning
+             FROM deployment_changes c
+             LEFT JOIN code_versions f ON f.id = c.from_version
+             JOIN code_versions t ON t.id = c.to_version
+             WHERE c.deployment_id = $1 ORDER BY c.interface",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading what the deployment changed")?;
+        let changed =
+            rows.into_iter().map(|(interface, from, to, warning)| Changed { interface, from, to, warning }).collect();
+        Ok(Some((id, changed)))
     }
 }
 

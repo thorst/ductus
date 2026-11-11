@@ -3679,6 +3679,8 @@ async fn deploy_with(
         versions: &versions,
         warnings,
         docs,
+        release: None,
+        project_version: None,
     };
     let ids = store.save_versions(&versions).await?;
     store.record_deployment(&d, &ids).await
@@ -4193,6 +4195,7 @@ async fn releases_are_stored_once_by_folder_and_read_back_whole() {
         problems: 0,
         seconds: 1.5,
         report: &report,
+        ductus_version: "0.7.0-test",
     };
     store.record_check(&check, &quiet()).await.unwrap();
     store.record_check(&ductus_store::NewCheck { ok: false, problems: 2, ..check.clone() }, &quiet()).await.unwrap();
@@ -4207,6 +4210,101 @@ async fn releases_are_stored_once_by_folder_and_read_back_whole() {
     assert_eq!(manifest["made"]["reason"], "second");
     assert_eq!(store.release_summary(&first).await.unwrap().unwrap().checks.len(), 0);
 
+    forget_release(&pool, &first).await;
+    forget_release(&pool, &second).await;
+}
+
+/// The pre-run (0.7.4.4): a deploy reuses a check only when it passed, is of that release against
+/// that environment by this Ductus version, is recent enough, and nothing was deployed there since.
+/// And the release an engine in release mode runs: the last one deployed to its environment.
+#[tokio::test]
+async fn a_deploy_reuses_only_a_recent_passing_check_with_nothing_deployed_since() {
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let tag = format!("{}-{nanos}", std::process::id());
+    let env = format!("test-prerun-{tag}");
+    let (first, second) = ([3u8; 32].map(|b| b ^ (nanos as u8)), [4u8; 32].map(|b| b ^ (nanos as u8)));
+    forget_deployments(&pool, &env).await;
+    store_test_release(&store, &first, &release_files(&tag, "a"), "first").await;
+    store_test_release(&store, &second, &release_files(&tag, "b"), "second").await;
+    let report = serde_json::json!({ "ok": true, "checks": [] });
+    let check = |ok, version| ductus_store::NewCheck {
+        release: &first,
+        environment: &env,
+        instance: "i-1",
+        host: "box",
+        by: "test-ci",
+        ok,
+        problems: if ok { 0 } else { 1 },
+        seconds: 1.0,
+        report: &report,
+        ductus_version: version,
+    };
+    let hour_ago = chrono::Utc::now() - chrono::Duration::hours(1);
+    let reuse = |version: &'static str, since| {
+        let (store, env) = (store.clone(), env.clone());
+        async move { store.reusable_check(&first, &env, version, since).await.unwrap().map(|c| c.id) }
+    };
+    assert_eq!(reuse("0.7.0-test", hour_ago).await, None, "no check yet");
+    store.record_check(&check(false, "0.7.0-test"), &quiet()).await.unwrap();
+    assert_eq!(reuse("0.7.0-test", hour_ago).await, None, "a failed check is never reused");
+    let passed = store.record_check(&check(true, "0.7.0-test"), &quiet()).await.unwrap();
+    assert_eq!(reuse("0.7.0-test", hour_ago).await, Some(passed));
+    assert_eq!(reuse("0.7.1-test", hour_ago).await, None, "another Ductus version ran it");
+    let later = chrono::Utc::now() + chrono::Duration::seconds(1);
+    assert_eq!(reuse("0.7.0-test", later).await, None, "older than the window");
+    assert_eq!(
+        store.reusable_check(&first, "another-env", "0.7.0-test", hour_ago).await.unwrap().map(|c| c.id),
+        None,
+        "another environment's check"
+    );
+
+    // A deployment of any kind in that environment since the check: not reusable any more.
+    let yaml = format!("name: {env}\n");
+    let v = TestVersion::new(&env, &[("interfaces/a/interface.yaml", &yaml)]);
+    let deployed = deploy_with(&store, &env, "ann", &[&v], &Default::default(), None).await.unwrap();
+    assert_eq!(reuse("0.7.0-test", hour_ago).await, None, "something was deployed since");
+    assert!(store.last_deployed(&env).await.unwrap().is_empty(), "folder mode records no release");
+
+    // Release mode: the deployments name their release; the last one per project is what runs.
+    for (release, by) in [(&first, "ann"), (&second, "bob")] {
+        let versions = [v.borrow()];
+        let d = ductus_store::NewDeployment {
+            environment: &env,
+            instance: &env,
+            host: "test-host",
+            version: "0.7.0-test",
+            how: "handover",
+            by,
+            reason: Some("deploying"),
+            git_commit: Some("abc"),
+            uncommitted: None,
+            versions: &versions,
+            warnings: &Default::default(),
+            docs: None,
+            release: Some(release.as_slice()),
+            project_version: Some([9u8; 32].as_slice()),
+        };
+        let ids = store.save_versions(&versions).await.unwrap();
+        store.record_deployment(&d, &ids).await.unwrap();
+    }
+    let last = store.last_deployed(&env).await.unwrap();
+    assert_eq!(last.len(), 1, "one project");
+    assert_eq!(
+        (last[0].project.as_str(), last[0].release.as_slice(), last[0].by.as_str()),
+        ("integrations", second.as_slice(), "bob")
+    );
+    assert!(last[0].deployment > deployed.id);
+    // The project version runs since the first deployment that brought it, not the restart after.
+    let project = store.project_running(&env, "integrations").await.unwrap().unwrap();
+    assert!(store.project_running(&env, "another").await.unwrap().is_none(), "by project");
+    assert_eq!((project.version, project.by.as_str()), (vec![9u8; 32], "ann"));
+    assert_eq!(project.release.as_deref(), Some(first.as_slice()));
+    let current = store.current_versions(&[v.interface.as_str()]).await.unwrap();
+    assert_eq!(current[0].release, None, "unchanged since the folder-mode start that brought it");
+
+    forget_deployments(&pool, &env).await;
     forget_release(&pool, &first).await;
     forget_release(&pool, &second).await;
 }

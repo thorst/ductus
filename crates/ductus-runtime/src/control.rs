@@ -136,6 +136,11 @@ pub struct Engine {
     /// What this engine runs, as its start recorded it (`deployment`); unset until then, or when
     /// it couldn't be recorded.
     pub deployment: std::sync::OnceLock<crate::deployment::Deployment>,
+    /// Release mode (`ductus run --releases`): where releases are unpacked, the project, the
+    /// release it runs and how long a passing check may be reused. None: folder mode.
+    pub releases: Option<crate::deploy::Releases>,
+    /// Asks this engine for a handover from inside (a deploy); unset without a control socket.
+    pub asker: std::sync::OnceLock<crate::handover::Asker>,
 }
 
 /// Where the engine's REST API (and web UI) listens, and its `tls` (none: plain HTTP).
@@ -171,6 +176,7 @@ pub struct Parts {
     pub tls: Arc<crate::tls::Certificates>,
     pub api: Option<ApiListener>,
     pub host: String,
+    pub releases: Option<crate::deploy::Releases>,
 }
 
 impl Engine {
@@ -197,6 +203,7 @@ impl Engine {
             tls,
             api,
             host,
+            releases,
         } = parts;
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
@@ -235,6 +242,8 @@ impl Engine {
             host,
             handed_over: std::sync::OnceLock::new(),
             deployment: std::sync::OnceLock::new(),
+            releases,
+            asker: std::sync::OnceLock::new(),
         });
         tokio::spawn(monitor(Arc::downgrade(&engine)));
         engine

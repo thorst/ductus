@@ -1,5 +1,6 @@
 mod admin;
 mod cert;
+mod deploy;
 mod dev;
 mod doctor;
 mod envfile;
@@ -38,9 +39,23 @@ struct Cli {
 /// What `ductus run` takes (and the Windows service, which is `ductus run --service`).
 #[derive(clap::Args, Clone)]
 struct RunArgs {
-    /// Project folder containing `interfaces/`.
-    #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
-    root: PathBuf,
+    /// Project folder containing `interfaces/` (folder mode; default: the current folder).
+    #[arg(long, env = "DUCTUS_PROJECT")]
+    root: Option<PathBuf>,
+    /// Release mode: run the release deployed to this environment (`ductus deploy`), unpacked
+    /// from the database into this folder, instead of a project folder. Not with `--root`
+    /// (DUCTUS_PROJECT). Example: `/var/lib/ductus/releases`.
+    #[arg(long, env = "DUCTUS_RELEASES", value_name = "FOLDER")]
+    releases: Option<PathBuf>,
+    /// Release mode: the project this engine runs, when several are deployed to its environment on
+    /// one database (default: the only one).
+    #[arg(long, env = "DUCTUS_RELEASE_PROJECT", value_name = "NAME", requires = "releases")]
+    release_project: Option<String>,
+    /// Release mode: how long a deploy may reuse a passing check of the same release here instead
+    /// of running the gate again (only when nothing was deployed since, by the same Ductus
+    /// version); `0` runs the gate at every deploy.
+    #[arg(long, env = "DUCTUS_DEPLOY_REUSE_CHECK", default_value = "1h", value_parser = parse_duration)]
+    deploy_reuse_check: std::time::Duration,
     /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
     #[arg(long, env = "DUCTUS_DATABASE_URL")]
     database_url: Option<String>,
@@ -74,6 +89,18 @@ impl RunArgs {
     /// Where the project is, which database, and the engine's settings.
     fn parts(self) -> Result<(PathBuf, String, ductus_runtime::EngineOptions)> {
         let defaults = ductus_runtime::EngineOptions::default();
+        if let (Some(project), Some(_)) = (&self.root, &self.releases) {
+            anyhow::bail!(
+                "both a project folder ({}, `--root` or DUCTUS_PROJECT) and release mode (`--releases` or DUCTUS_RELEASES) \
+                 are set: remove DUCTUS_PROJECT to run releases, or DUCTUS_RELEASES to run the folder",
+                project.display()
+            );
+        }
+        let releases = self.releases.map(|dir| ductus_runtime::deploy::Mode {
+            dir,
+            project: self.release_project,
+            reuse_check: self.deploy_reuse_check,
+        });
         let options = ductus_runtime::EngineOptions {
             pool_threads: self.threads.unwrap_or(defaults.pool_threads),
             db_connections: self.db_connections,
@@ -82,9 +109,10 @@ impl RunArgs {
             stop_timeout: self.stop_timeout,
             control: true,
             takeover: self.takeover.map(ductus_runtime::handover::Takeover::new).transpose()?,
+            releases,
             ..defaults
         };
-        Ok((self.root, tools::database_url(self.database_url)?, options))
+        Ok((self.root.unwrap_or_else(|| PathBuf::from(".")), tools::database_url(self.database_url)?, options))
     }
 }
 
@@ -339,6 +367,44 @@ enum Command {
         action: Option<ReleaseAction>,
         #[command(flatten)]
         make: ReleaseArgs,
+    },
+    /// Deploy a release to an engine in release mode (`ductus run --releases`): the engine holds
+    /// it against what runs there (the "replaces" check: refused when it would undo someone
+    /// else's work), runs the gate (`ductus release check`) against its environment unless a
+    /// recent passing check can be reused, then hands over to an engine running it: receiving
+    /// never stops. Exits 1 when it wasn't deployed. Needs a token with the `deploy` permission.
+    /// Example: `ductus deploy .ductus/releases/integrations-0a1b2c3d4e5f.tar.gz --to
+    /// https://ductus-test:7700 -m "lab wants PV1-3 mapped"`.
+    Deploy {
+        /// The release: a file `ductus release` wrote (stored on the engine first when it isn't),
+        /// or the id of a release stored there (its first 12 characters are enough).
+        release: String,
+        /// The engine's REST API.
+        #[arg(long, env = "DUCTUS_API_URL", default_value = "http://127.0.0.1:7700")]
+        to: String,
+        /// A token with the `deploy` permission (`ductus token create ci --role operator
+        /// --permission deploy`).
+        #[arg(long, env = "DUCTUS_API_TOKEN", hide_env_values = true)]
+        token: Option<String>,
+        /// Why: required, except to an environment named `dev`; recorded with the deployment,
+        /// in its history and in the audit log.
+        #[arg(short = 'm', long = "message")]
+        reason: Option<String>,
+        /// Deploy over someone else's work the "replaces" check names: their change is undone
+        /// (recorded in the audit log as `release.force`, and in the history). Needs `-m`.
+        #[arg(long)]
+        force: bool,
+        /// Run every interface's tests in the gate, not only those of what the release changes
+        /// there (never reuses a check).
+        #[arg(long)]
+        all_tests: bool,
+        /// The engine's report as JSON.
+        #[arg(long)]
+        json: bool,
+        /// How long to wait for the engine's answer (the gate, up to 30 minutes, then the
+        /// handover).
+        #[arg(long, default_value = "40m", value_parser = parse_duration)]
+        timeout: std::time::Duration,
     },
     /// Run a period's messages through this version's code again, sending nothing, and compare what
     /// each destination's code decides (sent and what, filtered, quarantined) with the installed
@@ -1306,6 +1372,9 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Release {
             action: Some(ReleaseAction::Check { bundle, env, all_tests, database_url, json }), ..
         } => exit_on_failure(release::check(release::Check { bundle, env, all_tests, database_url, json }).await),
+        Command::Deploy { release, to, token, reason, force, all_tests, json, timeout } => exit_on_failure(
+            deploy::run(deploy::Deploy { release, to, token, reason, force, all_tests, json, timeout }).await,
+        ),
         Command::Release { action: None, make } => {
             let ReleaseArgs { reason, uncommitted, over, no_tests, out, json, root, env } = make;
             release::make(release::Make { root, env, reason, uncommitted, over, no_tests, out, json }).await

@@ -16,6 +16,7 @@ mod actions;
 mod alerts;
 mod audit;
 mod certificates;
+mod deployments;
 mod hotspots;
 mod me;
 mod messages;
@@ -101,6 +102,7 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
         .merge(certificates::routes())
         .merge(metrics::routes())
         .merge(releases::routes())
+        .merge(deployments::routes())
         .merge(reports::routes())
         .merge(retention::routes())
         .merge(tokens::routes())
@@ -183,6 +185,7 @@ pub const ACCESS: &[(&str, &str, &str)] = &[
     ("POST", "/releases", "deploy"),
     ("GET", "/releases/{id}", "signed"),
     ("POST", "/releases/{id}/check", "deploy"),
+    ("POST", "/deployments", "deploy"),
 ];
 
 pub use metrics::{METRICS, Metric};

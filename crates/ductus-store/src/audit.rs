@@ -89,6 +89,14 @@ pub const ACTIONS: &[(&str, &str)] = &[
         "release.check",
         "Someone checked a stored release against this engine's environment (`POST /releases/{id}/check`): its code was validated and tested with that environment's settings and secrets.",
     ),
+    (
+        "release.deploy",
+        "Someone deployed a release to this engine (`POST /deployments`, `ductus deploy`), or tried: `detail.ok`, `detail.outcome` (why it was refused, or the handover's result), the reason, the check it ran or reused.",
+    ),
+    (
+        "release.force",
+        "Someone deployed a release over someone else's work the \"replaces\" check named (`force`): `detail.replaces` names each interface and whose work it undid, `detail.reason` why.",
+    ),
 ];
 
 /// Who did it, and how they came.

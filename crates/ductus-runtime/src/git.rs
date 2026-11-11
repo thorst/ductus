@@ -300,6 +300,15 @@ pub struct Ancestry {
 }
 
 impl Ancestry {
+    /// A release's (0.7.4.4): its commit and the ancestry it carries (20-byte ids, `release::GitSource`).
+    pub fn of_release(commit: &str, ancestry: &[u8]) -> Self {
+        let (ids, _) = ancestry.as_chunks::<20>();
+        Self {
+            head: Some(commit.to_string()),
+            ids: ids.iter().map(|id| gix::ObjectId::from_bytes_or_panic(id.as_slice())).collect(),
+        }
+    }
+
     /// Whether `commit` (hex) is HEAD or one of its ancestors.
     pub fn contains(&self, commit: &str) -> bool {
         gix::ObjectId::from_hex(commit.as_bytes()).is_ok_and(|id| self.ids.contains(&id))

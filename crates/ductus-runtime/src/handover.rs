@@ -63,6 +63,10 @@ pub struct Request {
 pub struct Asked {
     pub by: Option<String>,
     pub reason: Option<String>,
+    /// A deploy (`POST /deployments`, 0.7.4.4): the release the new engine runs, in hex (release
+    /// mode). None: the release that runs now (a plain `ductus handover`). Engines before ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<String>,
 }
 
 impl Asked {
@@ -76,7 +80,7 @@ impl Asked {
             (None, Some(_)) => "systemd (systemctl reload)".into(),
             (None, None) => crate::deployment::account(),
         };
-        Self { by: Some(by), reason: reason.filter(|r| !r.trim().is_empty()) }
+        Self { by: Some(by), reason: reason.filter(|r| !r.trim().is_empty()), release: None }
     }
 }
 
@@ -182,6 +186,9 @@ pub struct Control {
     /// A handover is under way: a request meanwhile is told so.
     #[cfg(target_os = "linux")]
     busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// Where a request from inside the engine goes (a deploy: `POST /deployments`).
+    #[cfg(target_os = "linux")]
+    asker: Option<tokio::sync::mpsc::Sender<linux::Requested>>,
 }
 
 impl Control {
@@ -191,20 +198,30 @@ impl Control {
         #[cfg(target_os = "linux")]
         {
             let busy = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let requests = control_path().filter(|_| enabled).and_then(|path| match linux::listen(&path, busy.clone()) {
-                Ok(requests) => Some(requests),
+            let opened = control_path().filter(|_| enabled).and_then(|path| match linux::listen(&path, busy.clone()) {
+                Ok(opened) => Some(opened),
                 Err(e) => {
                     tracing::warn!(error = %format!("{e:#}"), "no handover possible (`systemctl reload` fails; restart instead)");
                     None
                 }
             });
-            Self { requests, busy }
+            let (asker, requests) = opened.unzip();
+            Self { requests, busy, asker }
         }
         #[cfg(not(target_os = "linux"))]
         {
             let _ = enabled;
             Self {}
         }
+    }
+
+    /// Asks for a handover from inside the engine (a deploy), as `ductus handover` asks over the
+    /// socket: None when there's no control socket (then there's no handover either).
+    pub fn asker(&self) -> Option<Asker> {
+        #[cfg(target_os = "linux")]
+        return self.asker.clone().map(|tx| Asker { tx, busy: self.busy.clone() });
+        #[cfg(not(target_os = "linux"))]
+        None
     }
 
     /// Resolves when a new engine is ready to take over: this one must then stop, let go of its
@@ -224,6 +241,47 @@ impl Control {
         }
         let _ = engine;
         std::future::pending().await
+    }
+}
+
+/// Asks this engine for a handover from inside it: what `POST /deployments` uses.
+#[derive(Clone)]
+pub struct Asker {
+    #[cfg(target_os = "linux")]
+    tx: tokio::sync::mpsc::Sender<linux::Requested>,
+    #[cfg(target_os = "linux")]
+    busy: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl Asker {
+    /// Ask, passing each line said as it goes to `say`: Ok((true, text)) once the new engine runs,
+    /// (false, why) when it couldn't take over (this engine goes on), as `ask` over the socket.
+    /// The answer comes once this engine stopped and let go (it answers before it exits).
+    pub async fn ask(&self, request: Request, mut say: impl FnMut(&str)) -> Result<(bool, String)> {
+        #[cfg(target_os = "linux")]
+        {
+            use std::sync::atomic::Ordering;
+            if self.busy.load(Ordering::SeqCst) {
+                return Ok((false, "another handover is under way".into()));
+            }
+            let (answers, mut rx) = tokio::sync::mpsc::unbounded_channel();
+            let requested = linux::Requested::in_process(request, answers);
+            if self.tx.try_send(requested).is_err() {
+                return Ok((false, "another handover is under way".into()));
+            }
+            while let Some(answer) = rx.recv().await {
+                match answer {
+                    Answer::Progress(text) => say(&text),
+                    Answer::Done { ok, text } => return Ok((ok, text)),
+                }
+            }
+            anyhow::bail!("the handover ended without an answer: see the engine's log")
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            let _ = (request, &mut say);
+            anyhow::bail!("the handover is for Linux")
+        }
     }
 }
 
@@ -341,19 +399,39 @@ mod linux {
         }
     }
 
-    /// A request for a handover, with the connection to answer it on.
-    pub(super) struct Requested {
+    /// Who to answer: `ductus handover` over the socket, or a deploy inside the engine.
+    enum Reply {
+        Socket(Lined),
+        InProcess(mpsc::UnboundedSender<Answer>),
+    }
+
+    impl Reply {
+        async fn send(&mut self, answer: Answer) {
+            // The asker may have gone (Ctrl-C): the handover goes on all the same.
+            match self {
+                Reply::Socket(lined) => drop(lined.send(&answer).await),
+                Reply::InProcess(tx) => drop(tx.send(answer)),
+            }
+        }
+    }
+
+    /// A request for a handover, with whom to answer.
+    pub(crate) struct Requested {
         request: Request,
-        asker: Option<Lined>,
+        asker: Option<Reply>,
     }
 
     impl Requested {
+        /// A request from inside the engine: answers go to `answers`.
+        pub(crate) fn in_process(request: Request, answers: mpsc::UnboundedSender<Answer>) -> Self {
+            Self { request, asker: Some(Reply::InProcess(answers)) }
+        }
+
         async fn say(&mut self, text: impl Into<String>) {
             let text = text.into();
             tracing::info!("handover: {text}");
             if let Some(asker) = self.asker.as_mut() {
-                // The asker may have gone (Ctrl-C): the handover goes on all the same.
-                let _ = asker.send(&Answer::Progress(text)).await;
+                asker.send(Answer::Progress(text)).await;
             }
         }
 
@@ -364,7 +442,7 @@ mod linux {
                 tracing::error!("handover: {text}");
             }
             if let Some(mut asker) = self.asker.take() {
-                let _ = asker.send(&Answer::Done { ok, text }).await;
+                asker.send(Answer::Done { ok, text }).await;
             }
         }
     }
@@ -373,18 +451,27 @@ mod linux {
         /// Not answered: this engine stopped while the new one got ready (a SIGTERM, a drain
         /// that stops), and the new one was stopped with it (`Spawned`).
         fn drop(&mut self) {
-            if let Some(asker) = self.asker.take() {
-                let text = "this engine stopped before the handover finished (it was asked to stop): a new engine it had started was stopped too";
-                let mut line = serde_json::to_vec(&Answer::Done { ok: false, text: text.into() }).unwrap_or_default();
-                line.push(b'\n');
-                let _ = asker.write.try_write(&line);
+            let text = "this engine stopped before the handover finished (it was asked to stop): a new engine it had started was stopped too";
+            let done = Answer::Done { ok: false, text: text.into() };
+            match self.asker.take() {
+                Some(Reply::Socket(asker)) => {
+                    let mut line = serde_json::to_vec(&done).unwrap_or_default();
+                    line.push(b'\n');
+                    let _ = asker.write.try_write(&line);
+                }
+                Some(Reply::InProcess(tx)) => drop(tx.send(done)),
+                None => {}
             }
         }
     }
 
     /// Listen at `path` (a stale socket left by an engine that's gone is replaced). Only this
     /// engine's own user (or root) may ask: the socket is 0600, and each asker's user is checked.
-    pub(super) fn listen(path: &Path, busy: Arc<AtomicBool>) -> Result<mpsc::Receiver<Requested>> {
+    /// Returns where requests arrive, and a sender for requests from inside the engine.
+    pub(super) fn listen(
+        path: &Path,
+        busy: Arc<AtomicBool>,
+    ) -> Result<(mpsc::Sender<Requested>, mpsc::Receiver<Requested>)> {
         let _ = std::fs::remove_file(path);
         let listener = tokio::net::UnixListener::bind(path)
             .with_context(|| format!("listening for `ductus handover` at {}", path.display()))?;
@@ -392,6 +479,7 @@ mod linux {
             .with_context(|| format!("making {} private", path.display()))?;
         // One at a time: a request while another is under way is told so.
         let (tx, rx) = mpsc::channel(1);
+        let inside = tx.clone();
         // SAFETY: geteuid has no preconditions.
         let me = unsafe { libc::geteuid() };
         tokio::spawn(async move {
@@ -414,7 +502,7 @@ mod linux {
                         Ok(Ok(Some(request))) => request,
                         _ => return,
                     };
-                    let requested = Requested { request, asker: Some(asker) };
+                    let requested = Requested { request, asker: Some(Reply::Socket(asker)) };
                     if busy.load(Ordering::SeqCst) {
                         return requested.done(false, "another handover is under way".into()).await;
                     }
@@ -426,7 +514,7 @@ mod linux {
                 });
             }
         });
-        Ok(rx)
+        Ok((inside, rx))
     }
 
     /// The new engine's process until it's ready: stopped if it's dropped before (this engine

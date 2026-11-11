@@ -6,12 +6,12 @@ interface's code version, who made it, why, from which commit, and whether its t
 and database) before anything deploys it, and changes nothing. This page is for whoever ships
 changes: a developer, a release manager, a CI pipeline.
 
-Releases are new in 0.7.4.3. Today you make them, check them from a shell or CI, and
+Releases are new in 0.7.4.3. You make them, check them from a shell or CI,
 [store them on an engine](#store-a-release-on-an-engine) and have it check them against its own
-environment; deploying them with `ductus deploy` and promoting one from test to prod come next.
-Until then you deploy as before (`git pull` and `systemctl reload ductus`,
-[what runs, recorded](deployments.md)), and a release is the thing you check first and keep as
-the record of what you meant to ship.
+environment, and (0.7.4.4) [deploy them](#deploy-a-release) to an engine in release mode on
+Linux. Promoting one from test to prod, rolling back, and deploys on Windows and in containers come
+next. An engine in folder mode deploys as before (`git pull` and `systemctl reload ductus`,
+[what runs, recorded](deployments.md)).
 
 **When not to bother:** a project you deploy only to your own machine with `ductus dev`. A
 release earns its place once code goes through review, or to more than one environment.
@@ -513,6 +513,139 @@ In CI: `ductus release --json --out dist/` (its `id` and `file` are in the JSON)
 above with the environment's URL and a token that has `deploy`, then fail the job when the
 check's `ok` is false. Retry after a pause on 409 (another check is running there).
 
+## Deploy a release
+
+`ductus deploy` sends a release to an engine and deploys it there: the engine holds it against
+what runs (would it undo someone else's work?), runs the gate against its own environment (or
+reuses a recent passing check), then hands over to a new engine running it. Receiving never
+stops; sending pauses while the two engines swap (tens of milliseconds for one interface, under
+half a second at a thousand). Every deploy is recorded: who, why, which release, what changed
+([what runs, recorded](deployments.md)), and in the audit log.
+
+**When to use it:** an engine whose project should only ever be a release that passed the gate:
+test and prod, once code goes through review. **When not:** your own machine (`ductus dev`), or
+an engine where people still edit the project on the server: that's folder mode, and stays as it
+was.
+
+### Run the engine in release mode
+
+An engine runs **releases** instead of a project folder when it's started with `--releases`
+(DUCTUS_RELEASES) in place of `--root` (DUCTUS_PROJECT). In the package's
+`/etc/ductus/ductus.env`, comment out `DUCTUS_PROJECT` and set:
+
+```sh
+DUCTUS_RELEASES=/var/lib/ductus/releases
+```
+
+then `sudo systemctl restart ductus`. The engine runs the release last deployed to its
+environment for its project on its database, unpacked from the database into that folder (each
+release in a folder named by its id; the running one and the two used last are kept). Before the
+first deploy there is none: it starts with no interfaces and says so
+([nuance](../nuances/releases.md#an-engine-in-release-mode-runs-nothing-until-a-release-is-deployed-and-its-api-starts-on-its-defaults-level-1)):
+
+```text
+release mode: nothing is deployed to this environment yet; the engine runs no interface until a release is (`ductus deploy`)
+```
+
+| Setting | What | Default |
+|---|---|---|
+| `DUCTUS_RELEASES` (`--releases`) | Release mode, and where releases are unpacked | off (folder mode) |
+| `DUCTUS_RELEASE_PROJECT` (`--release-project`) | The project this engine runs, when several projects are deployed to its environment on one database | the only one |
+| `DUCTUS_DEPLOY_REUSE_CHECK` (`--deploy-reuse-check`) | How long a deploy may reuse a passing check of the same release instead of running the gate again; `0`: never | `1h` |
+
+Deploys apply by the [handover](high-availability.md#deploying-and-upgrading-without-a-gap), so they need the package's systemd unit (or
+DUCTUS_CONTROL); on Windows and in containers an engine in release mode refuses deploys for now
+([nuance](../nuances/releases.md#deploys-need-the-handover-linux-with-a-control-socket-level-1)).
+
+### Deploy
+
+A token with the `deploy` permission (`ductus token create ci --role operator --permission
+deploy`) in DUCTUS_API_TOKEN, the engine's API in DUCTUS_API_URL (or `--to`), and a reason
+(`-m`, required everywhere but an environment named `dev`):
+
+```text
+$ ductus deploy .ductus/releases/integrations-7427b4d0a2b8.tar.gz -m "first release"
+stored release 7427b4d0a2b8 on the engine
+deploying: the gate runs (or a recent passing check is reused), then the handover…
+release 7427b4d0a2b8 (project integrations) to environment `prod`
+gate: passed in 0.91 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+  started /home/todd/target/release/ductus (pid 4598): it reads the project, migrates the database and loads every interface's code while this one runs
+  ductus 0.7.0-dev (pid 4598) is ready after 438 ms and receives beside this one: stopping this one
+  this engine stopped in 0 ms and let go of its interfaces: the new one takes them
+✓ handed over to ductus 0.7.0-dev (pid 4598): receiving never stopped, sending paused 51 ms
+changed 1 interface:
+  release-demo-adt new here dc57f91f79d2
+```
+
+The release can be a file (stored first when the engine hasn't got it) or the id of one stored
+there. It exits 1 when nothing was deployed; `--json` prints the engine's report.
+
+| Option | What |
+|---|---|
+| `-m`, `--message` | Why: recorded with the deployment, in its history and in the audit log |
+| `--to URL` | The engine's API (DUCTUS_API_URL; default `http://127.0.0.1:7700`) |
+| `--force` | Deploy over someone else's work the "replaces" check names ([below](#it-wont-undo-someone-elses-work)) |
+| `--all-tests` | The gate runs every interface's tests, not only those of what changes there (never reuses a check) |
+| `--json` | The engine's report, as JSON |
+| `--timeout` | How long to wait for the answer (default 40 min: the gate, then the handover) |
+
+**The gate, or a check reused.** Checked on the engine first (`POST /releases/{id}/check`, as
+when you want the answer before the change window), a deploy within the hour reuses that check
+instead of running the gate again, as long as nothing at all was deployed to that environment
+since, by the same Ductus version
+([nuance](../nuances/releases.md#a-deploy-reuses-a-recent-passing-check-only-when-nothing-was-deployed-there-since-level-2)):
+
+```text
+$ ductus deploy 212583ebcc72 -m "archive: MSH-6"
+deploying: the gate runs (or a recent passing check is reused), then the handover…
+release 212583ebcc72 (project integrations) to environment `prod`
+gate: reused check #24 (2026-11-11T17:06:08.209069Z by release-demo-deploy-3870: passed; nothing deployed here since)
+  started /home/todd/target/release/ductus (pid 4685): it reads the project, migrates the database and loads every interface's code while this one runs
+  ductus 0.7.0-dev (pid 4685) is ready after 412 ms and receives beside this one: stopping this one
+  this engine stopped in 2 ms and let go of its interfaces: the new one takes them
+✓ handed over to ductus 0.7.0-dev (pid 4685): receiving never stopped, sending paused 62 ms
+changed 1 interface:
+  release-demo-adt dc57f91f79d2 → bb37528fc711
+```
+
+A gate that finds problems refuses the deploy (exit 1, the problems listed, the check kept with
+the release). A new engine that can't take over leaves the running one as it was, as any
+handover does.
+
+### It won't undo someone else's work
+
+For each interface a release changes, the version running there must be yours, or come from a
+commit in the release's history (a colleague's merged work), and not from files never committed;
+the project's own files (`ductus.yaml`, `resources.yaml`, `environments/`) are held to the same
+rule. Otherwise the deploy is refused before the gate runs, saying whose work and why:
+
+```text
+$ DUCTUS_API_TOKEN=$OPS ductus deploy 7427b4d0a2b8 -m "back to the first"
+deploying: the gate runs (or a recent passing check is reused), then the handover…
+release 7427b4d0a2b8 (project integrations) to environment `prod`
+✗ would undo release-demo-adt: replaces bb37528fc711 (deployed 2026-11-11 17:06 UTC by release-demo-deploy-3870 on DESKTOP-GCT6E6V): it came from commit a324857afd23, which this release's history doesn't have, so their change may be undone (`ductus history release-demo-adt`)
+✗ refused: it would undo someone else's work (release-demo-adt): merge their commit and release again, or deploy with `force` (`ductus deploy --force`) and a reason to undo it on purpose
+```
+
+Merge their commit and release again: what's in `main` is what ships. To undo their work on
+purpose, `ductus deploy --force -m "why"`: the audit log (`release.force`) names each interface
+and whose work, and the deployment's history keeps the warning. A release is the whole project,
+so a colleague's deployed but unmerged work on *another* interface refuses yours too
+([nuance](../nuances/releases.md#a-deploy-is-refused-when-it-would-undo-someone-elses-work-and-a-release-is-the-whole-project-level-2)).
+
+### Through the API
+
+`POST /api/v1/deployments` with `{"release": "<id>", "reason": "…", "force": false,
+"all_tests": false}` (the `deploy` permission). It answers when the new engine sends: 200 with the
+report (`ok`, `outcome`, `gate`, `replaces`, `steps`, `changes`), 409 when refused before
+anything ran (folder mode, another deploy or check running, the release already runs, the
+"replaces" check), 422 when the gate found problems, 500 when the new engine couldn't take over
+(the running one goes on). One deploy or check at a time per engine. Every attempt is in the audit
+log (`release.deploy`, with `detail.ok` and `detail.outcome`).
+
+In release mode, the files on the server are the database's copy: an edit there is never
+deployed ([nuance](../nuances/releases.md#in-release-mode-the-files-on-the-server-are-the-databases-copy-level-2)).
+
 ## Measured
 
 On a 4-core (8-thread) Linux machine, against a local Postgres (`scripts/bench-release.sh`;
@@ -541,6 +674,20 @@ The engine's intake on one interface (20,000 HL7 messages over 4 connections, th
 and Postgres): 799–809 messages a second alone, 641–655 over a run during which one `all_tests`
 check ran; nothing refused or lost.
 
+Deployed to an engine in release mode, the same 1,001-interface project (`ductus deploy`, timed
+from the command to its answer):
+
+| | Time | Sending paused |
+|---|---|---|
+| A release deployed, the gate run (4.6–4.7 s of it) | 5.7–6.0 s | 62–159 ms |
+| A release deployed, a passing check reused | 0.95–1.0 s | 48–85 ms |
+| The new engine unpacking a release from the database (5,023 files, 1.1 MB) | 0.18–0.24 s, before it's ready | none (the old engine still sends) |
+| A restart with the release's folder there: finding the release | 9–27 ms | (a restart's) |
+| An engine in release mode with nothing deployed, to `started` | 0.37 s | |
+
+The gate is what a deploy waits for; check the release on the engine before the change window
+and the deploy itself takes about a second.
+
 ## Try it
 
 `scripts/demo-release.sh` does all of the above on a fresh `ductus init` project against your
@@ -548,4 +695,6 @@ database: a release, the same id from a CRLF checkout, a change not committed re
 without and with the database, nothing changed after a start, a commit's change tested, an edited
 release refused, and nothing written; then, on an engine, `deploy` refused to a viewer, the
 release stored, stored again (the same id), refused without the permission, checked by the engine,
-and listed.
+and listed; then an engine in release mode: nothing deployed, the first release deployed (the
+gate run), the next one checked and deployed (the check reused), and the first one again by
+someone else refused.

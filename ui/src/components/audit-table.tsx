@@ -45,6 +45,8 @@ export const ACTIONS: Record<string, string> = {
   "interface.partitions_raised": "Interface lanes raised with messages waiting",
   "release.store": "Stored a release",
   "release.check": "Checked a release",
+  "release.deploy": "Deployed a release",
+  "release.force": "Deployed over someone's work",
 };
 
 /** Why a start was refused, from its detail (`reason`: `owned` or `lanes`). */

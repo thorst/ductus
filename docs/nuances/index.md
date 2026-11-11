@@ -48,10 +48,10 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Local development](dev.md) (2)
 - [Upgrades](upgrades.md) (15)
 - [What runs, recorded](deployments.md) (17)
-- [Releases](releases.md) (12)
+- [Releases](releases.md) (17)
 - [Windows](windows.md) (9)
 
-## Level 1: Foundations (35)
+## Level 1: Foundations (37)
 
 - [Retention is 1, 3 or 7 weeks, not any number of days](retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1) (Retention)
 - [Missing fields read as "" and never throw](transforms.md#missing-fields-read-as--and-never-throw-level-1) (Writing transforms)
@@ -86,10 +86,12 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [`systemctl reload` can't say who deployed](deployments.md#systemctl-reload-cant-say-who-deployed-level-1) (What runs, recorded)
 - [A release is the commit, not the folder](releases.md#a-release-is-the-commit-not-the-folder-level-1) (Releases)
 - [A committed private key refuses the release](releases.md#a-committed-private-key-refuses-the-release-level-1) (Releases)
+- [An engine in release mode runs nothing until a release is deployed, and its API starts on its defaults](releases.md#an-engine-in-release-mode-runs-nothing-until-a-release-is-deployed-and-its-api-starts-on-its-defaults-level-1) (Releases)
+- [Deploys need the handover: Linux, with a control socket](releases.md#deploys-need-the-handover-linux-with-a-control-socket-level-1) (Releases)
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (105)
+## Level 2: Practitioner (108)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -191,6 +193,9 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The gate tests what the release changes there, by code version](releases.md#the-gate-tests-what-the-release-changes-there-by-code-version-level-2) (Releases)
 - [Checking a release on an engine runs its code there, with that environment's secrets](releases.md#checking-a-release-on-an-engine-runs-its-code-there-with-that-environments-secrets-level-2) (Releases)
 - [The same release stored twice is stored once, with its first manifest](releases.md#the-same-release-stored-twice-is-stored-once-with-its-first-manifest-level-2) (Releases)
+- [A deploy is refused when it would undo someone else's work, and a release is the whole project](releases.md#a-deploy-is-refused-when-it-would-undo-someone-elses-work-and-a-release-is-the-whole-project-level-2) (Releases)
+- [A deploy reuses a recent passing check only when nothing was deployed there since](releases.md#a-deploy-reuses-a-recent-passing-check-only-when-nothing-was-deployed-there-since-level-2) (Releases)
+- [In release mode the files on the server are the database's copy](releases.md#in-release-mode-the-files-on-the-server-are-the-databases-copy-level-2) (Releases)
 - [The service's account: the default, a gMSA, or a named account](windows.md#the-services-account-the-default-a-gmsa-or-a-named-account-level-2) (Windows)
 - [An upgrade can't keep an account's password: the service waits for it](windows.md#an-upgrade-cant-keep-an-accounts-password-the-service-waits-for-it-level-2) (Windows)
 - [An upgrade starts the service again, unless it was stopped on purpose](windows.md#an-upgrade-starts-the-service-again-unless-it-was-stopped-on-purpose-level-2) (Windows)

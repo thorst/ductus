@@ -9,7 +9,10 @@
 #     code of a tenth of the interfaces (those tested);
 #   - 0.7.4.3.3, releases stored on the engine (its API): `POST /releases` (new, the next commit
 #     beside it, one stored before), the database's growth, `POST /releases/{id}/check`, and the
-#     engine's intake (`ductus gen` to one interface) alone and while a check runs.
+#     engine's intake (`ductus gen` to one interface) alone and while a check runs;
+#   - 0.7.4.4.1, deploys: an engine in release mode started with nothing deployed, `ductus deploy`
+#     of each commit's release (the gate run, or a check reused), the sending pause, the release
+#     unpacked by the new engine, and restarts with the release's folder there or unpacked again.
 #
 #   bash scripts/bench-release.sh                 # COUNT=1001 ROUNDS=3 by default
 set -euo pipefail
@@ -189,3 +192,44 @@ for r in $(seq 1 "$ROUNDS"); do
 done
 kill -INT $ENGINE
 wait $ENGINE || true
+
+echo "== deployed (0.7.4.4.1): an engine in release mode, the handover"
+# What the folder-mode engine ran is forgotten: the releases are deployed onto nothing (one token,
+# one person: the "replaces" check never refuses here).
+psql -qtA "$URL" -c "DELETE FROM interface_versions" >/dev/null
+RELEASES=$WORK/releases
+# The engine running the project now (a handover started it): its pid.
+running() { psql -tA "$URL" -c "SELECT pid FROM engines WHERE stopped_at IS NULL ORDER BY started_at DESC LIMIT 1"; }
+start_releases() {
+  local log=$1 began
+  began=$(date +%s.%N)
+  DUCTUS_CONTROL=$WORK/control "$BIN" run --releases "$RELEASES" --env prod --api-listen "127.0.0.1:$API" >"$log" 2>&1 &
+  ENGINE=$!
+  until grep "started interfaces=" "$log" >/dev/null 2>&1; do kill -0 $ENGINE || { cat "$log"; exit 1; }; sleep 0.05; done
+  printf '%-34s %6.2f s  %s\n' "$2" "$(awk "BEGIN { print $(date +%s.%N) - $began }")" "$(grep -o 'running release [0-9a-f]*.*took=[0-9.a-zµ]*' "$log" | tail -1 | grep -o 'unpacked=[a-z]* took=.*')"
+}
+deploy() {
+  local label=$1 release=$2 began
+  began=$(date +%s.%N)
+  DUCTUS_API_TOKEN=$TOKEN "$BIN" deploy "$release" --to "http://127.0.0.1:$API" -m "$label" --json >"$WORK/deploy.json" 2>"$WORK/deploy.err" || { cat "$WORK/deploy.json" "$WORK/deploy.err"; exit 1; }
+  printf '%-34s %6.2f s  gate %s  %s\n' "$label" "$(awk "BEGIN { print $(date +%s.%N) - $began }")" \
+    "$(grep -q '"reused": true' "$WORK/deploy.json" && echo reused || grep -o '"seconds": [0-9.]*' "$WORK/deploy.json" | head -1)" \
+    "$(grep -o 'sending paused [0-9.]* [a-z]*' "$WORK/deploy.json")"
+}
+start_releases "$WORK/releases.log" "release mode, nothing deployed"
+deploy "deploy the first commit's" "$FIRST_ID"
+grep -o 'running release [0-9a-f]*.*took=[0-9.a-zµ]*' "$WORK/releases.log" | tail -1 | grep -o 'unpacked=[a-z]* took=.*' | sed 's/^/  the new engine: /'
+for r in $(seq 1 "$ROUNDS"); do
+  deploy "deploy the next (gate) #$r" "$NEXT_ID"
+  check "API check of the other #$r" "$FIRST_ID"
+  deploy "deploy it (check reused) #$r" "$FIRST_ID"
+done
+for r in $(seq 1 "$ROUNDS"); do
+  kill -INT "$(running)"
+  while [ -n "$(running)" ]; do sleep 0.1; done
+  [ $((r % 2)) = 0 ] && rm -rf "${RELEASES:?}"/[0-9a-f]*
+  start_releases "$WORK/restart.log" "restart, $([ $((r % 2)) = 0 ] && echo unpacked again || echo folder there) #$r"
+done
+kill -INT "$(running)"
+while [ -n "$(running)" ]; do sleep 0.1; done
+echo "unpacked: $(du -sb "$RELEASES" | cut -f1) bytes in $(find "$RELEASES" -mindepth 1 -maxdepth 1 -type d | wc -l) folders"

@@ -241,6 +241,17 @@ pub async fn forget_version_parts(store: &Store, interface: &str) -> Result<u64>
     Ok(done.rows_affected())
 }
 
+/// Delete releases a test stored, with their checks (the same files give the same id at the next
+/// run, which would find them "stored before"). Deployments naming them stay, as deployments do.
+pub async fn forget_releases(store: &Store, ids: &[Vec<u8>]) -> Result<()> {
+    for statement in
+        ["DELETE FROM release_checks WHERE release_id = ANY($1)", "DELETE FROM releases WHERE id = ANY($1)"]
+    {
+        sqlx::query(statement).bind(ids).execute(&store.pool).await.context("forgetting the test's releases")?;
+    }
+    Ok(())
+}
+
 /// While it lives, the database refuses `interface`'s retention row (a trigger on `retention` for
 /// that name only, so other tests' engines on the same database aren't touched): what a start
 /// does when it can't apply the configured retention. Drop it with `allow`.
