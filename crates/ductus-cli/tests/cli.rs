@@ -4926,10 +4926,12 @@ fn a_release_is_the_commit_with_its_versions_and_tests() {
     let id = made["id"].as_str().unwrap();
     assert_eq!(id.len(), 64);
     let file = std::path::PathBuf::from(made["file"].as_str().unwrap());
-    // Shown as typed (on Windows, not canonicalize's `\\?\` form); on Linux the two are the same.
-    let releases = |root: &Path| root.join(".ductus").join("releases");
+    // The project's real path without canonicalize's `\\?\` (Windows prints paths without it; the
+    // temporary folder's path as given may use 8.3 names, `RUNNER~1`, where the printed one doesn't).
     let canonical = std::fs::canonicalize(dir.path()).unwrap();
-    assert!(file.starts_with(releases(dir.path())) || file.starts_with(releases(&canonical)), "{file:?}");
+    let canonical = canonical.to_string_lossy();
+    let root = std::path::PathBuf::from(canonical.strip_prefix(r"\\?\").unwrap_or(&canonical));
+    assert!(file.starts_with(root.join(".ductus").join("releases")), "{file:?} in {root:?}");
     assert!(file.to_string_lossy().ends_with(&format!("-{}.tar.gz", &id[..12])));
     assert_eq!(made["git"]["commit"], git(dir.path(), &["rev-parse", "HEAD"]));
     assert_eq!(made["git"]["commits"], 1);
