@@ -120,8 +120,16 @@ impl Store {
             {
                 applied.push((r.interface.clone(), a));
             }
-            if let (Some(first_lane), Some(lanes), Some(mixed), Some(since)) = (r.first_lane, r.lanes, r.mixed, r.since) {
-                generations.push(LaneGeneration { interface: r.interface, first_lane, lanes, key: r.key, mixed, since });
+            if let (Some(first_lane), Some(lanes), Some(mixed), Some(since)) = (r.first_lane, r.lanes, r.mixed, r.since)
+            {
+                generations.push(LaneGeneration {
+                    interface: r.interface,
+                    first_lane,
+                    lanes,
+                    key: r.key,
+                    mixed,
+                    since,
+                });
             }
         }
         Ok((generations, applied))
