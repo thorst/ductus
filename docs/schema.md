@@ -18,7 +18,7 @@ Every message received, as received (the original is never changed). **Partition
 | `received_at` | timestamptz | When it was stored. |
 | `interface` | text | The interface's name. |
 | `status` | smallint | Overall status: pending until every destination is done; then quarantined if any destination quarantined it, else sent if any sent it, else filtered. |
-| `partition_key` | integer | The lane, from the ordering key (`ductus_core::partition_of`). |
+| `partition_key` | integer | The lane, from the ordering key in the interface's newest lane generation (`lane_generations`); a resend moves it to the newest generation. |
 | `ordering_key` | text | The ordering key's value (e.g. the MRN), if the interface has one. |
 | `control_id` | text | MSH-10 for HL7, when present. |
 | `payload` | bytea | The message as received. |
@@ -39,7 +39,7 @@ One row per queued message and destination: each destination's work queue and it
 | `message_id` | bigint | `messages.id`. |
 | `received_at` | timestamptz | `messages.received_at` (finds the partition). |
 | `destination_id` | integer | `destinations.id`. |
-| `partition_key` | integer | The message's lane (copied, so the queue index needs no join). |
+| `partition_key` | integer | The message's lane (copied, so the queue index needs no join); a resend puts the delivery back in its key's lane in the newest lane generation. |
 | `status` | smallint | This destination's status. |
 | `attempts` | integer | Failed attempts so far. |
 | `last_error` | text | Last failure or the reason it was filtered/quarantined. |
@@ -217,7 +217,7 @@ Who did what, to what, from where, and how it ended. Written in the transaction 
 | `actor_name` | text | The user's or token's name at the time (a snapshot). |
 | `via` | text | `session` (the web UI), `token`, `cli`, `engine`; none for rows made from `message_actions` when this table was added. |
 | `ip` | inet | The address the connection came from (a proxy's address behind one). |
-| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create` (also a directory account's first sign-in, by `directory`), `user.update`, `user.disable`, `user.unlock`, `user.directory_change` (the directory changed an account's role, permissions, name or email, or let it back in), `user.directory_refused` (the directory said no to an account: its sessions ended), `token.create`, `token.revoke`, `message.payload.read`, `message.release` (a resend that put back only quarantined deliveries, whether or not it named their destinations), `message.replay` (one that sent again a delivery that had finished as sent or filtered), `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `engine.handover` (this engine took over from another: `systemctl reload`, an upgrade or a deploy; `detail.from` and `detail.to` with version, pid and instance, `detail.sending_paused_ms`), `engine.refused` (a start refused: another live engine runs some of its interfaces, or its lanes would strand waiting messages, or a handover would lower lanes; `detail.reason` is `owned`, `lanes` or `handover_lanes`), `interface.stopped`, `interface.partitions_raised` (an interface started with more lanes while messages waited: a key's new messages may pass its older ones until those are sent), `release.store` (a release stored with `POST /releases`; `subject` its short id, `detail` its project, commit, maker and reason), `release.check` (a stored release checked against this engine's environment; `detail.environment`, `detail.ok`, `detail.problems`), `release.deploy` (a release deployed to this engine, or a deploy refused or failed: `detail.ok`, `detail.outcome`, `detail.reason`, `detail.check`, `detail.reused_check`), `release.force` (a release deployed over someone else's work the "replaces" check named: `detail.replaces`, `detail.reason`), `release.rollback` (this engine rolled back to a release it ran before, or a rollback refused or failed: `detail.ok`, `detail.outcome`, `detail.reason`, `detail.from`, `detail.undoes`), `release.download` (a stored release's file downloaded with `GET /releases/{id}/file`). |
+| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create` (also a directory account's first sign-in, by `directory`), `user.update`, `user.disable`, `user.unlock`, `user.directory_change` (the directory changed an account's role, permissions, name or email, or let it back in), `user.directory_refused` (the directory said no to an account: its sessions ended), `token.create`, `token.revoke`, `message.payload.read`, `message.release` (a resend that put back only quarantined deliveries, whether or not it named their destinations), `message.replay` (one that sent again a delivery that had finished as sent or filtered), `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `engine.handover` (this engine took over from another: `systemctl reload`, an upgrade or a deploy; `detail.from` and `detail.to` with version, pid and instance, `detail.sending_paused_ms`), `engine.refused` (a start refused: another live engine runs some of its interfaces, `detail.reason` `owned`; before 0.7.4.4.4 also `lanes`, its lanes would strand waiting messages, and `handover_lanes`, a handover would lower lanes), `interface.stopped`, `interface.partitions_raised` (before 0.7.4.4.4: an interface started with more lanes while messages waited, so a key's new messages could pass its older ones), `interface.lanes_changed` (an interface's `ordering` changed: a lane generation added; `detail.before`, `detail.now`, `detail.key_changed`, `detail.adopted` when an older version ran it since, `detail.waiting`, `detail.first_lane`), `interface.lanes_settled` (nothing waits in its old lanes: they were deleted; `detail.lanes`, `detail.first_lane`, `detail.seconds` since the engine started), `release.store` (a release stored with `POST /releases`; `subject` its short id, `detail` its project, commit, maker and reason), `release.check` (a stored release checked against this engine's environment; `detail.environment`, `detail.ok`, `detail.problems`), `release.deploy` (a release deployed to this engine, or a deploy refused or failed: `detail.ok`, `detail.outcome`, `detail.reason`, `detail.check`, `detail.reused_check`), `release.force` (a release deployed over someone else's work the "replaces" check named: `detail.replaces`, `detail.reason`), `release.rollback` (this engine rolled back to a release it ran before, or a rollback refused or failed: `detail.ok`, `detail.outcome`, `detail.reason`, `detail.from`, `detail.undoes`), `release.download` (a stored release's file downloaded with `GET /releases/{id}/file`). |
 | `subject` | text | What it was done to: a username, a token name, `interface/destination`. |
 | `interface` | text | The interface it concerns. |
 | `message_id` | bigint | The message, when the request was about exactly one. |
@@ -275,15 +275,30 @@ Indexes: primary key `interface`; `interface_owners_instance (instance)`.
 
 ## `interface_applied`
 
-The lanes each interface last ran with: `ordering.partitions`, or 1 without `ordering.key`. At start, an interface with fewer lanes than recorded (or none recorded) has its waiting deliveries checked: any in lanes it no longer has refuse the start (no worker would read them). More lanes with messages waiting only warn (`interface.partitions_raised`).
+Where each interface's lanes end (migration 0023). Before 0.7.4.4.4 the lanes it last ran with (`ordering.partitions`, or 1 without `ordering.key`), checked at start for messages in lanes it no longer had; since, one past its newest lane generation's last lane (`lane_generations`), kept for older binaries: one started on this database sees a lowering and refuses if messages wait above its own lanes. A start that finds a value other than that end knows an older binary ran the interface since, and takes its lanes in (adopted).
 
 | column | type | |
 |---|---|---|
 | `interface` | text | The interface's name. |
-| `lanes` | integer | Its lanes. |
+| `lanes` | integer | One past its last lane (before 0.7.4.4.4: its lane count). |
 | `updated_at` | timestamptz | When it last changed. |
 
 Index: primary key `interface`.
+
+## `lane_generations`
+
+The lanes each interface's messages are stored in (migration 0033). A message's lane is worked out once, at intake: `first_lane + hash(key) % lanes` of the newest generation. A change of `ordering` (the lane count or the key) adds a generation numbered after the last one's lanes; workers read every generation listed, holding a newer lane for a destination while older lanes that may hold the same keys still have messages for it, and older generations are deleted once nothing waits in them (`interface.lanes_settled`), so the steady state is one row per interface. A start that finds none recorded, or finds `interface_applied` not at the newest generation's end, adopts the lanes anything waits in as one `mixed` generation. A handover that fails takes back the generations it added unless messages were stored in them. Read at each start and on a resend (a resent delivery goes to its key's lane in the newest generation).
+
+| column | type | |
+|---|---|---|
+| `interface` | text | The interface's name. |
+| `first_lane` | integer | Its lanes are `first_lane` to `first_lane + lanes - 1`; generations never overlap, and a newer one starts where the last ended. |
+| `lanes` | integer | How many (`ordering.partitions`, or 1 without `ordering.key`). |
+| `key` | text | `ordering.key` (`''` without one); NULL: not known (made from `interface_applied` by the migration; the next start records it without a new generation). |
+| `mixed` | boolean | Adopted: its messages' lanes don't follow a key, so every newer lane waits for all of it. |
+| `since` | timestamptz | When it was added. |
+
+Index: primary key `(interface, first_lane)`.
 
 ## `interface_activity`
 

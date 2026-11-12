@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# v0.6.2 demo: one engine per interface across every engine on one database, and the lanes guard.
+# v0.6.2 demo: one engine per interface across every engine on one database, and changing lanes.
 #   1. A second engine started with the same project (a DR server booted with production's
 #      config, a test VM pointed at production) is refused: exit 3, the other engine named, the
 #      refusal in the audit log. Before 0.6.2 both ran: duplicates, and per-patient order broken.
@@ -8,8 +8,8 @@
 #      here its session killed): sending pauses, receiving goes on; it takes the lock back and
 #      delivers what came in meanwhile.
 #   4. kill -9: the lock goes with the process, so the refused engine starts at once.
-#   5. `ordering.partitions` lowered with messages waiting in the lanes it drops: `ductus validate`
-#      says so and the start is refused; set back, drained, then changed: fine.
+#   5. `ordering.partitions` lowered with messages waiting (0.7.4.4.4): `ductus validate` says what
+#      the start will do, the start goes through, the old lanes are sent first and then settle.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
@@ -52,6 +52,7 @@ forget_waiting() {
 }
 forget_waiting
 q "DELETE FROM interface_applied WHERE interface = 'one-owner-adt'" >/dev/null
+q "DELETE FROM lane_generations WHERE interface = 'one-owner-adt'" >/dev/null
 trap 'kill -9 $ENGINE $OTHER 2>/dev/null || true; kill -INT $SINK 2>/dev/null || true; wait 2>/dev/null || true; forget_waiting || true; "$BIN" token revoke "demo-one-owner-$$" >/dev/null 2>&1 || true' EXIT
 
 start() { # start <log> [root]: start an engine in the background, set ENGINE, wait until it runs
@@ -112,7 +113,7 @@ t0=$(date +%s.%N)
 start "$P/second.log"
 echo "   started $(echo "$(date +%s.%N) - $t0" | bc | cut -c1-4) s after the kill (no timeout to wait out)"
 
-echo "== 5. lowering ordering.partitions with messages waiting"
+echo "== 5. lowering ordering.partitions with messages waiting: never refused, the old lanes first"
 kill -INT "$SINK"; wait "$SINK" 2>/dev/null || true; SINK=""
 "$BIN" gen --to 127.0.0.1:6731 --count 200 --patients 200 --offset 5000 >/dev/null
 wait_for 10 '[ "$(waiting)" -ge 200 ]' || fail+=" no-backlog"
@@ -120,24 +121,16 @@ kill -INT "$ENGINE"; wait "$ENGINE" 2>/dev/null || true
 lanes=$(q "SELECT count(DISTINCT d.partition_key) FILTER (WHERE d.partition_key >= 32) FROM deliveries d JOIN destinations t ON t.id = d.destination_id WHERE t.interface = 'one-owner-adt' AND d.status = 0")
 echo "   $(waiting) waiting, in $lanes lanes at 32 or above"
 adt 32
-check=$("$BIN" validate --root "$P" 2>&1) && fail+=" validate-passed"
-grep '^✗ one-owner-adt → receiver' <<<"$check" | sed 's/^/   validate: /'
-code=0
-refused=$("$BIN" run --root "$P" 2>&1) || code=$?
-sed 's/^/   | /' <<<"$refused"
-[ "$code" = 3 ] || fail+=" lanes-exit-$code"
-grep "now has 32 lanes (it had 64)" <<<"$refused" >/dev/null || fail+=" lanes-message"
-echo "   set back to 64, drained, then 32"
-adt 64
+check=$("$BIN" validate --root "$P" 2>&1) || fail+=" validate-failed"
+grep 'one-owner-adt: lanes go from 64 to 32' <<<"$check" | sed 's/^ */   validate: /'
+grep -q 'one-owner-adt: lanes go from 64 to 32: the 200 messages waiting are sent first' <<<"$check" || fail+=" validate-said"
+start "$P/third.log"
+grep "lanes changed" "$P/third.log" | sed -E 's/^[^ ]+ +[A-Z]+ [^ ]+ /   log: /' | cut -c1-200
 "$BIN" sink --port 6732 >"$P/sink2.log" 2>&1 &
 SINK=$!
-start "$P/third.log"
-"$BIN" drain --wait --token "$TOKEN" >"$P/drain.log" 2>&1 || { cat "$P/drain.log"; fail+=" drain"; }
-[ "$(waiting)" = 0 ] || fail+=" not-drained($(waiting))"
-kill -INT "$ENGINE"; wait "$ENGINE" 2>/dev/null || true
-adt 32
-"$BIN" validate --root "$P" >/dev/null || fail+=" validate-after-drain"
-start "$P/fourth.log"
-echo "   32 lanes: started ($(sent) sent, $(waiting) waiting)"
+wait_for 30 '[ "$(waiting)" = 0 ] && grep -q "lanes settled" "$P/third.log"' || fail+=" not-settled($(waiting))"
+generations=$(q "SELECT string_agg(first_lane || '+' || lanes, ' ') FROM lane_generations WHERE interface = 'one-owner-adt'")
+echo "   32 lanes: $(sent) sent, $(waiting) waiting; lanes (first+count): $generations"
+[ "$generations" = "64+32" ] || fail+=" generations($generations)"
 
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

@@ -59,8 +59,14 @@ How to read the first line ([nuance](../nuances/monitoring.md#finding-the-messag
   arriving faster than one worker sends. Order keeps a key on one worker, so more workers don't
   help that key. A hot key that clears by itself is a burst; one that's hot every day is a feed
   to discuss with the sender.
-- **"a lane no worker reads"**: `ordering.partitions` was lowered while messages waited
-  ([nuance](../nuances/ordering.md#change-orderingpartitions-only-with-an-empty-queue-level-4)).
+- **"`ordering` changed: the N waiting in old lanes go first"**: the interface's lanes changed
+  while messages waited. New lanes that may hold the same patients as old ones wait for them
+  (the lane list says which: "waits for old lanes 8, 40", old lanes shown as "old 40"); it ends
+  by itself as the old lanes empty. If it doesn't, the head of an old lane is blocked: look at that
+  message ([nuance](../nuances/ordering.md#after-a-change-of-ordering-new-messages-of-a-key-wait-for-its-older-ones-level-4)).
+- **"waiting that this engine doesn't read (stored under another `ordering`)"**: an older version
+  or a handover that failed stored them; the next start or handover takes them in
+  ([nuance](../nuances/ordering.md#a-handover-that-fails-after-storing-messages-in-new-lanes-leaves-them-for-the-next-start-level-5)).
 
 After a receiver comes back, the first message is tried at its next retry: the wait between tries
 doubles up to `retry.max_backoff_ms` (60 s by default), so a destination can show *stalled* for up

@@ -101,8 +101,8 @@ says which two lines to add with `systemctl edit`.
    ```
 
    `validate` checks the project as the engine will read it, in the environment it will run in,
-   and against the database (reading only): lane changes that would strand waiting messages,
-   retention changes still running. `--root` is needed: unlike `run`, these commands don't read
+   and against the database (reading only): lane changes the start will make, retention changes
+   still running. `--root` is needed: unlike `run`, these commands don't read
    `DUCTUS_PROJECT`. `doctor` connects to everything the project connects to, from this
    server, and says in words what a failure means: a firewall, a certificate, a login.
 
@@ -126,9 +126,9 @@ journalctl -u ductus -f                # the log; "started interfaces=12 …" wh
   A stop, a failed start and a drain do close the ports, on purpose
   ([why](../nuances/upgrades.md#a-stopped-service-a-failed-start-and-a-drain-refuse-connections-on-purpose-level-2)).
 - **A refused start isn't retried.** Exit code 3 means another engine runs some of these
-  interfaces on the same database, or a change to an interface's lanes would strand waiting
-  messages. Trying again changes neither, so systemd doesn't (`RestartPreventExitStatus=3`): the
-  log says what to do, then `systemctl start ductus`. Any other failure is retried every 5 s.
+  interfaces on the same database. Trying again doesn't change that, so systemd doesn't
+  (`RestartPreventExitStatus=3`): the log says what to do, then `systemctl start ductus`. Any
+  other failure is retried every 5 s.
 - **Logs** go to the journal, plain text with fields (`interface=adt-in`). `RUST_LOG` in
   ductus.env sets how much: `info` by default.
 

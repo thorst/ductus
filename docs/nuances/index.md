@@ -22,7 +22,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Several engines on one database](engines.md) (5)
 - [Retention](retention.md) (7)
 - [Several destinations](destinations.md) (8)
-- [Order, retries and durability](ordering.md) (7)
+- [Order, retries and durability](ordering.md) (8)
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
 - [Writing transforms](transforms.md) (17)
@@ -48,7 +48,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Local development](dev.md) (2)
 - [Upgrades](upgrades.md) (17)
 - [What runs, recorded](deployments.md) (17)
-- [Releases](releases.md) (24)
+- [Releases](releases.md) (23)
 - [Windows](windows.md) (9)
 
 ## Level 1: Foundations (37)
@@ -91,7 +91,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (116)
+## Level 2: Practitioner (115)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -202,7 +202,6 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [An environment's rules aren't skipped by `--force`; a rollback isn't held to them](releases.md#an-environments-rules-arent-skipped-by---force-a-rollback-isnt-held-to-them-level-2) (Releases)
 - [A rollback brings back the whole project, secrets included, but not the database](releases.md#a-rollback-brings-back-the-whole-project-secrets-included-but-not-the-database-level-2) (Releases)
 - [The default rollback skips releases a rollback left](releases.md#the-default-rollback-skips-releases-a-rollback-left-level-2) (Releases)
-- [In release mode, a release that lowers an interface's lanes can't be applied yet](releases.md#in-release-mode-a-release-that-lowers-an-interfaces-lanes-cant-be-applied-yet-level-2) (Releases)
 - [A release made on a detached HEAD records no branch](releases.md#a-release-made-on-a-detached-head-records-no-branch-level-2) (Releases)
 - [The service's account: the default, a gMSA, or a named account](windows.md#the-services-account-the-default-a-gmsa-or-a-named-account-level-2) (Windows)
 - [An upgrade can't keep an account's password: the service waits for it](windows.md#an-upgrade-cant-keep-an-accounts-password-the-service-waits-for-it-level-2) (Windows)
@@ -302,7 +301,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 
 - [A query that holds the message tables for days can pause intake](store.md#a-query-that-holds-the-message-tables-for-days-can-pause-intake-level-4) (The store (Postgres))
 - [Shortening frees disk when partitions go, not at once](retention.md#shortening-frees-disk-when-partitions-go-not-at-once-level-4) (Retention)
-- [Change `ordering.partitions` only with an empty queue](ordering.md#change-orderingpartitions-only-with-an-empty-queue-level-4) (Order, retries and durability)
+- [After a change of `ordering`, new messages of a key wait for its older ones](ordering.md#after-a-change-of-ordering-new-messages-of-a-key-wait-for-its-older-ones-level-4) (Order, retries and durability)
 - [`durability: relaxed` can lose the last fraction of a second](ordering.md#durability-relaxed-can-lose-the-last-fraction-of-a-second-level-4) (Order, retries and durability)
 - [Order holds across a route when the sender keeps it](routes.md#order-holds-across-a-route-when-the-sender-keeps-it-level-4) (Routing between interfaces)
 - [A routed message waits up to 20 ms before the next interface sees it](routes.md#a-routed-message-waits-up-to-20-ms-before-the-next-interface-sees-it-level-4) (Routing between interfaces)
@@ -333,10 +332,11 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The first history read after a deploy walks git; later ones don't](deployments.md#the-first-history-read-after-a-deploy-walks-git-later-ones-dont-level-4) (What runs, recorded)
 - [`import()` with a computed name isn't counted](deployments.md#import-with-a-computed-name-isnt-counted-level-4) (What runs, recorded)
 
-## Level 5: Expert (4)
+## Level 5: Expert (5)
 
 - [A "done" marker can't prevent duplicates](delivery.md#a-done-marker-cant-prevent-duplicates-level-5) (Messages and delivery)
 - [A runaway is blamed on the interface, not the destination](destinations.md#a-runaway-is-blamed-on-the-interface-not-the-destination-level-5) (Several destinations)
+- [A handover that fails after storing messages in new lanes leaves them for the next start](ordering.md#a-handover-that-fails-after-storing-messages-in-new-lanes-leaves-them-for-the-next-start-level-5) (Order, retries and durability)
 - [A runaway after `await` interrupts every async transform on its thread](runaway.md#a-runaway-after-await-interrupts-every-async-transform-on-its-thread-level-5) (Runaway scripts)
 - [A runaway in a shared library after `await` can't be blamed on anyone](runaway.md#a-runaway-in-a-shared-library-after-await-cant-be-blamed-on-anyone-level-5) (Runaway scripts)
 <!-- end of nuances -->

@@ -893,7 +893,7 @@
           {
             "name": "lanes",
             "in": "query",
-            "description": "Lanes to list per destination, most waiting first (default 10, at most 1000). Lanes\nwhose first message is failing, and lanes no worker reads, are always listed.",
+            "description": "Lanes to list per destination, most waiting first (default 10, at most 1000). Lanes\nwhose first message is failing, and lanes no worker reads, are always listed.\nWhile `ordering` changes, old lanes count among them.",
             "required": false,
             "schema": {
               "type": "integer",
@@ -4851,7 +4851,7 @@
           "lanes_total": {
             "type": "integer",
             "format": "int32",
-            "description": "Lanes the interface has (`ordering.partitions`; 1 without an ordering key).",
+            "description": "Lanes the interface has (`ordering.partitions`; 1 without an ordering key). While\n`ordering` changes, old lanes are listed too (`LaneInfo::old`).",
             "minimum": 0
           },
           "lanes_waiting": {
@@ -5414,7 +5414,7 @@
         "properties": {
           "kind": {
             "type": "string",
-            "description": "`blocked` (a message keeps failing; its worker's lanes wait), `all_blocked` (every worker\nis retrying: the receiver looks down), `uneven` (one worker has most of the backlog),\n`hot_lane` (one lane has most of it), `unowned` (a lane no worker reads)."
+            "description": "`blocked` (a message keeps failing; its worker's lanes wait), `all_blocked` (every worker\nis retrying: the receiver looks down), `uneven` (one worker has most of the backlog),\n`hot_lane` (one lane has most of it), `unowned` (a lane no worker reads), `changing`\n(`ordering` changed: old lanes go first, new lanes sharing their keys wait)."
           },
           "lane": {
             "type": [
@@ -6170,7 +6170,8 @@
               "to",
               "timeout_ms",
               "format",
-              "folder"
+              "folder",
+              "lanes"
             ],
             "properties": {
               "code": {
@@ -6199,6 +6200,10 @@
                 "items": {
                   "type": "string"
                 }
+              },
+              "lanes": {
+                "$ref": "#/components/schemas/LanesInfo",
+                "description": "Its lanes, and whether a change of `ordering` is still under way."
               },
               "source_allow": {
                 "oneOf": [
@@ -6436,16 +6441,43 @@
         "type": "object",
         "required": [
           "lane",
+          "name",
+          "old",
           "waiting",
+          "held_by",
           "head"
         ],
         "properties": {
           "head": {
             "$ref": "#/components/schemas/HeadInfo"
           },
+          "held": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The same, in words: \"waits for old lanes 1, 5\"."
+          },
+          "held_by": {
+            "type": "array",
+            "items": {
+              "type": "integer",
+              "format": "int32"
+            },
+            "description": "Held: the old lanes (`lane` numbers) it waits for, which may hold the same keys. Empty\nwhen it's read."
+          },
           "lane": {
             "type": "integer",
-            "format": "int32"
+            "format": "int32",
+            "description": "Its number as stored (lanes are numbered after the previous `ordering`'s, so after a\nchange they no longer start at 0): what `held_by` names."
+          },
+          "name": {
+            "type": "string",
+            "description": "As configured: \"lane 8\", or \"old lane 40\" (of an earlier `ordering`, sent first)."
+          },
+          "old": {
+            "type": "boolean",
+            "description": "In an earlier `ordering`'s lanes: its messages go before new ones of the same keys."
           },
           "waiting": {
             "type": "integer",
@@ -6458,8 +6490,43 @@
               "null"
             ],
             "format": "int32",
-            "description": "None: no worker reads it (`ordering.partitions` was lowered while it had messages).",
+            "description": "None: this engine doesn't read it (stored under another `ordering`: by an older version,\nor by a handover that failed; the next start or handover takes it in).",
             "minimum": 0
+          }
+        }
+      },
+      "LanesInfo": {
+        "type": "object",
+        "description": "An interface's lanes (`ordering`): how many, and while a change is under way, the earlier\nlanes still holding messages (sent first) and how many new lanes wait behind them.",
+        "required": [
+          "lanes",
+          "old",
+          "held"
+        ],
+        "properties": {
+          "changing": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "In words, while changing: \"changing from 64 to 32 lanes: messages in the old lanes are\nsent first; 3 lanes wait behind them\"."
+          },
+          "held": {
+            "type": "integer",
+            "description": "New lanes held behind old ones sharing their keys, counted per destination.",
+            "minimum": 0
+          },
+          "lanes": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The lanes configured: `ordering.partitions`, 1 without `ordering.key`."
+          },
+          "old": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/OldLanes"
+            },
+            "description": "Earlier `ordering`s whose lanes still hold messages, oldest first: empty unless `ordering`\nchanged and what waited then isn't all sent yet."
           }
         }
       },
@@ -6870,6 +6937,25 @@
           },
           "username": {
             "type": "string"
+          }
+        }
+      },
+      "OldLanes": {
+        "type": "object",
+        "required": [
+          "lanes"
+        ],
+        "properties": {
+          "key": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "`ordering.key` then (`\"\"` without one); none: not recorded."
+          },
+          "lanes": {
+            "type": "integer",
+            "format": "int32"
           }
         }
       },

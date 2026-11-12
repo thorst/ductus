@@ -169,6 +169,55 @@ impl Store {
         tx.commit().await.context("committing lanes")
     }
 
+    /// A handover failed while the running engine still had its interfaces: delete the
+    /// generations the new engine added past `ends` (each interface's end of lanes as the running
+    /// engine has them) unless messages were stored in them, and set `interface_applied` back for
+    /// those. Without this, a resend from the running engine would go to lanes it doesn't read.
+    /// Returns the interfaces whose added lanes hold messages (kept for the next start), with how
+    /// many.
+    pub async fn take_back_lanes(&self, ends: &[(String, i32)]) -> Result<Vec<(String, i64)>> {
+        let (names, ends): (Vec<&str>, Vec<i32>) = ends.iter().map(|(n, e)| (n.as_str(), *e)).unzip();
+        let mut tx = self.pool.begin().await.context("starting transaction")?;
+        let waiting: Vec<(String, i64)> = sqlx::query_as(
+            "SELECT c.interface, count(*) FROM unnest($1::text[], $2::int[]) AS c(interface, end_lane)
+             JOIN destinations t ON t.interface = c.interface
+             JOIN deliveries d ON d.destination_id = t.id AND d.status = 0 AND d.partition_key >= c.end_lane
+             GROUP BY 1 ORDER BY 1",
+        )
+        .bind(&names)
+        .bind(&ends)
+        .fetch_all(&mut *tx)
+        .await
+        .context("looking for messages in lanes a failed handover added")?;
+        let (clear, clear_ends): (Vec<&str>, Vec<i32>) = names
+            .iter()
+            .zip(&ends)
+            .filter(|(n, _)| !waiting.iter().any(|(w, _)| w == *n))
+            .map(|(n, e)| (*n, *e))
+            .unzip();
+        sqlx::query(
+            "DELETE FROM lane_generations g USING unnest($1::text[], $2::int[]) AS c(interface, end_lane)
+             WHERE g.interface = c.interface AND g.first_lane >= c.end_lane",
+        )
+        .bind(&clear)
+        .bind(&clear_ends)
+        .execute(&mut *tx)
+        .await
+        .context("removing the lanes a failed handover added")?;
+        sqlx::query(
+            "UPDATE interface_applied a SET lanes = c.end_lane, updated_at = now()
+             FROM unnest($1::text[], $2::int[]) AS c(interface, end_lane)
+             WHERE a.interface = c.interface AND a.lanes <> c.end_lane",
+        )
+        .bind(&clear)
+        .bind(&clear_ends)
+        .execute(&mut *tx)
+        .await
+        .context("recording the lanes interfaces run with")?;
+        tx.commit().await.context("committing lanes")?;
+        Ok(waiting)
+    }
+
     /// Delete an interface's generations older than the one starting at `newest` (nothing waits in
     /// them any more). Returns how many went.
     pub async fn retire_lanes(&self, interface: &str, newest: i32) -> Result<u64> {

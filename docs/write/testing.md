@@ -369,7 +369,7 @@ $ ductus validate --json
       "severity": "note",
       "code": "DUC390",
       "source": "ductus",
-      "message": "not checked against a database (set DUCTUS_DATABASE_URL): lanes that would strand waiting messages, retention changes",
+      "message": "not checked against a database (set DUCTUS_DATABASE_URL): lane changes, retention changes",
       "hint": "set DUCTUS_DATABASE_URL (or --database-url)"
     }
   ]

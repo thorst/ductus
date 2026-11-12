@@ -83,7 +83,8 @@ pub struct LaneInfo {
     name: String,
     /// In an earlier `ordering`'s lanes: its messages go before new ones of the same keys.
     old: bool,
-    /// None: no worker reads it (an older version changed `ordering` while it had messages).
+    /// None: this engine doesn't read it (stored under another `ordering`: by an older version,
+    /// or by a handover that failed; the next start or handover takes it in).
     worker: Option<u32>,
     waiting: u64,
     /// Held: the old lanes (`lane` numbers) it waits for, which may hold the same keys. Empty

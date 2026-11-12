@@ -669,9 +669,9 @@ enum Command {
         #[arg(long, env = "DUCTUS_DATABASE_URL", global = true)]
         database_url: Option<String>,
     },
-    /// Stop taking new messages and deliver what's stored (for upgrades, server moves, config
-    /// changes that need an empty queue): MLLP listeners close, queued HTTP answers 503, file
-    /// pickup and schedules pause. Through the running engine's REST API.
+    /// Stop taking new messages and deliver what's stored (for upgrades without a handover and
+    /// server moves): MLLP listeners close, queued HTTP answers 503, file pickup and schedules
+    /// pause. Through the running engine's REST API.
     Drain {
         /// Exit the engine once nothing is pending.
         #[arg(long)]

@@ -15,10 +15,11 @@
 #      the gate run (`release.rollback`, the deployment marked);
 #   9. rolled back again: to release 1 (release 3, which a rollback left, is skipped);
 #  10. release 1's file from prod carries where it went: dev, test, prod;
-#  11. release 4 raises the interface's lanes (2 → 8), promoted; messages wait in the new lanes;
-#      a rollback would lower them: the gate refuses (DUC303);
-#  12. everything sent: the handover still refuses to lower lanes, and in release mode no restart
-#      can apply it either (a known limit, said in the refusal); the engine goes on.
+#  11. release 4 raises the interface's lanes (2 → 8), promoted; a sender keeps sending (10
+#      patients) while the receiver is down, and prod is rolled back to release 1 (8 → 2 lanes):
+#      nothing refused, new messages go to new lanes (numbered after the old), the old ones go first;
+#  12. the receiver comes up: every message arrives once, each patient's in order, and the old
+#      lanes settle (`interface.lanes_settled`).
 # `TRANSCRIPT=file` keeps what each step printed (docs/operate/releases.md shows it).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
@@ -196,7 +197,7 @@ echo "== 10. release 1's file from prod: where it went"
 step where "curl -sS -H \"Authorization: Bearer \$PROD_TOKEN\" \$PROD/api/v1/releases/$S1/file | tar xzO release.json | python3 -c 'import json, sys; print(sorted(p[\"environment\"] for p in json.load(sys.stdin)[\"deployed\"]))'"
 has where "\['dev', 'prod', 'test'\]" || fail+=" where"
 
-echo "== 11. lanes raised (release 4); rolling back would lower them"
+echo "== 11. lanes raised (release 4), then rolled back (8 → 2) under traffic, the receiver down"
 lanes 8
 g commit -qam "8 lanes"
 step r4 'env -u DUCTUS_DATABASE_URL ductus release -m "8 lanes"'
@@ -204,22 +205,33 @@ REL4=.ductus/releases/$(basename "$(released r4)") S4=$(short_id r4)
 step test4 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL4"' --to $TEST -m "8 lanes"'
 step promote4 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S4"' --from $TEST --to $PROD -m "8 lanes, tested"'
 [ "$(code test4)" = 0 ] && [ "$(code promote4)" = 0 ] || fail+=" promote4"
-"$BIN" gen --to "127.0.0.1:${MLLP[prod]}" --count 40 --patients 40 >/dev/null
+# 200 messages for 10 patients over 10 s; the rollback 3 s in.
+"$BIN" gen --to "127.0.0.1:${MLLP[prod]}" --count 200 --patients 10 --rate 20 >"$W/gen.log" 2>&1 &
+SENDER=$!
+sleep 3
 waiting() { q prod "SELECT count(*) FROM messages WHERE interface = '$NAME' AND status = 0"; }
-upper() { q prod "SELECT count(*) FROM deliveries d JOIN destinations t ON t.id = d.destination_id WHERE t.interface = '$NAME' AND d.status = 0 AND d.partition_key >= 2"; }
-echo "waiting on prod: $(waiting), $(upper) in lanes 2 and up" | tee -a "$OUT"
-[ "$(upper)" -gt 0 ] || fail+=" no-upper-lanes"
+generations() { q prod "SELECT string_agg(first_lane || '+' || lanes, ' ' ORDER BY first_lane) FROM lane_generations WHERE interface = '$NAME'"; }
+echo "waiting on prod: $(waiting); lanes (first+count): $(generations)" | tee -a "$OUT"
 step rollback-lanes 'DUCTUS_API_TOKEN=$OPS_PROD ductus deploy --rollback --to $PROD -m "8 lanes broke the lab feed"'
-[ "$(code rollback-lanes)" = 1 ] && has rollback-lanes "gate: found problems" && has rollback-lanes "messages waiting in lanes" || fail+=" lanes-not-refused"
+[ "$(code rollback-lanes)" = 0 ] && has rollback-lanes "^rollback to release $S1" && has rollback-lanes "^✓ handed over" || fail+=" lanes-rollback"
+wait "$SENDER"
+grep -q "rejected 0, refused 0," "$W/gen.log" || { cat "$W/gen.log"; fail+=" lanes-sender"; }
+echo "waiting on prod: $(waiting); lanes (first+count): $(generations)" | tee -a "$OUT"
+# Release 4's 8 lanes (2–9; release 1's 0–1 settled at its start, nothing waited), then release
+# 1's 2 again, numbered after them (10–11).
+[ "$(generations)" = "2+8 10+2" ] || fail+=" lanes-generations"
 
-echo "== 12. everything sent: the handover still can't lower lanes in release mode (a known limit)"
+echo "== 12. the receiver comes up: every message once, each patient's in order; the old lanes settle"
 "$BIN" sink --port "${SINK[prod]}" >"$W/sink.log" 2>&1 &
 RECEIVER=$!
-for _ in $(seq 1 150); do [ "$(waiting)" = 0 ] && break; sleep 0.2; done
-echo "waiting on prod: $(waiting)" | tee -a "$OUT"
-step rollback-drained 'DUCTUS_API_TOKEN=$OPS_PROD ductus deploy --rollback --to $PROD -m "8 lanes broke the lab feed"'
-[ "$(code rollback-drained)" = 1 ] && has rollback-drained "a handover can't lower an interface's lanes" || fail+=" lanes-handover"
-has rollback-drained "In release mode a restart runs the release that runs now" && has rollback-drained "goes on" || fail+=" lanes-advice"
-kill -0 "${PID[prod]}" || fail+=" lanes-engine-gone"
+for _ in $(seq 1 150); do [ "$(waiting)" = 0 ] && [ "$(generations)" = "10+2" ] && break; sleep 0.2; done
+echo "waiting on prod: $(waiting); lanes (first+count): $(generations)" | tee -a "$OUT"
+[ "$(generations)" = "10+2" ] || fail+=" lanes-settled"
+[ "$(q prod "SELECT count(*) FROM audit_log WHERE interface = '$NAME' AND action = 'interface.lanes_settled'")" -ge 1 ] || fail+=" lanes-settled-audit"
+kill -INT "$RECEIVER"
+for _ in $(seq 1 50); do grep -q "final:" "$W/sink.log" && break; sleep 0.1; done
+RECEIVER=""
+grep "final:" "$W/sink.log" | tee -a "$OUT"
+grep -q "| duplicates 0 | out of order 0 |" "$W/sink.log" && grep -q "unique 200 |" "$W/sink.log" || fail+=" lanes-order"
 
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

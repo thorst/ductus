@@ -28,10 +28,11 @@ ordering:
   results (`ORC-2`). A message whose field is empty goes to the empty value's lane.
 - **More workers help only with a key**: with one lane, one worker does everything
   ([nuance](../nuances/ordering.md#without-an-ordering-key-more-workers-dont-help-level-3)).
-- **Set `partitions` before the interface carries traffic.** Lowering it with messages waiting is
-  refused at start (they'd be in lanes no worker reads); raising it can reorder a patient's
-  waiting and new messages until the backlog drains. `ductus drain --wait` first
-  ([nuance](../nuances/ordering.md#change-orderingpartitions-only-with-an-empty-queue-level-4)).
+- **Change `partitions` or `key` when you need to**, with messages waiting or not: new messages
+  go to new lanes at once, the waiting ones are sent first, and a patient's new messages wait
+  behind their older ones, so nothing is refused, sent twice or reordered. `ductus validate`
+  against the database says what the next start will do
+  ([nuance](../nuances/ordering.md#after-a-change-of-ordering-new-messages-of-a-key-wait-for-its-older-ones-level-4)).
 
 ## Failures: `retry`
 

@@ -117,9 +117,9 @@ What that means when you run it:
   `isolation: dedicated` ([dedicated threads](../configure/delivery.md#dedicated-threads-and-connections)).
 - **One hot patient** (a batch load sent as one patient's updates) goes as fast as one worker,
   whatever the number of workers: that's what order per patient costs.
-- **Change `partitions` only with an empty queue**: lowering it with messages waiting is refused
-  at start, raising it can reorder a patient's waiting and new messages
-  ([nuance](../nuances/ordering.md#change-orderingpartitions-only-with-an-empty-queue-level-4)). `ductus
-  drain --wait`, change, deploy, `ductus resume`.
+- **Change `partitions` (or the key) whenever you need to**, by a restart or a handover: new
+  messages go to new lanes, the waiting ones are sent first, and a patient's new messages wait
+  behind their older ones until those are sent
+  ([nuance](../nuances/ordering.md#after-a-change-of-ordering-new-messages-of-a-key-wait-for-its-older-ones-level-4)).
 - **Several destinations are independent**: one receiver down holds up only its own queue
   ([nuance](../nuances/destinations.md#one-destination-down-holds-up-only-itself-level-2)).

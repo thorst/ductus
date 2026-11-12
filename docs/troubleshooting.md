@@ -367,7 +367,7 @@ And the [database errors](#postgres-connection-errors) above.
 
 | Exit | Means | Linux (systemd) | Windows |
 |---|---|---|---|
-| 3 | Refused on purpose: another engine owns an interface, or a change to an interface's lanes would strand waiting messages | Not retried (`RestartPreventExitStatus=3`): fix it, then `systemctl start ductus` | Event 1003; the service stays stopped: fix it, then `Start-Service Ductus` |
+| 3 | Refused on purpose: another engine owns an interface | Not retried (`RestartPreventExitStatus=3`): fix it, then `systemctl start ductus` | Event 1003; the service stays stopped: fix it, then `Start-Service Ductus` |
 | 1 | Anything else (a configuration error, the database, a port, a certificate) | Retried every 5 s, so it starts by itself once the cause is gone; each try is in the journal | Event 1003; the service stays stopped: fix it, then `Start-Service Ductus` |
 
 On Windows the service's recovery settings restart it only when a *running* engine dies (after a

@@ -16,11 +16,13 @@ crates/ductus-store    Postgres store + migrations (crates/ductus-store/migratio
                        sign-in bookkeeping, sessions, appearance); api.rs (tokens, sessions, `Principal`, the message browser);
                        audit.rs (the audit log: `Audit`, `By`, reads, trimming); alerts.rs (alert state, events, the outbox);
                        certificates.rs (certificate_status, doctor_runs); directory.rs (directory accounts: save, refuse, who to check);
-                       engines.rs (the engine lock, interface claims, lanes: stranded and applied); releases.rs (releases stored by folder, their checks)
+                       engines.rs (the engine lock, interface claims, `interface_applied`); lanes.rs (lane generations: read,
+                       written, retired, taken back; the key hash a resend uses); releases.rs (releases stored by folder, their checks)
 crates/ductus-script   embedded V8, module loader, ops, runaway guard (guard.rs), type checker, errors.rs (an error from interface code as people read it) (+ tests/script.rs)
 crates/ductus-runtime  engine: lib.rs (startup, its phases timed), code.rs (code versions), git.rs (the project's commit
                        and uncommitted files, gix; an interface's commits; HEAD's ancestry), deployment.rs (who and why; recording each start's deployment; the folder-mode warning), release.rs (a release's files from git, its id, the manifest, the archive), history.rs (one timeline per interface: git, deployments, audit, documentation), ownership.rs (one engine per interface: lock, claims, the
-                       watch, the lanes guard, refusal texts), control.rs (engine state for the API: health, queues, drain, pauses),
+                       watch, refusal texts), lanes.rs (lane generations: the start's decision, which lanes a worker reads
+                       and which are held, drained old lanes, retiring, a failed handover's take-back), control.rs (engine state for the API: health, queues, drain, pauses),
                        stats.rs (counts and timings in memory: histograms, Prometheus text format),
                        activity.rs (last activity and pauses, kept in the database across restarts),
                        gate.rs (drain gate), retention.rs (applies retention, runs changes, drops partitions),

@@ -2043,6 +2043,20 @@ async fn lane_generations_are_recorded_retired_and_resends_go_to_the_newest() {
     );
     assert!(!store.pending(t.id("lab"), &[50], 10).await.unwrap().iter().any(|p| p.id == done.id));
 
+    // A handover that added lanes 96–103 failed: taken back where nothing was stored in them; kept
+    // where something was (the resent message waits in 64–95, past an engine running lanes 0–63).
+    let failed = LaneWrites {
+        added: vec![generation(96, 8, "PID-18")],
+        applied: vec![(t.name.clone(), 104)],
+        ..Default::default()
+    };
+    store.write_lanes(&failed).await.unwrap();
+    assert!(store.take_back_lanes(&[(t.name.clone(), 96)]).await.unwrap().is_empty());
+    assert_eq!(store.lane_generations(&names).await.unwrap().len(), 2);
+    assert_eq!(store.applied_lanes(&names).await.unwrap(), [(t.name.clone(), 96)]);
+    assert_eq!(store.take_back_lanes(&[(t.name.clone(), 64)]).await.unwrap(), [(t.name.clone(), 1)]);
+    assert_eq!(store.lane_generations(&names).await.unwrap().len(), 2, "kept: a message waits there");
+
     // Retired: everything older than the newest generation.
     assert_eq!(store.retire_lanes(&t.name, 64).await.unwrap(), 1);
     let rows = store.lane_generations(&names).await.unwrap();

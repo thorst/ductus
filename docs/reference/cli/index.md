@@ -27,7 +27,7 @@ Options can also come from the environment (the variable each one names), or fro
 | [`ductus user`](user.md) | Manage the people who sign in (in the engine's database; that is how the first admin is made). |
 | [`ductus token`](token.md) | Manage REST API tokens (in the engine's database). |
 | [`ductus audit`](audit.md) | The audit log (who did what), straight from the engine's database. |
-| [`ductus drain`](drain.md) | Stop taking new messages and deliver what's stored (for upgrades, server moves, config changes that need an empty queue): MLLP listeners close, queued HTTP answers 503, file pickup and schedules pause. |
+| [`ductus drain`](drain.md) | Stop taking new messages and deliver what's stored (for upgrades without a handover and server moves): MLLP listeners close, queued HTTP answers 503, file pickup and schedules pause. |
 | [`ductus resume`](resume.md) | Take new messages again after `ductus drain`; or, with an interface, resume its paused destination (it sends its backlog in order). |
 | [`ductus pause`](pause.md) | Pause a destination at once: nothing is sent or retried until `ductus resume <interface> [destination]`; messages keep queueing. |
 | [`ductus retention`](retention.md) | How long each interface keeps its messages (`retention:` in interface.yaml), changes in progress, shorter values waiting for a confirmation, and expired partitions that had to stay. |

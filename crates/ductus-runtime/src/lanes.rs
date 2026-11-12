@@ -497,6 +497,34 @@ pub async fn start(store: &Store, wanted: &[Wanted]) -> Result<HashMap<String, L
     Ok(decided.layouts)
 }
 
+/// A handover failed while this engine still had its interfaces (`interfaces`: each with its
+/// lanes): take back the lanes the new engine added where it stored nothing (`Store::
+/// take_back_lanes`). Returns what to tell whoever asked about those it did store messages in
+/// (they wait for the next start or handover); none when there are none.
+pub async fn take_back(store: &Store, interfaces: &[(String, &Lanes)]) -> Option<String> {
+    let ends: Vec<(String, i32)> = interfaces.iter().map(|(n, l)| (n.clone(), l.layout.newest().end())).collect();
+    if ends.is_empty() {
+        return None;
+    }
+    match store.take_back_lanes(&ends).await {
+        Ok(kept) if kept.is_empty() => None,
+        Ok(kept) => {
+            let lines: Vec<String> = kept
+                .iter()
+                .map(|(i, n)| format!("  {i}: {n} message{} stored by the new engine", if *n == 1 { "" } else { "s" }))
+                .collect();
+            Some(format!(
+                "the new engine stored messages in lanes this one doesn't read (`ordering` changed):\n{}\nThey wait until the next start or handover, which sends them (docs: nuances, ordering).",
+                lines.join("\n")
+            ))
+        }
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "couldn't take back the lanes the failed handover added");
+            None
+        }
+    }
+}
+
 /// Once `lanes` settles (every old lane drained for every destination), delete its old
 /// generations and tell it (`interface.lanes_settled`). Runs only for an interface whose lanes are
 /// changing, until it settles or the engine stops.

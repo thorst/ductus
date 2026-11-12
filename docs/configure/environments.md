@@ -176,7 +176,7 @@ environment: prod
 ✓ adt-in: config and code load
 ⚠ interfaces/adt-in/route.ts:4:3 console.log(): environment `prod` writes it to the log for every message this code runs for (`console:` isn't set, so `info`); remove it once you've seen what you needed, or set `console: warn` (or `off`) in environments/prod.yaml
 ⚠ interfaces/adt-in/route.ts:5:32 console.warn(): environment `prod` writes it to the log for every message this code runs for (`console:` isn't set, so `info`); remove it once you've seen what you needed, or set `console: warn` (or `off`) in environments/prod.yaml
-note: not checked against a database (set DUCTUS_DATABASE_URL): lanes that would strand waiting messages, retention changes
+note: not checked against a database (set DUCTUS_DATABASE_URL): lane changes, retention changes
 ✓ types: no errors
 
 valid

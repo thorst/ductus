@@ -120,7 +120,8 @@ refusing with a temporary error, holding up its patient's lane
 
 `ductus drain` stops taking new messages (MLLP listeners close, queued HTTP answers 503, file
 pickup and schedules pause) and delivers everything stored. Use it before moving the engine to
-another server, or a change that needs empty queues (fewer `ordering.partitions`).
+another server. A change of `ordering` doesn't need it: the waiting messages are sent first
+([nuance](../nuances/ordering.md#after-a-change-of-ordering-new-messages-of-a-key-wait-for-its-older-ones-level-4)).
 
 ```text
 $ ductus drain --wait

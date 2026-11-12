@@ -37,9 +37,11 @@ The audit log records who did what, to what, from where, and how it ended: on th
 | `engine.start` | The engine started, with its version and how the previous run on this host ended (a start without a stop before it is a crash). |
 | `engine.stop` | The engine stopped cleanly (or handed over to a new engine). |
 | `engine.handover` | A new engine took over from the running one (`systemctl reload`: an upgrade or a deploy), with both versions and how long sending paused. |
-| `engine.refused` | A start was refused: another live engine runs some of its interfaces, its lanes would strand waiting messages, or a handover would lower lanes. |
+| `engine.refused` | A start was refused: another live engine runs some of its interfaces (before 0.7.4.4.4 also: its lanes would strand waiting messages, or a handover would lower lanes). |
 | `interface.stopped` | An interface's code was stopped (it ran away or ran out of memory): its messages wait. |
-| `interface.partitions_raised` | An interface started with more lanes while messages waited: a key's new messages may pass its older ones until those are sent. |
+| `interface.partitions_raised` | Before 0.7.4.4.4: an interface started with more lanes while messages waited, so a key's new messages could pass its older ones until those were sent. |
+| `interface.lanes_changed` | An interface's `ordering` changed (its lane count or key): new messages go to new lanes, the waiting ones (`detail.waiting`) are sent first and a key's new messages wait behind them. `detail.adopted`: an older version ran it since. |
+| `interface.lanes_settled` | Nothing waits in an interface's old lanes any more: they were deleted, and how long that took since the engine started (`detail.seconds`). |
 | `release.store` | Someone stored a release on this database (`POST /releases`), with its project, commit and why it was made. |
 | `release.check` | Someone checked a stored release against this engine's environment (`POST /releases/{id}/check`): its code was validated and tested with that environment's settings and secrets. |
 | `release.deploy` | Someone deployed a release to this engine (`POST /deployments`, `ductus deploy`), or tried: `detail.ok`, `detail.outcome` (why it was refused, or the handover's result), the reason, the check it ran or reused. |

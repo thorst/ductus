@@ -114,7 +114,7 @@ environment: dev
 ⚠ adt-in: about.from: add the sending system's `application` or `vendor`
 ⚠ adt-in: about.to: add the receiving system's `application` or `vendor`
   (warnings: `ductus impact` can't find what isn't named; `require_about: true` in ductus.yaml makes them errors)
-note: not checked against a database (set DUCTUS_DATABASE_URL): lanes that would strand waiting messages, retention changes
+note: not checked against a database (set DUCTUS_DATABASE_URL): lane changes, retention changes
 ✓ types: no errors
 
 valid

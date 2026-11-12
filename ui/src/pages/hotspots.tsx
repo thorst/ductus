@@ -166,7 +166,11 @@ function Lanes({ d, onAllLanes }: { d: Schemas["DestinationHotspots"]; onAllLane
             .map((l) => (
               <tr key={l.lane} className={cn(l.head.attempts > 0 && "bg-bad/5")}>
                 <Td className="text-right tabular-nums whitespace-nowrap">
-                  {l.old ? <span className="text-muted">old {l.name.replace("old lane ", "")}</span> : l.name.replace("lane ", "")}
+                  {l.old ? (
+                    <span className="text-muted">old {l.name.replace("old lane ", "")}</span>
+                  ) : (
+                    l.name.replace("lane ", "")
+                  )}
                 </Td>
                 <Td className="text-right tabular-nums">{l.worker ?? <span className="text-bad">none</span>}</Td>
                 <Td className="text-right tabular-nums">{count(l.waiting)}</Td>

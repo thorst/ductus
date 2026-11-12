@@ -271,8 +271,8 @@ on a prod server or a CI runner given them. What it does:
    ([nuance](../nuances/releases.md#what-runs-there-is-what-the-engines-recorded-not-what-the-folder-holds-level-3)).
    Each interface changes, is new there, or runs as it is.
 4. **Runs `ductus validate --read-only`** for that environment against its database, as a
-   separate process: the config, the code loading, the types, the resources, lanes that would
-   strand waiting messages, retention changes.
+   separate process: the config, the code loading, the types, the resources, lane changes (a
+   note: never a refusal), retention changes.
 5. **Runs the tests of the interfaces the release changes there** (and those new there), as a
    separate process, in that environment. A release that changes nothing there runs none:
 
@@ -834,35 +834,23 @@ for a destination it removed)
 ([nuance](../nuances/releases.md#a-rollback-brings-back-the-whole-project-secrets-included-but-not-the-database-level-2),
 [nuance](../nuances/releases.md#a-destination-a-rollback-brings-back-doesnt-get-what-waited-while-it-was-gone-level-3)).
 
-### Lowering lanes
+### Changing lanes
 
-A release that lowers an interface's lanes (`ordering.partitions`), a rollback past one that
-raised them included, is refused by the gate while messages wait in the lanes that would go
-(`DUC303`):
+A release that changes an interface's lanes (`ordering.partitions` up or down, or `ordering.key`),
+a rollback past one that changed them included, deploys like any other, with messages waiting or
+not: the new engine stores new messages in new lanes at once, the messages waiting in the old
+lanes are sent first, and a patient's new messages wait behind their older ones
+([nuance](../nuances/ordering.md#after-a-change-of-ordering-new-messages-of-a-key-wait-for-its-older-ones-level-4)).
+Here prod is rolled back from 8 lanes to 2 while a sender sends and the receiver is down
+(`scripts/demo-promote.sh`, step 11):
 
-```text
-      ✗ promote-demo → lab: 31 messages waiting in lanes 2–7; promote-demo now has 2 lanes (it had 8)
-        (the engine would refuse to start: no worker reads those lanes. Keep `ordering` as it is until they're sent; `ductus drain --wait` stops new messages until nothing waits)
-```
+<<DEMO-OUTPUT>>
 
-and, even once nothing waits, by the handover: the running engine stores into every lane it has
-until it lets go. In folder mode the answer is a restart. **In release mode a restart runs the
-release that runs now, so such a release can't be applied yet** (a known limit, on the
-roadmap; [nuance](../nuances/releases.md#in-release-mode-a-release-that-lowers-an-interfaces-lanes-cant-be-applied-yet-level-2));
-the engine goes on as it was:
-
-```text
-✗ the new engine can't take over:
-a handover can't lower an interface's lanes (`ordering`):
-  promote-demo: 8 → 2 lanes
-The running engine stores into every lane it has until it lets go, so messages could be left in lanes
-nothing reads. In release mode a restart runs the release that runs now, so a release that lowers lanes can't be
-applied yet: release again with `ordering.partitions` as it runs (docs: releases, "Lowering lanes").
-This engine (pid 3648, ductus 0.7.0-dev) goes on.
-```
-
-Until then, raise lanes only when you mean to keep them, and roll back by releasing the old code
-with the new lane count.
+The gate's `validate` notes the change (`DUC311`), never refuses it. Once the receiver is back,
+every message arrives once and each patient's in order, and the old lanes settle
+(`interface.lanes_settled` in the audit log). Should the handover fail after the new engine
+stored messages in its new lanes, they wait for the next start or handover
+([nuance](../nuances/ordering.md#a-handover-that-fails-after-storing-messages-in-new-lanes-leaves-them-for-the-next-start-level-5)).
 
 ## Measured
 

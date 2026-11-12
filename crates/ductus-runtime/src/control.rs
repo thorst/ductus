@@ -2,7 +2,7 @@
 //! queue counts, drain mode, and pausing a destination.
 //!
 //! **Drain mode** stops taking new messages and keeps delivering what's stored, until nothing
-//! is pending: for server moves, upgrades, and config changes that need an empty queue. MLLP
+//! is pending: for server moves and upgrades without a handover. MLLP
 //! listeners close (senders see the engine as down and keep their messages), queued HTTP
 //! answers 503 with `Retry-After`, file pickup and schedules pause. Respond-mode HTTP keeps
 //! answering: it stores nothing. "Drained" means the gates are closed, nothing is being

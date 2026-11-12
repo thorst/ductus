@@ -65,7 +65,7 @@ impl Layout {
     }
 
     /// The worker that owns a lane (lane `l` is worker `l % workers`'s), if any: a lane in no
-    /// generation listed was made by an older version under another `ordering`, and nobody reads it.
+    /// generation listed was made under another `ordering`, and this engine doesn't read it.
     pub fn worker_of(&self, lane: i32) -> Option<u32> {
         self.generation(lane)?;
         Some(lane as u32 % self.workers.max(1))
@@ -103,8 +103,8 @@ pub enum Kind {
     Uneven { worker: u32, share: f64 },
     /// One lane holds most of the backlog: a key (or a few) arriving faster than it's sent.
     HotLane { lane: i32, share: f64 },
-    /// Messages in a lane no worker reads: in no generation listed (an older version changed
-    /// `ordering` while they waited).
+    /// Messages in a lane this engine doesn't read: in no generation it listed (stored under
+    /// another `ordering`, by an older version or a handover that failed).
     Unowned { lane: i32, waiting: u64 },
     /// `ordering` changed: `held` new lanes with messages wait for old lanes sharing their keys,
     /// which hold `old` messages (sent first).
@@ -276,7 +276,7 @@ pub fn analyze(
         findings.push(Finding {
             kind: Kind::Unowned { lane: l.lane, waiting: l.waiting },
             text: format!(
-                "lane {}: {} waiting that no worker reads (an older version changed `ordering` while they waited): restart the engine, its start takes them in",
+                "lane {}: {} waiting that this engine doesn't read (stored under another `ordering`: by an older version, or by a handover that failed): the next start or handover takes them in",
                 l.lane,
                 count(l.waiting)
             ),
@@ -479,7 +479,7 @@ mod tests {
     fn lanes_nobody_reads_are_reported() {
         let h = analyze(&[lane(2, 5, 6), lane(70, 30, 1)], &Layout::new(64, 4), &[], false, None, now());
         assert_eq!(kinds(&h), [&Kind::Unowned { lane: 70, waiting: 30 }]);
-        assert!(h.findings[0].text.contains("an older version changed `ordering`"), "{}", h.findings[0].text);
+        assert!(h.findings[0].text.contains("stored under another `ordering`"), "{}", h.findings[0].text);
         assert_eq!(h.workers.len(), 1);
     }
 

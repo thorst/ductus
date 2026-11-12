@@ -1762,7 +1762,8 @@ export interface components {
             lanes: components["schemas"]["LaneInfo"][];
             /**
              * Format: int32
-             * @description Lanes the interface has (`ordering.partitions`; 1 without an ordering key).
+             * @description Lanes the interface has (`ordering.partitions`; 1 without an ordering key). While
+             *     `ordering` changes, old lanes are listed too (`LaneInfo::old`).
              */
             lanes_total: number;
             lanes_waiting: number;
@@ -1984,7 +1985,8 @@ export interface components {
             /**
              * @description `blocked` (a message keeps failing; its worker's lanes wait), `all_blocked` (every worker
              *     is retrying: the receiver looks down), `uneven` (one worker has most of the backlog),
-             *     `hot_lane` (one lane has most of it), `unowned` (a lane no worker reads).
+             *     `hot_lane` (one lane has most of it), `unowned` (a lane no worker reads), `changing`
+             *     (`ordering` changed: old lanes go first, new lanes sharing their keys wait).
              */
             kind: string;
             /** Format: int32 */
@@ -2270,6 +2272,8 @@ export interface components {
             /** @description The sending system and where its connections come from. */
             from: components["schemas"]["SystemInfo"];
             from_hosts: string[];
+            /** @description Its lanes, and whether a change of `ordering` is still under way. */
+            lanes: components["schemas"]["LanesInfo"];
             source_allow?: components["schemas"]["SourceAllow"] | null;
             source_tls?: components["schemas"]["SourceTls"] | null;
             /**
@@ -2370,15 +2374,54 @@ export interface components {
         };
         LaneInfo: {
             head: components["schemas"]["HeadInfo"];
-            /** Format: int32 */
+            /** @description The same, in words: "waits for old lanes 1, 5". */
+            held?: string | null;
+            /**
+             * @description Held: the old lanes (`lane` numbers) it waits for, which may hold the same keys. Empty
+             *     when it's read.
+             */
+            held_by: number[];
+            /**
+             * Format: int32
+             * @description Its number as stored (lanes are numbered after the previous `ordering`'s, so after a
+             *     change they no longer start at 0): what `held_by` names.
+             */
             lane: number;
+            /** @description As configured: "lane 8", or "old lane 40" (of an earlier `ordering`, sent first). */
+            name: string;
+            /** @description In an earlier `ordering`'s lanes: its messages go before new ones of the same keys. */
+            old: boolean;
             /** Format: int64 */
             waiting: number;
             /**
              * Format: int32
-             * @description None: no worker reads it (`ordering.partitions` was lowered while it had messages).
+             * @description None: this engine doesn't read it (stored under another `ordering`: by an older version,
+             *     or by a handover that failed; the next start or handover takes it in).
              */
             worker?: number | null;
+        };
+        /**
+         * @description An interface's lanes (`ordering`): how many, and while a change is under way, the earlier
+         *     lanes still holding messages (sent first) and how many new lanes wait behind them.
+         */
+        LanesInfo: {
+            /**
+             * @description In words, while changing: "changing from 64 to 32 lanes: messages in the old lanes are
+             *     sent first; 3 lanes wait behind them".
+             */
+            changing?: string | null;
+            /** @description New lanes held behind old ones sharing their keys, counted per destination. */
+            held: number;
+            /**
+             * Format: int32
+             * @description The lanes configured: `ordering.partitions`, 1 without `ordering.key`.
+             */
+            lanes: number;
+            /**
+             * @description Earlier `ordering`s whose lanes still hold messages, oldest first: empty unless `ordering`
+             *     changed and what waited then isn't all sent yet.
+             */
+            old: components["schemas"]["OldLanes"][];
         };
         LastError: {
             /** Format: date-time */
@@ -2520,6 +2563,12 @@ export interface components {
             /** @description `viewer` (default), `operator` or `admin`. */
             role?: string | null;
             username: string;
+        };
+        OldLanes: {
+            /** @description `ordering.key` then (`""` without one); none: not recorded. */
+            key?: string | null;
+            /** Format: int32 */
+            lanes: number;
         };
         OtherEngine: {
             environment: string;
@@ -3809,6 +3858,7 @@ export interface operations {
                 /**
                  * @description Lanes to list per destination, most waiting first (default 10, at most 1000). Lanes
                  *     whose first message is failing, and lanes no worker reads, are always listed.
+                 *     While `ordering` changes, old lanes count among them.
                  */
                 lanes?: number;
             };

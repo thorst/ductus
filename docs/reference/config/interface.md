@@ -312,7 +312,7 @@ Which messages must be delivered in the order they arrived: those with the same 
 
 The field whose value decides which messages stay in order with each other, as a key path in the interface's `format`: usually the patient (`PID-3.1`, the MRN), or an order or account. Messages with the same value are delivered in arrival order; different values can overtake each other, so one patient's failing message doesn't hold up everyone.
 
-Choose the narrowest value correctness allows: by patient for ADT, by order for results. A message whose field is empty goes to the lane of the empty value. Without a key, the whole interface is delivered in one strict order, one message at a time per destination. Default: none. Example: `key: PID-3.1`.
+Choose the narrowest value correctness allows: by patient for ADT, by order for results. A message whose field is empty goes to the lane of the empty value. Without a key, the whole interface is delivered in one strict order, one message at a time per destination. Changing it (or adding or removing it) with messages waiting is safe: they're sent first, before any new message. Default: none. Example: `key: PID-3.1`.
 
 ### `ordering.partitions`
 
@@ -322,7 +322,7 @@ How many lanes messages are spread over by their `key`. Messages with the same k
 
 The lanes are divided among the workers (one per destination in the shared pool; `workers` with `isolation: dedicated`), and a worker with no lane has nothing to do. The default suits up to 64 workers; to give N workers 64 lanes each, use `64 * N`.
 
-Change it only when nothing is waiting (`ductus drain --wait` first). Lowered with messages waiting, the engine refuses to start: they'd be in lanes no worker reads. Raised, it starts, but a patient's waiting messages and their new ones can go out of order until the backlog drains. Default: `64`. Example: `ordering: { key: PID-3.1, partitions: 128 }`.
+Change it whenever you need to, up or down, with messages waiting or not, by a restart or a handover: new messages go to the new lanes at once, the messages waiting in the old lanes are sent first, and a key's new messages wait behind its older ones, so nothing is held at the sender, sent twice or reordered. Changing `key` works the same way. Default: `64`. Example: `ordering: { key: PID-3.1, partitions: 128 }`.
 
 ### `isolation`
 
