@@ -144,7 +144,7 @@ fn serve() -> Result<()> {
     let failed = if started { eventlog::ENDED_ON_ERROR } else { eventlog::COULD_NOT_START };
     let exit = match &result {
         Ok(()) => ServiceExitCode::Win32(0),
-        // A refused start (another engine runs these interfaces; lanes would strand messages):
+        // A refused start (another engine runs these interfaces):
         // the same code as on Linux. The service's failure actions don't restart it (only a crash
         // does), so it waits for a person, as it should.
         Err(e) if e.is::<ductus_runtime::ownership::Refused>() => {

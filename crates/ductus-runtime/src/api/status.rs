@@ -620,6 +620,52 @@ pub struct InterfaceDetail {
     /// What it runs (its code version) and since which deployment; none while the start records
     /// it, or when it couldn't.
     code: Option<CodeInfo>,
+    /// Its lanes, and whether a change of `ordering` is still under way.
+    lanes: LanesInfo,
+}
+
+/// An interface's lanes (`ordering`): how many, and while a change is under way, the earlier
+/// lanes still holding messages (sent first) and how many new lanes wait behind them.
+#[derive(Serialize, ToSchema)]
+pub struct LanesInfo {
+    /// The lanes configured: `ordering.partitions`, 1 without `ordering.key`.
+    lanes: i32,
+    /// Earlier `ordering`s whose lanes still hold messages, oldest first: empty unless `ordering`
+    /// changed and what waited then isn't all sent yet.
+    old: Vec<OldLanes>,
+    /// New lanes held behind old ones sharing their keys, counted per destination.
+    held: usize,
+    /// In words, while changing: "changing from 64 to 32 lanes: messages in the old lanes are
+    /// sent first; 3 lanes wait behind them".
+    changing: Option<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct OldLanes {
+    lanes: i32,
+    /// `ordering.key` then (`""` without one); none: not recorded.
+    key: Option<String>,
+}
+
+impl LanesInfo {
+    fn of(lanes: &crate::lanes::Lanes, destinations: usize) -> Self {
+        let layout = &lanes.layout;
+        let old: Vec<OldLanes> = layout.generations[..layout.generations.len() - 1]
+            .iter()
+            .map(|g| OldLanes { lanes: g.lanes, key: if g.mixed { None } else { g.key.clone() } })
+            .collect();
+        let held = (0..destinations).map(|d| lanes.holding(d).len()).sum();
+        let now = layout.newest().lanes;
+        let changing = old.last().map(|before| {
+            let wait = match held {
+                0 => String::new(),
+                1 => "; 1 lane waits behind them".to_string(),
+                n => format!("; {n} lanes wait behind them"),
+            };
+            format!("changing from {} to {now} lanes: messages in the old lanes are sent first{wait}", before.lanes)
+        });
+        Self { lanes: now, old, held, changing }
+    }
 }
 
 /// A listener's `allow:` list and how it's doing.
@@ -867,6 +913,7 @@ async fn interface(engine: Eng, _caller: Caller, Path(name): Path<String>) -> Ap
         source_tls: source_tls(&i.config.source),
         source_allow: i.config.source.allow().map(|a| SourceAllow::of(a, &i.config.source)),
         code: engine.deployment.get().and_then(|d| d.interfaces.get(&name)).map(CodeInfo::of),
+        lanes: LanesInfo::of(&i.lanes, i.destinations.len()),
     }))
 }
 

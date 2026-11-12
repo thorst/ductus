@@ -220,10 +220,13 @@ impl Store {
         // A part's entries (0.7.4.2), as `ductus_runtime::history` tags them: a pause, a resume or a
         // destination's alert by its subject; a resend, correction or dismissal by the destinations
         // its message actions name, or under every destination when none were recorded with it (a
-        // refused attempt, or before 0.5.8.2); raised lanes are the source's (its `ordering`).
+        // refused attempt, or before 0.5.8.2); changed lanes are the source's (its `ordering`).
         let (part, name) = match part {
             None => ("", None),
-            Some(Part::Source) => ("AND action = 'interface.partitions_raised'", None),
+            Some(Part::Source) => (
+                "AND action IN ('interface.partitions_raised', 'interface.lanes_changed', 'interface.lanes_settled')",
+                None,
+            ),
             Some(Part::Destination(name)) => (
                 "AND ((action IN ('destination.pause', 'destination.resume') AND subject = interface || '/' || $4)
                       OR (action LIKE 'alert.%' AND subject = 'dest:' || interface || '/' || $4)

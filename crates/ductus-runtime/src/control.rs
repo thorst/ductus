@@ -38,6 +38,8 @@ pub struct Running {
     pub destinations: Vec<(String, DestinationId)>,
     /// Where its messages are stored and its workers woken (none in respond mode: no queue).
     pub intake: Option<Arc<crate::ingest::Intake>>,
+    /// Its lanes: which generations are listed, and while they change, which lanes are held.
+    pub lanes: Arc<crate::lanes::Lanes>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

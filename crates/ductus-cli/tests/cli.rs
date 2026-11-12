@@ -3670,80 +3670,110 @@ async fn a_directory_that_is_down_never_delays_the_start() {
     drop(silent);
 }
 
-/// The lanes guard: lowering `ordering.partitions` (or removing `ordering.key`) with messages
-/// waiting in lanes it no longer has refuses the start, and `ductus validate` says so first;
-/// keeping them starts; raising them with messages waiting starts with a warning.
+/// Lanes nothing recorded (an older version's, or messages stored under another `ordering`) are
+/// adopted, never refused: lowering lanes over messages waiting in the upper ones starts, `ductus
+/// validate` says what the start will do, the old lanes are sent first and settle once empty;
+/// removing the key works the same way.
 #[tokio::test(flavor = "multi_thread")]
-async fn lanes_that_would_strand_messages_refuse_the_start() {
+async fn lanes_nothing_recorded_are_adopted_and_sent_first() {
     let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let name = format!("lanes-test-{nanos}");
-    let (mllp, receiver) = (free_port(), free_port()); // nothing listens on `receiver`: messages wait
+    let (mllp, receiver) = (free_port(), free_port()); // nothing listens on `receiver` yet: messages wait
     let config = |ordering: &str| {
         format!(
-            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\n{ordering}destinations: {{ receiver: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 200 }} }} }}\n"
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\n{ordering}retry: {{ initial_backoff_ms: 100, max_backoff_ms: 200 }}\ndestinations: {{ receiver: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 200 }} }} }}\n"
         )
     };
     let file = format!("interfaces/{name}/interface.yaml");
-    let dir = project(&[(file.as_str(), config("ordering: { key: PID-3.1, partitions: 64 }\n").as_str())]);
+    let dir = project(&[(file.as_str(), config("ordering: { key: PID-3.1, partitions: 32 }\n").as_str())]);
     let yaml = dir.path().join(&file);
 
+    // Waiting in lanes 5, 40 and 63, as an engine with 64 lanes left them; nothing recorded.
     let store = ductus_store::Store::connect(&db, 2).await.unwrap();
     let ids = store.destination_ids(&[(name.clone(), "receiver".to_string())]).await.unwrap();
-    let mut waiting = Vec::new();
     for lane in [5, 40, 63] {
+        let payload = format!("MSH|^~\\&|waiting in lane {lane}");
         let m = ductus_store::NewMessage {
             interface: &name,
             partition_key: lane,
             ordering_key: Some("100001"),
             control_id: None,
-            payload: b"MSH|^~\\&|waiting",
+            payload: payload.as_bytes(),
             relaxed: false,
             destinations: &ids,
             tier: 49,
         };
-        waiting.push(store.insert(m).await.unwrap());
+        store.insert(m).await.unwrap();
     }
-
-    std::fs::write(&yaml, config("ordering: { key: PID-3.1, partitions: 32 }\n")).unwrap();
-    let (code, out) = run_to_end(dir.path(), &db);
-    assert_eq!(code, Some(3), "{out}");
-    let line = format!("{name} → receiver: 2 messages waiting in lanes 40–63; {name} now has 32 lanes");
-    assert!(out.contains(&line) && out.contains("ductus drain --wait"), "{out}");
-    let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
-    assert!(!ok && out.contains(&format!("✗ {line}")) && out.contains("would refuse to start"), "{out}");
     let (_, out) = without_a_database(dir.path(), &["validate"]);
     assert!(out.contains("note: not checked against a database"), "{out}");
-
-    std::fs::write(&yaml, config("")).unwrap();
-    let (code, out) = run_to_end(dir.path(), &db);
-    assert_eq!(code, Some(3), "{out}");
-    assert!(out.contains(&format!("{name} has no `ordering.key` now: 1 lane")) && out.contains("lanes 5–63"), "{out}");
-
-    // As it was: starts, and the lanes are recorded.
-    std::fs::write(&yaml, config("ordering: { key: PID-3.1, partitions: 64 }\n")).unwrap();
-    let (mut engine, log) = start_engine(dir.path(), &db, None, "64.log");
-    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
-    engine.0.kill().unwrap();
-    engine.0.wait().unwrap();
     let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
-    assert!(ok && out.contains("✓ database: every interface's lanes reach the messages waiting for it"), "{out}");
+    assert!(ok, "a lane change is never an error: {out}");
+    let line = format!(
+        "{name}: lanes go to 32 (taking in lanes this version didn't record): the 3 messages waiting are sent first"
+    );
+    assert!(out.contains(&line), "{out}");
 
-    // More lanes with messages waiting: a warning, in the log and the audit log; it starts.
-    std::fs::write(&yaml, config("ordering: { key: PID-3.1, partitions: 128 }\n")).unwrap();
-    let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
-    assert!(ok && out.contains(&format!("⚠ {name}: lanes go from 64 to 128 with 3 message(s) waiting")), "{out}");
-    let (mut engine, log) = start_engine(dir.path(), &db, None, "128.log");
+    let (mut engine, log) = start_engine(dir.path(), &db, None, "32.log");
     assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
     let text = std::fs::read_to_string(&log).unwrap();
-    assert!(text.contains("lanes raised with messages waiting") && text.contains("before=64 now=128"), "{text}");
+    assert!(text.contains("lanes changed") && text.contains("waiting=3"), "{text}");
+    let names = [name.clone()];
+    let lanes = |rows: Vec<ductus_store::LaneGeneration>| -> Vec<(i32, i32, bool)> {
+        rows.iter().map(|g| (g.first_lane, g.lanes, g.mixed)).collect()
+    };
+    // Every lane anything waits in, adopted (their lanes follow no key), then the new 32.
+    assert_eq!(lanes(store.lane_generations(&names).await.unwrap()), [(0, 64, true), (64, 32, false)]);
+    let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
+    assert!(
+        ok && out.contains(&format!("{name}: still sending what waits in its old lanes (3 messages waiting)")),
+        "{out}"
+    );
+
+    // The receiver comes up: the three go, and the old lanes settle.
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let sink_log = dir.path().join("sink.log");
+    let sink = std::fs::File::create(&sink_log).unwrap();
+    let _sink = Child(
+        Command::new(bin)
+            .args(["sink", "--port", &receiver.to_string()])
+            .stdout(sink.try_clone().unwrap())
+            .stderr(sink)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "lanes settled", 30), "{}", std::fs::read_to_string(&log).unwrap());
+    assert!(store.waiting_by_interface(&names).await.unwrap().is_empty());
+    assert_eq!(lanes(store.lane_generations(&names).await.unwrap()), [(64, 32, false)]);
+    // The audit row follows the log line.
+    let audit = async || -> Vec<String> {
+        let filter = ductus_store::AuditFilter { interface: Some(&name), limit: 100, ..Default::default() };
+        store.audit_log(&filter).await.unwrap().into_iter().map(|r| r.action).collect()
+    };
+    assert!(
+        eventually(async || audit().await.contains(&"interface.lanes_settled".into())).await,
+        "{:?}",
+        audit().await
+    );
+    assert!(audit().await.contains(&"interface.lanes_changed".into()));
     engine.0.kill().unwrap();
     engine.0.wait().unwrap();
+    let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
+    assert!(ok && out.contains("✓ database: every interface's lanes are as configured"), "{out}");
 
-    // Leave nothing pending behind.
-    let destination = ids[0];
-    let done: Vec<_> = waiting.iter().map(|m| ductus_store::Done::sent(*m, None)).collect();
-    store.finish(destination, &done).await.unwrap();
+    // The key removed: one lane after the 32, numbered on from them.
+    std::fs::write(&yaml, config("")).unwrap();
+    let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
+    assert!(
+        ok && out.contains(&format!("{name}: lanes go from 32 to 1 (`ordering.key` changed): nothing waits")),
+        "{out}"
+    );
+    let (mut engine, log) = start_engine(dir.path(), &db, None, "1.log");
+    assert!(wait_for_log(&log, "lanes settled", 60), "{}", std::fs::read_to_string(&log).unwrap());
+    engine.0.kill().unwrap();
+    engine.0.wait().unwrap();
+    assert_eq!(lanes(store.lane_generations(&names).await.unwrap()), [(96, 1, false)]);
 }
 
 /// Stops a process this test didn't start itself (an engine a handover started) when dropped.
@@ -3778,8 +3808,8 @@ impl Drop for Terminate {
 
 /// The handover (`ductus handover`, which `systemctl reload` runs) under traffic: a new engine
 /// takes over with no connection refused and every message delivered once, in order; `GET
-/// /engine` says how. A project that can't start, and one lowering lanes, are refused: the
-/// running engine goes on and still takes messages.
+/// /engine` says how. A project that can't start is refused: the running engine goes on and still
+/// takes messages. (Lanes changed by a handover: `changing_lanes_under_traffic_keeps_every_patient_in_order`.)
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_handover_refuses_nothing_and_a_failed_one_leaves_the_engine_running() {
@@ -3899,11 +3929,6 @@ async fn a_handover_refuses_nothing_and_a_failed_one_leaves_the_engine_running()
     assert!(!ok, "{out}");
     assert!(out.contains("the new engine can't take over") && out.contains("unknown field `bogus`"), "{out}");
     assert!(out.contains(&format!("This engine (pid {}", new.0)) && out.contains("goes on."), "{out}");
-    // Lanes going down: a restart's to judge.
-    std::fs::write(&yaml, config(4)).unwrap();
-    let (ok, out) = ductus(dir.path(), &["handover", "--control", control]);
-    assert!(!ok && out.contains("a handover can't lower an interface's lanes"), "{out}");
-    assert!(out.contains(&format!("{name}: 8 → 4 lanes")) && out.contains("systemctl restart ductus"), "{out}");
     assert!(new.alive());
     let (ok, out) =
         ductus(dir.path(), &["gen", "--to", &format!("127.0.0.1:{mllp}"), "--count", "1", "--offset", "1000"]);
@@ -3922,6 +3947,124 @@ async fn a_handover_refuses_nothing_and_a_failed_one_leaves_the_engine_running()
     let received = read("sink.log");
     assert!(received.contains("| duplicates 0 | out of order 0 |"), "{received}");
     assert!(received.contains("unique 601 |"), "every message once (and the last one): {received}");
+}
+
+/// Changing lanes by handovers under traffic (0.7.4.4.4): 8 → 6 → 8 → 1 lane (the last removes
+/// the key) on four workers, while the receiver is down, so every lane has a backlog and new lanes
+/// are held behind old ones sharing their keys; then the receiver comes up. Nothing is refused or
+/// held at the sender, every message arrives once and each patient's in order, and the old lanes
+/// settle.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn changing_lanes_under_traffic_keeps_every_patient_in_order() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("lanes-handover-{nanos}");
+    let (mllp, receiver) = (free_port(), free_port());
+    let config = |ordering: &str| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {mllp} }} }}\n{ordering}isolation: dedicated\nworkers: 4\nretry: {{ initial_backoff_ms: 50, max_backoff_ms: 200 }}\ndestinations: {{ receiver: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 500 }} }} }}\n"
+        )
+    };
+    let keyed = |lanes: u32| format!("ordering: {{ key: PID-3.1, partitions: {lanes} }}\n");
+    let file = format!("interfaces/{name}/interface.yaml");
+    let dir = project(&[(file.as_str(), config(&keyed(8)).as_str())]);
+    let yaml = dir.path().join(&file);
+    let control = dir.path().join("control");
+    let control = control.to_str().unwrap();
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let output = |name: &str| std::fs::File::create(dir.path().join(name)).unwrap();
+    let read = |name: &str| std::fs::read_to_string(dir.path().join(name)).unwrap_or_default();
+
+    let log = dir.path().join("engine.log");
+    let file_log = output("engine.log");
+    let _first = Child(
+        Command::new(bin)
+            .args(["run", "--root", &dir.path().to_string_lossy(), "--threads", "1", "--api-listen", "off"])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", control)
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "started interfaces=", 60), "{}", read("engine.log"));
+
+    // 1,200 messages at 100/s over two connections, 40 patients: 12 s. The lanes change at 2, 5
+    // and 8 s; the receiver comes up at 10 s.
+    let started = std::time::Instant::now();
+    let mut sender = Child(
+        Command::new(bin)
+            .args(["gen", "--to", &format!("127.0.0.1:{mllp}"), "--count", "1200", "--patients", "40"])
+            .args(["--connections", "2", "--rate", "100"])
+            .stdout(output("gen.log"))
+            .stderr(output("gen.err"))
+            .spawn()
+            .unwrap(),
+    );
+    let at = async |seconds: u64| {
+        let wait = std::time::Duration::from_secs(seconds).saturating_sub(started.elapsed());
+        tokio::time::sleep(wait).await;
+    };
+    for (seconds, ordering) in [(2, keyed(6)), (5, keyed(8)), (8, String::new())] {
+        at(seconds).await;
+        std::fs::write(&yaml, config(&ordering)).unwrap();
+        let (ok, out) = ductus(dir.path(), &["handover", "--control", control, "-m", "lanes"]);
+        assert!(ok, "{out}\n{}", read("engine.log"));
+    }
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let names = [name.clone()];
+    let generations = store.lane_generations(&names).await.unwrap();
+    let firsts: Vec<(i32, i32)> = generations.iter().map(|g| (g.first_lane, g.lanes)).collect();
+    assert_eq!(firsts, [(0, 8), (8, 6), (14, 8), (22, 1)], "nothing could be sent, so nothing settled yet");
+    at(10).await;
+    let sink = Child(
+        Command::new(bin)
+            .args(["sink", "--port", &receiver.to_string()])
+            .stdout(output("sink.log"))
+            .stderr(output("sink.err"))
+            .spawn()
+            .unwrap(),
+    );
+    tokio::task::spawn_blocking(move || sender.0.wait()).await.unwrap().unwrap();
+    let sent = read("gen.log");
+    assert!(sent.contains("rejected 0, refused 0,"), "{sent}");
+
+    let mut settled = false;
+    for _ in 0..600 {
+        let waiting = store.waiting_by_interface(&names).await.unwrap();
+        let generations = store.lane_generations(&names).await.unwrap();
+        if waiting.is_empty() && generations.len() == 1 {
+            settled = true;
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert!(settled, "everything delivered and the old lanes settled: {}", read("engine.log"));
+    let changed = store
+        .audit_log(&ductus_store::AuditFilter {
+            interface: Some(&name),
+            action: Some("interface.lanes_changed"),
+            limit: 10,
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    assert_eq!(changed.len(), 3, "{changed:?}");
+
+    let engines = store.live_engines().await.unwrap();
+    let running = engines.iter().find(|e| e.interfaces.contains(&name)).expect("an engine runs it");
+    drop(Terminate(running.pid as u32));
+    let _ = Command::new("kill").args(["-INT", &sink.0.id().to_string()]).status();
+    for _ in 0..50 {
+        if read("sink.log").contains("final:") {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let received = read("sink.log");
+    assert!(received.contains("| duplicates 0 | out of order 0 |"), "{received}");
+    assert!(received.contains("unique 1200 |"), "every message once: {received}");
 }
 
 /// One timeline of who changed what and why (0.7.3.3), folder mode with two people: Ann's commit

@@ -1,13 +1,10 @@
-//! One owner per interface across engines, and the lanes guard (0.6.2; `ductus_store` engines.rs).
+//! One owner per interface across engines (0.6.2; `ductus_store` engines.rs).
 //!
-//! At start, before anything is changed for its interfaces (reconcile, retention, the workers),
-//! the engine takes its lock and claims its interfaces (`Owner::claim`). An interface run by
-//! another live engine refuses the start: two engines running one interface would both send its
-//! messages (duplicates), and per-key order would break. Then the lanes guard
-//! (`Owner::guard_lanes`): lowering an interface's lanes (`ordering.partitions`, or removing
-//! `ordering.key`) with messages waiting in the lanes it no longer has would strand them, so that
-//! refuses the start too; raising them with messages waiting only warns (a key's new messages
-//! can pass its older ones until the backlog drains).
+//! At start, before anything is changed for its interfaces (their lanes, reconcile, retention,
+//! the workers), the engine takes its lock and claims its interfaces (`Owner::claim`). An
+//! interface run by another live engine refuses the start: two engines running one interface
+//! would both send its messages (duplicates), and per-key order would break. (A change of an
+//! interface's lanes is never refused since 0.7.4.4.4: `crate::lanes`.)
 //!
 //! While running, `Owner::watch` checks the lock connection every few seconds. If it is lost (a
 //! database restart, a failover), workers, file pickup and schedules pause (`Ownership`) and the
@@ -24,10 +21,9 @@
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use ductus_core::InterfaceConfig;
-use ductus_store::{Audit, By, EngineLock, NewEngine, Owned, Store, Stranded};
+use ductus_store::{Audit, By, EngineLock, NewEngine, Owned, Store};
 use serde_json::json;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::BTreeMap;
 use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Duration;
@@ -151,17 +147,8 @@ impl Owner {
 
     /// A takeover's start: the lock and the engine's record, nothing claimed (the engine it takes
     /// over from, `from`, still runs them), and `Ownership` not held. Refused as a start would be
-    /// when another live engine runs any of `interfaces`, and when lanes go down (`lowered`).
-    /// `releases`: release mode (a restart would run the release running now, so "restart instead"
-    /// isn't advice there).
-    pub async fn prepare(
-        store: &Store,
-        me: Me,
-        interfaces: Vec<String>,
-        from: &str,
-        lanes: &[Lanes],
-        releases: bool,
-    ) -> Result<Self> {
+    /// when another live engine runs any of `interfaces`.
+    pub async fn prepare(store: &Store, me: Me, interfaces: Vec<String>, from: &str) -> Result<Self> {
         let lock = store.lock_engine(&me.row(), None).await?;
         let owner = Self {
             key: lock.key,
@@ -181,17 +168,6 @@ impl Owner {
                 "owners": owners_detail(&owned),
             });
             return Err(owner.refuse(store, detail, owned_message(&owned)).await);
-        }
-        let names: Vec<String> = lanes.iter().map(|l| l.interface.clone()).collect();
-        let applied: HashMap<String, i32> = store.applied_lanes(&names).await?.into_iter().collect();
-        let lowered = lowered(lanes, &applied);
-        if !lowered.is_empty() {
-            let detail = json!({
-                "reason": "handover_lanes",
-                "instance": owner.me.instance,
-                "lowered": lowered.iter().map(|(i, before, now)| json!({ "interface": i, "before": before, "now": now })).collect::<Vec<_>>(),
-            });
-            return Err(owner.refuse(store, detail, lowered_message(&lowered, releases)).await);
         }
         Ok(owner)
     }
@@ -219,51 +195,6 @@ impl Owner {
 
     pub fn instance(&self) -> &str {
         &self.me.instance
-    }
-
-    /// The lanes guard (see the module). Refuses the start (and lets go of everything) when
-    /// messages would be stranded; warns about raised lanes with messages waiting; records the
-    /// lanes each interface runs with now.
-    pub async fn guard_lanes(&self, store: &Store, lanes: &[Lanes]) -> Result<()> {
-        let names: Vec<String> = lanes.iter().map(|l| l.interface.clone()).collect();
-        let applied: HashMap<String, i32> = store.applied_lanes(&names).await?.into_iter().collect();
-        let check = check_lanes(store, lanes, &applied).await?;
-        if !check.stranded.is_empty() {
-            let detail = json!({
-                "reason": "lanes",
-                "instance": self.me.instance,
-                "stranded": check.stranded.iter().map(|s| json!({
-                    "interface": s.row.interface, "destination": s.row.destination, "waiting": s.row.waiting,
-                    "lanes": [s.row.first_lane, s.row.last_lane], "now": s.now, "before": s.before,
-                })).collect::<Vec<_>>(),
-            });
-            return Err(self.refuse(store, detail, stranded_message(&check.stranded)).await);
-        }
-        for r in &check.raised {
-            tracing::warn!(
-                interface = %r.interface,
-                before = r.before,
-                now = r.now,
-                waiting = r.waiting,
-                "lanes raised with messages waiting: a patient's (key's) new messages may be sent before its older ones until those {} are sent",
-                r.waiting
-            );
-            let audit = Audit::new(By::engine(), "interface.partitions_raised")
-                .interface(&r.interface)
-                .detail(json!({ "before": r.before, "now": r.now, "waiting": r.waiting }));
-            if let Err(e) = store.record(&audit).await {
-                tracing::error!(error = %format!("{e:#}"), interface = %r.interface, "could not write the audit log (lanes raised)");
-            }
-        }
-        let changed: Vec<(String, i32)> = lanes
-            .iter()
-            .filter(|l| applied.get(&l.interface) != Some(&l.lanes))
-            .map(|l| (l.interface.clone(), l.lanes))
-            .collect();
-        if changed.is_empty() {
-            return Ok(());
-        }
-        store.save_lanes(&changed).await
     }
 
     /// Write the refusal to the audit log, let go of everything, and make the error to return.
@@ -368,176 +299,6 @@ impl Owner {
     }
 }
 
-/// An interface's lanes as configured now: `ordering.partitions`, or 1 without `ordering.key`.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Lanes {
-    pub interface: String,
-    pub lanes: i32,
-    /// Has an `ordering.key` (without one there is a single lane, whatever `partitions` says).
-    pub keyed: bool,
-    pub destinations: Vec<String>,
-}
-
-impl Lanes {
-    /// None for respond mode (no queue, no lanes).
-    pub fn of(config: &InterfaceConfig) -> Option<Self> {
-        (!config.responds()).then(|| Self {
-            interface: config.name.clone(),
-            lanes: config.partition_count() as i32,
-            keyed: config.ordering.key.is_some(),
-            destinations: config.destinations().map(|(name, _)| name.to_string()).collect(),
-        })
-    }
-}
-
-/// Messages a lane change would strand, with the lanes before and now.
-#[derive(Debug, Clone, PartialEq)]
-pub struct StrandedLanes {
-    pub row: Stranded,
-    pub now: i32,
-    /// None: not recorded (the first start with 0.6.2, or an interface never run).
-    pub before: Option<i32>,
-    pub keyed: bool,
-}
-
-/// An interface whose lanes went up while messages wait.
-#[derive(Debug, Clone, PartialEq)]
-pub struct Raised {
-    pub interface: String,
-    pub before: i32,
-    pub now: i32,
-    pub waiting: i64,
-}
-
-#[derive(Debug, Default)]
-pub struct LaneCheck {
-    pub stranded: Vec<StrandedLanes>,
-    pub raised: Vec<Raised>,
-}
-
-/// What to look at: `(interface, destination, lanes)` to count stranded messages for (lanes
-/// lowered, or never recorded), and the interfaces whose lanes went up.
-pub fn lane_plan(lanes: &[Lanes], applied: &HashMap<String, i32>) -> (Vec<(String, String, i32)>, Vec<String>) {
-    let mut count = Vec::new();
-    let mut raised = Vec::new();
-    for l in lanes {
-        match applied.get(&l.interface) {
-            Some(&before) if before == l.lanes => {}
-            Some(&before) if before < l.lanes => raised.push(l.interface.clone()),
-            _ => count.extend(l.destinations.iter().map(|d| (l.interface.clone(), d.clone(), l.lanes))),
-        }
-    }
-    (count, raised)
-}
-
-/// The lanes guard's reading of the database (writes nothing; `ductus validate` uses it too).
-/// `applied`: the lanes each interface last ran with.
-pub async fn check_lanes(store: &Store, lanes: &[Lanes], applied: &HashMap<String, i32>) -> Result<LaneCheck> {
-    let (count, raised) = lane_plan(lanes, applied);
-    let by_name: HashMap<&str, &Lanes> = lanes.iter().map(|l| (l.interface.as_str(), l)).collect();
-    let mut check = LaneCheck::default();
-    if !count.is_empty() {
-        check.stranded = store
-            .stranded(&count)
-            .await?
-            .into_iter()
-            .map(|row| {
-                let l = by_name[row.interface.as_str()];
-                StrandedLanes { now: l.lanes, before: applied.get(&row.interface).copied(), keyed: l.keyed, row }
-            })
-            .collect();
-    }
-    if !raised.is_empty() {
-        check.raised = store
-            .waiting_by_interface(&raised)
-            .await?
-            .into_iter()
-            .map(|(interface, waiting)| Raised {
-                before: applied[&interface],
-                now: by_name[interface.as_str()].lanes,
-                interface,
-                waiting,
-            })
-            .collect();
-    }
-    Ok(check)
-}
-
-/// "adt → lab: 412 messages waiting in lanes 32–63; adt now has 32 lanes (it had 64)", one line each.
-pub fn stranded_lines(stranded: &[StrandedLanes]) -> Vec<String> {
-    stranded
-        .iter()
-        .map(|s| {
-            let r = &s.row;
-            let range = if r.first_lane == r.last_lane {
-                format!("lane {}", r.first_lane)
-            } else {
-                format!("lanes {}–{}", r.first_lane, r.last_lane)
-            };
-            let now = if s.keyed {
-                format!("{} now has {} lane{}", r.interface, s.now, plural(s.now as i64))
-            } else {
-                format!("{} has no `ordering.key` now: 1 lane", r.interface)
-            };
-            let before = s.before.map(|b| format!(" (it had {b})")).unwrap_or_default();
-            format!(
-                "{} → {}: {} message{} waiting in {range}; {now}{before}",
-                r.interface,
-                r.destination,
-                r.waiting,
-                plural(r.waiting)
-            )
-        })
-        .collect()
-}
-
-fn stranded_message(stranded: &[StrandedLanes]) -> String {
-    let mut text = String::from("messages are waiting in lanes the interfaces' `ordering` no longer has:\n");
-    for line in stranded_lines(stranded) {
-        let _ = writeln!(text, "  {line}");
-    }
-    text.push_str(
-        "No worker reads those lanes: they would never be sent. Set `ordering` back, let the engine send what waits\n\
-         (`ductus drain --wait` stops new messages until nothing is waiting), then change it.",
-    );
-    text
-}
-
-/// Interfaces whose lanes go down from those they last ran with: `(interface, before, now)`.
-pub fn lowered(lanes: &[Lanes], applied: &HashMap<String, i32>) -> Vec<(String, i32, i32)> {
-    lanes
-        .iter()
-        .filter_map(|l| {
-            applied.get(&l.interface).filter(|&&before| l.lanes < before).map(|&b| (l.interface.clone(), b, l.lanes))
-        })
-        .collect()
-}
-
-/// A handover can't lower lanes: the engine taken over from stores into every lane it has until
-/// it lets go, so whether messages wait in the lanes that go can only be known once it stopped.
-fn lowered_message(lowered: &[(String, i32, i32)], releases: bool) -> String {
-    let mut text = String::from("a handover can't lower an interface's lanes (`ordering`):\n");
-    for (interface, before, now) in lowered {
-        let _ = writeln!(text, "  {interface}: {before} → {now} lane{}", plural(*now as i64));
-    }
-    text.push_str(
-        "The running engine stores into every lane it has until it lets go, so messages could be left in lanes\n\
-         nothing reads. ",
-    );
-    if releases {
-        // A restart in release mode runs the release that runs now: no way to apply this one yet.
-        text.push_str(
-            "In release mode a restart runs the release that runs now, so a release that lowers lanes can't be\n\
-             applied yet: release again with `ordering.partitions` as it runs (docs: releases, \"Lowering lanes\").",
-        );
-    } else {
-        text.push_str(
-            "Restart instead (`systemctl restart ductus`): the start checks the lanes that go for waiting messages.",
-        );
-    }
-    text
-}
-
 /// The refusal for interfaces owned by live engines, grouped by engine.
 pub fn owned_message(owned: &[Owned]) -> String {
     let mut by_engine: BTreeMap<(DateTime<Utc>, &str), Vec<&Owned>> = BTreeMap::new();
@@ -584,77 +345,9 @@ fn owners_detail(owned: &[Owned]) -> Vec<serde_json::Value> {
         .collect()
 }
 
-fn plural(n: i64) -> &'static str {
-    if n == 1 { "" } else { "s" }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn lanes(name: &str, n: i32, keyed: bool) -> Lanes {
-        Lanes { interface: name.into(), lanes: n, keyed, destinations: vec!["lab".into(), "billing".into()] }
-    }
-
-    #[test]
-    fn only_lowered_or_unrecorded_lanes_are_counted() {
-        let applied: HashMap<String, i32> =
-            [("same".to_string(), 64), ("lower".to_string(), 64), ("higher".to_string(), 8)].into();
-        let wanted =
-            [lanes("same", 64, true), lanes("lower", 1, false), lanes("higher", 64, true), lanes("new", 64, true)];
-        let (count, raised) = lane_plan(&wanted, &applied);
-        assert_eq!(
-            count,
-            vec![
-                ("lower".into(), "lab".into(), 1),
-                ("lower".into(), "billing".into(), 1),
-                ("new".into(), "lab".into(), 64),
-                ("new".into(), "billing".into(), 64),
-            ]
-        );
-        assert_eq!(raised, vec!["higher".to_string()]);
-    }
-
-    #[test]
-    fn the_refusal_names_the_lanes_and_what_to_do() {
-        let row = |i: &str, d: &str, n, a, b| Stranded {
-            interface: i.into(),
-            destination: d.into(),
-            waiting: n,
-            first_lane: a,
-            last_lane: b,
-        };
-        let stranded = [
-            StrandedLanes { row: row("adt", "lab", 412, 32, 63), now: 32, before: Some(64), keyed: true },
-            StrandedLanes { row: row("orders", "default", 1, 5, 5), now: 1, before: None, keyed: false },
-        ];
-        let text = stranded_message(&stranded);
-        assert!(
-            text.contains("adt → lab: 412 messages waiting in lanes 32–63; adt now has 32 lanes (it had 64)"),
-            "{text}"
-        );
-        assert!(
-            text.contains("orders → default: 1 message waiting in lane 5; orders has no `ordering.key` now: 1 lane\n"),
-            "{text}"
-        );
-        assert!(text.contains("ductus drain --wait"), "{text}");
-    }
-
-    #[test]
-    fn a_handover_refuses_lanes_that_go_down() {
-        let applied: HashMap<String, i32> =
-            [("same".to_string(), 64), ("lower".to_string(), 64), ("unkeyed".to_string(), 8)].into();
-        let wanted =
-            [lanes("same", 64, true), lanes("lower", 32, true), lanes("unkeyed", 1, false), lanes("new", 4, true)];
-        let found = lowered(&wanted, &applied);
-        assert_eq!(found, vec![("lower".to_string(), 64, 32), ("unkeyed".to_string(), 8, 1)]);
-        let text = lowered_message(&found, false);
-        assert!(text.contains("  lower: 64 → 32 lanes\n  unkeyed: 8 → 1 lane\n"), "{text}");
-        assert!(text.contains("systemctl restart ductus"), "{text}");
-        // In release mode a restart runs the release that runs now: no such advice.
-        let text = lowered_message(&found, true);
-        assert!(!text.contains("systemctl restart") && text.contains("can't be\napplied yet"), "{text}");
-    }
 
     #[test]
     fn the_refusal_names_the_other_engine() {

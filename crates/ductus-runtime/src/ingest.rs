@@ -5,13 +5,14 @@ use crate::Wake;
 use crate::gate::{Closed, Gate};
 use crate::hl7_now;
 use crate::keys::{self, KeyPath};
+use crate::lanes::Lanes;
 use crate::stats::{self, InterfaceStats};
 use crate::tls::Conn;
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use ductus_core::InterfaceConfig;
 use ductus_core::config::{Durability, Source};
 use ductus_core::format::Format;
-use ductus_core::{InterfaceConfig, partition_of};
 use ductus_hl7::{AckCode, Message};
 use ductus_store::{Batch, BatchMessage, DedupeKey, DestinationId, Done, MessageRef, NewMessage, Store};
 use std::sync::Arc;
@@ -42,11 +43,14 @@ pub struct Intake {
     control_id: Option<KeyPath>,
     /// What it received (shared with the API and `/metrics`).
     pub stats: Arc<InterfaceStats>,
+    /// Its lanes: messages go to the newest generation's (`crate::lanes`).
+    lanes: Arc<Lanes>,
 }
 
 impl Intake {
     /// `destinations`: the ids of the interface's destinations (`Store::destination_ids`);
     /// `tier`: its retention tier (`Retention::tier`).
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: Arc<InterfaceConfig>,
         store: Store,
@@ -55,6 +59,7 @@ impl Intake {
         destinations: Vec<DestinationId>,
         tier: Arc<AtomicI16>,
         stats: Arc<InterfaceStats>,
+        lanes: Arc<Lanes>,
     ) -> Result<Self> {
         let compile = |path: &str| {
             keys::compile(&config.format, path).with_context(|| format!("interface `{}`: key `{path}`", config.name))
@@ -62,7 +67,7 @@ impl Intake {
         let ordering = config.ordering.key.as_deref().map(compile).transpose()?;
         let dedupe = config.dedupe.iter().flat_map(|d| d.keys.iter()).map(|k| compile(k)).collect::<Result<_>>()?;
         let control_id = (config.format == Format::Hl7).then(|| compile("MSH-10")).transpose()?;
-        Ok(Self { config, store, wake, gate, destinations, tier, ordering, dedupe, control_id, stats })
+        Ok(Self { config, store, wake, gate, destinations, tier, ordering, dedupe, control_id, stats, lanes })
     }
 
     pub fn store(&self) -> &Store {
@@ -76,7 +81,7 @@ impl Intake {
         let ordering_key = self.ordering.as_ref().map(read);
         let values: Vec<String> = self.dedupe.iter().map(read).collect();
         Keys {
-            partition: partition_of(ordering_key.as_deref().unwrap_or(""), self.config.partition_count()),
+            partition: self.lanes.lane_of(ordering_key.as_deref().unwrap_or("")),
             ordering_key,
             control_id: self.control_id.as_ref().map(read).filter(|c| !c.is_empty()),
             // Nothing to identify the message by: no dedupe. The unit separator can't appear in
@@ -273,9 +278,10 @@ impl Intake {
     /// previous run is still pending; `skipped_state` is saved instead of `state` then.
     pub async fn accept_scheduled(&self, payload: &[u8], key: &str, state: &str, skipped_state: &str) -> Result<bool> {
         let _pass = self.gate.enter()?;
+        let lane = self.lanes.lane_of("");
         let new = NewMessage {
             interface: &self.config.name,
-            partition_key: 0,
+            partition_key: lane,
             ordering_key: None,
             control_id: None,
             payload,
@@ -287,7 +293,7 @@ impl Intake {
         self.count(&queued, |&q| (u64::from(q), 0));
         let queued = queued?;
         if queued {
-            self.wake(0);
+            self.wake(lane);
         }
         Ok(queued)
     }

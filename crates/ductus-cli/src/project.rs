@@ -1242,7 +1242,7 @@ async fn check_project(
         None => report.add(
             Finding::note(
                 "DUC390",
-                "not checked against a database (set DUCTUS_DATABASE_URL): lanes that would strand waiting messages, retention changes",
+                "not checked against a database (set DUCTUS_DATABASE_URL): lane changes, retention changes",
             )
             .hint("set DUCTUS_DATABASE_URL (or --database-url)"),
         ),
@@ -1284,9 +1284,25 @@ fn function_key<'a>(config: &'a InterfaceConfig, error: &str) -> Vec<&'a str> {
     vec!["script"]
 }
 
+/// "adt: lanes go from 64 to 32: the 412 messages waiting are sent first, …" (`DUC311`).
+fn lane_change_line(c: &ductus_runtime::lanes::Change, waiting: i64) -> String {
+    let before = match c.before {
+        Some(b) => format!("from {b} "),
+        None => String::new(),
+    };
+    let key = if c.key_changed { " (`ordering.key` changed)" } else { "" };
+    let adopted = if c.adopted { " (taking in lanes this version didn't record)" } else { "" };
+    let what = match waiting {
+        0 => "nothing waits, so the new lanes are used at once".to_string(),
+        1 => "the 1 message waiting is sent first, and a key's new messages wait behind its older ones".to_string(),
+        n => format!("the {n} messages waiting are sent first, and a key's new messages wait behind its older ones"),
+    };
+    format!("{}: lanes go {before}to {}{key}{adopted}: {what}", c.interface, c.now)
+}
+
 /// `validate` against a database, reading only (it may run with a newer binary than the engines
-/// there, before deploying it): the lanes guard the engine runs at start, and retention changes
-/// running, waiting for a confirmation, or that the next start would begin.
+/// there, before deploying it): what the next start would do with each interface's lanes, and
+/// retention changes running, waiting for a confirmation, or that the next start would begin.
 async fn check_database(
     report: &mut Report,
     places: &Places<'_>,
@@ -1296,7 +1312,7 @@ async fn check_database(
     resources: &ductus_core::Resources,
     teams: &BTreeMap<String, ductus_core::alerts::OwnerContact>,
 ) {
-    use ductus_runtime::ownership::{Lanes, check_lanes, stranded_lines};
+    use ductus_runtime::lanes::{self, Wanted};
     use std::collections::HashMap;
     let store = match ductus_store::Store::connect_read_only(url).await {
         Ok(s) => s,
@@ -1325,50 +1341,43 @@ async fn check_database(
         return;
     }
     check_owners(report, &store, configs, resources, teams).await;
-    let lanes: Vec<Lanes> = configs.iter().filter_map(|c| Lanes::of(c)).collect();
-    let names: Vec<String> = lanes.iter().map(|l| l.interface.clone()).collect();
-    let recorded = store.has_table("interface_applied").await.unwrap_or(false);
-    let applied: HashMap<String, i32> = if recorded {
-        store.applied_lanes(&names).await.map(|v| v.into_iter().collect()).unwrap_or_default()
-    } else {
-        HashMap::new()
-    };
     // A finding about one interface, at a key of its interface.yaml.
     let about = |report: &Report, finding: Finding, interface: &str, key: &[&str]| match places.file(interface) {
         Some(file) => report.at_key(finding.interface(interface), file, key),
         None => finding.interface(interface),
     };
-    match check_lanes(&store, &lanes, &applied).await {
-        Err(e) => report.add(Finding::error("DUC304", format!("database: checking lanes: {e:#}"))),
-        Ok(check) => {
-            for (stranded, line) in check.stranded.iter().zip(stranded_lines(&check.stranded)) {
-                let finding = Finding::error("DUC303", line)
-                    .hint("keep `ordering` as it is until they're sent (`ductus drain --wait` stops new messages until nothing waits)");
-                report.add(about(report, finding, &stranded.row.interface, &["ordering"]));
-            }
-            if !check.stranded.is_empty() {
-                report.say(
-                    "  (the engine would refuse to start: no worker reads those lanes. Keep `ordering` as it is until they're sent; `ductus drain --wait` stops new messages until nothing waits)",
-                );
-            }
-            for r in &check.raised {
-                let finding = Finding::warning(
-                    "DUC305",
-                    format!(
-                        "{}: lanes go from {} to {} with {} message(s) waiting: a patient's (key's) new messages may be sent before its older ones until those are",
-                        r.interface, r.before, r.now, r.waiting
-                    ),
-                );
-                report.add(about(report, finding, &r.interface, &["ordering"]));
-            }
-            if check.stranded.is_empty() {
-                report.ok("database: every interface's lanes reach the messages waiting for it");
-            }
-            if !recorded {
-                report.add(Finding::note(
-                    "DUC391",
-                    "no engine of this version has run on this database yet: the lanes interfaces last ran with aren't recorded, so raised lanes can't be told (lowered ones are checked)",
-                ));
+    // Lanes: what the next start would do with each interface's `ordering` (never a refusal).
+    let wanted: Vec<Wanted> = configs.iter().filter_map(|c| Wanted::of(c)).collect();
+    if !store.has_table("lane_generations").await.unwrap_or(false) {
+        report.add(Finding::note(
+            "DUC391",
+            "no engine of this version has run on this database yet: a change of an interface's lanes is told at its first start (and never refused)",
+        ));
+    } else {
+        match lanes::read(&store, &wanted).await {
+            Err(e) => report.add(Finding::error("DUC304", format!("database: reading lanes: {e:#}"))),
+            Ok(decided) => {
+                let changing: Vec<String> =
+                    decided.layouts.iter().filter(|(_, l)| l.changing()).map(|(name, _)| name.clone()).collect();
+                let waiting: HashMap<String, i64> = if changing.is_empty() {
+                    HashMap::new()
+                } else {
+                    store.waiting_by_interface(&changing).await.map(|v| v.into_iter().collect()).unwrap_or_default()
+                };
+                for name in wanted.iter().map(|w| &w.interface).filter(|n| changing.contains(n)) {
+                    let waiting = waiting.get(name).copied().unwrap_or(0);
+                    let line = match decided.changes.iter().find(|c| &c.interface == name) {
+                        Some(c) => lane_change_line(c, waiting),
+                        None => format!(
+                            "{name}: still sending what waits in its old lanes ({waiting} message{} waiting); new messages are already stored in the new ones",
+                            if waiting == 1 { "" } else { "s" }
+                        ),
+                    };
+                    report.add(about(report, Finding::note("DUC311", line), name, &["ordering"]));
+                }
+                if changing.is_empty() {
+                    report.ok("database: every interface's lanes are as configured");
+                }
             }
         }
     }

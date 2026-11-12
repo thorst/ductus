@@ -576,19 +576,9 @@ pub const CODES: &[Code] = &[
         "Couldn't read how the database connection is protected",
         "The check of the connection's TLS failed; the rest went on.",
     ),
-    code(
-        "DUC303",
-        "error",
-        "Lanes would strand waiting messages",
-        "`ordering.partitions` is lower than the lanes messages wait in: the engine would refuse to start. Keep it as it is until they're sent (`ductus drain --wait`).",
-    ),
-    code("DUC304", "error", "The lanes couldn't be checked", "Reading the waiting messages' lanes failed."),
-    code(
-        "DUC305",
-        "warning",
-        "More lanes with messages waiting",
-        "A patient's (key's) new messages may be sent before its older ones until those are.",
-    ),
+    // DUC303 (lanes would strand waiting messages) and DUC305 (more lanes with messages waiting)
+    // were retired in 0.7.4.4.4: a lane change is never refused or reordered now (DUC311).
+    code("DUC304", "error", "The lanes couldn't be checked", "Reading the interfaces' lanes failed."),
     code("DUC306", "warning", "A retention change is still running", "Its messages are moving in the background."),
     code(
         "DUC307",
@@ -605,16 +595,22 @@ pub const CODES: &[Code] = &[
     ),
     code("DUC310", "warning", "The accounts couldn't be read", "Owners weren't matched to accounts."),
     code(
+        "DUC311",
+        "note",
+        "Lanes change",
+        "An interface's `ordering` (its lane count or key) differs from what it runs with, or its old lanes still hold messages: the next start stores new messages in new lanes, sends what waits in the old ones first, and holds a key's new messages behind its older ones. Nothing to do: it's told so you know why some new messages wait.",
+    ),
+    code(
         "DUC390",
         "note",
         "Not checked against a database",
-        "Without `--database-url` (or DUCTUS_DATABASE_URL), lanes that would strand waiting messages and retention changes aren't checked.",
+        "Without `--database-url` (or DUCTUS_DATABASE_URL), lane changes and retention changes aren't checked.",
     ),
     code(
         "DUC391",
         "note",
         "This version hasn't run on the database yet",
-        "The lanes interfaces last ran with aren't recorded, so raised lanes can't be told (lowered ones are checked).",
+        "The lanes interfaces run with aren't recorded in this version's form yet: a change of an interface's lanes is told at its first start (and never refused).",
     ),
 ];
 

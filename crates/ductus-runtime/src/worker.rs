@@ -20,6 +20,7 @@ use crate::health::Health;
 use crate::http::HttpCall;
 use crate::ingest::{Intake, Routed};
 use crate::inspect::{Attach, Inspector, Target};
+use crate::lanes::Lanes;
 use crate::limiter::{Decision, Limiter};
 use crate::services::EngineServices;
 use crate::stats::{self, DestinationStats, InterfaceStats};
@@ -67,6 +68,8 @@ pub struct Job {
     pub waiting: Arc<Waiting>,
     /// Its code version's id, once saved: recorded with every decision.
     pub decided: crate::deployment::Decided,
+    /// The interface's lanes: which this slot reads (`crate::lanes`).
+    pub lanes: Arc<Lanes>,
 }
 
 /// Set once, before the engine holds its interfaces (see `Job::waiting`).
@@ -350,7 +353,8 @@ struct Worker {
     destination: Arc<str>,
     /// Its id in the store.
     destination_id: DestinationId,
-    lanes: Vec<i32>,
+    /// The interface's lanes; this worker reads its slot's open ones (`Lanes::readable`).
+    lanes: Arc<Lanes>,
     script: Option<Script>,
     /// Where messages go: sent by `sender`, or stored in another interface by `route`.
     sender: Option<Sender>,
@@ -444,7 +448,7 @@ impl Worker {
         Self {
             destination: name.into(),
             destination_id: outlet.id,
-            lanes: config.partitions_for_worker(job.slot),
+            lanes: job.lanes.clone(),
             sender: Sender::new(&config, destination, outlet.server, outlet.api, outlet.tls),
             route: outlet.route,
             retry: config.retry_for(destination).clone(),
@@ -472,9 +476,12 @@ impl Worker {
     }
 
     async fn run(mut self) {
-        if self.lanes.is_empty() {
+        let slot = self.slot as u32;
+        if self.lanes.of_slot(slot).is_empty() {
             return; // more workers than lanes: nothing to own
         }
+        // While lanes change: an old lane drained for this destination (a lane held here may open).
+        let mut opened = self.lanes.watch(self.index);
         // A stopped interface's messages stay pending until it's fixed and restarted.
         while self.health.stopped().is_none() && self.hold_while_paused().await {
             // Known by now: the engine holds its interfaces (`hold_while_paused`).
@@ -482,15 +489,18 @@ impl Worker {
                 && waiting.get().is_some_and(|w| !w.contains(&self.config.name))
             {
                 // Nothing was waiting when the engine took the interface: a message stored since
-                // has woken this worker (its permit is kept), so reading now would find nothing.
-                tokio::select! {
-                    _ = self.wake.get(self.slot, self.index).notified() => {}
-                    _ = tokio::time::sleep(IDLE_POLL) => {}
-                    _ = self.stop.cancelled() => {}
-                }
+                // has woken this worker (its permit is kept), so reading now would find nothing;
+                // and old lanes, if lanes are changing, are empty for good.
+                self.lanes.nothing_waiting(slot, self.index);
+                self.idle(&mut opened).await;
                 continue;
             }
-            let (destination, lanes) = (self.destination_id, self.lanes.clone());
+            let readable = self.lanes.readable(slot, self.index);
+            if readable.lanes.is_empty() {
+                self.idle(&mut opened).await; // every lane held (or drained) for now
+                continue;
+            }
+            let (destination, lanes) = (self.destination_id, readable.lanes.clone());
             let read = |store: Store| async move { store.pending(destination, &lanes, BATCH).await };
             let batch = match self.db(read).await {
                 Ok(batch) => batch,
@@ -500,12 +510,13 @@ impl Worker {
                     continue;
                 }
             };
+            if (batch.len() as i64) < BATCH && self.lanes.is_changing() {
+                // Short: the old lanes read that it found nothing in are empty for good.
+                let found: std::collections::HashSet<i32> = batch.iter().map(|m| m.lane).collect();
+                self.lanes.read_short(self.index, &readable.lanes, &found);
+            }
             if batch.is_empty() {
-                tokio::select! {
-                    _ = self.wake.get(self.slot, self.index).notified() => {}
-                    _ = tokio::time::sleep(IDLE_POLL) => {}
-                    _ = self.stop.cancelled() => {}
-                }
+                self.idle(&mut opened).await;
                 continue;
             }
             for message in batch {
@@ -522,6 +533,26 @@ impl Worker {
             self.flush().await;
         }
         self.flush().await;
+    }
+
+    /// Nothing to read: wait for a message stored in this slot's lanes, a held lane opening
+    /// (`opened`, while lanes change), the safety-net poll, or the engine stopping.
+    async fn idle(&self, opened: &mut Option<watch::Receiver<u64>>) {
+        let opening = async {
+            match opened {
+                // The sender lives as long as the lanes, which this worker holds.
+                Some(rx) => {
+                    let _ = rx.changed().await;
+                }
+                None => std::future::pending().await,
+            }
+        };
+        tokio::select! {
+            _ = self.wake.get(self.slot, self.index).notified() => {}
+            _ = opening => {}
+            _ = tokio::time::sleep(IDLE_POLL) => {}
+            _ = self.stop.cancelled() => {}
+        }
     }
 
     /// Wait `delay` (a retry's back-off, a rate limit), unless the engine stops meanwhile: then

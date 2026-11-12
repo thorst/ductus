@@ -1138,7 +1138,8 @@ pub struct Ordering {
     /// Choose the narrowest value correctness allows: by patient for ADT, by order for results.
     /// A message whose field is empty goes to the lane of the empty value. Without a key, the
     /// whole interface is delivered in one strict order, one message at a time per destination.
-    /// Default: none. Example: `key: PID-3.1`.
+    /// Changing it (or adding or removing it) with messages waiting is safe: they're sent first,
+    /// before any new message. Default: none. Example: `key: PID-3.1`.
     pub key: Option<String>,
     /// How many lanes messages are spread over by their `key`. Messages with the same key value
     /// always go to the same lane, and each lane is delivered strictly in arrival order, so more
@@ -1149,11 +1150,11 @@ pub struct Ordering {
     /// `workers` with `isolation: dedicated`), and a worker with no lane has nothing to do. The
     /// default suits up to 64 workers; to give N workers 64 lanes each, use `64 * N`.
     ///
-    /// Change it only when nothing is waiting (`ductus drain --wait` first). Lowered with
-    /// messages waiting, the engine refuses to start: they'd be in lanes no worker reads.
-    /// Raised, it starts, but a patient's waiting messages and their new ones can go out of order
-    /// until the backlog drains. Default: `64`. Example: `ordering: { key: PID-3.1, partitions:
-    /// 128 }`.
+    /// Change it whenever you need to, up or down, with messages waiting or not, by a restart or a
+    /// handover: new messages go to the new lanes at once, the messages waiting in the old lanes
+    /// are sent first, and a key's new messages wait behind its older ones, so nothing is held at
+    /// the sender, sent twice or reordered. Changing `key` works the same way. Default: `64`.
+    /// Example: `ordering: { key: PID-3.1, partitions: 128 }`.
     #[serde(default = "defaults::partitions")]
     pub partitions: u32,
 }
@@ -1663,13 +1664,6 @@ impl InterfaceConfig {
         }
     }
 
-    /// Partitions are spread across slots round-robin. Each partition has exactly one owner,
-    /// which is what keeps per-key ordering.
-    pub fn partitions_for_worker(&self, worker: u32) -> Vec<i32> {
-        let slots = self.slots();
-        (0..self.partition_count()).filter(|p| p % slots == worker).map(|p| p as i32).collect()
-    }
-
     /// Effective partition count: one lane when there's no ordering key.
     pub fn partition_count(&self) -> u32 {
         if self.ordering.key.is_some() { self.ordering.partitions } else { 1 }
@@ -1697,8 +1691,7 @@ retry: { max_attempts: 3 }
         assert!(matches!(c.source, Source::Mllp { port: 6661, .. }));
         assert_eq!(c.ordering.key.as_deref(), Some("PID-3.1"));
         assert_eq!(c.retry.max_attempts, Some(3));
-        assert_eq!(c.partitions_for_worker(0), vec![0, 2, 4, 6]);
-        assert_eq!(c.partitions_for_worker(1), vec![1, 3, 5, 7]);
+        assert_eq!((c.partition_count(), c.slots()), (8, 2));
     }
 
     #[test]
@@ -1875,8 +1868,7 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
         )
         .unwrap();
         assert_eq!(shared.isolation, Isolation::Shared);
-        assert_eq!(shared.slots(), 1);
-        assert_eq!(shared.partitions_for_worker(0), vec![0, 1, 2, 3]);
+        assert_eq!((shared.slots(), shared.partition_count()), (1, 4));
 
         let mut bad = shared.clone();
         bad.workers = Some(4);

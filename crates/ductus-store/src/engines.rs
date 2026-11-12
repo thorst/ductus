@@ -8,9 +8,8 @@
 //! one owned by a live engine refuses the whole claim. Two engines with different interfaces may
 //! share a database.
 //!
-//! **Lanes.** `interface_applied` keeps the lane count each interface last ran with, so a start
-//! can tell that `ordering` changed and look for messages waiting in lanes no worker would own
-//! (`Store::stranded`).
+//! **Lanes.** `interface_applied` keeps the end of the lanes each interface last ran with (for
+//! older binaries; the lanes themselves are in `lane_generations`, the `lanes` module).
 
 use super::Store;
 use anyhow::{Context, Result, bail};
@@ -58,16 +57,6 @@ pub struct Owned {
     pub pid: i32,
     pub version: String,
     pub started_at: DateTime<Utc>,
-}
-
-/// Messages waiting in lanes a destination's interface no longer has.
-#[derive(Debug, Clone, PartialEq, sqlx::FromRow)]
-pub struct Stranded {
-    pub interface: String,
-    pub destination: String,
-    pub waiting: i64,
-    pub first_lane: i32,
-    pub last_lane: i32,
 }
 
 /// The lock that says an engine is alive, on a connection of its own (not the pool's: a pooled
@@ -302,7 +291,9 @@ impl Store {
         Ok(done.rows_affected())
     }
 
-    /// The lanes each of `interfaces` last ran with (absent: never recorded).
+    /// The end of the lanes each of `interfaces` last ran with (absent: never recorded): the lane
+    /// count before 0.7.4.4.4, the end of the newest lane generation since (`write_lanes`). A
+    /// value other than that end means an older binary ran it since.
     pub async fn applied_lanes(&self, interfaces: &[String]) -> Result<Vec<(String, i32)>> {
         sqlx::query_as("SELECT interface, lanes FROM interface_applied WHERE interface = ANY($1)")
             .bind(interfaces)
@@ -311,67 +302,10 @@ impl Store {
             .context("reading the lanes interfaces last ran with")
     }
 
-    /// Record the lanes each interface runs with now.
-    pub async fn save_lanes(&self, lanes: &[(String, i32)]) -> Result<()> {
-        let (names, counts): (Vec<&str>, Vec<i32>) = lanes.iter().map(|(n, l)| (n.as_str(), *l)).unzip();
-        sqlx::query(
-            "INSERT INTO interface_applied (interface, lanes)
-             SELECT * FROM unnest($1::text[], $2::int[]) ORDER BY 1
-             ON CONFLICT (interface) DO UPDATE SET lanes = excluded.lanes, updated_at = now()
-             WHERE interface_applied.lanes <> excluded.lanes",
-        )
-        .bind(&names)
-        .bind(&counts)
-        .execute(&self.pool)
-        .await
-        .context("recording the lanes interfaces run with")?;
-        Ok(())
-    }
-
-    /// Messages waiting for each `(interface, destination)` in lanes at or past its `lanes`, the
-    /// ones a worker would never read (only destinations with such messages are returned).
-    ///
-    /// The waiting deliveries of these destinations are read once from the queue index (a
-    /// materialized CTE; only lanes past the smallest limit), then matched to their limits. A
-    /// count per destination (`LATERAL`) let the plan scan a partition holding one destination's
-    /// backlog once for every destination: 18 s for 1,001 destinations with 300,000 waiting,
-    /// against 18–55 ms this way (150–190 ms with 150,000 of them stranded). Its cost is the
-    /// backlog's, and it only runs when lanes were lowered or never recorded.
-    pub async fn stranded(&self, checks: &[(String, String, i32)]) -> Result<Vec<Stranded>> {
-        let mut interfaces = Vec::with_capacity(checks.len());
-        let mut destinations = Vec::with_capacity(checks.len());
-        let mut lanes = Vec::with_capacity(checks.len());
-        for (i, d, l) in checks {
-            interfaces.push(i.as_str());
-            destinations.push(d.as_str());
-            lanes.push(*l);
-        }
-        sqlx::query_as(
-            "WITH c AS MATERIALIZED (
-                 SELECT t.id, c.interface, c.destination, c.lanes
-                 FROM unnest($1::text[], $2::text[], $3::int[]) AS c(interface, destination, lanes)
-                 JOIN destinations t ON t.interface = c.interface AND t.name = c.destination),
-             waiting AS MATERIALIZED (
-                 SELECT d.destination_id, d.partition_key FROM deliveries d
-                 WHERE d.status = 0 AND d.destination_id = ANY (SELECT id FROM c)
-                   AND d.partition_key >= (SELECT min(lanes) FROM c))
-             SELECT c.interface, c.destination, count(*) AS waiting,
-                    min(w.partition_key) AS first_lane, max(w.partition_key) AS last_lane
-             FROM waiting w JOIN c ON c.id = w.destination_id
-             WHERE w.partition_key >= c.lanes
-             GROUP BY c.interface, c.destination
-             ORDER BY c.interface, c.destination",
-        )
-        .bind(&interfaces)
-        .bind(&destinations)
-        .bind(&lanes)
-        .fetch_all(&self.pool)
-        .await
-        .context("looking for messages in lanes no worker would read")
-    }
-
     /// How many messages wait for each of `interfaces` (all destinations), for those with any.
-    /// Read like `stranded`: once, from the queue index.
+    /// Read once from the queue index (a materialized CTE): a count per destination (`LATERAL`)
+    /// let the plan scan a partition holding one destination's backlog once for every destination
+    /// (18 s for 1,001 destinations with 300,000 waiting, against 18–55 ms this way).
     pub async fn waiting_by_interface(&self, interfaces: &[String]) -> Result<Vec<(String, i64)>> {
         sqlx::query_as(
             "WITH t AS MATERIALIZED (SELECT id, interface FROM destinations WHERE interface = ANY($1)),

@@ -24,6 +24,7 @@ mod http;
 mod ingest;
 pub mod inspect;
 pub mod keys;
+pub mod lanes;
 pub mod ldap;
 mod limiter;
 pub mod mssql;
@@ -407,28 +408,27 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     };
     phases.mark("database connected and migrated");
     log_database_security(&store, database_url).await;
-    // Before anything is changed for an interface (deliveries reconciled, retention applied,
-    // workers started): it must be this engine's, and its lanes must still reach what waits. A
-    // takeover only checks that now, and claims once the engine it takes over from let go.
+    // Before anything is changed for an interface (its lanes, deliveries reconciled, retention
+    // applied, workers started): it must be this engine's. A takeover only checks that now, and
+    // claims once the engine it takes over from let go.
     let instance = audit::new_instance();
     let me = ownership::Me { instance: instance.clone(), host: audit::host_name(), environment: options.env.clone() };
     let queued: Vec<String> = configs.iter().filter(|c| !c.responds()).map(|c| c.name.clone()).collect();
-    let lanes: Vec<_> = configs.iter().filter_map(ownership::Lanes::of).collect();
+    let wanted: Vec<_> = configs.iter().filter_map(lanes::Wanted::of).collect();
     let takeover = options.takeover.clone();
     let owner = Arc::new(match &takeover {
-        None => {
-            let owner = ownership::Owner::claim(&store, me, queued.clone()).await?;
-            owner.guard_lanes(&store, &lanes).await?;
-            owner
-        }
+        None => ownership::Owner::claim(&store, me, queued.clone()).await?,
         Some(t) => {
             let from = t.predecessor().await?;
             tracing::info!(pid = from.pid, version = %from.version, "taking over from the running engine: getting ready beside it");
-            let releases = options.releases.is_some();
-            ownership::Owner::prepare(&store, me, queued.clone(), &from.instance, &lanes, releases).await?
+            ownership::Owner::prepare(&store, me, queued.clone(), &from.instance).await?
         }
     });
-    phases.mark("interfaces claimed, lanes checked");
+    // Each interface's lanes, a generation added where `ordering` changed: after the claim, and in
+    // a takeover before it receives (what it stores goes to the new lanes, which only it reads; a
+    // takeover that fails leaves them listed, for the next start to read).
+    let mut layouts = lanes::start(&store, &wanted).await?;
+    phases.mark("interfaces claimed, lanes decided");
     // The company's documentation fields: a broken docs-schema.yaml is for `ductus validate` to report,
     // not a reason to stop the engine. The snapshot is for SQL reports, so it never blocks startup either.
     let docs = ductus_core::docs::Schema::load(root).unwrap_or_else(|e| {
@@ -499,6 +499,10 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         let gate = Arc::new(gate::Gate::default());
         let stats =
             Arc::new(stats::InterfaceStats::new(&config.name, config.destinations().map(|(name, _)| name.to_string())));
+        // Respond mode has no queue: one lane, never read.
+        let layout = layouts.remove(&config.name).unwrap_or_else(|| lanes::Layout::single(1, ""));
+        let lanes = Arc::new(lanes::Lanes::new(layout, config.slots(), config.destinations().count()));
+        lanes::retire_when_settled(store.clone(), config.name.clone(), lanes.clone(), ended.clone());
         if !config.responds() {
             let intake = ingest::Intake::new(
                 config.clone(),
@@ -508,16 +512,17 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 destination_ids.clone(),
                 retention.tier(&config.name),
                 stats.clone(),
+                lanes.clone(),
             )?;
             intakes.insert(config.name.clone(), Arc::new(intake));
         }
-        parts.push((config, wake, destination_ids, gate, stats));
+        parts.push((config, wake, destination_ids, gate, stats, lanes));
     }
     // Last activity and pauses, before any worker starts (a paused destination sends nothing).
     let watched = parts
         .iter()
         .filter(|(config, ..)| !config.responds())
-        .map(|(_, _, ids, _, stats)| activity::Watched { stats: stats.clone(), destinations: ids.clone() })
+        .map(|(_, _, ids, _, stats, _)| activity::Watched { stats: stats.clone(), destinations: ids.clone() })
         .collect();
     // The engine is stopping: workers finish what's in hand, save it and end (see `stop`).
     let stopping = tokio_util::sync::CancellationToken::new();
@@ -526,7 +531,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let activity =
         activity::Activity::start(store.clone(), watched, stopping.clone()).await.context("loading last activity")?;
     phases.mark("last activity loaded");
-    for (config, wake, destination_ids, gate, stats) in parts {
+    for (config, wake, destination_ids, gate, stats, lanes) in parts {
         let health = Arc::new(health::Health::reporting(&config.name, stopped_tx.clone()));
         let outlets: Vec<worker::Outlet> = config
             .destinations()
@@ -606,6 +611,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 ownership: owner.ownership.clone(),
                 waiting: waiting.clone(),
                 decided: decided.clone(),
+                lanes: lanes.clone(),
             };
             if inspected.as_ref().is_some_and(|i| i.interfaces.contains(&config.name)) {
                 debugged.entry(config.name.clone()).or_default().push(job);
@@ -619,7 +625,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 Isolation::Dedicated => dedicated.push((format!("{}-w{slot}", config.name), job)),
             }
         }
-        interfaces.push((config, wake, destination_ids, health, gate, stats));
+        interfaces.push((config, wake, destination_ids, health, gate, stats, lanes));
     }
 
     let services = Arc::new(services::SharedServices::new(env, &resources, &certificates)?);
@@ -782,13 +788,14 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     phases.mark("listening");
     let running: Vec<control::Running> = interfaces
         .iter()
-        .map(|(config, _, ids, health, gate, stats)| control::Running {
+        .map(|(config, _, ids, health, gate, stats, lanes)| control::Running {
             config: config.clone(),
             health: health.clone(),
             gate: gate.clone(),
             stats: stats.clone(),
             destinations: config.destinations().map(|(name, _)| name.to_string()).zip(ids.iter().copied()).collect(),
             intake: intakes.get(&config.name).cloned(),
+            lanes: lanes.clone(),
         })
         .collect();
     let engine = control::Engine::new(control::Parts {
@@ -900,8 +907,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         systemd::promote();
         phases.mark("the old engine let go");
         owner.claim_now(&store).await?;
-        owner.guard_lanes(&store, &lanes).await?;
-        phases.mark("interfaces claimed, lanes recorded");
+        phases.mark("interfaces claimed");
         let _ = waiting.set(take_charge(&store, &charge, &mut phases).await?);
         engine.activity.refresh_pauses(&store).await.context("reading the pauses")?;
         owner.hold();
@@ -1260,7 +1266,7 @@ impl Wake {
         self.notify.len() / self.destinations
     }
 
-    /// Wake the owners of a lane (same assignment as `InterfaceConfig::partitions_for_worker`).
+    /// Wake the owners of a lane (same assignment as `lanes::Layout::lanes_of_slot`).
     pub(crate) fn lane(&self, partition: i32) {
         let slot = partition as usize % self.slots();
         self.notify[slot * self.destinations..][..self.destinations].iter().for_each(Notify::notify_one);

@@ -344,8 +344,8 @@ enum Command {
         /// The environment: `${NAME}` values come from environments/<env>.yaml, `${secret:NAME}` from secrets/<env>.json.
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
-        /// Also check the project against this database, reading only: lanes that would strand
-        /// waiting messages, retention changes still running or waiting for a confirmation.
+        /// Also check the project against this database, reading only: lane changes the next start
+        /// would make, retention changes still running or waiting for a confirmation.
         #[arg(long, env = "DUCTUS_DATABASE_URL")]
         database_url: Option<String>,
         /// One JSON document for tools (an editor, CI) instead of the text: every finding with its
@@ -1277,7 +1277,7 @@ fn exit_on_failure(result: Result<bool>) -> Result<()> {
     Ok(())
 }
 
-/// A start the engine refused (another engine runs its interfaces; lanes would strand messages):
+/// A start the engine refused (another engine runs its interfaces):
 /// the reason, then exit 3, which the systemd unit doesn't restart (a person has to act).
 fn exit_if_refused(result: Result<()>) -> Result<()> {
     if let Err(e) = &result

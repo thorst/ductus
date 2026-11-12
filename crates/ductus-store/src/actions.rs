@@ -40,6 +40,46 @@ fn resend_action(released: bool) -> &'static str {
     if released { "message.release" } else { "message.replay" }
 }
 
+/// Where each of the messages `ids` goes when it is sent again: its key's lane in its interface's
+/// newest lane generation (an interface with none recorded keeps the lane). A message stored before
+/// `ordering` changed would otherwise go back to a lane of a generation that may be retired, which
+/// no worker reads. After a change of the key itself, the lane is the stored key's (the value the
+/// old key read): a resend goes ahead of what waits in its lane anyway. Returns the ids and lanes.
+async fn newest_lanes(
+    conn: &mut PgConnection,
+    ids: &[i64],
+    first: DateTime<Utc>,
+    last: DateTime<Utc>,
+) -> Result<(Vec<i64>, Vec<i32>)> {
+    #[derive(sqlx::FromRow)]
+    struct Row {
+        id: i64,
+        lane: i32,
+        key: Option<String>,
+        first_lane: Option<i32>,
+        lanes: Option<i32>,
+    }
+    let rows: Vec<Row> = sqlx::query_as(
+        "SELECT m.id, m.partition_key AS lane, m.ordering_key AS key, g.first_lane, g.lanes FROM messages m
+         LEFT JOIN LATERAL (SELECT first_lane, lanes FROM lane_generations g
+                            WHERE g.interface = m.interface ORDER BY first_lane DESC LIMIT 1) g ON true
+         WHERE m.id = ANY($1) AND m.received_at BETWEEN $2 AND $3",
+    )
+    .bind(ids)
+    .bind(first)
+    .bind(last)
+    .fetch_all(&mut *conn)
+    .await
+    .context("reading the messages' lanes")?;
+    Ok(rows
+        .into_iter()
+        .map(|r| match (r.first_lane, r.lanes) {
+            (Some(f), Some(n)) => (r.id, crate::lane_of(r.key.as_deref().unwrap_or(""), f, n)),
+            _ => (r.id, r.lane),
+        })
+        .unzip())
+}
+
 /// The request's audit row, written first in the transaction so the `message_actions` it makes
 /// can point at it; `finish_audit` fills in what was done once that is known.
 async fn begin_audit(conn: &mut PgConnection, actor: Actor<'_>, action: &str) -> Result<i64> {
@@ -89,7 +129,7 @@ pub struct Resent {
     pub interface: String,
     pub destination_id: DestinationId,
     pub destination: String,
-    /// The message's lane (whose worker to wake).
+    /// The lane it was put back in (whose worker to wake): its key's in the newest lanes.
     pub partition_key: i32,
     #[sqlx(try_from = "i16")]
     pub previous_status: Status,
@@ -168,7 +208,9 @@ pub struct Quarantined {
 
 impl Store {
     /// Put deliveries back to pending (and their messages), recording each. A message keeps its
-    /// id, so its worker takes it next in its lane, ahead of what's waiting. Pending deliveries
+    /// id, so its worker takes it next in its lane, ahead of what's waiting; the lane is its key's
+    /// in the interface's newest lanes (`newest_lanes`: `ordering` may have changed since it was
+    /// stored), and `Resent::partition_key` says which, for waking its worker. Pending deliveries
     /// are left alone (one is being sent or retried right now), and so are duplicates (never
     /// queued). Returns what was reset, by message and destination.
     ///
@@ -190,6 +232,7 @@ impl Store {
             .context("locking messages")?;
             let (ids, times): (Vec<i64>, Vec<DateTime<Utc>>) = locked.into_iter().unzip();
             let Some((first, last)) = span(&times) else { return Ok(Vec::new()) };
+            let (lane_ids, lanes) = newest_lanes(&mut tx, &ids, first, last).await?;
             let audit_id = begin_audit(&mut tx, by, resend_action(r.quarantined_only)).await?;
             let resent: Vec<Resent> = sqlx::query_as(
                 "WITH old AS (
@@ -201,11 +244,13 @@ impl Store {
                        AND d.status <> 0 AND (d.status = 3 OR NOT $6)
                      ORDER BY d.message_id, d.destination_id
                      FOR UPDATE
+                 ), lane AS (
+                     SELECT * FROM unnest($12::bigint[], $13::int[]) AS l(id, lane)
                  ), reset AS (
                      UPDATE deliveries d
                      SET status = 0, attempts = 0, last_error = NULL, output = NULL, code_version = NULL,
-                         updated_at = now()
-                     FROM old
+                         partition_key = lane.lane, updated_at = now()
+                     FROM old JOIN lane ON lane.id = old.message_id
                      WHERE d.message_id = old.message_id AND d.received_at = old.received_at
                        AND d.destination_id = old.destination_id AND d.received_at BETWEEN $3 AND $4
                  ), recorded AS (
@@ -216,10 +261,11 @@ impl Store {
                             old.status, old.attempts, old.last_error, old.output, old.code_version, $10, $11
                      FROM old JOIN destinations t ON t.id = old.destination_id
                  )
-                 SELECT old.message_id, t.interface, old.destination_id, t.name AS destination, old.partition_key,
+                 SELECT old.message_id, t.interface, old.destination_id, t.name AS destination,
+                        lane.lane AS partition_key,
                         old.status AS previous_status, old.attempts AS previous_attempts,
                         old.last_error AS previous_error
-                 FROM old JOIN destinations t ON t.id = old.destination_id
+                 FROM old JOIN destinations t ON t.id = old.destination_id JOIN lane ON lane.id = old.message_id
                  ORDER BY old.message_id, t.name",
             )
             .bind(&ids)
@@ -233,6 +279,8 @@ impl Store {
             .bind(by.reason)
             .bind(by.by.user_id)
             .bind(audit_id)
+            .bind(&lane_ids)
+            .bind(&lanes)
             .fetch_all(&mut *tx)
             .await
             .context("resetting deliveries")?;
@@ -275,6 +323,21 @@ impl Store {
             .execute(&mut *tx)
             .await
             .context("marking messages pending again")?;
+            // The message's own lane follows, so a destination added later (`reconcile`, which
+            // queues a pending message in its message's lane) finds it in a lane that is read.
+            sqlx::query(
+                "UPDATE messages m SET partition_key = l.lane
+                 FROM unnest($1::bigint[], $2::int[]) AS l(id, lane)
+                 WHERE m.id = l.id AND m.received_at BETWEEN $3 AND $4 AND m.id = ANY($5) AND m.partition_key <> l.lane",
+            )
+            .bind(&lane_ids)
+            .bind(&lanes)
+            .bind(first)
+            .bind(last)
+            .bind(&again)
+            .execute(&mut *tx)
+            .await
+            .context("moving messages to the newest lanes")?;
             tx.commit().await.context("committing resend")?;
             anyhow::Ok(resent)
         })

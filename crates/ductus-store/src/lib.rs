@@ -17,6 +17,7 @@ mod directory;
 mod docs;
 mod engines;
 mod history;
+mod lanes;
 pub mod migrations;
 mod releases;
 mod replay;
@@ -38,8 +39,9 @@ pub use certificates::{CertificateRow, DOCTOR_RUNS_KEPT, DoctorRunRow};
 pub use deployments::{Changed, Current, Deployed, NewDeployment, NewVersion, Running, Since, VersionIds};
 pub use directory::{DirectoryAccount, DirectoryPerson, DirectoryUpdate};
 pub use docs::DocsRow;
-pub use engines::{EngineLock, EngineRow, NewEngine, Owned, Stranded};
+pub use engines::{EngineLock, EngineRow, NewEngine, Owned};
 pub use history::{AuditEntry, DeploymentEntry, DocsEntry, Page as HistoryPage, Part, VersionFiles};
+pub use lanes::{LaneGeneration, LaneWrites, NewGeneration, lane_of};
 pub use releases::{
     CheckRow, LastDeployed, NewCheck, NewRelease, Place, ProjectRunning, ReleaseContents, ReleaseFile, ReleaseRow,
     ReleaseStored, Run, folder_of,
@@ -177,6 +179,9 @@ pub struct Pending {
     pub attempts: i32,
     /// Routed from another interface: the id of the message there.
     pub origin: Option<i64>,
+    /// Its lane (`partition_key`): a read shorter than its limit tells which of the lanes read
+    /// have nothing waiting (the runtime's `lanes`).
+    pub lane: i32,
 }
 
 impl Pending {
@@ -980,8 +985,9 @@ fn can_run_again(e: &anyhow::Error) -> bool {
 /// `Store::pending`: destination `$1`'s oldest `$3` pending deliveries in lanes `$2`, with their
 /// messages. Public so a test can check its plan.
 #[doc(hidden)]
-pub const QUEUE_READ: &str = "SELECT d.message_id AS id, d.received_at, m.payload, d.attempts, m.origin_id AS origin
-     FROM (SELECT message_id, received_at, attempts FROM deliveries
+pub const QUEUE_READ: &str = "SELECT d.message_id AS id, d.received_at, m.payload, d.attempts, m.origin_id AS origin,
+            d.partition_key AS lane
+     FROM (SELECT message_id, received_at, attempts, partition_key FROM deliveries
            WHERE destination_id = $1 AND status = 0 AND partition_key = ANY($2)
            ORDER BY message_id LIMIT $3) d
      CROSS JOIN LATERAL (SELECT payload, origin_id FROM messages m

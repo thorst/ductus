@@ -43,6 +43,8 @@ export const ACTIONS: Record<string, string> = {
   "engine.refused": "Engine start refused",
   "interface.stopped": "Interface stopped",
   "interface.partitions_raised": "Interface lanes raised with messages waiting",
+  "interface.lanes_changed": "Interface lanes changed",
+  "interface.lanes_settled": "Interface's old lanes emptied",
   "release.store": "Stored a release",
   "release.check": "Checked a release",
   "release.deploy": "Deployed a release",
@@ -91,6 +93,15 @@ export function summary(e: Entry): string {
   if (e.action === "engine.handover") return handover(d);
   if (e.action === "interface.partitions_raised") {
     return `${String(d.before)} → ${String(d.now)} lanes with ${String(d.waiting)} waiting`;
+  }
+  if (e.action === "interface.lanes_changed") {
+    const before = d.before === null || d.before === undefined ? "?" : String(d.before);
+    const key = d.key_changed === true ? " (new key)" : "";
+    const adopted = d.adopted === true ? " · an older version ran it since" : "";
+    return `${before} → ${String(d.now)} lanes${key}; ${String(d.waiting ?? 0)} waiting go first${adopted}`;
+  }
+  if (e.action === "interface.lanes_settled" && typeof d.seconds === "number") {
+    return `nothing waits in the old lanes: ${String(d.lanes)} lanes, settled after ${ms(d.seconds * 1000)}`;
   }
   const parts: string[] = [];
   if (typeof d.reason === "string" && d.reason) parts.push(d.reason);

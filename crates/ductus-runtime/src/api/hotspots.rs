@@ -26,6 +26,7 @@ pub struct HotspotQuery {
     interface: Option<String>,
     /// Lanes to list per destination, most waiting first (default 10, at most 1000). Lanes
     /// whose first message is failing, and lanes no worker reads, are always listed.
+    /// While `ordering` changes, old lanes count among them.
     lanes: Option<usize>,
 }
 
@@ -34,7 +35,8 @@ pub struct DestinationHotspots {
     interface: String,
     destination: String,
     paused: bool,
-    /// Lanes the interface has (`ordering.partitions`; 1 without an ordering key).
+    /// Lanes the interface has (`ordering.partitions`; 1 without an ordering key). While
+    /// `ordering` changes, old lanes are listed too (`LaneInfo::old`).
     lanes_total: u32,
     /// Workers each destination has (1 in the shared pool).
     workers_total: u32,
@@ -53,7 +55,8 @@ pub struct DestinationHotspots {
 pub struct FindingInfo {
     /// `blocked` (a message keeps failing; its worker's lanes wait), `all_blocked` (every worker
     /// is retrying: the receiver looks down), `uneven` (one worker has most of the backlog),
-    /// `hot_lane` (one lane has most of it), `unowned` (a lane no worker reads).
+    /// `hot_lane` (one lane has most of it), `unowned` (a lane no worker reads), `changing`
+    /// (`ordering` changed: old lanes go first, new lanes sharing their keys wait).
     kind: &'static str,
     worker: Option<u32>,
     lane: Option<i32>,
@@ -73,10 +76,21 @@ pub struct WorkerInfo {
 
 #[derive(Serialize, ToSchema)]
 pub struct LaneInfo {
+    /// Its number as stored (lanes are numbered after the previous `ordering`'s, so after a
+    /// change they no longer start at 0): what `held_by` names.
     lane: i32,
-    /// None: no worker reads it (`ordering.partitions` was lowered while it had messages).
+    /// As configured: "lane 8", or "old lane 40" (of an earlier `ordering`, sent first).
+    name: String,
+    /// In an earlier `ordering`'s lanes: its messages go before new ones of the same keys.
+    old: bool,
+    /// None: no worker reads it (an older version changed `ordering` while it had messages).
     worker: Option<u32>,
     waiting: u64,
+    /// Held: the old lanes (`lane` numbers) it waits for, which may hold the same keys. Empty
+    /// when it's read.
+    held_by: Vec<i32>,
+    /// The same, in words: "waits for old lanes 1, 5".
+    held: Option<String>,
     head: HeadInfo,
 }
 
@@ -101,6 +115,7 @@ fn finding(f: hotspots::Finding) -> FindingInfo {
         Kind::Uneven { worker, share } => ("uneven", Some(worker), None, Some(share)),
         Kind::HotLane { lane, share } => ("hot_lane", None, Some(lane), Some(share)),
         Kind::Unowned { lane, .. } => ("unowned", None, Some(lane), None),
+        Kind::Changing { .. } => ("changing", None, None, None),
     };
     FindingInfo { kind, worker, lane, share: share.map(|s| (s * 1000.0).round() / 1000.0), text: f.text }
 }
@@ -123,7 +138,8 @@ async fn hotspots(engine: Eng, _caller: Caller, Query(q): Query<HotspotQuery>) -
     let now = Utc::now();
     let mut out = Vec::new();
     for i in engine.interfaces.iter().filter(|i| q.interface.as_ref().is_none_or(|n| *n == i.config.name)) {
-        let layout = Layout { lanes: i.config.partition_count(), workers: i.config.slots() };
+        let generations = i.lanes.layout.generations.iter().map(|g| (g.first, g.lanes as u32)).collect();
+        let layout = Layout { generations, workers: i.config.slots() };
         for (n, (name, id)) in i.destinations.iter().enumerate() {
             if snapshot.queue(*id).pending == 0 {
                 continue;
@@ -148,8 +164,11 @@ async fn hotspots(engine: Eng, _caller: Caller, Query(q): Query<HotspotQuery>) -
                 .collect();
             let paused = engine.paused(*id).is_some();
             let last_sent = i.stats.destinations.get(n).and_then(|s| s.last_sent.get());
-            let h = hotspots::analyze(&lanes, layout, paused, last_sent, now);
+            let held = i.lanes.holding(n);
+            let h = hotspots::analyze(&lanes, &layout, &held, paused, last_sent, now);
             let blocked: Vec<i32> = h.workers.iter().filter_map(|w| w.blocked_by).collect();
+            let held_by =
+                |lane: i32| held.iter().find(|(l, _)| *l == lane).map(|(_, by)| by.clone()).unwrap_or_default();
             // Most waiting first (as stored), then anything that must be seen.
             let shown = lanes
                 .iter()
@@ -159,7 +178,7 @@ async fn hotspots(engine: Eng, _caller: Caller, Query(q): Query<HotspotQuery>) -
                 interface: i.config.name.clone(),
                 destination: name.clone(),
                 paused,
-                lanes_total: layout.lanes,
+                lanes_total: layout.lanes(),
                 workers_total: layout.workers,
                 waiting: h.waiting,
                 lanes_waiting: h.lanes_waiting,
@@ -178,8 +197,22 @@ async fn hotspots(engine: Eng, _caller: Caller, Query(q): Query<HotspotQuery>) -
                 lanes: shown
                     .map(|(_, l)| LaneInfo {
                         lane: l.lane,
+                        name: layout.name(l.lane),
+                        old: layout.is_old(l.lane),
                         worker: layout.worker_of(l.lane),
                         waiting: l.waiting,
+                        held: Some(held_by(l.lane)).filter(|by| !by.is_empty()).map(|by| {
+                            let names: Vec<String> = by
+                                .iter()
+                                .map(|&b| layout.name(b).trim_start_matches("old lane ").to_string())
+                                .collect();
+                            format!(
+                                "waits for old lane{} {}",
+                                if names.len() == 1 { "" } else { "s" },
+                                names.join(", ")
+                            )
+                        }),
+                        held_by: held_by(l.lane),
                         head: HeadInfo {
                             id: l.head.id,
                             ordering_key: l.head.key.clone(),

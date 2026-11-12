@@ -112,6 +112,18 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
               {i.isolation === "dedicated" ? `dedicated, ${i.workers} workers` : "shared pool"} · timeout{" "}
               {ms(i.timeout_ms)}
             </Field>
+            <Field label="Lanes">
+              {count(i.lanes.lanes)}
+              {i.lanes.changing && (
+                <span className="mt-0.5 block text-xs text-muted">
+                  {i.lanes.changing} (
+                  <Link to="/hotspots" search={{ interface: i.name }}>
+                    Hotspots
+                  </Link>{" "}
+                  shows which)
+                </span>
+              )}
+            </Field>
             <Field label="Keeps messages">{i.retention_days ? `${i.retention_days} days` : "–"}</Field>
             <Field label="Received since start">
               {count(i.since_start.received)}

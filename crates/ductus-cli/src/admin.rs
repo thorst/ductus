@@ -567,10 +567,20 @@ pub async fn hotspots(remote: Remote, interface: Option<&str>, lanes: Option<usi
         let name = format!("{} → {destination}", d["interface"].as_str().unwrap_or("?"));
         println!("{name}: {}", d["summary"].as_str().unwrap_or("?"));
         let workers = d["workers"].as_array().cloned().unwrap_or_default();
+        let lanes = d["lanes"].as_array().cloned().unwrap_or_default();
+        // A lane as configured ("lane 8", "old lane 40"), by its stored number.
+        let lane_name = |n: i64| {
+            lanes
+                .iter()
+                .find(|l| l["lane"].as_i64() == Some(n))
+                .and_then(|l| l["name"].as_str())
+                .map_or_else(|| format!("lane {n}"), str::to_string)
+        };
         if int(&d["workers_total"]) > 1 {
             println!("  {:<8} {:>6} {:>10}", "worker", "lanes", "waiting");
             for w in &workers {
-                let blocked = w["blocked_by"].as_i64().map(|l| format!("  blocked (lane {l})")).unwrap_or_default();
+                let blocked =
+                    w["blocked_by"].as_i64().map(|l| format!("  blocked ({})", lane_name(l))).unwrap_or_default();
                 println!(
                     "  {:<8} {:>6} {:>10}{blocked}",
                     int(&w["worker"]),
@@ -580,17 +590,22 @@ pub async fn hotspots(remote: Remote, interface: Option<&str>, lanes: Option<usi
             }
         }
         println!(
-            "  {:<6} {:<7} {:>9}  {:<12} {:<16} {:>10} {:>8}  last error",
+            "  {:<8} {:<7} {:>9}  {:<12} {:<16} {:>10} {:>8}  last error",
             "lane", "worker", "waiting", "first msg", "key", "age", "attempts"
         );
-        for l in d["lanes"].as_array().into_iter().flatten() {
+        for l in &lanes {
             let head = &l["head"];
             let worker = l["worker"].as_i64().map(|w| w.to_string()).unwrap_or_else(|| "none".into());
             let waited = ductus_core::monitor::human(Duration::from_secs(int(&head["waiting_s"]).max(0) as u64));
-            let error = head["last_error"].as_str().and_then(|e| e.lines().next()).unwrap_or("");
+            // A held lane says what it waits for instead (its first message isn't being tried).
+            let error = match l["held"].as_str() {
+                Some(held) => held,
+                None => head["last_error"].as_str().and_then(|e| e.lines().next()).unwrap_or(""),
+            };
+            let lane = lane_name(int(&l["lane"])).replace("old lane ", "old ").replace("lane ", "");
             println!(
-                "  {:<6} {:<7} {:>9}  {:<12} {:<16} {:>10} {:>8}  {error}",
-                int(&l["lane"]),
+                "  {:<8} {:<7} {:>9}  {:<12} {:<16} {:>10} {:>8}  {error}",
+                lane,
                 worker,
                 int(&l["waiting"]),
                 int(&head["id"]),

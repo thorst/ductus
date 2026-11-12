@@ -106,15 +106,17 @@ function DestinationHotspots({ d, onAllLanes }: { d: Schemas["DestinationHotspot
             ))}
           </ul>
         )}
-        {d.workers.length > 1 && <Workers workers={d.workers} />}
+        {d.workers.length > 1 && <Workers workers={d.workers} lanes={d.lanes} />}
       </CardBody>
       <Lanes d={d} onAllLanes={onAllLanes} />
     </Card>
   );
 }
 
-function Workers({ workers }: { workers: Schemas["WorkerInfo"][] }) {
+function Workers({ workers, lanes }: { workers: Schemas["WorkerInfo"][]; lanes: Schemas["LaneInfo"][] }) {
   const most = Math.max(...workers.map((w) => w.waiting));
+  // A lane as configured ("lane 8", "old lane 40"), by its stored number.
+  const name = (n: number) => lanes.find((l) => l.lane === n)?.name ?? `lane ${n}`;
   return (
     <div>
       <h3 className="mb-2 text-xs font-medium tracking-wide text-muted uppercase">Workers</h3>
@@ -131,7 +133,7 @@ function Workers({ workers }: { workers: Schemas["WorkerInfo"][] }) {
             </span>
             <span className="tabular-nums">
               {count(w.waiting)} in {count(w.lanes_waiting)} {w.lanes_waiting === 1 ? "lane" : "lanes"}
-              {w.blocked_by != null && <span className="text-bad"> · blocked by lane {w.blocked_by}</span>}
+              {w.blocked_by != null && <span className="text-bad"> · blocked by {name(w.blocked_by)}</span>}
             </span>
           </li>
         ))}
@@ -163,7 +165,9 @@ function Lanes({ d, onAllLanes }: { d: Schemas["DestinationHotspots"]; onAllLane
             .sort((a, b) => Number(b.head.attempts > 0) - Number(a.head.attempts > 0))
             .map((l) => (
               <tr key={l.lane} className={cn(l.head.attempts > 0 && "bg-bad/5")}>
-                <Td className="text-right tabular-nums">{l.lane}</Td>
+                <Td className="text-right tabular-nums whitespace-nowrap">
+                  {l.old ? <span className="text-muted">old {l.name.replace("old lane ", "")}</span> : l.name.replace("lane ", "")}
+                </Td>
                 <Td className="text-right tabular-nums">{l.worker ?? <span className="text-bad">none</span>}</Td>
                 <Td className="text-right tabular-nums">{count(l.waiting)}</Td>
                 <Td>
@@ -176,7 +180,10 @@ function Lanes({ d, onAllLanes }: { d: Schemas["DestinationHotspots"]; onAllLane
                 <Td className={cn("text-right tabular-nums", l.head.attempts > 0 && "font-semibold text-bad")}>
                   {l.head.attempts}
                 </Td>
-                <Td className="max-w-md text-xs break-words">{l.head.last_error ?? ""}</Td>
+                <Td className="max-w-md text-xs break-words">
+                  {/* A held lane's first message isn't being tried: say what it waits for. */}
+                  {l.held ? <span className="text-muted">{l.held}</span> : (l.head.last_error ?? "")}
+                </Td>
               </tr>
             ))}
         </tbody>

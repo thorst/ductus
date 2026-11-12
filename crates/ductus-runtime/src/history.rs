@@ -511,7 +511,7 @@ fn deployment(d: DeploymentEntry, touches: Touches) -> Entry {
 
 /// What an audit row touches (as `Store::history_audit` narrows them): a pause, a resume or a
 /// destination's alert by its subject; a resend, correction or dismissal by the destinations its
-/// message actions name (none recorded: not known); raised lanes are the source's (`ordering`).
+/// message actions name (none recorded: not known); changed lanes are the source's (`ordering`).
 fn audit_touches(r: &AuditEntry) -> Touches {
     let row = &r.row;
     let interface = row.interface.as_deref().unwrap_or_default();
@@ -532,7 +532,7 @@ fn audit_touches(r: &AuditEntry) -> Touches {
             true => touches.unsure = true,
             false => touches.destinations = r.acted_on.clone(),
         },
-        "interface.partitions_raised" => touches.source = true,
+        "interface.partitions_raised" | "interface.lanes_changed" | "interface.lanes_settled" => touches.source = true,
         _ => {}
     }
     touches

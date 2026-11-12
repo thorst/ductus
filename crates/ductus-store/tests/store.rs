@@ -1979,35 +1979,76 @@ async fn a_lost_lock_connection_is_taken_again_with_the_claims() {
 }
 
 #[tokio::test]
-async fn lanes_no_worker_reads_are_found_from_the_queue() {
+async fn lane_generations_are_recorded_retired_and_resends_go_to_the_newest() {
+    use ductus_store::{LaneWrites, NewGeneration, lane_of};
     let Some(store) = store().await else { return };
-    let t = Iface::new(&store, "stranded", &["lab", "billing"]).await;
+    let t = Iface::new(&store, "lanes", &["lab", "billing"]).await;
     let only_lab = [t.id("lab")];
     for lane in [3, 40, 63] {
         store.insert(NewMessage { destinations: &only_lab, ..t.msg(lane, b"waiting") }).await.unwrap();
     }
     let done = store.insert(NewMessage { destinations: &only_lab, ..t.msg(50, b"sent") }).await.unwrap();
     store.finish(t.id("lab"), &[sent(done)]).await.unwrap();
-    let check =
-        |lanes: i32| [(t.name.clone(), "lab".to_string(), lanes), (t.name.clone(), "billing".to_string(), lanes)];
-
-    let lowered = store.stranded(&check(32)).await.unwrap();
-    assert_eq!(lowered.len(), 1, "billing has nothing waiting: {lowered:?}");
-    let s = &lowered[0];
-    assert_eq!(
-        (s.destination.as_str(), s.waiting, s.first_lane, s.last_lane),
-        ("lab", 2, 40, 63),
-        "the sent one doesn't count"
-    );
-    assert_eq!(store.stranded(&check(1)).await.unwrap()[0].waiting, 3, "no ordering key: one lane");
-    assert!(store.stranded(&check(64)).await.unwrap().is_empty());
-    assert_eq!(store.waiting_by_interface(std::slice::from_ref(&t.name)).await.unwrap(), [(t.name.clone(), 3)]);
-
     let names = [t.name.clone()];
+
+    // What a start adopting these lanes reads: the highest lane anything waits in (the sent one
+    // doesn't count), and how many wait.
+    assert_eq!(store.highest_waiting_lanes(&names).await.unwrap(), [(t.name.clone(), 63)]);
+    assert_eq!(store.waiting_by_interface(&names).await.unwrap(), [(t.name.clone(), 3)]);
     assert!(store.applied_lanes(&names).await.unwrap().is_empty(), "never recorded");
-    store.save_lanes(&[(t.name.clone(), 64)]).await.unwrap();
-    store.save_lanes(&[(t.name.clone(), 32)]).await.unwrap();
-    assert_eq!(store.applied_lanes(&names).await.unwrap(), [(t.name.clone(), 32)]);
+    assert!(store.lane_generations(&names).await.unwrap().is_empty());
+
+    let generation = |first_lane, lanes, key: &str| NewGeneration {
+        interface: t.name.clone(),
+        first_lane,
+        lanes,
+        key: key.into(),
+        mixed: false,
+    };
+    // The first start: 64 lanes. Then `ordering` changes to 32 lanes on another key.
+    let first = LaneWrites {
+        replaced: vec![t.name.clone()],
+        added: vec![generation(0, 64, "PID-3.1")],
+        applied: vec![(t.name.clone(), 64)],
+        ..Default::default()
+    };
+    store.write_lanes(&first).await.unwrap();
+    let change = LaneWrites {
+        added: vec![generation(64, 32, "PID-18")],
+        applied: vec![(t.name.clone(), 96)],
+        ..Default::default()
+    };
+    store.write_lanes(&change).await.unwrap();
+    let rows = store.lane_generations(&names).await.unwrap();
+    let got: Vec<(i32, i32, Option<&str>, i32)> =
+        rows.iter().map(|g| (g.first_lane, g.lanes, g.key.as_deref(), g.end())).collect();
+    assert_eq!(got, [(0, 64, Some("PID-3.1"), 64), (64, 32, Some("PID-18"), 96)]);
+    assert_eq!(store.applied_lanes(&names).await.unwrap(), [(t.name.clone(), 96)]);
+    // A key recorded only where none was (the generations an upgrade made from the lane count).
+    let keys = LaneWrites { keys: vec![(t.name.clone(), 0, "other".into())], ..Default::default() };
+    store.write_lanes(&keys).await.unwrap();
+    assert_eq!(store.lane_generations(&names).await.unwrap()[0].key.as_deref(), Some("PID-3.1"));
+
+    // A resend of the sent message goes to its key's lane in the newest generation (64–95), not
+    // back to lane 50, which no worker may read once the old lanes are retired; the message's
+    // own lane follows (where `reconcile` queues it for a destination added later).
+    let actor = ductus_store::Actor { by: ductus_store::By::engine(), reason: Some("test") };
+    let resend = ductus_store::Resend { messages: &[done.id], destinations: &only_lab, quarantined_only: false };
+    let resent = store.resend(resend, actor).await.unwrap();
+    let lane = lane_of("", 64, 32); // `msg` stores no ordering key
+    assert_eq!(resent.iter().map(|r| r.partition_key).collect::<Vec<_>>(), [lane]);
+    assert!(
+        store.pending(t.id("lab"), &[lane], 10).await.unwrap().iter().any(|p| p.id == done.id && p.lane == lane),
+        "pending in the newest lanes"
+    );
+    assert!(!store.pending(t.id("lab"), &[50], 10).await.unwrap().iter().any(|p| p.id == done.id));
+
+    // Retired: everything older than the newest generation.
+    assert_eq!(store.retire_lanes(&t.name, 64).await.unwrap(), 1);
+    let rows = store.lane_generations(&names).await.unwrap();
+    assert_eq!(rows.iter().map(|g| g.first_lane).collect::<Vec<_>>(), [64]);
+    store.write_lanes(&LaneWrites { replaced: vec![t.name.clone()], ..Default::default() }).await.unwrap();
+    assert!(store.lane_generations(&names).await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -2314,6 +2355,7 @@ async fn everything_at_once_without_lock_errors() {
         let (store, t, routed, stop) = (store.clone(), t.clone(), routed.clone(), stop.clone());
         tokio::spawn(async move {
             let names = [t.name.clone(), routed.name.clone()];
+            let lanes_name = format!("{}-lanes", t.name);
             let (mut claimed, mut refused) = (0, 0);
             while !stop.load(Relaxed) {
                 let (a, b) = (unique("stress-a"), unique("stress-b"));
@@ -2323,11 +2365,27 @@ async fn everything_at_once_without_lock_errors() {
                 assert!(ra.is_empty() != rb.is_empty(), "exactly one engine claims them");
                 claimed += 1;
                 refused += 1;
-                let lanes: Vec<_> = t.destinations.iter().map(|(d, _)| (t.name.clone(), d.clone(), 4)).collect();
-                store.stranded(&lanes).await.unwrap();
+                // Lanes, as a start reads and changes them. Written under a name of their own: a
+                // generation recorded for `t` would send its resends to lanes the drains don't read.
+                store.lane_generations(&names).await.unwrap();
+                store.highest_waiting_lanes(&names).await.unwrap();
                 store.with_waiting(&names).await.unwrap();
                 store.waiting_by_interface(&names).await.unwrap();
-                store.save_lanes(&[(t.name.clone(), if claimed % 2 == 0 { 8 } else { 4 })]).await.unwrap();
+                let (first_lane, lanes) = if claimed % 2 == 0 { (0, 8) } else { (8, 4) };
+                let writes = ductus_store::LaneWrites {
+                    replaced: (first_lane == 0).then(|| lanes_name.clone()).into_iter().collect(),
+                    added: vec![ductus_store::NewGeneration {
+                        interface: lanes_name.clone(),
+                        first_lane,
+                        lanes,
+                        key: String::new(),
+                        mixed: false,
+                    }],
+                    applied: vec![(lanes_name.clone(), first_lane + lanes)],
+                    ..Default::default()
+                };
+                store.write_lanes(&writes).await.unwrap();
+                store.retire_lanes(&lanes_name, first_lane).await.unwrap();
                 store.other_engines(&a).await.unwrap();
                 let winner = if ra.is_empty() { &a } else { &b };
                 store.release_engine(winner).await.unwrap();
@@ -2337,6 +2395,8 @@ async fn everything_at_once_without_lock_errors() {
                 store.forget_engine(&b).await.unwrap();
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
+            let gone = ductus_store::LaneWrites { replaced: vec![lanes_name], ..Default::default() };
+            store.write_lanes(&gone).await.unwrap();
             (claimed, refused)
         })
     };
