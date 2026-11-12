@@ -500,7 +500,7 @@
         "tags": [
           "releases"
         ],
-        "summary": "Deploy a stored release to this engine (release mode): the \"replaces\" check, the gate (or a\nrecent passing check reused), then the handover to an engine running it. Answers when the new\nengine sends, or when it couldn't (this one goes on): seconds, plus the gate's time when it\nruns. 200: deployed. 409: refused before anything ran (folder mode, another deploy or check\nrunning, the release already runs, its \"replaces\" check names someone's work), the report\nsays why. 422: the gate found problems. 500: the new engine couldn't take over (this one goes\non). Needs the `deploy` permission. One deploy or check at a time per engine.",
+        "summary": "Deploy a stored release to this engine (release mode): this environment's rules, the \"replaces\"\ncheck, the gate (or a recent passing check reused), then the handover to an engine running it;\nor roll back (`rollback`) to a release that ran here before. Answers when the new engine sends,\nor when it couldn't (this one goes on): seconds, plus the gate's time when it runs. 200:\ndeployed. 409: refused before anything ran (folder mode, another deploy or check running, the\nrelease already runs, this environment's rules, its \"replaces\" check names someone's work, a\nrollback to a release that never ran here), the report says why. 422: the gate found problems.\n500: the new engine couldn't take over (this one goes on). Needs the `deploy` permission. One\ndeploy or check at a time per engine.",
         "operationId": "deploy_release",
         "requestBody": {
           "content": {
@@ -524,7 +524,7 @@
             }
           },
           "400": {
-            "description": "No reason given, or no such release",
+            "description": "No reason given, no release named, or no such release",
             "content": {
               "application/json": {
                 "schema": {
@@ -2596,6 +2596,56 @@
         }
       }
     },
+    "/releases/{id}/file": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "A stored release's file, as `ductus release` wrote it (the same id), its record of where it was\ndeployed brought up to date: this database's deployments of it and what earlier files said\n(`deployed`, oldest first). What `ductus deploy ID --from URL --to URL` fetches to promote it\nto another engine, record included. Needs the `deploy` permission (it carries the code and\nevery environment's encrypted secrets); audited as `release.download`.",
+        "operationId": "download_release",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The release id, or its first 12 characters",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The release file",
+            "content": {
+              "application/gzip": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReleaseArchive"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/retention": {
       "get": {
         "tags": [
@@ -4372,12 +4422,22 @@
           "short",
           "project",
           "environment",
+          "branches",
+          "rollback",
+          "rules",
           "replaces",
           "forced",
           "steps",
           "changes"
         ],
         "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The branches it was made on, as its files said (the same files made on two branches are\none release); empty: a detached HEAD without `--branch`, or made without git."
+          },
           "changes": {
             "type": "array",
             "items": {
@@ -4418,6 +4478,17 @@
             "type": "string",
             "description": "What happened, in a sentence."
           },
+          "place": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PlaceInfo",
+                "description": "The record of this deployment, as a release file carries it (`ductus deploy` writes it into\nthe file it deployed; `GET /releases/{id}/file` includes it): what an environment that\nrequires this one first reads."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "project": {
             "type": "string"
           },
@@ -4427,13 +4498,24 @@
           },
           "replaces": {
             "type": "object",
-            "description": "Each interface (and \"the project's own files\") whose running version is someone else's work\nthis release would undo, with why. A deploy is refused when any is named, unless forced.",
+            "description": "Each interface (and \"the project's own files\") whose running version is someone else's work\nthis release would undo, with why. A deploy is refused when any is named, unless forced; a\nrollback names them and goes on.",
             "additionalProperties": {
               "type": "string"
             },
             "propertyNames": {
               "type": "string"
             }
+          },
+          "rollback": {
+            "type": "boolean",
+            "description": "A rollback: to a release that ran here before."
+          },
+          "rules": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What this environment's rules said (`DUCTUS_DEPLOY_REQUIRES`, `DUCTUS_DEPLOY_BRANCHES`):\neach reason a deploy is refused, or (a rollback) that they don't hold it."
           },
           "short": {
             "type": "string"
@@ -4449,9 +4531,6 @@
       },
       "DeployRequest": {
         "type": "object",
-        "required": [
-          "release"
-        ],
         "properties": {
           "all_tests": {
             "type": "boolean",
@@ -4459,7 +4538,7 @@
           },
           "force": {
             "type": "boolean",
-            "description": "Deploy over someone else's work the \"replaces\" check names: their change is undone. The\ninterfaces and whose work go into the audit log (`release.force`) and the deployment's\nhistory."
+            "description": "Deploy over someone else's work the \"replaces\" check names: their change is undone. The\ninterfaces and whose work go into the audit log (`release.force`) and the deployment's\nhistory. Doesn't skip this environment's rules (`DUCTUS_DEPLOY_REQUIRES`,\n`DUCTUS_DEPLOY_BRANCHES`)."
           },
           "reason": {
             "type": [
@@ -4469,8 +4548,15 @@
             "description": "Why: required, except in an environment named `dev`. Recorded with the deployment, in its\nhistory and in the audit log."
           },
           "release": {
-            "type": "string",
-            "description": "The release: its id, or its first 12 characters. Store it first (`POST /releases`)."
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The release: its id, or its first 12 characters. Store it first (`POST /releases`).\nRequired, except for a rollback (default: the last release run here before the current\none, skipping any a rollback left)."
+          },
+          "rollback": {
+            "type": "boolean",
+            "description": "Roll back: go back to a release that ran in this environment before. Not held to this\nenvironment's rules; the \"replaces\" check names whose work it undoes without refusing; the\ngate runs. Audited as `release.rollback`."
           }
         }
       },
@@ -7160,6 +7246,47 @@
           }
         }
       },
+      "PlaceInfo": {
+        "type": "object",
+        "description": "Where a release was deployed: one entry of a release file's record (`deployed`).",
+        "required": [
+          "environment",
+          "host",
+          "deployment",
+          "at",
+          "by",
+          "ductus"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "by": {
+            "type": "string"
+          },
+          "deployment": {
+            "type": "integer",
+            "format": "int32",
+            "description": "The deployment's id on that engine's database."
+          },
+          "ductus": {
+            "type": "string",
+            "description": "The Ductus version that ran it."
+          },
+          "environment": {
+            "type": "string"
+          },
+          "here": {
+            "type": "boolean",
+            "description": "Recorded on this engine's database; false: a release file said so when it was stored here."
+          },
+          "host": {
+            "type": "string",
+            "description": "The engine's server."
+          }
+        }
+      },
       "PortsReport": {
         "type": "object",
         "required": [
@@ -7504,9 +7631,25 @@
           {
             "type": "object",
             "required": [
+              "branches",
+              "deployed",
               "manifest"
             ],
             "properties": {
+              "branches": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "description": "Every branch it was made on, as its files said when they were stored here (the same files\nmade on two branches are one release); empty: a detached HEAD without `--branch`, or made\nwithout git. Labels, unsigned."
+              },
+              "deployed": {
+                "type": "array",
+                "items": {
+                  "$ref": "#/components/schemas/PlaceInfo"
+                },
+                "description": "Where it was deployed, oldest first: each environment's first deployment of it on this\ndatabase (`here`), and what files carrying it said about other databases when they were\nstored here (unsigned). What `DUCTUS_DEPLOY_REQUIRES` reads."
+              },
               "manifest": {
                 "type": "object",
                 "description": "The release's manifest (`release.json`): every interface's code version and files, the\nproject version, the tests' result when it was made, who made it and why."
@@ -8122,7 +8265,8 @@
             "required": [
               "new",
               "new_folders",
-              "new_files"
+              "new_files",
+              "new_places"
             ],
             "properties": {
               "new": {
@@ -8136,6 +8280,11 @@
               "new_folders": {
                 "type": "integer",
                 "description": "Folders and files this release added to the database (the rest were there already).",
+                "minimum": 0
+              },
+              "new_places": {
+                "type": "integer",
+                "description": "Records of where it was deployed that the file carried and this database didn't have yet\n(kept even when the release was stored before: a release keeps its first manifest).",
                 "minimum": 0
               }
             }

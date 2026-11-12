@@ -45,6 +45,8 @@ pub struct NewDeployment<'a> {
     pub release: Option<&'a [u8]>,
     /// The release's project version (the files outside every interface); None in folder mode.
     pub project_version: Option<&'a [u8]>,
+    /// A rollback (`ductus deploy --rollback`, 0.7.4.4.3).
+    pub rollback: bool,
 }
 
 /// What an interface runs now, as recorded (`interface_versions`), with the deployment it came
@@ -248,8 +250,9 @@ impl Store {
         let set = interface_set(&mut tx, &names).await?;
         let (id, at): (i32, DateTime<Utc>) = sqlx::query_as(
             "INSERT INTO deployments (environment, instance, host, version, how, by_name, reason, git_commit,
-                                      uncommitted, interfaces, changed, interface_set, release_id, project_version)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+                                      uncommitted, interfaces, changed, interface_set, release_id, project_version,
+                                      rollback)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
              RETURNING id, at",
         )
         .bind(d.environment)
@@ -266,6 +269,7 @@ impl Store {
         .bind(set)
         .bind(d.release)
         .bind(d.project_version)
+        .bind(d.rollback.then_some(true))
         .fetch_one(&mut *tx)
         .await
         .context("saving the deployment")?;

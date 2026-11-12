@@ -44,3 +44,5 @@ The audit log records who did what, to what, from where, and how it ended: on th
 | `release.check` | Someone checked a stored release against this engine's environment (`POST /releases/{id}/check`): its code was validated and tested with that environment's settings and secrets. |
 | `release.deploy` | Someone deployed a release to this engine (`POST /deployments`, `ductus deploy`), or tried: `detail.ok`, `detail.outcome` (why it was refused, or the handover's result), the reason, the check it ran or reused. |
 | `release.force` | Someone deployed a release over someone else's work the "replaces" check named (`force`): `detail.replaces` names each interface and whose work it undid, `detail.reason` why. |
+| `release.rollback` | Someone rolled this engine back to a release it ran before (`ductus deploy --rollback`), or tried: `detail.ok`, `detail.outcome`, `detail.reason`, `detail.from` (the release it left), `detail.undoes` (each interface whose newer work it undid, and whose). |
+| `release.download` | Someone downloaded a stored release's file (`GET /releases/{id}/file`, `ductus deploy --from`): its code and every environment's encrypted secrets. |

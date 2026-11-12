@@ -48,6 +48,85 @@ pub struct Mode {
     /// How long a deploy may reuse a passing check instead of running the gate again (the pre-run;
     /// `DUCTUS_DEPLOY_REUSE_CHECK`); zero: never.
     pub reuse_check: Duration,
+    /// Environments a release must have been deployed to before this one takes it
+    /// (`DUCTUS_DEPLOY_REQUIRES`); empty: none.
+    pub requires: Vec<String>,
+    /// Branches a release may be made on to be deployed here (`DUCTUS_DEPLOY_BRANCHES`; a trailing
+    /// `*` matches the start); empty: any.
+    pub branches: Vec<String>,
+}
+
+/// Why this environment's rules refuse a release, before anything runs (`DUCTUS_DEPLOY_REQUIRES`,
+/// `DUCTUS_DEPLOY_BRANCHES`); empty: they don't. `branches`: every branch it was made on (the
+/// same files made on a feature branch and on main after a fast-forward merge are one release:
+/// any of them may match). A rollback is never held to them (the caller skips this): the release
+/// ran here before.
+pub fn rules(mode: &Mode, manifest: &Manifest, branches: &[String], places: &[ductus_store::Place]) -> Vec<String> {
+    let mut refused = Vec::new();
+    let missing: Vec<&str> =
+        mode.requires.iter().filter(|e| !places.iter().any(|p| &p.environment == *e)).map(String::as_str).collect();
+    if !missing.is_empty() {
+        let went: BTreeSet<&str> = places.iter().map(|p| p.environment.as_str()).collect();
+        let went = if went.is_empty() {
+            "it hasn't been deployed anywhere that this engine knows of".to_string()
+        } else {
+            format!("it was deployed to {} only", went.into_iter().collect::<Vec<_>>().join(", "))
+        };
+        refused.push(format!(
+            "this environment takes only releases deployed to {} first (DUCTUS_DEPLOY_REQUIRES), and {went}: deploy it \
+             there, then bring it here with its record (`ductus deploy {} --from <{}'s engine> --to <this engine>`)",
+            missing.join(", "),
+            short(&manifest.id),
+            missing[0]
+        ));
+    }
+    if !mode.branches.is_empty() {
+        let allowed = mode.branches.join(", ");
+        let matches = branches.iter().any(|b| mode.branches.iter().any(|pattern| branch_matches(pattern, b)));
+        match (&manifest.git, branches.is_empty()) {
+            (None, _) => refused.push(format!(
+                "this environment takes only releases made on {allowed} (DUCTUS_DEPLOY_BRANCHES), and this one was made without git"
+            )),
+            (Some(_), true) => refused.push(format!(
+                "this environment takes only releases made on {allowed} (DUCTUS_DEPLOY_BRANCHES), and this one records no \
+                 branch (made on a detached HEAD: make it with `ductus release --branch NAME`)"
+            )),
+            (Some(_), false) if !matches => {
+                let on = branches.iter().map(|b| format!("`{b}`")).collect::<Vec<_>>().join(", ");
+                refused.push(format!(
+                    "this environment takes only releases made on {allowed} (DUCTUS_DEPLOY_BRANCHES), and this one was \
+                     made on {on}: merge it, then release from there"
+                ))
+            }
+            _ => {}
+        }
+    }
+    refused
+}
+
+fn short(hex: &str) -> &str {
+    release::short(hex)
+}
+
+/// `main` matches `main`; `release/*` matches `release/2026-11`.
+pub fn branch_matches(pattern: &str, branch: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => branch.starts_with(prefix),
+        None => pattern == branch,
+    }
+}
+
+/// The release a rollback goes to when none is named: the last one run here before the current
+/// run, skipping the current release and any whose last run here was left by a rollback (going
+/// back to one of those is a plain deploy). `runs`: oldest first.
+pub fn rollback_target<'a>(runs: &'a [ductus_store::Run], current: &[u8]) -> Option<&'a ductus_store::Run> {
+    let left_by_rollback = |release: &[u8]| {
+        // Its last run here, and whether the run after it was a rollback.
+        let last = runs.iter().rposition(|r| r.release == release)?;
+        Some(runs.get(last + 1).is_some_and(|next| next.rollback))
+    };
+    let now = runs.iter().rposition(|r| r.release == current).unwrap_or(runs.len());
+    runs[..now].iter().rev().find(|r| r.release != current && left_by_rollback(&r.release) == Some(false))
 }
 
 /// The release an engine runs.
@@ -410,7 +489,7 @@ mod tests {
     }
 
     fn who(by: &str) -> Who {
-        Who { how: "handover", by: by.into(), reason: None }
+        Who { how: "handover", by: by.into(), reason: None, rollback: false }
     }
 
     /// A release holds what runs against its own history: a colleague's merged commit passes, an
@@ -451,6 +530,110 @@ mod tests {
         assert!(folder.contains("came from a project folder") && folder.contains("names no base"), "{folder}");
         assert!(!folder.contains("ductus history"));
         assert!(suspect(&current("ann", None, None), &none, &who("bob")), "without git, anyone else's is a suspect");
+    }
+
+    fn run(release: u8, deployment: i32, rollback: bool) -> ductus_store::Run {
+        ductus_store::Run { release: vec![release; 32], deployment, at: Utc::now(), by: "ann".into(), rollback }
+    }
+
+    /// The default rollback: the last release run before the current one, skipping any a rollback
+    /// left; going back again after a rollback goes further back, never to what was rolled back from.
+    #[test]
+    fn a_rollback_goes_to_the_last_release_before_skipping_what_a_rollback_left() {
+        let target =
+            |runs: &[ductus_store::Run], current: u8| rollback_target(runs, &[current; 32]).map(|r| r.release[0]);
+        assert_eq!(target(&[run(1, 1, false), run(2, 2, false)], 2), Some(1));
+        // Z A B, rolled back to A: the next rollback goes to Z, not B.
+        let runs = [run(9, 1, false), run(1, 2, false), run(2, 3, false), run(1, 4, true)];
+        assert_eq!(target(&runs, 1), Some(9));
+        // A B, rolled back to A: nothing before A but A.
+        assert_eq!(target(&[run(1, 1, false), run(2, 2, false), run(1, 3, true)], 1), None);
+        // B deployed again after it was rolled back from: a rollback from C may go to it.
+        let runs = [run(1, 1, false), run(2, 2, false), run(1, 3, true), run(2, 4, false), run(3, 5, false)];
+        assert_eq!(target(&runs, 3), Some(2));
+        assert_eq!(target(&[], 1), None);
+    }
+
+    fn manifest(git: Option<(&str, Option<&str>)>) -> Manifest {
+        Manifest {
+            format: 1,
+            id: "ab".repeat(32),
+            project: "p".into(),
+            made: crate::release::Made {
+                at: "2026-11-12T00:00:00Z".into(),
+                by: "ann".into(),
+                host: "h".into(),
+                reason: None,
+                binary: "0.7.0".into(),
+                platform: "linux-x86_64".into(),
+            },
+            git: git.map(|(commit, branch)| crate::release::GitSource {
+                commit: commit.into(),
+                folder: String::new(),
+                branch: branch.map(str::to_string),
+                commits: 1,
+                ancestry: Vec::new(),
+            }),
+            uncommitted: Vec::new(),
+            over: None,
+            project_version: crate::release::ProjectVersion { version: String::new(), files: Vec::new() },
+            interfaces: BTreeMap::new(),
+            tests: crate::release::Tests::default(),
+            files: 0,
+            bytes: 0,
+            binary: Vec::new(),
+            deployed: Vec::new(),
+        }
+    }
+
+    fn place(environment: &str) -> ductus_store::Place {
+        ductus_store::Place {
+            environment: environment.into(),
+            host: "box".into(),
+            deployment: 1,
+            at: Utc::now(),
+            by: "ci".into(),
+            ductus_version: "0.7.0".into(),
+            here: false,
+        }
+    }
+
+    /// `DUCTUS_DEPLOY_REQUIRES` and `DUCTUS_DEPLOY_BRANCHES`: each refusal says what's missing and
+    /// what to do; nothing set, nothing refused.
+    #[test]
+    fn an_environments_rules_refuse_with_what_to_do() {
+        let mode = |requires: &[&str], branches: &[&str]| Mode {
+            dir: PathBuf::new(),
+            project: None,
+            reuse_check: Duration::ZERO,
+            requires: requires.iter().map(|s| s.to_string()).collect(),
+            branches: branches.iter().map(|s| s.to_string()).collect(),
+        };
+        let git = manifest(Some(("1".repeat(40).as_str(), None)));
+        let on = |names: &[&str]| -> Vec<String> { names.iter().map(|s| s.to_string()).collect() };
+        assert!(rules(&mode(&[], &[]), &manifest(None), &[], &[]).is_empty(), "no rules");
+        assert!(rules(&mode(&["test"], &["main"]), &git, &on(&["main"]), &[place("test")]).is_empty());
+
+        let missing = rules(&mode(&["test", "uat"], &[]), &git, &[], &[place("dev"), place("test")]);
+        assert_eq!(missing.len(), 1);
+        assert!(
+            missing[0].contains("deployed to uat first") && missing[0].contains("it was deployed to dev, test only")
+        );
+        assert!(missing[0].contains("ductus deploy abababababab --from <uat's engine>"), "{}", missing[0]);
+        let nowhere = rules(&mode(&["test"], &[]), &git, &[], &[]);
+        assert!(nowhere[0].contains("it hasn't been deployed anywhere that this engine knows of"), "{}", nowhere[0]);
+
+        let branches = mode(&[], &["main", "release/*"]);
+        let feature = rules(&branches, &git, &on(&["feature/x"]), &[]);
+        assert!(feature[0].contains("made on main, release/*") && feature[0].contains("made on `feature/x`"));
+        assert!(rules(&branches, &git, &on(&["release/2026-11"]), &[]).is_empty(), "a prefix");
+        // The same files made on a feature branch, then on main after a fast-forward merge.
+        assert!(rules(&branches, &git, &on(&["feature/x", "main"]), &[]).is_empty(), "any of its branches");
+        let detached = rules(&mode(&[], &["main"]), &git, &[], &[]);
+        assert!(detached[0].contains("records no branch") && detached[0].contains("--branch NAME"), "{}", detached[0]);
+        let no_git = rules(&mode(&[], &["main"]), &manifest(None), &[], &[]);
+        assert!(no_git[0].contains("made without git"), "{}", no_git[0]);
+        assert!(!branch_matches("main", "main-old") && branch_matches("*", "anything"));
     }
 
     #[test]

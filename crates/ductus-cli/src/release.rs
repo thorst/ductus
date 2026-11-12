@@ -34,6 +34,7 @@ pub struct Make {
     pub reason: Option<String>,
     pub uncommitted: bool,
     pub over: Option<String>,
+    pub branch: Option<String>,
     pub no_tests: bool,
     pub out: Option<PathBuf>,
     pub json: bool,
@@ -47,10 +48,24 @@ pub async fn make(args: Make) -> Result<()> {
         bail!("{} isn't a project (no `interfaces/` folder): give the project with --root", args.root.display());
     }
     let over = args.over.as_deref().map(base_release).transpose()?;
-    let picked = {
+    let mut picked = {
         let (root, uncommitted) = (root.clone(), args.uncommitted);
         tokio::task::spawn_blocking(move || release::pick(&root, uncommitted)).await??
     };
+    if let Some(given) = args.branch.as_deref().map(str::trim) {
+        match picked.git.as_mut() {
+            None => {
+                bail!("`--branch {given}`: the project isn't in git (or has no commit yet), so a release has no branch")
+            }
+            Some(g) => match g.branch.as_deref() {
+                Some(on) if on != given => bail!(
+                    "`--branch {given}`: HEAD is on branch `{on}`, and a release records the branch it was made on (`--branch` is for a detached HEAD)"
+                ),
+                _ if given.is_empty() => bail!("`--branch` needs a name"),
+                _ => g.branch = Some(given.to_string()),
+            },
+        }
+    }
     if !picked.refused.is_empty() {
         bail!("a release can't carry these:\n{}", list(&picked.refused));
     }
@@ -149,6 +164,7 @@ pub async fn make(args: Make) -> Result<()> {
         files: picked.files.len(),
         bytes: picked.files.iter().map(|f| f.bytes.len() as u64).sum(),
         binary: picked.files.iter().filter(|f| f.binary).map(|f| f.path.clone()).collect(),
+        deployed: Vec::new(),
     };
     let file_name = format!("{name}-{}.tar.gz", release::short(&id));
     let path = match &args.out {
@@ -186,7 +202,13 @@ pub async fn make(args: Make) -> Result<()> {
         crate::admin::size(size as i64)
     );
     match &manifest.git {
-        Some(g) => println!("  from commit {} ({} commit(s) of history carried)", release::short(&g.commit), g.commits),
+        Some(g) => {
+            let on = match &g.branch {
+                Some(b) => format!("on branch {b}"),
+                None => "HEAD detached, no branch recorded (`--branch NAME` names it)".to_string(),
+            };
+            println!("  from commit {} {on} ({} commit(s) of history carried)", release::short(&g.commit), g.commits)
+        }
         None => println!("  not in git: a deploy holds it against the release it names with --over"),
     }
     if !manifest.uncommitted.is_empty() {

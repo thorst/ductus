@@ -217,7 +217,7 @@ Who did what, to what, from where, and how it ended. Written in the transaction 
 | `actor_name` | text | The user's or token's name at the time (a snapshot). |
 | `via` | text | `session` (the web UI), `token`, `cli`, `engine`; none for rows made from `message_actions` when this table was added. |
 | `ip` | inet | The address the connection came from (a proxy's address behind one). |
-| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create` (also a directory account's first sign-in, by `directory`), `user.update`, `user.disable`, `user.unlock`, `user.directory_change` (the directory changed an account's role, permissions, name or email, or let it back in), `user.directory_refused` (the directory said no to an account: its sessions ended), `token.create`, `token.revoke`, `message.payload.read`, `message.release` (a resend that put back only quarantined deliveries, whether or not it named their destinations), `message.replay` (one that sent again a delivery that had finished as sent or filtered), `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `engine.handover` (this engine took over from another: `systemctl reload`, an upgrade or a deploy; `detail.from` and `detail.to` with version, pid and instance, `detail.sending_paused_ms`), `engine.refused` (a start refused: another live engine runs some of its interfaces, or its lanes would strand waiting messages, or a handover would lower lanes; `detail.reason` is `owned`, `lanes` or `handover_lanes`), `interface.stopped`, `interface.partitions_raised` (an interface started with more lanes while messages waited: a key's new messages may pass its older ones until those are sent), `release.store` (a release stored with `POST /releases`; `subject` its short id, `detail` its project, commit, maker and reason), `release.check` (a stored release checked against this engine's environment; `detail.environment`, `detail.ok`, `detail.problems`), `release.deploy` (a release deployed to this engine, or a deploy refused or failed: `detail.ok`, `detail.outcome`, `detail.reason`, `detail.check`, `detail.reused_check`), `release.force` (a release deployed over someone else's work the "replaces" check named: `detail.replaces`, `detail.reason`). |
+| `action` | text | `session.sign_in`, `session.failed`, `session.sign_out`, `password.change`, `password.reset`, `user.create` (also a directory account's first sign-in, by `directory`), `user.update`, `user.disable`, `user.unlock`, `user.directory_change` (the directory changed an account's role, permissions, name or email, or let it back in), `user.directory_refused` (the directory said no to an account: its sessions ended), `token.create`, `token.revoke`, `message.payload.read`, `message.release` (a resend that put back only quarantined deliveries, whether or not it named their destinations), `message.replay` (one that sent again a delivery that had finished as sent or filtered), `message.edit`, `message.dismiss`, `destination.pause`, `destination.resume`, `engine.drain`, `engine.resume`, `retention.change`, `retention.confirm`, `doctor.run`, `audit.export`, `alert.ack`, `alert.silence`, `alert.unsilence`, `alert.test` (a test notification to a channel), `engine.start`, `engine.stop`, `engine.handover` (this engine took over from another: `systemctl reload`, an upgrade or a deploy; `detail.from` and `detail.to` with version, pid and instance, `detail.sending_paused_ms`), `engine.refused` (a start refused: another live engine runs some of its interfaces, or its lanes would strand waiting messages, or a handover would lower lanes; `detail.reason` is `owned`, `lanes` or `handover_lanes`), `interface.stopped`, `interface.partitions_raised` (an interface started with more lanes while messages waited: a key's new messages may pass its older ones until those are sent), `release.store` (a release stored with `POST /releases`; `subject` its short id, `detail` its project, commit, maker and reason), `release.check` (a stored release checked against this engine's environment; `detail.environment`, `detail.ok`, `detail.problems`), `release.deploy` (a release deployed to this engine, or a deploy refused or failed: `detail.ok`, `detail.outcome`, `detail.reason`, `detail.check`, `detail.reused_check`), `release.force` (a release deployed over someone else's work the "replaces" check named: `detail.replaces`, `detail.reason`), `release.rollback` (this engine rolled back to a release it ran before, or a rollback refused or failed: `detail.ok`, `detail.outcome`, `detail.reason`, `detail.from`, `detail.undoes`), `release.download` (a stored release's file downloaded with `GET /releases/{id}/file`). |
 | `subject` | text | What it was done to: a username, a token name, `interface/destination`. |
 | `interface` | text | The interface it concerns. |
 | `message_id` | bigint | The message, when the request was about exactly one. |
@@ -369,6 +369,7 @@ One row per engine start and handover (migration 0026, 0.7.3), whether or not an
 | `interface_set` | integer | `interface_sets.id`: which interfaces it ran, changed or not (migration 0028); null for deployments recorded before 0.7.3.3 or by an older engine. |
 | `release_id` | bytea | Release mode (`ductus run --releases`, migration 0031): the release it ran (`releases.id`; no foreign key, releases are kept). The release last deployed to an environment for a project is what its engines run. Null in folder mode and before 0.7.4.4; `git_commit` and `uncommitted` are then the release's. |
 | `project_version` | bytea | Release mode: the release's project version (SHA-256 over the files outside every interface), which a deploy holds against the next one's. Null in folder mode. |
+| `rollback` | boolean | The deployment was a rollback (`ductus deploy --rollback`, migration 0032, 0.7.4.4.3): the next rollback's default skips the release it went back from. Null otherwise. |
 
 Indexes: primary key `id`; `deployments_at (at)`; `deployments_interface_set (interface_set, id)`; `deployments_releases (environment, id) WHERE release_id IS NOT NULL`.
 
@@ -458,6 +459,7 @@ Each release stored on this database with `POST /releases` (migration 0030, 0.7.
 | `folders` | bytea[] | Its folders (`release_folders.hash`), in path order. |
 | `stored_at` | timestamptz | When it was stored here. |
 | `stored_by` | text | Who stored it (a person's or a token's name, as the audit log names them). |
+| `branches` | text[] | Every branch it was made on, as its files said (`git.branch`), added at each upload (migration 0032, 0.7.4.4.3): the same files made on a feature branch and again on `main` after a fast-forward merge are one release, made on both. What `DUCTUS_DEPLOY_BRANCHES` reads (any may match). Null: none said (a detached HEAD without `ductus release --branch`, made without git, or stored before 0.7.4.4.3). Labels, unsigned. |
 
 Indexes: primary key `id`; `releases_stored_at (stored_at)`.
 
@@ -503,6 +505,24 @@ Each check of a stored release against an environment (`POST /releases/{id}/chec
 | `ductus_version` | text | The Ductus version that ran it (migration 0031): a deploy reuses only a check its own version ran. Null for checks before 0.7.4.4. |
 
 Indexes: primary key `id`; `release_checks_release (release_id, at)`.
+
+## `release_places`
+
+Where a release was deployed on **other** databases, as the file carrying it said when it was stored here (migration 0032, 0.7.4.4.3): what an environment that requires others first (`DUCTUS_DEPLOY_REQUIRES`) reads, beside this database's own `deployments`. Each upload of the file adds the records it carries that aren't here yet (a release stored before keeps its first manifest, so the record can't live only there). **Unsigned**: anyone holding the file can edit its manifest ([why, and what to rely on instead](nuances/releases.md)). Kept.
+
+| column | type | |
+|---|---|---|
+| `release_id` | bytea | `releases.id`. |
+| `environment` | text | The environment it was deployed to. |
+| `host` | text | That engine's server. |
+| `deployment` | integer | The deployment's id on that database. |
+| `at` | timestamptz | When it was deployed there. |
+| `by_name` | text | Who deployed it there. |
+| `ductus_version` | text | The Ductus version that ran it there. |
+| `received_at` | timestamptz | When the file carrying the record was stored here. |
+| `received_by` | text | Who stored it. |
+
+Index: primary key `(release_id, environment, host, deployment)`.
 
 ## `alert_state`
 

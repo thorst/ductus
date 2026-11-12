@@ -3681,6 +3681,7 @@ async fn deploy_with(
         docs,
         release: None,
         project_version: None,
+        rollback: false,
     };
     let ids = store.save_versions(&versions).await?;
     store.record_deployment(&d, &ids).await
@@ -4136,6 +4137,7 @@ async fn store_test_release(
         made_by: "ann",
         reason: Some(reason),
         git_commit: None,
+        branch: None,
         interfaces: 2,
         ancestry: &[7u8; 40],
         files: &files,
@@ -4146,6 +4148,7 @@ async fn store_test_release(
 
 async fn forget_release(pool: &sqlx::PgPool, id: &[u8]) {
     sqlx::query("DELETE FROM release_checks WHERE release_id = $1").bind(id).execute(pool).await.unwrap();
+    sqlx::query("DELETE FROM release_places WHERE release_id = $1").bind(id).execute(pool).await.unwrap();
     sqlx::query("DELETE FROM releases WHERE id = $1").bind(id).execute(pool).await.unwrap();
 }
 
@@ -4285,6 +4288,7 @@ async fn a_deploy_reuses_only_a_recent_passing_check_with_nothing_deployed_since
             docs: None,
             release: Some(release.as_slice()),
             project_version: Some([9u8; 32].as_slice()),
+            rollback: false,
         };
         let ids = store.save_versions(&versions).await.unwrap();
         store.record_deployment(&d, &ids).await.unwrap();
@@ -4307,6 +4311,88 @@ async fn a_deploy_reuses_only_a_recent_passing_check_with_nothing_deployed_since
     forget_deployments(&pool, &env).await;
     forget_release(&pool, &first).await;
     forget_release(&pool, &second).await;
+}
+
+/// Promotion and rollback (0.7.4.4.3): where a release went is this database's deployments plus
+/// what files said about others (kept once, merged on every upload, a record that came home listed
+/// once); an environment's runs are one entry per release run, the rollbacks marked.
+#[tokio::test]
+async fn where_a_release_went_and_the_runs_a_rollback_chooses_from() {
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let tag = format!("{}-{nanos}", std::process::id());
+    let env = format!("test-promote-{tag}");
+    let (a, b) = ([5u8; 32].map(|x| x ^ (nanos as u8)), [6u8; 32].map(|x| x ^ (nanos as u8)));
+    forget_deployments(&pool, &env).await;
+    store_test_release(&store, &a, &release_files(&tag, "a"), "a").await;
+    store_test_release(&store, &b, &release_files(&tag, "b"), "b").await;
+    let yaml = format!("name: {env}\n");
+    let v = TestVersion::new(&env, &[("interfaces/a/interface.yaml", &yaml)]);
+    // a, a again (a restart), b, then a rolled back to.
+    let mut ids = Vec::new();
+    for (release, rollback) in [(&a, false), (&a, false), (&b, false), (&a, true)] {
+        let versions = [v.borrow()];
+        let d = ductus_store::NewDeployment {
+            environment: &env,
+            instance: &env,
+            host: "test-host",
+            version: "0.7.0-test",
+            how: "handover",
+            by: "ann",
+            reason: Some("deploying"),
+            git_commit: None,
+            uncommitted: None,
+            versions: &versions,
+            warnings: &Default::default(),
+            docs: None,
+            release: Some(release.as_slice()),
+            project_version: None,
+            rollback,
+        };
+        let saved = store.save_versions(&versions).await.unwrap();
+        ids.push(store.record_deployment(&d, &saved).await.unwrap().id);
+    }
+    let runs = store.release_runs(&env, "integrations").await.unwrap();
+    let seen: Vec<(&[u8], i32, bool)> = runs.iter().map(|r| (r.release.as_slice(), r.deployment, r.rollback)).collect();
+    assert_eq!(seen, [(a.as_slice(), ids[0], false), (b.as_slice(), ids[2], false), (a.as_slice(), ids[3], true)]);
+    assert!(store.release_runs(&env, "another").await.unwrap().is_empty(), "by project");
+
+    // Where it went: here (each environment's first deployment), and what a file said.
+    let here = store.release_places(&a).await.unwrap();
+    let mine: Vec<_> = here.iter().filter(|p| p.environment == env).collect();
+    assert_eq!(mine.len(), 1, "one per environment: {here:?}");
+    assert!(mine[0].here && mine[0].deployment == ids[0] && mine[0].host == "test-host");
+    let elsewhere = ductus_store::Place {
+        environment: format!("{env}-test"),
+        host: "test-box".into(),
+        deployment: 41,
+        at: chrono::Utc::now() - chrono::Duration::hours(2),
+        by: "ci".into(),
+        ductus_version: "0.7.0-test".into(),
+        here: false,
+    };
+    // A record that came home (the file went back to the database it was made on): listed once.
+    let home = ductus_store::Place { here: false, ..mine[0].clone() };
+    assert_eq!(store.add_release_places(&a, &[elsewhere.clone(), home], "test-ci").await.unwrap(), 2);
+    assert_eq!(
+        store.add_release_places(&a, std::slice::from_ref(&elsewhere), "test-ci").await.unwrap(),
+        0,
+        "kept once"
+    );
+    let places: Vec<_> =
+        store.release_places(&a).await.unwrap().into_iter().filter(|p| p.environment.starts_with(&env)).collect();
+    assert_eq!(places.len(), 2, "{places:?}");
+    assert_eq!(
+        (places[0].environment.as_str(), places[0].here),
+        (elsewhere.environment.as_str(), false),
+        "oldest first"
+    );
+    assert!(places[1].here);
+
+    forget_deployments(&pool, &env).await;
+    forget_release(&pool, &a).await;
+    forget_release(&pool, &b).await;
 }
 
 fn ductus_store_hex(bytes: &[u8]) -> String {

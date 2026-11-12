@@ -113,6 +113,12 @@ pub struct GitSource {
     /// The project's folder in the repository, with `/` ("" at its top).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub folder: String,
+    /// The branch HEAD was on when it was made (`main`), or the one `ductus release --branch`
+    /// named (a detached HEAD: CI checking out a tag or a pull request). None: detached and not
+    /// named, or made before 0.7.4.4.3. A label, not proof (anyone can edit a manifest): what
+    /// `DUCTUS_DEPLOY_BRANCHES` reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
     /// How many commits `ancestry` holds (HEAD's whole history, HEAD included).
     pub commits: usize,
     /// The commits, 20 bytes each, sorted: not in the manifest's JSON (its own archive entry).
@@ -205,6 +211,7 @@ fn from_git(repository: &gix::Repository, root: &Path, uncommitted: bool) -> Res
         git = Some(GitSource {
             commit: commit.id.to_string(),
             folder: folder.clone(),
+            branch: repository.head_name().ok().flatten().map(|name| name.shorten().to_string()),
             commits: 0,
             ancestry: ancestry(repository, commit.id)?,
         });
@@ -376,6 +383,73 @@ pub struct Manifest {
     /// Files carried byte for byte (not text).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub binary: Vec<String>,
+    /// Where it has been deployed (0.7.4.4.3), oldest first: written into the file by `ductus
+    /// deploy` and by `GET /releases/{id}/file`, read by an engine that requires others first
+    /// (`DUCTUS_DEPLOY_REQUIRES`). Not in the id: adding a record never changes the release.
+    /// **Unsigned**: anyone holding the file can edit it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deployed: Vec<Place>,
+}
+
+/// One deployment of a release, as its file carries it (`Manifest::deployed`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Place {
+    pub environment: String,
+    /// The engine's server.
+    pub host: String,
+    /// The deployment's id on that engine's database.
+    pub deployment: i32,
+    pub at: chrono::DateTime<chrono::Utc>,
+    pub by: String,
+    /// The Ductus version that ran it.
+    pub ductus: String,
+}
+
+impl Place {
+    pub fn from_store(p: &ductus_store::Place) -> Self {
+        Self {
+            environment: p.environment.clone(),
+            host: p.host.clone(),
+            deployment: p.deployment,
+            at: p.at,
+            by: p.by.clone(),
+            ductus: p.ductus_version.clone(),
+        }
+    }
+
+    pub fn to_store(&self) -> ductus_store::Place {
+        ductus_store::Place {
+            environment: self.environment.clone(),
+            host: self.host.clone(),
+            deployment: self.deployment,
+            at: self.at,
+            by: self.by.clone(),
+            ductus_version: self.ductus.clone(),
+            here: false,
+        }
+    }
+
+    /// The same deployment (the record may come back to the database it was made on).
+    pub fn same(&self, other: &Place) -> bool {
+        (&self.environment, &self.host, self.deployment) == (&other.environment, &other.host, other.deployment)
+    }
+}
+
+impl Manifest {
+    /// Add `place` unless it's there; true when added. Kept oldest first.
+    pub fn add_place(&mut self, place: Place) -> bool {
+        if self.deployed.iter().any(|p| p.same(&place)) {
+            return false;
+        }
+        self.deployed.push(place);
+        self.deployed.sort_by(|a, b| a.at.cmp(&b.at).then_with(|| a.environment.cmp(&b.environment)));
+        true
+    }
+
+    /// The branch it was made on, if it says.
+    pub fn branch(&self) -> Option<&str> {
+        self.git.as_ref().and_then(|g| g.branch.as_deref())
+    }
 }
 
 /// Who made a release, when, why, and with which binary.
@@ -437,7 +511,29 @@ pub struct Bundle {
 /// contents (every header's time, owner and mode fixed). Returns the file's size.
 pub fn write(path: &Path, manifest: &Manifest, ancestry: &[u8], files: &[File]) -> Result<u64> {
     let out = std::fs::File::create(path).with_context(|| format!("writing {}", path.display()))?;
-    let gz = flate2::GzBuilder::new().mtime(0).write(std::io::BufWriter::new(out), flate2::Compression::best());
+    let mut buffered = archive(std::io::BufWriter::new(out), manifest, ancestry, files)?;
+    buffered.flush().with_context(|| format!("writing {}", path.display()))?;
+    Ok(std::fs::metadata(path)?.len())
+}
+
+/// `write`, into memory: what `GET /releases/{id}/file` sends.
+pub fn to_bytes(manifest: &Manifest, ancestry: &[u8], files: &[File]) -> Result<Vec<u8>> {
+    archive(Vec::new(), manifest, ancestry, files)
+}
+
+/// Rewrite the release file at `path` with `manifest` (its records changed, nothing else): into
+/// a file beside it, then renamed over it, so a reader never sees half of it. The id is unchanged.
+pub fn rewrite(path: &Path, manifest: &Manifest, ancestry: &[u8], files: &[File]) -> Result<()> {
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let partial = path.with_file_name(format!(".{name}.partial-{}", std::process::id()));
+    write(&partial, manifest, ancestry, files)?;
+    std::fs::rename(&partial, path).with_context(|| format!("replacing {}", path.display())).inspect_err(|_| {
+        let _ = std::fs::remove_file(&partial);
+    })
+}
+
+fn archive<W: Write>(out: W, manifest: &Manifest, ancestry: &[u8], files: &[File]) -> Result<W> {
+    let gz = flate2::GzBuilder::new().mtime(0).write(out, flate2::Compression::best());
     let mut tar = tar::Builder::new(gz);
     let mut add = |name: &str, bytes: &[u8]| -> Result<()> {
         let mut header = tar::Header::new_gnu();
@@ -461,9 +557,7 @@ pub fn write(path: &Path, manifest: &Manifest, ancestry: &[u8], files: &[File]) 
         add(&format!("{FILES}{}", f.path), &f.bytes)?;
     }
     let gz = tar.into_inner().context("finishing the archive")?;
-    let mut buffered = gz.finish().context("finishing the archive")?;
-    buffered.flush().with_context(|| format!("writing {}", path.display()))?;
-    Ok(std::fs::metadata(path)?.len())
+    gz.finish().context("finishing the archive")
 }
 
 /// Read a release and check it: the manifest first, every path a plain relative one, and the id
@@ -629,7 +723,40 @@ mod tests {
             files: files.len(),
             bytes: files.iter().map(|f| f.bytes.len() as u64).sum(),
             binary: Vec::new(),
+            deployed: Vec::new(),
         }
+    }
+
+    /// A record of where it went is added to the file without changing its id: once per
+    /// deployment, oldest first, and the file rewritten whole (read back, the same files).
+    #[test]
+    fn a_record_is_added_to_the_file_and_the_id_stays() {
+        let dir = tempfile::tempdir().unwrap();
+        let files = vec![File::new("ductus.yaml", b"{}\n".to_vec())];
+        let mut m = manifest(&files);
+        let path = dir.path().join("p.tar.gz");
+        write(&path, &m, &[], &files).unwrap();
+        let at = |h| chrono::DateTime::parse_from_rfc3339(&format!("2026-11-12T{h:02}:00:00Z")).unwrap().to_utc();
+        let place = |environment: &str, deployment, h| Place {
+            environment: environment.into(),
+            host: "box".into(),
+            deployment,
+            at: at(h),
+            by: "ci".into(),
+            ductus: "0.7.0".into(),
+        };
+        assert!(m.add_place(place("test", 7, 10)));
+        assert!(m.add_place(place("dev", 3, 9)));
+        assert!(!m.add_place(place("test", 7, 10)), "the same deployment once");
+        assert_eq!(m.deployed.iter().map(|p| p.environment.as_str()).collect::<Vec<_>>(), ["dev", "test"]);
+        rewrite(&path, &m, &[], &files).unwrap();
+        let back = read(&path).unwrap();
+        assert_eq!((back.manifest.id, back.manifest.deployed, back.files), (m.id.clone(), m.deployed.clone(), files));
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1, "nothing left beside it");
+        assert_eq!(
+            to_bytes(&m, &[], &[File::new("ductus.yaml", b"{}\n".to_vec())]).unwrap(),
+            std::fs::read(&path).unwrap()
+        );
     }
 
     /// Written twice, the same bytes; read back, the same files and manifest; a long path (over

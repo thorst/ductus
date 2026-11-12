@@ -184,6 +184,7 @@ pub const ACCESS: &[(&str, &str, &str)] = &[
     ("GET", "/releases", "signed"),
     ("POST", "/releases", "deploy"),
     ("GET", "/releases/{id}", "signed"),
+    ("GET", "/releases/{id}/file", "deploy"),
     ("POST", "/releases/{id}/check", "deploy"),
     ("POST", "/deployments", "deploy"),
 ];

@@ -86,3 +86,38 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **What:** a deploy applies by the handover: a new engine runs the release beside the old one, then takes over (receiving never stops). Under the package's systemd unit (a control socket) the new engine is a new process; on Windows, in a container and under a plain `ductus run` it runs in the engine's own process, so the Windows service stays Running and the container never restarts ([nuance](upgrades.md#without-a-control-socket-the-handover-runs-in-the-engines-own-process-level-2)). The deploy's answer comes from the engine being replaced, once the new one sends; it says which (`✓ handed over to ductus 0.7.0 (pid 4598)` or `✓ handed over to a new engine in this process`). Only `ductus dev` takes no deploys (409).
 - **Why:** one way to apply a release everywhere, with the same promise: nothing refused, a release that can't start changes nothing.
 - **What to do:** nothing differs for the person deploying. On Windows and in containers, leave room for a second engine's memory during the deploy, as on Linux.
+
+## Where a release went, and its branch, are labels in its file, not proof (level 2)
+- **What:** an environment with DUCTUS_DEPLOY_REQUIRES reads where a release was deployed from the record its file carries (written by `ductus deploy` into the file it deployed, and by `GET /releases/{id}/file`, which `ductus deploy --from` fetches) and from its own database's deployments. DUCTUS_DEPLOY_BRANCHES reads the branch the release records. Both are fields of the manifest, outside the release id and unsigned: anyone holding the file can edit them, and the release keeps its id. An engine whose environment happens to be named `test` writes a record like any other.
+- **Why:** test and prod have separate databases, so prod can only learn about test from what it's given; signing releases is a later step.
+- **What to do:** treat the rules as a guard against mistakes, not against someone determined. What keeps work that isn't in `main` out of production is who can deploy there: CI building releases from `main` and holding the only tokens with the `deploy` permission on test and prod. Give people tokens without `deploy` on those engines.
+
+## An environment's rules aren't skipped by `--force`; a rollback isn't held to them (level 2)
+- **What:** a deploy refused by DUCTUS_DEPLOY_REQUIRES or DUCTUS_DEPLOY_BRANCHES (409, before the gate runs) stays refused with `--force`, which only concerns the "replaces" check (someone else's work). A rollback (`ductus deploy --rollback`) is never held to them: the release ran in that environment before. The report and the audit row (`release.rollback`) say so.
+- **Why:** the rules are what the operator decided an environment takes; a person deploying shouldn't be able to waive them in passing. Going back to what ran there yesterday mustn't wait for a test environment.
+- **What to do:** to deploy outside the rules on purpose (an emergency fix straight to production), change the setting in ductus.env and reload (`sudo systemctl reload ductus`, `ductus handover` on Windows): the reload is recorded. Put it back after.
+
+## A rollback brings back the whole project, secrets included, but not the database (level 2)
+- **What:** a rollback deploys an earlier release, and a release is the whole project: every interface's code and interface.yaml, `ductus.yaml`, `resources.yaml`, `environments/`, and `secrets/*.json` **as they were then** (a secret rotated in the later release comes back with its old value). It doesn't change the engine's own settings (ductus.env, `DUCTUS_*`, the secret key), the binary, or the database: migrations come with the binary, never with a release, so a rollback runs none (the schema only grows, and the earlier release runs on it as the gate checked). What the later release did stays done: messages it sent stay sent.
+- **Why:** a release is one exact, checked artifact; going back means running that artifact again, not reversing each change.
+- **What to do:** after rotating a secret, release again with the new one rather than rolling back over it (or rotate it again after the rollback). If an interface's lanes (`ordering.partitions`) went up in the later release and messages wait in the upper lanes, the gate refuses the rollback (`DUC303`): let them send (`ductus drain --wait`), or keep the lanes in a new release.
+
+## A destination a rollback brings back doesn't get what waited while it was gone (level 3)
+- **What:** when a release removed a destination, the deliveries waiting for it were filtered at that release's start ([nuance](destinations.md#adding-removing-or-renaming-a-destination-level-3)). Rolling back to a release that has the destination brings it back for new messages; the filtered deliveries stay filtered.
+- **Why:** filtering is a decision recorded per delivery; a rollback doesn't rewrite what was decided while it wasn't there.
+- **What to do:** find them in the message view (status filtered, that destination, the time between the two deploys) and resend them, or replay them.
+
+## The default rollback skips releases a rollback left (level 2)
+- **What:** `ductus deploy --rollback` without a release goes to the last release run in that environment before the current one, **skipping any release that a rollback left**. After A → B → rollback (back to A), the next `--rollback` goes to the release before A, not back to B. Only releases that ran in that environment can be rolled back to; any other is refused (409) with "deploy it". Restarts don't count as runs.
+- **Why:** a rollback says "that release was bad"; a second rollback toggling back to it would undo the first.
+- **What to do:** to go back to a release a rollback left (it was fine after all), deploy it by its id: `ductus deploy <id>` (held to the environment's rules, like any deploy).
+
+## In release mode, a release that lowers an interface's lanes can't be applied yet (level 2)
+- **What:** a release that lowers `ordering.partitions` (a rollback past a release that raised them included) is refused by the gate while messages wait in the lanes that would go (`DUC303`), and by the handover even once none wait (the running engine stores into every lane it has until it lets go). In folder mode the answer is a restart, whose start checks the lanes; in release mode a restart runs the release that runs now, so there's no way to apply it. The deploy is refused and the engine goes on as it was.
+- **Why:** a handover can't know what the old engine will still store into the lanes that go; applying such a release needs the old engine stopped first, which deploys don't do yet.
+- **What to do:** raise lanes only when you mean to keep them. To go back to older code, release it with the lane count that runs now. Lowering lanes in release mode is on the roadmap.
+
+## A release made on a detached HEAD records no branch (level 2)
+- **What:** `ductus release` records the branch HEAD is on. CI often checks out a commit, not a branch (a tag, a pull request): HEAD is detached and the release records none, which DUCTUS_DEPLOY_BRANCHES refuses. `--branch NAME` names it then; on a branch, a different name is refused.
+- **Why:** git doesn't know which branch a detached commit "belongs to" (it can be on several).
+- **What to do:** in CI, `ductus release --branch "$GITHUB_REF_NAME"` (GitHub Actions; other CI systems have a variable for the branch built).

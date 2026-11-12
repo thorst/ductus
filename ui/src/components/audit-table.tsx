@@ -47,6 +47,8 @@ export const ACTIONS: Record<string, string> = {
   "release.check": "Checked a release",
   "release.deploy": "Deployed a release",
   "release.force": "Deployed over someone's work",
+  "release.rollback": "Rolled back to a release",
+  "release.download": "Downloaded a release",
 };
 
 /** Why a start was refused, from its detail (`reason`: `owned` or `lanes`). */

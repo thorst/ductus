@@ -37,4 +37,5 @@ echo "##### ductus dev";      bash scripts/demo-dev.sh | tail -1
 echo "##### debugging";       bash scripts/demo-debug.sh | tail -1
 echo "##### ductus try";      bash scripts/demo-try.sh | tail -1
 echo "##### releases";        bash scripts/demo-release.sh | tail -1
+echo "##### promote";         bash scripts/demo-promote.sh | tail -1
 echo "##### scale";           SHARED=300 EPIC_SECONDS=10 SAMPLED=50 bash scripts/demo-scale.sh | tail -1

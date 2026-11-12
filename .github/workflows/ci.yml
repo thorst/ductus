@@ -228,6 +228,9 @@ jobs:
       - name: Release demo (`ductus release` of a commit, the same id from a CRLF checkout, uncommitted files refused; `ductus release check` without and with the database, nothing changed after a start, a commit's change tested, an edited release refused, nothing written)
         run: BIN=target/release/ductus bash scripts/demo-release.sh
 
+      - name: Promote demo (three engines and databases; prod requires test and main; dev → test → prod with the record, a feature branch refused even forced, a colleague's work refused then forced, a rollback refused by the gate over raised lanes, then rolled back twice)
+        run: BIN=target/release/ductus bash scripts/demo-promote.sh
+
       - name: One-owner demo (a second engine with the same interfaces refused, another project alongside, the lock lost and taken back, kill -9 then a start at once, lowered lanes with a backlog refused)
         run: BIN=target/release/ductus bash scripts/demo-one-owner.sh
 

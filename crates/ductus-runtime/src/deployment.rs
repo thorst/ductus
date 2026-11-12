@@ -157,13 +157,15 @@ pub struct Who {
     pub how: &'static str,
     pub by: String,
     pub reason: Option<String>,
+    /// A rollback (`ductus deploy --rollback`): recorded on its deployment.
+    pub rollback: bool,
 }
 
 impl Who {
     /// A start: the account running it; `service` when a service manager started it (systemd, the
     /// Windows service), where that account is the service's.
     pub fn start(service: bool) -> Self {
-        Self { how: if service { "service" } else { "start" }, by: account(), reason: None }
+        Self { how: if service { "service" } else { "start" }, by: account(), reason: None, rollback: false }
     }
 
     /// A handover: whoever asked for it (`ductus handover`), and why if they said.
@@ -172,6 +174,7 @@ impl Who {
             how: "handover",
             by: asked.by.clone().unwrap_or_else(|| "unknown (an engine before 0.7.3 asked)".into()),
             reason: asked.reason.clone(),
+            rollback: asked.rollback,
         }
     }
 }
@@ -285,6 +288,7 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
         docs: Some(&docs),
         release: release.as_ref().map(|r| r.id.as_slice()),
         project_version: project_version.as_deref(),
+        rollback: who.rollback,
     };
     let recorded = match store.record_deployment(&deployment, &saved.ids).await.context("recording the deployment") {
         Ok(r) => r,

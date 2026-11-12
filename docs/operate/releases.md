@@ -25,7 +25,7 @@ $ ductus release -m "first release"
 running the tests on what the release carries…
 release 7427b4d0a2b8 of integrations
   1 interface(s), 13 file(s), 7.6 KB unpacked, 4.3 KB as a release
-  from commit 154175bd8a1c (1 commit(s) of history carried)
+  from commit 154175bd8a1c on branch main (1 commit(s) of history carried)
   tests: 1 passed (environment dev) in 0.0 s
   project version 56cb5df5ea64
 wrote ~/integrations/.ductus/releases/integrations-7427b4d0a2b8.tar.gz (0.1 s)
@@ -552,6 +552,8 @@ release mode: nothing is deployed to this environment yet; the engine runs no in
 | `DUCTUS_RELEASES` (`--releases`) | Release mode, and where releases are unpacked | off (folder mode) |
 | `DUCTUS_RELEASE_PROJECT` (`--release-project`) | The project this engine runs, when several projects are deployed to its environment on one database | the only one |
 | `DUCTUS_DEPLOY_REUSE_CHECK` (`--deploy-reuse-check`) | How long a deploy may reuse a passing check of the same release instead of running the gate again; `0`: never | `1h` |
+| `DUCTUS_DEPLOY_REQUIRES` (`--deploy-requires`) | Environments a release must have been deployed to before this one takes it (`test`, `test,uat`) ([promote](#promote-and-roll-back)) | none |
+| `DUCTUS_DEPLOY_BRANCHES` (`--deploy-branches`) | Branches a release may be made on to be deployed here (`main`, `main,release/*`) ([only main reaches prod](#only-main-reaches-prod)) | any |
 
 On Windows, the same two lines in `C:\ProgramData\Ductus\ductus.env` (`DUCTUS_RELEASES=C:\ProgramData\Ductus\releases`,
 `DUCTUS_PROJECT` commented out), then `Restart-Service Ductus`. In a container, `-e
@@ -591,7 +593,10 @@ there. It exits 1 when nothing was deployed; `--json` prints the engine's report
 |---|---|
 | `-m`, `--message` | Why: recorded with the deployment, in its history and in the audit log |
 | `--to URL` | The engine's API (DUCTUS_API_URL; default `http://127.0.0.1:7700`) |
-| `--force` | Deploy over someone else's work the "replaces" check names ([below](#it-wont-undo-someone-elses-work)) |
+| `--force` | Deploy over someone else's work the "replaces" check names ([below](#it-wont-undo-someone-elses-work)); never skips the environment's rules |
+| `--from URL` | Promote: fetch the release (by its id) from that engine with its record of where it went, then store and deploy it on `--to`'s ([promote](#promote-and-roll-back)) |
+| `--from-token` | The token for `--from` (DUCTUS_FROM_TOKEN; default: `--token`'s) |
+| `--rollback [ID]` | Go back to a release that ran there before ([roll back](#roll-back)) |
 | `--all-tests` | The gate runs every interface's tests, not only those of what changes there (never reuses a check) |
 | `--json` | The engine's report, as JSON |
 | `--timeout` | How long to wait for the answer (default 40 min: the gate, then the handover) |
@@ -661,15 +666,203 @@ so a colleague's deployed but unmerged work on *another* interface refuses yours
 ### Through the API
 
 `POST /api/v1/deployments` with `{"release": "<id>", "reason": "…", "force": false,
-"all_tests": false}` (the `deploy` permission). It answers when the new engine sends: 200 with the
-report (`ok`, `outcome`, `gate`, `replaces`, `steps`, `changes`), 409 when refused before
-anything ran (folder mode, another deploy or check running, the release already runs, the
-"replaces" check), 422 when the gate found problems, 500 when the new engine couldn't take over
-(the running one goes on). One deploy or check at a time per engine. Every attempt is in the audit
-log (`release.deploy`, with `detail.ok` and `detail.outcome`).
+"all_tests": false, "rollback": false}` (the `deploy` permission; `release` may be left out of a
+rollback). It answers when the new engine sends: 200 with the report (`ok`, `outcome`, `branch`,
+`rules`, `gate`, `replaces`, `steps`, `changes`, and `place`: this deployment's record, as a
+release file carries it), 409 when refused before anything ran (folder mode, another deploy or
+check running, the release already runs, the environment's rules, the "replaces" check, a
+rollback to a release that never ran there), 422 when the gate found problems, 500 when the new
+engine couldn't take over (the running one goes on). One deploy or check at a time per engine.
+Every attempt is in the audit log (`release.deploy`, or `release.rollback`, with `detail.ok` and
+`detail.outcome`).
+
+`GET /api/v1/releases/{id}/file` (the `deploy` permission, audited as `release.download`) gives
+the release's file with its record brought up to date; `GET /api/v1/releases/{id}` says where it
+was deployed (`deployed`) and its `branch`.
 
 In release mode, the files on the server are the database's copy: an edit there is never
 deployed ([nuance](../nuances/releases.md#in-release-mode-the-files-on-the-server-are-the-databases-copy-level-2)).
+
+## Promote and roll back
+
+A release moves from one environment to the next as the same file: the same id, checked by each
+environment's own gate, with that environment's values and secrets. Each environment decides
+what it takes (its engine's settings, not the project's: a release can't loosen its own rules),
+and a deploy that went wrong is undone by going back to the release that ran before.
+
+**When to use it:** test and prod have engines in release mode, and code reaches prod through
+test. **When not:** a single environment (deploy, and roll back if needed, without the rules).
+
+### Require test first
+
+On prod's engine, in its ductus.env:
+
+```sh
+DUCTUS_DEPLOY_REQUIRES=test
+```
+
+A release that wasn't deployed to `test` is refused before anything runs (409, nothing changed):
+
+```text
+$ DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy .ductus/releases/integrations-7fc9677466dd.tar.gz --to $PROD -m "the lab feed"
+stored release 7fc9677466dd on the engine
+deploying: the gate runs (or a recent passing check is reused), then the handover…
+release 7fc9677466dd (project integrations, branch main) to environment `prod`
+✗ this environment takes only releases deployed to test first (DUCTUS_DEPLOY_REQUIRES), and it hasn't been deployed anywhere that this engine knows of: deploy it there, then bring it here with its record (`ductus deploy 7fc9677466dd --from <test's engine> --to <this engine>`)
+✗ refused by this environment's rules (`rules` says why)
+```
+
+Test and prod have separate databases, so prod learns where a release went from **the record the
+release carries**: each deploy of a file writes into it where it went (its id doesn't change: the
+record isn't part of it):
+
+```text
+$ DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy .ductus/releases/integrations-7fc9677466dd.tar.gz --to $TEST -m "the lab feed"
+stored release 7fc9677466dd on the engine (1 record of where it went added)
+deploying: the gate runs (or a recent passing check is reused), then the handover…
+release 7fc9677466dd (project integrations, branch main) to environment `test`
+gate: passed in 0.99 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `test` since)
+  started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 362 ms and receives beside this one: stopping this one
+  this engine stopped in 0 ms and let go of its interfaces: the new one takes them
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 29 ms
+changed 1 interface:
+  promote-demo new here 0db7a1e1454e
+recorded in .ductus/releases/integrations-7fc9677466dd.tar.gz: deployed to test
+```
+
+The record is unsigned: anyone holding the file can edit it
+([nuance](../nuances/releases.md#where-a-release-went-and-its-branch-are-labels-in-its-file-not-proof-level-2)).
+Several environments: `DUCTUS_DEPLOY_REQUIRES=test,uat`. `--force` never skips it, and a rollback
+is never held to it
+([nuance](../nuances/releases.md#an-environments-rules-arent-skipped-by---force-a-rollback-isnt-held-to-them-level-2)).
+
+### Promote: `--from`
+
+`ductus deploy ID --from <test> --to <prod>` fetches the release from test's engine with its
+record brought up to date (`GET /releases/{id}/file`), stores it on prod's and deploys it there.
+Each engine has its own tokens: `DUCTUS_FROM_TOKEN` (or `--from-token`) for the one it's fetched
+from, DUCTUS_API_TOKEN for the one it goes to:
+
+```text
+$ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy 7fc9677466dd --from $TEST --to $PROD -m "tested in test"
+fetched release 7fc9677466dd from http://127.0.0.1:17793 (1.3 KB, deployed to: dev, test)
+release 7fc9677466dd was stored on the engine before (2 records of where it went added)
+deploying: the gate runs (or a recent passing check is reused), then the handover…
+release 7fc9677466dd (project integrations, branch main) to environment `prod`
+gate: passed in 0.87 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+  started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 365 ms and receives beside this one: stopping this one
+  this engine stopped in 0 ms and let go of its interfaces: the new one takes them
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 33 ms
+changed 1 interface:
+  promote-demo new here 0db7a1e1454e
+```
+
+Prod had stored it already (the refused deploy above): a release stored before keeps its first
+manifest, and the records a file brings are added all the same. Prod's gate runs against prod:
+a check in test says nothing about prod's database and secrets.
+
+### Only main reaches prod
+
+An engine in release mode never reads git: it runs the release deployed to it. A release is the
+commit it was made from (`ductus release` refuses what isn't committed), and it records **the
+branch** it was made on. So work on a feature branch reaches prod only if someone makes a release
+there and deploys it. Two locks, the second one optional:
+
+1. **Who can deploy.** CI builds releases from `main` and holds the only tokens with the `deploy`
+   permission on test and prod; people get tokens without it there. This is the one that holds
+   against someone determined.
+2. **`DUCTUS_DEPLOY_BRANCHES=main`** on prod (a trailing `*` matches a start: `main,release/*`)
+   refuses a release made on any other branch, made on a detached HEAD without a name, or made
+   without git, with or without `--force`:
+
+```text
+$ DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy .ductus/releases/integrations-d74871d958b0.tar.gz --to $PROD --force -m "just this once"
+stored release d74871d958b0 on the engine
+deploying: the gate runs (or a recent passing check is reused), then the handover…
+release d74871d958b0 (project integrations, branch feature/lab-codes) to environment `prod`
+✗ this environment takes only releases deployed to test first (DUCTUS_DEPLOY_REQUIRES), and it hasn't been deployed anywhere that this engine knows of: deploy it there, then bring it here with its record (`ductus deploy d74871d958b0 --from <test's engine> --to <this engine>`)
+✗ this environment takes only releases made on main (DUCTUS_DEPLOY_BRANCHES), and this one was made on `feature/lab-codes`: merge it, then release from there
+✗ refused by this environment's rules (`rules` says why)
+```
+
+The branch is a label in the release, unsigned like the record. The same files made on a feature
+branch and again on `main` (after a fast-forward merge) are one release, made on both: any of its
+branches may match. In CI, a checkout of a tag or a pull request has no branch (a detached HEAD):
+`ductus release --branch "$GITHUB_REF_NAME"` names it
+([nuance](../nuances/releases.md#a-release-made-on-a-detached-head-records-no-branch-level-2)).
+An engine in folder mode runs whatever its folder holds; it records the commit and any uncommitted
+file and warns, but never refuses: one more reason for release mode on test and prod.
+
+### Roll back
+
+`ductus deploy --rollback -m "why"` goes back to the release that ran before the current one in
+that environment (or `--rollback ID`, any release that ran there). It isn't held to the
+environment's rules (the release ran there), it names whose newer work it undoes without
+refusing (undoing is the point), and the gate always runs (the database may have changed since):
+
+```text
+$ DUCTUS_API_TOKEN=$OPS_PROD ductus deploy --rollback --to $PROD -m "LAB3 broke the lab feed"
+rolling back: the gate runs, then the handover…
+rollback to release e16ad8ac6cdb (project integrations, branch main) to environment `prod`
+· a rollback isn't held to this environment's rules (DUCTUS_DEPLOY_REQUIRES, DUCTUS_DEPLOY_BRANCHES): release e16ad8ac6cdb ran here before
+⚠ undoes promote-demo: replaces 1df6c3410060 (deployed 2026-11-12 16:36 UTC by ci on DESKTOP-GCT6E6V): it came from commit bc7b61dc0197, which this release's history doesn't have, so their change may be undone (`ductus history promote-demo`)
+gate: passed in 0.81 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+  started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
+  ⚠ promote-demo: replaces 1df6c3410060 (deployed 2026-11-12 16:36 UTC by ci on DESKTOP-GCT6E6V): it came from commit bc7b61dc0197, which this release's history doesn't have, so their change may be undone (`ductus history promote-demo`)
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 328 ms and receives beside this one: stopping this one
+  this engine stopped in 1 ms and let go of its interfaces: the new one takes them
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 33 ms
+changed 1 interface:
+  promote-demo 1df6c3410060 → 9242851858df
+```
+
+The audit log has a `release.rollback` row (`detail.from`, the release it left; `detail.undoes`),
+and the deployment is marked as a rollback. **A second `--rollback` doesn't go back to what the
+first one left**: it skips any release a rollback left and goes further back (here, to the first
+release); to return to a release a rollback left, deploy it by its id
+([nuance](../nuances/releases.md#the-default-rollback-skips-releases-a-rollback-left-level-2)).
+A release that never ran in that environment is refused as a rollback ("deploy it").
+
+**What a rollback brings back:** the whole project as that release has it, every interface's code
+and settings, `ductus.yaml`, `resources.yaml`, `environments/`, and the encrypted secrets as they
+were then (a rotated secret comes back old). **Not:** the engine's own settings (ductus.env), the
+binary, or the database: migrations come with the binary, never with a release, so a rollback
+runs none, and what the later release did stays done (messages it sent; deliveries it filtered
+for a destination it removed)
+([nuance](../nuances/releases.md#a-rollback-brings-back-the-whole-project-secrets-included-but-not-the-database-level-2),
+[nuance](../nuances/releases.md#a-destination-a-rollback-brings-back-doesnt-get-what-waited-while-it-was-gone-level-3)).
+
+### Lowering lanes
+
+A release that lowers an interface's lanes (`ordering.partitions`), a rollback past one that
+raised them included, is refused by the gate while messages wait in the lanes that would go
+(`DUC303`):
+
+```text
+      ✗ promote-demo → lab: 31 messages waiting in lanes 2–7; promote-demo now has 2 lanes (it had 8)
+        (the engine would refuse to start: no worker reads those lanes. Keep `ordering` as it is until they're sent; `ductus drain --wait` stops new messages until nothing waits)
+```
+
+and, even once nothing waits, by the handover: the running engine stores into every lane it has
+until it lets go. In folder mode the answer is a restart. **In release mode a restart runs the
+release that runs now, so such a release can't be applied yet** (a known limit, on the
+roadmap; [nuance](../nuances/releases.md#in-release-mode-a-release-that-lowers-an-interfaces-lanes-cant-be-applied-yet-level-2));
+the engine goes on as it was:
+
+```text
+✗ the new engine can't take over:
+a handover can't lower an interface's lanes (`ordering`):
+  promote-demo: 8 → 2 lanes
+The running engine stores into every lane it has until it lets go, so messages could be left in lanes
+nothing reads. In release mode a restart runs the release that runs now, so a release that lowers lanes can't be
+applied yet: release again with `ordering.partitions` as it runs (docs: releases, "Lowering lanes").
+This engine (pid 3648, ductus 0.7.0-dev) goes on.
+```
+
+Until then, raise lanes only when you mean to keep them, and roll back by releasing the old code
+with the new lane count.
 
 ## Measured
 
@@ -713,6 +906,18 @@ from the command to its answer):
 The gate is what a deploy waits for; check the release on the engine before the change window
 and the deploy itself takes about a second.
 
+Promoted and rolled back, the same project (0.7.4.4.3, `scripts/bench-release.sh`, three rounds):
+
+| | Time | Sending paused |
+|---|---|---|
+| `GET /releases/{id}/file` (what `deploy --from` fetches; 142 KB) | 0.16–0.17 s | |
+| The fetched file stored again, its records merged | 0.03–0.05 s | |
+| A rollback, the gate run (4.7–4.9 s of it), the release's folder there | 5.8–6.0 s | 51–98 ms |
+| A rollback, the release unpacked again | 6.2 s | 177 ms |
+| Deployed forward again after it (the gate run) | 5.9–6.3 s | 93–184 ms |
+
+A rollback costs what a deploy with its gate costs: the gate is most of it, and it always runs.
+
 The handover itself at 1,001 interfaces (`IN_PROCESS=1 scripts/bench-handover.sh`, asked by
 SIGHUP, a sender on 4 connections at 200 messages a second), in the engine's own process against
 a new process (the package's way):
@@ -725,6 +930,13 @@ a new process (the package's way):
 | Memory | 95 MB before; 138–167 MB at the peak (both engines); 120–136 MB after ten handovers | 96 MB each, two processes while they overlap |
 
 ## Try it
+
+`scripts/demo-promote.sh` runs the promotion and rollback above: three engines in release mode,
+each with its own database (dev, test, prod; prod with `DUCTUS_DEPLOY_REQUIRES=test` and
+`DUCTUS_DEPLOY_BRANCHES=main`), a release refused by prod then deployed to dev and test and
+promoted with `--from`, a feature branch's release refused even forced, a colleague's work
+refused then forced in test, two rollbacks, the release's file saying where it went, and the
+lanes limit.
 
 `scripts/demo-release.sh` does all of the above on a fresh `ductus init` project against your
 database: a release, the same id from a CRLF checkout, a change not committed refused, the gate

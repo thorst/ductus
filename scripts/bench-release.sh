@@ -12,7 +12,10 @@
 #     engine's intake (`ductus gen` to one interface) alone and while a check runs;
 #   - 0.7.4.4.1, deploys: an engine in release mode started with nothing deployed, `ductus deploy`
 #     of each commit's release (the gate run, or a check reused), the sending pause, the release
-#     unpacked by the new engine, and restarts with the release's folder there or unpacked again.
+#     unpacked by the new engine, and restarts with the release's folder there or unpacked again;
+#   - 0.7.4.4.3, promote and roll back: `GET /releases/{id}/file` (what `deploy --from` fetches),
+#     the file stored again with its records merged, `ductus deploy --rollback` (the gate run; the
+#     release's folder there, or unpacked again).
 #
 #   bash scripts/bench-release.sh                 # COUNT=1001 ROUNDS=3 by default
 set -euo pipefail
@@ -223,6 +226,27 @@ for r in $(seq 1 "$ROUNDS"); do
   deploy "deploy the next (gate) #$r" "$NEXT_ID"
   check "API check of the other #$r" "$FIRST_ID"
   deploy "deploy it (check reused) #$r" "$FIRST_ID"
+done
+echo "== promote and roll back (0.7.4.4.3)"
+for r in $(seq 1 "$ROUNDS"); do
+  curl -sS -o "$WORK/fetched.tar.gz" -w '%{time_total}\n' -H "Authorization: Bearer $TOKEN" \
+    "http://127.0.0.1:$API/api/v1/releases/$FIRST_ID/file" >"$WORK/get.time"
+  printf '%-34s %6.2f s  %d bytes, deployed to: %s\n' "GET /releases/{id}/file #$r" "$(cat "$WORK/get.time")" \
+    "$(stat -c %s "$WORK/fetched.tar.gz")" "$(tar xzOf "$WORK/fetched.tar.gz" release.json | grep -o '"deployed":\[[^]]*\]' | grep -o '"environment":"[a-z]*"' | sort -u | tr '\n' ' ')"
+  post "store it again, records merged #$r" "$WORK/fetched.tar.gz"
+done
+rollback() {
+  local label=$1 began
+  began=$(date +%s.%N)
+  DUCTUS_API_TOKEN=$TOKEN "$BIN" deploy --rollback --to "http://127.0.0.1:$API" -m "$label" --json >"$WORK/deploy.json" 2>"$WORK/deploy.err" || { cat "$WORK/deploy.json" "$WORK/deploy.err"; exit 1; }
+  printf '%-34s %6.2f s  gate %s  %s\n' "$label" "$(awk "BEGIN { print $(date +%s.%N) - $began }")" \
+    "$(grep -o '"seconds": [0-9.]*' "$WORK/deploy.json" | head -1)" "$(grep -o 'sending paused [0-9.]* [a-z]*' "$WORK/deploy.json")"
+}
+for r in $(seq 1 "$ROUNDS"); do
+  # The release rolled back to: its folder there, or (every second round) removed, unpacked again.
+  [ $((r % 2)) = 0 ] && rm -rf "${RELEASES:?}/$(tar xzOf "$WORK/changed.tar.gz" release.json | sed -n 's/^{"format":1,"id":"\([0-9a-f]\{64\}\).*/\1/p')"
+  rollback "roll back ($([ $((r % 2)) = 0 ] && echo unpacked again || echo folder there)) #$r"
+  deploy "deploy forward again #$r" "$FIRST_ID"
 done
 for r in $(seq 1 "$ROUNDS"); do
   kill -INT "$(running)"

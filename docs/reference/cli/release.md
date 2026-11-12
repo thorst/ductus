@@ -14,6 +14,7 @@ ductus release [OPTIONS]
 | `-m, --message <WHY>` | Why: a sentence the release carries, shown wherever it goes (`-m "lab feed: new OBX mapping"`). |  |  |
 | `--uncommitted` | Carry files that aren't committed as they are in the folder (changed, added, new and not ignored; deleted ones left out), instead of refusing. The release lists them, and every check of it says so: for trying a release out, not for production. |  |  |
 | `--over <RELEASE>` | The release this one replaces, by its whole id or its file: recorded, so a deploy can tell whose work it would undo when the project isn't in git (in git, the commit's history says). |  |  |
+| `--branch <NAME>` | The branch to record when HEAD is detached (CI checking out a tag or a pull request; on GitHub Actions `--branch "$GITHUB_REF_NAME"`). An engine with DUCTUS_DEPLOY_BRANCHES refuses releases made on other branches. When HEAD is on a branch, it's that one (another name here is refused). |  |  |
 | `--no-tests` | Make it without running the tests; the release says they weren't run, and `ductus release check` then runs every interface's. |  |  |
 | `--out <PATH>` | Where to write it: a folder (made when missing if it ends with `/`), or the file's path (default `.ductus/releases/` in the project). |  |  |
 | `--json` | One JSON document: the manifest, with the file written, its size and how long it took. |  |  |

@@ -1,23 +1,38 @@
 //! `ductus deploy` (0.7.4.4): send a release to an engine in release mode and deploy it there
 //! (`POST /releases` when it's a file the engine hasn't stored, then `POST /deployments`), and
-//! say what happened: the "replaces" check, the gate (run or reused), the handover's steps and
-//! what changed.
+//! say what happened: this environment's rules, the "replaces" check, the gate (run or reused),
+//! the handover's steps and what changed.
+//!
+//! 0.7.4.4.3: **promotion and rollback.** A file deployed gets the record of where it went written
+//! into it (its id unchanged: the record isn't in the id), so the next environment, which may
+//! require it (`DUCTUS_DEPLOY_REQUIRES`), can read it. `--from URL` fetches a stored release from
+//! one engine with that record (`GET /releases/{id}/file`) and deploys it to another.
+//! `--rollback [ID]` goes back to a release that ran there before.
 
 use anyhow::{Context, Result, bail};
+use ductus_runtime::release;
 use serde_json::{Value, json};
 use std::path::Path;
 use std::time::Duration;
 
 pub struct Deploy {
-    /// A release file, or a stored release's id (or its start).
-    pub release: String,
+    /// A release file, or a stored release's id (or its start); None: a rollback's default.
+    pub release: Option<String>,
     pub to: String,
     pub token: Option<String>,
+    /// Promote: the engine to fetch the release from, and its token (default: `token`).
+    pub from: Option<String>,
+    pub from_token: Option<String>,
+    pub rollback: bool,
     pub reason: Option<String>,
     pub force: bool,
     pub all_tests: bool,
     pub json: bool,
     pub timeout: Duration,
+}
+
+fn api(url: &str) -> String {
+    format!("{}/api/v1", url.trim_end_matches('/'))
 }
 
 /// Deploy; Ok(true) when the release runs there.
@@ -26,49 +41,69 @@ pub async fn run(d: Deploy) -> Result<bool> {
         "set DUCTUS_API_TOKEN to a token with the `deploy` permission (on the server: `ductus token create ci --role operator --permission deploy`)",
     )?;
     let client = reqwest::Client::builder().timeout(d.timeout).build()?;
-    let base = format!("{}/api/v1", d.to.trim_end_matches('/'));
-    let reach = || format!("can't reach the engine's API at {base} (is it running? `--to`, DUCTUS_API_URL)");
-    let path = Path::new(&d.release);
-    let id = if path.is_file() {
-        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
-        let response = client
-            .post(format!("{base}/releases"))
-            .bearer_auth(&token)
-            .header(reqwest::header::CONTENT_TYPE, "application/gzip")
-            .body(bytes)
-            .send()
-            .await
-            .with_context(reach)?;
-        let status = response.status();
-        let body: Value = response.json().await.unwrap_or(Value::Null);
-        if !status.is_success() {
-            bail!("storing {} on the engine: {status}: {}", path.display(), error(&body));
-        }
+    let base = api(&d.to);
+    let reach = |base: &str| format!("can't reach the engine's API at {base} (is it running? `--to`, DUCTUS_API_URL)");
+    let file = d.release.as_deref().map(Path::new).filter(|p| p.is_file());
+    let say = |line: String| {
         if !d.json {
-            let short = body["short"].as_str().unwrap_or("?");
-            if body["new"] == true {
-                println!("stored release {short} on the engine");
-            } else {
-                println!("release {short} was stored on the engine before");
-            }
+            println!("{line}");
         }
-        body["id"].as_str().context("the engine didn't say the release's id")?.to_string()
-    } else if d.release.contains(['/', '\\']) || d.release.ends_with(".tar.gz") {
-        bail!("{}: no such file (give a release file `ductus release` wrote, or a stored release's id)", d.release);
-    } else {
-        d.release.clone()
     };
-    let request = json!({ "release": id, "reason": d.reason, "force": d.force, "all_tests": d.all_tests });
-    if !d.json {
-        println!("deploying: the gate runs (or a recent passing check is reused), then the handover…");
+    let id = match (&d.release, file, &d.from) {
+        (Some(_), Some(_), Some(_)) => {
+            bail!("`--from` fetches a release by its id from another engine: give the id, not a file")
+        }
+        (Some(given), Some(path), None) => {
+            let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            store(&client, &base, &token, bytes, &given.to_string(), &say).await?
+        }
+        (Some(given), None, Some(from)) => {
+            let from_token = d.from_token.as_deref().filter(|t| !t.trim().is_empty()).unwrap_or(&token);
+            let source = api(from);
+            let response = client
+                .get(format!("{source}/releases/{given}/file"))
+                .bearer_auth(from_token)
+                .send()
+                .await
+                .with_context(|| format!("can't reach the engine's API at {source} (`--from`)"))?;
+            let status = response.status();
+            if !status.is_success() {
+                let body: Value = response.json().await.unwrap_or(Value::Null);
+                bail!("fetching release {given} from {from}: {status}: {}", error(&body));
+            }
+            let bytes = response.bytes().await.context("reading the release fetched")?.to_vec();
+            let bundle = release::read_bytes(&bytes, "the release fetched")?;
+            let went: Vec<&str> = bundle.manifest.deployed.iter().map(|p| p.environment.as_str()).collect();
+            say(format!(
+                "fetched release {} from {from} ({}, deployed to: {})",
+                release::short(&bundle.manifest.id),
+                crate::admin::size(bytes.len() as i64),
+                if went.is_empty() { "nowhere yet".to_string() } else { went.join(", ") }
+            ));
+            store(&client, &base, &token, bytes, given, &say).await?
+        }
+        (Some(given), None, None) if given.contains(['/', '\\']) || given.ends_with(".tar.gz") => {
+            bail!("{given}: no such file (give a release file `ductus release` wrote, or a stored release's id)")
+        }
+        (Some(given), None, None) => given.clone(),
+        (None, _, _) => String::new(), // a rollback to the default
+    };
+    let mut request = json!({ "reason": d.reason, "force": d.force, "all_tests": d.all_tests, "rollback": d.rollback });
+    if !id.is_empty() {
+        request["release"] = id.clone().into();
     }
+    say(if d.rollback {
+        "rolling back: the gate runs, then the handover…".to_string()
+    } else {
+        "deploying: the gate runs (or a recent passing check is reused), then the handover…".to_string()
+    });
     let response = client
         .post(format!("{base}/deployments"))
         .bearer_auth(&token)
         .json(&request)
         .send()
         .await
-        .with_context(reach)?;
+        .with_context(|| reach(&base))?;
     let status = response.status();
     let report: Value = response.json().await.unwrap_or(Value::Null);
     if report.get("outcome").is_none() {
@@ -79,7 +114,71 @@ pub async fn run(d: Deploy) -> Result<bool> {
     } else {
         print!("{}", text(&report));
     }
-    Ok(report["ok"] == true)
+    let ok = report["ok"] == true;
+    // The record of where it went, into the file deployed: what the next environment reads.
+    if ok {
+        match (file, report.get("place").filter(|p| !p.is_null())) {
+            (Some(path), Some(place)) => {
+                let place: release::Place = serde_json::from_value(place.clone()).context("reading the record")?;
+                let environment = place.environment.clone();
+                if record(path, place)? {
+                    say(format!("recorded in {}: deployed to {environment}", path.display()));
+                }
+            }
+            (Some(path), None) => say(format!(
+                "⚠ the engine's record isn't in yet, so {} doesn't say where it went: promote it with `--from` instead",
+                path.display()
+            )),
+            _ => {}
+        }
+    }
+    Ok(ok)
+}
+
+/// Store a release file on the engine (`POST /releases`); its id.
+async fn store(
+    client: &reqwest::Client,
+    base: &str,
+    token: &str,
+    bytes: Vec<u8>,
+    name: &str,
+    say: &impl Fn(String),
+) -> Result<String> {
+    let response = client
+        .post(format!("{base}/releases"))
+        .bearer_auth(token)
+        .header(reqwest::header::CONTENT_TYPE, "application/gzip")
+        .body(bytes)
+        .send()
+        .await
+        .with_context(|| format!("can't reach the engine's API at {base} (is it running? `--to`, DUCTUS_API_URL)"))?;
+    let status = response.status();
+    let body: Value = response.json().await.unwrap_or(Value::Null);
+    if !status.is_success() {
+        bail!("storing {name} on the engine: {status}: {}", error(&body));
+    }
+    let short = body["short"].as_str().unwrap_or("?");
+    let places = match body["new_places"].as_u64().unwrap_or(0) {
+        0 => String::new(),
+        1 => " (1 record of where it went added)".to_string(),
+        n => format!(" ({n} records of where it went added)"),
+    };
+    if body["new"] == true {
+        say(format!("stored release {short} on the engine{places}"));
+    } else {
+        say(format!("release {short} was stored on the engine before{places}"));
+    }
+    Ok(body["id"].as_str().context("the engine didn't say the release's id")?.to_string())
+}
+
+/// Add `place` to the release file at `path` (rewritten, the same id); false when it was there.
+fn record(path: &Path, place: release::Place) -> Result<bool> {
+    let mut bundle = release::read(path)?;
+    if !bundle.manifest.add_place(place) {
+        return Ok(false);
+    }
+    release::rewrite(path, &bundle.manifest, &bundle.ancestry, &bundle.files)?;
+    Ok(true)
 }
 
 fn error(body: &Value) -> &str {
@@ -89,14 +188,29 @@ fn error(body: &Value) -> &str {
 /// The report in words.
 fn text(r: &Value) -> String {
     let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let what = if r["rollback"] == true { "rollback to release" } else { "release" };
+    let names: Vec<&str> = r["branches"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let branch = match names.len() {
+        0 => String::new(),
+        1 => format!(", branch {}", names[0]),
+        _ => format!(", branches {}", names.join(", ")),
+    };
     let mut out = format!(
-        "release {} (project {}) to environment `{}`\n",
+        "{what} {} (project {}{branch}) to environment `{}`\n",
         s(&r["short"]),
         s(&r["project"]),
         s(&r["environment"])
     );
+    for rule in r["rules"].as_array().into_iter().flatten() {
+        let mark = if r["rollback"] == true { "·" } else { "✗" };
+        out += &format!("{mark} {}\n", s(rule));
+    }
     if let Some(replaces) = r["replaces"].as_object().filter(|m| !m.is_empty()) {
-        let mark = if r["forced"] == true { "⚠ deployed over" } else { "✗ would undo" };
+        let mark = match (r["rollback"] == true, r["forced"] == true) {
+            (true, _) => "⚠ undoes",
+            (false, true) => "⚠ deployed over",
+            (false, false) => "✗ would undo",
+        };
         for (part, why) in replaces {
             out += &format!("{mark} {part}: {}\n", s(why));
         }
@@ -185,5 +299,32 @@ mod tests {
                 && t.contains("  lab new here cccccccccccc"),
             "{t}"
         );
+    }
+
+    /// The environment's rules refuse with what to do; a rollback names what it undoes and that
+    /// the rules don't hold it.
+    #[test]
+    fn rules_and_a_rollback_are_said() {
+        let refused = json!({
+            "ok": false, "outcome": "refused by this environment's rules (`rules` says why)", "short": "0a1b2c3d4e5f",
+            "project": "integrations", "environment": "prod", "branches": ["feature/x"], "rollback": false,
+            "rules": ["this environment takes only releases made on main (DUCTUS_DEPLOY_BRANCHES), and this one was made on `feature/x`: merge it, then release from there"],
+            "replaces": {}, "forced": false, "gate": null, "steps": [], "deployment": null, "changes": []
+        });
+        let t = text(&refused);
+        assert!(
+            t.starts_with("release 0a1b2c3d4e5f (project integrations, branch feature/x) to environment `prod`"),
+            "{t}"
+        );
+        assert!(t.contains("✗ this environment takes only releases made on main"), "{t}");
+        let back = json!({
+            "ok": true, "outcome": "handed over", "short": "0a1b2c3d4e5f", "project": "integrations",
+            "environment": "prod", "rollback": true, "rules": ["a rollback isn't held to this environment's rules (…)"],
+            "replaces": { "adt": "replaces 1234 (deployed … by bob)" }, "forced": false,
+            "gate": null, "steps": [], "deployment": 41, "changes": []
+        });
+        let t = text(&back);
+        assert!(t.starts_with("rollback to release 0a1b2c3d4e5f"), "{t}");
+        assert!(t.contains("· a rollback isn't held") && t.contains("⚠ undoes adt: replaces 1234"), "{t}");
     }
 }

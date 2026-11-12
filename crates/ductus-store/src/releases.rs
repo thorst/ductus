@@ -37,6 +37,9 @@ pub struct NewRelease<'a> {
     pub made_by: &'a str,
     pub reason: Option<&'a str>,
     pub git_commit: Option<&'a str>,
+    /// The branch it was made on (`git.branch`): added to `releases.branches` even when the
+    /// release was stored before (the same files made on another branch are the same release).
+    pub branch: Option<&'a str>,
     pub interfaces: usize,
     /// 20-byte commit ids, sorted (empty without git).
     pub ancestry: &'a [u8],
@@ -136,6 +139,34 @@ pub struct ProjectRunning {
     pub release: Option<Vec<u8>>,
 }
 
+/// Where a release was deployed (0.7.4.4.3): a deployment on this database, or one on another
+/// database that a file carrying it said (`release_places`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Place {
+    pub environment: String,
+    pub host: String,
+    /// The deployment's id on the database it was recorded in.
+    pub deployment: i32,
+    pub at: DateTime<Utc>,
+    pub by: String,
+    pub ductus_version: String,
+    /// Recorded on this database (`deployments`), not carried in by a file.
+    pub here: bool,
+}
+
+/// A run of one release in an environment (consecutive deployments of it: a deploy, then the
+/// restarts that ran it again), oldest first: what a rollback chooses from.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    pub release: Vec<u8>,
+    /// Its first deployment, when and by whom.
+    pub deployment: i32,
+    pub at: DateTime<Utc>,
+    pub by: String,
+    /// It began with a rollback (`ductus deploy --rollback`).
+    pub rollback: bool,
+}
+
 /// A stored release's contents, read back: what `ductus_runtime::release` writes an archive from.
 #[derive(Debug, Clone)]
 pub struct ReleaseContents {
@@ -222,6 +253,8 @@ impl Store {
     pub async fn store_release(&self, r: &NewRelease<'_>, audit: &Audit<'_>) -> Result<ReleaseStored> {
         let mut tx = self.pool.begin().await.context("starting to store the release")?;
         if let Some((at, by)) = stored_before(&mut tx, r.id).await? {
+            add_branch(&mut tx, r.id, r.branch).await?;
+            tx.commit().await.context("committing the release's branch")?;
             return Ok(ReleaseStored { new: false, at, by, new_folders: 0, new_files: 0 });
         }
 
@@ -325,8 +358,9 @@ impl Store {
         let bytes: i64 = r.files.iter().map(|f| f.bytes.len() as i64).sum();
         let stored: Option<DateTime<Utc>> = sqlx::query_scalar(
             "INSERT INTO releases (id, project, manifest, made_at, made_by, reason, git_commit, interfaces, files,
-                                   bytes, ancestry, folders, stored_by)
-             VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                                   bytes, ancestry, folders, stored_by, branches)
+             VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+                     CASE WHEN $14::text IS NULL THEN NULL ELSE ARRAY[$14::text] END)
              ON CONFLICT (id) DO NOTHING RETURNING stored_at",
         )
         .bind(r.id)
@@ -342,12 +376,15 @@ impl Store {
         .bind(r.ancestry)
         .bind(&order)
         .bind(r.by)
+        .bind(r.branch)
         .fetch_optional(&mut *tx)
         .await
         .context("saving the release")?;
         let Some(at) = stored else {
             // Stored by someone else since the read above.
             let (at, by) = stored_before(&mut tx, r.id).await?.context("the release was stored and is gone")?;
+            add_branch(&mut tx, r.id, r.branch).await?;
+            tx.commit().await.context("committing the release's branch")?;
             return Ok(ReleaseStored { new: false, at, by, new_folders: 0, new_files: 0 });
         };
         let short = &hex(r.id)[..12];
@@ -651,6 +688,124 @@ impl Store {
             release,
         }))
     }
+
+    /// Where release `id` was deployed: each environment's first deployment of it on this database,
+    /// then what files carrying it said about other databases (`release_places`), oldest first.
+    /// A record that came back to the database it was made on is listed once (as `here`).
+    pub async fn release_places(&self, id: &[u8]) -> Result<Vec<Place>> {
+        type Row = (String, String, i32, DateTime<Utc>, String, String, bool);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT environment, host, id, at, by_name, version, true FROM (
+                 SELECT DISTINCT ON (environment) environment, host, id, at, by_name, version
+                 FROM deployments WHERE release_id = $1 ORDER BY environment, id) AS here
+             UNION ALL
+             SELECT p.environment, p.host, p.deployment, p.at, p.by_name, p.ductus_version, false
+             FROM release_places p
+             WHERE p.release_id = $1
+               AND NOT EXISTS (SELECT 1 FROM deployments d WHERE d.id = p.deployment AND d.release_id = $1
+                                                             AND d.environment = p.environment AND d.host = p.host)
+             ORDER BY 4, 1",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading where the release was deployed")?;
+        Ok(rows
+            .into_iter()
+            .map(|(environment, host, deployment, at, by, ductus_version, here)| Place {
+                environment,
+                host,
+                deployment,
+                at,
+                by,
+                ductus_version,
+                here,
+            })
+            .collect())
+    }
+
+    /// Every branch release `id` was made on, as its files said when they were stored (empty:
+    /// none said: a detached HEAD, made without git, or stored before 0.7.4.4.3).
+    pub async fn release_branches(&self, id: &[u8]) -> Result<Vec<String>> {
+        let branches: Option<Vec<String>> = sqlx::query_scalar("SELECT branches FROM releases WHERE id = $1")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await
+            .context("reading the branches the release was made on")?
+            .flatten();
+        Ok(branches.unwrap_or_default())
+    }
+
+    /// Keep what a file said about where release `id` was deployed (`places`, from its manifest),
+    /// stored by `by`: those not kept already. Returns how many were new.
+    pub async fn add_release_places(&self, id: &[u8], places: &[Place], by: &str) -> Result<usize> {
+        if places.is_empty() {
+            return Ok(0);
+        }
+        let environments: Vec<&str> = places.iter().map(|p| p.environment.as_str()).collect();
+        let hosts: Vec<&str> = places.iter().map(|p| p.host.as_str()).collect();
+        let deployments: Vec<i32> = places.iter().map(|p| p.deployment).collect();
+        let at: Vec<DateTime<Utc>> = places.iter().map(|p| p.at).collect();
+        let names: Vec<&str> = places.iter().map(|p| p.by.as_str()).collect();
+        let versions: Vec<&str> = places.iter().map(|p| p.ductus_version.as_str()).collect();
+        let added = sqlx::query(
+            "INSERT INTO release_places (release_id, environment, host, deployment, at, by_name, ductus_version, received_by)
+             SELECT $1, * , $8 FROM unnest($2::text[], $3::text[], $4::int[], $5::timestamptz[], $6::text[], $7::text[])
+             ORDER BY 1, 2, 3
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(id)
+        .bind(&environments)
+        .bind(&hosts)
+        .bind(&deployments)
+        .bind(&at)
+        .bind(&names)
+        .bind(&versions)
+        .bind(by)
+        .execute(&self.pool)
+        .await
+        .context("keeping where the release was deployed")?;
+        Ok(added.rows_affected() as usize)
+    }
+
+    /// The releases `project` ran in `environment`, oldest first, one entry per run (consecutive
+    /// deployments of one release are one run): what a rollback chooses from.
+    pub async fn release_runs(&self, environment: &str, project: &str) -> Result<Vec<Run>> {
+        type Row = (Vec<u8>, i32, DateTime<Utc>, String, bool);
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT release_id, id, at, by_name, rollback FROM (
+                 SELECT d.release_id, d.id, d.at, d.by_name, coalesce(d.rollback, false) AS rollback,
+                        lag(d.release_id) OVER (ORDER BY d.id) AS before
+                 FROM deployments d JOIN releases r ON r.id = d.release_id
+                 WHERE d.environment = $1 AND d.release_id IS NOT NULL AND r.project = $2) AS runs
+             WHERE before IS DISTINCT FROM release_id
+             ORDER BY id",
+        )
+        .bind(environment)
+        .bind(project)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the releases run here")?;
+        Ok(rows
+            .into_iter()
+            .map(|(release, deployment, at, by, rollback)| Run { release, deployment, at, by, rollback })
+            .collect())
+    }
+}
+
+/// Add `branch` to the branches release `id` was made on, unless it's there.
+async fn add_branch(tx: &mut sqlx::PgConnection, id: &[u8], branch: Option<&str>) -> Result<()> {
+    let Some(branch) = branch else { return Ok(()) };
+    sqlx::query(
+        "UPDATE releases SET branches = array_append(coalesce(branches, '{}'), $2)
+         WHERE id = $1 AND NOT ($2 = ANY(coalesce(branches, '{}')))",
+    )
+    .bind(id)
+    .bind(branch)
+    .execute(tx)
+    .await
+    .context("adding the branch the release was made on")?;
+    Ok(())
 }
 
 /// When and by whom release `id` was stored, if it is.

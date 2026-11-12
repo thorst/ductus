@@ -165,13 +165,15 @@ export interface paths {
         get?: never;
         put?: never;
         /**
-         * Deploy a stored release to this engine (release mode): the "replaces" check, the gate (or a
-         *     recent passing check reused), then the handover to an engine running it. Answers when the new
-         *     engine sends, or when it couldn't (this one goes on): seconds, plus the gate's time when it
-         *     runs. 200: deployed. 409: refused before anything ran (folder mode, another deploy or check
-         *     running, the release already runs, its "replaces" check names someone's work), the report
-         *     says why. 422: the gate found problems. 500: the new engine couldn't take over (this one goes
-         *     on). Needs the `deploy` permission. One deploy or check at a time per engine.
+         * Deploy a stored release to this engine (release mode): this environment's rules, the "replaces"
+         *     check, the gate (or a recent passing check reused), then the handover to an engine running it;
+         *     or roll back (`rollback`) to a release that ran here before. Answers when the new engine sends,
+         *     or when it couldn't (this one goes on): seconds, plus the gate's time when it runs. 200:
+         *     deployed. 409: refused before anything ran (folder mode, another deploy or check running, the
+         *     release already runs, this environment's rules, its "replaces" check names someone's work, a
+         *     rollback to a release that never ran here), the report says why. 422: the gate found problems.
+         *     500: the new engine couldn't take over (this one goes on). Needs the `deploy` permission. One
+         *     deploy or check at a time per engine.
          */
         post: operations["deploy_release"];
         delete?: never;
@@ -924,6 +926,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/releases/{id}/file": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * A stored release's file, as `ductus release` wrote it (the same id), its record of where it was
+         *     deployed brought up to date: this database's deployments of it and what earlier files said
+         *     (`deployed`, oldest first). What `ductus deploy ID --from URL --to URL` fetches to promote it
+         *     to another engine, record included. Needs the `deploy` permission (it carries the code and
+         *     every environment's encrypted secrets); audited as `release.download`.
+         */
+        get: operations["download_release"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/retention": {
         parameters: {
             query?: never;
@@ -1550,6 +1575,11 @@ export interface components {
         };
         /** @description What a deploy did, or why it didn't. */
         DeployReport: {
+            /**
+             * @description The branches it was made on, as its files said (the same files made on two branches are
+             *     one release); empty: a detached HEAD without `--branch`, or made without git.
+             */
+            branches: string[];
             changes: components["schemas"]["DeployChange"][];
             /**
              * Format: int32
@@ -1565,16 +1595,25 @@ export interface components {
             ok: boolean;
             /** @description What happened, in a sentence. */
             outcome: string;
+            place?: components["schemas"]["PlaceInfo"] | null;
             project: string;
             /** @description The release, in hex, and its first 12 characters. */
             release: string;
             /**
              * @description Each interface (and "the project's own files") whose running version is someone else's work
-             *     this release would undo, with why. A deploy is refused when any is named, unless forced.
+             *     this release would undo, with why. A deploy is refused when any is named, unless forced; a
+             *     rollback names them and goes on.
              */
             replaces: {
                 [key: string]: string;
             };
+            /** @description A rollback: to a release that ran here before. */
+            rollback: boolean;
+            /**
+             * @description What this environment's rules said (`DUCTUS_DEPLOY_REQUIRES`, `DUCTUS_DEPLOY_BRANCHES`):
+             *     each reason a deploy is refused, or (a rollback) that they don't hold it.
+             */
+            rules: string[];
             short: string;
             /** @description What the handover said as it went. */
             steps: string[];
@@ -1588,7 +1627,8 @@ export interface components {
             /**
              * @description Deploy over someone else's work the "replaces" check names: their change is undone. The
              *     interfaces and whose work go into the audit log (`release.force`) and the deployment's
-             *     history.
+             *     history. Doesn't skip this environment's rules (`DUCTUS_DEPLOY_REQUIRES`,
+             *     `DUCTUS_DEPLOY_BRANCHES`).
              */
             force?: boolean;
             /**
@@ -1596,8 +1636,18 @@ export interface components {
              *     history and in the audit log.
              */
             reason?: string | null;
-            /** @description The release: its id, or its first 12 characters. Store it first (`POST /releases`). */
-            release: string;
+            /**
+             * @description The release: its id, or its first 12 characters. Store it first (`POST /releases`).
+             *     Required, except for a rollback (default: the last release run here before the current
+             *     one, skipping any a rollback left).
+             */
+            release?: string | null;
+            /**
+             * @description Roll back: go back to a release that ran in this environment before. Not held to this
+             *     environment's rules; the "replaces" check names whose work it undoes without refusing; the
+             *     gate runs. Audited as `release.rollback`.
+             */
+            rollback?: boolean;
         };
         /** @description When a version was deployed, by whom and why. */
         Deployed: {
@@ -2601,6 +2651,24 @@ export interface components {
              */
             pending: number;
         };
+        /** @description Where a release was deployed: one entry of a release file's record (`deployed`). */
+        PlaceInfo: {
+            /** Format: date-time */
+            at: string;
+            by: string;
+            /**
+             * Format: int32
+             * @description The deployment's id on that engine's database.
+             */
+            deployment: number;
+            /** @description The Ductus version that ran it. */
+            ductus: string;
+            environment: string;
+            /** @description Recorded on this engine's database; false: a release file said so when it was stored here. */
+            here?: boolean;
+            /** @description The engine's server. */
+            host: string;
+        };
         PortsReport: {
             /** @description What it connects to (destinations and resources.yaml), by host: what a firewall request lists. */
             connects_to: components["schemas"]["OutboundPort"][];
@@ -2718,6 +2786,18 @@ export interface components {
          */
         ReleaseArchive: string;
         ReleaseDetail: components["schemas"]["ReleaseInfo"] & {
+            /**
+             * @description Every branch it was made on, as its files said when they were stored here (the same files
+             *     made on two branches are one release); empty: a detached HEAD without `--branch`, or made
+             *     without git. Labels, unsigned.
+             */
+            branches: string[];
+            /**
+             * @description Where it was deployed, oldest first: each environment's first deployment of it on this
+             *     database (`here`), and what files carrying it said about other databases when they were
+             *     stored here (unsigned). What `DUCTUS_DEPLOY_REQUIRES` reads.
+             */
+            deployed: components["schemas"]["PlaceInfo"][];
             /**
              * @description The release's manifest (`release.json`): every interface's code version and files, the
              *     project version, the tests' result when it was made, who made it and why.
@@ -2947,6 +3027,11 @@ export interface components {
             new_files: number;
             /** @description Folders and files this release added to the database (the rest were there already). */
             new_folders: number;
+            /**
+             * @description Records of where it was deployed that the file carried and this database didn't have yet
+             *     (kept even when the release was stored before: a release keeps its first manifest).
+             */
+            new_places: number;
         };
         SystemInfo: {
             application?: string | null;
@@ -3412,7 +3497,7 @@ export interface operations {
                     "application/json": components["schemas"]["DeployReport"];
                 };
             };
-            /** @description No reason given, or no such release */
+            /** @description No reason given, no release named, or no such release */
             400: {
                 headers: {
                     [name: string]: unknown;
@@ -5002,6 +5087,45 @@ export interface operations {
             };
             /** @description Another check is running on this engine */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    download_release: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The release id, or its first 12 characters */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The release file */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/gzip": components["schemas"]["ReleaseArchive"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

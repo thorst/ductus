@@ -4,7 +4,7 @@ Releases made by `ductus release`: stored here, and checked against this engine'
 
 ## `POST /api/v1/deployments`
 
-Deploy a stored release to this engine (release mode): the "replaces" check, the gate (or a recent passing check reused), then the handover to an engine running it. Answers when the new engine sends, or when it couldn't (this one goes on): seconds, plus the gate's time when it runs. 200: deployed. 409: refused before anything ran (folder mode, another deploy or check running, the release already runs, its "replaces" check names someone's work), the report says why. 422: the gate found problems. 500: the new engine couldn't take over (this one goes on). Needs the `deploy` permission. One deploy or check at a time per engine.
+Deploy a stored release to this engine (release mode): this environment's rules, the "replaces" check, the gate (or a recent passing check reused), then the handover to an engine running it; or roll back (`rollback`) to a release that ran here before. Answers when the new engine sends, or when it couldn't (this one goes on): seconds, plus the gate's time when it runs. 200: deployed. 409: refused before anything ran (folder mode, another deploy or check running, the release already runs, this environment's rules, its "replaces" check names someone's work, a rollback to a release that never ran here), the report says why. 422: the gate found problems. 500: the new engine couldn't take over (this one goes on). Needs the `deploy` permission. One deploy or check at a time per engine.
 
 **Who may call it:** an operator or admin with the `deploy` permission (admins have it).
 
@@ -13,7 +13,7 @@ Deploy a stored release to this engine (release mode): the "replaces" check, the
 **Answers**
 
 - `200` Deployed: the release runs here (application/json): [`DeployReport`](#deployreport)
-- `400` No reason given, or no such release (application/json): [`ErrorBody`](#errorbody)
+- `400` No reason given, no release named, or no such release (application/json): [`ErrorBody`](#errorbody)
 - `403` (application/json): [`ErrorBody`](#errorbody)
 - `409` Refused before anything ran: `outcome` says why (application/json): [`DeployReport`](#deployreport)
 - `422` The gate found problems: `gate.check.report` (application/json): [`DeployReport`](#deployreport)
@@ -89,6 +89,24 @@ Check a stored release against this engine's environment: `ductus release check`
 - `404` (application/json): [`ErrorBody`](#errorbody)
 - `409` Another check is running on this engine (application/json): [`ErrorBody`](#errorbody)
 
+## `GET /api/v1/releases/{id}/file`
+
+A stored release's file, as `ductus release` wrote it (the same id), its record of where it was deployed brought up to date: this database's deployments of it and what earlier files said (`deployed`, oldest first). What `ductus deploy ID --from URL --to URL` fetches to promote it to another engine, record included. Needs the `deploy` permission (it carries the code and every environment's encrypted secrets); audited as `release.download`.
+
+**Who may call it:** an operator or admin with the `deploy` permission (admins have it).
+
+**Parameters**
+
+| | In | Type | |
+|---|---|---|---|
+| `id` (required) | path | text | The release id, or its first 12 characters. |
+
+**Answers**
+
+- `200` The release file (application/gzip): [`ReleaseArchive`](#releasearchive)
+- `403` (application/json): [`ErrorBody`](#errorbody)
+- `404` (application/json): [`ErrorBody`](#errorbody)
+
 ## Shapes
 
 The JSON bodies the operations above take and return.
@@ -131,6 +149,7 @@ What a deploy did, or why it didn't.
 
 | Field | Type | |
 |---|---|---|
+| `branches` | list of text | The branches it was made on, as its files said (the same files made on two branches are one release); empty: a detached HEAD without `--branch`, or made without git. |
 | `changes` | list of [`DeployChange`](#deploychange) |  |
 | `deployment` (optional) | number or null | The deployment the new engine recorded and what it changed (absent if it wasn't recorded within seconds: `GET /engine` shows it then). |
 | `environment` | text |  |
@@ -138,9 +157,12 @@ What a deploy did, or why it didn't.
 | `gate` (optional) | [`DeployGate`](#deploygate) or null |  |
 | `ok` | true or false | The new release runs here. |
 | `outcome` | text | What happened, in a sentence. |
+| `place` (optional) | [`PlaceInfo`](#placeinfo) or null |  |
 | `project` | text |  |
 | `release` | text | The release, in hex, and its first 12 characters. |
-| `replaces` | map of name to text | Each interface (and "the project's own files") whose running version is someone else's work this release would undo, with why. A deploy is refused when any is named, unless forced. |
+| `replaces` | map of name to text | Each interface (and "the project's own files") whose running version is someone else's work this release would undo, with why. A deploy is refused when any is named, unless forced; a rollback names them and goes on. |
+| `rollback` | true or false | A rollback: to a release that ran here before. |
+| `rules` | list of text | What this environment's rules said (`DUCTUS_DEPLOY_REQUIRES`, `DUCTUS_DEPLOY_BRANCHES`): each reason a deploy is refused, or (a rollback) that they don't hold it. |
 | `short` | text |  |
 | `steps` | list of text | What the handover said as it went. |
 
@@ -149,15 +171,30 @@ What a deploy did, or why it didn't.
 | Field | Type | |
 |---|---|---|
 | `all_tests` (optional) | true or false | Run every interface's tests in the gate, not only those of what the release changes here (a passing check is reused only when it ran them all too: never, then). |
-| `force` (optional) | true or false | Deploy over someone else's work the "replaces" check names: their change is undone. The interfaces and whose work go into the audit log (`release.force`) and the deployment's history. |
+| `force` (optional) | true or false | Deploy over someone else's work the "replaces" check names: their change is undone. The interfaces and whose work go into the audit log (`release.force`) and the deployment's history. Doesn't skip this environment's rules (`DUCTUS_DEPLOY_REQUIRES`, `DUCTUS_DEPLOY_BRANCHES`). |
 | `reason` (optional) | text or null | Why: required, except in an environment named `dev`. Recorded with the deployment, in its history and in the audit log. |
-| `release` | text | The release: its id, or its first 12 characters. Store it first (`POST /releases`). |
+| `release` (optional) | text or null | The release: its id, or its first 12 characters. Store it first (`POST /releases`). Required, except for a rollback (default: the last release run here before the current one, skipping any a rollback left). |
+| `rollback` (optional) | true or false | Roll back: go back to a release that ran in this environment before. Not held to this environment's rules; the "replaces" check names whose work it undoes without refusing; the gate runs. Audited as `release.rollback`. |
 
 ### `ErrorBody`
 
 | Field | Type | |
 |---|---|---|
 | `error` | text | What went wrong, in plain words. |
+
+### `PlaceInfo`
+
+Where a release was deployed: one entry of a release file's record (`deployed`).
+
+| Field | Type | |
+|---|---|---|
+| `at` | time (RFC 3339) |  |
+| `by` | text |  |
+| `deployment` | number | The deployment's id on that engine's database. |
+| `ductus` | text | The Ductus version that ran it. |
+| `environment` | text |  |
+| `here` (optional) | true or false | Recorded on this engine's database; false: a release file said so when it was stored here. |
+| `host` | text | The engine's server. |
 
 ### `ReleaseArchive`
 

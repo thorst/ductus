@@ -88,6 +88,10 @@ pub struct Asked {
     /// mode). None: the release that runs now (a plain `ductus handover`). Engines before ignore it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub release: Option<String>,
+    /// That deploy is a rollback (`ductus deploy --rollback`, 0.7.4.4.3): the new engine's
+    /// deployment says so. Engines before ignore it.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub rollback: bool,
 }
 
 impl Asked {
@@ -101,7 +105,7 @@ impl Asked {
             (None, Some(_)) => "systemd (systemctl reload)".into(),
             (None, None) => crate::deployment::account(),
         };
-        Self { by: Some(by), reason: reason.filter(|r| !r.trim().is_empty()), release: None }
+        Self { by: Some(by), reason: reason.filter(|r| !r.trim().is_empty()), release: None, rollback: false }
     }
 }
 
@@ -313,7 +317,7 @@ pub fn reload(by: &str) -> bool {
     let request = Request {
         timeout_secs: RELOAD_TIMEOUT.as_secs(),
         environment: None,
-        asked: Asked { by: Some(by.to_string()), reason: None, release: None },
+        asked: Asked { by: Some(by.to_string()), ..Asked::default() },
     };
     if busy.load(Ordering::SeqCst) || tx.try_send(Requested { request, asker: None }).is_err() {
         tracing::warn!(%by, "a reload was asked while another handover is under way: ignored (ask again once it's done)");

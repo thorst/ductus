@@ -56,6 +56,19 @@ struct RunArgs {
     /// version); `0` runs the gate at every deploy.
     #[arg(long, env = "DUCTUS_DEPLOY_REUSE_CHECK", default_value = "1h", value_parser = parse_duration)]
     deploy_reuse_check: std::time::Duration,
+    /// Release mode: environments a release must have been deployed to before this one takes it
+    /// (`test`, or `test,uat`), read from the record the release carries (`ductus deploy --from`
+    /// brings it) and this database's deployments. `--force` doesn't skip it; a rollback (a
+    /// release that ran here before) does. The record is unsigned: see the releases guide.
+    #[arg(long, env = "DUCTUS_DEPLOY_REQUIRES", value_name = "ENVIRONMENTS", value_delimiter = ',')]
+    deploy_requires: Vec<String>,
+    /// Release mode: the branches a release may be made on to be deployed here (`main`, or
+    /// `main,release/*`: a trailing `*` matches the start). A release made on another branch, on
+    /// none (a detached HEAD without `ductus release --branch`) or without git is refused.
+    /// `--force` doesn't skip it; a rollback does. The branch is a label the release carries,
+    /// unsigned: the releases guide says what to rely on.
+    #[arg(long, env = "DUCTUS_DEPLOY_BRANCHES", value_name = "BRANCHES", value_delimiter = ',')]
+    deploy_branches: Vec<String>,
     /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
     #[arg(long, env = "DUCTUS_DATABASE_URL")]
     database_url: Option<String>,
@@ -96,10 +109,15 @@ impl RunArgs {
                 project.display()
             );
         }
+        let names = |list: Vec<String>| -> Vec<String> {
+            list.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()
+        };
         let releases = self.releases.map(|dir| ductus_runtime::deploy::Mode {
             dir,
             project: self.release_project,
             reuse_check: self.deploy_reuse_check,
+            requires: names(self.deploy_requires),
+            branches: names(self.deploy_branches),
         });
         let options = ductus_runtime::EngineOptions {
             pool_threads: self.threads.unwrap_or(defaults.pool_threads),
@@ -386,12 +404,18 @@ enum Command {
     /// else's work), runs the gate (`ductus release check`) against its environment unless a
     /// recent passing check can be reused, then hands over to an engine running it: receiving
     /// never stops. Exits 1 when it wasn't deployed. Needs a token with the `deploy` permission.
-    /// Example: `ductus deploy .ductus/releases/integrations-0a1b2c3d4e5f.tar.gz --to
-    /// https://ductus-test:7700 -m "lab wants PV1-3 mapped"`.
+    /// A file deployed gets the record of where it went written into it (its id unchanged), which
+    /// an environment requiring this one first reads (DUCTUS_DEPLOY_REQUIRES). Promote from one
+    /// engine to the next with `--from`; go back with `--rollback`. Example: `ductus deploy
+    /// .ductus/releases/integrations-0a1b2c3d4e5f.tar.gz --to https://ductus-test:7700 -m "lab
+    /// wants PV1-3 mapped"`, then `ductus deploy 0a1b2c3d4e5f --from https://ductus-test:7700 --to
+    /// https://ductus-prod:7700 -m "tested in test"`.
     Deploy {
         /// The release: a file `ductus release` wrote (stored on the engine first when it isn't),
-        /// or the id of a release stored there (its first 12 characters are enough).
-        release: String,
+        /// or the id of a release stored there (its first 12 characters are enough). With
+        /// `--rollback`, optional: the last release run there before the current one.
+        #[arg(required_unless_present = "rollback")]
+        release: Option<String>,
         /// The engine's REST API.
         #[arg(long, env = "DUCTUS_API_URL", default_value = "http://127.0.0.1:7700")]
         to: String,
@@ -399,13 +423,29 @@ enum Command {
         /// --permission deploy`).
         #[arg(long, env = "DUCTUS_API_TOKEN", hide_env_values = true)]
         token: Option<String>,
+        /// Promote: fetch the release (by its id) from this engine's API with its record of where
+        /// it was deployed (`GET /releases/{id}/file`), store it on `--to`'s engine, and deploy it
+        /// there. Example: `--from https://ductus-test:7700`.
+        #[arg(long, value_name = "URL", conflicts_with = "rollback")]
+        from: Option<String>,
+        /// The token for `--from` (its engine's: a token with the `deploy` permission there);
+        /// default: `--token`'s.
+        #[arg(long, env = "DUCTUS_FROM_TOKEN", hide_env_values = true, requires = "from")]
+        from_token: Option<String>,
+        /// Roll back to a release that ran on that engine's environment before: the one named, or
+        /// the last one before the current run (skipping any a rollback left). Not held to the
+        /// environment's DUCTUS_DEPLOY_REQUIRES or DUCTUS_DEPLOY_BRANCHES; names whose newer work it
+        /// undoes without refusing; the gate runs. Needs `-m`, except to `dev`.
+        #[arg(long)]
+        rollback: bool,
         /// Why: required, except to an environment named `dev`; recorded with the deployment,
         /// in its history and in the audit log.
         #[arg(short = 'm', long = "message")]
         reason: Option<String>,
         /// Deploy over someone else's work the "replaces" check names: their change is undone
-        /// (recorded in the audit log as `release.force`, and in the history). Needs `-m`.
-        #[arg(long)]
+        /// (recorded in the audit log as `release.force`, and in the history). Needs `-m`. Doesn't
+        /// skip the environment's DUCTUS_DEPLOY_REQUIRES or DUCTUS_DEPLOY_BRANCHES.
+        #[arg(long, conflicts_with = "rollback")]
         force: bool,
         /// Run every interface's tests in the gate, not only those of what the release changes
         /// there (never reuses a check).
@@ -934,6 +974,12 @@ struct ReleaseArgs {
     /// whose work it would undo when the project isn't in git (in git, the commit's history says).
     #[arg(long, value_name = "RELEASE")]
     over: Option<String>,
+    /// The branch to record when HEAD is detached (CI checking out a tag or a pull request; on
+    /// GitHub Actions `--branch "$GITHUB_REF_NAME"`). An engine with DUCTUS_DEPLOY_BRANCHES
+    /// refuses releases made on other branches. When HEAD is on a branch, it's that one (another
+    /// name here is refused).
+    #[arg(long, value_name = "NAME")]
+    branch: Option<String>,
     /// Make it without running the tests; the release says they weren't run, and `ductus release
     /// check` then runs every interface's.
     #[arg(long)]
@@ -1388,12 +1434,25 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Release {
             action: Some(ReleaseAction::Check { bundle, env, all_tests, database_url, json }), ..
         } => exit_on_failure(release::check(release::Check { bundle, env, all_tests, database_url, json }).await),
-        Command::Deploy { release, to, token, reason, force, all_tests, json, timeout } => exit_on_failure(
-            deploy::run(deploy::Deploy { release, to, token, reason, force, all_tests, json, timeout }).await,
-        ),
+        Command::Deploy { release, to, token, from, from_token, rollback, reason, force, all_tests, json, timeout } => {
+            let d = deploy::Deploy {
+                release,
+                to,
+                token,
+                from,
+                from_token,
+                rollback,
+                reason,
+                force,
+                all_tests,
+                json,
+                timeout,
+            };
+            exit_on_failure(deploy::run(d).await)
+        }
         Command::Release { action: None, make } => {
-            let ReleaseArgs { reason, uncommitted, over, no_tests, out, json, root, env } = make;
-            release::make(release::Make { root, env, reason, uncommitted, over, no_tests, out, json }).await
+            let ReleaseArgs { reason, uncommitted, over, branch, no_tests, out, json, root, env } = make;
+            release::make(release::Make { root, env, reason, uncommitted, over, branch, no_tests, out, json }).await
         }
         Command::Upgrade { check: _, json, root, env, database_url, replay } => {
             let options =

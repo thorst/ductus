@@ -38,6 +38,7 @@ pub fn routes() -> OpenApiRouter<Shared> {
     OpenApiRouter::new()
         .routes(routes!(store, list))
         .routes(routes!(one))
+        .routes(routes!(file))
         .routes(routes!(check))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
 }
@@ -96,6 +97,14 @@ pub struct CheckInfo {
 pub struct ReleaseDetail {
     #[serde(flatten)]
     release: ReleaseInfo,
+    /// Every branch it was made on, as its files said when they were stored here (the same files
+    /// made on two branches are one release); empty: a detached HEAD without `--branch`, or made
+    /// without git. Labels, unsigned.
+    branches: Vec<String>,
+    /// Where it was deployed, oldest first: each environment's first deployment of it on this
+    /// database (`here`), and what files carrying it said about other databases when they were
+    /// stored here (unsigned). What `DUCTUS_DEPLOY_REQUIRES` reads.
+    deployed: Vec<super::deployments::PlaceInfo>,
     /// The release's manifest (`release.json`): every interface's code version and files, the
     /// project version, the tests' result when it was made, who made it and why.
     #[schema(value_type = Object)]
@@ -111,6 +120,9 @@ pub struct Stored {
     /// Folders and files this release added to the database (the rest were there already).
     new_folders: usize,
     new_files: usize,
+    /// Records of where it was deployed that the file carried and this database didn't have yet
+    /// (kept even when the release was stored before: a release keeps its first manifest).
+    new_places: usize,
 }
 
 fn info(r: ductus_store::ReleaseRow) -> ReleaseInfo {
@@ -194,16 +206,26 @@ async fn store(engine: Eng, caller: Caller, body: Bytes) -> Result<Response, Api
         made_by: &m.made.by,
         reason: m.made.reason.as_deref(),
         git_commit: m.git.as_ref().map(|g| g.commit.as_str()),
+        branch: m.branch(),
         interfaces: m.interfaces.len(),
         ancestry: &bundle.ancestry,
         files: &files,
         by: &by,
     };
     let stored = engine.store.store_release(&new, &caller.audit("release.store")).await?;
+    // Where it went, as the file says: merged whether or not the release was here (a release
+    // stored before keeps its first manifest, so the record can't live only there).
+    let places: Vec<ductus_store::Place> = m.deployed.iter().map(release::Place::to_store).collect();
+    let new_places = engine.store.add_release_places(&id, &places, &by).await?;
     let row = engine.store.release_summary(&id).await?.ok_or_else(|| anyhow::anyhow!("the release stored is gone"))?;
     let status = if stored.new { StatusCode::CREATED } else { StatusCode::OK };
-    let answer =
-        Stored { new: stored.new, release: info(row), new_folders: stored.new_folders, new_files: stored.new_files };
+    let answer = Stored {
+        new: stored.new,
+        release: info(row),
+        new_folders: stored.new_folders,
+        new_files: stored.new_files,
+        new_places,
+    };
     Ok((status, Json(answer)).into_response())
 }
 
@@ -249,7 +271,71 @@ async fn one(engine: Eng, _caller: Caller, Path(id): Path<String>) -> ApiResult<
     let id = find(&engine, &id).await?;
     let (row, manifest) =
         engine.store.release(&id).await?.ok_or_else(|| ApiError::not_found("that release is no longer stored"))?;
-    Ok(Json(ReleaseDetail { release: info(row), manifest }))
+    let branches = engine.store.release_branches(&id).await?;
+    let deployed = engine.store.release_places(&id).await?.iter().map(super::deployments::PlaceInfo::of).collect();
+    Ok(Json(ReleaseDetail { release: info(row), branches, deployed, manifest }))
+}
+
+/// A stored release's file, as `ductus release` wrote it (the same id), its record of where it was
+/// deployed brought up to date: this database's deployments of it and what earlier files said
+/// (`deployed`, oldest first). What `ductus deploy ID --from URL --to URL` fetches to promote it
+/// to another engine, record included. Needs the `deploy` permission (it carries the code and
+/// every environment's encrypted secrets); audited as `release.download`.
+#[utoipa::path(
+    get, path = "/releases/{id}/file", operation_id = "download_release", tag = "releases",
+    params(("id" = String, Path, description = "The release id, or its first 12 characters")),
+    responses(
+        (status = 200, body = ReleaseArchive, content_type = "application/gzip", description = "The release file"),
+        (status = 404, body = super::ErrorBody),
+        (status = 403, body = super::ErrorBody)
+    )
+)]
+async fn file(engine: Eng, caller: Caller, Path(id): Path<String>) -> Result<Response, ApiError> {
+    caller.require_permission("deploy")?;
+    let id = find(&engine, &id).await?;
+    let contents = engine
+        .store
+        .release_contents(&id)
+        .await?
+        .ok_or_else(|| ApiError::not_found("that release is no longer stored"))?;
+    let places = engine.store.release_places(&id).await?;
+    let expected = crate::code::hex(&id);
+    let (name, bytes) = tokio::task::spawn_blocking(move || -> anyhow::Result<(String, Vec<u8>)> {
+        let files: Vec<release::File> =
+            contents.files.into_iter().map(|(path, bytes, _)| release::File::new(path, bytes)).collect();
+        let recomputed = crate::code::hex(&release::id(&files));
+        if recomputed != expected {
+            anyhow::bail!(
+                "the release stored as {} reads back as {}: the database was changed by hand",
+                release::short(&expected),
+                release::short(&recomputed)
+            );
+        }
+        let mut manifest: Manifest =
+            serde_json::from_value(contents.manifest).map_err(|e| anyhow::anyhow!("reading its manifest: {e}"))?;
+        for place in &places {
+            manifest.add_place(release::Place::from_store(place));
+        }
+        let name = format!("{}-{}.tar.gz", manifest.project, release::short(&expected));
+        Ok((name, release::to_bytes(&manifest, &contents.ancestry, &files)?))
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("writing the release file: {e}"))??;
+    let hex = crate::code::hex(&id);
+    let row = caller
+        .audit("release.download")
+        .subject(release::short(&hex))
+        .detail(serde_json::json!({ "environment": engine.environment, "bytes": bytes.len() }));
+    engine.store.record(&row).await?;
+    let disposition = format!("attachment; filename=\"{name}\"");
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "application/gzip".to_string()),
+            (axum::http::header::CONTENT_DISPOSITION, disposition),
+        ],
+        bytes,
+    )
+        .into_response())
 }
 
 #[derive(Deserialize, IntoParams)]

@@ -424,7 +424,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         Some(t) => {
             let from = t.predecessor().await?;
             tracing::info!(pid = from.pid, version = %from.version, "taking over from the running engine: getting ready beside it");
-            ownership::Owner::prepare(&store, me, queued.clone(), &from.instance, &lanes).await?
+            let releases = options.releases.is_some();
+            ownership::Owner::prepare(&store, me, queued.clone(), &from.instance, &lanes, releases).await?
         }
     });
     phases.mark("interfaces claimed, lanes checked");

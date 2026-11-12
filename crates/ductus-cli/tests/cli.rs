@@ -5183,6 +5183,216 @@ async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_proces
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
+/// Promotion and rollback (0.7.4.4.3), in the engines' own processes (so on every system): a file
+/// deployed to test gets test's record; `--from test --to prod` brings it, but prod requires `uat`
+/// too and refuses; with a `uat` record (hand-added: it's unsigned) it deploys. A release made on a
+/// feature branch is refused, `--force` or not. Rolled back: to the release before, not held to
+/// the rules, naming whose work it undoes; again: nothing earlier (the release left is skipped); to
+/// a release that never ran there: refused. The file from the engine carries every record.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_release_is_promoted_by_its_record_and_rolled_back() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (mllp, test_api, prod_api) = (free_port(), free_port(), free_port());
+    let (dir, name) = release_project(mllp);
+    std::fs::write(dir.path().join("environments/test.yaml"), "variables: {}\n").unwrap();
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "a test environment"]);
+    let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let work = tempfile::tempdir().unwrap();
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let (ann, bob) = {
+        let token = |who: &str| {
+            let token_name = format!("{name}-{who}");
+            let args = ["token", "create", &token_name, "--role", "operator", "--permission", "deploy"];
+            let (ok, out) = ductus(dir.path(), &args);
+            assert!(ok, "{out}");
+            out.lines().next().unwrap().to_string()
+        };
+        (token("ann"), token("bob"))
+    };
+    let (test_url, prod_url) = (format!("http://127.0.0.1:{test_api}"), format!("http://127.0.0.1:{prod_api}"));
+    let deploy = |token: &str, args: &[&str]| -> (bool, String) {
+        let out = Command::new(bin)
+            .arg("deploy")
+            .args(args)
+            .env("DUCTUS_API_TOKEN", token)
+            .env_remove("DUCTUS_FROM_TOKEN")
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let engine = |env: &str, api: u16, rules: &[&str]| -> (Child, std::path::PathBuf) {
+        let log = work.path().join(format!("{env}.log"));
+        let file_log = std::fs::File::create(&log).unwrap();
+        let releases = work.path().join(format!("{env}-releases"));
+        let child = Child(
+            Command::new(bin)
+                .args(["run", "--releases", &releases.to_string_lossy(), "--release-project", &project_name])
+                .args(["--env", env, "--threads", "1", "--api-listen", &format!("127.0.0.1:{api}")])
+                .args(rules)
+                .env("DUCTUS_DATABASE_URL", &db)
+                .env_remove("DUCTUS_CONTROL")
+                .env_remove("RUNTIME_DIRECTORY")
+                .env_remove("DUCTUS_PROJECT")
+                .stdout(file_log.try_clone().unwrap())
+                .stderr(file_log)
+                .spawn()
+                .unwrap(),
+        );
+        assert!(wait_for_log(&log, "started interfaces=0", 60), "{}", read(&log));
+        (child, log)
+    };
+    let (test_engine, test_log) = engine("test", test_api, &[]);
+    let (prod_engine, prod_log) =
+        engine("prod", prod_api, &["--deploy-requires", "test,uat", "--deploy-branches", "main,release/*"]);
+
+    // To test: the file gets test's record.
+    let a = release_json(dir.path(), &["-m", "first"]);
+    let (a_file, a_id) = (a["file"].as_str().unwrap(), a["id"].as_str().unwrap());
+    assert_eq!(a["git"]["branch"], "main");
+    let (ok, out) = deploy(&ann, &[a_file, "--to", &test_url, "-m", "to test"]);
+    assert!(ok, "{out}\n{}", read(&test_log));
+    assert!(out.contains("(project ") && out.contains(", branch main) to environment `test`"), "{out}");
+    assert!(out.contains(&format!("recorded in {a_file}: deployed to test")), "{out}");
+    let carried = ductus_runtime::release::read(Path::new(a_file)).unwrap().manifest;
+    assert_eq!((carried.id.as_str(), carried.deployed.len()), (a_id, 1), "the same id, one record");
+    assert_eq!(carried.deployed[0].environment, "test");
+
+    // `--from test --to prod`: fetched with its record, stored, refused (prod requires uat too).
+    let (ok, out) = deploy(&bob, &[&a_id[..12], "--from", &test_url, "--to", &prod_url, "-m", "promote"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains(&format!("fetched release {} from {test_url}", &a_id[..12])), "{out}");
+    assert!(out.contains("deployed to: test)") && out.contains("release ") && out.contains("on the engine"), "{out}");
+    assert!(out.contains("✗ this environment takes only releases deployed to uat first"), "{out}");
+    assert!(out.contains("it was deployed to test only") && !out.contains("gate:"), "{out}");
+    drop(test_engine);
+
+    // A uat record added by hand (unsigned: said in the docs), the file deployed: rules pass.
+    let mut bundle = ductus_runtime::release::read(Path::new(a_file)).unwrap();
+    let uat = ductus_runtime::release::Place { environment: "uat".into(), ..bundle.manifest.deployed[0].clone() };
+    assert!(bundle.manifest.add_place(ductus_runtime::release::Place { deployment: 1, ..uat }));
+    ductus_runtime::release::rewrite(Path::new(a_file), &bundle.manifest, &bundle.ancestry, &bundle.files).unwrap();
+    let (ok, out) = deploy(&ann, &[a_file, "--to", &prod_url, "-m", "to prod"]);
+    assert!(ok, "{out}\n{}", read(&prod_log));
+    assert!(out.contains("was stored on the engine before (1 record of where it went added)"), "{out}");
+    assert!(out.contains(&format!("recorded in {a_file}: deployed to prod")), "{out}");
+
+    // A feature branch's release: refused, and `--force` doesn't change that.
+    git(dir.path(), &["checkout", "-qb", "feature/x"]);
+    std::fs::write(dir.path().join("lib/codes.ts"), "export const LAB = \"LAB\"; // feature\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "feature"]);
+    let b = release_json(dir.path(), &["-m", "feature"]);
+    for extra in [&[][..], &["--force"][..]] {
+        let args = [&[b["file"].as_str().unwrap(), "--to", &prod_url, "-m", "x"][..], extra].concat();
+        let (ok, out) = deploy(&ann, &args);
+        assert!(!ok && out.contains("made on `feature/x`: merge it, then release from there"), "{out}");
+    }
+
+    // Merged (fast-forward), released on main: the same files, so the same release, now made on
+    // main too; Bob deploys it (records added by hand).
+    git(dir.path(), &["checkout", "-q", "main"]);
+    git(dir.path(), &["merge", "-q", "--ff-only", "feature/x"]);
+    let c = release_json(dir.path(), &["-m", "merged"]);
+    assert_eq!((&c["id"], &c["git"]["branch"]), (&b["id"], &serde_json::json!("main")));
+    let c_file = c["file"].as_str().unwrap();
+    let mut bundle = ductus_runtime::release::read(Path::new(c_file)).unwrap();
+    for (environment, deployment) in [("test", 2), ("uat", 3)] {
+        bundle.manifest.add_place(ductus_runtime::release::Place {
+            environment: environment.into(),
+            deployment,
+            ..uat_place(&carried)
+        });
+    }
+    ductus_runtime::release::rewrite(Path::new(c_file), &bundle.manifest, &bundle.ancestry, &bundle.files).unwrap();
+    let (ok, out) = deploy(&bob, &[c_file, "--to", &prod_url, "-m", "merged feature"]);
+    assert!(ok, "{out}\n{}", read(&prod_log));
+    assert!(out.contains(", branches feature/x, main) to environment `prod`"), "{out}");
+
+    // Rolled back (Ann): to A, not held to the rules, naming Bob's work it undoes.
+    let (ok, out) = deploy(&ann, &["--rollback", "--to", &prod_url]);
+    assert!(!ok && out.contains("say why") && out.contains("--rollback"), "{out}");
+    let (ok, out) = deploy(&ann, &["--rollback", "--to", &prod_url, "-m", "the merge broke the lab feed"]);
+    assert!(ok, "{out}\n{}", read(&prod_log));
+    assert!(out.starts_with("rolling back") && out.contains(&format!("rollback to release {}", &a_id[..12])), "{out}");
+    assert!(out.contains("· a rollback isn't held to this environment's rules"), "{out}");
+    assert!(out.contains(&format!("⚠ undoes {name}:")) && out.contains(&format!("by {name}-bob")), "{out}");
+    assert!(out.contains("gate: passed"), "the gate runs: {out}");
+    let got: serde_json::Value = reqwest::Client::new()
+        .get(format!("{prod_url}/api/v1/engine"))
+        .bearer_auth(&ann)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["deployment"]["release"], a_id, "{got}");
+
+    // Again: C was left by a rollback, A runs: nothing earlier. To D (stored, never ran here): refused.
+    let (ok, out) = deploy(&ann, &["--rollback", "--to", &prod_url, "-m", "again"]);
+    assert!(!ok && out.contains("no earlier release ran in `prod` to roll back to"), "{out}");
+    std::fs::write(dir.path().join("lib/codes.ts"), "export const LAB = \"LAB\"; // d\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "d"]);
+    let d = release_json(dir.path(), &["-m", "d"]);
+    let stored = reqwest::Client::new()
+        .post(format!("{prod_url}/api/v1/releases"))
+        .bearer_auth(&ann)
+        .header("Content-Type", "application/gzip")
+        .body(std::fs::read(d["file"].as_str().unwrap()).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert!(stored.status().is_success(), "{}", stored.text().await.unwrap());
+    let (ok, out) = deploy(&ann, &["--rollback", &d["id"].as_str().unwrap()[..12], "--to", &prod_url, "-m", "d"]);
+    assert!(!ok && out.contains("never ran in `prod`, so it isn't a rollback"), "{out}");
+
+    // The file from the engine carries every record; the release's page says where it went.
+    let client = reqwest::Client::new();
+    let bytes = client
+        .get(format!("{prod_url}/api/v1/releases/{a_id}/file"))
+        .bearer_auth(&ann)
+        .send()
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let fetched = ductus_runtime::release::read_bytes(&bytes, "fetched").unwrap();
+    let mut went: Vec<&str> = fetched.manifest.deployed.iter().map(|p| p.environment.as_str()).collect();
+    went.sort();
+    assert_eq!((fetched.manifest.id.as_str(), went), (a_id, vec!["prod", "test", "uat"]));
+    let page: serde_json::Value = client
+        .get(format!("{prod_url}/api/v1/releases/{a_id}"))
+        .bearer_auth(&ann)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(page["branches"], serde_json::json!(["main"]), "{page:#}");
+    assert_eq!(page["deployed"].as_array().map(Vec::len), Some(3), "{page:#}");
+
+    drop(prod_engine);
+    for who in ["ann", "bob"] {
+        let _ = ductus(dir.path(), &["token", "revoke", &format!("{name}-{who}")]);
+    }
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let ids: Vec<Vec<u8>> =
+        [&a, &b, &d].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
+    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
+}
+
+/// A record like `m`'s first, for hand-made records in tests.
+fn uat_place(m: &ductus_runtime::release::Manifest) -> ductus_runtime::release::Place {
+    ductus_runtime::release::Place { environment: "uat".into(), ..m.deployed[0].clone() }
+}
+
 /// A reload where there's no `systemctl reload` (0.7.4.4.2): `SIGHUP` hands the engine over in its
 /// own process to one on the project as it is now (before, it ended the engine); a project that
 /// can't start leaves the engine running; SIGTERM still stops it cleanly.

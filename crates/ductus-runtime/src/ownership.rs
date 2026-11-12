@@ -152,7 +152,16 @@ impl Owner {
     /// A takeover's start: the lock and the engine's record, nothing claimed (the engine it takes
     /// over from, `from`, still runs them), and `Ownership` not held. Refused as a start would be
     /// when another live engine runs any of `interfaces`, and when lanes go down (`lowered`).
-    pub async fn prepare(store: &Store, me: Me, interfaces: Vec<String>, from: &str, lanes: &[Lanes]) -> Result<Self> {
+    /// `releases`: release mode (a restart would run the release running now, so "restart instead"
+    /// isn't advice there).
+    pub async fn prepare(
+        store: &Store,
+        me: Me,
+        interfaces: Vec<String>,
+        from: &str,
+        lanes: &[Lanes],
+        releases: bool,
+    ) -> Result<Self> {
         let lock = store.lock_engine(&me.row(), None).await?;
         let owner = Self {
             key: lock.key,
@@ -182,7 +191,7 @@ impl Owner {
                 "instance": owner.me.instance,
                 "lowered": lowered.iter().map(|(i, before, now)| json!({ "interface": i, "before": before, "now": now })).collect::<Vec<_>>(),
             });
-            return Err(owner.refuse(store, detail, lowered_message(&lowered)).await);
+            return Err(owner.refuse(store, detail, lowered_message(&lowered, releases)).await);
         }
         Ok(owner)
     }
@@ -506,15 +515,26 @@ pub fn lowered(lanes: &[Lanes], applied: &HashMap<String, i32>) -> Vec<(String, 
 
 /// A handover can't lower lanes: the engine taken over from stores into every lane it has until
 /// it lets go, so whether messages wait in the lanes that go can only be known once it stopped.
-fn lowered_message(lowered: &[(String, i32, i32)]) -> String {
+fn lowered_message(lowered: &[(String, i32, i32)], releases: bool) -> String {
     let mut text = String::from("a handover can't lower an interface's lanes (`ordering`):\n");
     for (interface, before, now) in lowered {
         let _ = writeln!(text, "  {interface}: {before} → {now} lane{}", plural(*now as i64));
     }
     text.push_str(
         "The running engine stores into every lane it has until it lets go, so messages could be left in lanes\n\
-         nothing reads. Restart instead (`systemctl restart ductus`): the start checks the lanes that go for waiting messages.",
+         nothing reads. ",
     );
+    if releases {
+        // A restart in release mode runs the release that runs now: no way to apply this one yet.
+        text.push_str(
+            "In release mode a restart runs the release that runs now, so a release that lowers lanes can't be\n\
+             applied yet: release again with `ordering.partitions` as it runs (docs: releases, \"Lowering lanes\").",
+        );
+    } else {
+        text.push_str(
+            "Restart instead (`systemctl restart ductus`): the start checks the lanes that go for waiting messages.",
+        );
+    }
     text
 }
 
@@ -628,9 +648,12 @@ mod tests {
             [lanes("same", 64, true), lanes("lower", 32, true), lanes("unkeyed", 1, false), lanes("new", 4, true)];
         let found = lowered(&wanted, &applied);
         assert_eq!(found, vec![("lower".to_string(), 64, 32), ("unkeyed".to_string(), 8, 1)]);
-        let text = lowered_message(&found);
+        let text = lowered_message(&found, false);
         assert!(text.contains("  lower: 64 → 32 lanes\n  unkeyed: 8 → 1 lane\n"), "{text}");
         assert!(text.contains("systemctl restart ductus"), "{text}");
+        // In release mode a restart runs the release that runs now: no such advice.
+        let text = lowered_message(&found, true);
+        assert!(!text.contains("systemctl restart") && text.contains("can't be\napplied yet"), "{text}");
     }
 
     #[test]
