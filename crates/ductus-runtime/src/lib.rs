@@ -162,7 +162,12 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     let mut ended = run_one(root.to_path_buf(), database_url.to_string(), options).await;
     loop {
         ended = match ended {
-            Ok(Ended::Stopped) => return Ok(()),
+            Ok(Ended::Stopped) => {
+                // The last engine here ended: the ports close now, as a stop always closed them,
+                // not when the process exits (the Windows service reports Stopped before that).
+                systemd::close_all();
+                return Ok(());
+            }
             Ok(Ended::HandedOver(next)) => match next.task.await {
                 Ok(ended @ Ok(_)) => ended,
                 // It was ready but failed once this one let go (its interfaces untouched or
@@ -193,6 +198,7 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
                 // systemd (nothing while a takeover from another process hasn't taken over: the
                 // sockets are the old engine's).
                 systemd::abandon();
+                systemd::close_all();
                 return Err(e);
             }
         };

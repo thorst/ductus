@@ -125,6 +125,12 @@ pub fn abandon() {
     SOCKETS.abandon();
 }
 
+/// The last engine in this process ended: close this process's copies, so the ports are free
+/// before the process exits (systemd's store keeps its own, for the next start).
+pub fn close_all() {
+    SOCKETS.close_all();
+}
+
 /// A copy of every socket listening now, by name: what a handover to a new process passes on.
 #[cfg(target_os = "linux")]
 pub fn handover_sockets() -> io::Result<Vec<(String, std::os::fd::OwnedFd)>> {
@@ -375,6 +381,11 @@ impl Sockets {
         }
     }
 
+    fn close_all(&self) {
+        self.kept.lock().unwrap().clear();
+        self.open.lock().unwrap().clear();
+    }
+
     fn begin_takeover(&self) {
         *self.fresh.lock().unwrap() = Some(HashSet::new());
     }
@@ -475,6 +486,22 @@ mod tests {
         sockets.release(&name("127.0.0.1", c));
         drop(new_c);
         assert!(free(c), "a drain after the takeover closes the socket");
+    }
+
+    /// A plain stop keeps the copies (a start again may follow); once the last engine ended they
+    /// close, so the ports are free before the process exits (a Windows service's restart).
+    #[tokio::test]
+    async fn the_ports_close_once_the_last_engine_ended() {
+        let sockets = Sockets::new(None, Vec::new(), true);
+        let port = free_port();
+        sockets.keep_only([name("127.0.0.1", port)].into());
+        let listener = sockets.listen("127.0.0.1", port).await.unwrap();
+        sockets.stopping(true);
+        sockets.release(&name("127.0.0.1", port));
+        drop(listener);
+        assert!(!free(port), "kept while a start again may follow");
+        sockets.close_all();
+        assert!(free(port), "free once the last engine ended");
     }
 
     /// The start again after a failed takeover (or any start in this process after a stop):
