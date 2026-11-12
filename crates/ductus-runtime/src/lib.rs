@@ -424,11 +424,12 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             ownership::Owner::prepare(&store, me, queued.clone(), &from.instance).await?
         }
     });
+    phases.mark(if takeover.is_some() { "ready to take the interfaces" } else { "interfaces claimed" });
     // Each interface's lanes, a generation added where `ordering` changed: after the claim, and in
     // a takeover before it receives (what it stores goes to the new lanes, which only it reads; a
     // takeover that fails leaves them listed, for the next start to read).
     let mut layouts = lanes::start(&store, &wanted).await?;
-    phases.mark("interfaces claimed, lanes decided");
+    phases.mark("lanes decided");
     // The company's documentation fields: a broken docs-schema.yaml is for `ductus validate` to report,
     // not a reason to stop the engine. The snapshot is for SQL reports, so it never blocks startup either.
     let docs = ductus_core::docs::Schema::load(root).unwrap_or_else(|e| {

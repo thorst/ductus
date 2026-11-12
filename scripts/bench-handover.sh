@@ -16,6 +16,10 @@
 # engine's log. Also reports the process's memory and threads, settled before the first round and
 # after the last (an engine that ended must leave nothing behind), and its peak (both engines run
 # while they overlap).
+#
+# LANES=1 (0.7.4.4.4): each handover also changes every interface's lanes (8 → 4 → 8 …), so every
+# round adds a lane generation to all 1,001 while the sender sends; reports how many interfaces'
+# old lanes settled (the log's "lanes settled") and the slowest. Order is the receiver's check.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
@@ -73,6 +77,10 @@ sleep 3
 memory() { awk '/^VmRSS/ { rss = $2 } /^VmHWM/ { peak = $2 } /^Threads/ { t = $2 } END { printf "%.0f MB, %d threads (peak so far %.0f MB)", rss / 1024, t, peak / 1024 }' "/proc/$1/status"; }
 [ "${IN_PROCESS:-0}" = 1 ] && echo "   the process before the first round: $(memory $ENGINE)"
 for round in $(seq 1 "$ROUNDS"); do
+  if [ "${LANES:-0}" = 1 ]; then
+    lanes=$((round % 2 == 1 ? 4 : 8))
+    sed -i -E "s/partitions: [0-9]+/partitions: $lanes/" "$WORK"/interfaces/*/interface.yaml
+  fi
   if [ "${IN_PROCESS:-0}" = 1 ]; then
     done_before=$(grep -c 'handover: handed over' "$WORK/engine.log" || true)
     lines_before=$(wc -l <"$WORK/engine.log")
@@ -129,6 +137,14 @@ for _ in $(seq 1 120); do
   [ "$left" = 0 ] && break
   sleep 0.5
 done
+if [ "${LANES:-0}" = 1 ]; then
+  sleep 2
+  settled=$(grep -c "lanes settled" "$WORK/engine.log" || true)
+  slowest=$(grep -o 'lanes settled.* took=[0-9.]*m*s' "$WORK/engine.log" | grep -o 'took=[0-9.]*m*s' | sed 's/took=//' |
+    awk '{ v = $1; if (v ~ /µs$/) { sub(/µs$/, "", v); v /= 1000000 } else if (v ~ /ms$/) { sub(/ms$/, "", v); v /= 1000 } else sub(/s$/, "", v); if (v > m) m = v } END { printf "%.2f s", m }')
+  generations=$(PGTZ=UTC psql "$DUCTUS_DATABASE_URL" -Atc "SELECT count(*) FROM lane_generations WHERE interface LIKE '$PREFIX-%'")
+  echo "   lanes: $settled interface changes settled (slowest $slowest after its engine started); $generations generations left for $COUNT interfaces"
+fi
 pkill -INT -f "ductus sink --port $SINK"
 sleep 0.5
 echo "   receiver: $(tail -1 "$WORK/sink.log")"

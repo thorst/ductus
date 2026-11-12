@@ -453,11 +453,12 @@ pub fn decide(
 /// Read what's recorded and decide (writing nothing): the start's reading, and `validate`'s.
 pub async fn read(store: &Store, wanted: &[Wanted]) -> Result<Decided> {
     let names: Vec<String> = wanted.iter().map(|w| w.interface.clone()).collect();
+    let (rows, applied) = store.lanes_recorded(&names).await?;
     let mut generations: HashMap<String, Vec<Generation>> = HashMap::new();
-    for row in store.lane_generations(&names).await? {
+    for row in rows {
         generations.entry(row.interface.clone()).or_default().push(Generation::of(&row));
     }
-    let applied: HashMap<String, i32> = store.applied_lanes(&names).await?.into_iter().collect();
+    let applied: HashMap<String, i32> = applied.into_iter().collect();
     let adopt = to_adopt(wanted, &generations, &applied);
     let highest: HashMap<String, i32> = if adopt.is_empty() {
         HashMap::new()
@@ -468,33 +469,45 @@ pub async fn read(store: &Store, wanted: &[Wanted]) -> Result<Decided> {
 }
 
 /// At start, after the claim (a takeover: before it receives): each interface's lanes, a
-/// generation added where `ordering` changed, written and told (log and audit).
+/// generation added where `ordering` changed, written; told (log and audit) beside the start, which
+/// doesn't need it (1,001 changes' audit rows written one by one took ~3.7 s).
 pub async fn start(store: &Store, wanted: &[Wanted]) -> Result<HashMap<String, Layout>> {
     let decided = read(store, wanted).await?;
     store.write_lanes(&decided.writes).await?;
     if !decided.changes.is_empty() {
-        let names: Vec<String> = decided.changes.iter().map(|c| c.interface.clone()).collect();
-        let waiting: HashMap<String, i64> = store.waiting_by_interface(&names).await?.into_iter().collect();
-        for c in &decided.changes {
-            let waiting = waiting.get(&c.interface).copied().unwrap_or(0);
-            tracing::info!(
-                interface = %c.interface,
-                before = ?c.before,
-                now = c.now,
-                key_changed = c.key_changed,
-                waiting,
-                "lanes changed: new messages go to the new lanes; the {waiting} waiting in the old ones are sent first, and a key's new messages wait behind its older ones"
-            );
-            let audit = Audit::new(By::engine(), "interface.lanes_changed").interface(&c.interface).detail(json!({
-                "before": c.before, "now": c.now, "key_changed": c.key_changed, "adopted": c.adopted,
-                "waiting": waiting, "first_lane": c.first_lane,
-            }));
-            if let Err(e) = store.record(&audit).await {
-                tracing::error!(error = %format!("{e:#}"), interface = %c.interface, "could not write the audit log (lanes changed)");
-            }
-        }
+        tokio::spawn(tell(store.clone(), decided.changes));
     }
     Ok(decided.layouts)
+}
+
+/// Log and audit the lane changes a start made, with how many messages wait.
+async fn tell(store: Store, changes: Vec<Change>) {
+    let names: Vec<String> = changes.iter().map(|c| c.interface.clone()).collect();
+    let waiting: HashMap<String, i64> = match store.waiting_by_interface(&names).await {
+        Ok(w) => w.into_iter().collect(),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "couldn't count what waits in the old lanes");
+            HashMap::new()
+        }
+    };
+    for c in &changes {
+        let waiting = waiting.get(&c.interface).copied().unwrap_or(0);
+        tracing::info!(
+            interface = %c.interface,
+            before = %c.before.map_or_else(|| "not recorded".to_string(), |b| b.to_string()),
+            now = c.now,
+            key_changed = c.key_changed,
+            waiting,
+            "lanes changed: new messages go to the new lanes; the {waiting} waiting in the old ones are sent first, and a key's new messages wait behind its older ones"
+        );
+        let audit = Audit::new(By::engine(), "interface.lanes_changed").interface(&c.interface).detail(json!({
+            "before": c.before, "now": c.now, "key_changed": c.key_changed, "adopted": c.adopted,
+            "waiting": waiting, "first_lane": c.first_lane,
+        }));
+        if let Err(e) = store.record(&audit).await {
+            tracing::error!(error = %format!("{e:#}"), interface = %c.interface, "could not write the audit log (lanes changed)");
+        }
+    }
 }
 
 /// A handover failed while this engine still had its interfaces (`interfaces`: each with its

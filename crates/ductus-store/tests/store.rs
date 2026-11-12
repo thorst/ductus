@@ -2024,6 +2024,11 @@ async fn lane_generations_are_recorded_retired_and_resends_go_to_the_newest() {
         rows.iter().map(|g| (g.first_lane, g.lanes, g.key.as_deref(), g.end())).collect();
     assert_eq!(got, [(0, 64, Some("PID-3.1"), 64), (64, 32, Some("PID-18"), 96)]);
     assert_eq!(store.applied_lanes(&names).await.unwrap(), [(t.name.clone(), 96)]);
+    // Both in one statement, as a start reads them; an interface with nothing recorded has neither.
+    let unknown = format!("{}-never-ran", t.name);
+    let (both, applied) = store.lanes_recorded(&[t.name.clone(), unknown]).await.unwrap();
+    assert_eq!(both, rows);
+    assert_eq!(applied, [(t.name.clone(), 96)]);
     // A key recorded only where none was (the generations an upgrade made from the lane count).
     let keys = LaneWrites { keys: vec![(t.name.clone(), 0, "other".into())], ..Default::default() };
     store.write_lanes(&keys).await.unwrap();

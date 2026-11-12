@@ -844,7 +844,30 @@ lanes are sent first, and a patient's new messages wait behind their older ones
 Here prod is rolled back from 8 lanes to 2 while a sender sends and the receiver is down
 (`scripts/demo-promote.sh`, step 11):
 
-<<DEMO-OUTPUT>>
+```text
+waiting on prod: 62; lanes (first+count): 2+8
+$ DUCTUS_API_TOKEN=$OPS_PROD ductus deploy --rollback --to $PROD -m "8 lanes broke the lab feed"
+rolling back: the gate runs, then the handover…
+rollback to release 7fc9677466dd (project integrations, branch main) to environment `prod`
+…
+gate: passed in 0.9 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+  …
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 264 ms and receives beside this one: stopping this one
+  this engine stopped in 8 ms and let go of its interfaces: the new one takes them
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 128 ms
+changed 1 interface:
+  promote-demo b2d89c0907a5 → 0db7a1e1454e
+
+waiting on prod: 200; lanes (first+count): 2+8 10+2
+```
+
+The 8 lanes are numbered 2–9 (the first release's 2 lanes settled when release 4 started with
+nothing waiting), the 2 new ones 10–11. Once the receiver is back:
+
+```text
+waiting on prod: 0; lanes (first+count): 10+2
+final: received 200 | unique 200 | duplicates 0 | out of order 0 | patients 10
+```
 
 The gate's `validate` notes the change (`DUC311`), never refuses it. Once the receiver is back,
 every message arrives once and each patient's in order, and the old lanes settle

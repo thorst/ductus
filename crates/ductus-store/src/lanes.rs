@@ -87,6 +87,46 @@ impl Store {
         .context("reading the interfaces' lanes")
     }
 
+    /// What a start reads about lanes, in one statement (two cost a second ~40 ms round trip at
+    /// 1,001 interfaces): the generations of `interfaces` (by interface, oldest first) and the end
+    /// of lanes `interface_applied` has for each (`Store::applied_lanes`).
+    pub async fn lanes_recorded(&self, interfaces: &[String]) -> Result<(Vec<LaneGeneration>, Vec<(String, i32)>)> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            interface: String,
+            applied: Option<i32>,
+            first_lane: Option<i32>,
+            lanes: Option<i32>,
+            key: Option<String>,
+            mixed: Option<bool>,
+            since: Option<DateTime<Utc>>,
+        }
+        let rows: Vec<Row> = sqlx::query_as(
+            "SELECT n.interface, a.lanes AS applied, g.first_lane, g.lanes, g.key, g.mixed, g.since
+             FROM unnest($1::text[]) AS n(interface)
+             LEFT JOIN interface_applied a ON a.interface = n.interface
+             LEFT JOIN lane_generations g ON g.interface = n.interface
+             ORDER BY n.interface, g.first_lane",
+        )
+        .bind(interfaces)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the interfaces' lanes")?;
+        let mut generations = Vec::new();
+        let mut applied: Vec<(String, i32)> = Vec::new();
+        for r in rows {
+            if let Some(a) = r.applied
+                && applied.last().is_none_or(|(i, _)| *i != r.interface)
+            {
+                applied.push((r.interface.clone(), a));
+            }
+            if let (Some(first_lane), Some(lanes), Some(mixed), Some(since)) = (r.first_lane, r.lanes, r.mixed, r.since) {
+                generations.push(LaneGeneration { interface: r.interface, first_lane, lanes, key: r.key, mixed, since });
+            }
+        }
+        Ok((generations, applied))
+    }
+
     /// The highest lane anything waits in, per interface of `interfaces` (only those with
     /// something waiting). One probe per destination down the pending index.
     pub async fn highest_waiting_lanes(&self, interfaces: &[String]) -> Result<Vec<(String, i32)>> {
