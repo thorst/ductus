@@ -617,7 +617,8 @@ changed 1 interface:
 
 A gate that finds problems refuses the deploy (exit 1, the problems listed, the check kept with
 the release). A new engine that can't take over leaves the running one as it was, as any
-handover does.
+handover does. For the rare failure after the old engine let go, see
+[Troubleshooting](../troubleshooting.md#the-engine-stopped-during-a-deploy-or-reload).
 
 **On Windows, in a container, under a plain `ductus run`**, the same deploy hands over inside the
 engine's own process: the steps say "in this process" instead of a pid, and the service or the

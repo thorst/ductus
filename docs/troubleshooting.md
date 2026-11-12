@@ -380,6 +380,42 @@ On Windows, a service account with a password leaves the service stopped after a
 upgrade until `ductus service account NAME --start` (event 1005); a missing "Log on as a service"
 right is [a Group Policy matter](nuances/windows.md#log-on-as-a-service-the-installer-grants-it-group-policy-can-take-it-away-level-3).
 
+## The engine stopped during a deploy or reload
+
+**When:** on Windows, in a container or under a plain `ductus run`, where a deploy or reload hands
+over [inside the engine's own process](operate/releases.md#deploy). A new engine that can't start
+or can't get ready never gets this far: the running engine just keeps going. This section is for
+the rare case after that: the new engine was ready, the old one let go of its interfaces, and
+*then* the new one failed (for example, the database went away while it claimed them).
+
+**What the engine does first:** it starts again in the same process, on the same ports (senders
+wait; they aren't refused). In release mode it starts the release that ran before, because the
+failed deploy was never recorded. Without release mode it starts the project's files as they
+are. The log says:
+
+```text
+ERROR the new engine failed after the old one let go: starting the release that ran before again in this process error=...
+```
+
+If that start works, nothing else is needed. Find the cause in the `error=` text, fix it, then
+deploy or reload again.
+
+**When the start again fails too,** the engine exits with code 1 and the ports close (senders are
+refused until it's back):
+
+| Where | What you see | What to do |
+|---|---|---|
+| Windows service | Stopped, event 1003 with both errors. The recovery settings don't restart it (it reported its own stop) | Fix the cause, then `Start-Service Ductus` |
+| Container | Exited with code 1. A restart policy (`restart: unless-stopped`) starts it again by itself | Fix the cause; without a restart policy, `docker start <container>` |
+| `ductus run` | The command ended with both errors | Fix the cause, then run it again |
+
+In release mode, the next start runs the release that ran before the failed deploy: the last
+deployment recorded ([Deployments](operate/deployments.md); the Overview shows it). Without release mode, it runs the files as they are now. If the new files
+are the cause, put the previous ones back first (`git checkout` the commit that ran).
+
+No test can make this happen on demand yet: the engine has no hooks that fail it at that point.
+It was checked by reading the code, not by a test.
+
 ## Other symptoms
 
 | Symptom | Where to look |
