@@ -46,7 +46,7 @@ use anyhow::{Context, Result, bail};
 use ductus_core::config::{Destination, Isolation, Source};
 use ductus_core::{Environment, InterfaceConfig};
 use ductus_store::Store;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Notify;
@@ -82,12 +82,17 @@ pub struct EngineOptions {
     pub api_listen: Option<String>,
     /// How long a stop may take before the engine exits anyway (see `stop`).
     pub stop_timeout: Duration,
-    /// Another way to ask for the stop a signal asks for: the Windows service manager's Stop.
-    pub stop_request: Option<std::sync::Arc<tokio::sync::Notify>>,
+    /// Another way to ask for the stop a signal asks for: the Windows service manager's Stop
+    /// (cancelled once; every engine in the process heeds it, a handover's new one too).
+    pub stop_request: Option<tokio_util::sync::CancellationToken>,
     /// Called once when every interface and the API are up (the service reports Running then).
     pub on_started: Option<Box<dyn FnOnce() + Send>>,
-    /// Listen for `ductus handover` (`handover::control_path`): `ductus run` does.
+    /// Take handovers (`ductus handover`, deploys, reloads): `ductus run` does, `ductus dev` not.
     pub control: bool,
+    /// How to start an engine again in this process, with its settings read again (the CLI's
+    /// `run` gives one): for a handover without a new process (`handover`) and for a start again
+    /// after a new engine failed once the old one let go. None: no in-process handover.
+    pub rebuild: Option<handover::Rebuild>,
     /// Take over from the running engine that started this one (`handover`).
     pub takeover: Option<Arc<handover::Takeover>>,
     /// `ductus dev --inspect`: interfaces a debugger may attach to (never `ductus run`).
@@ -138,6 +143,7 @@ impl Default for EngineOptions {
             stop_request: None,
             on_started: None,
             control: false,
+            rebuild: None,
             takeover: None,
             inspect: None,
             releases: None,
@@ -147,24 +153,107 @@ impl Default for EngineOptions {
 
 /// Start every interface under `root` and run until Ctrl-C or SIGTERM (or until drained, when a
 /// drain asked to stop, or handed over to a new engine: `handover`); then stop cleanly (`stop`).
+/// A handover in this process goes on with the new engine: this returns when the last engine
+/// that ran here ended.
 pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Result<()> {
     handover::remember_executable();
     systemd::init();
-    let takeover = options.takeover.clone();
-    let result = run_engine(root, database_url, options).await;
-    if let Err(e) = &result {
-        // A takeover that failed: the old engine says why (and goes on, if it hadn't let go yet).
-        if let Some(t) = takeover {
-            t.failed(&format!("{e:#}")).await;
-        }
-        // A failed or refused start: senders are refused while it's down, as without systemd
-        // (nothing while a takeover hasn't taken over: the sockets are the old engine's).
-        systemd::abandon();
+    let (rebuild, stop) = (options.rebuild.clone(), options.stop_request.clone());
+    let mut ended = run_one(root.to_path_buf(), database_url.to_string(), options).await;
+    loop {
+        ended = match ended {
+            Ok(Ended::Stopped) => return Ok(()),
+            Ok(Ended::HandedOver(next)) => match next.task.await {
+                Ok(ended @ Ok(_)) => ended,
+                // It was ready but failed once this one let go (its interfaces untouched or
+                // released again): a plain start in this process, on the same sockets (senders
+                // wait). The deployment it would have recorded isn't, so a release-mode start
+                // runs the release that ran before.
+                failed => {
+                    let why = match failed {
+                        Ok(Err(e)) => format!("{e:#}"),
+                        Err(e) => format!("it panicked: {e}"),
+                        Ok(Ok(_)) => unreachable!(),
+                    };
+                    let what = if next.releases { "the release that ran before" } else { "the project as it is" };
+                    tracing::error!(error = %why, "the new engine failed after the old one let go: starting {what} again in this process");
+                    match rebuild.as_ref().map(|rebuild| rebuild()) {
+                        Some(Ok(handover::Restart { root, database_url, mut options })) => {
+                            // The service manager's stop reaches it too.
+                            options.stop_request = stop.clone();
+                            run_one(root, database_url, options).await
+                        }
+                        Some(Err(e)) => Err(e.context("reading the engine's settings again to start it again")),
+                        None => Err(anyhow::anyhow!("{why}")),
+                    }
+                }
+            },
+            Err(e) => {
+                // A failed or refused start: senders are refused while it's down, as without
+                // systemd (nothing while a takeover from another process hasn't taken over: the
+                // sockets are the old engine's).
+                systemd::abandon();
+                return Err(e);
+            }
+        };
     }
-    result
 }
 
-async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions) -> Result<()> {
+/// After an in-process handover, once the engine taken over from has ended: give the memory it
+/// freed back to the system. glibc keeps what a thread's arena freed for that arena, and the
+/// ended engine's threads are gone, so without this the process grew a few MB at every handover
+/// (measured at 1,001 interfaces: 94 → 221 MB over ten; with it: see `bench-handover.sh`
+/// IN_PROCESS=1). Once, beside the engine, off the async threads; nothing elsewhere (other
+/// allocators return memory themselves).
+fn give_back_freed_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    tokio::spawn(async {
+        tokio::time::sleep(Duration::from_secs(3)).await;
+        // SAFETY: malloc_trim has no preconditions; it only returns free pages to the system.
+        let _ = tokio::task::spawn_blocking(|| unsafe { libc::malloc_trim(0) }).await;
+    });
+}
+
+/// How an engine's run ended.
+pub(crate) enum Ended {
+    /// It stopped (a signal, the service manager, a drain that stops, a handover to a new
+    /// process): the process ends.
+    Stopped,
+    /// A new engine in this process took over: the run goes on with it.
+    HandedOver(handover::Next),
+}
+
+/// One engine's run, from its start to its end. A takeover that fails tells the engine it took
+/// over from why; in this process, what it bound anew closes then (the sockets it shares with
+/// the running engine stay).
+///
+/// Boxed with its `Send` said: an engine's run may start the next one's (`handover`), and the
+/// compiler can't prove that cycle `Send` by itself.
+fn run_one(
+    root: PathBuf,
+    database_url: String,
+    options: EngineOptions,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<Ended>> + Send>> {
+    Box::pin(async move {
+        let takeover = options.takeover.clone();
+        let result = run_engine(&root, &database_url, options).await;
+        if let (Err(e), Some(t)) = (&result, &takeover) {
+            // The old engine says why (and goes on, if it hadn't let go yet).
+            t.failed(&format!("{e:#}")).await;
+            if t.in_process() {
+                systemd::abandon_takeover();
+            }
+        }
+        result
+    })
+}
+
+async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions) -> Result<Ended> {
+    // Everything this engine started that outlives a step (listeners, schedules, file pickup,
+    // hourly jobs, worker threads, the API) ends with it, however it ends: in a process that goes
+    // on (an in-process handover, a start again) nothing of an engine that ended may linger.
+    let ended = tokio_util::sync::CancellationToken::new();
+    let _end = ended.clone().drop_guard();
     let mut phases = Phases::new();
     // Release mode: the release to run comes from the database (a deploy's handover names it),
     // unpacked into its folder the first time; that folder is the project from here on. The
@@ -360,7 +449,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         .collect();
     // What the audit log's hourly job needs: how long each interface keeps its messages.
     let retention_days: Vec<(String, i32)> = configured.iter().map(|c| (c.name.clone(), i32::from(c.days))).collect();
-    let retention = retention::Retention::new(store.clone(), configured).await.context("reading retention")?;
+    let retention =
+        retention::Retention::new(store.clone(), configured, ended.clone()).await.context("reading retention")?;
     // Which interfaces have messages waiting, known once they're this engine's (`take_charge`).
     let waiting = Arc::new(worker::Waiting::new());
     // Each interface's code version id, saved once computed (below): workers record it with every
@@ -424,6 +514,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         .collect();
     // The engine is stopping: workers finish what's in hand, save it and end (see `stop`).
     let stopping = tokio_util::sync::CancellationToken::new();
+    // A start that fails from here on stops the worker threads it started (a stop cancels it too).
+    let _stop_workers = stopping.clone().drop_guard();
     let activity =
         activity::Activity::start(store.clone(), watched, stopping.clone()).await.context("loading last activity")?;
     phases.mark("last activity loaded");
@@ -570,12 +662,16 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         )?);
     }
     drop(ready_tx);
-    // Fail fast if any interface's code doesn't load, before accepting any messages.
+    // Fail fast if any interface's code doesn't load, before accepting any messages. Waited for
+    // off the async threads: another engine in this process (a handover's) runs on them meanwhile.
+    let answers = tokio::task::spawn_blocking(move || ready_rx.iter().take(jobs).collect::<Vec<_>>())
+        .await
+        .context("waiting for the interface workers to load their code")?;
     let mut failed = Vec::new();
     let mut reported = 0;
     // The files each interface's code loaded: its code version's (`code`).
     let mut loaded = std::collections::HashMap::new();
-    for (name, result) in ready_rx.iter().take(jobs) {
+    for (name, result) in answers {
         reported += 1;
         match result {
             Ok(files) => {
@@ -653,16 +749,20 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             Source::Mllp { host, port, tls, allow } => {
                 let label = format!("interface `{}` (MLLP)", config.name);
                 let admission = admission(&label, host, *port, allow.as_ref())?;
-                ingest::spawn_mllp(intake(), server_tls(tls, &[])?, admission).await?
+                ingest::spawn_mllp(intake(), server_tls(tls, &[])?, admission, ended.clone()).await?
             }
             Source::File(f) | Source::Sftp(f) => {
                 let server = f.server.as_deref().and_then(sftp_server);
                 let watcher = files::FileWatcher::new(intake(), server, owner.ownership.clone())?;
-                tokio::spawn(watcher.run());
+                tokio::spawn(ended.clone().run_until_cancelled_owned(watcher.run()));
             }
             Source::Schedule(s) => {
                 let timing = ductus_core::schedule::Timing::new(s)?;
-                tokio::spawn(schedule::run(intake(), timing, owner.ownership.clone()));
+                tokio::spawn(ended.clone().run_until_cancelled_owned(schedule::run(
+                    intake(),
+                    timing,
+                    owner.ownership.clone(),
+                )));
             }
             Source::Http { .. } => {} // served below, with the other HTTP interfaces on its port
             Source::Internal => {}    // other interfaces' workers store its messages (routes)
@@ -712,6 +812,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         }),
         host: audit::host_name(),
         releases: releases.clone(),
+        ended: ended.clone(),
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse
@@ -762,7 +863,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         && let Some(start) = background.take()
     {
         start(engine.clone(), None);
-        settle_in(engine.retention.clone());
+        settle_in(engine.retention.clone(), &ended);
         record(&engine);
     }
     let mut api_server = None;
@@ -799,8 +900,13 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         owner.hold();
         let sending_paused = stop_took.unwrap_or_default() + released.elapsed();
         phases.mark("sending");
-        settle_in(engine.retention.clone());
-        let handed = handover::HandedOver { from: t.predecessor().await?, at: chrono::Utc::now(), sending_paused };
+        settle_in(engine.retention.clone(), &ended);
+        let handed = handover::HandedOver {
+            from: t.predecessor().await?,
+            at: chrono::Utc::now(),
+            sending_paused,
+            in_process: t.in_process(),
+        };
         tracing::info!(
             from_pid = handed.from.pid,
             from_version = %handed.from.version,
@@ -813,6 +919,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         record(&engine);
         let _ = engine.handed_over.set(handed);
         t.running(sending_paused).await;
+        if t.in_process() {
+            give_back_freed_memory();
+        }
     }
     // Messages left pending with nothing pending for them (after a crash, or reconcile's
     // changes): workers don't wait for their overall status, so it's set after the start.
@@ -854,7 +963,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     }
 
     let maintenance = store.clone();
-    tokio::spawn(async move {
+    tokio::spawn(ended.clone().run_until_cancelled_owned(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(3600)).await;
             if let Err(e) = maintenance.ensure_partitions(3).await {
@@ -866,11 +975,11 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 tracing::error!(error = %e, "dedupe key cleanup failed");
             }
         }
-    });
+    }));
 
     let requested = async {
         match &options.stop_request {
-            Some(request) => request.notified().await,
+            Some(request) => request.cancelled().await,
             None => std::future::pending().await,
         }
     };
@@ -880,7 +989,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         tokio::task::spawn_blocking(move || deploy::tidy(&dir, &keep));
     }
     owner.watch(store.clone(), stopping.clone());
-    let mut control = handover::Control::listen(options.control);
+    let mut control = handover::Control::listen(options.control, options.rebuild.clone(), options.stop_request.clone());
     // A deploy (`POST /deployments`) asks for its handover here, as `ductus handover` does.
     if let Some(asker) = control.asker() {
         let _ = engine.asker.set(asker);
@@ -939,21 +1048,24 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     owner.release(&store).await;
     // Before the new engine takes over: its start reads how this run ended.
     let why = match &successor {
+        Some(s) if s.in_process() => format!("handed over to a new engine in this process (ductus {})", s.version()),
         Some(s) => format!("handed over to pid {} (ductus {})", s.pid(), s.version()),
         None => why.to_string(),
     };
     audit::stopped(&engine, &why, forced).await;
+    let mut next = None;
     if let Some(successor) = successor {
-        successor.released(stop_took).await;
+        next = successor.released(stop_took).await;
     }
-    // Answer the API requests in flight (a drain's own, say). Live-update streams never end by
-    // themselves, hence the limit.
+    // Answer the API requests in flight (a drain's own, say; a deploy's). Live-update streams
+    // never end by themselves, hence the limit: the server ends with the engine (`ended`).
     if let Some(server) = api_server {
         let _ = tokio::time::timeout(Duration::from_secs(5), server).await;
     }
-    match owner.taken_why() {
-        Some(why) => Err(ownership::Refused(why).into()),
-        None => Ok(()),
+    match (owner.taken_why(), next) {
+        (Some(why), _) => Err(ownership::Refused(why).into()),
+        (None, Some(next)) => Ok(Ended::HandedOver(next)),
+        (None, None) => Ok(Ended::Stopped),
     }
 }
 
@@ -1055,8 +1167,8 @@ async fn take_charge(store: &Store, charge: &Charge, phases: &mut Phases) -> Res
 /// recorded in the audit log only within its first minute, so a retry never records it twice),
 /// and the retention tasks (changes, drops) start once it's applied. The documentation snapshot
 /// is saved with the deployment, beside the start too.
-fn settle_in(retention: Arc<retention::Retention>) {
-    tokio::spawn(async move {
+fn settle_in(retention: Arc<retention::Retention>, ended: &tokio_util::sync::CancellationToken) {
+    tokio::spawn(ended.clone().run_until_cancelled_owned(async move {
         let started = std::time::Instant::now();
         loop {
             match retention.apply().await {
@@ -1068,7 +1180,7 @@ fn settle_in(retention: Arc<retention::Retention>) {
             }
         }
         tracing::debug!(took = ?started.elapsed(), "retention applied beside the start");
-    });
+    }));
 }
 
 /// Stop in order, so nothing is left half done: close every interface's gate (listeners close,

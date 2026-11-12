@@ -273,8 +273,10 @@ again; `C:\ProgramData\Ductus` (settings, project, logs) is never touched. The e
 a few seconds (an MSI upgrade measured **3.1–3.5 s**: a few connections refused or reset,
 nothing lost), so choose a quiet moment
 ([nuance](nuances/upgrades.md#windows-and-containers-a-restart-is-a-short-gap-level-2)). A
-handover like Linux's is planned for v1.0. Details (a service stopped on purpose, a password
-account, Restart Manager): [Windows installer](install/windows.md#upgrade).
+project change or a deploy hands over without a gap (`ductus handover`, in the service's own
+process), but a new version needs the new program, so the MSI restarts the service: a handover
+to a new version on Windows is planned for v1.0. Details (a service stopped on purpose, a
+password account, Restart Manager): [Windows installer](install/windows.md#upgrade).
 
 ### The portable archive
 
@@ -286,9 +288,12 @@ sudo systemctl reload ductus
 ```
 
 Without the package's service (`ductus run` under your own supervisor), stop and start it with
-the new program; the senders see a short gap. To hand over there too, start the engine with
-`DUCTUS_CONTROL=/some/dir/control` and run `ductus handover --control /some/dir/control` after
-replacing the program ([nuance](nuances/upgrades.md#deploying-project-changes-systemctl-reload-level-1)).
+the new program; the senders see a short gap. To hand over to the new program there too, start
+the engine with `DUCTUS_CONTROL=/some/dir/control` and run `ductus handover --control
+/some/dir/control` after replacing the program
+([nuance](nuances/upgrades.md#deploying-project-changes-systemctl-reload-level-1)). Without a
+control socket, `SIGHUP` reloads the project in the engine's own process, but on the program it
+started with ([nuance](nuances/upgrades.md#sighup-reloads-the-engine-it-no-longer-ends-it-level-2)).
 
 ### Docker
 

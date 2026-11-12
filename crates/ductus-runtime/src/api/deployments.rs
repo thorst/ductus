@@ -9,8 +9,10 @@
 //! (`ductus release check` against this environment, as `POST /releases/{id}/check`), or a passing
 //! check it may reuse (the pre-run: same release, environment, database and Ductus version, within
 //! `DUCTUS_DEPLOY_REUSE_CHECK`, nothing deployed here since); then the handover, asked from inside
-//! the engine as `ductus handover` asks over its socket. The engine being replaced answers once the
-//! new one sends (or failed, and it goes on), with what the new engine recorded.
+//! the engine as `ductus handover` asks over its socket: to a new process under the package's
+//! systemd unit, else in this process (Windows, containers, a plain `ductus run`). The engine being
+//! replaced answers once the new one sends (or failed, and it goes on), with what the new engine
+//! recorded.
 
 use super::releases::{CHECKING, CheckInfo, check_info, find, run_check};
 use super::{ApiError, Caller, Eng};
@@ -188,9 +190,8 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
         return refuse(report, StatusCode::CONFLICT, outcome);
     }
     let Some(asker) = engine.asker.get().cloned() else {
-        let outcome = "this engine can't apply a deploy: it has no control socket for the handover (it isn't the \
-                       package's systemd service, nor started with DUCTUS_CONTROL); Windows and containers apply \
-                       deploys from a later version (0.7.4.4.2)"
+        let outcome = "this engine takes no handovers, so it can't apply a deploy (`ductus dev`): run the release \
+                       with `ductus run --releases`"
             .to_string();
         return refuse(report, StatusCode::CONFLICT, outcome);
     };

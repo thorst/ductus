@@ -139,8 +139,12 @@ pub struct Engine {
     /// Release mode (`ductus run --releases`): where releases are unpacked, the project, the
     /// release it runs and how long a passing check may be reused. None: folder mode.
     pub releases: Option<crate::deploy::Releases>,
-    /// Asks this engine for a handover from inside (a deploy); unset without a control socket.
+    /// Asks this engine for a handover from inside (a deploy); unset when it takes no handovers.
     pub asker: std::sync::OnceLock<crate::handover::Asker>,
+    /// Cancelled once this engine's run ended, however it ended: what it started that outlives a
+    /// step (its API server, hourly jobs, alert rounds) ends with it, so an engine started again
+    /// in the same process (an in-process handover) leaves nothing of it behind.
+    pub ended: CancellationToken,
 }
 
 /// Where the engine's REST API (and web UI) listens, and its `tls` (none: plain HTTP).
@@ -177,6 +181,7 @@ pub struct Parts {
     pub api: Option<ApiListener>,
     pub host: String,
     pub releases: Option<crate::deploy::Releases>,
+    pub ended: CancellationToken,
 }
 
 impl Engine {
@@ -204,6 +209,7 @@ impl Engine {
             api,
             host,
             releases,
+            ended,
         } = parts;
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
@@ -244,8 +250,9 @@ impl Engine {
             deployment: std::sync::OnceLock::new(),
             releases,
             asker: std::sync::OnceLock::new(),
+            ended,
         });
-        tokio::spawn(monitor(Arc::downgrade(&engine)));
+        tokio::spawn(engine.ended.clone().run_until_cancelled_owned(monitor(Arc::downgrade(&engine))));
         engine
     }
 

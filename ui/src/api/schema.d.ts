@@ -1959,6 +1959,11 @@ export interface components {
             /** @description The version it took over from. */
             from_version: string;
             /**
+             * @description In the same process as the engine it took over from (Windows, containers, a plain
+             *     `ductus run`: `from_pid` is this one's); false: a new process (Linux under systemd).
+             */
+            in_process: boolean;
+            /**
              * Format: int64
              * @description From the old engine's stop until this one sent (receiving never stopped).
              */

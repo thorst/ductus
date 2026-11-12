@@ -1,36 +1,49 @@
 //! Every listening socket the engine opens goes through here (`listen`), so it outlives the
-//! process that opened it (Linux):
+//! engine that opened it:
 //!
-//! **systemd keeps them** (under the package's `Type=notify` unit). A restart used to refuse
+//! **This process keeps a copy of each** (every system): another handle to the same socket (`dup`
+//! on Linux, `WSADuplicateSocketW` on Windows), which listens until every copy is closed. An
+//! engine started in the same process (an in-process handover, `crate::handover`; a start again
+//! after a failed one) listens on that copy instead of binding: the socket never closes in
+//! between, so senders' connections wait in the kernel's backlog until it accepts them, and two
+//! engines may accept on it at once while one takes over from the other.
+//!
+//! **systemd keeps them** (Linux, under the package's `Type=notify` unit). A restart used to refuse
 //! connections: between the old process closing its listeners and the new one binding them again
 //! (the start takes ~0.5–1 s) nothing listened on the port. Now every listening socket is also
 //! handed to systemd's file descriptor store when it's opened (`FDSTORE=1`, named after its
 //! configured address). systemd holds its copy while the service restarts or after a crash and
 //! hands it to the next start (`LISTEN_FDS`, `LISTEN_FDNAMES`), which listens on it instead of
-//! binding. The socket never closes in between, so senders' connections wait in the kernel's
-//! backlog until the new process accepts them: nothing is refused, senders wait for the start.
+//! binding: nothing is refused, senders wait for the start.
 //!
-//! **A handover passes them on** (`crate::handover`): the engine keeps a copy of each socket it
-//! listens on (`handover_sockets`); the new engine inherits them (`DUCTUS_LISTEN_FDS`) and
-//! listens on them as on systemd's, while the old one still does. Until the old engine hands it
-//! the service (`MAINPID`), systemd listens only to the old one (`NotifyAccess=main`): the new
-//! one stores nothing and gives nothing back until then (`promote`).
+//! **A handover to a new process passes them on** (Linux, `crate::handover`): the new engine
+//! inherits this process's copies (`DUCTUS_LISTEN_FDS`) and listens on them as on systemd's,
+//! while the old one still does. Until the old engine hands it the service (`MAINPID`), systemd
+//! listens only to the old one (`NotifyAccess=main`): the new one stores nothing and gives nothing
+//! back until then (`promote`).
 //!
-//! Three things close a socket on purpose, and each takes it out of the store first
-//! (`FDSTOREREMOVE=1`), or systemd's copy would keep it listening with nobody behind it:
+//! Closing a socket on purpose takes it out of systemd's store first (`FDSTOREREMOVE=1`), or
+//! systemd's copy would keep it listening with nobody behind it; and out of this process's copies,
+//! for the same reason:
 //! - a drain closes MLLP listeners so senders see the engine down (`release`; a stop and a
 //!   handover keep them: `stopping`, `handing_over`);
 //! - a socket no longer configured is dropped at start, before anything binds (`keep_only`: it
-//!   would hold its port);
+//!   would hold its port), and once a takeover took over (`promote`: the engine taken over from
+//!   listened on it);
 //! - a start that fails (`abandon`): a broken engine is refused as before, not a port that takes
-//!   connections and never answers. systemd itself closes the store when the service stops.
+//!   connections and never answers; a takeover in this process that fails closes only what it
+//!   opened itself (`abandon_takeover`: the engine it would have taken over from goes on).
 //!
 //! Also `READY=1` once every interface is up (`systemctl start` waits for it) and `STOPPING=1`.
-//! Outside systemd (no `NOTIFY_SOCKET`: `ductus dev`, containers) nothing is stored, and outside
-//! Linux `listen` binds as before and the rest does nothing.
+//! Outside systemd (no `NOTIFY_SOCKET`: `ductus dev`, containers, Windows) nothing is stored.
 
+use std::collections::{HashMap, HashSet};
 use std::io;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{LazyLock, Mutex};
 use tokio::net::TcpListener;
+
+static SOCKETS: LazyLock<Sockets> = LazyLock::new(Sockets::from_env);
 
 /// The name a listening socket is stored under: its configured address (`tcp-0.0.0.0-2575`).
 /// The protocol isn't part of it: a port moved from MLLP to HTTP keeps its socket. systemd takes
@@ -46,18 +59,14 @@ pub fn name(host: &str, port: u16) -> String {
 /// Read what systemd or the engine taken over from passed to this process (call at start,
 /// before anything else could start a process: those descriptors are made close-on-exec here).
 pub fn init() {
-    #[cfg(target_os = "linux")]
-    std::sync::LazyLock::force(&linux::SOCKETS);
+    LazyLock::force(&SOCKETS);
 }
 
-/// Listen on `host:port`: on the socket kept for it when there is one (systemd's, or the engine
-/// taken over from), else on a new one (which systemd is then given to keep).
+/// Listen on `host:port`: on the socket kept for it when there is one (systemd's, the engine
+/// taken over from's, a copy this process holds), else on a new one (which systemd is then given
+/// to keep).
 pub async fn listen(host: &str, port: u16) -> io::Result<TcpListener> {
-    #[cfg(target_os = "linux")]
-    let listening = linux::SOCKETS.listen(host, port).await;
-    #[cfg(not(target_os = "linux"))]
-    let listening = TcpListener::bind((host, port)).await;
-    listening.map_err(|e| in_use(e, port))
+    SOCKETS.listen(host, port).await.map_err(|e| in_use(e, port))
 }
 
 /// "Address already in use" says nothing about what to do: name the port and how to find what
@@ -80,326 +89,467 @@ fn in_use(e: io::Error, port: u16) -> io::Error {
     )
 }
 
-#[cfg(test)]
-mod in_use_tests {
-    #[tokio::test]
-    async fn a_port_in_use_says_how_to_find_what_holds_it() {
-        let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let port = holder.local_addr().unwrap().port();
-        let e = super::listen("127.0.0.1", port).await.unwrap_err();
-        assert_eq!(e.kind(), std::io::ErrorKind::AddrInUse);
-        assert!(e.to_string().starts_with(&format!("port {port} is in use: another program listens on it")), "{e}");
-    }
-}
-
-/// The listener on `host:port` is about to close for a while (a drain): systemd mustn't keep it
-/// listening, nor a handover pass it on. Nothing while the engine stops (the next start, or the
-/// engine taking over, listens on it).
+/// The listener on `host:port` is about to close for a while (a drain): nothing may keep it
+/// listening (systemd, this process's copy) nor pass it on. Nothing while the engine stops (the
+/// next start, or the engine taking over, listens on it).
 pub fn release(host: &str, port: u16) {
-    #[cfg(target_os = "linux")]
-    linux::SOCKETS.release(&name(host, port));
-    #[cfg(not(target_os = "linux"))]
-    let _ = (host, port);
+    SOCKETS.release(&name(host, port));
 }
 
-/// Before anything listens: close the sockets kept for addresses no longer configured.
+/// Before anything listens: close the sockets kept for addresses no longer configured, and
+/// remember what this engine listens on (what a takeover keeps once it took over).
 pub fn keep_only<'a>(addresses: impl IntoIterator<Item = (&'a str, u16)>) {
-    #[cfg(target_os = "linux")]
-    linux::SOCKETS.keep_only(addresses.into_iter().map(|(host, port)| name(host, port)).collect());
-    #[cfg(not(target_os = "linux"))]
-    let _ = addresses.into_iter().count();
+    SOCKETS.keep_only(addresses.into_iter().map(|(host, port)| name(host, port)).collect());
 }
 
 /// Every interface and the API are up: `systemctl start` returns.
 pub fn ready(status: &str) {
-    #[cfg(target_os = "linux")]
-    linux::SOCKETS.notify_main(&format!("READY=1\nSTATUS={status}"));
-    #[cfg(not(target_os = "linux"))]
-    let _ = status;
+    SOCKETS.notify_main(&format!("READY=1\nSTATUS={status}"));
 }
 
-/// The engine is stopping: listeners that close from now on stay in the store.
+/// The engine is stopping: listeners that close from now on stay kept.
 pub fn stopping() {
-    #[cfg(target_os = "linux")]
-    linux::SOCKETS.stopping(true);
+    SOCKETS.stopping(true);
 }
 
 /// The engine stops for a handover: as `stopping`, but systemd isn't told the service stops (it
-/// goes on in the new process).
+/// goes on in the new engine).
 pub fn handing_over() {
-    #[cfg(target_os = "linux")]
-    linux::SOCKETS.stopping(false);
+    SOCKETS.stopping(false);
 }
 
 /// The start failed: give every socket back, so senders are refused while the engine is down
 /// (systemd tries the start again in a few seconds; the next one binds them anew). Nothing in a
-/// takeover that hasn't taken over: the sockets are still the old engine's.
+/// takeover from another process that hasn't taken over: the sockets are still the old engine's.
 pub fn abandon() {
-    #[cfg(target_os = "linux")]
-    linux::SOCKETS.abandon();
+    SOCKETS.abandon();
 }
 
-/// A copy of every socket listening now, by name: what a handover passes on.
+/// A copy of every socket listening now, by name: what a handover to a new process passes on.
 #[cfg(target_os = "linux")]
 pub fn handover_sockets() -> io::Result<Vec<(String, std::os::fd::OwnedFd)>> {
-    linux::SOCKETS.copies()
+    SOCKETS.copies()
 }
 
 /// A handover: the service's process is `pid` from now on (this one stops telling systemd anything).
 pub fn main_pid(pid: u32) {
-    #[cfg(target_os = "linux")]
-    linux::SOCKETS.hand_to(pid);
-    #[cfg(not(target_os = "linux"))]
-    let _ = pid;
+    SOCKETS.hand_to(pid);
 }
 
-/// A takeover took over: this process is the service's now. systemd gets the sockets this engine
-/// opened and loses the ones it no longer uses (`ready` follows once it sends).
+/// A takeover took over: this engine is the service's now. It keeps the sockets it listens on;
+/// the ones only the engine taken over from listened on close (in this process: that engine's
+/// copies), and systemd's store follows (`ready` follows once it sends).
 pub fn promote() {
+    SOCKETS.promote();
+}
+
+/// An engine starts beside the running one in this process (an in-process handover): note the
+/// sockets it binds anew, which close again if it fails (`abandon_takeover`).
+pub fn begin_takeover() {
+    SOCKETS.begin_takeover();
+}
+
+/// The in-process takeover failed: close what it bound anew; the running engine's sockets stay.
+pub fn abandon_takeover() {
+    SOCKETS.abandon_takeover();
+}
+
+/// Another handle to the same listening socket: it listens until every handle is closed.
+fn copy(listener: &TcpListener) -> io::Result<std::net::TcpListener> {
+    #[cfg(unix)]
+    let copy = std::os::fd::AsFd::as_fd(listener).try_clone_to_owned()?.into();
+    #[cfg(windows)]
+    let copy = std::os::windows::io::AsSocket::as_socket(listener).try_clone_to_owned()?.into();
+    Ok(copy)
+}
+
+struct Sockets {
+    /// systemd's notify socket (`NOTIFY_SOCKET`: a path, or `@name` for an abstract one). None
+    /// outside systemd (always, off Linux).
+    notify: Option<Vec<u8>>,
+    /// Sockets handed to this start that nothing has listened on yet, by name.
+    kept: Mutex<HashMap<String, std::net::TcpListener>>,
+    /// A copy of every socket listening now, by name: a handover passes them on, an engine started
+    /// again in this process listens on them.
+    open: Mutex<HashMap<String, std::net::TcpListener>>,
+    /// Every name in systemd's store as far as this process knows (for `abandon`, `promote`).
+    stored: Mutex<HashSet<String>>,
+    stopping: AtomicBool,
+    /// systemd listens to this process (`NotifyAccess=main`). False in a takeover from another
+    /// process until the old engine hands it the service, and in the old engine once it did.
+    main: AtomicBool,
+    /// What the engine that started last listens on (`keep_only`): a takeover keeps only these.
+    wanted: Mutex<Option<HashSet<String>>>,
+    /// While an engine starts beside another in this process: the sockets it bound anew.
+    fresh: Mutex<Option<HashSet<String>>>,
+}
+
+impl Sockets {
     #[cfg(target_os = "linux")]
-    linux::SOCKETS.promote();
+    fn from_env() -> Self {
+        linux::from_env()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    fn from_env() -> Self {
+        Self::new(None, Vec::new(), true)
+    }
+
+    fn new(notify: Option<&[u8]>, kept: Vec<(String, std::net::TcpListener)>, main: bool) -> Self {
+        // The ones handed over are in systemd's store already (the engine taken over from
+        // stored them): a takeover that drops one takes it out once it's the service's.
+        let stored =
+            if notify.is_some() { kept.iter().map(|(name, _)| name.clone()).collect() } else { HashSet::new() };
+        if !kept.is_empty() {
+            let from = if main {
+                "systemd kept the listening sockets"
+            } else {
+                "listening on the sockets of the engine it takes over from"
+            };
+            tracing::info!(sockets = kept.len(), "{from}: senders waited for this start");
+        }
+        Self {
+            notify: notify.map(<[u8]>::to_vec),
+            kept: Mutex::new(kept.into_iter().collect()),
+            open: Mutex::new(HashMap::new()),
+            stored: Mutex::new(stored),
+            stopping: AtomicBool::new(false),
+            main: AtomicBool::new(main),
+            wanted: Mutex::new(None),
+            fresh: Mutex::new(None),
+        }
+    }
+
+    fn is_main(&self) -> bool {
+        self.main.load(Ordering::SeqCst)
+    }
+
+    async fn listen(&self, host: &str, port: u16) -> io::Result<TcpListener> {
+        let name = name(host, port);
+        let kept = self.kept.lock().unwrap().remove(&name);
+        // A socket still open (another engine in this process listens on it, or this one did
+        // before an accept error): its copy.
+        let kept = match kept {
+            Some(socket) => Some(socket),
+            None => self.open.lock().unwrap().get(&name).map(std::net::TcpListener::try_clone).transpose()?,
+        };
+        let mut listener = None;
+        if let Some(std) = kept {
+            if std.local_addr().is_ok_and(|a| a.port() == port) {
+                std.set_nonblocking(true)?;
+                tracing::debug!(%host, port, "listening on a socket kept for it");
+                listener = Some(TcpListener::from_std(std)?);
+            } else {
+                // Not the port its name says (nothing of ours stores one like that): close it.
+                tracing::warn!(socket = %name, "a socket handed to this start isn't on its port: closing it");
+                drop(std);
+                self.remove(&name);
+            }
+        }
+        let (listener, bound) = match listener {
+            Some(l) => (l, false),
+            None => (TcpListener::bind((host, port)).await?, true),
+        };
+        let copy = copy(&listener)?;
+        if bound {
+            self.store(&name, &copy);
+            if let Some(fresh) = self.fresh.lock().unwrap().as_mut() {
+                fresh.insert(name.clone());
+            }
+        }
+        self.open.lock().unwrap().insert(name, copy);
+        Ok(listener)
+    }
+
+    /// Give `listener` to systemd's store (when this process is the service's; a takeover's are
+    /// stored when it is: `promote`).
+    fn store(&self, name: &str, listener: &std::net::TcpListener) {
+        if self.notify.is_none() || !self.is_main() {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        match self.send(&format!("FDSTORE=1\nFDNAME={name}"), Some(std::os::fd::AsFd::as_fd(listener))) {
+            Ok(()) => {
+                self.stored.lock().unwrap().insert(name.to_string());
+            }
+            Err(e) => tracing::warn!(
+                socket = %name,
+                error = %e,
+                "systemd can't keep this listening socket (`FileDescriptorStoreMax=` in the unit): a restart refuses connections to it for a moment"
+            ),
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = (name, listener);
+    }
+
+    fn release(&self, name: &str) {
+        if !self.stopping.load(Ordering::SeqCst) {
+            self.open.lock().unwrap().remove(name);
+            self.remove(name);
+        }
+    }
+
+    fn keep_only(&self, wanted: HashSet<String>) {
+        let gone: Vec<(String, std::net::TcpListener)> = {
+            let mut kept = self.kept.lock().unwrap();
+            let names: Vec<String> = kept.keys().filter(|n| !wanted.contains(*n)).cloned().collect();
+            names.into_iter().filter_map(|n| kept.remove_entry(&n)).collect()
+        };
+        for (name, socket) in gone {
+            tracing::info!(socket = %name, "no longer configured: closing the listening socket kept for it");
+            drop(socket);
+            self.remove(&name);
+        }
+        *self.wanted.lock().unwrap() = Some(wanted);
+        // An engine starting again in this process after another stopped: its drains close
+        // listeners for real again.
+        self.stopping.store(false, Ordering::SeqCst);
+    }
+
+    /// `tell`: say so to systemd (not when a handover stops the engine: the service goes on).
+    fn stopping(&self, tell: bool) {
+        self.stopping.store(true, Ordering::SeqCst);
+        if tell {
+            self.notify_main("STOPPING=1\nSTATUS=stopping: finishing the messages in hand");
+        }
+    }
+
+    fn abandon(&self) {
+        if !self.is_main() {
+            return;
+        }
+        self.kept.lock().unwrap().clear();
+        let names: Vec<String> = self.stored.lock().unwrap().iter().cloned().collect();
+        for name in names {
+            self.remove(&name);
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn copies(&self) -> io::Result<Vec<(String, std::os::fd::OwnedFd)>> {
+        self.open.lock().unwrap().iter().map(|(name, socket)| Ok((name.clone(), socket.try_clone()?.into()))).collect()
+    }
+
+    fn hand_to(&self, pid: u32) {
+        self.notify_main(&format!("MAINPID={pid}"));
+        self.main.store(false, Ordering::SeqCst);
+    }
+
+    fn promote(&self) {
+        self.main.store(true, Ordering::SeqCst);
+        *self.fresh.lock().unwrap() = None;
+        self.stopping.store(false, Ordering::SeqCst);
+        // In this process, the engine taken over from had copies of its own: those this engine
+        // doesn't listen on close now (a port the new release dropped).
+        if let Some(wanted) = self.wanted.lock().unwrap().clone() {
+            let dropped: Vec<String> = {
+                let mut open = self.open.lock().unwrap();
+                let names: Vec<String> = open.keys().filter(|n| !wanted.contains(*n)).cloned().collect();
+                names.into_iter().filter(|n| open.remove(n).is_some()).collect()
+            };
+            for name in dropped {
+                tracing::info!(socket = %name, "no longer configured: closing the listening socket the engine taken over from used");
+                self.remove(&name);
+            }
+        }
+        if self.notify.is_none() {
+            return;
+        }
+        let open: Vec<(String, std::net::TcpListener)> = self
+            .open
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(n, socket)| Some((n.clone(), socket.try_clone().ok()?)))
+            .collect();
+        let stored = self.stored.lock().unwrap().clone();
+        for (name, socket) in &open {
+            if !stored.contains(name) {
+                self.store(name, socket);
+            }
+        }
+        for name in stored {
+            if !open.iter().any(|(n, _)| *n == name) {
+                self.remove(&name);
+            }
+        }
+    }
+
+    fn begin_takeover(&self) {
+        *self.fresh.lock().unwrap() = Some(HashSet::new());
+    }
+
+    fn abandon_takeover(&self) {
+        let Some(fresh) = self.fresh.lock().unwrap().take() else { return };
+        for name in fresh {
+            self.open.lock().unwrap().remove(&name);
+            self.remove(&name);
+        }
+    }
+
+    /// Tell systemd `state`, when this process is the service's.
+    fn notify_main(&self, state: &str) {
+        if self.notify.is_none() || !self.is_main() {
+            return;
+        }
+        #[cfg(target_os = "linux")]
+        if let Err(e) = self.send(state, None) {
+            tracing::warn!(error = %e, state, "couldn't tell systemd");
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = state;
+    }
+
+    fn remove(&self, name: &str) {
+        let stored = self.notify.is_some() && self.is_main() && self.stored.lock().unwrap().remove(name);
+        #[cfg(target_os = "linux")]
+        if stored && let Err(e) = self.send(&format!("FDSTOREREMOVE=1\nFDNAME={name}"), None) {
+            tracing::warn!(socket = %name, error = %e, "couldn't take the listening socket out of systemd's store");
+        }
+        #[cfg(not(target_os = "linux"))]
+        let _ = stored;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn free_port() -> u16 {
+        std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
+    }
+
+    fn free(port: u16) -> bool {
+        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    }
+
+    async fn takes_connections(listener: &TcpListener, port: u16) -> bool {
+        let _sender = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), listener.accept()).await.is_ok_and(|a| a.is_ok())
+    }
+
+    #[tokio::test]
+    async fn a_port_in_use_says_how_to_find_what_holds_it() {
+        let holder = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = holder.local_addr().unwrap().port();
+        let e = listen("127.0.0.1", port).await.unwrap_err();
+        assert_eq!(e.kind(), io::ErrorKind::AddrInUse);
+        assert!(e.to_string().starts_with(&format!("port {port} is in use: another program listens on it")), "{e}");
+    }
+
+    /// What an in-process handover relies on, on every system: the new engine listens on the old
+    /// one's sockets beside it; whatever it bound anew closes if it fails; once it took over, the
+    /// ports only the old engine used close and the rest listen on.
+    #[tokio::test]
+    async fn an_engine_started_in_this_process_shares_the_running_one_s_sockets() {
+        let sockets = Sockets::new(None, Vec::new(), true);
+        let (a, b, c) = (free_port(), free_port(), free_port());
+        sockets.keep_only([name("127.0.0.1", a), name("127.0.0.1", b)].into());
+        let old_a = sockets.listen("127.0.0.1", a).await.unwrap();
+        let old_b = sockets.listen("127.0.0.1", b).await.unwrap();
+
+        // A takeover that fails: it listened on a beside the old engine and bound c anew.
+        sockets.begin_takeover();
+        let new_a = sockets.listen("127.0.0.1", a).await.expect("a copy of the old engine's socket, not a bind");
+        let new_c = sockets.listen("127.0.0.1", c).await.unwrap();
+        sockets.keep_only([name("127.0.0.1", a), name("127.0.0.1", c)].into());
+        assert!(takes_connections(&new_a, a).await && takes_connections(&old_a, a).await, "both accept on a");
+        drop((new_a, new_c));
+        sockets.abandon_takeover();
+        assert!(free(c), "what the failed takeover bound is closed");
+        assert!(takes_connections(&old_a, a).await && takes_connections(&old_b, b).await, "the old engine goes on");
+
+        // One that takes over: the old engine stops (its listeners close, the copies stay).
+        sockets.begin_takeover();
+        let new_a = sockets.listen("127.0.0.1", a).await.unwrap();
+        let new_c = sockets.listen("127.0.0.1", c).await.unwrap();
+        sockets.keep_only([name("127.0.0.1", a), name("127.0.0.1", c)].into());
+        sockets.stopping(false);
+        sockets.release(&name("127.0.0.1", a));
+        drop((old_a, old_b));
+        assert!(!free(b), "b is still kept until the new engine took over");
+        sockets.promote();
+        assert!(free(b), "b, which the new release doesn't configure, closed");
+        assert!(takes_connections(&new_a, a).await && takes_connections(&new_c, c).await);
+        // And its drains close for real again (`stopping` was the old engine's).
+        sockets.release(&name("127.0.0.1", c));
+        drop(new_c);
+        assert!(free(c), "a drain after the takeover closes the socket");
+    }
+
+    /// The start again after a failed takeover (or any start in this process after a stop):
+    /// nothing listens for a moment, and senders wait instead of being refused.
+    #[tokio::test]
+    async fn a_start_again_in_this_process_listens_on_the_kept_socket() {
+        let sockets = Sockets::new(None, Vec::new(), true);
+        let port = free_port();
+        sockets.keep_only([name("127.0.0.1", port)].into());
+        let first = sockets.listen("127.0.0.1", port).await.unwrap();
+        sockets.stopping(true);
+        sockets.release(&name("127.0.0.1", port)); // a stop keeps it
+        drop(first);
+        let sender = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.expect("waits in the backlog");
+        sockets.keep_only([name("127.0.0.1", port)].into());
+        let again = sockets.listen("127.0.0.1", port).await.unwrap();
+        let (accepted, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(2), again.accept()).await.unwrap().unwrap();
+        assert_eq!(accepted.peer_addr().unwrap(), sender.local_addr().unwrap(), "the sender that waited");
+    }
 }
 
 #[cfg(target_os = "linux")]
 mod linux {
-    use super::name;
-    use std::collections::{HashMap, HashSet};
-    use std::io;
+    use super::*;
     use std::os::fd::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd, RawFd};
     use std::os::linux::net::SocketAddrExt;
     use std::os::unix::ffi::OsStrExt;
     use std::os::unix::net::{SocketAddr, UnixDatagram};
-    use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{LazyLock, Mutex};
-    use tokio::net::TcpListener;
-
-    pub(super) static SOCKETS: LazyLock<Sockets> = LazyLock::new(Sockets::from_env);
 
     /// The first descriptor systemd passes (`SD_LISTEN_FDS_START`).
     const FIRST_FD: RawFd = 3;
 
-    pub(super) struct Sockets {
-        /// systemd's notify socket (`NOTIFY_SOCKET`: a path, or `@name` for an abstract one).
-        /// None outside systemd.
-        notify: Option<Vec<u8>>,
-        /// Sockets handed to this start that nothing has listened on yet, by name.
-        kept: Mutex<HashMap<String, OwnedFd>>,
-        /// A copy of every socket listening now, by name (a handover passes them on).
-        open: Mutex<HashMap<String, OwnedFd>>,
-        /// Every name in systemd's store as far as this process knows (for `abandon`, `promote`).
-        stored: Mutex<HashSet<String>>,
-        stopping: AtomicBool,
-        /// systemd listens to this process (`NotifyAccess=main`). False in a takeover until the
-        /// old engine hands it the service, and in the old engine once it did.
-        main: AtomicBool,
+    pub(super) fn from_env() -> Sockets {
+        let var = |name: &str| std::env::var(name).ok();
+        let notify = std::env::var_os("NOTIFY_SOCKET").map(|a| a.as_bytes().to_vec());
+        let takeover = std::env::var_os("DUCTUS_TAKEOVER").is_some();
+        let passed = if takeover {
+            inherited(var("DUCTUS_LISTEN_FDS").as_deref())
+        } else if notify.is_some() {
+            passed(
+                var("LISTEN_PID").as_deref(),
+                var("LISTEN_FDS").as_deref(),
+                var("LISTEN_FDNAMES").as_deref(),
+                std::process::id(),
+            )
+        } else {
+            Vec::new()
+        };
+        let kept = passed
+            .into_iter()
+            .map(|(name, fd)| {
+                // SAFETY: systemd (LISTEN_PID is ours) or the engine taken over from (in
+                // DUCTUS_LISTEN_FDS, with DUCTUS_TAKEOVER) passed these descriptors to this
+                // process, and nothing else in it knows them: they're taken once, here.
+                let fd = unsafe { OwnedFd::from_raw_fd(fd) };
+                close_on_exec(fd.as_fd());
+                (name, fd)
+            })
+            .collect();
+        Sockets::with_fds(notify.as_deref(), kept, !takeover)
     }
 
     impl Sockets {
-        fn from_env() -> Self {
-            let var = |name: &str| std::env::var(name).ok();
-            let notify = std::env::var_os("NOTIFY_SOCKET").map(|a| a.as_bytes().to_vec());
-            let takeover = std::env::var_os("DUCTUS_TAKEOVER").is_some();
-            let passed = if takeover {
-                inherited(var("DUCTUS_LISTEN_FDS").as_deref())
-            } else if notify.is_some() {
-                passed(
-                    var("LISTEN_PID").as_deref(),
-                    var("LISTEN_FDS").as_deref(),
-                    var("LISTEN_FDNAMES").as_deref(),
-                    std::process::id(),
-                )
-            } else {
-                Vec::new()
-            };
-            let kept = passed
-                .into_iter()
-                .map(|(name, fd)| {
-                    // SAFETY: systemd (LISTEN_PID is ours) or the engine taken over from (in
-                    // DUCTUS_LISTEN_FDS, with DUCTUS_TAKEOVER) passed these descriptors to this
-                    // process, and nothing else in it knows them: they're taken once, here.
-                    let fd = unsafe { OwnedFd::from_raw_fd(fd) };
-                    close_on_exec(fd.as_fd());
-                    (name, fd)
-                })
-                .collect();
-            Self::new(notify.as_deref(), kept, !takeover)
-        }
-
-        pub(super) fn new(notify: Option<&[u8]>, kept: Vec<(String, OwnedFd)>, main: bool) -> Self {
-            // The ones handed over are in systemd's store already (the engine taken over from
-            // stored them): a takeover that drops one takes it out once it's the service's.
-            let stored =
-                if notify.is_some() { kept.iter().map(|(name, _)| name.clone()).collect() } else { HashSet::new() };
-            if !kept.is_empty() {
-                let from = if main {
-                    "systemd kept the listening sockets"
-                } else {
-                    "listening on the sockets of the engine it takes over from"
-                };
-                tracing::info!(sockets = kept.len(), "{from}: senders waited for this start");
-            }
-            Self {
-                notify: notify.map(<[u8]>::to_vec),
-                kept: Mutex::new(kept.into_iter().collect()),
-                open: Mutex::new(HashMap::new()),
-                stored: Mutex::new(stored),
-                stopping: AtomicBool::new(false),
-                main: AtomicBool::new(main),
-            }
-        }
-
-        fn is_main(&self) -> bool {
-            self.main.load(Ordering::SeqCst)
-        }
-
-        pub(super) async fn listen(&self, host: &str, port: u16) -> io::Result<TcpListener> {
-            let name = name(host, port);
-            let kept = self.kept.lock().unwrap().remove(&name);
-            // Listening again on a socket that's still open (after an accept error): its copy.
-            let kept = match kept {
-                Some(fd) => Some(fd),
-                None => self.open.lock().unwrap().get(&name).map(|fd| fd.try_clone()).transpose()?,
-            };
-            let mut listener = None;
-            if let Some(fd) = kept {
-                let std = std::net::TcpListener::from(fd);
-                if std.local_addr().is_ok_and(|a| a.port() == port) {
-                    std.set_nonblocking(true)?;
-                    tracing::debug!(%host, port, "listening on a socket kept for it");
-                    listener = Some(TcpListener::from_std(std)?);
-                } else {
-                    // Not the port its name says (nothing of ours stores one like that): close it.
-                    tracing::warn!(socket = %name, "a socket handed to this start isn't on its port: closing it");
-                    drop(std);
-                    self.remove(&name);
-                }
-            }
-            let listener = match listener {
-                Some(l) => l,
-                None => {
-                    let l = TcpListener::bind((host, port)).await?;
-                    self.store(&name, l.as_fd());
-                    l
-                }
-            };
-            self.open.lock().unwrap().insert(name, listener.as_fd().try_clone_to_owned()?);
-            Ok(listener)
-        }
-
-        /// Give `fd` to systemd's store (when this process is the service's; a takeover's are
-        /// stored when it is: `promote`).
-        fn store(&self, name: &str, fd: BorrowedFd) {
-            if self.notify.is_none() || !self.is_main() {
-                return;
-            }
-            match self.send(&format!("FDSTORE=1\nFDNAME={name}"), Some(fd)) {
-                Ok(()) => {
-                    self.stored.lock().unwrap().insert(name.to_string());
-                }
-                Err(e) => tracing::warn!(
-                    socket = %name,
-                    error = %e,
-                    "systemd can't keep this listening socket (`FileDescriptorStoreMax=` in the unit): a restart refuses connections to it for a moment"
-                ),
-            }
-        }
-
-        pub(super) fn release(&self, name: &str) {
-            if !self.stopping.load(Ordering::SeqCst) {
-                self.open.lock().unwrap().remove(name);
-                self.remove(name);
-            }
-        }
-
-        pub(super) fn keep_only(&self, wanted: HashSet<String>) {
-            let gone: Vec<(String, OwnedFd)> = {
-                let mut kept = self.kept.lock().unwrap();
-                let names: Vec<String> = kept.keys().filter(|n| !wanted.contains(*n)).cloned().collect();
-                names.into_iter().filter_map(|n| kept.remove_entry(&n)).collect()
-            };
-            for (name, fd) in gone {
-                tracing::info!(socket = %name, "no longer configured: closing the listening socket kept for it");
-                drop(fd);
-                self.remove(&name);
-            }
-        }
-
-        /// `tell`: say so to systemd (not when a handover stops the engine: the service goes on).
-        pub(super) fn stopping(&self, tell: bool) {
-            self.stopping.store(true, Ordering::SeqCst);
-            if tell {
-                self.notify_main("STOPPING=1\nSTATUS=stopping: finishing the messages in hand");
-            }
-        }
-
-        pub(super) fn abandon(&self) {
-            if !self.is_main() {
-                return;
-            }
-            self.kept.lock().unwrap().clear();
-            let names: Vec<String> = self.stored.lock().unwrap().iter().cloned().collect();
-            for name in names {
-                self.remove(&name);
-            }
-        }
-
-        pub(super) fn copies(&self) -> io::Result<Vec<(String, OwnedFd)>> {
-            self.open.lock().unwrap().iter().map(|(name, fd)| Ok((name.clone(), fd.try_clone()?))).collect()
-        }
-
-        pub(super) fn hand_to(&self, pid: u32) {
-            self.notify_main(&format!("MAINPID={pid}"));
-            self.main.store(false, Ordering::SeqCst);
-        }
-
-        pub(super) fn promote(&self) {
-            self.main.store(true, Ordering::SeqCst);
-            if self.notify.is_none() {
-                return;
-            }
-            let open: Vec<(String, OwnedFd)> = self
-                .open
-                .lock()
-                .unwrap()
-                .iter()
-                .filter_map(|(n, fd)| Some((n.clone(), fd.try_clone().ok()?)))
-                .collect();
-            let stored = self.stored.lock().unwrap().clone();
-            for (name, fd) in &open {
-                if !stored.contains(name) {
-                    self.store(name, fd.as_fd());
-                }
-            }
-            for name in stored {
-                if !open.iter().any(|(n, _)| *n == name) {
-                    self.remove(&name);
-                }
-            }
-        }
-
-        /// Tell systemd `state`, when this process is the service's.
-        pub(super) fn notify_main(&self, state: &str) {
-            if self.notify.is_none() || !self.is_main() {
-                return;
-            }
-            if let Err(e) = self.send(state, None) {
-                tracing::warn!(error = %e, state, "couldn't tell systemd");
-            }
-        }
-
-        fn remove(&self, name: &str) {
-            if self.notify.is_none() || !self.is_main() {
-                return;
-            }
-            self.stored.lock().unwrap().remove(name);
-            if let Err(e) = self.send(&format!("FDSTOREREMOVE=1\nFDNAME={name}"), None) {
-                tracing::warn!(socket = %name, error = %e, "couldn't take the listening socket out of systemd's store");
-            }
+        pub(super) fn with_fds(notify: Option<&[u8]>, kept: Vec<(String, OwnedFd)>, main: bool) -> Self {
+            Self::new(
+                notify,
+                kept.into_iter().map(|(name, fd)| (name, std::net::TcpListener::from(fd))).collect(),
+                main,
+            )
         }
 
         /// One datagram to systemd's notify socket, with `fd` attached (`SCM_RIGHTS`). Connected
         /// anew each time, as `sd_notify` does: the socket is new after `systemctl daemon-reexec`.
-        fn send(&self, state: &str, fd: Option<BorrowedFd>) -> io::Result<()> {
+        pub(super) fn send(&self, state: &str, fd: Option<BorrowedFd>) -> io::Result<()> {
             let Some(address) = self.notify.as_deref() else { return Ok(()) };
             let socket = UnixDatagram::unbound()?;
             match address.strip_prefix(b"@") {
@@ -492,12 +642,12 @@ mod linux {
 
             /// The service's process, started with `kept`.
             fn systemd(&self, kept: Vec<(String, OwnedFd)>) -> Sockets {
-                Sockets::new(Some(self.path.as_os_str().as_bytes()), kept, true)
+                Sockets::with_fds(Some(self.path.as_os_str().as_bytes()), kept, true)
             }
 
             /// A takeover, with the sockets the engine it takes over from passed it.
             fn taking_over(&self, inherited: Vec<(String, OwnedFd)>) -> Sockets {
-                Sockets::new(Some(self.path.as_os_str().as_bytes()), inherited, false)
+                Sockets::with_fds(Some(self.path.as_os_str().as_bytes()), inherited, false)
             }
 
             /// The next datagram and the descriptor it carried.
@@ -640,7 +790,7 @@ mod linux {
 
         #[tokio::test]
         async fn a_handover_passes_on_every_listening_socket_but_a_drained_one() {
-            let systemd = Sockets::new(None, Vec::new(), true); // outside systemd: the same
+            let systemd = Sockets::with_fds(None, Vec::new(), true); // outside systemd: the same
             let (a, b) = (free_port(), free_port());
             let _a = systemd.listen("127.0.0.1", a).await.unwrap();
             let held_b = systemd.listen("127.0.0.1", b).await.unwrap();
@@ -745,7 +895,7 @@ mod linux {
             let name = format!("ductus-test-{}", std::process::id());
             let fake = UnixDatagram::bind_addr(&SocketAddr::from_abstract_name(name.as_bytes()).unwrap()).unwrap();
             fake.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
-            Sockets::new(Some(format!("@{name}").as_bytes()), Vec::new(), true).notify_main("READY=1");
+            Sockets::with_fds(Some(format!("@{name}").as_bytes()), Vec::new(), true).notify_main("READY=1");
             let mut buffer = [0u8; 64];
             let n = fake.recv(&mut buffer).unwrap();
             assert_eq!(&buffer[..n], b"READY=1");

@@ -553,9 +553,16 @@ release mode: nothing is deployed to this environment yet; the engine runs no in
 | `DUCTUS_RELEASE_PROJECT` (`--release-project`) | The project this engine runs, when several projects are deployed to its environment on one database | the only one |
 | `DUCTUS_DEPLOY_REUSE_CHECK` (`--deploy-reuse-check`) | How long a deploy may reuse a passing check of the same release instead of running the gate again; `0`: never | `1h` |
 
-Deploys apply by the [handover](high-availability.md#deploying-and-upgrading-without-a-gap), so they need the package's systemd unit (or
-DUCTUS_CONTROL); on Windows and in containers an engine in release mode refuses deploys for now
-([nuance](../nuances/releases.md#deploys-need-the-handover-linux-with-a-control-socket-level-1)).
+On Windows, the same two lines in `C:\ProgramData\Ductus\ductus.env` (`DUCTUS_RELEASES=C:\ProgramData\Ductus\releases`,
+`DUCTUS_PROJECT` commented out), then `Restart-Service Ductus`. In a container, `-e
+DUCTUS_RELEASES=/tmp/ductus-releases`: no volume needed, the engine unpacks the release from the
+database at every start ([Docker](../install/docker.md)).
+
+Deploys apply by the [handover](high-availability.md#deploying-and-upgrading-without-a-gap):
+under the package's systemd unit the new engine is a new process; on Windows, in a container
+and under a plain `ductus run` it runs in the engine's own process, so the service stays Running
+and the container never restarts
+([nuance](../nuances/releases.md#a-deploy-applies-by-a-handover-to-a-new-process-under-systemd-in-the-engines-own-process-elsewhere-level-1)).
 
 ### Deploy
 
@@ -611,6 +618,23 @@ changed 1 interface:
 A gate that finds problems refuses the deploy (exit 1, the problems listed, the check kept with
 the release). A new engine that can't take over leaves the running one as it was, as any
 handover does.
+
+**On Windows, in a container, under a plain `ductus run`**, the same deploy hands over inside the
+engine's own process: the steps say "in this process" instead of a pid, and the service or the
+container goes on as it was (here the engine is a container's PID 1, `scripts/demo-docker.sh`):
+
+```text
+$ ductus deploy /project/.ductus/releases/project-c85ec701a9c3.tar.gz --to http://127.0.0.1:7701 -m "first deploy"
+stored release c85ec701a9c3 on the engine
+deploying: the gate runs (or a recent passing check is reused), then the handover…
+release c85ec701a9c3 (project project) to environment `dev`
+gate: passed in 0.62 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `dev` since)
+  started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 151 ms and receives beside this one: stopping this one
+  this engine stopped in 0 ms and let go of its interfaces: the new one takes them
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 27 ms
+no interface's code changed (the project's own files may have)
+```
 
 ### It won't undo someone else's work
 
@@ -687,6 +711,17 @@ from the command to its answer):
 
 The gate is what a deploy waits for; check the release on the engine before the change window
 and the deploy itself takes about a second.
+
+The handover itself at 1,001 interfaces (`IN_PROCESS=1 scripts/bench-handover.sh`, asked by
+SIGHUP, a sender on 4 connections at 200 messages a second), in the engine's own process against
+a new process (the package's way):
+
+| | In the engine's process | A new process |
+|---|---|---|
+| The new engine ready | 586–709 ms | 682–786 ms |
+| Sending paused | 508–627 ms | 540–642 ms |
+| The sender | 0 refused, longest wait 142–168 ms | 0 refused, longest wait 141 ms |
+| Memory | 95 MB before; 138–167 MB at the peak (both engines); 120–136 MB after ten handovers | 96 MB each, two processes while they overlap |
 
 ## Try it
 

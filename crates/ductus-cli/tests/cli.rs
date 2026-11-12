@@ -5052,6 +5052,174 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
+/// Deploys without a control socket (0.7.4.4.2): Windows, a container, a plain `ductus run`. The
+/// handover runs in the engine's own process: the same process before and after, `GET /engine`
+/// says so, and a sender sending through a deploy is refused nothing. A release that can't start
+/// here (its port is taken) is refused and the engine goes on.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_process() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (mllp, api) = (free_port(), free_port());
+    let (dir, name) = release_project(mllp);
+    let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let work = tempfile::tempdir().unwrap();
+    let releases = work.path().join("releases");
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let token_name = format!("{name}-deployer");
+    let (ok, out) =
+        ductus(dir.path(), &["token", "create", &token_name, "--role", "operator", "--permission", "deploy"]);
+    assert!(ok, "{out}");
+    let token = out.lines().next().unwrap().to_string();
+    let to = format!("http://127.0.0.1:{api}");
+    let deploy = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(bin)
+            .arg("deploy")
+            .args(args)
+            .args(["--to", &to])
+            .env("DUCTUS_API_TOKEN", &token)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let runner = async || -> ductus_store::EngineRow {
+        for _ in 0..100 {
+            let engines = store.live_engines().await.unwrap();
+            if let Some(e) = engines.into_iter().find(|e| e.interfaces.contains(&name)) {
+                return e;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("no engine runs {name}");
+    };
+
+    let log = work.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let mut engine = Child(
+        Command::new(bin)
+            .args(["run", "--releases", &releases.to_string_lossy(), "--release-project", &project_name])
+            .args(["--env", "prod", "--threads", "1", "--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env_remove("DUCTUS_CONTROL")
+            .env_remove("RUNTIME_DIRECTORY")
+            .env_remove("DUCTUS_PROJECT")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "started interfaces=0", 60), "{}", read(&log));
+    let pid = engine.0.id();
+
+    // The first release: handed over in this process.
+    let a = release_json(dir.path(), &["-m", "first"]);
+    let (ok, out) = deploy(&[a["file"].as_str().unwrap(), "-m", "first deploy"]);
+    assert!(ok, "{out}\n{}", read(&log));
+    assert!(out.contains("✓ handed over to a new engine in this process"), "{out}");
+    assert!(engine.0.try_wait().unwrap().is_none(), "the same process goes on");
+    assert_eq!(runner().await.pid as u32, pid, "the engine running it is in the same process");
+
+    // The next, under traffic: refused nothing.
+    std::fs::write(dir.path().join("lib/codes.ts"), "export const LAB = \"LAB\"; // second\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "second"]);
+    let b = release_json(dir.path(), &["-m", "second"]);
+    let output = |name: &str| std::fs::File::create(work.path().join(name)).unwrap();
+    let mut sender = Child(
+        Command::new(bin)
+            .args(["gen", "--to", &format!("127.0.0.1:{mllp}"), "--count", "400", "--patients", "40"])
+            .args(["--connections", "2", "--rate", "200"])
+            .stdout(output("gen.log"))
+            .stderr(output("gen.err"))
+            .spawn()
+            .unwrap(),
+    );
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let (ok, out) = deploy(&[b["file"].as_str().unwrap(), "-m", "second deploy"]);
+    assert!(ok, "{out}\n{}", read(&log));
+    sender.0.wait().unwrap();
+    let sent = read(&work.path().join("gen.log"));
+    assert!(sent.contains("rejected 0, refused 0,"), "{sent}\n{}", read(&work.path().join("gen.err")));
+    let got: serde_json::Value = reqwest::Client::new()
+        .get(format!("{to}/api/v1/engine"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["handover"]["in_process"], true, "{got}");
+    assert_eq!(got["handover"]["from_pid"], pid, "{got}");
+    assert_eq!(got["deployment"]["release"], b["id"], "{got}");
+    let running = runner().await;
+
+    // A release whose port another program holds: refused, the engine goes on as it was.
+    let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let held_port = held.local_addr().unwrap().port();
+    edit(
+        &dir.path().join(format!("interfaces/{name}/interface.yaml")),
+        &format!("port: {mllp}"),
+        &format!("port: {held_port}"),
+    );
+    git(dir.path(), &["commit", "-qam", "a port that's taken"]);
+    let c = release_json(dir.path(), &["-m", "taken port"]);
+    let (ok, out) = deploy(&[c["file"].as_str().unwrap(), "-m", "taken port"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("can't take over") && out.contains(&format!("port {held_port} is in use")), "{out}");
+    assert!(out.contains("goes on."), "{out}");
+    assert!(engine.0.try_wait().unwrap().is_none(), "the process goes on");
+    assert_eq!(runner().await.instance, running.instance, "the engine running it goes on");
+    drop(held);
+
+    drop(engine);
+    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
+    let ids: Vec<Vec<u8>> =
+        [&a, &b, &c].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
+    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
+}
+
+/// A reload where there's no `systemctl reload` (0.7.4.4.2): `SIGHUP` hands the engine over in its
+/// own process to one on the project as it is now (before, it ended the engine); a project that
+/// can't start leaves the engine running; SIGTERM still stops it cleanly.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn sighup_reloads_the_engine_in_its_own_process() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("sighup-{nanos}");
+    let config = format!(
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {} }} }}\ndestinations: {{ out: {{ file: {{ dir: out }} }} }}\n",
+        free_port()
+    );
+    let file = format!("interfaces/{name}/interface.yaml");
+    let dir = project(&[(file.as_str(), config.as_str())]);
+    let (mut engine, log) = start_engine(dir.path(), &db, None, "engine.log");
+    let read = || std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(wait_for_log(&log, "started interfaces=1", 60), "{}", read());
+    let pid = engine.0.id().to_string();
+    let signal = |name: &str| assert!(Command::new("kill").args(["-s", name, &pid]).status().unwrap().success());
+
+    signal("HUP");
+    assert!(wait_for_log(&log, "handed over to a new engine in this process", 60), "{}", read());
+    assert!(read().contains("asked by a signal (SIGHUP)") || read().contains("a signal (SIGHUP)"), "{}", read());
+    assert!(engine.0.try_wait().unwrap().is_none(), "the same process goes on");
+
+    std::fs::write(dir.path().join(&file), format!("{config}bogus: true\n")).unwrap();
+    signal("HUP");
+    assert!(wait_for_log(&log, "the new engine can't take over", 60), "{}", read());
+    assert!(read().contains("unknown field `bogus`"), "{}", read());
+    assert!(engine.0.try_wait().unwrap().is_none(), "the engine goes on");
+
+    signal("TERM");
+    let exited = tokio::task::spawn_blocking(move || engine.0.wait()).await.unwrap().unwrap();
+    assert!(exited.success(), "stopped cleanly: {exited}\n{}", read());
+}
+
 /// `ductus release check` (0.7.4.3.2), the gate: against the environment's database, the tests of
 /// what the release changes there (none when it changes nothing), validate reading only; nothing
 /// written into the project, the database or the temporary folder it used; a changed file found.

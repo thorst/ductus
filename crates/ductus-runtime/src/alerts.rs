@@ -287,6 +287,8 @@ fn without_url(e: reqwest::Error) -> String {
 
 /// Start judging, sending and the heartbeat. Ends with the engine.
 pub async fn start(engine: &Arc<Engine>) {
+    // Its rounds end with the engine's run (Engine::ended).
+    let ended = engine.ended.clone();
     let Some(a) = engine.alerts.clone() else { return };
     let keys: Vec<(String, String, Option<String>)> = engine
         .interfaces
@@ -320,7 +322,7 @@ pub async fn start(engine: &Arc<Engine>) {
         "alerts on"
     );
     let weak = Arc::downgrade(engine);
-    tokio::spawn(async move {
+    tokio::spawn(ended.clone().run_until_cancelled_owned(async move {
         loop {
             tokio::time::sleep(EVERY).await;
             let Some(engine) = weak.upgrade() else { return };
@@ -330,9 +332,9 @@ pub async fn start(engine: &Arc<Engine>) {
                 Err(e) => tracing::warn!(error = %format!("{e:#}"), "judging alerts failed; trying again"),
             }
         }
-    });
+    }));
     let weak = Arc::downgrade(engine);
-    tokio::spawn(async move {
+    tokio::spawn(ended.clone().run_until_cancelled_owned(async move {
         loop {
             let Some(engine) = weak.upgrade() else { return };
             let Some(a) = engine.alerts.clone() else { return };
@@ -345,10 +347,10 @@ pub async fn start(engine: &Arc<Engine>) {
                 _ = tokio::time::sleep(Duration::from_secs(5)) => {}
             }
         }
-    });
+    }));
     if let Some(heartbeat) = a.settings.heartbeat.clone() {
         let weak = Arc::downgrade(&a);
-        tokio::spawn(async move {
+        tokio::spawn(ended.clone().run_until_cancelled_owned(async move {
             let mut failing = false;
             loop {
                 let Some(a) = weak.upgrade() else { return };
@@ -368,10 +370,10 @@ pub async fn start(engine: &Arc<Engine>) {
                 drop(a);
                 tokio::time::sleep(heartbeat.every).await;
             }
-        });
+        }));
     }
     let weak = Arc::downgrade(engine);
-    tokio::spawn(async move {
+    tokio::spawn(ended.clone().run_until_cancelled_owned(async move {
         tokio::time::sleep(Duration::from_secs(90)).await;
         loop {
             let Some(engine) = weak.upgrade() else { return };
@@ -385,7 +387,7 @@ pub async fn start(engine: &Arc<Engine>) {
             drop(engine);
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
-    });
+    }));
 }
 
 /// Owners whose alerts reach nobody (no user with an email, not in `owners:`, not an address).

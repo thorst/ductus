@@ -305,6 +305,8 @@ pub async fn run(engine: &Engine, mode: Mode, who: &str, only: &[String], timeou
 /// were renewed, or couldn't be) come in, and start the scheduled checks (if `doctor.schedule`
 /// isn't `off`). Ends with the engine.
 pub async fn start(engine: &Arc<Engine>, mut changes: tokio::sync::mpsc::Receiver<Vec<String>>) {
+    // Its rounds end with the engine's run (Engine::ended).
+    let ended = engine.ended.clone();
     match save_ours(engine, &[]).await {
         Ok(0) => {}
         Ok(n) => tracing::debug!(certificates = n, "our certificates saved"),
@@ -313,14 +315,14 @@ pub async fn start(engine: &Arc<Engine>, mut changes: tokio::sync::mpsc::Receive
         }
     }
     let weak = Arc::downgrade(engine);
-    tokio::spawn(async move {
+    tokio::spawn(ended.clone().run_until_cancelled_owned(async move {
         while let Some(names) = changes.recv().await {
             let Some(engine) = weak.upgrade() else { return };
             if let Err(e) = save_ours(&engine, &names).await {
                 tracing::warn!(error = %format!("{e:#}"), "could not save a renewed certificate's row (the next change or start does)");
             }
         }
-    });
+    }));
     let Some(every) = engine.doctor.schedule else {
         tracing::info!("scheduled connection checks are off (`doctor.schedule: off`)");
         return;
@@ -331,7 +333,7 @@ pub async fn start(engine: &Arc<Engine>, mut changes: tokio::sync::mpsc::Receive
         return;
     }
     let weak = Arc::downgrade(engine);
-    tokio::spawn(async move {
+    tokio::spawn(ended.clone().run_until_cancelled_owned(async move {
         tokio::time::sleep(FIRST_AFTER + jitter(FIRST_AFTER)).await;
         loop {
             let Some(engine) = weak.upgrade() else { return };
@@ -353,7 +355,7 @@ pub async fn start(engine: &Arc<Engine>, mut changes: tokio::sync::mpsc::Receive
             drop(engine);
             tokio::time::sleep(every).await;
         }
-    });
+    }));
 }
 
 /// Up to `max`, at random: engines started together don't all check at once.

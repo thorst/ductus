@@ -32,6 +32,8 @@ tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 [target.'cfg(windows)'.dependencies]
 tracing = "0.1.44"
 tracing-appender = "0.2.3"
+# The service's Stop, which every engine in the process heeds (an in-process handover's too).
+tokio-util = "0.7.19"
 windows-service = "0.8.0"
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Security_Authentication_Identity", "Win32_System_EventLog", "Win32_System_Services"] }
 

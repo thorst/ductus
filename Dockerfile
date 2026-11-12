@@ -73,8 +73,10 @@ LABEL org.opencontainers.image.title="Ductus" \
 USER ductus
 WORKDIR /project
 # Inside a container the API must listen on every address to be reachable through a published
-# port; publish it to 127.0.0.1 on the host unless a TLS proxy is in front.
-ENV DUCTUS_PROJECT=/project DUCTUS_API_LISTEN=0.0.0.0:7700
+# port; publish it to 127.0.0.1 on the host unless a TLS proxy is in front. The project is the
+# working folder, /project (no DUCTUS_PROJECT: release mode is then just -e DUCTUS_RELEASES=<folder>,
+# deploys apply in the engine's own process, and SIGHUP reloads: `docker kill --signal HUP`).
+ENV DUCTUS_API_LISTEN=0.0.0.0:7700
 EXPOSE 7700
 # The engine stops cleanly on SIGTERM within DUCTUS_STOP_TIMEOUT (30 s): give `docker stop` longer
 # than its default 10 s (`--time 45`, or `stop_grace_period` in compose).

@@ -288,6 +288,9 @@ pub struct Handover {
     at: DateTime<Utc>,
     /// From the old engine's stop until this one sent (receiving never stopped).
     sending_paused_ms: u64,
+    /// In the same process as the engine it took over from (Windows, containers, a plain
+    /// `ductus run`: `from_pid` is this one's); false: a new process (Linux under systemd).
+    in_process: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -352,6 +355,7 @@ async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
             from_pid: h.from.pid,
             at: h.at,
             sending_paused_ms: h.sending_paused.as_millis() as u64,
+            in_process: h.in_process,
         }),
         deployment: engine.deployment.get().map(DeploymentInfo::of),
     }))

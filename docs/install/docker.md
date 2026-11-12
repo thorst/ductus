@@ -67,8 +67,18 @@ services:
   can need up to `DUCTUS_STOP_TIMEOUT` (30 s). `stop_grace_period: 45s` (or
   `docker stop --time 45`) lets the engine finish the messages in hand
   ([what finishes](../nuances/delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2)).
-- **The project is read-only**: interfaces change through Git and a new container, never inside
-  a running one. A file destination needs a volume of its own, writable by uid 10001.
+- **The project is read-only**: interfaces change through Git, never inside a running container.
+  With the project mounted, `docker kill --signal HUP <container>` after a change reloads it:
+  a new engine starts inside the container beside the running one and takes over, so senders
+  are refused nothing and the container never restarts; one that can't start leaves the running
+  engine as it was, and `docker logs` says why
+  ([nuance](../nuances/upgrades.md#sighup-reloads-the-engine-it-no-longer-ends-it-level-2)). A file
+  destination needs a volume of its own, writable by uid 10001.
+- **Release mode needs no volume**: `-e DUCTUS_RELEASES=/tmp/ductus-releases` (and no project
+  mounted) runs the release deployed to its environment, unpacked from the database at every
+  start; `ductus deploy` applies a new one inside the container the same way
+  ([releases](../operate/releases.md#deploy-a-release)). The image's working folder is `/project`,
+  the project when none is set (no `DUCTUS_PROJECT`, which release mode refuses beside it).
 - **The database** in the Compose file is for trying it out. For anything that matters, point
   `DUCTUS_DATABASE_URL` at the DBA's Postgres ([PostgreSQL](postgres.md)).
 - **Time zone**: the image runs on UTC unless you set `TZ`. Cron schedules, quiet hours and

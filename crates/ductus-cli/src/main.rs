@@ -108,11 +108,24 @@ impl RunArgs {
             api_listen: self.api_listen,
             stop_timeout: self.stop_timeout,
             control: true,
+            rebuild: Some(Self::rebuild()),
             takeover: self.takeover.map(ductus_runtime::handover::Takeover::new).transpose()?,
             releases,
             ..defaults
         };
         Ok((self.root.unwrap_or_else(|| PathBuf::from(".")), tools::database_url(self.database_url)?, options))
+    }
+
+    /// How an engine started again in this process gets its settings (an in-process handover: a
+    /// deploy or reload on Windows, in a container, under a plain `ductus run`): `run`'s arguments
+    /// read again, with the env file as it is now (`envfile::run_args_again`).
+    fn rebuild() -> ductus_runtime::handover::Rebuild {
+        std::sync::Arc::new(|| {
+            let mut args = envfile::run_args_again()?;
+            args.takeover = None; // the handover gives the new engine its own
+            let (root, database_url, options) = args.parts()?;
+            Ok(ductus_runtime::handover::Restart { root, database_url, options })
+        })
     }
 }
 
@@ -457,11 +470,14 @@ enum Command {
         #[arg(long, hide = true)]
         emit: bool,
     },
-    /// Hand the running engine over to the binary now on disk and the project as it is now,
-    /// refusing no connection (Linux: the package's `systemctl reload ductus` runs it): an upgrade
-    /// or a project deploy. The new engine starts beside the running one on the same listening
-    /// sockets; once it's ready, the running one stops and lets go. Exit 0 once the new engine
-    /// sends; 1 when it couldn't take over (the running engine goes on: the reason is printed).
+    /// Hand the running engine over to a new one on the project (or release) as it is now,
+    /// refusing no connection: a reload. The new engine starts beside the running one on the same
+    /// listening sockets; once it's ready, the running one stops and lets go. Linux: the package's
+    /// `systemctl reload ductus` runs it, and the new engine is the binary now on disk (an
+    /// upgrade too); exit 0 once it sends, 1 when it couldn't take over (the running engine goes
+    /// on: the reason is printed). Windows: asks the service (`sc.exe control Ductus paramchange`,
+    /// from an elevated shell); the new engine runs in the service's process, with ductus.env read
+    /// again, and the service's log and the Event Log say how it went.
     Handover {
         /// The running engine's control socket (default: `$RUNTIME_DIRECTORY/control`, which
         /// systemd sets for the service and its reload, else /run/ductus/control).
@@ -1422,6 +1438,9 @@ async fn run(cli: Cli) -> Result<()> {
             };
             exit_on_failure(replay::run(options).await)
         }
+        #[cfg(windows)]
+        Command::Handover { reason, .. } => service::reload(reason.as_deref()),
+        #[cfg(not(windows))]
         Command::Handover { control, timeout, with_environment, reason } => {
             use ductus_runtime::handover;
             let path = control.or_else(handover::control_path).unwrap_or_else(|| "/run/ductus/control".into());

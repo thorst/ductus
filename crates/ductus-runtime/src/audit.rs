@@ -58,7 +58,7 @@ pub async fn start(
     });
     record(engine, Audit::new(By::engine(), "engine.start").detail(detail)).await;
 
-    let store = engine.store.clone();
+    let (store, ended) = (engine.store.clone(), engine.ended.clone());
     tokio::spawn(async move {
         while let Some((interface, reason)) = stopped.recv().await {
             let audit =
@@ -70,7 +70,7 @@ pub async fn start(
     });
 
     let engine = Arc::downgrade(engine);
-    tokio::spawn(async move {
+    tokio::spawn(ended.run_until_cancelled_owned(async move {
         tokio::time::sleep(Duration::from_secs(60)).await;
         loop {
             let Some(engine) = engine.upgrade() else { return };
@@ -78,7 +78,7 @@ pub async fn start(
             drop(engine);
             tokio::time::sleep(Duration::from_secs(3600)).await;
         }
-    });
+    }));
 }
 
 /// Record that the engine stopped (`forced`: it did not finish what was in hand in time).
@@ -94,6 +94,7 @@ pub async fn handed_over(engine: &Engine, handover: &crate::handover::HandedOver
         "from": { "version": from.version, "pid": from.pid, "instance": from.instance },
         "to": { "version": env!("CARGO_PKG_VERSION"), "pid": std::process::id(), "instance": engine.instance },
         "sending_paused_ms": handover.sending_paused.as_millis() as u64,
+        "in_process": handover.in_process,
     });
     record(engine, Audit::new(By::engine(), "engine.handover").detail(detail)).await;
 }

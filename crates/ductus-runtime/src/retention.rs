@@ -36,6 +36,8 @@ pub struct Retention {
     drop_now: Arc<Notify>,
     /// The last drop run.
     last_drop: Mutex<Option<LastDrop>>,
+    /// The engine's run ended: the background work ends with it.
+    ended: tokio_util::sync::CancellationToken,
 }
 
 /// What the last hourly run found.
@@ -60,7 +62,11 @@ impl Retention {
     /// Each interface's tier as stored now (a new interface's: its configured one), changing
     /// nothing: a takeover stores messages before it may change an interface's rows. `apply`
     /// applies what's configured.
-    pub async fn new(store: Store, configured: Vec<Configured>) -> Result<Arc<Self>> {
+    pub async fn new(
+        store: Store,
+        configured: Vec<Configured>,
+        ended: tokio_util::sync::CancellationToken,
+    ) -> Result<Arc<Self>> {
         let stored: std::collections::HashMap<String, Tier> =
             store.retention().await?.into_iter().map(|s| (s.interface, s.days)).collect();
         let interfaces = configured
@@ -78,6 +84,7 @@ impl Retention {
             kick: Arc::new(Notify::new()),
             drop_now: Arc::new(Notify::new()),
             last_drop: Mutex::new(None),
+            ended,
         }))
     }
 
@@ -102,8 +109,8 @@ impl Retention {
             m.tier.store(state.days, Relaxed);
         }
         self.store.set_quarantined(&self.purge).await?;
-        tokio::spawn(run_changes(Arc::downgrade(self)));
-        tokio::spawn(drop_expired(Arc::downgrade(self)));
+        tokio::spawn(self.ended.clone().run_until_cancelled_owned(run_changes(Arc::downgrade(self))));
+        tokio::spawn(self.ended.clone().run_until_cancelled_owned(drop_expired(Arc::downgrade(self))));
         Ok(())
     }
 

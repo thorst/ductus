@@ -702,13 +702,15 @@ pub struct Refreshed {
 /// at once, in the background (a directory that is down never delays a start), then every
 /// `refresh`.
 pub fn start(engine: &Arc<Engine>) {
+    // Its rounds end with the engine's run (Engine::ended).
+    let ended = engine.ended.clone();
     let Some(directory) = engine.directory.clone() else { return };
     let mut round = Round::of(engine);
     let every = directory.auth.refresh;
     // The store, not the engine: a round waiting on a directory that's down holds nothing of it.
     let store = engine.store.clone();
     let weak = Arc::downgrade(engine);
-    tokio::spawn(async move {
+    tokio::spawn(ended.clone().run_until_cancelled_owned(async move {
         loop {
             if weak.strong_count() == 0 {
                 return;
@@ -730,7 +732,7 @@ pub fn start(engine: &Arc<Engine>) {
             }
             tokio::time::sleep(every).await;
         }
-    });
+    }));
 }
 
 #[cfg(test)]

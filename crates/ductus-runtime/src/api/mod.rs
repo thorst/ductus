@@ -225,7 +225,7 @@ pub async fn serve(
     // `tap_io` gives the listener axum's connect info (the caller's address, for the audit log).
     let listener = crate::tls::Listener::new(listener, tls, "the REST API", admission)?.tap_io(|_| {});
     tracing::info!(%host, port, https, "REST API listening (/api/v1)");
-    let shutdown = engine.shutdown.clone();
+    let (shutdown, ended) = (engine.shutdown.clone(), engine.ended.clone());
     let (mut router, _) = router(engine);
     if https {
         // Browsers that have seen HTTPS here never try plain HTTP again (a year).
@@ -237,9 +237,11 @@ pub async fn serve(
             response
         }));
     }
+    // Until the engine ended, whatever is still open then (live-update streams never end).
     Ok(tokio::spawn(async move {
         let app = router.into_make_service_with_connect_info::<SocketAddr>();
-        if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned()).await {
+        let serving = axum::serve(listener, app).with_graceful_shutdown(shutdown.cancelled_owned());
+        if let Some(Err(e)) = ended.run_until_cancelled_owned(serving.into_future()).await {
             tracing::error!(error = %e, "REST API stopped");
         }
     }))

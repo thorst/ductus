@@ -110,7 +110,7 @@ grant the computer account (`HOSPITAL\SERVER01$`), or the gMSA.
 ## Start, stop, look
 
 ```powershell
-Start-Service Ductus           # after a change to ductus.env: Restart-Service Ductus
+Start-Service Ductus           # after a change to ductus.env or the project: ductus handover
 Get-Service Ductus
 Get-ChildItem C:\ProgramData\Ductus\logs\ductus.*.log | Sort-Object LastWriteTime |
   Select-Object -Last 1 | Get-Content -Tail 50 -Wait      # the newest log, as it grows
@@ -127,6 +127,14 @@ newest one may carry tomorrow's or yesterday's date.
 - **A restart is a short gap**: measured 0 refused, a few connections reset, the longest wait
   for an ACK ~1.1 s ([measured](../nuances/upgrades.md#windows-and-containers-a-restart-is-a-short-gap-level-2)).
   Senders resend by themselves.
+- **A reload has no gap**: after changing the project or ductus.env, `ductus handover` from an
+  elevated shell asks the service for one (it sends `sc.exe control Ductus paramchange`). A new
+  engine starts inside the service, beside the running one, on the project (or release) as it is
+  now with ductus.env read again, and takes over once it's ready: nothing refused, and the
+  service stays Running. One that can't start leaves the running engine as it was. The service's
+  log and the Event Log say how it went; the same binary runs on, so a new version is still the
+  MSI's ([nuance](../nuances/upgrades.md#without-a-control-socket-the-handover-runs-in-the-engines-own-process-level-2)).
+  Deploys of releases apply the same way ([releases](../operate/releases.md#deploy-a-release)).
 - **If it fails** it's started again after a minute, twice, then waits for a person. A start
   refused because another engine runs these interfaces isn't retried.
 - **The Event Log** gets what operations watch for: started, stopped, couldn't start (with the

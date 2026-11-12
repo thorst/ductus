@@ -10,6 +10,12 @@
 # and a different person asks: every handover then warns that it may undo someone else's change
 # (`ductus handover` prints it), which the new engine works out before it's ready, outside the
 # sending pause. Run it with a binary before 0.7.3.3 too (BIN=...) to compare the pause.
+#
+# IN_PROCESS=1 (0.7.4.4.2): no control socket, so each handover runs in the engine's own process
+# (as on Windows, in a container, under a plain `ductus run`), asked by SIGHUP; timed from the
+# engine's log. Also reports the process's memory and threads, settled before the first round and
+# after the last (an engine that ended must leave nothing behind), and its peak (both engines run
+# while they overlap).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
@@ -50,8 +56,10 @@ cleanup() {
 trap cleanup EXIT
 
 "$BIN" sink --port $SINK >"$WORK/sink.log" 2>&1 &
-export DUCTUS_CONTROL=$WORK/control RUST_LOG=${RUST_LOG:-info,ductus_runtime=debug}
+export RUST_LOG=${RUST_LOG:-info,ductus_runtime=debug}
+if [ "${IN_PROCESS:-0}" = 1 ]; then unset DUCTUS_CONTROL; else export DUCTUS_CONTROL=$WORK/control; fi
 "$BIN" run --root "$WORK" --threads 4 --api-listen off >"$WORK/engine.log" 2>&1 &
+ENGINE=$!
 for _ in $(seq 1 300); do
   grep "started interfaces=" "$WORK/engine.log" >/dev/null && break
   sleep 0.1
@@ -62,7 +70,28 @@ TOTAL=$((ROUNDS * 4 * 200 + 1200)) # 200 msg/s for each round's 4 s, and a littl
 "$BIN" gen --to 127.0.0.1:$BASE --count $TOTAL --patients 200 --connections 4 --rate 200 >"$WORK/gen.log" 2>&1 &
 SENDER=$!
 sleep 3
+memory() { awk '/^VmRSS/ { rss = $2 } /^VmHWM/ { peak = $2 } /^Threads/ { t = $2 } END { printf "%.0f MB, %d threads (peak so far %.0f MB)", rss / 1024, t, peak / 1024 }' "/proc/$1/status"; }
+[ "${IN_PROCESS:-0}" = 1 ] && echo "   the process before the first round: $(memory $ENGINE)"
 for round in $(seq 1 "$ROUNDS"); do
+  if [ "${IN_PROCESS:-0}" = 1 ]; then
+    done_before=$(grep -c 'handover: handed over' "$WORK/engine.log" || true)
+    lines_before=$(wc -l <"$WORK/engine.log")
+    started=$(date +%s.%N)
+    kill -HUP $ENGINE
+    for _ in $(seq 1 1200); do
+      [ "$(grep -c 'handover: handed over\|handover: .*can.t take over' "$WORK/engine.log" || true)" -gt "$done_before" ] && break
+      sleep 0.05
+    done
+    took=$(echo "$(date +%s.%N) - $started" | bc)
+    out=$(tail -n +$((lines_before + 1)) "$WORK/engine.log" | grep 'handover: ' || true)
+    ready=$(grep -o 'ready after [0-9.]* m*s' <<<"$out" | tail -1 | sed 's/ready after //')
+    stop=$(grep -o 'stopped in [0-9.]* m*s' <<<"$out" | tail -1 | sed 's/stopped in //')
+    paused=$(grep -o 'sending paused [0-9.]* m*s' <<<"$out" | tail -1 | sed 's/sending paused //')
+    sleep 4
+    printf '   in-process handover %d: ready after %s, old engine stopped in %s, sending paused %s (SIGHUP to its end: %.2f s); then %s\n' \
+      "$round" "$ready" "$stop" "$paused" "$took" "$(memory $ENGINE)"
+    continue
+  fi
   asker=()
   if [ "${WARN:-0}" = 1 ]; then
     echo "# round $round" >>"$FIRST"
@@ -83,8 +112,13 @@ for round in $(seq 1 "$ROUNDS"); do
   sleep 4
 done
 # What the second engine costs while both run: one engine's memory, once settled.
-pid=$(pgrep -f "ductus run --root $WORK" | head -1)
-echo "   one engine's memory: $(ps -o rss= -p "$pid" | awk '{printf "%.0f MB", $1 / 1024}') (two run while they overlap)"
+if [ "${IN_PROCESS:-0}" = 1 ]; then
+  sleep 3
+  echo "   the process after the last round: $(memory $ENGINE)"
+else
+  pid=$(pgrep -f "ductus run --root $WORK" | head -1)
+  echo "   one engine's memory: $(ps -o rss= -p "$pid" | awk '{printf "%.0f MB", $1 / 1024}') (two run while they overlap)"
+fi
 wait $SENDER
 echo "   sender: $(tail -1 "$WORK/gen.log" | sed 's/.*), //')"
 echo "   the last takeover's phases (debug):"

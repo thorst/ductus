@@ -316,6 +316,7 @@ pub async fn spawn_mllp(
     intake: Arc<Intake>,
     tls: Option<Arc<rustls::ServerConfig>>,
     admission: crate::tls::Admission,
+    ended: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let config = intake.config.clone();
     let Source::Mllp { host, port, .. } = &config.source else { return Ok(()) };
@@ -352,7 +353,8 @@ pub async fn spawn_mllp(
             }
         }
     };
-    tokio::spawn(async move {
+    // Until the engine ended: after a stop its gate stays closed, and this would wait forever.
+    tokio::spawn(ended.run_until_cancelled_owned(async move {
         let name = &intake.config.name;
         loop {
             intake.gate.opened().await;
@@ -389,7 +391,7 @@ pub async fn spawn_mllp(
                 }
             }
         }
-    });
+    }));
     Ok(())
 }
 

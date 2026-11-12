@@ -27,6 +27,38 @@ pub fn data_dir() -> std::path::PathBuf {
     std::path::PathBuf::from(std::env::var_os("ProgramData").unwrap_or_else(|| r"C:\ProgramData".into())).join("Ductus")
 }
 
+/// `ductus handover` on Windows: ask the service for a reload (`paramchange`), as `systemctl
+/// reload` on Linux. The service manager carries no answer: the service's log and the Event Log
+/// say how it went. Needs an elevated shell (the right to control the service).
+#[cfg(windows)]
+pub fn reload(reason: Option<&str>) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let out = std::process::Command::new("sc.exe")
+        .args(["control", NAME, "paramchange"])
+        .output()
+        .context("running sc.exe to ask the service for a reload")?;
+    if !out.status.success() {
+        let said = String::from_utf8_lossy(&out.stdout);
+        let said = said.lines().map(str::trim).filter(|l| !l.is_empty()).collect::<Vec<_>>().join(" ");
+        anyhow::bail!(
+            "the Ductus service didn't take the reload: {said} (run it from an elevated shell, with the service running)"
+        );
+    }
+    if reason.is_some() {
+        eprintln!(
+            "note: on Windows `-m` isn't recorded (the service manager carries no reason): the deployment says it was \
+             asked by \"the service manager (paramchange)\""
+        );
+    }
+    println!(
+        "asked the Ductus service to reload: a new engine starts beside the running one on the project or release as \
+         it is now, with ductus.env read again, and takes over once ready (the running one goes on if it can't).\n\
+         How it went: the log in {} and the Event Log (Windows Logs > Application, source Ductus).",
+        run::log_dir().display()
+    );
+    Ok(())
+}
+
 /// Who is running this command, for the Event Log.
 #[cfg(windows)]
 pub fn who() -> String {

@@ -82,7 +82,7 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **Why:** the database holds what was released, gated and recorded; a folder only mirrors it so the engine can read it like a project.
 - **What to do:** change the project, release, deploy. To look at what runs, read the folder, or the release itself (`GET /releases/{id}`).
 
-## Deploys need the handover: Linux, with a control socket (level 1)
-- **What:** a deploy applies by the handover (a new engine runs the release beside the old one, then takes over: receiving never stops). That needs the control socket the package's systemd unit gives the engine (or DUCTUS_CONTROL). An engine without one (Windows, a container, `ductus run` by hand) refuses deploys (409) saying so. The deploy's answer comes from the engine being replaced, once the new one sends.
-- **Why:** on Windows and in containers the engine is the service's one process, so it can't start its successor beside itself; an in-process restart that keeps the listening sockets is the next step (0.7.4.4.2).
-- **What to do:** deploy to engines run by the package's systemd unit; until 0.7.4.4.2, on Windows and in containers run the project in folder mode.
+## A deploy applies by a handover: to a new process under systemd, in the engine's own process elsewhere (level 1)
+- **What:** a deploy applies by the handover: a new engine runs the release beside the old one, then takes over (receiving never stops). Under the package's systemd unit (a control socket) the new engine is a new process; on Windows, in a container and under a plain `ductus run` it runs in the engine's own process, so the Windows service stays Running and the container never restarts ([nuance](upgrades.md#without-a-control-socket-the-handover-runs-in-the-engines-own-process-level-2)). The deploy's answer comes from the engine being replaced, once the new one sends; it says which (`✓ handed over to ductus 0.7.0 (pid 4598)` or `✓ handed over to a new engine in this process`). Only `ductus dev` takes no deploys (409).
+- **Why:** one way to apply a release everywhere, with the same promise: nothing refused, a release that can't start changes nothing.
+- **What to do:** nothing differs for the person deploying. On Windows and in containers, leave room for a second engine's memory during the deploy, as on Linux.

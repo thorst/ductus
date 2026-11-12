@@ -86,8 +86,15 @@ Everything the engine knows is in Postgres: the messages, the queues, the audit 
   No drain, no maintenance window for the senders. Every start and handover records what each
   interface runs, by whom and why: `sudo ductus handover -m "why"` instead of `systemctl reload`
   puts your name and reason on it ([what runs, recorded](deployments.md#who-and-why)).
-- **Windows**: a restart or the MSI is a short gap (above): pick a quiet moment. Zero-downtime
-  Windows upgrades are planned for v1.0.
+- **Windows, containers, a plain `ductus run`**: a project change or a deploy hands over too,
+  inside the engine's own process: the new engine starts beside the running one on copies of the
+  same listening sockets and takes over the same way, so receiving never stops and a project that
+  can't start leaves the running one serving. Ask for it with `ductus handover` (Windows: from an
+  elevated shell, it asks the service), `SIGHUP` (`docker kill --signal HUP <container>`), or a
+  deploy ([releases](releases.md#deploy-a-release)). The same binary runs on: a new version still
+  needs a restart or the MSI, a short gap (above), so pick a quiet moment for those; zero-downtime
+  Windows upgrades are planned for v1.0
+  ([nuance](../nuances/upgrades.md#without-a-control-socket-the-handover-runs-in-the-engines-own-process-level-2)).
 - **Before every upgrade**: `ductus upgrade --check` with the new version, and `ductus replay`
   for what it does to real traffic ([replay](resend.md#replay-a-period-before-a-change)).
 

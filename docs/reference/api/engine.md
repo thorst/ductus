@@ -305,6 +305,7 @@ What an interface runs, and the deployment it came with.
 | `at` | time (RFC 3339) | When it held the interfaces. |
 | `from_pid` | number |  |
 | `from_version` | text | The version it took over from. |
+| `in_process` | true or false | In the same process as the engine it took over from (Windows, containers, a plain `ductus run`: `from_pid` is this one's); false: a new process (Linux under systemd). |
 | `sending_paused_ms` | number | From the old engine's stop until this one sent (receiving never stopped). |
 
 ### `HeadInfo`

@@ -10,6 +10,11 @@
 //! A Stop from the service manager (a person, `Stop-Service`, the installer) leaves a `stopped`
 //! file in the log folder; the next start removes it. An upgrade that finds it leaves the service
 //! stopped: an engine stopped on purpose stays stopped. Windows shutting down leaves none.
+//!
+//! `paramchange` (`sc.exe control Ductus paramchange`, which `ductus handover` sends) is a reload,
+//! as `systemctl reload` is on Linux: a new engine starts beside the running one in this process,
+//! on the project or release as it is now and ductus.env read again, and takes over
+//! (`ductus_runtime::handover`). The service stays Running throughout.
 
 use super::eventlog::{self, EventLogLayer};
 use crate::RunArgs;
@@ -19,7 +24,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::sync::Notify;
+use tokio_util::sync::CancellationToken;
 use windows_service::service::{
     ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType,
 };
@@ -59,7 +64,8 @@ fn service_main(_arguments: Vec<OsString>) {
 fn serve() -> Result<()> {
     let args = ARGS.lock().unwrap().take().context("the service started without its settings")?;
     let stop_timeout = args.stop_timeout;
-    let stop = Arc::new(Notify::new());
+    // Cancelled once: every engine in the process heeds it (a handover's new one too).
+    let stop = CancellationToken::new();
     let phase = Arc::new(AtomicU8::new(STARTING));
     let checkpoint = Arc::new(AtomicU32::new(0));
     let reached_running = Arc::new(AtomicBool::new(false));
@@ -79,8 +85,12 @@ fn serve() -> Result<()> {
                         let wait = stop_timeout + Duration::from_secs(15);
                         report(&h, ServiceState::StopPending, &checkpoint, wait, ServiceExitCode::Win32(0));
                     }
-                    stop.notify_one();
+                    stop.cancel();
                 }
+                ServiceControlHandlerResult::NoError
+            }
+            ServiceControl::ParamChange => {
+                ductus_runtime::handover::reload("the service manager (paramchange)");
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
@@ -155,7 +165,10 @@ fn running(status: &ServiceStatusHandle) {
     set(
         status,
         ServiceState::Running,
-        ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN | ServiceControlAccept::PRESHUTDOWN,
+        ServiceControlAccept::STOP
+            | ServiceControlAccept::SHUTDOWN
+            | ServiceControlAccept::PRESHUTDOWN
+            | ServiceControlAccept::PARAM_CHANGE,
         0,
         Duration::ZERO,
         ServiceExitCode::Win32(0),

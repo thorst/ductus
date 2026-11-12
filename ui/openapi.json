@@ -5364,7 +5364,8 @@
           "from_version",
           "from_pid",
           "at",
-          "sending_paused_ms"
+          "sending_paused_ms",
+          "in_process"
         ],
         "properties": {
           "at": {
@@ -5380,6 +5381,10 @@
           "from_version": {
             "type": "string",
             "description": "The version it took over from."
+          },
+          "in_process": {
+            "type": "boolean",
+            "description": "In the same process as the engine it took over from (Windows, containers, a plain\n`ductus run`: `from_pid` is this one's); false: a new process (Linux under systemd)."
           },
           "sending_paused_ms": {
             "type": "integer",
