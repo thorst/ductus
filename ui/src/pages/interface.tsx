@@ -117,7 +117,7 @@ function Overview({ i }: { i: Schemas["InterfaceDetail"] }) {
               {i.lanes.changing && (
                 <span className="mt-0.5 block text-xs text-muted">
                   {i.lanes.changing} (
-                  <Link to="/hotspots" search={{ interface: i.name }}>
+                  <Link to="/hotspots" search={{ interface: i.name }} className="underline">
                     Hotspots
                   </Link>{" "}
                   shows which)
