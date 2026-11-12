@@ -31,6 +31,8 @@
       <Directory Id="DATADIR" Name="Ductus">
         <Directory Id="PROJECTDIR" Name="project" />
         <Directory Id="LOGDIR" Name="logs" />
+        <!-- Release mode (DUCTUS_RELEASES): where deployed releases are unpacked. -->
+        <Directory Id="RELEASEDIR" Name="releases" />
       </Directory>
     </StandardDirectory>
 
@@ -104,6 +106,9 @@
       <Component Id="LogFolder" Guid="EEB4C84E-CA60-4783-9AC2-A73C0C2B07EF" Bitness="always64" Permanent="yes" Directory="LOGDIR">
         <CreateFolder />
       </Component>
+      <Component Id="ReleaseFolder" Guid="35DCFE62-F8F7-40FA-9F58-FC4668A13A3E" Bitness="always64" Permanent="yes" Directory="RELEASEDIR">
+        <CreateFolder />
+      </Component>
     </ComponentGroup>
 
     <!--
@@ -130,6 +135,10 @@
                   ExeCommand="icacls.exe &quot;[DATADIR].&quot; /inheritance:r /grant:r *S-1-5-32-544:(OI)(CI)F *S-1-5-18:(OI)(CI)F &quot;NT SERVICE\Ductus:(OI)(CI)RX&quot;" />
     <CustomAction Id="LetServiceWriteLogs" Directory="SystemFolder" Execute="deferred" Impersonate="no" Return="check"
                   ExeCommand="icacls.exe &quot;[LOGDIR].&quot; /grant &quot;NT SERVICE\Ductus:(OI)(CI)M&quot;" />
+    <!-- Release mode unpacks each deployed release there (DUCTUS_RELEASES, 0.7.4.4): found by hand
+         on Windows, the service couldn't make its folder in the read-only data folder. -->
+    <CustomAction Id="LetServiceWriteReleases" Directory="SystemFolder" Execute="deferred" Impersonate="no" Return="check"
+                  ExeCommand="icacls.exe &quot;[RELEASEDIR].&quot; /grant &quot;NT SERVICE\Ductus:(OI)(CI)M&quot;" />
     <!--
       ductus.exe's own step once the service exists (`ductus service installed`): its SID type
       unrestricted, so the permissions above (NT SERVICE\Ductus) hold whatever account runs it; the
@@ -141,7 +150,8 @@
     <InstallExecuteSequence>
       <Custom Action="LockDataFolder" After="InstallServices" Condition="NOT REMOVE~=&quot;ALL&quot;" />
       <Custom Action="LetServiceWriteLogs" After="LockDataFolder" Condition="NOT REMOVE~=&quot;ALL&quot;" />
-      <Custom Action="ServiceInstalled" After="LetServiceWriteLogs" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="LetServiceWriteReleases" After="LetServiceWriteLogs" Condition="NOT REMOVE~=&quot;ALL&quot;" />
+      <Custom Action="ServiceInstalled" After="LetServiceWriteReleases" Condition="NOT REMOVE~=&quot;ALL&quot;" />
     </InstallExecuteSequence>
 
     <Feature Id="Main" Title="Ductus" Level="1">

@@ -41,11 +41,14 @@ nothing is configured yet, and without a database it would stop at once.
 | `C:\ProgramData\Ductus\ductus.env` | Settings (`NAME=value` lines): the database URL, the project, the environment, the secrets key. Written once as a template; never overwritten. |
 | `C:\ProgramData\Ductus\project\` | The project (a Git clone, usually). |
 | `C:\ProgramData\Ductus\logs\` | `ductus.<date>.log`, a file a day, the last 14 kept. |
+| `C:\ProgramData\Ductus\releases\` | Release mode only (`DUCTUS_RELEASES=C:\ProgramData\Ductus\releases`): each deployed release, unpacked from the database ([releases](../operate/releases.md#run-the-engine-in-release-mode)). Empty otherwise. |
 | Service `Ductus` | "Ductus Integration Engine": `ductus.exe run --service --env-file C:\ProgramData\Ductus\ductus.env`, as `NT SERVICE\Ductus` unless you choose another account (below). |
 | Event Log source `Ductus` | In the Application log: what operations teams watch for ([IDs](../reference/event-log.md)). |
 
 `C:\ProgramData\Ductus` can be read by administrators, SYSTEM and the service only: `ductus.env`
-holds the database password. Keep it that way.
+holds the database password. Keep it that way. The service may write only in `logs\` and
+`releases\`. Release mode elsewhere (another `DUCTUS_RELEASES` folder) needs that folder writable
+by the service's account: `icacls <folder> /grant "NT SERVICE\Ductus:(OI)(CI)M"`.
 
 ## The service's account
 

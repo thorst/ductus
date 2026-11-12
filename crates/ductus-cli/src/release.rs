@@ -187,7 +187,7 @@ pub async fn make(args: Make) -> Result<()> {
 
     if args.json {
         let mut document = serde_json::to_value(&manifest)?;
-        document["file"] = path.display().to_string().into();
+        document["file"] = shown(&path).into();
         document["size"] = size.into();
         document["seconds"] = ((took * 100.0).round() / 100.0).into();
         println!("{}", serde_json::to_string_pretty(&document)?);
@@ -228,9 +228,31 @@ pub async fn make(args: Make) -> Result<()> {
         println!("  {} file(s) that aren't text, carried byte for byte", manifest.binary.len());
     }
     println!("  project version {}", release::short(&manifest.project_version.version));
-    println!("wrote {} ({took:.1} s)", path.display());
-    println!("check it against an environment: ductus release check {} --env prod", path.display());
+    println!("wrote {} ({took:.1} s)", shown(&path));
+    println!("check it against an environment: ductus release check {} --env prod", shown(&path));
     Ok(())
+}
+
+/// A path as a person would type it: on Windows without the `\\?\` prefix `canonicalize` adds
+/// (found by hand on Windows: `ductus deploy` then echoed it back).
+fn shown(path: &Path) -> String {
+    let text = path.display().to_string();
+    if let Some(share) = text.strip_prefix(r"\\?\UNC\") {
+        return format!(r"\\{share}");
+    }
+    text.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(text)
+}
+
+#[cfg(test)]
+mod shown_tests {
+    use super::*;
+
+    #[test]
+    fn windows_verbatim_paths_are_shown_as_typed() {
+        assert_eq!(shown(Path::new(r"\\?\C:\work\a.tar.gz")), r"C:\work\a.tar.gz");
+        assert_eq!(shown(Path::new(r"\\?\UNC\server\share\a.tar.gz")), r"\\server\share\a.tar.gz");
+        assert_eq!(shown(Path::new("/home/ann/a.tar.gz")), "/home/ann/a.tar.gz");
+    }
 }
 
 /// `--over`: a release id (64 hex characters) or a release file, whose id is read from it.

@@ -127,7 +127,9 @@ try {
     Check "starts automatically, with --service and the env file" (($config -match "AUTO_START") -and ($config -match "run --service --env-file"))
     Check "its own SID is unrestricted (the data folder's permissions hold for any account)" (((sc.exe qsidtype Ductus) -join "`n") -match "UNRESTRICTED")
     Check "Event Log source registered with our message file" ((Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\EventLog\Application\Ductus").EventMessageFile -match "ductus.exe")
-    Check "installed files" ((Test-Path $exe) -and (Test-Path "$data\ductus.env") -and (Test-Path "$data\project") -and (Test-Path "$data\logs"))
+    Check "installed files" ((Test-Path $exe) -and (Test-Path "$data\ductus.env") -and (Test-Path "$data\project") -and (Test-Path "$data\logs") -and (Test-Path "$data\releases"))
+    $releasesAcl = (icacls "$data\releases") -join "`n"
+    Check "the service may write releases (release mode)" ($releasesAcl -match "NT SERVICE\\Ductus:\(OI\)\(CI\)\(M\)")
     $acl = (icacls "$data\ductus.env") -join "`n"
     Check "settings readable by the service, not by users" (($acl -match "NT SERVICE\\Ductus") -and ($acl -notmatch "BUILTIN\\Users"))
 

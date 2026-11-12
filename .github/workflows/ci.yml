@@ -451,6 +451,10 @@ jobs:
         shell: pwsh
         run: ./scripts/demo-windows.ps1 -Msi (Get-Item dist/*.msi).FullName -UpgradeMsi (Get-Item dist-upgrade/*.msi).FullName -NewerMsi (Get-Item dist-newer/*.msi).FullName -DatabaseUrl $env:DEMO_DATABASE_URL -LogDir "$env:RUNNER_TEMP/demo-logs"
 
+      - name: Deploys to the service (release mode, two deploys in its own process under traffic, ductus handover, a rollback, uninstall)
+        shell: pwsh
+        run: ./scripts/demo-windows-deploy.ps1 -Msi (Get-Item dist/*.msi).FullName -DatabaseUrl $env:DEMO_DATABASE_URL -LogDir "$env:RUNNER_TEMP/demo-logs/deploy"
+
       # From the zip, as a site would before upgrading: against the database the demo's service
       # used (migrated, its engine stopped), with the example project.
       - name: The archive's upgrade --check (unpacked, against the demo's database)
