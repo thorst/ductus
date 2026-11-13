@@ -343,27 +343,35 @@ $ curl -sS -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/gzip"
     "id": "212583ebcc729254a9bb2366361180b55b372e46a383f5f7c03eacfd4dcbbef2",
     "short": "212583ebcc72",
     "project": "integrations",
-    "made_at": "2026-11-10T22:41:41Z",
+    "made_at": "2026-11-13T21:37:15Z",
     "made_by": "todd",
     "reason": "archive: MSH-6",
-    "commit": "d68fbc34cb4188c2c777b57d799de7a9bb24739c",
+    "commit": "719aa0a84105eb3f69775ecfbf229be8623a04d2",
     "interfaces": 1,
     "files": 13,
     "bytes": 7829,
-    "stored_at": "2026-11-10T22:41:44.079061Z",
-    "stored_by": "release-demo-deploy-4574",
+    "stored_at": "2026-11-13T21:37:17.529843Z",
+    "stored_by": "release-demo-deploy-10714",
+    "branches": [
+        "main"
+    ],
+    "environments": [],
+    "running": false,
     "checks": [],
-    "new_folders": 4,
-    "new_files": 11
+    "new_folders": 0,
+    "new_files": 0,
+    "new_places": 0
 }
 ```
 
 The engine reads the release as `ductus release check` does: its files must match its id, or it's
 refused (400) before anything is stored; a release carrying a private key is refused too. It
 stores only what the database doesn't have yet: each text once (shared with the
-[code versions](deployments.md#the-code-version) engines record: 2 of these 13 files were there
-already, from the engine's start), each folder's list of files once. A release that changes ten
-interfaces of a thousand adds about ten folders and their changed files.
+[code versions](deployments.md#the-code-version) engines record), each folder's list of files
+once. Here `new_folders` and `new_files` are 0: earlier runs of the demo on this database had
+stored the same folders and files (on a fresh database this release adds 4 folders and 11 of its
+13 files; 2 were there from the engine's start). A release that changes ten interfaces of a
+thousand adds about ten folders and their changed files.
 
 **The same release again** (the same commit, made again with another reason) is the same id:
 stored once, said so (200, `"new": false`), nothing changed. It keeps the first one's manifest

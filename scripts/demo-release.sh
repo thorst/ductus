@@ -217,8 +217,10 @@ grep -q "0 interface(s) change, 0 new there, 1 as they run now" "$W/check.txt" |
 echo "== 13. listed, and read"
 pipe list 'curl -sS -H "Authorization: Bearer $VIEWER" "$DUCTUS_URL/api/v1/releases?limit=1" | python3 -m json.tool'
 grep -q "\"short\": \"$NEXT_SHORT\"" "$W/list.txt" && grep -q '"ok": true' "$W/list.txt" || fail+=" list"
-curl -sS -H "Authorization: Bearer $VIEWER" "$DUCTUS_URL/api/v1/releases/$NEXT_SHORT" >"$W/one.json"
+curl -sS -H "Authorization: Bearer $VIEWER" "$DUCTUS_URL/api/v1/releases/$NEXT_SHORT?manifest=true" >"$W/one.json"
 grep -q "\"interfaces\":{\"$NAME\"" "$W/one.json" || fail+=" one-manifest"
+# Without asking, no manifest (0.7.4.5: hundreds of KB at a thousand interfaces).
+curl -sS -H "Authorization: Bearer $VIEWER" "$DUCTUS_URL/api/v1/releases/$NEXT_SHORT" | grep -q '"manifest":null' || fail+=" manifest-unasked"
 kill -INT $ENGINE && wait $ENGINE 2>/dev/null || true
 ENGINE=
 
