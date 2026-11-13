@@ -54,6 +54,31 @@ pub struct Mode {
     /// Branches a release may be made on to be deployed here (`DUCTUS_DEPLOY_BRANCHES`; a trailing
     /// `*` matches the start); empty: any.
     pub branches: Vec<String>,
+    /// The engine this one pulls releases from (`DUCTUS_PROMOTE_FROM`, 0.7.4.5.2): prod's engine
+    /// names test's, and the Releases page lists test's releases to bring here.
+    pub promote_from: Option<Upstream>,
+}
+
+/// Another engine releases are pulled from: its address and a token on it (`download` is
+/// enough). A lower environment never holds a key to a higher one: prod pulls from test.
+#[derive(Clone)]
+pub struct Upstream {
+    /// Its address as `ductus deploy --to` takes it: `https://ductus-test:8443`.
+    pub url: String,
+    pub token: String,
+}
+
+impl Upstream {
+    /// Its API's base: `<url>/api/v1`.
+    pub fn api(&self) -> String {
+        format!("{}/api/v1", self.url.trim_end_matches('/'))
+    }
+}
+
+impl std::fmt::Debug for Upstream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Upstream").field("url", &self.url).field("token", &"…").finish()
+    }
 }
 
 /// Why this environment's rules refuse a release, before anything runs (`DUCTUS_DEPLOY_REQUIRES`,
@@ -533,7 +558,7 @@ mod tests {
     }
 
     fn run(release: u8, deployment: i32, rollback: bool) -> ductus_store::Run {
-        ductus_store::Run { release: vec![release; 32], deployment, at: Utc::now(), by: "ann".into(), rollback }
+        ductus_store::Run { release: vec![release; 32], deployment, at: Utc::now(), by: "ann".into(), reason: None, rollback }
     }
 
     /// The default rollback: the last release run before the current one, skipping any a rollback
@@ -608,6 +633,7 @@ mod tests {
             reuse_check: Duration::ZERO,
             requires: requires.iter().map(|s| s.to_string()).collect(),
             branches: branches.iter().map(|s| s.to_string()).collect(),
+            promote_from: None,
         };
         let git = manifest(Some(("1".repeat(40).as_str(), None)));
         let on = |names: &[&str]| -> Vec<String> { names.iter().map(|s| s.to_string()).collect() };

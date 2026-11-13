@@ -13,7 +13,8 @@ export const ROLES = Object.keys(ROLE_HELP) as Role[];
 export const PERMISSION_HELP = {
   payloads: "may read message payloads (patient data)",
   audit: "may read the audit log",
-  deploy: "may store releases and check them here; what they deploy runs with every secret and payload",
+  deploy: "may store, check and deploy releases here; what they deploy runs with every secret and payload",
+  download: "may fetch release files only: the token another engine pulls releases with",
 } as const;
 
 export type Permission = keyof typeof PERMISSION_HELP;

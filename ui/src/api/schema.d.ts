@@ -162,7 +162,12 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * The releases this engine's project ran in its environment, newest first, one entry per run:
+         *     what runs now, what ran before, and which one a rollback without a release named goes back
+         *     to. Empty in folder mode.
+         */
+        get: operations["list_deployments"];
         put?: never;
         /**
          * Deploy a stored release to this engine (release mode): this environment's rules, the "replaces"
@@ -892,7 +897,10 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        /** One release: what it is, its manifest, and every check of it (newest first, with reports). */
+        /**
+         * One release: what it is, where it went, what it would change here, and every check of it
+         *     (newest first, with reports); its manifest with `?manifest=true`.
+         */
         get: operations["get_release"];
         put?: never;
         post?: never;
@@ -937,7 +945,8 @@ export interface paths {
          * A stored release's file, as `ductus release` wrote it (the same id), its record of where it was
          *     deployed brought up to date: this database's deployments of it and what earlier files said
          *     (`deployed`, oldest first). What `ductus deploy ID --from URL --to URL` fetches to promote it
-         *     to another engine, record included. Needs the `deploy` permission (it carries the code and
+         *     to another engine, record included, and what an engine pulling from this one fetches
+         *     (`DUCTUS_PROMOTE_FROM`). Needs the `deploy` or `download` permission (it carries the code and
          *     every environment's encrypted secrets); audited as `release.download`.
          */
         get: operations["download_release"];
@@ -1039,6 +1048,49 @@ export interface paths {
         post?: never;
         /** Revoke a token: it stops working at once. Admin. */
         delete: operations["revoke_token"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upstream": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The engine this one pulls from (`DUCTUS_PROMOTE_FROM`) and its releases of this project, each
+         *     with whether it's stored here. 404 when this engine pulls from none; 502 when that engine
+         *     can't be reached or refuses the token.
+         */
+        get: operations["list_upstream"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/upstream/releases/{id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Bring a release here from the engine this one pulls from: its file (with its record of where it
+         *     went, brought up to date there) is fetched and stored, as `POST /releases` stores one; a release
+         *     stored here before keeps its first manifest and gains the records it didn't have. Nothing is
+         *     deployed. Needs the `deploy` permission here; audited as `release.pull` (when new).
+         */
+        post: operations["pull_release"];
+        delete?: never;
         options?: never;
         head?: never;
         patch?: never;
@@ -1964,6 +2016,7 @@ export interface components {
              *     An interface runs on one engine at a time.
              */
             others: components["schemas"]["OtherEngine"][];
+            releases?: components["schemas"]["ReleaseMode"] | null;
             /**
              * @description Calls from interface code to each database and API in resources.yaml (`fetch`: URLs
              *     called directly), since the engine started.
@@ -2090,6 +2143,33 @@ export interface components {
             pending: number;
             /** Format: int64 */
             quarantined: number;
+        };
+        /** @description What a release would change in this engine's environment, compared with what runs here now. */
+        Here: {
+            /** @description Each interface it changes, adds or removes here, by name. */
+            changes: components["schemas"]["HereChange"][];
+            environment: string;
+            /**
+             * @description The files outside every interface (`ductus.yaml`, `resources.yaml`, `environments/`,
+             *     `secrets/`) differ from the running release's. None when this engine doesn't run a release
+             *     (folder mode, or nothing deployed yet).
+             */
+            project_files_change?: boolean | null;
+            /** @description It ran in this environment before (a rollback may go back to it). */
+            ran_before: boolean;
+            /** @description It runs here now: deploying it changes nothing. */
+            running: boolean;
+            /** @description Interfaces it runs as they run here now. */
+            unchanged: number;
+        };
+        HereChange: {
+            /** @description `changed`, `new` (not run here now) or `removed` (runs here now, not in the release). */
+            change: string;
+            /** @description The code version running here (12 hex characters); none: new here. */
+            from?: string | null;
+            interface: string;
+            /** @description The release's (12 hex characters); none: removed. */
+            to?: string | null;
         };
         HistoryAudit: {
             /** @description `destination.pause`, `message.replay`, … */
@@ -2728,6 +2808,12 @@ export interface components {
             display_name?: string | null;
             email?: string | null;
         };
+        /** @description What a pull did. */
+        Pulled: components["schemas"]["Stored"] & {
+            environment: string;
+            /** @description Where it came from. */
+            from: string;
+        };
         QuarantinePage: {
             /** @description Newest message first; a message quarantined by two destinations is listed twice. */
             deliveries: components["schemas"]["QuarantinedDelivery"][];
@@ -2836,24 +2922,26 @@ export interface components {
         ReleaseArchive: string;
         ReleaseDetail: components["schemas"]["ReleaseInfo"] & {
             /**
-             * @description Every branch it was made on, as its files said when they were stored here (the same files
-             *     made on two branches are one release); empty: a detached HEAD without `--branch`, or made
-             *     without git. Labels, unsigned.
-             */
-            branches: string[];
-            /**
              * @description Where it was deployed, oldest first: each environment's first deployment of it on this
              *     database (`here`), and what files carrying it said about other databases when they were
              *     stored here (unsigned). What `DUCTUS_DEPLOY_REQUIRES` reads.
              */
             deployed: components["schemas"]["PlaceInfo"][];
+            here?: components["schemas"]["Here"] | null;
             /**
              * @description The release's manifest (`release.json`): every interface's code version and files, the
-             *     project version, the tests' result when it was made, who made it and why.
+             *     project version, the tests' result when it was made, who made it and why. Only with
+             *     `?manifest=true` (hundreds of KB at a thousand interfaces); null otherwise.
              */
             manifest: Record<string, never>;
         };
         ReleaseInfo: {
+            /**
+             * @description Every branch it was made on, as its files said when they were stored here (the same files
+             *     made on two branches are one release); empty: a detached HEAD without `--branch`, or made
+             *     without git. Labels, unsigned.
+             */
+            branches: string[];
             /**
              * Format: int64
              * @description Its files' bytes, unpacked.
@@ -2866,6 +2954,11 @@ export interface components {
             checks: components["schemas"]["CheckInfo"][];
             /** @description The git commit it was made from (none: made without git). */
             commit?: string | null;
+            /**
+             * @description The environments it went to, by name: deployed there on this database, or a file carrying
+             *     it said so (unsigned). Where and when: `GET /releases/{id}`'s `deployed`.
+             */
+            environments: string[];
             /** Format: int32 */
             files: number;
             /** @description The release id (SHA-256 over its files), in hex. */
@@ -2881,6 +2974,8 @@ export interface components {
             /** @description The project's folder name. */
             project: string;
             reason?: string | null;
+            /** @description This engine runs it now (release mode). */
+            running: boolean;
             /** @description Its first 12 characters, as `ductus release` shows it. */
             short: string;
             /**
@@ -2889,6 +2984,34 @@ export interface components {
              */
             stored_at: string;
             stored_by: string;
+        };
+        /** @description An engine in release mode, and what this environment takes. */
+        ReleaseMode: {
+            /**
+             * @description Branches a release must be made on (`DUCTUS_DEPLOY_BRANCHES`, a trailing `*` matches the
+             *     start); empty: any.
+             */
+            branches: string[];
+            /**
+             * @description The project it runs (its release's, or `DUCTUS_RELEASE_PROJECT`); none before the first
+             *     deploy when no project is named.
+             */
+            project?: string | null;
+            /**
+             * @description The engine this one pulls releases from (`DUCTUS_PROMOTE_FROM`); none: releases come by
+             *     upload, `ductus deploy` or `--from`.
+             */
+            promote_from?: string | null;
+            /** @description Environments a release must have been deployed to first (`DUCTUS_DEPLOY_REQUIRES`); empty: none. */
+            requires: string[];
+            /**
+             * Format: int64
+             * @description How long a deploy may reuse a passing check instead of running the gate again
+             *     (`DUCTUS_DEPLOY_REUSE_CHECK`); 0: the gate runs at every deploy.
+             */
+            reuse_check_seconds: number;
+            /** @description The release it runs, in hex; none before the first deploy. */
+            running?: string | null;
         };
         /** @description The whole report: what `ductus doctor` prints and `--report` saves. */
         Report: {
@@ -2951,6 +3074,30 @@ export interface components {
              * @description When expired partitions were last dropped (hourly).
              */
             last_drop_at?: string | null;
+        };
+        /**
+         * @description One run of a release in this environment: a deploy (or rollback), and the restarts that ran
+         *     the same release again.
+         */
+        RunInfo: {
+            /** Format: date-time */
+            at: string;
+            by: string;
+            /**
+             * Format: int32
+             * @description Its first deployment in this run: when, by whom, why.
+             */
+            deployment: number;
+            reason?: string | null;
+            /** @description The release, in hex, and its first 12 characters. */
+            release: string;
+            /** @description The run began with a rollback. */
+            rollback: boolean;
+            /** @description What `ductus deploy --rollback` (no release named) would go back to. */
+            rollback_target: boolean;
+            /** @description It runs now (the newest run). */
+            running: boolean;
+            short: string;
         };
         /** @description A server's certificate as a check saw it. */
         SeenCertificate: {
@@ -3119,6 +3266,53 @@ export interface components {
             permissions: string[];
             /** @description `viewer`, `operator` or `admin`. */
             role: string;
+        };
+        UpstreamCheck: {
+            /** Format: date-time */
+            at: string;
+            environment: string;
+            ok: boolean;
+        };
+        /** @description The engine this one pulls from, and its releases of this engine's project. */
+        UpstreamInfo: {
+            /** @description Its environment and Ductus version, as it says (`GET /engine` there). */
+            environment: string;
+            /**
+             * @description Its releases of this project, newest first (at most 50), as it lists them, each with
+             *     whether it's stored here already. `stored_here` false: Bring here fetches it.
+             */
+            releases: components["schemas"]["UpstreamRelease"][];
+            /** @description Its address (`DUCTUS_PROMOTE_FROM`). */
+            url: string;
+            version: string;
+        };
+        /** @description One of its releases, as it lists it (`GET /releases` there). */
+        UpstreamRelease: {
+            /**
+             * @description The branches it was made on and the environments it went to, as that engine knows them
+             *     (empty from an engine older than 0.7.4.5).
+             */
+            branches?: string[];
+            /** @description Its last check there per environment. */
+            checks?: components["schemas"]["UpstreamCheck"][];
+            commit?: string | null;
+            environments?: string[];
+            id: string;
+            /** Format: int32 */
+            interfaces?: number;
+            /** Format: date-time */
+            made_at?: string | null;
+            made_by?: string;
+            project: string;
+            reason?: string | null;
+            short: string;
+            /** Format: date-time */
+            stored_at: string;
+            /**
+             * @description Stored on this engine's database already (bringing it again adds only what its record
+             *     says that this database doesn't know).
+             */
+            stored_here?: boolean;
         };
         UserInfo: {
             /** Format: date-time */
@@ -3520,6 +3714,25 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["CertificatesOverview"];
+                };
+            };
+        };
+    };
+    list_deployments: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["RunInfo"][];
                 };
             };
         };
@@ -5059,7 +5272,13 @@ export interface operations {
     };
     get_release: {
         parameters: {
-            query?: never;
+            query?: {
+                /**
+                 * @description Include the manifest (every interface's version and files: hundreds of KB at a thousand
+                 *     interfaces).
+                 */
+                manifest?: boolean;
+            };
             header?: never;
             path: {
                 /** @description The release id, or its first 12 characters (at least 4) */
@@ -5427,6 +5646,110 @@ export interface operations {
                 };
             };
             404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    list_upstream: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["UpstreamInfo"];
+                };
+            };
+            /** @description This engine pulls from no other */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description That engine didn't answer, or refused the token */
+            502: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    pull_release: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The release id there, or its first 12 characters */
+                id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Stored here before: only records of where it went were added */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Pulled"];
+                };
+            };
+            /** @description Brought here and stored */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["Pulled"];
+                };
+            };
+            /** @description The file it sent isn't a release, or is damaged */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description This engine pulls from no other */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description That engine didn't answer, or refused */
+            502: {
                 headers: {
                     [name: string]: unknown;
                 };

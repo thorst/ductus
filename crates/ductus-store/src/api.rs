@@ -46,8 +46,10 @@ impl TryFrom<i16> for Role {
 
 /// Permissions a role doesn't say (admins have them all). `deploy` (0.7.4.3.3: store and check
 /// releases; deploy them from 0.7.4.4) is for operators and above (`allowed_for`): what it
-/// deploys runs with every secret and payload.
-pub const PERMISSIONS: [&str; 3] = ["payloads", "audit", "deploy"];
+/// deploys runs with every secret and payload. `download` (0.7.4.5.2) only fetches a stored
+/// release's file (`GET /releases/{id}/file`): what another engine's token holds to pull releases
+/// from this one, so that engine can't deploy here; any role may hold it.
+pub const PERMISSIONS: [&str; 4] = ["payloads", "audit", "deploy", "download"];
 
 /// The permissions only operators and above may hold.
 const OPERATORS_ONLY: [&str; 1] = ["deploy"];

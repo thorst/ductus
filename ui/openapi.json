@@ -496,6 +496,27 @@
       }
     },
     "/deployments": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "The releases this engine's project ran in its environment, newest first, one entry per run:\nwhat runs now, what ran before, and which one a rollback without a release named goes back\nto. Empty in folder mode.",
+        "operationId": "list_deployments",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/RunInfo"
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
       "post": {
         "tags": [
           "releases"
@@ -2483,7 +2504,7 @@
         "tags": [
           "releases"
         ],
-        "summary": "One release: what it is, its manifest, and every check of it (newest first, with reports).",
+        "summary": "One release: what it is, where it went, what it would change here, and every check of it\n(newest first, with reports); its manifest with `?manifest=true`.",
         "operationId": "get_release",
         "parameters": [
           {
@@ -2493,6 +2514,15 @@
             "required": true,
             "schema": {
               "type": "string"
+            }
+          },
+          {
+            "name": "manifest",
+            "in": "query",
+            "description": "Include the manifest (every interface's version and files: hundreds of KB at a thousand\ninterfaces).",
+            "required": false,
+            "schema": {
+              "type": "boolean"
             }
           }
         ],
@@ -2601,7 +2631,7 @@
         "tags": [
           "releases"
         ],
-        "summary": "A stored release's file, as `ductus release` wrote it (the same id), its record of where it was\ndeployed brought up to date: this database's deployments of it and what earlier files said\n(`deployed`, oldest first). What `ductus deploy ID --from URL --to URL` fetches to promote it\nto another engine, record included. Needs the `deploy` permission (it carries the code and\nevery environment's encrypted secrets); audited as `release.download`.",
+        "summary": "A stored release's file, as `ductus release` wrote it (the same id), its record of where it was\ndeployed brought up to date: this database's deployments of it and what earlier files said\n(`deployed`, oldest first). What `ductus deploy ID --from URL --to URL` fetches to promote it\nto another engine, record included, and what an engine pulling from this one fetches\n(`DUCTUS_PROMOTE_FROM`). Needs the `deploy` or `download` permission (it carries the code and\nevery environment's encrypted secrets); audited as `release.download`.",
         "operationId": "download_release",
         "parameters": [
           {
@@ -2925,6 +2955,127 @@
             }
           },
           "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/upstream": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "The engine this one pulls from (`DUCTUS_PROMOTE_FROM`) and its releases of this project, each\nwith whether it's stored here. 404 when this engine pulls from none; 502 when that engine\ncan't be reached or refuses the token.",
+        "operationId": "list_upstream",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UpstreamInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This engine pulls from no other",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "That engine didn't answer, or refused the token",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/upstream/releases/{id}": {
+      "post": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "Bring a release here from the engine this one pulls from: its file (with its record of where it\nwent, brought up to date there) is fetched and stored, as `POST /releases` stores one; a release\nstored here before keeps its first manifest and gains the records it didn't have. Nothing is\ndeployed. Needs the `deploy` permission here; audited as `release.pull` (when new).",
+        "operationId": "pull_release",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The release id there, or its first 12 characters",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Stored here before: only records of where it went were added",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pulled"
+                }
+              }
+            }
+          },
+          "201": {
+            "description": "Brought here and stored",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Pulled"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "The file it sent isn't a release, or is damaged",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "This engine pulls from no other",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "502": {
+            "description": "That engine didn't answer, or refused",
             "content": {
               "application/json": {
                 "schema": {
@@ -5368,6 +5519,17 @@
             },
             "description": "Other engines running on this database, oldest first, and the interfaces each runs.\nAn interface runs on one engine at a time."
           },
+          "releases": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ReleaseMode",
+                "description": "Release mode (`ductus run --releases`): what it runs and this environment's rules for\ndeploys. None in folder mode: deploys are refused there (`ductus handover` applies the folder)."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "resources": {
             "type": "array",
             "items": {
@@ -5646,6 +5808,79 @@
           "quarantined": {
             "type": "integer",
             "format": "int64"
+          }
+        }
+      },
+      "Here": {
+        "type": "object",
+        "description": "What a release would change in this engine's environment, compared with what runs here now.",
+        "required": [
+          "environment",
+          "running",
+          "ran_before",
+          "changes",
+          "unchanged"
+        ],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HereChange"
+            },
+            "description": "Each interface it changes, adds or removes here, by name."
+          },
+          "environment": {
+            "type": "string"
+          },
+          "project_files_change": {
+            "type": [
+              "boolean",
+              "null"
+            ],
+            "description": "The files outside every interface (`ductus.yaml`, `resources.yaml`, `environments/`,\n`secrets/`) differ from the running release's. None when this engine doesn't run a release\n(folder mode, or nothing deployed yet)."
+          },
+          "ran_before": {
+            "type": "boolean",
+            "description": "It ran in this environment before (a rollback may go back to it)."
+          },
+          "running": {
+            "type": "boolean",
+            "description": "It runs here now: deploying it changes nothing."
+          },
+          "unchanged": {
+            "type": "integer",
+            "description": "Interfaces it runs as they run here now.",
+            "minimum": 0
+          }
+        }
+      },
+      "HereChange": {
+        "type": "object",
+        "required": [
+          "interface",
+          "change"
+        ],
+        "properties": {
+          "change": {
+            "type": "string",
+            "description": "`changed`, `new` (not run here now) or `removed` (runs here now, not in the release)."
+          },
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The code version running here (12 hex characters); none: new here."
+          },
+          "interface": {
+            "type": "string"
+          },
+          "to": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The release's (12 hex characters); none: removed."
           }
         }
       },
@@ -7413,6 +7648,30 @@
           }
         }
       },
+      "Pulled": {
+        "allOf": [
+          {
+            "$ref": "#/components/schemas/Stored"
+          },
+          {
+            "type": "object",
+            "required": [
+              "from",
+              "environment"
+            ],
+            "properties": {
+              "environment": {
+                "type": "string"
+              },
+              "from": {
+                "type": "string",
+                "description": "Where it came from."
+              }
+            }
+          }
+        ],
+        "description": "What a pull did."
+      },
       "QuarantinePage": {
         "type": "object",
         "required": [
@@ -7717,18 +7976,10 @@
           {
             "type": "object",
             "required": [
-              "branches",
               "deployed",
               "manifest"
             ],
             "properties": {
-              "branches": {
-                "type": "array",
-                "items": {
-                  "type": "string"
-                },
-                "description": "Every branch it was made on, as its files said when they were stored here (the same files\nmade on two branches are one release); empty: a detached HEAD without `--branch`, or made\nwithout git. Labels, unsigned."
-              },
               "deployed": {
                 "type": "array",
                 "items": {
@@ -7736,9 +7987,20 @@
                 },
                 "description": "Where it was deployed, oldest first: each environment's first deployment of it on this\ndatabase (`here`), and what files carrying it said about other databases when they were\nstored here (unsigned). What `DUCTUS_DEPLOY_REQUIRES` reads."
               },
+              "here": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/Here",
+                    "description": "What deploying it here would change, from its code versions and what this engine runs (no\ngate: `POST /releases/{id}/check` runs that). None while this engine's start is still being\nrecorded, and in a list."
+                  },
+                  {
+                    "type": "null"
+                  }
+                ]
+              },
               "manifest": {
                 "type": "object",
-                "description": "The release's manifest (`release.json`): every interface's code version and files, the\nproject version, the tests' result when it was made, who made it and why."
+                "description": "The release's manifest (`release.json`): every interface's code version and files, the\nproject version, the tests' result when it was made, who made it and why. Only with\n`?manifest=true` (hundreds of KB at a thousand interfaces); null otherwise."
               }
             }
           }
@@ -7756,9 +8018,19 @@
           "bytes",
           "stored_at",
           "stored_by",
+          "branches",
+          "environments",
+          "running",
           "checks"
         ],
         "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Every branch it was made on, as its files said when they were stored here (the same files\nmade on two branches are one release); empty: a detached HEAD without `--branch`, or made\nwithout git. Labels, unsigned."
+          },
           "bytes": {
             "type": "integer",
             "format": "int64",
@@ -7777,6 +8049,13 @@
               "null"
             ],
             "description": "The git commit it was made from (none: made without git)."
+          },
+          "environments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The environments it went to, by name: deployed there on this database, or a file carrying\nit said so (unsigned). Where and when: `GET /releases/{id}`'s `deployed`."
           },
           "files": {
             "type": "integer",
@@ -7811,6 +8090,10 @@
               "null"
             ]
           },
+          "running": {
+            "type": "boolean",
+            "description": "This engine runs it now (release mode)."
+          },
           "short": {
             "type": "string",
             "description": "Its first 12 characters, as `ductus release` shows it."
@@ -7822,6 +8105,58 @@
           },
           "stored_by": {
             "type": "string"
+          }
+        }
+      },
+      "ReleaseMode": {
+        "type": "object",
+        "description": "An engine in release mode, and what this environment takes.",
+        "required": [
+          "requires",
+          "branches",
+          "reuse_check_seconds"
+        ],
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Branches a release must be made on (`DUCTUS_DEPLOY_BRANCHES`, a trailing `*` matches the\nstart); empty: any."
+          },
+          "project": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The project it runs (its release's, or `DUCTUS_RELEASE_PROJECT`); none before the first\ndeploy when no project is named."
+          },
+          "promote_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The engine this one pulls releases from (`DUCTUS_PROMOTE_FROM`); none: releases come by\nupload, `ductus deploy` or `--from`."
+          },
+          "requires": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Environments a release must have been deployed to first (`DUCTUS_DEPLOY_REQUIRES`); empty: none."
+          },
+          "reuse_check_seconds": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long a deploy may reuse a passing check instead of running the gate again\n(`DUCTUS_DEPLOY_REUSE_CHECK`); 0: the gate runs at every deploy.",
+            "minimum": 0
+          },
+          "running": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The release it runs, in hex; none before the first deploy."
           }
         }
       },
@@ -8000,6 +8335,59 @@
             ],
             "format": "date-time",
             "description": "When expired partitions were last dropped (hourly)."
+          }
+        }
+      },
+      "RunInfo": {
+        "type": "object",
+        "description": "One run of a release in this environment: a deploy (or rollback), and the restarts that ran\nthe same release again.",
+        "required": [
+          "release",
+          "short",
+          "deployment",
+          "at",
+          "by",
+          "rollback",
+          "running",
+          "rollback_target"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "by": {
+            "type": "string"
+          },
+          "deployment": {
+            "type": "integer",
+            "format": "int32",
+            "description": "Its first deployment in this run: when, by whom, why."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "release": {
+            "type": "string",
+            "description": "The release, in hex, and its first 12 characters."
+          },
+          "rollback": {
+            "type": "boolean",
+            "description": "The run began with a rollback."
+          },
+          "rollback_target": {
+            "type": "boolean",
+            "description": "What `ductus deploy --rollback` (no release named) would go back to."
+          },
+          "running": {
+            "type": "boolean",
+            "description": "It runs now (the newest run)."
+          },
+          "short": {
+            "type": "string"
           }
         }
       },
@@ -8485,6 +8873,131 @@
           "role": {
             "type": "string",
             "description": "`viewer`, `operator` or `admin`."
+          }
+        }
+      },
+      "UpstreamCheck": {
+        "type": "object",
+        "required": [
+          "environment",
+          "ok",
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "environment": {
+            "type": "string"
+          },
+          "ok": {
+            "type": "boolean"
+          }
+        }
+      },
+      "UpstreamInfo": {
+        "type": "object",
+        "description": "The engine this one pulls from, and its releases of this engine's project.",
+        "required": [
+          "url",
+          "environment",
+          "version",
+          "releases"
+        ],
+        "properties": {
+          "environment": {
+            "type": "string",
+            "description": "Its environment and Ductus version, as it says (`GET /engine` there)."
+          },
+          "releases": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UpstreamRelease"
+            },
+            "description": "Its releases of this project, newest first (at most 50), as it lists them, each with\nwhether it's stored here already. `stored_here` false: Bring here fetches it."
+          },
+          "url": {
+            "type": "string",
+            "description": "Its address (`DUCTUS_PROMOTE_FROM`)."
+          },
+          "version": {
+            "type": "string"
+          }
+        }
+      },
+      "UpstreamRelease": {
+        "type": "object",
+        "description": "One of its releases, as it lists it (`GET /releases` there).",
+        "required": [
+          "id",
+          "short",
+          "project",
+          "stored_at"
+        ],
+        "properties": {
+          "branches": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The branches it was made on and the environments it went to, as that engine knows them\n(empty from an engine older than 0.7.4.5)."
+          },
+          "checks": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/UpstreamCheck"
+            },
+            "description": "Its last check there per environment."
+          },
+          "commit": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "environments": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "id": {
+            "type": "string"
+          },
+          "interfaces": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "made_at": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          },
+          "made_by": {
+            "type": "string"
+          },
+          "project": {
+            "type": "string"
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "short": {
+            "type": "string"
+          },
+          "stored_at": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "stored_here": {
+            "type": "boolean",
+            "description": "Stored on this engine's database already (bringing it again adds only what its record\nsays that this database doesn't know)."
           }
         }
       },

@@ -442,6 +442,7 @@ fn operation(out: &mut String, method: &str, path: &str, op: &Value, shapes: &mu
         "admin" => "an admin",
         "audit" => "anyone with the `audit` permission",
         "deploy" => "an operator or admin with the `deploy` permission (admins have it)",
+        "download" => "anyone with the `download` permission, or an operator or admin with `deploy` (admins have both)",
         other => other,
     };
     let _ = writeln!(out, "**Who may call it:** {who}.\n");

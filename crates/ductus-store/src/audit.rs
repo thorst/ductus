@@ -113,6 +113,10 @@ pub const ACTIONS: &[(&str, &str)] = &[
         "release.download",
         "Someone downloaded a stored release's file (`GET /releases/{id}/file`, `ductus deploy --from`): its code and every environment's encrypted secrets.",
     ),
+    (
+        "release.pull",
+        "Someone brought a release here from the engine this one pulls from (`DUCTUS_PROMOTE_FROM`, the Releases page's Bring here): stored new, with `detail.from` (that engine) and `detail.environment` (its environment), besides what `release.store` says.",
+    ),
 ];
 
 /// Who did it, and how they came.

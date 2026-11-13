@@ -22,6 +22,8 @@ import { NotFound } from "@/pages/not-found";
 import { OverviewPage } from "@/pages/overview";
 import { OwnersPage } from "@/pages/owners";
 import { QuarantinePage } from "@/pages/quarantine";
+import { ReleasePage } from "@/pages/release";
+import { ReleasesPage } from "@/pages/releases";
 import { RetentionPage } from "@/pages/retention";
 import { SignInPage } from "@/pages/sign-in";
 import { TokensPage } from "@/pages/tokens";
@@ -229,6 +231,9 @@ const appearance = createRoute({
   component: lazyRouteComponent(() => import("@/pages/appearance"), "AppearancePage"),
 });
 
+const releasesPage = createRoute({ getParentRoute: () => app, path: "/releases", component: ReleasesPage });
+const releasePage = createRoute({ getParentRoute: () => app, path: "/releases/$id", component: ReleasePage });
+
 const message = createRoute({
   getParentRoute: () => app,
   path: "/messages/$id",
@@ -254,6 +259,8 @@ const tree = root.addChildren([
     retention,
     drain,
     doctor,
+    releasesPage,
+    releasePage,
     tokens,
     users,
     auditPage,

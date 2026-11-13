@@ -74,6 +74,11 @@ pub struct ReleaseRow {
     pub bytes: i64,
     pub stored_at: DateTime<Utc>,
     pub stored_by: String,
+    /// Every branch it was made on, as its files said when they were stored (empty: none said).
+    pub branches: Vec<String>,
+    /// The environments it went to, by name: deployed there on this database, or a file carrying
+    /// it said so (`release_places`). Filled in lists and summaries.
+    pub environments: Vec<String>,
     /// The last check against each environment, by environment's name.
     pub checks: Vec<CheckRow>,
 }
@@ -163,6 +168,8 @@ pub struct Run {
     pub deployment: i32,
     pub at: DateTime<Utc>,
     pub by: String,
+    /// Why, as its first deployment said (`ductus deploy -m`); none for a plain start.
+    pub reason: Option<String>,
     /// It began with a rollback (`ductus deploy --rollback`).
     pub rollback: bool,
 }
@@ -204,7 +211,8 @@ fn folder_list(files: &[&ReleaseFile<'_>]) -> (Vec<u8>, String) {
 }
 
 const RELEASE_COLUMNS: &str =
-    "id, project, made_at, made_by, reason, git_commit, interfaces, files, bytes, stored_at, stored_by";
+    "id, project, made_at, made_by, reason, git_commit, interfaces, files, bytes, stored_at, stored_by, \
+     coalesce(branches, '{}')";
 
 type Row = (
     Vec<u8>,
@@ -218,10 +226,12 @@ type Row = (
     i64,
     DateTime<Utc>,
     String,
+    Vec<String>,
 );
 
 fn release_row(r: Row) -> ReleaseRow {
-    let (id, project, made_at, made_by, reason, git_commit, interfaces, files, bytes, stored_at, stored_by) = r;
+    let (id, project, made_at, made_by, reason, git_commit, interfaces, files, bytes, stored_at, stored_by, branches) =
+        r;
     ReleaseRow {
         id,
         project,
@@ -234,6 +244,8 @@ fn release_row(r: Row) -> ReleaseRow {
         bytes,
         stored_at,
         stored_by,
+        branches,
+        environments: Vec::new(),
         checks: Vec::new(),
     }
 }
@@ -388,7 +400,7 @@ impl Store {
             return Ok(ReleaseStored { new: false, at, by, new_folders: 0, new_files: 0 });
         };
         let short = &hex(r.id)[..12];
-        let detail = serde_json::json!({
+        let mut detail = serde_json::json!({
             "project": r.project,
             "commit": r.git_commit,
             "made_by": r.made_by,
@@ -396,6 +408,10 @@ impl Store {
             "interfaces": r.interfaces,
             "files": r.files.len(),
         });
+        // The caller's own (a pull's `from`) kept beside.
+        if let (Some(serde_json::Value::Object(own)), Some(all)) = (&audit.detail, detail.as_object_mut()) {
+            all.extend(own.clone());
+        }
         audit::insert(&mut tx, &Audit { subject: Some(short), detail: Some(detail), ..audit.clone() }).await?;
         tx.commit().await.context("committing the release")?;
         Ok(ReleaseStored { new: true, at, by: r.by.to_string(), new_folders: new.len(), new_files })
@@ -433,7 +449,7 @@ impl Store {
             .into_iter()
             .map(release_row)
             .collect();
-        let ids: Vec<&[u8]> = rows.iter().map(|r| r.id.as_slice()).collect();
+        let ids: Vec<Vec<u8>> = rows.iter().map(|r| r.id.clone()).collect();
         let checks: Vec<Check> = sqlx::query_as(
             "SELECT DISTINCT ON (release_id, environment)
                     id, release_id, at, environment, instance, host, by_name, ok, problems, seconds, NULL::text
@@ -449,7 +465,36 @@ impl Store {
                 row.checks.push(check);
             }
         }
+        // Where each went: this database's deployments of it (on the partial index of deployments
+        // that ran a release) and what files carrying it said.
+        let went: Vec<(Vec<u8>, Vec<String>)> = sqlx::query_as(
+            "SELECT release_id, array_agg(DISTINCT environment ORDER BY environment) FROM (
+                 SELECT release_id, environment FROM deployments
+                 WHERE release_id IS NOT NULL AND release_id = ANY($1)
+                 UNION ALL
+                 SELECT release_id, environment FROM release_places WHERE release_id = ANY($1)) AS went
+             GROUP BY release_id",
+        )
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading where the releases went")?;
+        for (release, environments) in went {
+            if let Some(row) = rows.iter_mut().find(|r| r.id == release) {
+                row.environments = environments;
+            }
+        }
         Ok(rows)
+    }
+
+    /// Which of `ids` are stored here (a pull's list of another engine's releases).
+    pub async fn stored_releases(&self, ids: &[Vec<u8>]) -> Result<std::collections::HashSet<Vec<u8>>> {
+        let found: Vec<Vec<u8>> = sqlx::query_scalar("SELECT id FROM releases WHERE id = ANY($1)")
+            .bind(ids)
+            .fetch_all(&self.pool)
+            .await
+            .context("reading which releases are stored here")?;
+        Ok(found.into_iter().collect())
     }
 
     /// The release whose id starts with `prefix` (hex, at least 4 characters): None when there's
@@ -771,10 +816,10 @@ impl Store {
     /// The releases `project` ran in `environment`, oldest first, one entry per run (consecutive
     /// deployments of one release are one run): what a rollback chooses from.
     pub async fn release_runs(&self, environment: &str, project: &str) -> Result<Vec<Run>> {
-        type Row = (Vec<u8>, i32, DateTime<Utc>, String, bool);
+        type Row = (Vec<u8>, i32, DateTime<Utc>, String, Option<String>, bool);
         let rows: Vec<Row> = sqlx::query_as(
-            "SELECT release_id, id, at, by_name, rollback FROM (
-                 SELECT d.release_id, d.id, d.at, d.by_name, coalesce(d.rollback, false) AS rollback,
+            "SELECT release_id, id, at, by_name, reason, rollback FROM (
+                 SELECT d.release_id, d.id, d.at, d.by_name, d.reason, coalesce(d.rollback, false) AS rollback,
                         lag(d.release_id) OVER (ORDER BY d.id) AS before
                  FROM deployments d JOIN releases r ON r.id = d.release_id
                  WHERE d.environment = $1 AND d.release_id IS NOT NULL AND r.project = $2) AS runs
@@ -788,7 +833,7 @@ impl Store {
         .context("reading the releases run here")?;
         Ok(rows
             .into_iter()
-            .map(|(release, deployment, at, by, rollback)| Run { release, deployment, at, by, rollback })
+            .map(|(release, deployment, at, by, reason, rollback)| Run { release, deployment, at, by, reason, rollback })
             .collect())
     }
 }

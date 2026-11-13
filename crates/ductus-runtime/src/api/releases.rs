@@ -18,6 +18,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
@@ -25,7 +26,7 @@ use utoipa_axum::routes;
 
 /// The largest release `POST /releases` takes, as sent (gzipped). A project of 1,001 interfaces
 /// with tests and fixtures is ~110 KB plus its manifest and history (20 KB per 1,000 commits).
-const MAX_UPLOAD: usize = 256 << 20;
+pub(super) const MAX_UPLOAD: usize = 256 << 20;
 /// A check that runs longer than this is stopped (the gate at 1,001 interfaces: seconds).
 const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_PAGE: i64 = 500;
@@ -70,6 +71,15 @@ pub struct ReleaseInfo {
     /// When it was stored here, and by whom.
     stored_at: DateTime<Utc>,
     stored_by: String,
+    /// Every branch it was made on, as its files said when they were stored here (the same files
+    /// made on two branches are one release); empty: a detached HEAD without `--branch`, or made
+    /// without git. Labels, unsigned.
+    branches: Vec<String>,
+    /// The environments it went to, by name: deployed there on this database, or a file carrying
+    /// it said so (unsigned). Where and when: `GET /releases/{id}`'s `deployed`.
+    environments: Vec<String>,
+    /// This engine runs it now (release mode).
+    running: bool,
     /// In a list: the last check against each environment (without its report). In a release's
     /// own page: every check, newest first, with their reports.
     checks: Vec<CheckInfo>,
@@ -97,24 +107,83 @@ pub struct CheckInfo {
 pub struct ReleaseDetail {
     #[serde(flatten)]
     release: ReleaseInfo,
-    /// Every branch it was made on, as its files said when they were stored here (the same files
-    /// made on two branches are one release); empty: a detached HEAD without `--branch`, or made
-    /// without git. Labels, unsigned.
-    branches: Vec<String>,
     /// Where it was deployed, oldest first: each environment's first deployment of it on this
     /// database (`here`), and what files carrying it said about other databases when they were
     /// stored here (unsigned). What `DUCTUS_DEPLOY_REQUIRES` reads.
     deployed: Vec<super::deployments::PlaceInfo>,
+    /// What deploying it here would change, from its code versions and what this engine runs (no
+    /// gate: `POST /releases/{id}/check` runs that). None while this engine's start is still being
+    /// recorded, and in a list.
+    here: Option<Here>,
     /// The release's manifest (`release.json`): every interface's code version and files, the
-    /// project version, the tests' result when it was made, who made it and why.
+    /// project version, the tests' result when it was made, who made it and why. Only with
+    /// `?manifest=true` (hundreds of KB at a thousand interfaces); null otherwise.
     #[schema(value_type = Object)]
     manifest: serde_json::Value,
+}
+
+/// What a release would change in this engine's environment, compared with what runs here now.
+#[derive(Serialize, ToSchema)]
+pub struct Here {
+    pub environment: String,
+    /// It runs here now: deploying it changes nothing.
+    pub running: bool,
+    /// It ran in this environment before (a rollback may go back to it).
+    pub ran_before: bool,
+    /// Each interface it changes, adds or removes here, by name.
+    pub changes: Vec<HereChange>,
+    /// Interfaces it runs as they run here now.
+    pub unchanged: usize,
+    /// The files outside every interface (`ductus.yaml`, `resources.yaml`, `environments/`,
+    /// `secrets/`) differ from the running release's. None when this engine doesn't run a release
+    /// (folder mode, or nothing deployed yet).
+    pub project_files_change: Option<bool>,
+}
+
+#[derive(Serialize, ToSchema, Debug, PartialEq)]
+pub struct HereChange {
+    pub interface: String,
+    /// `changed`, `new` (not run here now) or `removed` (runs here now, not in the release).
+    pub change: &'static str,
+    /// The code version running here (12 hex characters); none: new here.
+    pub from: Option<String>,
+    /// The release's (12 hex characters); none: removed.
+    pub to: Option<String>,
+}
+
+/// Compare a release's interfaces (`to`: name → version in hex) with what runs (`running`), by name.
+pub fn changes_here(to: &BTreeMap<String, String>, running: &BTreeMap<String, String>) -> (Vec<HereChange>, usize) {
+    let mut changes = Vec::new();
+    let mut unchanged = 0;
+    for (name, version) in to {
+        match running.get(name) {
+            Some(now) if now == version => unchanged += 1,
+            now => changes.push(HereChange {
+                interface: name.clone(),
+                change: if now.is_some() { "changed" } else { "new" },
+                from: now.map(|v| release::short(v).to_string()),
+                to: Some(release::short(version).to_string()),
+            }),
+        }
+    }
+    for (name, now) in running {
+        if !to.contains_key(name) {
+            changes.push(HereChange {
+                interface: name.clone(),
+                change: "removed",
+                from: Some(release::short(now).to_string()),
+                to: None,
+            });
+        }
+    }
+    changes.sort_by(|a, b| a.interface.cmp(&b.interface));
+    (changes, unchanged)
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct Stored {
     /// False: it was stored before (by `stored_by`, at `stored_at`); nothing changed.
-    new: bool,
+    pub(super) new: bool,
     #[serde(flatten)]
     release: ReleaseInfo,
     /// Folders and files this release added to the database (the rest were there already).
@@ -125,9 +194,17 @@ pub struct Stored {
     new_places: usize,
 }
 
-fn info(r: ductus_store::ReleaseRow) -> ReleaseInfo {
+/// The release this engine runs (release mode), in raw bytes.
+fn running(engine: &Shared) -> Option<Vec<u8>> {
+    engine.releases.as_ref()?.running.as_ref().map(|r| r.id.clone())
+}
+
+fn info(r: ductus_store::ReleaseRow, running: Option<&[u8]>) -> ReleaseInfo {
     let id = crate::code::hex(&r.id);
     ReleaseInfo {
+        running: running == Some(r.id.as_slice()),
+        branches: r.branches,
+        environments: r.environments,
         short: release::short(&id).to_string(),
         id,
         project: r.project,
@@ -175,7 +252,21 @@ pub(super) fn check_info(c: ductus_store::CheckRow) -> CheckInfo {
 )]
 async fn store(engine: Eng, caller: Caller, body: Bytes) -> Result<Response, ApiError> {
     caller.require_permission("deploy")?;
-    let bundle = tokio::task::spawn_blocking(move || release::read_bytes(&body, "the release sent"))
+    let stored = store_bytes(&engine, &caller, body, caller.audit("release.store"), "the release sent").await?;
+    let status = if stored.new { StatusCode::CREATED } else { StatusCode::OK };
+    Ok((status, Json(stored)).into_response())
+}
+
+/// Store the release file `body` (`what` names it in errors), with `audit` as its audit row when
+/// it's new: what `POST /releases` and a pull (`POST /upstream/releases/{id}`) do.
+pub(super) async fn store_bytes(
+    engine: &Shared,
+    caller: &Caller,
+    body: Bytes,
+    audit: ductus_store::Audit<'_>,
+    what: &'static str,
+) -> Result<Stored, ApiError> {
+    let bundle = tokio::task::spawn_blocking(move || release::read_bytes(&body, what))
         .await
         .map_err(|e| anyhow::anyhow!("reading the release: {e}"))?
         .map_err(|e| ApiError::bad_request(format!("{e:#}")))?;
@@ -212,21 +303,19 @@ async fn store(engine: Eng, caller: Caller, body: Bytes) -> Result<Response, Api
         files: &files,
         by: &by,
     };
-    let stored = engine.store.store_release(&new, &caller.audit("release.store")).await?;
+    let stored = engine.store.store_release(&new, &audit).await?;
     // Where it went, as the file says: merged whether or not the release was here (a release
     // stored before keeps its first manifest, so the record can't live only there).
     let places: Vec<ductus_store::Place> = m.deployed.iter().map(release::Place::to_store).collect();
     let new_places = engine.store.add_release_places(&id, &places, &by).await?;
     let row = engine.store.release_summary(&id).await?.ok_or_else(|| anyhow::anyhow!("the release stored is gone"))?;
-    let status = if stored.new { StatusCode::CREATED } else { StatusCode::OK };
-    let answer = Stored {
+    Ok(Stored {
         new: stored.new,
-        release: info(row),
+        release: info(row, running(engine).as_deref()),
         new_folders: stored.new_folders,
         new_files: stored.new_files,
         new_places,
-    };
-    Ok((status, Json(answer)).into_response())
+    })
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -246,7 +335,17 @@ pub struct ReleasesQuery {
 async fn list(engine: Eng, _caller: Caller, Query(q): Query<ReleasesQuery>) -> ApiResult<Vec<ReleaseInfo>> {
     let limit = q.limit.unwrap_or(50).clamp(1, MAX_PAGE);
     let rows = engine.store.releases(q.before, limit).await?;
-    Ok(Json(rows.into_iter().map(info).collect()))
+    let running = running(&engine);
+    Ok(Json(rows.into_iter().map(|r| info(r, running.as_deref())).collect()))
+}
+
+#[derive(Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
+pub struct ReleaseQuery {
+    /// Include the manifest (every interface's version and files: hundreds of KB at a thousand
+    /// interfaces).
+    #[serde(default)]
+    manifest: bool,
 }
 
 /// The release whose id starts with `id` (12 characters are enough): 404 when none, 400 when
@@ -261,25 +360,69 @@ pub(super) async fn find(engine: &Shared, id: &str) -> Result<Vec<u8>, ApiError>
     }
 }
 
-/// One release: what it is, its manifest, and every check of it (newest first, with reports).
+/// One release: what it is, where it went, what it would change here, and every check of it
+/// (newest first, with reports); its manifest with `?manifest=true`.
 #[utoipa::path(
     get, path = "/releases/{id}", operation_id = "get_release", tag = "releases",
-    params(("id" = String, Path, description = "The release id, or its first 12 characters (at least 4)")),
+    params(("id" = String, Path, description = "The release id, or its first 12 characters (at least 4)"), ReleaseQuery),
     responses((status = 200, body = ReleaseDetail), (status = 404, body = super::ErrorBody), (status = 400, body = super::ErrorBody))
 )]
-async fn one(engine: Eng, _caller: Caller, Path(id): Path<String>) -> ApiResult<ReleaseDetail> {
+async fn one(
+    engine: Eng,
+    _caller: Caller,
+    Path(id): Path<String>,
+    Query(q): Query<ReleaseQuery>,
+) -> ApiResult<ReleaseDetail> {
     let id = find(&engine, &id).await?;
-    let (row, manifest) =
+    let (mut row, manifest) =
         engine.store.release(&id).await?.ok_or_else(|| ApiError::not_found("that release is no longer stored"))?;
-    let branches = engine.store.release_branches(&id).await?;
-    let deployed = engine.store.release_places(&id).await?.iter().map(super::deployments::PlaceInfo::of).collect();
-    Ok(Json(ReleaseDetail { release: info(row), branches, deployed, manifest }))
+    let places = engine.store.release_places(&id).await?;
+    let mut environments: Vec<String> = places.iter().map(|p| p.environment.clone()).collect();
+    environments.sort();
+    environments.dedup();
+    row.environments = environments;
+    let deployed = places.iter().map(super::deployments::PlaceInfo::of).collect();
+    let here = here(&engine, &id, &manifest).await?;
+    let manifest = if q.manifest { manifest } else { serde_json::Value::Null };
+    Ok(Json(ReleaseDetail { release: info(row, running(&engine).as_deref()), deployed, here, manifest }))
+}
+
+/// What release `id` (its stored manifest) would change here; None while this engine's start is
+/// still being recorded.
+async fn here(engine: &Shared, id: &[u8], manifest: &serde_json::Value) -> Result<Option<Here>, ApiError> {
+    let Some(deployment) = engine.deployment.get() else { return Ok(None) };
+    let to: BTreeMap<String, String> = manifest["interfaces"]
+        .as_object()
+        .map(|all| {
+            all.iter().filter_map(|(name, i)| Some((name.clone(), i["version"].as_str()?.to_string()))).collect()
+        })
+        .unwrap_or_default();
+    let now: BTreeMap<String, String> =
+        deployment.interfaces.iter().map(|(name, r)| (name.clone(), crate::code::hex(&r.version))).collect();
+    let (changes, unchanged) = changes_here(&to, &now);
+    let current = engine.releases.as_ref().and_then(|r| r.running.as_ref());
+    let project_files_change = current.map(|r| {
+        manifest["project_version"]["version"].as_str() != Some(r.manifest.project_version.version.as_str())
+    });
+    let ran_before = match engine.releases.as_ref().and_then(|r| r.project()) {
+        Some(project) => engine.store.release_runs(&engine.environment, project).await?.iter().any(|r| r.release == id),
+        None => false,
+    };
+    Ok(Some(Here {
+        environment: engine.environment.clone(),
+        running: current.is_some_and(|r| r.id == id),
+        ran_before,
+        changes,
+        unchanged,
+        project_files_change,
+    }))
 }
 
 /// A stored release's file, as `ductus release` wrote it (the same id), its record of where it was
 /// deployed brought up to date: this database's deployments of it and what earlier files said
 /// (`deployed`, oldest first). What `ductus deploy ID --from URL --to URL` fetches to promote it
-/// to another engine, record included. Needs the `deploy` permission (it carries the code and
+/// to another engine, record included, and what an engine pulling from this one fetches
+/// (`DUCTUS_PROMOTE_FROM`). Needs the `deploy` or `download` permission (it carries the code and
 /// every environment's encrypted secrets); audited as `release.download`.
 #[utoipa::path(
     get, path = "/releases/{id}/file", operation_id = "download_release", tag = "releases",
@@ -291,7 +434,9 @@ async fn one(engine: Eng, _caller: Caller, Path(id): Path<String>) -> ApiResult<
     )
 )]
 async fn file(engine: Eng, caller: Caller, Path(id): Path<String>) -> Result<Response, ApiError> {
-    caller.require_permission("deploy")?;
+    if !caller.can("download") {
+        caller.require_permission("deploy")?;
+    }
     let id = find(&engine, &id).await?;
     let contents = engine
         .store
@@ -518,4 +663,35 @@ fn unhex(text: &str) -> Option<Vec<u8>> {
         return None;
     }
     (0..64).step_by(2).map(|i| u8::from_str_radix(text.get(i..i + 2)?, 16).ok()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn map(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs.iter().map(|(n, v)| (n.to_string(), v.repeat(64 / v.len()))).collect()
+    }
+
+    /// What a release changes here: changed, new and removed interfaces by name, with short versions;
+    /// the rest counted.
+    #[test]
+    fn a_release_changes_what_differs_from_what_runs() {
+        let release = map(&[("adt", "a"), ("lab", "b"), ("orders", "c")]);
+        let running = map(&[("adt", "a"), ("lab", "9"), ("billing", "d")]);
+        let (changes, unchanged) = changes_here(&release, &running);
+        assert_eq!(unchanged, 1);
+        let shown: Vec<(&str, &str, Option<&str>, Option<&str>)> =
+            changes.iter().map(|c| (c.interface.as_str(), c.change, c.from.as_deref(), c.to.as_deref())).collect();
+        assert_eq!(
+            shown,
+            [
+                ("billing", "removed", Some("dddddddddddd"), None),
+                ("lab", "changed", Some("999999999999"), Some("bbbbbbbbbbbb")),
+                ("orders", "new", None, Some("cccccccccccc")),
+            ]
+        );
+        let (changes, unchanged) = changes_here(&release, &release);
+        assert!(changes.is_empty() && unchanged == 3);
+    }
 }

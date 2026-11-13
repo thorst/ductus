@@ -3,7 +3,7 @@
 // fetches again what it changed, so every screen shows it at once.
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { api, unwrap, type Schemas } from "./client";
+import { api, ApiError, unwrap, type Schemas } from "./client";
 import { session } from "./queries";
 
 /** Operators and admins act; viewers look (the engine enforces it, this just hides the buttons). */
@@ -30,6 +30,12 @@ export function useCanAudit(): boolean {
   return data?.role === "admin" || !!data?.permissions.includes("audit");
 }
 
+/** Can the signed-in caller store, check and deploy releases? Operators and admins with the permission. */
+export function useCanDeploy(): boolean {
+  const { data } = useQuery(session);
+  return data?.role === "admin" || (data?.role === "operator" && data.permissions.includes("deploy"));
+}
+
 /** Fetch again everything an action can change. */
 export function useRefresh() {
   const queryClient = useQueryClient();
@@ -51,6 +57,9 @@ export function useRefresh() {
         "alerts",
         "certificates",
         "doctor",
+        "releases",
+        "deployments",
+        "upstream",
       ].map((key) => queryClient.invalidateQueries({ queryKey: [key] })),
     );
 }
@@ -263,4 +272,41 @@ export async function unsilenceAlert(id: number) {
 /** A test notification to a channel, now. */
 export async function testChannel(name: string) {
   return unwrap(await api.POST("/alerts/channels/{name}/test", { params: { path: { name } } }));
+}
+
+/** Store a release file (`ductus release` wrote it) on this engine, as it is. */
+export async function uploadRelease(file: Blob): Promise<Schemas["Stored"]> {
+  // The body is the file's bytes, not JSON: sent with fetch, signed in and marked as the UI's.
+  const response = await fetch("/api/v1/releases", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/gzip", "X-Ductus": "1" },
+    body: file,
+  });
+  const body: unknown = await response.json().catch(() => undefined);
+  if (response.ok) return body as Schemas["Stored"];
+  const error = body as { error?: string } | undefined;
+  throw new ApiError(response.status, error?.error ?? `${response.status} ${response.statusText}`);
+}
+
+/** Run the gate on a stored release against this engine's environment (seconds); `ok` says whether it passed. */
+export async function checkRelease(id: string) {
+  return unwrap(await api.POST("/releases/{id}/check", { params: { path: { id } } }));
+}
+
+/** Bring a release here from the engine this one pulls from (stored, not deployed). */
+export async function pullRelease(id: string) {
+  return unwrap(await api.POST("/upstream/releases/{id}", { params: { path: { id } } }));
+}
+
+/**
+ * Deploy (or roll back): the engine answers with its report whether it deployed, refused before
+ * anything ran (409), found problems in the gate (422) or couldn't take over (500). Only other
+ * failures (no reason, no permission, no such release) are thrown.
+ */
+export async function deployRelease(request: Schemas["DeployRequest"]): Promise<Schemas["DeployReport"]> {
+  const { data, error, response } = await api.POST("/deployments", { body: request });
+  if (data) return data;
+  if (error && typeof error === "object" && "outcome" in error) return error as Schemas["DeployReport"];
+  return unwrap<Schemas["DeployReport"]>({ data: undefined, error, response });
 }

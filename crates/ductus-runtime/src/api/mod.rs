@@ -6,9 +6,10 @@
 //! Every call but `health` and `openapi.json` needs a token (`Authorization: Bearer dux_...`,
 //! made with `ductus token create`) or a browser session (`session.rs`: a user's, signed in with a
 //! password, or a token's). Roles: viewer reads, operator also drains, pauses, resends and
-//! corrects messages and runs connection checks, admin also manages users and tokens. Three
-//! permissions go beyond a role: `payloads` (read message payloads), `audit`, and `deploy` (store
-//! and check releases; operators and above).
+//! corrects messages and runs connection checks, admin also manages users and tokens. Four
+//! permissions go beyond a role: `payloads` (read message payloads), `audit`, `deploy` (store,
+//! check and deploy releases; operators and above) and `download` (fetch a release's file only:
+//! another engine's token pulling releases from this one).
 //!
 //! The same listener serves the web UI (`ui.rs`) at every path outside `/api`.
 
@@ -28,6 +29,7 @@ mod session;
 mod status;
 mod tokens;
 mod ui;
+mod upstream;
 mod users;
 
 use crate::control::Engine;
@@ -103,6 +105,7 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
         .merge(metrics::routes())
         .merge(releases::routes())
         .merge(deployments::routes())
+        .merge(upstream::routes())
         .merge(reports::routes())
         .merge(retention::routes())
         .merge(tokens::routes())
@@ -184,9 +187,12 @@ pub const ACCESS: &[(&str, &str, &str)] = &[
     ("GET", "/releases", "signed"),
     ("POST", "/releases", "deploy"),
     ("GET", "/releases/{id}", "signed"),
-    ("GET", "/releases/{id}/file", "deploy"),
+    ("GET", "/releases/{id}/file", "download"),
     ("POST", "/releases/{id}/check", "deploy"),
     ("POST", "/deployments", "deploy"),
+    ("GET", "/deployments", "signed"),
+    ("GET", "/upstream", "signed"),
+    ("POST", "/upstream/releases/{id}", "deploy"),
 ];
 
 pub use metrics::{METRICS, Metric};
@@ -494,7 +500,7 @@ mod tests {
         );
         for (method, path, access) in ACCESS {
             assert!(
-                ["public", "signed", "user", "operator", "admin", "audit", "deploy"].contains(access),
+                ["public", "signed", "user", "operator", "admin", "audit", "deploy", "download"].contains(access),
                 "{method} {path}: {access}"
             );
         }

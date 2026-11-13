@@ -69,6 +69,17 @@ struct RunArgs {
     /// unsigned: the releases guide says what to rely on.
     #[arg(long, env = "DUCTUS_DEPLOY_BRANCHES", value_name = "BRANCHES", value_delimiter = ',')]
     deploy_branches: Vec<String>,
+    /// Release mode: another engine to pull releases from, as `ductus deploy --to` takes it
+    /// (`https://ductus-test:8443`): prod's engine names test's, and the Releases page lists
+    /// test's releases to bring here with where they went. HTTPS is verified against the system's
+    /// trusted CAs. Needs DUCTUS_PROMOTE_FROM_TOKEN.
+    #[arg(long, env = "DUCTUS_PROMOTE_FROM", value_name = "URL", requires = "releases")]
+    promote_from: Option<String>,
+    /// A token on the engine named by DUCTUS_PROMOTE_FROM, with the `download` permission (it
+    /// can fetch release files there and nothing else). Keep it in the env file, readable by the
+    /// service only, as the database's password.
+    #[arg(long, env = "DUCTUS_PROMOTE_FROM_TOKEN", value_name = "TOKEN", hide_env_values = true)]
+    promote_from_token: Option<String>,
     /// The engine's database, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
     #[arg(long, env = "DUCTUS_DATABASE_URL")]
     database_url: Option<String>,
@@ -112,12 +123,26 @@ impl RunArgs {
         let names = |list: Vec<String>| -> Vec<String> {
             list.into_iter().map(|n| n.trim().to_string()).filter(|n| !n.is_empty()).collect()
         };
+        let promote_from = match (self.promote_from.as_deref().map(str::trim), self.promote_from_token) {
+            (None | Some(""), _) => None,
+            (Some(url), _) if !url.starts_with("http://") && !url.starts_with("https://") => anyhow::bail!(
+                "DUCTUS_PROMOTE_FROM must be the other engine's address with its scheme: https://ductus-test:8443 (got `{url}`)"
+            ),
+            (Some(url), Some(token)) if !token.trim().is_empty() => {
+                Some(ductus_runtime::deploy::Upstream { url: url.to_string(), token: token.trim().to_string() })
+            }
+            (Some(url), _) => anyhow::bail!(
+                "DUCTUS_PROMOTE_FROM names {url}, and no token on it is set: make one there with the `download` permission \
+                 (`ductus token create prod-pulls --role viewer --permission download`) and set DUCTUS_PROMOTE_FROM_TOKEN"
+            ),
+        };
         let releases = self.releases.map(|dir| ductus_runtime::deploy::Mode {
             dir,
             project: self.release_project,
             reuse_check: self.deploy_reuse_check,
             requires: names(self.deploy_requires),
             branches: names(self.deploy_branches),
+            promote_from,
         });
         let options = ductus_runtime::EngineOptions {
             pool_threads: self.threads.unwrap_or(defaults.pool_threads),

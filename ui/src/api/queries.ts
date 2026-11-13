@@ -256,3 +256,38 @@ export const lastDoctorRun = queryOptions({
     return { run: last, report };
   },
 });
+
+/** The releases stored on this engine's database, newest first (the last 200). */
+export const releases = queryOptions({
+  queryKey: ["releases"],
+  queryFn: async () => unwrap(await api.GET("/releases", { params: { query: { limit: 200 } } })),
+});
+
+/** One release: where it went, what it would change here, every check with its report. */
+export const release = (id: string) =>
+  queryOptions({
+    queryKey: ["releases", id],
+    queryFn: async () => unwrap(await api.GET("/releases/{id}", { params: { path: { id } } })),
+  });
+
+/** A release's manifest (every interface's version and files): only when someone opens it. */
+export const releaseManifest = (id: string) =>
+  queryOptions({
+    queryKey: ["releases", id, "manifest"],
+    queryFn: async () =>
+      unwrap(await api.GET("/releases/{id}", { params: { path: { id }, query: { manifest: true } } })).manifest,
+    staleTime: Infinity,
+  });
+
+/** What ran in this environment, newest first, one entry per run (release mode). */
+export const runs = queryOptions({
+  queryKey: ["deployments"],
+  queryFn: async () => unwrap(await api.GET("/deployments")),
+});
+
+/** The engine this one pulls releases from, and its releases (only when one is set). */
+export const upstream = queryOptions({
+  queryKey: ["upstream"],
+  queryFn: async () => unwrap(await api.GET("/upstream")),
+  retry: false,
+});

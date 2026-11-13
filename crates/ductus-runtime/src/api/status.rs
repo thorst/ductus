@@ -200,6 +200,43 @@ pub struct EngineInfo {
     /// git commit, how many interfaces changed. None while it's being recorded, or when it couldn't
     /// be (the log says why).
     deployment: Option<DeploymentInfo>,
+    /// Release mode (`ductus run --releases`): what it runs and this environment's rules for
+    /// deploys. None in folder mode: deploys are refused there (`ductus handover` applies the folder).
+    releases: Option<ReleaseMode>,
+}
+
+/// An engine in release mode, and what this environment takes.
+#[derive(Serialize, ToSchema)]
+pub struct ReleaseMode {
+    /// The project it runs (its release's, or `DUCTUS_RELEASE_PROJECT`); none before the first
+    /// deploy when no project is named.
+    project: Option<String>,
+    /// The release it runs, in hex; none before the first deploy.
+    running: Option<String>,
+    /// Environments a release must have been deployed to first (`DUCTUS_DEPLOY_REQUIRES`); empty: none.
+    requires: Vec<String>,
+    /// Branches a release must be made on (`DUCTUS_DEPLOY_BRANCHES`, a trailing `*` matches the
+    /// start); empty: any.
+    branches: Vec<String>,
+    /// How long a deploy may reuse a passing check instead of running the gate again
+    /// (`DUCTUS_DEPLOY_REUSE_CHECK`); 0: the gate runs at every deploy.
+    reuse_check_seconds: u64,
+    /// The engine this one pulls releases from (`DUCTUS_PROMOTE_FROM`); none: releases come by
+    /// upload, `ductus deploy` or `--from`.
+    promote_from: Option<String>,
+}
+
+impl ReleaseMode {
+    fn of(r: &crate::deploy::Releases) -> Self {
+        Self {
+            project: r.project().map(str::to_string),
+            running: r.running.as_ref().map(|r| r.hex()),
+            requires: r.mode.requires.clone(),
+            branches: r.mode.branches.clone(),
+            reuse_check_seconds: r.mode.reuse_check.as_secs(),
+            promote_from: r.mode.promote_from.as_ref().map(|u| u.url.clone()),
+        }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -358,6 +395,7 @@ async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
             in_process: h.in_process,
         }),
         deployment: engine.deployment.get().map(DeploymentInfo::of),
+        releases: engine.releases.as_ref().map(ReleaseMode::of),
     }))
 }
 

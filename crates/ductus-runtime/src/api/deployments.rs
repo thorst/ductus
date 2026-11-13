@@ -46,7 +46,62 @@ const READY_WITHIN: Duration = Duration::from_secs(5 * 60);
 const RECORDED_WITHIN: Duration = Duration::from_secs(3);
 
 pub fn routes() -> OpenApiRouter<super::Shared> {
-    OpenApiRouter::new().routes(routes!(deploy))
+    OpenApiRouter::new().routes(routes!(deploy, runs))
+}
+
+/// One run of a release in this environment: a deploy (or rollback), and the restarts that ran
+/// the same release again.
+#[derive(Serialize, ToSchema)]
+pub struct RunInfo {
+    /// The release, in hex, and its first 12 characters.
+    release: String,
+    short: String,
+    /// Its first deployment in this run: when, by whom, why.
+    deployment: i32,
+    at: DateTime<Utc>,
+    by: String,
+    reason: Option<String>,
+    /// The run began with a rollback.
+    rollback: bool,
+    /// It runs now (the newest run).
+    running: bool,
+    /// What `ductus deploy --rollback` (no release named) would go back to.
+    rollback_target: bool,
+}
+
+/// The releases this engine's project ran in its environment, newest first, one entry per run:
+/// what runs now, what ran before, and which one a rollback without a release named goes back
+/// to. Empty in folder mode.
+#[utoipa::path(
+    get, path = "/deployments", operation_id = "list_deployments", tag = "releases",
+    responses((status = 200, body = Vec<RunInfo>))
+)]
+async fn runs(engine: Eng, _caller: Caller) -> Result<Json<Vec<RunInfo>>, ApiError> {
+    let Some(project) = engine.releases.as_ref().and_then(|r| r.project()) else { return Ok(Json(Vec::new())) };
+    let runs = engine.store.release_runs(&engine.environment, project).await?;
+    let current = engine.releases.as_ref().and_then(|r| r.running.as_ref()).map(|r| r.id.clone());
+    let target = current.as_deref().and_then(|c| deploy::rollback_target(&runs, c)).map(|r| r.deployment);
+    let last = runs.len().checked_sub(1);
+    Ok(Json(
+        runs.iter()
+            .enumerate()
+            .rev()
+            .map(|(n, r)| {
+                let hex = crate::code::hex(&r.release);
+                RunInfo {
+                    short: release::short(&hex).to_string(),
+                    release: hex,
+                    deployment: r.deployment,
+                    at: r.at,
+                    by: r.by.clone(),
+                    reason: r.reason.clone(),
+                    rollback: r.rollback,
+                    running: Some(n) == last && current.as_deref() == Some(r.release.as_slice()),
+                    rollback_target: target == Some(r.deployment),
+                }
+            })
+            .collect(),
+    ))
 }
 
 #[derive(Deserialize, ToSchema)]
