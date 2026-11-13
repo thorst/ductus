@@ -208,7 +208,7 @@ psql -q "$DB" -c "DELETE FROM alert_events WHERE $RUN_ALERTS" \
 until grep "started interfaces=" "$P/run.log" >/dev/null; do kill -0 $ENGINE || { cat "$P/run.log"; exit 1; }; sleep 0.2; done
 echo "engine log: $P/run.log"
 # A token of this name left by an earlier run (process ids repeat after a reboot) would refuse the new one.
-for t in operator viewer admin; do "$BIN" token revoke "ui-demo-$t-$$" >/dev/null 2>&1 || true; done
+for t in operator viewer admin deployer pull; do "$BIN" token revoke "ui-demo-$t-$$" >/dev/null 2>&1 || true; done
 export DUCTUS_API_TOKEN=$("$BIN" token create "ui-demo-operator-$$" --role operator --permission payloads 2>/dev/null)
 VIEWER=$("$BIN" token create "ui-demo-viewer-$$" --role viewer --permission payloads 2>/dev/null)
 ADMIN=$("$BIN" token create "ui-demo-admin-$$" --role admin 2>/dev/null)
@@ -281,8 +281,63 @@ grep -i '^content-encoding: gzip' <<<"$head" >/dev/null || { echo "FAIL: not com
 grep -i "^content-security-policy: default-src 'self'" <<<"$head" >/dev/null || { echo "FAIL: no CSP: $head"; exit 1; }
 echo "   /interfaces/adt → index.html, gzip, CSP"
 
+echo "== releases: an engine in release mode beside this one (the Releases page)"
+# Project `ui-releases`, environment `staging`, only releases made on main, pulling from this demo's
+# engine (folder mode, `dev`: same database, so what it lists is stored here already). Release 1 is
+# deployed now; release 2 the browser uploads and deploys; release 3 (a feature branch) is stored
+# for the browser to see refused; then a rollback. The interface is named for this run
+# (`ui-release-<pid>`): what earlier runs deployed of it, from commits this run's git doesn't have,
+# would make the "replaces" check refuse. This project's releases are forgotten before and after.
+R=$P/ui-releases
+IFACE=ui-release-$$
+forget_releases() {
+  local of="SELECT id FROM releases WHERE project = 'ui-releases'"
+  psql -q "$DB" -c "DELETE FROM release_checks WHERE release_id IN ($of)" \
+    -c "DELETE FROM release_places WHERE release_id IN ($of)" -c "DELETE FROM releases WHERE project = 'ui-releases'"
+}
+forget_releases
+mkdir -p "$R/interfaces/$IFACE" "$R/environments"
+echo "{}" >"$R/ductus.yaml"
+printf 'out/\n*.key\n' >"$R/.gitignore"
+printf 'variables: {}\n' >"$R/environments/staging.yaml"
+printf 'variables: {}\n' >"$R/environments/dev.yaml" # `ductus release` loads the code in dev
+printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: 6727 } }\ndestinations: { archive: { file: { dir: out }, script: archive.ts } }\n' \
+  "$IFACE" >"$R/interfaces/$IFACE/interface.yaml"
+archive_code() {
+  printf 'import type { Message } from "@ductus/sdk";\n\nexport function transform(m: Message) {\n  m.set("MSH-5", "%s");\n  return m;\n}\n' "$1" \
+    >"$R/interfaces/$IFACE/archive.ts"
+}
+rgit() { git -C "$R" -c core.autocrlf=false -c user.name="Ann Example" -c user.email=ann@example.org "$@"; }
+release_of() { # release_of <why>: makes a release of HEAD, prints its file
+  (cd "$R" && env -u DUCTUS_DATABASE_URL "$BIN" release --no-tests -m "$1" >/dev/null)
+  ls -t "$R"/.ductus/releases/*.tar.gz | head -1
+}
+short_of() { basename "$1" .tar.gz | sed 's/.*-//'; }
+archive_code ONE && rgit init -q -b main && rgit add . && rgit commit -qm "the archive"
+R1=$(release_of "the archive")
+archive_code TWO && rgit commit -qam "archive: TWO"
+R2=$(release_of "archive: TWO")
+rgit checkout -qb feature/x && archive_code THREE && rgit commit -qam "not reviewed"
+R3=$(release_of "trying THREE")
+rgit checkout -q main
+DEPLOYER=$("$BIN" token create "ui-demo-deployer-$$" --role operator --permission deploy 2>/dev/null)
+PULL=$("$BIN" token create "ui-demo-pull-$$" --role viewer --permission download 2>/dev/null)
+RELEASES_URL=http://127.0.0.1:7795
+env -u DUCTUS_PROJECT -u DUCTUS_CONTROL "$BIN" run --releases "$P/releases" --release-project ui-releases --env staging \
+  --threads 1 --api-listen 127.0.0.1:7795 --deploy-branches main --promote-from "$DUCTUS_API_URL" \
+  --promote-from-token "$PULL" >"$P/releases.log" 2>&1 &
+RELEASE_ENGINE=$!
+trap 'kill -INT $ENGINE $HOOK $NEIGHBOUR $RELEASE_ENGINE 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE $NEIGHBOUR $RELEASE_ENGINE 2>/dev/null || true; forget_waiting || true; forget_releases || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true' EXIT
+until grep "started interfaces=" "$P/releases.log" >/dev/null; do kill -0 $RELEASE_ENGINE || { cat "$P/releases.log"; exit 1; }; sleep 0.2; done
+DUCTUS_API_TOKEN=$DEPLOYER "$BIN" deploy "$R1" --to "$RELEASES_URL" -m "the archive" | tail -1 | sed 's/^/   release 1: /'
+curl -sf -o /dev/null -H "Authorization: Bearer $DEPLOYER" -H "Content-Type: application/gzip" --data-binary "@$R3" \
+  "$RELEASES_URL/api/v1/releases" || { echo "FAIL: release 3 wasn't stored"; exit 1; }
+echo "   release 3 (feature/x) stored; release 2 is for the browser to upload"
+
 echo "== the browser (Playwright)"
 cd "$UI"
+export DUCTUS_RELEASES_URL=$RELEASES_URL DUCTUS_DEPLOYER_TOKEN=$DEPLOYER DUCTUS_RELEASE_FILE=$R2 \
+  DUCTUS_RELEASES="$(short_of "$R1") $(short_of "$R2") $(short_of "$R3")"
 export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN \
   DUCTUS_ADMIN_TOKEN=$ADMIN DUCTUS_PEOPLE_PREFIX=$PEOPLE_PREFIX DUCTUS_PERSON_ADMIN="${PEOPLE_PREFIX}admin:$PASSWORD" \
   DUCTUS_PERSON_OPERATOR="${PEOPLE_PREFIX}operator:$PASSWORD" DUCTUS_PERSON_VIEWER="${PEOPLE_PREFIX}viewer:$PASSWORD" \

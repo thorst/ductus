@@ -1,5 +1,6 @@
 // Engines sharing one database (scripts/demo-ui.sh): a second engine runs another project
-// (`ui-neighbour`), and the demo's own project was started a second time and refused. The Overview
+// (`ui-neighbour`), a third runs releases (`ui-release`, for releases.spec.ts), and the demo's own
+// project was started a second time and refused. The Overview
 // lists the other engine and what it runs; the audit log says why the start was refused. Both pass
 // axe in every theme (AAA in High contrast), in custom colors (presets and a bad palette after Fix
 // all), and fit a phone. Runs last (playwright.config.ts).
@@ -44,10 +45,11 @@ async function axe(page: Page, tags: string[], what: string) {
 test("the overview lists the other engine on this database and what it runs", async ({ page }) => {
   await signIn(page);
   const card = page.getByRole("region", { name: "Other engines on this database" });
-  const engine = card.getByRole("listitem");
-  await expect(engine).toHaveCount(1);
-  await expect(engine).toContainText("Runs ui-neighbour");
+  // The neighbour, and the engine in release mode the Releases page's tests use (staging).
+  await expect(card.getByRole("listitem")).toHaveCount(2);
+  const engine = card.getByRole("listitem").filter({ hasText: "Runs ui-neighbour" });
   await expect(engine).toContainText(/Ductus .* · dev · since .* · pid \d+/);
+  await expect(card.getByRole("listitem").filter({ hasText: "Runs ui-release" })).toContainText(" · staging · ");
   await page.screenshot({ path: "test-results/overview-other-engines.png", fullPage: true });
 });
 

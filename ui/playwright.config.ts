@@ -78,5 +78,13 @@ export default defineConfig({
       dependencies: ["owners"],
       use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
     },
+    {
+      // The Releases page, on the engine in release mode beside the demo's (demo-ui.sh): deploys
+      // and rolls back there, so it goes last.
+      name: "releases",
+      testMatch: "releases.spec.ts",
+      dependencies: ["engines"],
+      use: { ...devices["Desktop Chrome"], viewport: { width: 1360, height: 900 } },
+    },
   ],
 });

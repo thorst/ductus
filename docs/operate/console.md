@@ -94,7 +94,7 @@ this message", "every worker blocked: the receiver is down")
 - **Documentation**: the company's own documentation fields for every interface, destination
   and resource, and which are missing.
 
-### Engine: Retention, Drain, Connections, Users, Tokens, Audit
+### Engine: Retention, Drain, Connections, Releases, Users, Tokens, Audit
 
 - **Retention**: each interface's retention, changes in progress, shorter values waiting for a
   confirmation (type the interface's name to confirm), and what the held area keeps
@@ -103,6 +103,12 @@ this message", "every worker blocked: the receiver is down")
   that needs empty queues; **Stop when drained** ([drain](cli.md#drain-before-a-change)).
 - **Connections**: `ductus doctor` from the engine's own server (**Check now**), the last
   scheduled checks, and every certificate the engine presents or connects to, with its expiry.
+- **Releases**: what this engine runs and this environment's rules, the releases stored here
+  (where each went, its checks), what ran here; a release's page says what it would change here
+  and shows its checks' reports. With the `deploy` permission: upload, **Check against**,
+  **Deploy…** (check first, then deploy reusing that check), **Roll back to it…**, download, and
+  **Bring here** from the engine this one pulls from
+  ([the Releases page](releases.md#from-the-web-ui-the-releases-page)).
 - **Users** and **Tokens** (admins): accounts, roles, permissions, lockouts; API tokens.
 - **Audit** (the `audit` permission): who did what, filtered by person, action, interface or
   message.

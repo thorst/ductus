@@ -7,7 +7,8 @@
 #   2. deployed to dev, then test: the file records both (its id unchanged);
 #   3. promoted: `ductus deploy ID --from <test> --to <prod>`: fetched with test's record, deployed;
 #   4. a release made on a feature branch: refused by prod's rules, and `--force` doesn't change it;
-#   5. release 2 (main) to test, promoted to prod;
+#   5. release 2 (main) to test; prod pulls it from test (DUCTUS_PROMOTE_FROM, a token on test that
+#      can only download: what prod's Releases page does) and deploys it;
 #   6. Ops' hotfix on a branch of their own, deployed to test;
 #   7. release 3 (main, without the hotfix) to test: refused, it would undo Ops' work;
 #      `--force -m why`: deployed, recorded (`release.force`); promoted to prod;
@@ -109,12 +110,14 @@ start() { # start <env> [DUCTUS_* settings...]
 }
 start dev
 start test
-start prod DUCTUS_DEPLOY_REQUIRES=test DUCTUS_DEPLOY_BRANCHES=main
-token() { DUCTUS_DATABASE_URL="${URL[$1]}" "$BIN" token create "$2" --role operator --permission deploy 2>/dev/null; }
 export DEV=http://127.0.0.1:${API[dev]} TEST=http://127.0.0.1:${API[test]} PROD=http://127.0.0.1:${API[prod]}
+# Prod pulls from test (0.7.4.5.2) with a token on test that can only download.
+PULL=$(DUCTUS_DATABASE_URL="${URL[test]}" "$BIN" token create prod-pulls --role viewer --permission download 2>/dev/null)
+start prod DUCTUS_DEPLOY_REQUIRES=test DUCTUS_DEPLOY_BRANCHES=main DUCTUS_PROMOTE_FROM="$TEST" DUCTUS_PROMOTE_FROM_TOKEN="$PULL"
+token() { DUCTUS_DATABASE_URL="${URL[$1]}" "$BIN" token create "$2" --role operator --permission deploy 2>/dev/null; }
 export DEV_TOKEN=$(token dev ci) TEST_TOKEN=$(token test ci) PROD_TOKEN=$(token prod ci)
 export OPS_TEST=$(token test ops) OPS_PROD=$(token prod ops)
-echo "prod: DUCTUS_DEPLOY_REQUIRES=test DUCTUS_DEPLOY_BRANCHES=main" | tee -a "$OUT"
+echo "prod: DUCTUS_DEPLOY_REQUIRES=test DUCTUS_DEPLOY_BRANCHES=main DUCTUS_PROMOTE_FROM=\$TEST" | tee -a "$OUT"
 
 echo "== 1. release 1 to prod: refused, not deployed to test"
 step r1 'env -u DUCTUS_DATABASE_URL ductus release -m "the lab feed"'
@@ -148,15 +151,22 @@ step feature-prod 'DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$REL_F"' --to $P
 [ "$(code feature-prod)" = 1 ] && has feature-prod "made on \`feature/lab-codes\`: merge it, then release from there" || fail+=" branch-not-refused"
 g checkout -q main
 
-echo "== 5. release 2 (main) to test, promoted to prod"
+echo "== 5. release 2 (main) to test; prod pulls it from test (as its Releases page's Bring to prod), deploys it"
 lab LAB2
 g commit -qam "lab: LAB2"
 step r2 'env -u DUCTUS_DATABASE_URL ductus release -m "lab: LAB2"'
 REL2=.ductus/releases/$(basename "$(released r2)") S2=$(short_id r2)
 step test2 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL2"' --to $TEST -m "lab: LAB2"'
 [ "$(code test2)" = 0 ] || fail+=" test2"
-step promote2 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S2"' --from $TEST --to $PROD -m "lab: LAB2, tested"'
+step upstream2 'curl -sS -H "Authorization: Bearer $PROD_TOKEN" $PROD/api/v1/upstream | python3 -c "import json, sys; u = json.load(sys.stdin); print(\"on\", u[\"environment\"] + \":\", \", \".join(r[\"short\"] + (\" (stored here)\" if r[\"stored_here\"] else \"\") for r in u[\"releases\"]))"'
+has upstream2 "^on test: $S2, " && has upstream2 "$S1 (stored here)" || fail+=" upstream"
+step pull2 'curl -sS -X POST -H "Authorization: Bearer $PROD_TOKEN" $PROD/api/v1/upstream/releases/'"$S2"' | python3 -c "import json, sys; p = json.load(sys.stdin); print(\"brought\", p[\"short\"], \"from\", p[\"environment\"], \"(new)\" if p[\"new\"] else \"(stored before)\", \"with\", p[\"new_places\"], \"record(s) of where it went\")"'
+has pull2 "^brought $S2 from test (new) with 1 record(s) of where it went" || fail+=" pull"
+[ "$(q prod "SELECT count(*) FROM audit_log WHERE action = 'release.pull' AND subject = '$S2' AND detail->>'from' = '$TEST'")" = 1 ] || fail+=" pull-audit"
+step promote2 'DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S2"' --to $PROD -m "lab: LAB2, tested"'
 [ "$(code promote2)" = 0 ] || fail+=" promote2"
+# The pull token can't deploy on test, nor bring anything to prod.
+[ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $PULL" -H 'Content-Type: application/json' -d '{}' "$TEST/api/v1/deployments")" = 403 ] || fail+=" pull-token-deploys"
 
 echo "== 6. Ops' hotfix, on a branch of their own, deployed to test"
 g checkout -qb hotfix/lab

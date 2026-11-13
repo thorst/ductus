@@ -242,7 +242,7 @@ function Checks({ checks }: { checks: Schemas["CheckInfo"][] }) {
                     <CheckVerdict check={c} />
                   </summary>
                   <div className="mt-2 ml-5">
-                    <GateReport check={c} />
+                    <GateReport check={c} verdict={false} />
                   </div>
                 </details>
               </li>

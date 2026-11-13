@@ -6,12 +6,12 @@ interface's code version, who made it, why, from which commit, and whether its t
 and database) before anything deploys it, and changes nothing. This page is for whoever ships
 changes: a developer, a release manager, a CI pipeline.
 
-Releases are new in 0.7.4.3. You make them, check them from a shell or CI,
+You make releases, check them from a shell or CI,
 [store them on an engine](#store-a-release-on-an-engine) and have it check them against its own
-environment, and (0.7.4.4) [deploy them](#deploy-a-release) to an engine in release mode on
-Linux. Promoting one from test to prod, rolling back, and deploys on Windows and in containers come
-next. An engine in folder mode deploys as before (`git pull` and `systemctl reload ductus`,
-[what runs, recorded](deployments.md)).
+environment, [deploy them](#deploy-a-release) to an engine in release mode (Linux, Windows,
+containers), [promote them and roll back](#promote-and-roll-back), from a shell or from
+[the web UI's Releases page](#from-the-web-ui-the-releases-page). An engine in folder mode deploys
+as before (`git pull` and `systemctl reload ductus`, [what runs, recorded](deployments.md)).
 
 **When not to bother:** a project you deploy only to your own machine with `ductus dev`. A
 release earns its place once code goes through review, or to more than one environment.
@@ -307,16 +307,18 @@ well.
 
 ## Store a release on an engine
 
-An engine keeps releases in its database, so every engine on that database (and, soon, the web
-UI's Releases page) sees them, and deploying or rolling back will be choosing one. CI stores the
-release it made, then asks the engine to check it there:
+An engine keeps releases in its database, so every engine on that database and the web UI's
+[Releases page](#from-the-web-ui-the-releases-page) see them, and deploying or rolling back is
+choosing one. CI stores the release it made, then asks the engine to check it there:
 
 | Call | What it does | Who |
 |---|---|---|
 | `POST /api/v1/releases` | Stores the release file (the body, as `ductus release` wrote it) | `deploy` permission |
-| `GET /api/v1/releases` | The releases stored, newest first, each with its last check per environment | anyone signed in |
-| `GET /api/v1/releases/{id}` | One release (its id or first 12 characters): its manifest and every check, with reports | anyone signed in |
+| `GET /api/v1/releases` | The releases stored, newest first, each with its branches, the environments it went to, whether it runs here, and its last check per environment | anyone signed in |
+| `GET /api/v1/releases/{id}` | One release (its id or first 12 characters): where it went, what deploying it here would change (`here`), every check with its report; its manifest with `?manifest=true` | anyone signed in |
 | `POST /api/v1/releases/{id}/check` | The gate, run by the engine against its own environment and database | `deploy` permission |
+| `GET /api/v1/releases/{id}/file` | The release's file, its record of where it went brought up to date | `deploy` or `download` permission |
+| `GET /api/v1/deployments` | What ran in this environment, newest first, one entry per run, and which one a rollback goes back to | anyone signed in |
 
 Every option and answer: the [REST API reference](../reference/api/releases.md).
 
@@ -676,9 +678,12 @@ engine couldn't take over (the running one goes on). One deploy or check at a ti
 Every attempt is in the audit log (`release.deploy`, or `release.rollback`, with `detail.ok` and
 `detail.outcome`).
 
-`GET /api/v1/releases/{id}/file` (the `deploy` permission, audited as `release.download`) gives
-the release's file with its record brought up to date; `GET /api/v1/releases/{id}` says where it
-was deployed (`deployed`) and its `branch`.
+`GET /api/v1/releases/{id}/file` (the `deploy` or `download` permission, audited as
+`release.download`) gives the release's file with its record brought up to date;
+`GET /api/v1/releases/{id}` says where it was deployed (`deployed`), its `branches`, and what
+deploying it here would change (`here`). `GET /api/v1/engine`'s `releases` says whether the engine
+runs releases, which one, and this environment's rules (`requires`, `branches`,
+`reuse_check_seconds`, `promote_from`); it's `null` in folder mode.
 
 In release mode, the files on the server are the database's copy: an edit there is never
 deployed ([nuance](../nuances/releases.md#in-release-mode-the-files-on-the-server-are-the-databases-copy-level-2)).
@@ -762,6 +767,66 @@ changed 1 interface:
 Prod had stored it already (the refused deploy above): a release stored before keeps its first
 manifest, and the records a file brings are added all the same. Prod's gate runs against prod:
 a check in test says nothing about prod's database and secrets.
+
+### Pull from test: `DUCTUS_PROMOTE_FROM`
+
+`--from` needs someone (or CI) holding tokens for both engines. To promote from prod's Releases
+page instead, give **prod's engine** test's address and a token there that can only download:
+
+```sh
+# On test's engine: a token that fetches release files and nothing else.
+ductus token create prod-pulls --role viewer --permission download
+
+# In prod's ductus.env (readable by the service only, as the database's password):
+DUCTUS_PROMOTE_FROM=https://ductus-test:8443
+DUCTUS_PROMOTE_FROM_TOKEN=dux_...
+```
+
+Reload prod (`systemctl reload ductus`, or the Windows service's reload). Its Releases page then
+lists test's releases of the same project under **On test**; **Bring to prod** fetches one with
+test's record of where it went (`GET /releases/{id}/file` there) and stores it on prod
+(`POST /api/v1/upstream/releases/{id}`, audited as `release.pull`), and you deploy it from its page,
+held to prod's rules as any other. From a shell, the same two calls, then the deploy
+(`scripts/demo-promote.sh`, step 5; the token is prod's, which needs only `deploy` there):
+
+```text
+$ curl -sS -H "Authorization: Bearer $PROD_TOKEN" $PROD/api/v1/upstream | python3 -c "import json, sys; u = json.load(sys.stdin); print(\"on\", u[\"environment\"] + \":\", \", \".join(r[\"short\"] + (\" (stored here)\" if r[\"stored_here\"] else \"\") for r in u[\"releases\"]))"
+on test: e16ad8ac6cdb, 7fc9677466dd (stored here)
+
+$ curl -sS -X POST -H "Authorization: Bearer $PROD_TOKEN" $PROD/api/v1/upstream/releases/e16ad8ac6cdb | python3 -c "import json, sys; p = json.load(sys.stdin); print(\"brought\", p[\"short\"], \"from\", p[\"environment\"], \"(new)\" if p[\"new\"] else \"(stored before)\", \"with\", p[\"new_places\"], \"record(s) of where it went\")"
+brought e16ad8ac6cdb from test (new) with 1 record(s) of where it went
+
+$ DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy e16ad8ac6cdb --to $PROD -m "lab: LAB2, tested"
+deploying: the gate runs (or a recent passing check is reused), then the handover…
+release e16ad8ac6cdb (project integrations, branch main) to environment `prod`
+gate: passed in 0.77 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+  started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 265 ms and receives beside this one: stopping this one
+  this engine stopped in 0 ms and let go of its interfaces: the new one takes them
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 17 ms
+changed 1 interface:
+  promote-demo 0db7a1e1454e → 9242851858df
+```
+
+Prod's `DUCTUS_DEPLOY_REQUIRES=test` passed: the file test sent carried test's record.
+
+**Why prod pulls, and test never pushes:** the token lives on the higher environment and opens
+only the lower one, read-only for releases. A test engine that's been broken into can't deploy
+to prod; prod's token on test can't deploy to test either (the `download` permission fetches
+files and nothing else; it still carries every environment's encrypted secrets, so keep it as you
+keep the database's password,
+[nuance](../nuances/releases.md#the-download-permission-reads-every-releases-code-and-encrypted-secrets-level-2)).
+
+| Setting | What | Default |
+|---|---|---|
+| `DUCTUS_PROMOTE_FROM` (`--promote-from`) | The engine to pull from, as `ductus deploy --to` takes it. Release mode only | none: releases come by upload, `ductus deploy` or `--from` |
+| `DUCTUS_PROMOTE_FROM_TOKEN` (`--promote-from-token`) | A token on that engine with `download` (or `deploy`). Required with the address | none |
+
+HTTPS to test is verified against the system's trusted CAs
+([nuance](../nuances/releases.md#pulling-from-another-engine-trusts-the-systems-cas-only-level-2)).
+`GET /api/v1/upstream` answers 404 when no engine is set, and 502 with what to do when test can't
+be reached or refuses the token. One engine to pull from: a chain dev → test → prod is test pulling
+from dev and prod from test.
 
 ### Only main reaches prod
 
@@ -874,6 +939,57 @@ every message arrives once and each patient's in order, and the old lanes settle
 (`interface.lanes_settled` in the audit log). Should the handover fail after the new engine
 stored messages in its new lanes, they wait for the next start or handover
 ([nuance](../nuances/ordering.md#a-handover-that-fails-after-storing-messages-in-new-lanes-leaves-them-for-the-next-start-level-5)).
+
+## From the web UI: the Releases page
+
+Everything above, without a shell: **Engine → Releases** in the [console](console.md). Anyone
+signed in sees it; storing, checking, deploying, rolling back and downloading need the `deploy`
+permission (the buttons aren't shown without it, and the engine refuses all the same).
+
+**When to use it:** a release manager or on-call operator promoting what CI built, or going back
+to yesterday's release at 3 a.m. **When not:** CI itself (it uses `ductus deploy` or the API, and
+holds the only `deploy` token on prod if you followed [Only main reaches prod](#only-main-reaches-prod)).
+
+**The list (`/releases`)** shows, at the top, what this engine runs and this environment's rules
+(`DUCTUS_DEPLOY_REQUIRES`, `DUCTUS_DEPLOY_BRANCHES`, how long a check is reused), or that it runs a
+project folder (folder mode: releases can be stored and checked there, not deployed). Then:
+
+| Part | What it shows |
+|---|---|
+| **On test** | Only when this engine [pulls from another](#pull-from-test-ductus_promote_from): that engine's releases of this project, each with **Bring to prod** (stored here with its record of where it went; nothing deployed) or a link when it's stored here already |
+| **Stored here** | Every release on this database, newest first: its id (the one running marked **Running here**), project, branches, commit, who made it, when and why, the environments it went to, and its last check per environment (✓/✗). **Upload a release** stores a file `ductus release` wrote, as `POST /releases` does |
+| **What ran in prod** | One line per run, newest first: the release, when, by whom, why, whether it was a rollback; **Roll back to it…** on each earlier one (the one `ductus deploy --rollback` would pick is highlighted) |
+
+**A release's page (`/releases/<id>`)** shows what it is, **what it changes here** (each
+interface that changes, is new here or would be removed, with the code versions from → to, and
+whether the project's own files change: worked out from the versions, no gate run), where it went
+(and whether this database recorded it or a release file said so), every check of it with its
+report as `ductus release check` prints it, and its interfaces with their files (on demand: the
+manifest is hundreds of KB at a thousand interfaces). Its buttons: **Check against prod** (the
+gate, recorded), **Download** (the file, record included), **Deploy to prod…**.
+
+**Deploy to prod…** opens a dialog with what it changes and this environment's rules, then:
+
+1. **Check first** (optional): the gate runs against this environment and its report shows in the
+   dialog. A failed check keeps **Deploy** disabled: fix what it found. A passed one is reused by
+   the deploy (the pre-run), so Deploy then takes about a second, not the gate's time again
+   (unless `DUCTUS_DEPLOY_REUSE_CHECK=0`, which the dialog says).
+2. **A reason** (required except in `dev`), then **Deploy**: the engine's rules, the "replaces"
+   check, the gate (or the reused check), the handover. The dialog waits for the answer: seconds,
+   plus the gate's time when it runs.
+3. **Refused:** the engine's own words show: which rule, or whose work it would undo (each
+   interface, who deployed it and from which commit). Only after a refusal names someone's work
+   does **Deploy over their work** appear: tick it and Deploy again (forced, recorded as
+   `release.force`, as `--force` is). This environment's rules are never skippable here either.
+4. **Deployed:** the outcome, the gate, and what changed; every page refreshes on the new engine
+   ([nuance](../nuances/releases.md#a-deploy-from-the-releases-page-waits-for-the-gate-and-the-handover-level-1)).
+
+**Roll back to it…** is the same dialog without the check (a rollback always runs the gate, and
+isn't held to the rules): a reason, then **Roll back**.
+
+What the page says a release changes is a comparison of code versions, not a check
+([nuance](../nuances/releases.md#what-a-release-changes-here-is-worked-out-from-code-versions-not-checked-level-2)):
+**Check first** is what tells you whether it works here.
 
 ## Measured
 

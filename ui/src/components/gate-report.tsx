@@ -26,11 +26,11 @@ export function CheckVerdict({ check }: { check: Schemas["CheckInfo"] }) {
 }
 
 /** The gate's report, as `ductus release check` prints it: each section's lines, with what's under them. */
-export function GateReport({ check }: { check: Schemas["CheckInfo"] }) {
+export function GateReport({ check, verdict = true }: { check: Schemas["CheckInfo"]; verdict?: boolean }) {
   const sections = gateSections(check.report);
   return (
     <section aria-label={`Check of ${check.environment}`} className="space-y-3">
-      <CheckVerdict check={check} />
+      {verdict && <CheckVerdict check={check} />}
       {sections.length === 0 && <p className="text-sm text-muted">The report has no lines.</p>}
       {sections.map((s, n) => (
         <div key={n}>

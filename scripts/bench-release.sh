@@ -15,7 +15,9 @@
 #     unpacked by the new engine, and restarts with the release's folder there or unpacked again;
 #   - 0.7.4.4.3, promote and roll back: `GET /releases/{id}/file` (what `deploy --from` fetches),
 #     the file stored again with its records merged, `ductus deploy --rollback` (the gate run; the
-#     release's folder there, or unpacked again).
+#     release's folder there, or unpacked again);
+#   - 0.7.4.5, the Releases page's reads: `GET /engine`, `/releases`, `/deployments`, a release's
+#     page with what it changes here, and with its manifest.
 #
 #   bash scripts/bench-release.sh                 # COUNT=1001 ROUNDS=3 by default
 set -euo pipefail
@@ -247,6 +249,19 @@ for r in $(seq 1 "$ROUNDS"); do
   [ $((r % 2)) = 0 ] && rm -rf "${RELEASES:?}/$(tar xzOf "$WORK/changed.tar.gz" release.json | sed -n 's/^{"format":1,"id":"\([0-9a-f]\{64\}\).*/\1/p')"
   rollback "roll back ($([ $((r % 2)) = 0 ] && echo unpacked again || echo folder there)) #$r"
   deploy "deploy forward again #$r" "$FIRST_ID"
+done
+echo "== the Releases page's reads (0.7.4.5): $(psql -tA "$URL" -c 'SELECT count(*) FROM releases') releases stored, $(psql -tA "$URL" -c 'SELECT count(*) FROM deployments WHERE release_id IS NOT NULL') deployments of them"
+page_get() {
+  curl -sS -o /dev/null -w '%{time_total} %{size_download}\n' -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:$API/api/v1$2" >"$WORK/page.time"
+  read -r took size <"$WORK/page.time"
+  printf '%-34s %6.3f s  %d bytes\n' "$1" "$took" "$size"
+}
+for r in $(seq 1 "$ROUNDS"); do
+  page_get "GET /engine #$r" /engine
+  page_get "GET /releases #$r" /releases
+  page_get "GET /deployments #$r" /deployments
+  page_get "GET /releases/{next} (here) #$r" "/releases/$NEXT_ID"
+  page_get "GET /releases/{next}?manifest #$r" "/releases/$NEXT_ID?manifest=true"
 done
 for r in $(seq 1 "$ROUNDS"); do
   kill -INT "$(running)"

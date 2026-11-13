@@ -252,7 +252,8 @@ function Type({ schema }: { schema?: Schema }) {
         typeof t === "string" ? (
           <Fragment key={n}>{t}</Fragment>
         ) : (
-          <a key={n} href={`#schema-${t.ref}`}>
+          // Underlined: beside `[]` or `| null` it's a link in text, which color alone can't mark (axe).
+          <a key={n} href={`#schema-${t.ref}`} className="underline">
             {t.ref}
           </a>
         ),

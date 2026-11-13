@@ -116,3 +116,22 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **What:** `ductus release` records the branch HEAD is on. CI often checks out a commit, not a branch (a tag, a pull request): HEAD is detached and the release records none, which DUCTUS_DEPLOY_BRANCHES refuses. `--branch NAME` names it then; on a branch, a different name is refused.
 - **Why:** git doesn't know which branch a detached commit "belongs to" (it can be on several).
 - **What to do:** in CI, `ductus release --branch "$GITHUB_REF_NAME"` (GitHub Actions; other CI systems have a variable for the branch built).
+## A deploy from the Releases page waits for the gate and the handover (level 1)
+- **What:** **Deploy** and **Roll back** on the Releases page wait for the engine's answer: the gate (seconds at a thousand interfaces, ~1 s when a check is reused), then the handover. The engine answering is the one being replaced; the new one takes the same port, so the page goes on (sessions are in the database: nobody is signed out), its live updates reconnect and every screen is fetched again from the new engine. One deploy or check at a time per engine: a second gets 409 until the first ends.
+- **Why:** the page shows the engine's own report (deployed, refused and why, or the gate's problems) rather than "started"; at these times a wait is simpler and clearer than polling.
+- **What to do:** leave the dialog open until it answers. Closing the tab doesn't stop a deploy that started: look at **What ran here** or the audit log (`release.deploy`) for how it ended.
+
+## What a release changes here is worked out from code versions, not checked (level 2)
+- **What:** a release's page says which interfaces it changes, adds or removes in this environment by comparing its code versions with what this engine runs, and whether the project's own files (`ductus.yaml`, `resources.yaml`, `environments/`, `secrets/`) differ from the running release's. Nothing runs to say it: the gate (**Check first**, **Check against prod**) is what tells whether it works here. A change to an environment's values outside the release (ductus.env) shows nowhere. In folder mode, or while the engine's start is still being recorded, the project files' line and the whole section may be missing.
+- **Why:** it's free (no gate, microseconds), so the page can say it before anyone asks.
+- **What to do:** read it as "what would move"; run the check before deploying anything that matters.
+
+## The `download` permission reads every release's code and encrypted secrets (level 2)
+- **What:** `download` lets a token fetch any stored release's file (`GET /releases/{id}/file`) and nothing else: no deploy, no check, no upload. Any role may hold it (it's meant for a viewer token that another engine pulls with, `DUCTUS_PROMOTE_FROM_TOKEN`). The file carries the project's code and every environment's secrets, encrypted with each environment's own key. Directory groups don't grant it.
+- **Why:** prod pulling from test needs a key to test that can't change test; `deploy` would be more than it needs.
+- **What to do:** keep the token where the database's password is (ductus.env, readable by the service only). Each download is in the audit log (`release.download`, with who). Don't give `download` to people: they get files from the Releases page with `deploy`.
+
+## Pulling from another engine trusts the system's CAs only (level 2)
+- **What:** prod's engine calls test's (`DUCTUS_PROMOTE_FROM`) over HTTPS verified against the server's trusted CAs, as `ductus deploy --from` does; resources.yaml's certificates aren't used (they're the release's, and the release is what's being fetched). Plain `http://` works and sends the token in the clear.
+- **Why:** the engine's own settings shouldn't depend on what a release carries.
+- **What to do:** with a private CA, add it to the server's trust store (Linux: `/usr/local/share/ca-certificates` and `update-ca-certificates`; Windows: the machine's Trusted Root store). Use `http://` only on a loopback or a network you'd send the database password over.

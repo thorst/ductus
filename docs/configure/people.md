@@ -13,7 +13,7 @@ audit log, by name.
 | `operator` | What viewers can, and act: resend, replay, edit and dismiss messages, pause and resume, drain, run connection checks. |
 | `admin` | What operators can, and manage accounts and tokens; has every permission. |
 
-Three **permissions** go on top of a role, given only to the people who need them:
+Four **permissions** go on top of a role, given only to the people (and tokens) who need them:
 
 - **`payloads`**: read message contents, which is usually patient data (and edit them, as an
   operator). Without it the message page shows status, destinations and errors, and says the
@@ -22,14 +22,20 @@ Three **permissions** go on top of a role, given only to the people who need the
 - **`audit`**: read and export the audit log. For compliance and security staff, not operators
   ([nuance](../nuances/people.md#the-audit-log-records-who-did-what-and-what-it-leaves-out-level-2)).
 - **`deploy`**: store [releases](../operate/releases.md#store-a-release-on-an-engine) on an
-  engine and check them against its environment (and, in a coming version, deploy them). A
-  release's code runs there with that environment's secrets and every payload it receives, so
-  give it as carefully as `payloads`: to the people and the CI token that ship changes. **Operators
-  and admins only**: giving it to a viewer is refused
+  engine, check them against its environment, deploy them and roll back (from a shell or the
+  [Releases page](../operate/releases.md#from-the-web-ui-the-releases-page)). A release's code
+  runs there with that environment's secrets and every payload it receives, so give it as
+  carefully as `payloads`: to the people and the CI token that ship changes. **Operators and
+  admins only**: giving it to a viewer is refused
   ([nuance](../nuances/releases.md#checking-a-release-on-an-engine-runs-its-code-there-with-that-environments-secrets-level-2)).
+- **`download`**: fetch a stored release's file and nothing else. It's for the token another
+  engine [pulls releases with](../operate/releases.md#pull-from-test-ductus_promote_from) (prod's,
+  on test), so that engine can't deploy there; any role may hold it. Not given by directory groups
+  ([nuance](../nuances/releases.md#the-download-permission-reads-every-releases-code-and-encrypted-secrets-level-2)).
 
 ```sh
 ductus token create ci-release --role operator --permission deploy
+ductus token create prod-pulls --role viewer --permission download
 ```
 
 ## Accounts

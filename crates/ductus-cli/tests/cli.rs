@@ -5396,8 +5396,42 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
         (child, log)
     };
     let (test_engine, test_log) = engine("test", test_api, &[]);
-    let (prod_engine, prod_log) =
-        engine("prod", prod_api, &["--deploy-requires", "test,uat", "--deploy-branches", "main,release/*"]);
+    // Prod pulls from test with a token that can only download there (0.7.4.5.2).
+    let pull = {
+        let args = ["token", "create", &format!("{name}-pull"), "--role", "viewer", "--permission", "download"];
+        let (ok, out) = ductus(dir.path(), &args);
+        assert!(ok, "{out}");
+        out.lines().next().unwrap().to_string()
+    };
+    let (prod_engine, prod_log) = engine(
+        "prod",
+        prod_api,
+        &[
+            "--deploy-requires",
+            "test,uat",
+            "--deploy-branches",
+            "main,release/*",
+            "--promote-from",
+            &test_url,
+            "--promote-from-token",
+            &pull,
+        ],
+    );
+    let client = reqwest::Client::new();
+    let get = async |url: String, token: &str| -> serde_json::Value {
+        let answer = client.get(&url).bearer_auth(token).send().await.unwrap();
+        let status = answer.status();
+        let text = answer.text().await.unwrap();
+        assert!(status.is_success(), "{url}: {status} {text}");
+        serde_json::from_str(&text).unwrap()
+    };
+    // The page's view of prod: release mode, its rules, where it pulls from; nothing ran yet.
+    let mode = get(format!("{prod_url}/api/v1/engine"), &ann).await["releases"].clone();
+    assert_eq!(mode["requires"], serde_json::json!(["test", "uat"]), "{mode}");
+    assert_eq!(mode["branches"], serde_json::json!(["main", "release/*"]), "{mode}");
+    assert_eq!((mode["promote_from"].as_str(), mode["running"].as_str()), (Some(test_url.as_str()), None), "{mode}");
+    assert_eq!(mode["reuse_check_seconds"], 3600, "{mode}");
+    assert_eq!(get(format!("{prod_url}/api/v1/deployments"), &ann).await, serde_json::json!([]));
 
     // To test: the file gets test's record.
     let a = release_json(dir.path(), &["-m", "first"]);
@@ -5410,6 +5444,29 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
     let carried = ductus_runtime::release::read(Path::new(a_file)).unwrap().manifest;
     assert_eq!((carried.id.as_str(), carried.deployed.len()), (a_id, 1), "the same id, one record");
     assert_eq!(carried.deployed[0].environment, "test");
+
+    // Prod's page lists test's releases (one database here, so it's stored on prod's already);
+    // bringing it adds nothing; the pull token can download on test but not deploy there.
+    let up = get(format!("{prod_url}/api/v1/upstream"), &ann).await;
+    assert_eq!(up["environment"], "test", "{up:#}");
+    let listed = up["releases"].as_array().unwrap().iter().find(|r| r["id"] == a_id).cloned().unwrap();
+    assert_eq!((listed["stored_here"].as_bool(), &listed["environments"]), (Some(true), &serde_json::json!(["test"])));
+    let pulled = client
+        .post(format!("{prod_url}/api/v1/upstream/releases/{}", &a_id[..12]))
+        .bearer_auth(&ann)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(pulled.status(), 200, "stored before");
+    let pulled: serde_json::Value = pulled.json().await.unwrap();
+    assert_eq!((pulled["new"].as_bool(), pulled["environment"].as_str()), (Some(false), Some("test")), "{pulled:#}");
+    let refused =
+        client.post(format!("{test_url}/api/v1/deployments")).bearer_auth(&pull).json(&serde_json::json!({})).send();
+    assert_eq!(refused.await.unwrap().status(), 403, "download can't deploy");
+    let file = client.get(format!("{test_url}/api/v1/releases/{a_id}/file")).bearer_auth(&pull).send();
+    assert_eq!(file.await.unwrap().status(), 200, "download can download");
+    let viewer = client.post(format!("{prod_url}/api/v1/upstream/releases/{a_id}")).bearer_auth(&pull).send();
+    assert_eq!(viewer.await.unwrap().status(), 403, "bringing a release here needs deploy");
 
     // `--from test --to prod`: fetched with its record, stored, refused (prod requires uat too).
     let (ok, out) = deploy(&bob, &[&a_id[..12], "--from", &test_url, "--to", &prod_url, "-m", "promote"]);
@@ -5481,6 +5538,41 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
         .unwrap();
     assert_eq!(got["deployment"]["release"], a_id, "{got}");
 
+    // What the Releases page shows: what ran in prod, newest first (A again, by a rollback; C; A),
+    // no rollback target left (C was left by a rollback); A running, with what it changes here
+    // (nothing) and its manifest only when asked.
+    let ran = get(format!("{prod_url}/api/v1/deployments"), &ann).await;
+    let ran: Vec<(&str, bool, bool, bool)> = ran
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| {
+            (
+                &r["short"].as_str().unwrap()[..4],
+                r["running"].as_bool().unwrap(),
+                r["rollback"].as_bool().unwrap(),
+                r["rollback_target"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    let (a4, c4) = (&a_id[..4], &c["id"].as_str().unwrap()[..4]);
+    assert_eq!(ran, [(a4, true, true, false), (c4, false, false, false), (a4, false, false, false)]);
+    let list = get(format!("{prod_url}/api/v1/releases"), &ann).await;
+    let a_listed = list.as_array().unwrap().iter().find(|r| r["id"] == a_id).unwrap();
+    assert_eq!((a_listed["running"].as_bool(), &a_listed["branches"]), (Some(true), &serde_json::json!(["main"])));
+    let page = get(format!("{prod_url}/api/v1/releases/{a_id}"), &ann).await;
+    let here = &page["here"];
+    assert_eq!((here["running"].as_bool(), here["ran_before"].as_bool()), (Some(true), Some(true)), "{page:#}");
+    assert_eq!((here["changes"].as_array().map(Vec::len), here["unchanged"].as_u64()), (Some(0), Some(1)), "{page:#}");
+    assert!(page["manifest"].is_null(), "the manifest only when asked");
+    let page = get(format!("{prod_url}/api/v1/releases/{a_id}?manifest=true"), &ann).await;
+    assert!(page["manifest"]["interfaces"][&name].is_object(), "{page:#}");
+    // C, seen from prod now: it changes the interface back.
+    let page = get(format!("{prod_url}/api/v1/releases/{}", c["id"].as_str().unwrap()), &ann).await;
+    let change = &page["here"]["changes"][0];
+    assert_eq!((change["interface"].as_str(), change["change"].as_str()), (Some(name.as_str()), Some("changed")));
+    assert_eq!(page["here"]["project_files_change"], false, "{page:#}");
+
     // Again: C was left by a rollback, A runs: nothing earlier. To D (stored, never ran here): refused.
     let (ok, out) = deploy(&ann, &["--rollback", "--to", &prod_url, "-m", "again"]);
     assert!(!ok && out.contains("no earlier release ran in `prod` to roll back to"), "{out}");
@@ -5527,7 +5619,7 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
     assert_eq!(page["deployed"].as_array().map(Vec::len), Some(3), "{page:#}");
 
     drop(prod_engine);
-    for who in ["ann", "bob"] {
+    for who in ["ann", "bob", "pull"] {
         let _ = ductus(dir.path(), &["token", "revoke", &format!("{name}-{who}")]);
     }
     let store = ductus_store::Store::connect(&db, 2).await.unwrap();
