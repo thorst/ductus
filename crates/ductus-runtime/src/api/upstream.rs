@@ -135,8 +135,12 @@ fn refused(from: &Upstream, answer: &reqwest::Response) -> Result<(), ApiError> 
         return Ok(());
     }
     let what = match status.as_u16() {
-        401 => "it doesn't know the token: make one there with the `download` permission and set DUCTUS_PROMOTE_FROM_TOKEN",
-        403 => "its token lacks the `download` permission there: give it (`ductus token create NAME --permission download`)",
+        401 => {
+            "it doesn't know the token: make one there with the `download` permission and set DUCTUS_PROMOTE_FROM_TOKEN"
+        }
+        403 => {
+            "its token lacks the `download` permission there: give it (`ductus token create NAME --permission download`)"
+        }
         404 => "it has no such release (or no Releases API: it runs an older Ductus)",
         _ => "",
     };
@@ -198,7 +202,9 @@ async fn pull(engine: Eng, caller: Caller, Path(id): Path<String>) -> Result<axu
     caller.require_permission("deploy")?;
     let from = upstream(&engine)?;
     if id.len() < 4 || id.len() > 64 || !id.bytes().all(|b| b.is_ascii_hexdigit()) {
-        return Err(ApiError::bad_request(format!("`{id}` isn't a release id: give its first 12 characters (or more)")));
+        return Err(ApiError::bad_request(format!(
+            "`{id}` isn't a release id: give its first 12 characters (or more)"
+        )));
     }
     let client = client()?;
     let other = get(&client, from, "/engine").await?;
@@ -214,9 +220,8 @@ async fn pull(engine: Eng, caller: Caller, Path(id): Path<String>) -> Result<axu
         return Err(ApiError::bad_request("the release it sent is larger than this engine takes (256 MB)"));
     }
     let body = answer.bytes().await.map_err(|e| unreachable(from, format!("reading the release: {e:#}")))?;
-    let audit = caller
-        .audit("release.pull")
-        .detail(serde_json::json!({ "from": from.url, "environment": environment }));
+    let audit =
+        caller.audit("release.pull").detail(serde_json::json!({ "from": from.url, "environment": environment }));
     let stored = store_bytes(&engine, &caller, body, audit, "the release it sent").await?;
     let status = if stored.new { StatusCode::CREATED } else { StatusCode::OK };
     Ok((status, Json(Pulled { from: from.url.clone(), environment, stored })).into_response())

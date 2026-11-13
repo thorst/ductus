@@ -210,8 +210,7 @@ fn folder_list(files: &[&ReleaseFile<'_>]) -> (Vec<u8>, String) {
     (Sha256::digest(text.as_bytes()).to_vec(), text)
 }
 
-const RELEASE_COLUMNS: &str =
-    "id, project, made_at, made_by, reason, git_commit, interfaces, files, bytes, stored_at, stored_by, \
+const RELEASE_COLUMNS: &str = "id, project, made_at, made_by, reason, git_commit, interfaces, files, bytes, stored_at, stored_by, \
      coalesce(branches, '{}')";
 
 type Row = (
@@ -852,7 +851,14 @@ impl Store {
         .context("reading the releases run here")?;
         Ok(rows
             .into_iter()
-            .map(|(release, deployment, at, by, reason, rollback)| Run { release, deployment, at, by, reason, rollback })
+            .map(|(release, deployment, at, by, reason, rollback)| Run {
+                release,
+                deployment,
+                at,
+                by,
+                reason,
+                rollback,
+            })
             .collect())
     }
 }

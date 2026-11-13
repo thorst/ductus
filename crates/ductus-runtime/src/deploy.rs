@@ -558,7 +558,14 @@ mod tests {
     }
 
     fn run(release: u8, deployment: i32, rollback: bool) -> ductus_store::Run {
-        ductus_store::Run { release: vec![release; 32], deployment, at: Utc::now(), by: "ann".into(), reason: None, rollback }
+        ductus_store::Run {
+            release: vec![release; 32],
+            deployment,
+            at: Utc::now(),
+            by: "ann".into(),
+            reason: None,
+            rollback,
+        }
     }
 
     /// The default rollback: the last release run before the current one, skipping any a rollback

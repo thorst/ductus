@@ -424,9 +424,8 @@ async fn here(engine: &Shared, id: &[u8], manifest: &serde_json::Value) -> Resul
         deployment.interfaces.iter().map(|(name, r)| (name.clone(), crate::code::hex(&r.version))).collect();
     let (changes, unchanged) = changes_here(&to, &now);
     let current = engine.releases.as_ref().and_then(|r| r.running.as_ref());
-    let project_files_change = current.map(|r| {
-        manifest["project_version"]["version"].as_str() != Some(r.manifest.project_version.version.as_str())
-    });
+    let project_files_change = current
+        .map(|r| manifest["project_version"]["version"].as_str() != Some(r.manifest.project_version.version.as_str()));
     let ran_before = match engine.releases.as_ref().and_then(|r| r.project()) {
         Some(project) => engine.store.release_runs(&engine.environment, project).await?.iter().any(|r| r.release == id),
         None => false,

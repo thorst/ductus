@@ -276,6 +276,7 @@ What an interface runs, and the deployment it came with.
 | `host` | text | The server's name. |
 | `interfaces` | number |  |
 | `others` | list of [`OtherEngine`](#otherengine) | Other engines running on this database, oldest first, and the interfaces each runs. An interface runs on one engine at a time. |
+| `releases` (optional) | [`ReleaseMode`](#releasemode) or null |  |
 | `resources` | list of [`ResourceCalls`](#resourcecalls) | Calls from interface code to each database and API in resources.yaml (`fetch`: URLs called directly), since the engine started. |
 | `started_at` | time (RFC 3339) |  |
 | `stopped` | number | Interfaces stopped because their code ran away (their messages wait). |
@@ -591,6 +592,19 @@ An interface's lanes (`ordering`): how many, and while a change is under way, th
 | `done_per_min` (optional) | number or null | Messages finished per minute (sent, filtered or quarantined). |
 | `received_per_min` (optional) | number or null | Messages arriving per minute. |
 | `send_ms` (optional) | number or null | A successful send's mean time. |
+
+### `ReleaseMode`
+
+An engine in release mode, and what this environment takes.
+
+| Field | Type | |
+|---|---|---|
+| `branches` | list of text | Branches a release must be made on (`DUCTUS_DEPLOY_BRANCHES`, a trailing `*` matches the start); empty: any. |
+| `project` (optional) | text or null | The project it runs (its release's, or `DUCTUS_RELEASE_PROJECT`); none before the first deploy when no project is named. |
+| `promote_from` (optional) | text or null | The engine this one pulls releases from (`DUCTUS_PROMOTE_FROM`); none: releases come by upload, `ductus deploy` or `--from`. |
+| `requires` | list of text | Environments a release must have been deployed to first (`DUCTUS_DEPLOY_REQUIRES`); empty: none. |
+| `reuse_check_seconds` | number | How long a deploy may reuse a passing check instead of running the gate again (`DUCTUS_DEPLOY_REUSE_CHECK`); 0: the gate runs at every deploy. |
+| `running` (optional) | text or null | The release it runs, in hex; none before the first deploy. |
 
 ### `ResourceCalls`
 

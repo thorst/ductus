@@ -2829,7 +2829,11 @@ async fn people_sign_in_with_passwords_and_are_kept_in_check() {
         (&"user".into(), &admin.clone().into(), &"admin".into()),
         "{me}"
     );
-    assert_eq!(me["permissions"], serde_json::json!(["payloads", "audit", "deploy"]), "admins have them all");
+    assert_eq!(
+        me["permissions"],
+        serde_json::json!(["payloads", "audit", "deploy", "download"]),
+        "admins have them all"
+    );
     assert_eq!(me["must_change_password"], false);
 
     // An admin makes a viewer with a temporary password; the viewer can do nothing until they change it.

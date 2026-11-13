@@ -48,10 +48,10 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Local development](dev.md) (2)
 - [Upgrades](upgrades.md) (17)
 - [What runs, recorded](deployments.md) (17)
-- [Releases](releases.md) (23)
+- [Releases](releases.md) (27)
 - [Windows](windows.md) (9)
 
-## Level 1: Foundations (37)
+## Level 1: Foundations (38)
 
 - [Retention is 1, 3 or 7 weeks, not any number of days](retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1) (Retention)
 - [Missing fields read as "" and never throw](transforms.md#missing-fields-read-as--and-never-throw-level-1) (Writing transforms)
@@ -88,10 +88,11 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A committed private key refuses the release](releases.md#a-committed-private-key-refuses-the-release-level-1) (Releases)
 - [An engine in release mode runs nothing until a release is deployed, and its API starts on its defaults](releases.md#an-engine-in-release-mode-runs-nothing-until-a-release-is-deployed-and-its-api-starts-on-its-defaults-level-1) (Releases)
 - [A deploy applies by a handover: to a new process under systemd, in the engine's own process elsewhere](releases.md#a-deploy-applies-by-a-handover-to-a-new-process-under-systemd-in-the-engines-own-process-elsewhere-level-1) (Releases)
+- [A deploy from the Releases page waits for the gate and the handover](releases.md#a-deploy-from-the-releases-page-waits-for-the-gate-and-the-handover-level-1) (Releases)
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (115)
+## Level 2: Practitioner (118)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -203,6 +204,9 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A rollback brings back the whole project, secrets included, but not the database](releases.md#a-rollback-brings-back-the-whole-project-secrets-included-but-not-the-database-level-2) (Releases)
 - [The default rollback skips releases a rollback left](releases.md#the-default-rollback-skips-releases-a-rollback-left-level-2) (Releases)
 - [A release made on a detached HEAD records no branch](releases.md#a-release-made-on-a-detached-head-records-no-branch-level-2) (Releases)
+- [What a release changes here is worked out from code versions, not checked](releases.md#what-a-release-changes-here-is-worked-out-from-code-versions-not-checked-level-2) (Releases)
+- [The `download` permission reads every release's code and encrypted secrets](releases.md#the-download-permission-reads-every-releases-code-and-encrypted-secrets-level-2) (Releases)
+- [Pulling from another engine trusts the system's CAs only](releases.md#pulling-from-another-engine-trusts-the-systems-cas-only-level-2) (Releases)
 - [The service's account: the default, a gMSA, or a named account](windows.md#the-services-account-the-default-a-gmsa-or-a-named-account-level-2) (Windows)
 - [An upgrade can't keep an account's password: the service waits for it](windows.md#an-upgrade-cant-keep-an-accounts-password-the-service-waits-for-it-level-2) (Windows)
 - [An upgrade starts the service again, unless it was stopped on purpose](windows.md#an-upgrade-starts-the-service-again-unless-it-was-stopped-on-purpose-level-2) (Windows)
