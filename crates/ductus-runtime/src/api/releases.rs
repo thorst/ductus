@@ -39,6 +39,7 @@ pub fn routes() -> OpenApiRouter<Shared> {
     OpenApiRouter::new()
         .routes(routes!(store, list))
         .routes(routes!(one))
+        .routes(routes!(one_check))
         .routes(routes!(file))
         .routes(routes!(check))
         .layer(DefaultBodyLimit::max(MAX_UPLOAD))
@@ -81,7 +82,8 @@ pub struct ReleaseInfo {
     /// This engine runs it now (release mode).
     running: bool,
     /// In a list: the last check against each environment (without its report). In a release's
-    /// own page: every check, newest first, with their reports.
+    /// own page: every check, newest first, each environment's newest with its report (the others'
+    /// `GET /releases/{id}/checks/{check}` gives).
     checks: Vec<CheckInfo>,
 }
 
@@ -98,7 +100,8 @@ pub struct CheckInfo {
     pub(super) ok: bool,
     problems: i32,
     seconds: f32,
-    /// `ductus release check --json`'s document (without the manifest: it's the release's); null in lists.
+    /// `ductus release check --json`'s document (without the manifest: it's the release's); null
+    /// in lists, and for a release's older checks of an environment.
     #[schema(value_type = Object)]
     report: serde_json::Value,
 }
@@ -385,6 +388,26 @@ async fn one(
     let here = here(&engine, &id, &manifest).await?;
     let manifest = if q.manifest { manifest } else { serde_json::Value::Null };
     Ok(Json(ReleaseDetail { release: info(row, running(&engine).as_deref()), deployed, here, manifest }))
+}
+
+/// One check of a release, with its report (a release's page carries only each environment's
+/// newest report).
+#[utoipa::path(
+    get, path = "/releases/{id}/checks/{check}", operation_id = "get_release_check", tag = "releases",
+    params(
+        ("id" = String, Path, description = "The release id, or its first 12 characters"),
+        ("check" = i32, Path, description = "The check's id (`checks[].id`)")
+    ),
+    responses((status = 200, body = CheckInfo), (status = 404, body = super::ErrorBody))
+)]
+async fn one_check(engine: Eng, _caller: Caller, Path((id, check)): Path<(String, i32)>) -> ApiResult<CheckInfo> {
+    let id = find(&engine, &id).await?;
+    let row = engine
+        .store
+        .release_check(&id, check)
+        .await?
+        .ok_or_else(|| ApiError::not_found(format!("that release has no check {check}")))?;
+    Ok(Json(check_info(row)))
 }
 
 /// What release `id` (its stored manifest) would change here; None while this engine's start is

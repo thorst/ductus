@@ -315,7 +315,8 @@ choosing one. CI stores the release it made, then asks the engine to check it th
 |---|---|---|
 | `POST /api/v1/releases` | Stores the release file (the body, as `ductus release` wrote it) | `deploy` permission |
 | `GET /api/v1/releases` | The releases stored, newest first, each with its branches, the environments it went to, whether it runs here, and its last check per environment | anyone signed in |
-| `GET /api/v1/releases/{id}` | One release (its id or first 12 characters): where it went, what deploying it here would change (`here`), every check with its report; its manifest with `?manifest=true` | anyone signed in |
+| `GET /api/v1/releases/{id}` | One release (its id or first 12 characters): where it went, what deploying it here would change (`here`), every check (each environment's newest with its report); its manifest with `?manifest=true` | anyone signed in |
+| `GET /api/v1/releases/{id}/checks/{check}` | One check with its report (an older one: at a thousand interfaces a report is hundreds of KB, so the release's answer carries only the newest per environment) | anyone signed in |
 | `POST /api/v1/releases/{id}/check` | The gate, run by the engine against its own environment and database | `deploy` permission |
 | `GET /api/v1/releases/{id}/file` | The release's file, its record of where it went brought up to date | `deploy` or `download` permission |
 | `GET /api/v1/deployments` | What ran in this environment, newest first, one entry per run, and which one a rollback goes back to | anyone signed in |
@@ -964,8 +965,9 @@ project folder (folder mode: releases can be stored and checked there, not deplo
 interface that changes, is new here or would be removed, with the code versions from → to, and
 whether the project's own files change: worked out from the versions, no gate run), where it went
 (and whether this database recorded it or a release file said so), every check of it with its
-report as `ductus release check` prints it, and its interfaces with their files (on demand: the
-manifest is hundreds of KB at a thousand interfaces). Its buttons: **Check against prod** (the
+report as `ductus release check` prints it (an older check's report is fetched when you open it),
+and its interfaces with their files (on demand: the manifest is hundreds of KB at a thousand
+interfaces). Its buttons: **Check against prod** (the
 gate, recorded), **Download** (the file, record included), **Deploy to prod…**.
 
 **Deploy to prod…** opens a dialog with what it changes and this environment's rules, then:
@@ -1055,6 +1057,20 @@ a new process (the package's way):
 | Sending paused | 508–627 ms | 540–642 ms |
 | The sender | 0 refused, longest wait 142–168 ms | 0 refused, longest wait 141 ms |
 | Memory | 95 MB before; 138–167 MB at the peak (both engines); 120–136 MB after ten handovers | 96 MB each, two processes while they overlap |
+
+What the Releases page reads, the same project (0.7.4.5, `scripts/bench-release.sh`, three
+rounds; 2 releases stored, 13 deployments of them, the release read checked several times):
+
+| Call | Time | Size |
+|---|---|---|
+| `GET /engine` | 5–17 ms | 1 KB |
+| `GET /releases` | 3–8 ms | 1.2 KB |
+| `GET /deployments` | 2–5 ms | 3.5 KB |
+| `GET /releases/{id}` (what it changes here, worked out from 1,001 versions) | 25–44 ms | 350 KB: the newest check's report, `validate`'s output a line per interface |
+| The same with `?manifest=true` | 36–47 ms | 710 KB |
+
+With every check's report, as it was before this step, the same release's page was 5.1 MB: only
+each environment's newest report comes with it now, the others when opened.
 
 ## Try it
 

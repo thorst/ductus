@@ -279,6 +279,14 @@ export const releaseManifest = (id: string) =>
     staleTime: Infinity,
   });
 
+/** One check of a release with its report (older checks come without: fetched when opened). */
+export const releaseCheck = (id: string, check: number) =>
+  queryOptions({
+    queryKey: ["releases", id, "checks", check],
+    queryFn: async () => unwrap(await api.GET("/releases/{id}/checks/{check}", { params: { path: { id, check } } })),
+    staleTime: Infinity,
+  });
+
 /** What ran in this environment, newest first, one entry per run (release mode). */
 export const runs = queryOptions({
   queryKey: ["deployments"],

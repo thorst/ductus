@@ -934,6 +934,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/releases/{id}/checks/{check}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * One check of a release, with its report (a release's page carries only each environment's
+         *     newest report).
+         */
+        get: operations["get_release_check"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/releases/{id}/file": {
         parameters: {
             query?: never;
@@ -1569,7 +1589,10 @@ export interface components {
             ok: boolean;
             /** Format: int32 */
             problems: number;
-            /** @description `ductus release check --json`'s document (without the manifest: it's the release's); null in lists. */
+            /**
+             * @description `ductus release check --json`'s document (without the manifest: it's the release's); null
+             *     in lists, and for a release's older checks of an environment.
+             */
             report: Record<string, never>;
             /** Format: float */
             seconds: number;
@@ -2949,7 +2972,8 @@ export interface components {
             bytes: number;
             /**
              * @description In a list: the last check against each environment (without its report). In a release's
-             *     own page: every check, newest first, with their reports.
+             *     own page: every check, newest first, each environment's newest with its report (the others'
+             *     `GET /releases/{id}/checks/{check}` gives).
              */
             checks: components["schemas"]["CheckInfo"][];
             /** @description The git commit it was made from (none: made without git). */
@@ -5356,6 +5380,38 @@ export interface operations {
             };
             /** @description Another check is running on this engine */
             409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+        };
+    };
+    get_release_check: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                /** @description The release id, or its first 12 characters */
+                id: string;
+                /** @description The check's id (`checks[].id`) */
+                check: number;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CheckInfo"];
+                };
+            };
+            404: {
                 headers: {
                     [name: string]: unknown;
                 };

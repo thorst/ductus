@@ -2626,6 +2626,56 @@
         }
       }
     },
+    "/releases/{id}/checks/{check}": {
+      "get": {
+        "tags": [
+          "releases"
+        ],
+        "summary": "One check of a release, with its report (a release's page carries only each environment's\nnewest report).",
+        "operationId": "get_release_check",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "description": "The release id, or its first 12 characters",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "check",
+            "in": "path",
+            "description": "The check's id (`checks[].id`)",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int32"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckInfo"
+                }
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/releases/{id}/file": {
       "get": {
         "tags": [
@@ -4390,7 +4440,7 @@
           },
           "report": {
             "type": "object",
-            "description": "`ductus release check --json`'s document (without the manifest: it's the release's); null in lists."
+            "description": "`ductus release check --json`'s document (without the manifest: it's the release's); null\nin lists, and for a release's older checks of an environment."
           },
           "seconds": {
             "type": "number",
@@ -8041,7 +8091,7 @@
             "items": {
               "$ref": "#/components/schemas/CheckInfo"
             },
-            "description": "In a list: the last check against each environment (without its report). In a release's\nown page: every check, newest first, with their reports."
+            "description": "In a list: the last check against each environment (without its report). In a release's\nown page: every check, newest first, each environment's newest with its report (the others'\n`GET /releases/{id}/checks/{check}` gives)."
           },
           "commit": {
             "type": [

@@ -4,7 +4,7 @@ import { Download, Rocket, ShieldCheck } from "lucide-react";
 import { useState } from "react";
 import { checkRelease, useCanDeploy, useRefresh } from "@/api/actions";
 import { ApiError, type Schemas } from "@/api/client";
-import { engine, release, releaseManifest } from "@/api/queries";
+import { engine, release, releaseCheck, releaseManifest } from "@/api/queries";
 import { Badge, Environments } from "@/components/badge";
 import { DeployDialog } from "@/components/deploy-dialog";
 import { CheckVerdict, GateReport } from "@/components/gate-report";
@@ -117,7 +117,7 @@ function Release({ release: r }: { release: Schemas["ReleaseDetail"] }) {
       </Card>
       {r.here && <Here here={r.here} />}
       <Went places={r.deployed} />
-      <Checks checks={r.checks} />
+      <Checks release={r.id} checks={r.checks} />
       <Interfaces id={r.id} />
       {deploying && mode && (
         <DeployDialog
@@ -224,7 +224,7 @@ function Went({ places }: { places: Schemas["PlaceInfo"][] }) {
   );
 }
 
-function Checks({ checks }: { checks: Schemas["CheckInfo"][] }) {
+function Checks({ release, checks }: { release: string; checks: Schemas["CheckInfo"][] }) {
   return (
     <Card className="mb-6">
       <CardHeader>
@@ -237,20 +237,34 @@ function Checks({ checks }: { checks: Schemas["CheckInfo"][] }) {
           <ul className="space-y-3">
             {checks.map((c, n) => (
               <li key={c.id}>
-                <details open={n === 0}>
-                  <summary className="cursor-pointer">
-                    <CheckVerdict check={c} />
-                  </summary>
-                  <div className="mt-2 ml-5">
-                    <GateReport check={c} verdict={false} />
-                  </div>
-                </details>
+                <OneCheck release={release} check={c} open={n === 0} />
               </li>
             ))}
           </ul>
         )}
       </CardBody>
     </Card>
+  );
+}
+
+/** A check's line; opened, its report (an older check's fetched then: the page carries only each environment's newest). */
+function OneCheck({ release, check, open }: { release: string; check: Schemas["CheckInfo"]; open: boolean }) {
+  const [shown, setShown] = useState(open);
+  const missing = check.report == null;
+  const query = useQuery({ ...releaseCheck(release, check.id), enabled: shown && missing });
+  return (
+    <details open={open} onToggle={(e) => setShown(e.currentTarget.open)}>
+      <summary className="cursor-pointer">
+        <CheckVerdict check={check} />
+      </summary>
+      <div className="mt-2 ml-5">
+        {missing ? (
+          <Loaded query={query}>{(full) => <GateReport check={full} verdict={false} />}</Loaded>
+        ) : (
+          <GateReport check={check} verdict={false} />
+        )}
+      </div>
+    </details>
   );
 }
 

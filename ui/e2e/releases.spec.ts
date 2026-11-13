@@ -94,7 +94,10 @@ test("staging is rolled back to the release that ran before", async ({ page }) =
   const ran = page.getByRole("table", { name: "What ran in staging" });
   await expect(ran.locator("tbody tr").first()).toContainText(r2);
   await expect(ran.locator("tbody tr").first()).toContainText("Running");
-  await ran.getByRole("row", { name: new RegExp(r1) }).getByRole("button", { name: "Roll back to it…" }).click();
+  await ran
+    .getByRole("row", { name: new RegExp(r1) })
+    .getByRole("button", { name: "Roll back to it…" })
+    .click();
   const dialog = page.getByRole("dialog", { name: `Roll staging back to release ${r1}` });
   await expect(dialog.getByRole("button", { name: "Check first" })).toHaveCount(0);
   await dialog.getByLabel(/Reason/).fill("TWO broke the archive");

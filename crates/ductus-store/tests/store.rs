@@ -4288,7 +4288,11 @@ async fn releases_are_stored_once_by_folder_and_read_back_whole() {
     assert!(!row.checks[0].ok && row.checks[0].report.is_null(), "lists leave reports out");
     let (one, manifest) = store.release(&second).await.unwrap().unwrap();
     assert_eq!(one.checks.len(), 2);
-    assert_eq!(one.checks[1].report["ok"], true, "every check, newest first, with its report");
+    assert!(one.checks[0].report.is_object(), "the newest of an environment with its report");
+    assert!(one.checks[1].report.is_null(), "older ones without (0.7.4.5: hundreds of KB each at scale)");
+    let older = store.release_check(&second, one.checks[1].id).await.unwrap().unwrap();
+    assert_eq!((older.ok, &older.report["ok"]), (true, &serde_json::json!(true)), "read one by one");
+    assert!(store.release_check(&first, one.checks[1].id).await.unwrap().is_none(), "another release's");
     assert_eq!(manifest["made"]["reason"], "second");
     assert_eq!(store.release_summary(&first).await.unwrap().unwrap().checks.len(), 0);
 

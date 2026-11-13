@@ -536,8 +536,13 @@ impl Store {
             .await
             .context("reading the release's manifest")?;
         let manifest = serde_json::from_str(&manifest).context("reading the release's manifest")?;
+        // Reports only for each environment's newest check: at a thousand interfaces one is hundreds
+        // of KB (validate's output), and a release deployed a dozen times has a dozen (`release_check`
+        // reads any one of them).
         let checks: Vec<Check> = sqlx::query_as(
-            "SELECT id, release_id, at, environment, instance, host, by_name, ok, problems, seconds, report::text
+            "SELECT id, release_id, at, environment, instance, host, by_name, ok, problems, seconds,
+                    CASE WHEN row_number() OVER (PARTITION BY environment ORDER BY at DESC, id DESC) = 1
+                         THEN report::text END
              FROM release_checks WHERE release_id = $1 ORDER BY at DESC, id DESC",
         )
         .bind(&release.id)
@@ -546,6 +551,20 @@ impl Store {
         .context("reading the release's checks")?;
         release.checks = checks.into_iter().map(|c| check_row(c).1).collect();
         Ok(Some((release, manifest)))
+    }
+
+    /// One check of release `id`, with its report; None when it has no such check.
+    pub async fn release_check(&self, id: &[u8], check: i32) -> Result<Option<CheckRow>> {
+        let row: Option<Check> = sqlx::query_as(
+            "SELECT id, release_id, at, environment, instance, host, by_name, ok, problems, seconds, report::text
+             FROM release_checks WHERE release_id = $1 AND id = $2",
+        )
+        .bind(id)
+        .bind(check)
+        .fetch_optional(&self.pool)
+        .await
+        .context("reading the release's check")?;
+        Ok(row.map(|c| check_row(c).1))
     }
 
     /// A stored release's manifest, ancestry and files, to write it as an archive again.
