@@ -716,6 +716,29 @@ impl Store {
         row.map(|(m, a)| Ok((serde_json::from_str(&m).context("reading the release's manifest")?, a))).transpose()
     }
 
+    /// A few of a stored release's text files by path (relative to the project), without reading
+    /// the rest: what the Releases page compares to say how a deploy would apply. Paths it doesn't
+    /// hold, or holds as binary files, are absent from the answer.
+    pub async fn release_texts(&self, id: &[u8], paths: &[String]) -> Result<BTreeMap<String, String>> {
+        if paths.is_empty() {
+            return Ok(BTreeMap::new());
+        }
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT e->>'path', c.content
+             FROM releases r
+             JOIN release_folders f ON f.hash = ANY(r.folders)
+             CROSS JOIN LATERAL jsonb_array_elements(f.files) e
+             JOIN code_files c ON c.hash = decode(e->>'hash', 'hex')
+             WHERE r.id = $1 AND e->>'path' = ANY($2) AND NOT coalesce((e->>'binary')::boolean, false)",
+        )
+        .bind(id)
+        .bind(paths)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading files of the release")?;
+        Ok(rows.into_iter().collect())
+    }
+
     /// The project version `project` runs now in `environment` (release mode records one), with the
     /// deployment it came with: the first deployment of that version since the last that ran
     /// another (who brought it, not who restarted it since).

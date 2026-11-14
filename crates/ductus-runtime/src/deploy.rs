@@ -369,18 +369,47 @@ fn interface_yaml(i: &release::Interface) -> Option<&str> {
 /// versions differ (an unchanged interface costs nothing). Read beside nothing: the deploy waits
 /// for it (milliseconds for a handful of changes).
 pub fn plan_over(dir: &Path, running: &Running, next: &Manifest, folder: &Path) -> Result<crate::changes::Plan> {
+    let read = |root: PathBuf| {
+        move |path: &str| {
+            let path = root.join(path);
+            std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
+        }
+    };
+    plan_between(&running.manifest, read(dir.join(running.hex())), next, read(folder.to_path_buf()))
+}
+
+/// The interface.yaml files of `from` that working out the plan against `other` reads: those of
+/// the interfaces whose versions differ, or that `other` doesn't have (paths in the release).
+pub fn plan_reads(from: &Manifest, other: &Manifest) -> Vec<String> {
+    from.interfaces
+        .iter()
+        .filter(|(name, i)| other.interfaces.get(*name).is_none_or(|o| o.version != i.version))
+        .filter_map(|(_, i)| interface_yaml(i).map(str::to_string))
+        .collect()
+}
+
+/// `plan_over` with each side's files read by `before` and `after` (a path in the release: only
+/// those `plan_reads` names are asked for).
+pub fn plan_between(
+    running: &Manifest,
+    before: impl Fn(&str) -> Result<String>,
+    next: &Manifest,
+    after: impl Fn(&str) -> Result<String>,
+) -> Result<crate::changes::Plan> {
     /// `from`'s interfaces by name: version, and interface.yaml's text where `other`'s version
     /// differs (empty elsewhere: never compared).
-    fn texts<'a>(from: &'a Manifest, root: &Path, other: &Manifest) -> Result<BTreeMap<&'a str, (&'a str, String)>> {
+    fn texts<'a>(
+        from: &'a Manifest,
+        read: impl Fn(&str) -> Result<String>,
+        other: &Manifest,
+    ) -> Result<BTreeMap<&'a str, (&'a str, String)>> {
         let mut side = BTreeMap::new();
         for (name, i) in &from.interfaces {
             let text = match other.interfaces.get(name).is_none_or(|o| o.version != i.version) {
-                true => {
-                    let path = interface_yaml(i)
-                        .with_context(|| format!("release {}: `{name}` has no interface.yaml", from.id))?;
-                    let path = root.join(path);
-                    std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?
-                }
+                true => read(
+                    interface_yaml(i)
+                        .with_context(|| format!("release {}: `{name}` has no interface.yaml", from.id))?,
+                )?,
                 false => String::new(),
             };
             side.insert(name.as_str(), (i.version.as_str(), text));
@@ -390,9 +419,9 @@ pub fn plan_over(dir: &Path, running: &Running, next: &Manifest, folder: &Path) 
     fn side<'a>(s: &'a BTreeMap<&'a str, (&'a str, String)>) -> crate::changes::Side<'a> {
         s.iter().map(|(n, (v, t))| (*n, (*v, t.as_str()))).collect()
     }
-    let before = texts(&running.manifest, &dir.join(running.hex()), next)?;
-    let after = texts(next, folder, &running.manifest)?;
-    let project_changed = running.manifest.project_version.version != next.project_version.version;
+    let before = texts(running, before, next)?;
+    let after = texts(next, after, running)?;
+    let project_changed = running.project_version.version != next.project_version.version;
     crate::changes::plan(&side(&before), &side(&after), project_changed)
 }
 

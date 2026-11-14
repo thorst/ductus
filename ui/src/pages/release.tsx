@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, Td, Th } from "@/components/ui/table";
 import { bytes, count, timestamp } from "@/lib/format";
-import { changesSummary } from "@/lib/releases";
+import { applyOf, applySummary, changesSummary } from "@/lib/releases";
 
 /**
  * One release: what it is, what deploying it here would change, where it went, every check of
@@ -137,6 +137,8 @@ function Release({ release: r }: { release: Schemas["ReleaseDetail"] }) {
 const CHANGE: Record<string, string> = { changed: "changes", new: "new here", removed: "removed" };
 
 function Here({ here }: { here: Schemas["Here"] }) {
+  const applies = applySummary(here);
+  const planned = here.plan != null && here.plan.changes.length > 0;
   return (
     <Card className="mb-6">
       <CardHeader>
@@ -144,6 +146,14 @@ function Here({ here }: { here: Schemas["Here"] }) {
       </CardHeader>
       <CardBody>
         <p className="text-sm">{changesSummary(here)}</p>
+        {applies && (
+          <p
+            className={`mt-1 text-sm ${here.plan?.handover_because.length ? "text-warn" : "text-ok"}`}
+            data-testid="applies"
+          >
+            {applies}
+          </p>
+        )}
         {here.ran_before && !here.running && (
           <p className="mt-1 text-sm text-muted">It ran here before: a rollback can go back to it.</p>
         )}
@@ -155,26 +165,34 @@ function Here({ here }: { here: Schemas["Here"] }) {
               <Th>Interface</Th>
               <Th>Change</Th>
               <Th>Code version</Th>
+              {planned && <Th>Applies</Th>}
             </tr>
           </thead>
           <tbody>
-            {here.changes.map((c) => (
-              <tr key={c.interface}>
-                <Td className="font-medium">
-                  {c.change === "new" ? (
-                    c.interface
-                  ) : (
-                    <Link to="/interfaces/$name" params={{ name: c.interface }}>
-                      {c.interface}
-                    </Link>
-                  )}
-                </Td>
-                <Td>{CHANGE[c.change] ?? c.change}</Td>
-                <Td className="font-mono text-xs">
-                  {c.from ?? "–"} → {c.to ?? "–"}
-                </Td>
-              </tr>
-            ))}
+            {here.changes.map((c) => {
+              const how = applyOf(here, c.interface);
+              return (
+                <tr key={c.interface}>
+                  <Td className="font-medium">
+                    {c.change === "new" ? (
+                      c.interface
+                    ) : (
+                      <Link to="/interfaces/$name" params={{ name: c.interface }}>
+                        {c.interface}
+                      </Link>
+                    )}
+                  </Td>
+                  <Td>
+                    {CHANGE[c.change] ?? c.change}
+                    {how && c.change === "changed" && <span className="text-muted">: {how.what}</span>}
+                  </Td>
+                  <Td className="font-mono text-xs">
+                    {c.from ?? "–"} → {c.to ?? "–"}
+                  </Td>
+                  {planned && <Td className={how && !how.inPlace ? "text-warn" : undefined}>{how?.how ?? "–"}</Td>}
+                </tr>
+              );
+            })}
           </tbody>
         </Table>
       )}

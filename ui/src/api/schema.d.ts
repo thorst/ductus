@@ -171,14 +171,18 @@ export interface paths {
         put?: never;
         /**
          * Deploy a stored release to this engine (release mode): this environment's rules, the "replaces"
-         *     check, the gate (or a recent passing check reused), then the handover to an engine running it;
-         *     or roll back (`rollback`) to a release that ran here before. Answers when the new engine sends,
-         *     or when it couldn't (this one goes on): seconds, plus the gate's time when it runs. 200:
-         *     deployed. 409: refused before anything ran (folder mode, another deploy or check running, the
-         *     release already runs, this environment's rules, its "replaces" check names someone's work, a
-         *     rollback to a release that never ran here), the report says why. 422: the gate found problems.
-         *     500: the new engine couldn't take over (this one goes on). Needs the `deploy` permission. One
-         *     deploy or check at a time per engine.
+         *     check, what it changes here (`plan`), the gate (or a recent passing check reused), then **in
+         *     place** when only interfaces' code, destinations and destination settings change (those
+         *     interfaces' workers restart between two messages on the new code; the others never pause), else
+         *     the handover to an engine running it (`plan.handover_because` says why); or roll back
+         *     (`rollback`) to a release that ran here before, the same way. Answers once it runs (in place:
+         *     milliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as
+         *     it was), plus the gate's time when it runs. 200: deployed (`applied` says how). 409: refused
+         *     before anything ran (folder mode, another deploy or check running, the release already runs,
+         *     this environment's rules, its "replaces" check names someone's work, a rollback to a release
+         *     that never ran here, `in_place_only` and it needs the handover), the report says why. 422: the
+         *     gate found problems. 500: it couldn't be applied (this engine goes on as it was). Needs the
+         *     `deploy` permission. One deploy or check at a time per engine.
          */
         post: operations["deploy_release"];
         delete?: never;
@@ -1651,6 +1655,12 @@ export interface components {
         /** @description What a deploy did, or why it didn't. */
         DeployReport: {
             /**
+             * @description How it was applied: `in_place` (only the changed interfaces restarted their workers,
+             *     between two messages; the others never paused) or `handover` (a new engine took over:
+             *     every interface's sending paused for a moment); absent when refused.
+             */
+            applied?: string | null;
+            /**
              * @description The branches it was made on, as its files said (the same files made on two branches are
              *     one release); empty: a detached HEAD without `--branch`, or made without git.
              */
@@ -1658,7 +1668,7 @@ export interface components {
             changes: components["schemas"]["DeployChange"][];
             /**
              * Format: int32
-             * @description The deployment the new engine recorded and what it changed (absent if it wasn't recorded
+             * @description The deployment recorded and what it changed (absent if the new engine's wasn't recorded
              *     within seconds: `GET /engine` shows it then).
              */
             deployment?: number | null;
@@ -1671,6 +1681,7 @@ export interface components {
             /** @description What happened, in a sentence. */
             outcome: string;
             place?: components["schemas"]["PlaceInfo"] | null;
+            plan?: components["schemas"]["PlanInfo"] | null;
             project: string;
             /** @description The release, in hex, and its first 12 characters. */
             release: string;
@@ -1690,7 +1701,7 @@ export interface components {
              */
             rules: string[];
             short: string;
-            /** @description What the handover said as it went. */
+            /** @description What applying it said as it went: each interface applied in place, or the handover's steps. */
             steps: string[];
         };
         DeployRequest: {
@@ -1706,6 +1717,12 @@ export interface components {
              *     `DUCTUS_DEPLOY_BRANCHES`).
              */
             force?: boolean;
+            /**
+             * @description Only in place: refuse (409, before the gate runs) when the release changes something only
+             *     the handover applies (`plan.handover_because` says what), and (500) when applying in place
+             *     fails, instead of taking the handover. For sites that schedule handovers.
+             */
+            in_place_only?: boolean;
             /**
              * @description Why: required, except in an environment named `dev`. Recorded with the deployment, in its
              *     history and in the audit log.
@@ -1735,7 +1752,7 @@ export interface components {
             /** Format: date-time */
             at: string;
             /**
-             * @description The account that started it, the person who asked for the handover, or
+             * @description The account that started it, the person who asked for the handover or deploy, or
              *     `systemd (systemctl reload)`.
              */
             by: string;
@@ -1743,7 +1760,11 @@ export interface components {
             changed: number;
             /** @description The project's git commit (HEAD); none without a git repository. */
             git_commit?: string | null;
-            /** @description `start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`. */
+            /**
+             * @description `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`,
+             *     or `deploy` (a deploy applied in place: the engine kept running, only the changed
+             *     interfaces took their new code).
+             */
             how: string;
             /**
              * Format: int32
@@ -2172,6 +2193,7 @@ export interface components {
             /** @description Each interface it changes, adds or removes here, by name. */
             changes: components["schemas"]["HereChange"][];
             environment: string;
+            plan?: components["schemas"]["PlanInfo"] | null;
             /**
              * @description The files outside every interface (`ductus.yaml`, `resources.yaml`, `environments/`,
              *     `secrets/`) differ from the running release's. None when this engine doesn't run a release
@@ -2224,7 +2246,7 @@ export interface components {
             /** @description The project's commit then (hex); none without git. */
             git_commit?: string | null;
             host: string;
-            /** @description `start`, `service` or `handover`. */
+            /** @description `start`, `service`, `handover` or `deploy` (a deploy applied in place, without a handover). */
             how: string;
             /** Format: int32 */
             id: number;
@@ -2820,6 +2842,28 @@ export interface components {
             here?: boolean;
             /** @description The engine's server. */
             host: string;
+        };
+        /** @description What a release changes here, by kind (`changes::plan`). */
+        PlanInfo: {
+            /** @description Every interface whose code version changes, is added or is removed. */
+            changes: components["schemas"]["PlannedChange"][];
+            /**
+             * @description Why it needs the handover, a line per reason (the project's own files, then each
+             *     interface); empty: it applies in place.
+             */
+            handover_because: string[];
+        };
+        PlannedChange: {
+            /** @description Why only the handover applies it; absent when it goes in place. */
+            handover_because?: string | null;
+            /** @description It can be applied in place (its workers restarted between messages). */
+            in_place: boolean;
+            interface: string;
+            /**
+             * @description What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`,
+             *     `source`, `added`, `removed`, ...
+             */
+            what: string[];
         };
         PortsReport: {
             /** @description What it connects to (destinations and resources.yaml), by host: what a firewall request lists. */
@@ -3774,7 +3818,7 @@ export interface operations {
             };
         };
         responses: {
-            /** @description Deployed: the release runs here */
+            /** @description Deployed: the release runs here (`applied`: in place or by the handover) */
             200: {
                 headers: {
                     [name: string]: unknown;
@@ -3818,7 +3862,7 @@ export interface operations {
                     "application/json": components["schemas"]["DeployReport"];
                 };
             };
-            /** @description The new engine couldn't take over: this one goes on */
+            /** @description It couldn't be applied: this engine goes on as it was */
             500: {
                 headers: {
                     [name: string]: unknown;

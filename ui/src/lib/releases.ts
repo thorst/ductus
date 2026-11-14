@@ -73,6 +73,33 @@ export function changesSummary(here: Schemas["Here"]): string {
   return `${parts.join(", ")}; ${count(here.unchanged)} as they run now.${files}`;
 }
 
+/**
+ * How deploying it here would apply (0.7.5.1): in place, or by the handover and why. Null when the
+ * engine didn't say (nothing to compare with, it runs this one) or nothing would change.
+ */
+export function applySummary(here: Schemas["Here"]): string | null {
+  const plan = here.plan;
+  if (!plan || here.running) return null;
+  if (plan.handover_because.length > 0) {
+    return `It needs the handover (a new engine takes over; every interface's sending pauses a moment): ${plan.handover_because.join("; ")}.`;
+  }
+  if (plan.changes.length === 0) return null;
+  return plan.changes.length === 1
+    ? "It applies in place: the interface it changes takes its new code between two messages; the others never pause."
+    : "It applies in place: the interfaces it changes take their new code between two messages; the others never pause.";
+}
+
+/** One interface's line of the plan: what changes, and "in place" or "the handover: why". */
+export function applyOf(here: Schemas["Here"], name: string): { what: string; how: string; inPlace: boolean } | null {
+  const c = here.plan?.changes.find((p) => p.interface === name);
+  if (!c) return null;
+  return {
+    what: c.what.join(", "),
+    how: c.in_place ? "in place" : `the handover: ${c.handover_because ?? "it needs one"}`,
+    inPlace: c.in_place,
+  };
+}
+
 /** This environment's rules, as sentences (none: a deploy is held only to the gate and the "replaces" check). */
 export function rulesText(mode: Schemas["ReleaseMode"], environment: string): string[] {
   const rules: string[] = [];

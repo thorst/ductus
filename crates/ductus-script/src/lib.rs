@@ -538,13 +538,40 @@ __setFixtures({fixtures_json}, {formats_json});
 
     /// Run a module's top-level code (and anything it awaits) within `timeout`. Nothing
     /// else runs on the thread while interfaces load, so the budget is simply wall time.
+    ///
+    /// The event loop is driven only until this module has evaluated, not until it's idle: on a
+    /// running thread (a deploy in place) other interfaces' calls may be in flight, and waiting
+    /// for them would hold every interface on the thread for as long as the slowest call (and
+    /// count it against this load's `timeout`). Their continuations that come due meanwhile run
+    /// here; the rest go on once the thread's driver polls again.
     async fn evaluate(&mut self, id: ModuleId, timeout: Duration) -> Result<()> {
         self.guard.arm(timeout, false);
-        let evaluated = self.runtime.mod_evaluate(id);
-        let result = match self.runtime.run_event_loop(Default::default()).await {
-            Ok(()) => evaluated.await.map_err(|e| anyhow!("{e}")),
-            Err(e) => Err(anyhow!("{e}")),
-        };
+        let mut evaluated = std::pin::pin!(self.runtime.mod_evaluate(id));
+        let runtime = &mut self.runtime;
+        // The module's result can come a tick after the loop says it's idle: poll again then,
+        // and only after many idle ticks in a row conclude that nothing will settle it.
+        let mut idle = 0;
+        let result = std::future::poll_fn(|cx| {
+            if let Poll::Ready(done) = evaluated.as_mut().poll(cx) {
+                return Poll::Ready(done.map_err(|e| anyhow!("{e}")));
+            }
+            match runtime.poll_event_loop(cx, PollEventLoopOptions::default()) {
+                Poll::Pending => {
+                    idle = 0;
+                    Poll::Pending
+                }
+                Poll::Ready(Err(e)) => Poll::Ready(Err(anyhow!("{e}"))),
+                Poll::Ready(Ok(())) if idle < 1_000 => {
+                    idle += 1;
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                Poll::Ready(Ok(())) => Poll::Ready(Err(anyhow!(
+                    "its top-level code never finished: it awaits something nothing will settle"
+                ))),
+            }
+        })
+        .await;
         match self.guard.disarm(self.runtime.v8_isolate()) {
             Some(trip) => Err(LoadRanAway(Runaway { interface: None, cause: trip.cause }).into()),
             None => result,

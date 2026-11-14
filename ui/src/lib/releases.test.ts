@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Schemas } from "@/api/client";
-import { changesSummary, gateSections, reuseCaveat, rulesText, sectionTitle } from "./releases";
+import { applyOf, applySummary, changesSummary, gateSections, reuseCaveat, rulesText, sectionTitle } from "./releases";
 
 const here: Schemas["Here"] = {
   environment: "prod",
@@ -9,6 +9,7 @@ const here: Schemas["Here"] = {
   changes: [],
   unchanged: 997,
   project_files_change: false,
+  plan: null,
 };
 
 const change = (interfaceName: string, kind: string): Schemas["HereChange"] => ({
@@ -49,6 +50,45 @@ describe("changesSummary", () => {
       "The project's own files (ductus.yaml, resources.yaml, environments, secrets) change too.",
     );
     expect(changesSummary({ ...here, running: true })).toBe("It runs here now: deploying it changes nothing.");
+  });
+});
+
+describe("applySummary and applyOf", () => {
+  const planned = (name: string, what: string[], why?: string): Schemas["PlannedChange"] => ({
+    interface: name,
+    what,
+    in_place: why === undefined,
+    ...(why === undefined ? {} : { handover_because: why }),
+  });
+
+  it("says a deploy goes in place, and each interface's line", () => {
+    const plan = { changes: [planned("adt", ["code", "destination pacs added"])], handover_because: [] };
+    const h = { ...here, changes: [change("adt", "changed")], plan };
+    expect(applySummary(h)).toBe(
+      "It applies in place: the interface it changes takes its new code between two messages; the others never pause.",
+    );
+    expect(applyOf(h, "adt")).toEqual({ what: "code, destination pacs added", how: "in place", inPlace: true });
+    expect(applyOf(h, "lab")).toBeNull();
+  });
+
+  it("says what needs the handover, and why", () => {
+    const why = "`source` changed (its listener is opened at a start)";
+    const plan = {
+      changes: [planned("adt", ["code"]), planned("lab", ["source"], why)],
+      handover_because: [`lab: ${why}`],
+    };
+    const h = { ...here, plan };
+    expect(applySummary(h)).toBe(
+      `It needs the handover (a new engine takes over; every interface's sending pauses a moment): lab: ${why}.`,
+    );
+    expect(applyOf(h, "lab")).toEqual({ what: "source", how: `the handover: ${why}`, inPlace: false });
+  });
+
+  it("says nothing when the engine didn't, it runs it, or nothing changes", () => {
+    expect(applySummary(here)).toBeNull();
+    expect(applySummary({ ...here, plan: { changes: [], handover_because: [] } })).toBeNull();
+    const plan = { changes: [planned("adt", ["code"])], handover_because: [] };
+    expect(applySummary({ ...here, running: true, plan })).toBeNull();
   });
 });
 

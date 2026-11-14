@@ -521,7 +521,7 @@
         "tags": [
           "releases"
         ],
-        "summary": "Deploy a stored release to this engine (release mode): this environment's rules, the \"replaces\"\ncheck, the gate (or a recent passing check reused), then the handover to an engine running it;\nor roll back (`rollback`) to a release that ran here before. Answers when the new engine sends,\nor when it couldn't (this one goes on): seconds, plus the gate's time when it runs. 200:\ndeployed. 409: refused before anything ran (folder mode, another deploy or check running, the\nrelease already runs, this environment's rules, its \"replaces\" check names someone's work, a\nrollback to a release that never ran here), the report says why. 422: the gate found problems.\n500: the new engine couldn't take over (this one goes on). Needs the `deploy` permission. One\ndeploy or check at a time per engine.",
+        "summary": "Deploy a stored release to this engine (release mode): this environment's rules, the \"replaces\"\ncheck, what it changes here (`plan`), the gate (or a recent passing check reused), then **in\nplace** when only interfaces' code, destinations and destination settings change (those\ninterfaces' workers restart between two messages on the new code; the others never pause), else\nthe handover to an engine running it (`plan.handover_because` says why); or roll back\n(`rollback`) to a release that ran here before, the same way. Answers once it runs (in place:\nmilliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as\nit was), plus the gate's time when it runs. 200: deployed (`applied` says how). 409: refused\nbefore anything ran (folder mode, another deploy or check running, the release already runs,\nthis environment's rules, its \"replaces\" check names someone's work, a rollback to a release\nthat never ran here, `in_place_only` and it needs the handover), the report says why. 422: the\ngate found problems. 500: it couldn't be applied (this engine goes on as it was). Needs the\n`deploy` permission. One deploy or check at a time per engine.",
         "operationId": "deploy_release",
         "requestBody": {
           "content": {
@@ -535,7 +535,7 @@
         },
         "responses": {
           "200": {
-            "description": "Deployed: the release runs here",
+            "description": "Deployed: the release runs here (`applied`: in place or by the handover)",
             "content": {
               "application/json": {
                 "schema": {
@@ -584,7 +584,7 @@
             }
           },
           "500": {
-            "description": "The new engine couldn't take over: this one goes on",
+            "description": "It couldn't be applied: this engine goes on as it was",
             "content": {
               "application/json": {
                 "schema": {
@@ -4632,6 +4632,13 @@
           "changes"
         ],
         "properties": {
+          "applied": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "How it was applied: `in_place` (only the changed interfaces restarted their workers,\nbetween two messages; the others never paused) or `handover` (a new engine took over:\nevery interface's sending paused for a moment); absent when refused."
+          },
           "branches": {
             "type": "array",
             "items": {
@@ -4651,7 +4658,7 @@
               "null"
             ],
             "format": "int32",
-            "description": "The deployment the new engine recorded and what it changed (absent if it wasn't recorded\nwithin seconds: `GET /engine` shows it then)."
+            "description": "The deployment recorded and what it changed (absent if the new engine's wasn't recorded\nwithin seconds: `GET /engine` shows it then)."
           },
           "environment": {
             "type": "string"
@@ -4684,6 +4691,17 @@
               {
                 "$ref": "#/components/schemas/PlaceInfo",
                 "description": "The record of this deployment, as a release file carries it (`ductus deploy` writes it into\nthe file it deployed; `GET /releases/{id}/file` includes it): what an environment that\nrequires this one first reads."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "plan": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PlanInfo",
+                "description": "What it changes here, by kind, and whether that applies in place; absent when refused\nbefore it was worked out, or on the first deploy here (nothing to compare: the handover)."
               },
               {
                 "type": "null"
@@ -4726,7 +4744,7 @@
             "items": {
               "type": "string"
             },
-            "description": "What the handover said as it went."
+            "description": "What applying it said as it went: each interface applied in place, or the handover's steps."
           }
         }
       },
@@ -4740,6 +4758,10 @@
           "force": {
             "type": "boolean",
             "description": "Deploy over someone else's work the \"replaces\" check names: their change is undone. The\ninterfaces and whose work go into the audit log (`release.force`) and the deployment's\nhistory. Doesn't skip this environment's rules (`DUCTUS_DEPLOY_REQUIRES`,\n`DUCTUS_DEPLOY_BRANCHES`)."
+          },
+          "in_place_only": {
+            "type": "boolean",
+            "description": "Only in place: refuse (409, before the gate runs) when the release changes something only\nthe handover applies (`plan.handover_because` says what), and (500) when applying in place\nfails, instead of taking the handover. For sites that schedule handovers."
           },
           "reason": {
             "type": [
@@ -4800,7 +4822,7 @@
           },
           "by": {
             "type": "string",
-            "description": "The account that started it, the person who asked for the handover, or\n`systemd (systemctl reload)`."
+            "description": "The account that started it, the person who asked for the handover or deploy, or\n`systemd (systemctl reload)`."
           },
           "changed": {
             "type": "integer",
@@ -4816,7 +4838,7 @@
           },
           "how": {
             "type": "string",
-            "description": "`start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`."
+            "description": "`start` (someone ran it), `service` (systemd or the Windows service started it), `handover`,\nor `deploy` (a deploy applied in place: the engine kept running, only the changed\ninterfaces took their new code)."
           },
           "id": {
             "type": "integer",
@@ -5882,6 +5904,17 @@
           "environment": {
             "type": "string"
           },
+          "plan": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PlanInfo",
+                "description": "How deploying it here would apply, by kind (as a deploy's `plan` says): each changed\ninterface in place or needing the handover, and why. Absent when this engine doesn't run a\nrelease, when it runs this one, or when it couldn't be worked out (the engine's log says\nwhy). One case is known only when the deploy applies: an interface whose lanes are still\nchanging from an earlier `ordering` change takes a destination change by the handover."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "project_files_change": {
             "type": [
               "boolean",
@@ -6041,7 +6074,7 @@
           },
           "how": {
             "type": "string",
-            "description": "`start`, `service` or `handover`."
+            "description": "`start`, `service`, `handover` or `deploy` (a deploy applied in place, without a handover)."
           },
           "id": {
             "type": "integer",
@@ -7655,6 +7688,61 @@
           "host": {
             "type": "string",
             "description": "The engine's server."
+          }
+        }
+      },
+      "PlanInfo": {
+        "type": "object",
+        "description": "What a release changes here, by kind (`changes::plan`).",
+        "required": [
+          "changes",
+          "handover_because"
+        ],
+        "properties": {
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlannedChange"
+            },
+            "description": "Every interface whose code version changes, is added or is removed."
+          },
+          "handover_because": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Why it needs the handover, a line per reason (the project's own files, then each\ninterface); empty: it applies in place."
+          }
+        }
+      },
+      "PlannedChange": {
+        "type": "object",
+        "required": [
+          "interface",
+          "what",
+          "in_place"
+        ],
+        "properties": {
+          "handover_because": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why only the handover applies it; absent when it goes in place."
+          },
+          "in_place": {
+            "type": "boolean",
+            "description": "It can be applied in place (its workers restarted between messages)."
+          },
+          "interface": {
+            "type": "string"
+          },
+          "what": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`,\n`source`, `added`, `removed`, ..."
           }
         }
       },

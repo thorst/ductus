@@ -4231,7 +4231,7 @@ async fn history_tells_who_changed_what_and_why() {
     new = running().await;
     wait_deployed(3).await;
 
-    let history =|args: &[&str], database: bool| {
+    let history = |args: &[&str], database: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ductus"));
         command.arg("history").arg(&name).args(args).arg("--root").arg(&root);
         command.env_remove("DUCTUS_PROJECT").env_remove("DUCTUS_ENV").env_remove("DUCTUS_DATABASE_URL");
@@ -5874,6 +5874,17 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
     let change = &page["here"]["changes"][0];
     assert_eq!((change["interface"].as_str(), change["change"].as_str()), (Some(name.as_str()), Some("changed")));
     assert_eq!(page["here"]["project_files_change"], false, "{page:#}");
+    // How it would apply, read from the stored releases: only code changes, so in place.
+    let plan = &page["here"]["plan"];
+    assert_eq!(plan["changes"][0]["what"], serde_json::json!(["code"]), "{page:#}");
+    assert_eq!(
+        (plan["changes"][0]["in_place"].as_bool(), plan["handover_because"].as_array().map(Vec::len)),
+        (Some(true), Some(0)),
+        "{page:#}"
+    );
+    // A's page (it runs): nothing to plan.
+    let running = get(format!("{prod_url}/api/v1/releases/{a_id}"), &ann).await;
+    assert!(running["here"]["plan"].is_null(), "{running:#}");
 
     // Again: C was left by a rollback, A runs: nothing earlier. To D (stored, never ran here): refused.
     let (ok, out) = deploy(&ann, &["--rollback", "--to", &prod_url, "-m", "again"]);

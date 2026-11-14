@@ -407,6 +407,7 @@ impl Engine {
     /// true when one is connected to that wasn't before.
     fn certificates_again(&self) -> bool {
         let _one_at_a_time = self.certificates_again.lock().unwrap_or_else(|e| e.into_inner());
+        let started = std::time::Instant::now();
         let interfaces = self.interfaces();
         let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
         let alerts = self.alerts.as_ref().map(|a| &a.settings);
@@ -416,6 +417,7 @@ impl Engine {
         let added =
             new.iter().any(|t| t.side == crate::certificates::Side::Remote && !before.iter().any(|b| b.key == t.key));
         *self.certificates.write().unwrap_or_else(|e| e.into_inner()) = new;
+        tracing::debug!(interfaces = interfaces.len(), took = ?started.elapsed(), "deploy: certificates worked out again");
         added
     }
 

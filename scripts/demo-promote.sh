@@ -8,15 +8,17 @@
 #   3. promoted: `ductus deploy ID --from <test> --to <prod>`: fetched with test's record, deployed;
 #   4. a release made on a feature branch: refused by prod's rules, and `--force` doesn't change it;
 #   5. release 2 (main) to test; prod pulls it from test (DUCTUS_PROMOTE_FROM, a token on test that
-#      can only download: what prod's Releases page does) and deploys it;
+#      can only download: what prod's Releases page does) and deploys it: only its code changed,
+#      so it's applied in place (0.7.5.1), recorded as `how = deploy`;
 #   6. Ops' hotfix on a branch of their own, deployed to test;
 #   7. release 3 (main, without the hotfix) to test: refused, it would undo Ops' work;
 #      `--force -m why`: deployed, recorded (`release.force`); promoted to prod;
 #   8. Ops rolls prod back: to release 2, not held to prod's rules, naming whose work it undoes,
-#      the gate run (`release.rollback`, the deployment marked);
+#      the gate run (`release.rollback`, the deployment marked), applied in place;
 #   9. rolled back again: to release 1 (release 3, which a rollback left, is skipped);
 #  10. release 1's file from prod carries where it went: dev, test, prod;
-#  11. release 4 raises the interface's lanes (2 → 8), promoted; a sender keeps sending (10
+#  11. release 4 raises the interface's lanes (2 → 8), promoted (by the handover, which the answer
+#      names as what lanes need); a sender keeps sending (10
 #      patients) while the receiver is down, and prod is rolled back to release 1 (8 → 2 lanes):
 #      nothing refused, new messages go to new lanes (numbered after the old), the old ones go first;
 #  12. the receiver comes up: every message arrives once, each patient's in order, and the old
@@ -165,6 +167,9 @@ has pull2 "^brought $S2 from test (new) with 1 record(s) of where it went" || fa
 [ "$(q prod "SELECT count(*) FROM audit_log WHERE action = 'release.pull' AND subject = '$S2' AND detail->>'from' = '$TEST'")" = 1 ] || fail+=" pull-audit"
 step promote2 'DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S2"' --to $PROD -m "lab: LAB2, tested"'
 [ "$(code promote2)" = 0 ] || fail+=" promote2"
+# Only its code changed: applied in place (0.7.5.1), no new engine.
+has promote2 "^· $NAME: code (in place)" && has promote2 "^✓ applied in place: 1 interface took its new code" || fail+=" promote2-in-place"
+[ "$(q prod "SELECT how FROM deployments ORDER BY id DESC LIMIT 1")" = deploy ] || fail+=" promote2-recorded"
 # The pull token can't deploy on test, nor bring anything to prod.
 [ "$(curl -s -o /dev/null -w '%{http_code}' -X POST -H "Authorization: Bearer $PULL" -H 'Content-Type: application/json' -d '{}' "$TEST/api/v1/deployments")" = 403 ] || fail+=" pull-token-deploys"
 
@@ -193,7 +198,7 @@ step promote3 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus
 
 echo "== 8. Ops rolls prod back: to release 2, naming whose work it undoes"
 step rollback 'DUCTUS_API_TOKEN=$OPS_PROD ductus deploy --rollback --to $PROD -m "LAB3 broke the lab feed"'
-[ "$(code rollback)" = 0 ] && has rollback "^rollback to release $S2" && has rollback "^✓ handed over" || fail+=" rollback"
+[ "$(code rollback)" = 0 ] && has rollback "^rollback to release $S2" && has rollback "^✓ applied in place" || fail+=" rollback"
 has rollback "· a rollback isn't held to this environment's rules" && has rollback "^⚠ undoes $NAME: .* by ci " || fail+=" rollback-said"
 has rollback "^gate: passed" || fail+=" rollback-gate"
 [ "$(q prod "SELECT count(*) FROM deployments WHERE rollback AND by_name = 'ops'")" = 1 ] || fail+=" rollback-recorded"
@@ -215,6 +220,8 @@ REL4=.ductus/releases/$(basename "$(released r4)") S4=$(short_id r4)
 step test4 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL4"' --to $TEST -m "8 lanes"'
 step promote4 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S4"' --from $TEST --to $PROD -m "8 lanes, tested"'
 [ "$(code test4)" = 0 ] && [ "$(code promote4)" = 0 ] || fail+=" promote4"
+# Its lanes changed: only the handover applies that, and the answer says so.
+has promote4 "^· $NAME: .*(needs the handover: " && has promote4 "^✓ handed over" || fail+=" promote4-handover"
 # 200 messages for 10 patients over 10 s; the rollback 3 s in.
 "$BIN" gen --to "127.0.0.1:${MLLP[prod]}" --count 200 --patients 10 --rate 20 >"$W/gen.log" 2>&1 &
 SENDER=$!

@@ -372,7 +372,9 @@ impl ductus_script::Services for FakeServices {
     ) -> ductus_script::BoxFuture<Vec<serde_json::Value>> {
         let resource = resource.to_string();
         Box::pin(async move {
-            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            // `stuck`: a call that outlasts any test (one in flight while code loads).
+            let wait = if resource == "stuck" { 300_000 } else { 50 };
+            tokio::time::sleep(std::time::Duration::from_millis(wait)).await;
             if resource == "down" {
                 anyhow::bail!("{} connection refused", ductus_script::TRANSIENT);
             }
@@ -427,6 +429,60 @@ fn async_transforms_use_databases_and_variables() {
 
     let err = rt.block_on(host.transform_with(down, ADT)).unwrap_err().to_string();
     assert!(err.contains(ductus_script::TRANSIENT) && err.contains("connection refused"), "{err}");
+}
+
+/// Loading code into a running isolate (a deploy in place) doesn't wait for another interface's
+/// call in flight: before 0.7.5.1's close the load drove the event loop until idle, so every
+/// interface on the thread waited for the slowest call (and it counted against the load's timeout).
+#[test]
+fn code_loads_while_another_interface_s_call_is_in_flight() {
+    let dir = project(&[
+        ("stuck/transform.ts", &LOOKUP.replace("RESOURCE", "stuck")),
+        ("next/transform.ts", &LOOKUP.replace("RESOURCE", "patients")),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host_with(Some(std::rc::Rc::new(FakeServices)));
+    let stuck = rt.block_on(host.add_interface(&dir.path().join("stuck/transform.ts"))).unwrap();
+    let in_flight = match host.begin(stuck, ADT).unwrap() {
+        ductus_script::Call::Pending(p) => p,
+        ductus_script::Call::Done(_) => panic!("the transform awaits its lookup"),
+    };
+    let loaded = rt.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(20),
+            host.add_interface(&dir.path().join("next/transform.ts")),
+        )
+        .await
+    });
+    let next = loaded.expect("the load waited for the other interface's call").unwrap();
+    // The new code runs, the call still in flight.
+    let out = rt.block_on(host.transform_with(next, ADT)).unwrap().unwrap();
+    assert!(out.ends_with("ZLK|SMITH|FACILITY-A\r"), "{out}");
+    drop(in_flight);
+}
+
+/// Hundreds of interfaces load into one isolate, each importing a shared file (a pool thread at a
+/// thousand interfaces): the 0.7.5.1 load that stopped driving the event loop once idle failed
+/// from about the 129th, its module's result coming a tick after the loop said it was idle.
+#[test]
+fn hundreds_of_interfaces_load_into_one_isolate() {
+    let shared = "export const code = (c: string): string => c.toUpperCase();\n";
+    let transform = "import type { Message } from \"@ductus/sdk\";\nimport { code } from \"../../lib/codes.ts\";\nexport function transform(msg: Message) {\n  msg.PID[5][1] = code(msg.PID[5][1]) + \"N\";\n  return msg;\n}\n";
+    let files: Vec<(String, String)> = std::iter::once(("lib/codes.ts".to_string(), shared.to_string()))
+        .chain((0..300).map(|i| (format!("interfaces/i{i}/transform.ts"), transform.replace("\"N\"", &format!("\"{i}\"")))))
+        .collect();
+    let dir = project(&files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect::<Vec<_>>());
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let mut last = None;
+    for i in 0..300 {
+        let path = dir.path().join(format!("interfaces/i{i}/transform.ts"));
+        last = Some(rt.block_on(host.add_interface(&path)).unwrap_or_else(|e| panic!("interface {i}: {e:#}")));
+    }
+    let out = rt.block_on(host.transform_with(last.unwrap(), ADT)).unwrap().unwrap();
+    assert!(out.contains("299"), "{out}");
 }
 
 #[test]

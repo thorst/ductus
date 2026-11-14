@@ -141,6 +141,12 @@ pub struct Here {
     /// `secrets/`) differ from the running release's. None when this engine doesn't run a release
     /// (folder mode, or nothing deployed yet).
     pub project_files_change: Option<bool>,
+    /// How deploying it here would apply, by kind (as a deploy's `plan` says): each changed
+    /// interface in place or needing the handover, and why. Absent when this engine doesn't run a
+    /// release, when it runs this one, or when it couldn't be worked out (the engine's log says
+    /// why). One case is known only when the deploy applies: an interface whose lanes are still
+    /// changing from an earlier `ordering` change takes a destination change by the handover.
+    pub plan: Option<super::deployments::PlanInfo>,
 }
 
 #[derive(Serialize, ToSchema, Debug, PartialEq)]
@@ -433,6 +439,10 @@ async fn here(engine: &Shared, id: &[u8], manifest: &serde_json::Value) -> Resul
         }
         None => false,
     };
+    let plan = match &current {
+        Some(r) if r.id != id => plan_here(engine, r, id, manifest).await,
+        _ => None,
+    };
     Ok(Some(Here {
         environment: engine.environment.clone(),
         running: current.is_some_and(|r| r.id == id),
@@ -440,7 +450,36 @@ async fn here(engine: &Shared, id: &[u8], manifest: &serde_json::Value) -> Resul
         changes,
         unchanged,
         project_files_change,
+        plan,
     }))
+}
+
+/// How deploying release `id` (its stored manifest) over `running` would apply: the few
+/// interface.yaml files that differ, read from the database (neither release is unpacked). None
+/// when it can't be worked out (logged: the page shows the rest).
+async fn plan_here(
+    engine: &Shared,
+    running: &crate::deploy::Running,
+    id: &[u8],
+    manifest: &serde_json::Value,
+) -> Option<super::deployments::PlanInfo> {
+    let worked_out = async {
+        let next: Manifest = serde_json::from_value(manifest.clone()).map_err(anyhow::Error::from)?;
+        let before =
+            engine.store.release_texts(&running.id, &crate::deploy::plan_reads(&running.manifest, &next)).await?;
+        let after = engine.store.release_texts(id, &crate::deploy::plan_reads(&next, &running.manifest)).await?;
+        let read = |texts: &BTreeMap<String, String>, path: &str| {
+            texts.get(path).cloned().ok_or_else(|| anyhow::anyhow!("`{path}` isn't stored with the release"))
+        };
+        crate::deploy::plan_between(&running.manifest, |p| read(&before, p), &next, |p| read(&after, p))
+    };
+    match worked_out.await {
+        Ok(plan) => Some(super::deployments::PlanInfo::of(&plan)),
+        Err(e) => {
+            tracing::warn!(release = release::short(&crate::code::hex(id)), error = %format!("{e:#}"), "couldn't work out how deploying a release would apply here: its page doesn't say");
+            None
+        }
+    }
 }
 
 /// A stored release's file, as `ductus release` wrote it (the same id), its record of where it was

@@ -6,7 +6,7 @@ import { GateReport } from "@/components/gate-report";
 import { Button } from "@/components/ui/button";
 import { Dialog } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
-import { changesSummary, reuseCaveat, rulesText } from "@/lib/releases";
+import { applySummary, changesSummary, reuseCaveat, rulesText } from "@/lib/releases";
 
 /**
  * Deploying a release here, or rolling back to one: this environment's rules and what it changes
@@ -97,7 +97,7 @@ export function DeployDialog({
       description={
         rollback
           ? "Goes back to a release that ran here before. This environment's rules don't hold it; the gate runs."
-          : "This environment's rules first, then whose work it would undo, then the gate; then the engine hands over to one running it. Receiving never stops."
+          : "This environment's rules first, then whose work it would undo, then the gate; then it's applied: in place when only interfaces' code and destinations change, else by a handover to a new engine. Receiving never stops."
       }
     >
       {report?.ok ? (
@@ -105,6 +105,7 @@ export function DeployDialog({
       ) : (
         <form onSubmit={deploy} className="space-y-4">
           {here && !rollback && <p className="text-sm">{changesSummary(here)}</p>}
+          {here && !rollback && applySummary(here) && <p className="text-sm text-muted">{applySummary(here)}</p>}
           {!rollback && (
             <ul className="list-disc space-y-0.5 pl-5 text-sm text-muted">
               {rulesText(mode, environment).map((r) => (

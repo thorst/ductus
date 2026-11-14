@@ -227,7 +227,7 @@ pub struct PlannedChange {
 }
 
 impl PlanInfo {
-    fn of(plan: &crate::changes::Plan) -> Self {
+    pub(crate) fn of(plan: &crate::changes::Plan) -> Self {
         use crate::changes::Apply;
         Self {
             changes: plan
@@ -515,9 +515,11 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
     let plan = match &running {
         Some(r) => {
             let (dir, r, next, folder) = (releases.mode.dir.clone(), r.clone(), manifest.clone(), folder.clone());
+            let started = std::time::Instant::now();
             let plan = tokio::task::spawn_blocking(move || deploy::plan_over(&dir, &r, &next, &folder))
                 .await
                 .map_err(anyhow::Error::from)??;
+            tracing::debug!(changes = plan.changes.len(), took = ?started.elapsed(), "deploy: what it changes here worked out");
             Some(plan)
         }
         None => None,

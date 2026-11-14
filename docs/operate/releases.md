@@ -683,7 +683,8 @@ deploy it again without the flag in the window.
 A deploy in place is all or nothing: if one interface can't be applied, those already applied are
 put back and the deploy goes by the handover
 ([nuance](../nuances/releases.md#a-deploy-in-place-is-all-or-nothing-level-2)). While its code
-loads, the changed interface waits for every async call in flight on its threads
+loads (about a millisecond per thread), the other interfaces on its threads wait too; calls in
+flight go on, and the load doesn't wait for them
 ([nuance](../nuances/releases.md#a-deploy-in-place-pauses-the-changed-interface-while-its-code-loads-level-3)).
 
 ### It won't undo someone else's work
@@ -1010,7 +1011,10 @@ project folder (folder mode: releases can be stored and checked there, not deplo
 
 **A release's page (`/releases/<id>`)** shows what it is, **what it changes here** (each
 interface that changes, is new here or would be removed, with the code versions from → to, and
-whether the project's own files change: worked out from the versions, no gate run), where it went
+whether the project's own files change: worked out from the versions, no gate run; and **how it
+would apply**: "It applies in place" or "It needs the handover" with the reason, and an
+**Applies** column per interface, [as a deploy works it out](#in-place-or-by-the-handover), from
+the two releases' interface.yaml files as stored), where it went
 (and whether this database recorded it or a release file said so), every check of it with its
 report as `ductus release check` prints it (an older check's report is fetched when you open it),
 and its interfaces with their files (on demand: the manifest is hundreds of KB at a thousand
@@ -1024,8 +1028,8 @@ gate, recorded), **Download** (the file, record included), **Deploy to prod…**
    the deploy (the pre-run), so Deploy then takes about a second, not the gate's time again
    (unless `DUCTUS_DEPLOY_REUSE_CHECK=0`, which the dialog says).
 2. **A reason** (required except in `dev`), then **Deploy**: the engine's rules, the "replaces"
-   check, the gate (or the reused check), the handover. The dialog waits for the answer: seconds,
-   plus the gate's time when it runs.
+   check, the gate (or the reused check), then the release applied in place or by the handover.
+   The dialog waits for the answer: seconds, plus the gate's time when it runs.
 3. **Refused:** the engine's own words show: which rule, or whose work it would undo (each
    interface, who deployed it and from which commit). Only after a refusal names someone's work
    does **Deploy over their work** appear: tick it and Deploy again (forced, recorded as

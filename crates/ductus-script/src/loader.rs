@@ -45,7 +45,9 @@ fn parse(
 ) -> anyhow::Result<deno_ast::ParsedSource> {
     Ok(deno_ast::parse_module(deno_ast::ParseParams {
         specifier: specifier.clone(),
-        text: text.into(),
+        // deno_ast wants the byte order mark gone (it would copy the text to drop it, and asserts
+        // in debug builds); a file saved by a Windows editor may start with one.
+        text: text.strip_prefix('\u{feff}').unwrap_or(text).into(),
         media_type,
         capture_tokens: false,
         scope_analysis: false,
