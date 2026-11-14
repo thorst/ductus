@@ -204,6 +204,7 @@ fn family<'a>(out: &'a mut Exposition, name: &str) -> &'a mut Exposition {
     responses((status = 200, description = "Prometheus text format (0.0.4)", body = String, content_type = "text/plain"))
 )]
 async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiError> {
+    let interfaces = engine.interfaces();
     let snapshot = engine.snapshot().await?;
     let mut out = Exposition::new();
     let iface = |name: &str| format!("interface=\"{}\"", label(name));
@@ -261,10 +262,10 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
         }
     }
     family(&mut out, "ductus_interface_stopped");
-    for i in &engine.interfaces {
+    for i in interfaces.iter() {
         out.sample("ductus_interface_stopped", &iface(&i.config.name), u8::from(i.health.stopped().is_some()));
     }
-    let queued = || engine.interfaces.iter().filter(|i| !i.config.responds());
+    let queued = || interfaces.iter().filter(|i| !i.config.responds());
     for (name, value) in [
         (
             "ductus_messages_received_total",
@@ -374,7 +375,7 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
         );
     }
 
-    let responding = || engine.interfaces.iter().filter(|i| i.config.responds());
+    let responding = || interfaces.iter().filter(|i| i.config.responds());
     family(&mut out, "ductus_http_request_seconds");
     for i in responding() {
         out.histogram("ductus_http_request_seconds", &iface(&i.config.name), &i.stats.requests);

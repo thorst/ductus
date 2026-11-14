@@ -2,6 +2,7 @@
 
 Read before changing: REST routes/OpenAPI, the web UI and Playwright, the docs reference and site, YAML/config parsing. Each note is something that already cost a debugging session; add a new one here (not in CLAUDE.md) when you solve something the next person would rediscover.
 
+- **The engine's interfaces are a snapshot** (`Engine::interfaces()`, since 0.7.5.1): a deploy in place swaps one while the engine runs. A handler or report takes `let interfaces = engine.interfaces();` once and reads only that, so it never shows an interface's old destinations beside its new counts; `engine.interface(name)` gives an `Arc<Running>` (clone what you return out of a closure, don't borrow it). `engine.interfaces().iter().map(..)` kept past the statement doesn't compile (a temporary): bind the snapshot first.
 - `serde_yaml_ng`: enums in YAML maps need `with = "serde_yaml_ng::with::singleton_map"` (or `_recursive`). It's only a dev-dependency of `ductus-runtime` (its unit tests compile, its library doesn't): read YAML there with `ductus_core::yaml::parse` and `ductus_core::yaml::Value` (as `changes.rs` does).
 - `${...}` in YAML flow style breaks parsing: always load project YAML through `ductus_core::env::parse_yaml` (protects references first).
 - chacha20poly1305 0.11 changed its RNG API: we use `getrandom` directly.

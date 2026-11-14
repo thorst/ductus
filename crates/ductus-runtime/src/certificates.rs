@@ -228,7 +228,8 @@ pub async fn run(engine: &Engine, mode: Mode, who: &str, only: &[String], timeou
     if !changed.is_empty() {
         save_ours(engine, &changed).await?;
     }
-    let configs: Vec<&InterfaceConfig> = engine.interfaces.iter().map(|i| &*i.config).collect();
+    let interfaces = engine.interfaces();
+    let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
     // What code uses only adds names to "used by" (every resource is checked anyway), and working
     // it out runs the TypeScript compiler: a certificates run (every few hours, by itself) goes
     // without, and a broken analysis mustn't stop a full one.

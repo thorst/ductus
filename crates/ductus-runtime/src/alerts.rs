@@ -291,7 +291,7 @@ pub async fn start(engine: &Arc<Engine>) {
     let ended = engine.ended.clone();
     let Some(a) = engine.alerts.clone() else { return };
     let keys: Vec<(String, String, Option<String>)> = engine
-        .interfaces
+        .interfaces()
         .iter()
         .flat_map(|i| {
             let name = i.config.name.clone();
@@ -393,13 +393,14 @@ pub async fn start(engine: &Arc<Engine>) {
 /// Owners whose alerts reach nobody (no user with an email, not in `owners:`, not an address).
 async fn warn_unreachable_owners(engine: &Engine, a: &Alerts) {
     if !a.settings.rules.iter().any(|r| r.to.iter().any(|t| t == OWNER))
-        && !engine.interfaces.iter().any(|i| i.config.alert.to.iter().any(|t| t == OWNER))
+        && !engine.interfaces().iter().any(|i| i.config.alert.to.iter().any(|t| t == OWNER))
     {
         return;
     }
     let accounts = engine.store.accounts().await.unwrap_or_default();
     let people = people(&accounts.users, &accounts.former);
-    let configs = engine.interfaces.iter().map(|i| i.config.as_ref());
+    let interfaces = engine.interfaces();
+    let configs = interfaces.iter().map(|i| i.config.as_ref());
     let mut owners: Vec<String> =
         ductus_core::owners::owned(configs, &engine.resources).into_iter().map(|o| o.owner).collect();
     owners.sort_by_key(|o| o.to_lowercase());
@@ -487,7 +488,7 @@ pub async fn evaluate(engine: &Engine) -> Result<()> {
         None => Now::Hold,
     };
     let mut judged = Vec::new();
-    for i in &engine.interfaces {
+    for i in engine.interfaces().iter() {
         let owner = ductus_core::about::given(&i.config.about.owner).unwrap_or("").to_string();
         let (state, summary) = engine.interface_state(i, now);
         judged.push(Judged {

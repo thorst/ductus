@@ -71,8 +71,9 @@ pub struct PortsReport {
 /// `ductus ports`.
 #[utoipa::path(get, path = "/ports", tag = "reports", responses((status = 200, body = PortsReport)))]
 async fn ports(engine: Eng, _caller: Caller) -> ApiResult<PortsReport> {
+    let interfaces = engine.interfaces();
     use ductus_core::ports;
-    let configs = engine.interfaces.iter().map(|i| &*i.config);
+    let configs = interfaces.iter().map(|i| &*i.config);
     let mut listening = ports::listeners(configs.clone());
     if let Some(api) = &engine.api {
         listening.push(ports::api_listener(&api.host, api.port, api.tls.as_ref(), api.allow.as_ref()));
@@ -158,6 +159,7 @@ pub struct ImpactReport {
     responses((status = 200, body = ImpactReport), (status = 400, body = super::ErrorBody))
 )]
 async fn impact_report(engine: Eng, _caller: Caller, Query(p): Query<ImpactParams>) -> ApiResult<ImpactReport> {
+    let interfaces = engine.interfaces();
     let query = match (p.vendor, p.application, p.host) {
         (Some(v), None, None) => ImpactQuery::Vendor(v),
         (None, Some(a), None) => ImpactQuery::Application(a),
@@ -166,7 +168,7 @@ async fn impact_report(engine: Eng, _caller: Caller, Query(p): Query<ImpactParam
         }
         _ => return Err(ApiError::bad_request("give exactly one of `vendor`, `application` or `host`")),
     };
-    let configs: Vec<&InterfaceConfig> = engine.interfaces.iter().map(|i| &*i.config).collect();
+    let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
     let code = engine.code_uses().await?;
     let resolve = p.resolve;
     let lookup = move |name: &str| -> Vec<std::net::IpAddr> {
@@ -313,11 +315,12 @@ fn reach_label(reach: &ductus_core::owners::Reach) -> &'static str {
 /// ignoring case, or one it had before), a team in `owners:`, or nobody the engine knows.
 #[utoipa::path(get, path = "/owners", tag = "reports", responses((status = 200, body = Vec<OwnerGroup>)))]
 async fn owners(engine: Eng, caller: Caller) -> ApiResult<Vec<OwnerGroup>> {
+    let interfaces = engine.interfaces();
     use ductus_core::owners::{self, Reach, What};
     let accounts = engine.store.accounts().await?;
     let people = crate::alerts::people(&accounts.users, &accounts.former);
     let me = caller.who.user_id.and_then(|id| accounts.users.iter().find(|u| u.id == id)).map(|u| u.username.as_str());
-    let items = owners::owned(engine.interfaces.iter().map(|i| &*i.config), &engine.resources);
+    let items = owners::owned(interfaces.iter().map(|i| &*i.config), &engine.resources);
     Ok(Json(
         owners::by_owner(items)
             .into_iter()
@@ -450,6 +453,7 @@ async fn reassign_preview(
     _caller: Caller,
     Json(request): Json<ReassignRequest>,
 ) -> ApiResult<ReassignPreview> {
+    let interfaces = engine.interfaces();
     use ductus_core::owners::{self, Reach};
     let unknown: Vec<&str> =
         request.interfaces.iter().filter(|n| engine.interface(n).is_none()).map(String::as_str).collect();
@@ -500,7 +504,7 @@ async fn reassign_preview(
         file.strip_prefix(&engine.root).unwrap_or(file).display().to_string().replace('\\', "/")
     };
     let mut patch = String::new();
-    for i in engine.interfaces.iter().filter(|i| everything || request.interfaces.contains(&i.config.name)) {
+    for i in interfaces.iter().filter(|i| everything || request.interfaces.contains(&i.config.name)) {
         let file = i.config.dir.join("interface.yaml");
         let path = relative(&file);
         let text = tokio::fs::read_to_string(&file)
@@ -555,7 +559,7 @@ async fn reassign_preview(
         }
     }
     if preview.files.is_empty() && preview.refused.is_empty() {
-        let groups = owners::by_owner(owners::owned(engine.interfaces.iter().map(|i| &*i.config), &engine.resources));
+        let groups = owners::by_owner(owners::owned(interfaces.iter().map(|i| &*i.config), &engine.resources));
         preview.known = groups.into_iter().map(|(owner, _)| owner).filter(|o| !o.is_empty()).collect();
     }
     if preview.refused.is_empty() && !preview.files.is_empty() {
@@ -674,9 +678,10 @@ pub struct DocsReport {
 /// values. Read-only: the project's files are the source of truth.
 #[utoipa::path(get, path = "/docs", tag = "reports", responses((status = 200, body = DocsReport)))]
 async fn docs_report(engine: Eng, _caller: Caller) -> ApiResult<DocsReport> {
+    let interfaces = engine.interfaces();
     use ductus_core::docs;
     let schema = &engine.docs;
-    let configs = || engine.interfaces.iter().map(|i| &*i.config);
+    let configs = || interfaces.iter().map(|i| &*i.config);
     let entries = docs::entries(configs(), &engine.resources)
         .into_iter()
         .map(|e| DocsEntry {

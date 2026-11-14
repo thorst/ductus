@@ -1215,10 +1215,10 @@ async fn stop(
     stopping: &tokio_util::sync::CancellationToken,
     threads: Vec<std::thread::JoinHandle<()>>,
 ) {
-    for i in &engine.interfaces {
+    for i in engine.interfaces().iter() {
         i.gate.set_open(false);
     }
-    while engine.interfaces.iter().any(|i| i.gate.in_flight() > 0) {
+    while engine.interfaces().iter().any(|i| i.gate.in_flight() > 0) {
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     stopping.cancel();

@@ -27,7 +27,12 @@ use tokio_util::sync::CancellationToken;
 /// How often the monitor counts queues while someone is watching (or draining).
 const MONITOR_EVERY: Duration = Duration::from_secs(2);
 
-/// One running interface.
+/// The running interfaces at one moment, in engine order (`Engine::interfaces`).
+pub type Interfaces = Arc<[Arc<Running>]>;
+
+/// One running interface. A deploy in place swaps it whole (`Engine::swap_interface`): whoever
+/// reads it sees the old interface or the new one, never a mix of the two.
+#[derive(Clone)]
 pub struct Running {
     pub config: Arc<InterfaceConfig>,
     pub health: Arc<Health>,
@@ -93,7 +98,9 @@ pub struct Engine {
     pub resources: Resources,
     /// The company-defined documentation fields (docs-schema.yaml; none if it is missing or broken).
     pub docs: ductus_core::docs::Schema,
-    pub interfaces: Vec<Running>,
+    /// Every running interface, in engine order: read with `interfaces()`, swapped by a deploy in
+    /// place.
+    interfaces: std::sync::RwLock<Interfaces>,
     /// Each interface's parts and threads, to change it while it runs (a deploy in place).
     pub kept: crate::in_place::Kept,
     pub retention: Arc<crate::retention::Retention>,
@@ -232,7 +239,7 @@ impl Engine {
             store,
             resources,
             docs,
-            interfaces,
+            interfaces: std::sync::RwLock::new(interfaces.into_iter().map(Arc::new).collect()),
             kept,
             retention,
             calls,
@@ -263,12 +270,31 @@ impl Engine {
         engine
     }
 
-    pub fn interface(&self, name: &str) -> Option<&Running> {
-        self.interfaces.iter().find(|i| i.config.name == name)
+    /// Every running interface now, in engine order. A snapshot: a deploy in place that swaps one
+    /// meanwhile doesn't change it, so a reader sees each interface whole.
+    pub fn interfaces(&self) -> Interfaces {
+        self.interfaces.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
-    fn destination_ids(&self) -> impl Iterator<Item = DestinationId> + '_ {
-        self.interfaces.iter().flat_map(|i| i.destinations.iter().map(|(_, id)| *id))
+    pub fn interface(&self, name: &str) -> Option<Arc<Running>> {
+        self.interfaces().iter().find(|i| i.config.name == name).cloned()
+    }
+
+    /// Put `running` in place of the running interface of its name (a deploy in place).
+    // TODO(0.7.5.1 item 4): `code` (what the code uses) and `certificates` (destinations' TLS)
+    // were worked out from the start's configs; the deploy endpoint calls this (item 7).
+    #[allow(dead_code)]
+    pub(crate) fn swap_interface(&self, running: Running) {
+        let mut interfaces = self.interfaces.write().unwrap_or_else(|e| e.into_inner());
+        let running = Arc::new(running);
+        *interfaces = interfaces
+            .iter()
+            .map(|i| if i.config.name == running.config.name { running.clone() } else { i.clone() })
+            .collect();
+    }
+
+    fn destination_ids(&self) -> Vec<DestinationId> {
+        self.interfaces().iter().flat_map(|i| i.destinations.iter().map(|(_, id)| *id)).collect()
     }
 
     /// A destination's pause, if it's paused.
@@ -278,10 +304,10 @@ impl Engine {
 
     /// An interface's destination by name: `Err` says what's wrong in plain words (no such
     /// interface or destination).
-    pub fn destination(&self, interface: &str, destination: &str) -> Result<(&Running, DestinationId), String> {
+    pub fn destination(&self, interface: &str, destination: &str) -> Result<(Arc<Running>, DestinationId), String> {
         let i = self.interface(interface).ok_or_else(|| format!("no interface named `{interface}`"))?;
         match i.destinations.iter().find(|(name, _)| name == destination) {
-            Some((_, id)) => Ok((i, *id)),
+            Some((_, id)) => Ok((i.clone(), *id)),
             None if i.destinations.is_empty() => Err(format!("`{interface}` has no destinations (respond mode)")),
             None => {
                 let names: Vec<&str> = i.destinations.iter().map(|(n, _)| n.as_str()).collect();
@@ -320,7 +346,7 @@ impl Engine {
     /// elsewhere (another engine, an older config) are left out, so they never look like a
     /// change here.
     pub async fn snapshot(&self) -> Result<Snapshot> {
-        let mine: std::collections::HashSet<DestinationId> = self.destination_ids().collect();
+        let mine: std::collections::HashSet<DestinationId> = self.destination_ids().into_iter().collect();
         let counts = self.store.queue_counts().await?;
         let queues: HashMap<_, _> =
             counts.into_iter().filter(|c| mine.contains(&c.destination_id)).map(|c| (c.destination_id, c)).collect();
@@ -334,7 +360,7 @@ impl Engine {
     /// quarantined), from the workers' counters: no query.
     pub fn finished(&self) -> Vec<u64> {
         use std::sync::atomic::Ordering::Relaxed;
-        self.interfaces
+        self.interfaces()
             .iter()
             .flat_map(|i| i.stats.destinations.iter())
             .map(|d| d.sent.load(Relaxed) + d.filtered.load(Relaxed) + d.quarantined.load(Relaxed))
@@ -344,7 +370,7 @@ impl Engine {
     /// The health state of every interface and destination (see `Snapshot::states`).
     pub fn states(&self, snapshot: &Snapshot) -> Vec<&'static str> {
         let now = Utc::now();
-        self.interfaces
+        self.interfaces()
             .iter()
             .flat_map(|i| {
                 let own = std::iter::once(self.interface_state(i, now).0.label());
@@ -422,7 +448,7 @@ impl Engine {
                 DrainState::Drained { since, .. } => DrainState::Drained { since, stop },
             }
         });
-        for i in &self.interfaces {
+        for i in self.interfaces().iter() {
             i.gate.set_open(false);
         }
         tracing::warn!(stop, "draining: not taking new messages; delivering what's stored");
@@ -436,7 +462,7 @@ impl Engine {
         if self.drain.send_replace(DrainState::Accepting) != DrainState::Accepting {
             tracing::info!("resumed: taking new messages again");
         }
-        for i in &self.interfaces {
+        for i in self.interfaces().iter() {
             i.gate.set_open(true);
         }
     }
@@ -444,12 +470,13 @@ impl Engine {
     /// Pending deliveries of this engine's interfaces, if nothing can add more: every gate
     /// closed and nothing being stored. `None` while a store is still in flight.
     async fn left_to_deliver(&self) -> Result<Option<i64>> {
-        if self.interfaces.iter().any(|i| i.gate.is_open() || i.gate.in_flight() > 0) {
+        if self.interfaces().iter().any(|i| i.gate.is_open() || i.gate.in_flight() > 0) {
             return Ok(None);
         }
         let snapshot = self.snapshot().await?;
         // A paused destination keeps its messages on purpose: it doesn't hold the drain up.
-        Ok(Some(self.destination_ids().filter(|d| self.paused(*d).is_none()).map(|d| snapshot.queue(d).pending).sum()))
+        let ids = self.destination_ids().into_iter();
+        Ok(Some(ids.filter(|d| self.paused(*d).is_none()).map(|d| snapshot.queue(d).pending).sum()))
     }
 
     /// What each interface's code uses (`db`/`api` names), worked out once.
@@ -457,7 +484,7 @@ impl Engine {
         self.code
             .get_or_try_init(|| async {
                 let root = self.root.clone();
-                let configs: Vec<InterfaceConfig> = self.interfaces.iter().map(|i| (*i.config).clone()).collect();
+                let configs: Vec<InterfaceConfig> = self.interfaces().iter().map(|i| (*i.config).clone()).collect();
                 // The analysis runs the TypeScript compiler in V8: on a thread of its own, so
                 // it never holds up the runtime that serves intake.
                 let (tx, rx) = tokio::sync::oneshot::channel();

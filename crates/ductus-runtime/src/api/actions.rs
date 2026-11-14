@@ -18,6 +18,7 @@ use chrono::{DateTime, Utc};
 use ductus_store::{Actor, DestinationId, Edited, Resend, Resent, Role, Status};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashSet};
+use std::sync::Arc;
 use utoipa::{IntoParams, ToSchema};
 use utoipa_axum::router::OpenApiRouter;
 use utoipa_axum::routes;
@@ -47,7 +48,7 @@ fn conflict(message: impl Into<String>) -> ApiError {
 }
 
 /// The interface a stored message belongs to, if this engine runs it with a queue.
-async fn owner(engine: &Engine, id: i64) -> Result<&Running, ApiError> {
+async fn owner(engine: &Engine, id: i64) -> Result<Arc<Running>, ApiError> {
     let (row, _) = engine.store.message(id).await?.ok_or_else(|| ApiError::not_found(format!("no message {id}")))?;
     engine
         .interface(&row.interface)
@@ -63,9 +64,9 @@ fn destination_ids(engine: &Engine, i: &Running, names: &[String]) -> Result<Vec
         .collect()
 }
 
-fn destination_name(engine: &Engine, id: DestinationId) -> Option<(&str, &str)> {
-    engine.interfaces.iter().find_map(|i| {
-        i.destinations.iter().find(|(_, d)| *d == id).map(|(name, _)| (i.config.name.as_str(), name.as_str()))
+fn destination_name(engine: &Engine, id: DestinationId) -> Option<(String, String)> {
+    engine.interfaces().iter().find_map(|i| {
+        i.destinations.iter().find(|(_, d)| *d == id).map(|(name, _)| (i.config.name.clone(), name.clone()))
     })
 }
 
@@ -73,7 +74,7 @@ fn destination_name(engine: &Engine, id: DestinationId) -> Option<(&str, &str)> 
 fn wake(engine: &Engine, resent: &[Resent]) {
     let lanes: HashSet<(&str, i32)> = resent.iter().map(|r| (r.interface.as_str(), r.partition_key)).collect();
     for (interface, lane) in lanes {
-        if let Some(intake) = engine.interface(interface).and_then(|i| i.intake.as_ref()) {
+        if let Some(intake) = engine.interface(interface).and_then(|i| i.intake.clone()) {
             intake.wake(lane);
         }
     }
@@ -146,7 +147,7 @@ async fn resend(
     let request = body.map(|Json(b)| b).unwrap_or_default();
     let i = owner(&engine, id).await?;
     let (destinations, quarantined_only) = match &request.destinations {
-        Some(names) if !names.is_empty() => (destination_ids(&engine, i, names)?, false),
+        Some(names) if !names.is_empty() => (destination_ids(&engine, &i, names)?, false),
         _ => (i.destinations.iter().map(|(_, id)| *id).collect(), true),
     };
     let r = Resend { messages: &[id], destinations: &destinations, quarantined_only };
@@ -229,7 +230,7 @@ async fn resend_many(
     }
     let named = request.destination.as_deref().filter(|d| !d.is_empty());
     let destinations: Vec<DestinationId> = engine
-        .interfaces
+        .interfaces()
         .iter()
         .flat_map(|i| i.destinations.iter())
         .filter(|(name, _)| named.is_none_or(|n| n == name))
@@ -332,7 +333,7 @@ async fn edit(
             quarantined
         }
     };
-    let destinations = destination_ids(&engine, i, &names)?;
+    let destinations = destination_ids(&engine, &i, &names)?;
     let intake = i.intake.as_ref().expect("owner() checked");
     let by = caller.actor(request.reason.as_deref());
     let name = |d: &DestinationId| destination_name(&engine, *d).map(|(_, n)| n.to_string()).unwrap_or_default();
@@ -412,7 +413,7 @@ async fn dismiss(
     let reason = require_reason(&request.reason)?;
     let i = owner(&engine, id).await?;
     let destinations = match &request.destinations {
-        Some(names) if !names.is_empty() => destination_ids(&engine, i, names)?,
+        Some(names) if !names.is_empty() => destination_ids(&engine, &i, names)?,
         _ => i.destinations.iter().map(|(_, id)| *id).collect(),
     };
     let r = Resend { messages: &[id], destinations: &destinations, quarantined_only: true };
@@ -455,7 +456,7 @@ async fn dismiss_many(
     }
     let named = request.destination.as_deref().filter(|d| !d.is_empty());
     let destinations: Vec<DestinationId> = engine
-        .interfaces
+        .interfaces()
         .iter()
         .flat_map(|i| i.destinations.iter())
         .filter(|(name, _)| named.is_none_or(|n| n == name))
@@ -534,7 +535,7 @@ async fn quarantine(engine: Eng, _caller: Caller, Query(q): Query<QuarantineQuer
         return Err(ApiError::not_found(format!("no interface named `{name}`")));
     }
     let destinations: Vec<DestinationId> = engine
-        .interfaces
+        .interfaces()
         .iter()
         .filter(|i| interface.is_none_or(|n| n == i.config.name))
         .flat_map(|i| i.destinations.iter())

@@ -690,12 +690,9 @@ async fn start(mut requested: Requested, engine: &Engine, how: &How) -> Option<S
     };
     // Lanes the new engine added for a change of `ordering`: gone again where it stored nothing,
     // so this engine's resends don't go to lanes it doesn't read.
-    let queued: Vec<(String, &crate::lanes::Lanes)> = engine
-        .interfaces
-        .iter()
-        .filter(|i| i.intake.is_some())
-        .map(|i| (i.config.name.clone(), i.lanes.as_ref()))
-        .collect();
+    let interfaces = engine.interfaces();
+    let queued: Vec<(String, &crate::lanes::Lanes)> =
+        interfaces.iter().filter(|i| i.intake.is_some()).map(|i| (i.config.name.clone(), i.lanes.as_ref())).collect();
     let kept = crate::lanes::take_back(&engine.store, &queued).await.map(|k| format!("\n{k}")).unwrap_or_default();
     requested.done(false, format!("{failure}{kept}\n{here}")).await;
     None

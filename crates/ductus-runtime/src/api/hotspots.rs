@@ -138,7 +138,7 @@ async fn hotspots(engine: Eng, _caller: Caller, Query(q): Query<HotspotQuery>) -
     let snapshot = engine.snapshot().await?;
     let now = Utc::now();
     let mut out = Vec::new();
-    for i in engine.interfaces.iter().filter(|i| q.interface.as_ref().is_none_or(|n| *n == i.config.name)) {
+    for i in engine.interfaces().iter().filter(|i| q.interface.as_ref().is_none_or(|n| *n == i.config.name)) {
         let generations = i.lanes.layout.generations.iter().map(|g| (g.first, g.lanes as u32)).collect();
         let layout = Layout { generations, workers: i.config.slots() };
         for (n, (name, id)) in i.destinations.iter().enumerate() {

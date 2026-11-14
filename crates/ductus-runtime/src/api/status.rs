@@ -149,6 +149,7 @@ fn drain_label(state: DrainState) -> &'static str {
 }
 
 fn drain_report(engine: &Engine, snapshot: &Snapshot) -> DrainStatus {
+    let interfaces = engine.interfaces();
     let state = engine.drain_state();
     let (since, stop) = match state {
         DrainState::Accepting => (None, false),
@@ -158,7 +159,7 @@ fn drain_report(engine: &Engine, snapshot: &Snapshot) -> DrainStatus {
         let live = i.destinations.iter().filter(|(_, id)| engine.paused(*id).is_none());
         live.map(|(_, id)| snapshot.queue(*id).pending).sum::<i64>()
     };
-    let paused = engine.interfaces.iter().flat_map(|i| {
+    let paused = interfaces.iter().flat_map(|i| {
         let paused = i.destinations.iter().filter(|(_, id)| engine.paused(*id).is_some());
         paused.map(|(name, _)| format!("{}/{name}", i.config.name))
     });
@@ -166,8 +167,8 @@ fn drain_report(engine: &Engine, snapshot: &Snapshot) -> DrainStatus {
         state: drain_label(state),
         since,
         stop_when_drained: stop,
-        pending: engine.interfaces.iter().map(pending).sum(),
-        waiting_for: engine.interfaces.iter().filter(|i| pending(i) > 0).map(|i| i.config.name.clone()).collect(),
+        pending: interfaces.iter().map(|i| pending(i)).sum(),
+        waiting_for: interfaces.iter().filter(|i| pending(i) > 0).map(|i| i.config.name.clone()).collect(),
         paused: paused.collect(),
     }
 }
@@ -354,6 +355,7 @@ pub struct ResourceCalls {
 /// The engine: version, environment, uptime, drain state.
 #[utoipa::path(get, path = "/engine", tag = "engine", responses((status = 200, body = EngineInfo)))]
 async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
+    let interfaces = engine.interfaces();
     let snapshot = engine.snapshot().await?;
     let others = engine.store.other_engines(&engine.instance).await?;
     Ok(Json(EngineInfo {
@@ -362,8 +364,8 @@ async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
         host: crate::doctor::hostname(),
         started_at: engine.started_at,
         uptime_seconds: (Utc::now() - engine.started_at).num_seconds(),
-        interfaces: engine.interfaces.len(),
-        stopped: engine.interfaces.iter().filter(|i| i.health.stopped().is_some()).count(),
+        interfaces: interfaces.len(),
+        stopped: interfaces.iter().filter(|i| i.health.stopped().is_some()).count(),
         drain: drain_report(&engine, &snapshot),
         resources: engine
             .calls
@@ -923,7 +925,7 @@ fn interface_status(engine: &Engine, i: &Running, snapshot: &Snapshot) -> Interf
 #[utoipa::path(get, path = "/interfaces", tag = "engine", responses((status = 200, body = Vec<InterfaceStatus>)))]
 async fn interfaces(engine: Eng, _caller: Caller) -> ApiResult<Vec<InterfaceStatus>> {
     let snapshot = engine.snapshot().await?;
-    Ok(Json(engine.interfaces.iter().map(|i| interface_status(&engine, i, &snapshot)).collect()))
+    Ok(Json(engine.interfaces().iter().map(|i| interface_status(&engine, i, &snapshot)).collect()))
 }
 
 /// One interface: its state, queues and what it connects.
@@ -941,7 +943,7 @@ async fn interface(engine: Eng, _caller: Caller, Path(name): Path<String>) -> Ap
         vendor: given(vendor).map(Into::into),
     };
     Ok(Json(InterfaceDetail {
-        status: interface_status(&engine, i, &snapshot),
+        status: interface_status(&engine, &i, &snapshot),
         from: system(&about.from.application, &about.from.vendor),
         from_hosts: about.from.hosts.clone(),
         to: system(&about.to.application, &about.to.vendor),
@@ -1116,7 +1118,7 @@ fn live_update(engine: &Engine, snapshot: &Snapshot) -> LiveUpdate {
         at: snapshot.at,
         drain: drain_report(engine, snapshot),
         interfaces: engine
-            .interfaces
+            .interfaces()
             .iter()
             .map(|i| LiveInterface {
                 name: i.config.name.clone(),

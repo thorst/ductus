@@ -486,7 +486,8 @@ impl Round {
 
     /// The engine's owners and teams.
     pub fn of(engine: &Engine) -> Self {
-        let configs = engine.interfaces.iter().map(|i| i.config.as_ref());
+        let interfaces = engine.interfaces();
+        let configs = interfaces.iter().map(|i| i.config.as_ref());
         let owned = owners::owned(configs, &engine.resources).into_iter().map(|o| o.owner);
         Self::new(owned, engine.teams.clone())
     }

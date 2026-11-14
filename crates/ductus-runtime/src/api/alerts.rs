@@ -347,6 +347,7 @@ pub struct ChannelCounts {
     responses((status = 200, body = ChannelsOverview), (status = 403, body = super::ErrorBody))
 )]
 async fn channels(engine: Eng, caller: Caller) -> ApiResult<ChannelsOverview> {
+    let interfaces = engine.interfaces();
     caller.require(Role::Operator)?;
     let Some(a) = &engine.alerts else {
         return Ok(Json(ChannelsOverview {
@@ -394,13 +395,13 @@ async fn channels(engine: Eng, caller: Caller) -> ApiResult<ChannelsOverview> {
         })
         .collect();
     let to_owner = a.settings.rules.iter().any(|r| r.to.iter().any(|t| t == OWNER))
-        || engine.interfaces.iter().any(|i| i.config.alert.to.iter().any(|t| t == OWNER));
+        || interfaces.iter().any(|i| i.config.alert.to.iter().any(|t| t == OWNER));
     let mut owners = Vec::new();
     let mut owner_notifications = None;
     if to_owner {
         let accounts = engine.store.accounts().await?;
         let people = crate::alerts::people(&accounts.users, &accounts.former);
-        let configs = engine.interfaces.iter().map(|i| i.config.as_ref());
+        let configs = interfaces.iter().map(|i| i.config.as_ref());
         for (owner, _) in ductus_core::owners::by_owner(ductus_core::owners::owned(configs, &engine.resources)) {
             if owner.is_empty() {
                 continue;
