@@ -370,16 +370,16 @@ pub async fn start(engine: &Arc<Engine>, mut changes: tokio::sync::mpsc::Receive
     }));
 }
 
-/// Check `interface`'s certificates now, beside what asked (a deploy in place that connects it
-/// somewhere new): its rows are there for alerts and the API without waiting for the next round.
-/// Not kept as a run: the Doctor page goes on showing the last whole one. A failure is logged,
-/// and the next round checks it anyway.
-pub fn check_beside(engine: &Arc<Engine>, interface: String) {
+/// Check `interfaces`' certificates now, beside what asked (a deploy in place that connects one
+/// somewhere new): their rows are there for alerts and the API without waiting for the next
+/// round. Not kept as a run: the Doctor page goes on showing the last whole one. A failure is
+/// logged, and the next round checks it anyway.
+pub fn check_beside(engine: &Arc<Engine>, interfaces: Vec<String>) {
     let weak = Arc::downgrade(engine);
     tokio::spawn(engine.ended.clone().run_until_cancelled_owned(async move {
         let Some(engine) = weak.upgrade() else { return };
-        if let Err(e) = check(&engine, Mode::Certificates, std::slice::from_ref(&interface), STEP_TIMEOUT).await {
-            tracing::warn!(interface, error = %format!("{e:#}"), "couldn't check the certificates a deploy added; the next scheduled check does");
+        if let Err(e) = check(&engine, Mode::Certificates, &interfaces, STEP_TIMEOUT).await {
+            tracing::warn!(interfaces = interfaces.join(", "), error = %format!("{e:#}"), "couldn't check the certificates a deploy added; the next scheduled check does");
         }
     }));
 }

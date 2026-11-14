@@ -470,7 +470,10 @@ fn hundreds_of_interfaces_load_into_one_isolate() {
     let shared = "export const code = (c: string): string => c.toUpperCase();\n";
     let transform = "import type { Message } from \"@ductus/sdk\";\nimport { code } from \"../../lib/codes.ts\";\nexport function transform(msg: Message) {\n  msg.PID[5][1] = code(msg.PID[5][1]) + \"N\";\n  return msg;\n}\n";
     let files: Vec<(String, String)> = std::iter::once(("lib/codes.ts".to_string(), shared.to_string()))
-        .chain((0..300).map(|i| (format!("interfaces/i{i}/transform.ts"), transform.replace("\"N\"", &format!("\"{i}\"")))))
+        .chain(
+            (0..300)
+                .map(|i| (format!("interfaces/i{i}/transform.ts"), transform.replace("\"N\"", &format!("\"{i}\"")))),
+        )
         .collect();
     let dir = project(&files.iter().map(|(p, t)| (p.as_str(), t.as_str())).collect::<Vec<_>>());
     let rt = rt();

@@ -311,11 +311,10 @@ impl Engine {
     }
 
     /// Run `config`'s interface on its new code and settings (`in_place::Kept::replace`: its
-    /// destinations added or removed too), and show it so from then on: the API, alerts and
-    /// metrics see its new destinations and their certificates, and what its code uses is worked
-    /// out again when next asked. A certificate it connects to for the first time is checked
-    /// now, beside the deploy (unless `doctor.schedule: off`), so its expiry shows without
-    /// waiting for the next round. Its new code version (`root`: the project it was loaded from,
+    /// destinations added or removed too), and show it so from then on: the API and metrics see
+    /// its new destinations, and what its code uses is worked out again when next asked (what
+    /// reads the whole engine, certificates and alerts, follows once per deploy:
+    /// `shown_after_replacing`). Its new code version (`root`: the project it was loaded from,
     /// the new release's folder) is saved once applied, and its new workers save their decisions
     /// with it (they wait for it). Answers the version, for the deploy's record
     /// (`deployment::record_in_place`). `in_place::NeedsHandover` when only the handover can
@@ -355,22 +354,32 @@ impl Engine {
             destinations: replaced.destinations,
             ..(*running).clone()
         });
-        let new = self.certificates_again();
+        Ok(crate::deployment::Applied { interface: name, version, id })
+    }
+
+    /// After a deploy in place applied (or put back) the interfaces `names`: what reads the whole
+    /// engine sees them. Once per deploy, not per interface: working the certificates out again
+    /// reads every interface (3–10 ms at a thousand), and fifty of those in a row, each blocking
+    /// a thread of the runtime that receives and saves for every interface, held up interfaces
+    /// the deploy never touched (0.7.5.1's measurement: a send latency of 400 ms). So it runs off
+    /// that runtime, once. Then live updates, the alert rows of their new destinations and
+    /// certificates (judging updates only rows that exist; the others are there, untouched), and
+    /// a certificate connected to for the first time checked beside the deploy (unless
+    /// `doctor.schedule: off`), so its expiry shows without waiting for the next round.
+    pub(crate) async fn shown_after_replacing(self: &Arc<Self>, names: &[String]) {
+        let engine = self.clone();
+        let new = tokio::task::spawn_blocking(move || engine.certificates_again()).await.unwrap_or(false);
         self.monitor.send_modify(|_| {}); // live updates show the new destinations at once
-        if self.alerts.is_some()
-            && let Some(running) = self.interface(&name)
-        {
-            // Judging updates only rows that exist: a new destination's or certificate's is made
-            // now (the others are there already, untouched).
-            let keys = crate::alerts::alert_keys(&[running], &self.certificates());
+        if self.alerts.is_some() {
+            let running: Vec<Arc<Running>> = names.iter().filter_map(|n| self.interface(n)).collect();
+            let keys = crate::alerts::alert_keys(&running, &self.certificates());
             if let Err(e) = self.store.ensure_alerts(&keys).await {
-                tracing::warn!(interface = name, error = %format!("{e:#}"), "couldn't make the alerts of a destination or certificate a deploy added; the next start does");
+                tracing::warn!(interfaces = names.join(", "), error = %format!("{e:#}"), "couldn't make the alerts of a destination or certificate a deploy added; the next start does");
             }
         }
         if new && self.doctor.schedule.is_some() {
-            crate::certificates::check_beside(self, name.clone());
+            crate::certificates::check_beside(self, names.to_vec());
         }
-        Ok(crate::deployment::Applied { interface: name, version, id })
     }
 
     /// Release mode: remove the unpacked releases nothing here runs from any more (`deploy::tidy`

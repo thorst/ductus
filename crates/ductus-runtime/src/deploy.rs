@@ -472,6 +472,7 @@ pub async fn apply_in_place(
         (engine.replace_interface(config.clone(), folder).await, started.elapsed())
     });
     let results = futures_util::future::join_all(applying).await;
+    let names: Vec<String> = configs.iter().map(|(config, _)| config.name.clone()).collect();
     if results.iter().any(|(r, _)| r.is_err()) {
         // Back on what they ran: the same files, from the release each came from.
         let mut first = None;
@@ -488,8 +489,10 @@ pub async fn apply_in_place(
                 }
             }
         }
+        engine.shown_after_replacing(&names).await;
         return Err(first.expect("one failed"));
     }
+    engine.shown_after_replacing(&names).await;
     let mut steps = Vec::with_capacity(results.len() + 1);
     let mut applied = Vec::with_capacity(results.len());
     for ((result, took), change) in results.into_iter().zip(&plan.changes) {

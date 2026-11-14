@@ -1109,6 +1109,35 @@ a new process (the package's way):
 | The sender | 0 refused, longest wait 142–168 ms | 0 refused, longest wait 141 ms |
 | Memory | 95 MB before; 138–167 MB at the peak (both engines); 120–136 MB after ten handovers | 96 MB each, two processes while they overlap |
 
+A deploy **in place** at 1,001 interfaces (0.7.5.1, `scripts/bench-deploy.sh`: release mode, 4
+pool threads, three rounds each). Four interfaces received 100 messages a second each (S, whose
+transform awaits an HTTP lookup, 2 a second): A (the one deployed), S and T sharing its thread, O
+on another. The release was stored and checked beforehand, so the deploy reused the check; "send
+latency" is from stored to sent:
+
+| | Applied in | The changed interface's pause | The other interfaces' send latency, max |
+|---|---|---|---|
+| No deploy (for comparison) | | | 34–92 ms |
+| A code change to 1 interface | 88–133 ms | 0.1–8 ms (its code loaded in 1.3–1.6 ms) | 30–95 ms |
+| A code change to 50 interfaces | 141–157 ms | 1.0–1.4 ms per load (49 interface × thread loads) | 25–58 ms |
+| A code change to 1, another interface on its thread waiting 300 ms on a lookup | 88–110 ms | its code loaded in 1.6 ms (the lookup isn't waited for) | 28–60 ms |
+
+What it changes here (`plan` in the answer, comparing the two releases' interface.yaml files)
+took 1.6–7.2 ms of that; the certificates worked out again once per deploy, 4–9 ms, off the
+thread that receives. `ductus deploy` answered in 0.25–0.37 s. In two of the run's eleven
+phases, one of them with no deploy, every interface's ACKs and sends waited together for 250–660 ms:
+a pause of the whole engine's database writes on this machine, not of the deploy (its cause
+isn't confirmed; it hits the intake of interfaces the deploy doesn't touch). Every message
+arrived once, in order.
+
+**Memory over many deploys:** the engine went from 242 MB to 278 MB over 100 deploys of one
+interface in a row: 26 MB over the first 25, then about 130 KB a deploy (code an interface no
+longer runs stays loaded until the next handover or restart:
+[nuance](../nuances/releases.md#a-deploy-in-place-pauses-the-changed-interface-while-its-code-loads-level-3)).
+A handover or restart gives it back. An engine deployed in place hundreds of times a day can
+reload (`systemctl reload ductus`) in a quiet hour now and then; a later step replaces an
+isolate on its own past a budget.
+
 What the Releases page reads, the same project (0.7.4.5, `scripts/bench-release.sh`, three
 rounds; 2 releases stored, 13 deployments of them, the release read checked several times):
 
