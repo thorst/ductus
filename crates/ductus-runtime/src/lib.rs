@@ -1025,9 +1025,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         }
     };
     // Unpacked releases no longer needed, beside the start.
-    if let (Some(r), Some(running)) = (&releases, &running_release) {
-        let (dir, keep) = (r.mode.dir.clone(), running.hex());
-        tokio::task::spawn_blocking(move || deploy::tidy(&dir, &keep));
+    if running_release.is_some() {
+        engine.tidy_releases();
     }
     owner.watch(store.clone(), stopping.clone());
     let mut control = handover::Control::listen(options.control, options.rebuild.clone(), options.stop_request.clone());

@@ -264,26 +264,33 @@ pub async fn resolve(
             manifest.project
         );
     }
-    let folder = mode.dir.join(&hex);
-    let unpacked = std::fs::read_to_string(folder.join(MARKER)).is_ok_and(|m| m.trim() == hex);
-    if !unpacked {
-        let contents = store
-            .release_contents(&id)
-            .await?
-            .with_context(|| format!("release {} isn't stored", release::short(&hex)))?;
-        let (dir, hex) = (mode.dir.clone(), hex.clone());
-        tokio::task::spawn_blocking(move || unpack(&dir, &hex, contents)).await.context("unpacking the release")??;
-    }
+    let (folder, unpacked) = unpacked(store, mode, &id).await?;
     tracing::info!(
         release = release::short(&hex),
         project = %manifest.project,
-        unpacked = !unpacked,
+        unpacked,
         took = ?started.elapsed(),
         "release mode: running release {}",
         release::short(&hex)
     );
     let running = Arc::new(Running { id, manifest, ancestry });
     Ok((folder, Releases::new(mode.clone(), Some(running))))
+}
+
+/// Release `id`'s folder under `mode.dir`, unpacked from the database unless it's there whole (its
+/// marker names it); true when it was unpacked now. A start runs it; a deploy in place loads the
+/// changed interfaces from it.
+pub async fn unpacked(store: &Store, mode: &Mode, id: &[u8]) -> Result<(PathBuf, bool)> {
+    let hex = code::hex(id);
+    let folder = mode.dir.join(&hex);
+    if std::fs::read_to_string(folder.join(MARKER)).is_ok_and(|m| m.trim() == hex) {
+        return Ok((folder, false));
+    }
+    let contents =
+        store.release_contents(id).await?.with_context(|| format!("release {} isn't stored", release::short(&hex)))?;
+    let dir = mode.dir.clone();
+    tokio::task::spawn_blocking(move || unpack(&dir, &hex, contents)).await.context("unpacking the release")??;
+    Ok((folder, true))
 }
 
 /// Write a release's files into `dir/<hex>/`: into a temporary folder first, its id checked, the
@@ -310,9 +317,22 @@ fn unpack(dir: &Path, hex: &str, contents: ductus_store::ReleaseContents) -> Res
     std::fs::rename(&partial, &folder).with_context(|| format!("moving the release into {}", folder.display()))
 }
 
-/// Remove unpacked releases but the one running and the `KEPT` used last, and folders a stopped
-/// unpack left. Beside the start; what can't be removed is said and left.
-pub fn tidy(dir: &Path, running: &str) {
+/// The unpacked releases (their folder names under `dir`) that interfaces in `folders` (each one's
+/// `InterfaceConfig::dir`) run from. After deploys in place an engine runs from several: an
+/// interface a deploy left alone keeps running the code it loaded from the release it came with,
+/// and its code may read more of that folder later (a dynamic `import()`).
+pub fn in_use<'a>(dir: &Path, folders: impl IntoIterator<Item = &'a Path>) -> BTreeSet<String> {
+    folders
+        .into_iter()
+        .filter_map(|f| f.strip_prefix(dir).ok()?.components().next())
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect()
+}
+
+/// Remove unpacked releases but those in `running` (what the engine runs from: `in_use`) and the
+/// `KEPT` used last, and folders a stopped unpack left. Beside the start and after each deploy in
+/// place; what can't be removed is said and left.
+pub fn tidy(dir: &Path, running: &BTreeSet<String>) {
     let Ok(entries) = std::fs::read_dir(dir) else { return };
     let mut releases = Vec::new();
     for entry in entries.flatten() {
@@ -322,7 +342,7 @@ pub fn tidy(dir: &Path, running: &str) {
             name.starts_with('.') && name.contains(".partial-") && !name.ends_with(&format!("-{}", std::process::id()));
         if leftover {
             remove(&path);
-        } else if name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit()) && name != running {
+        } else if name.len() == 64 && name.bytes().all(|b| b.is_ascii_hexdigit()) && !running.contains(&name) {
             let used = entry.metadata().and_then(|m| m.modified()).ok();
             releases.push((used, path));
         }
@@ -565,6 +585,33 @@ mod tests {
 
     fn who(by: &str) -> Who {
         Who { how: "handover", by: by.into(), reason: None, rollback: false }
+    }
+
+    /// After deploys in place an engine runs from several unpacked releases: `tidy` keeps every
+    /// one an interface runs from (`in_use`), however old, then the `KEPT` used last; it removes
+    /// the rest and what a stopped unpack left.
+    #[test]
+    fn tidy_keeps_every_release_an_interface_runs_from() {
+        let dir = tempfile::tempdir().unwrap();
+        let release = |n: u8| format!("{n:064x}");
+        for n in 1..=5 {
+            std::fs::create_dir_all(dir.path().join(release(n)).join("interfaces").join("a")).unwrap();
+            // Told apart by when they were used last: the oldest first.
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let leftover = dir.path().join(format!(".{}.partial-1", release(9)));
+        std::fs::create_dir_all(&leftover).unwrap();
+        let folders =
+            [dir.path().join(release(1)).join("interfaces/adt"), dir.path().join(release(2)).join("interfaces/lab")];
+        let elsewhere = PathBuf::from("/somewhere/else/interfaces/x");
+        let running = in_use(dir.path(), folders.iter().map(PathBuf::as_path).chain([elsewhere.as_path()]));
+        assert_eq!(running, [release(1), release(2)].into());
+
+        tidy(dir.path(), &running);
+        let mut left: Vec<String> =
+            std::fs::read_dir(dir.path()).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into()).collect();
+        left.sort();
+        assert_eq!(left, [release(1), release(2), release(4), release(5)], "1 and 2 run, 4 and 5 used last");
     }
 
     /// A release holds what runs against its own history: a colleague's merged commit passes, an

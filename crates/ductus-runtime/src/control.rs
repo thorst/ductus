@@ -375,6 +375,18 @@ impl Engine {
         Ok(crate::deployment::Applied { interface: name, version, id })
     }
 
+    /// Release mode: remove the unpacked releases nothing here runs from any more (`deploy::tidy`
+    /// keeping `deploy::in_use` and the release it runs), beside the caller. At the start, and
+    /// after each deploy in place.
+    pub(crate) fn tidy_releases(&self) {
+        let Some(releases) = &self.releases else { return };
+        let interfaces = self.interfaces();
+        let mut keep = crate::deploy::in_use(&releases.mode.dir, interfaces.iter().map(|i| i.config.dir.as_path()));
+        keep.extend(releases.running().map(|r| r.hex()));
+        let dir = releases.mode.dir.clone();
+        tokio::task::spawn_blocking(move || crate::deploy::tidy(&dir, &keep));
+    }
+
     /// Put `running` in place of the running interface of its name (a deploy in place). What its
     /// code uses is forgotten with it: a request that took its snapshot just before may see the
     /// new analysis (names of databases and APIs only), never one older than what it shows.
