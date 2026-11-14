@@ -113,8 +113,6 @@ pub enum Command {
     ///
     /// The code must come from paths not loaded on this thread before (a release's own folder):
     /// V8 keys modules by URL, so a file loaded again from the same path is the old module.
-    // TODO(0.7.5.1): sent by a deploy in place once the engine keeps each interface's parts.
-    #[cfg_attr(not(test), allow(dead_code))]
     Replace { interface: String, jobs: Vec<Job>, answer: tokio::sync::oneshot::Sender<Result<Vec<CodeFile>>> },
 }
 
@@ -231,7 +229,7 @@ async fn load(host: &mut Isolate, config: &InterfaceConfig) -> Result<(Loaded, V
 }
 
 /// A respond-mode interface's requests, handed from its responder to the next one (`Command::Replace`).
-type Requests = mpsc::Receiver<HttpCall>;
+pub(crate) type Requests = mpsc::Receiver<HttpCall>;
 
 /// What a worker thread's interfaces share once it runs.
 struct Thread {

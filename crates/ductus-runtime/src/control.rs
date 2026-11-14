@@ -94,6 +94,8 @@ pub struct Engine {
     /// The company-defined documentation fields (docs-schema.yaml; none if it is missing or broken).
     pub docs: ductus_core::docs::Schema,
     pub interfaces: Vec<Running>,
+    /// Each interface's parts and threads, to change it while it runs (a deploy in place).
+    pub kept: crate::in_place::Kept,
     pub retention: Arc<crate::retention::Retention>,
     /// Calls to each database and API in resources.yaml (`fetch` for URLs called directly).
     pub calls: Arc<crate::stats::ResourceCalls>,
@@ -168,6 +170,7 @@ pub struct Parts {
     pub resources: Resources,
     pub docs: ductus_core::docs::Schema,
     pub interfaces: Vec<Running>,
+    pub kept: crate::in_place::Kept,
     pub retention: Arc<crate::retention::Retention>,
     pub calls: Arc<crate::stats::ResourceCalls>,
     pub activity: Activity,
@@ -196,6 +199,7 @@ impl Engine {
             resources,
             docs,
             interfaces,
+            kept,
             retention,
             calls,
             activity,
@@ -229,6 +233,7 @@ impl Engine {
             resources,
             docs,
             interfaces,
+            kept,
             retention,
             calls,
             activity,

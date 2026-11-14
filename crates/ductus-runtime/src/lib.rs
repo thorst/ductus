@@ -22,6 +22,7 @@ pub mod handover;
 pub mod health;
 pub mod history;
 mod http;
+pub mod in_place;
 mod ingest;
 pub mod inspect;
 pub mod keys;
@@ -45,7 +46,7 @@ pub mod try_message;
 mod worker;
 
 use anyhow::{Context, Result, bail};
-use ductus_core::config::{Destination, Isolation, Source};
+use ductus_core::config::{Isolation, Source};
 use ductus_core::{Environment, InterfaceConfig};
 use ductus_store::Store;
 use std::path::{Path, PathBuf};
@@ -533,6 +534,17 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let activity =
         activity::Activity::start(store.clone(), watched, stopping.clone()).await.context("loading last activity")?;
     phases.mark("last activity loaded");
+    // What every interface's jobs and outlets are built with, kept for a deploy in place.
+    let shared = in_place::Shared {
+        ownership: owner.ownership.clone(),
+        waiting: waiting.clone(),
+        decided: decided.clone(),
+        certificates: certificates.clone(),
+        resources: resources.clone(),
+        intakes,
+    };
+    let intakes = &shared.intakes;
+    let mut kept: std::collections::HashMap<String, in_place::Interface> = Default::default();
     for (config, wake, destination_ids, gate, stats, lanes) in parts {
         let health = Arc::new(health::Health::reporting(&config.name, stopped_tx.clone()));
         let outlets: Vec<worker::Outlet> = config
@@ -540,37 +552,13 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             .zip(&destination_ids)
             .zip(&stats.destinations)
             .map(|(((name, d), &id), destination_stats)| {
-                // Built here, once: the names were checked above, and destinations naming the
-                // same CA and certificate share their settings.
-                let tls = match &d.connector {
-                    Destination::Mllp { tls: Some(t), .. } => Some(certificates.client(t)),
-                    Destination::Http { api: Some(api), .. } => {
-                        resources.apis.get(api).and_then(|a| certificates.named(&a.tls()).transpose())
-                    }
-                    Destination::Http { ca, certificate, .. } => {
-                        certificates.named(&ductus_core::tls::ConnectTls::new(ca, certificate)).transpose()
-                    }
-                    _ => None,
-                };
-                let tls = tls.transpose().with_context(|| format!("{}: TLS", config.label_destination(name)))?;
-                anyhow::Ok(worker::Outlet {
+                let kept = in_place::KeptDestination {
                     id,
-                    tls,
                     stats: destination_stats.clone(),
                     pause: activity.pauses[&id].clone(),
-                    limiter: config
-                        .rate_limit_for(d)
-                        .map(|r| Arc::new(limiter::Limiter::new(r.clone(), std::time::Instant::now()))),
-                    server: match &d.connector {
-                        Destination::Sftp { server, .. } => sftp_server(server),
-                        _ => None,
-                    },
-                    api: match &d.connector {
-                        Destination::Http { api: Some(api), .. } => resources.apis.get(api).cloned(),
-                        _ => None,
-                    },
-                    route: d.route().map(|target| intakes[target].clone()), // checked by check_routes
-                })
+                    limiter: None,
+                };
+                shared.outlet(&config, name, d, kept)
             })
             .collect::<Result<_>>()?;
         // Respond-mode HTTP interfaces get requests over a channel instead of a queue.
@@ -601,20 +589,17 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 },
             });
         }
+        let parts = in_place::Interface {
+            config: config.clone(),
+            wake: wake.clone(),
+            health: health.clone(),
+            stats: stats.clone(),
+            lanes: lanes.clone(),
+            outlets,
+            threads: Vec::new(), // once they're spawned (below)
+        };
         for slot in 0..config.slots() {
-            let job = worker::Job {
-                config: config.clone(),
-                slot,
-                wake: wake.clone(),
-                requests: requests.take(),
-                health: health.clone(),
-                outlets: outlets.clone(),
-                stats: stats.clone(),
-                ownership: owner.ownership.clone(),
-                waiting: waiting.clone(),
-                decided: decided.clone(),
-                lanes: lanes.clone(),
-            };
+            let job = parts.job(&shared, slot, requests.take());
             if inspected.as_ref().is_some_and(|i| i.interfaces.contains(&config.name)) {
                 debugged.entry(config.name.clone()).or_default().push(job);
                 continue;
@@ -627,6 +612,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 Isolation::Dedicated => dedicated.push((format!("{}-w{slot}", config.name), job)),
             }
         }
+        kept.insert(config.name.clone(), parts);
         interfaces.push((config, wake, destination_ids, health, gate, stats, lanes));
     }
 
@@ -634,16 +620,16 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let mut jobs = 0;
     let mut threads = Vec::new();
-    // Each interface's threads, to ask them for changes while the engine runs (a deploy in place).
-    // TODO(0.7.5.1): kept with each interface's parts once a deploy uses them.
-    let mut _commands: std::collections::HashMap<String, Vec<tokio::sync::mpsc::UnboundedSender<worker::Command>>> =
-        Default::default();
+    // Each interface's threads and its slots on each, to ask them for changes while the engine
+    // runs (a deploy in place).
     let mut commands_for = |thread_jobs: &[worker::Job]| {
         let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        let mut names: Vec<&str> = thread_jobs.iter().map(|j| j.config.name.as_str()).collect();
-        names.dedup();
-        for name in names {
-            _commands.entry(name.to_string()).or_default().push(tx.clone());
+        for job in thread_jobs {
+            let threads = &mut kept.get_mut(&job.config.name).expect("every job's interface is kept").threads;
+            match threads.last_mut() {
+                Some(placed) if placed.commands.same_channel(&tx) => placed.slots.push(job.slot),
+                _ => threads.push(in_place::Placed { commands: tx.clone(), slots: vec![job.slot] }),
+            }
         }
         rx
     };
@@ -828,6 +814,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         resources: resources.clone(),
         docs,
         interfaces: running,
+        kept: in_place::Kept::new(shared, kept.into_values()),
         retention,
         calls: services.calls(),
         activity,
