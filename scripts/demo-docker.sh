@@ -2,9 +2,10 @@
 # The container image: build it, run the example relay with Postgres and a receiver in compose,
 # stream ADT through it, `docker compose stop` the engine mid-stream (SIGTERM), start it again,
 # and check nothing was lost or sent twice. Also: runs as a non-root user, project read-only.
-# Then release mode as the container's PID 1 (0.7.4.4.2): two deploys and a SIGHUP reload hand
-# over in the engine's own process (the container never restarts), a sender sending through a
-# deploy is refused nothing, and `docker stop` still stops it cleanly.
+# Then release mode as the container's PID 1 (0.7.4.4.2): the first deploy and a SIGHUP reload
+# hand over in the engine's own process (the container never restarts), the second (only code
+# changed) goes in place (0.7.5.1) while a sender sends and is refused nothing, and `docker stop`
+# still stops it cleanly.
 # BUILD=0 skips the build (an image tagged $IMAGE must exist). Needs Docker, curl and git.
 set -euo pipefail
 
@@ -132,7 +133,7 @@ echo "   sender: $(grep -o 'rejected [0-9]*, refused [0-9]*' "$WORK/gen2.log")"
 echo "== a reload: docker kill --signal HUP"
 docker kill --signal HUP "$container" >/dev/null
 for _ in $(seq 1 150); do
-  compose logs releases 2>&1 | grep -q 'handover: handed over.*sending paused' && [ "$(compose logs releases 2>&1 | grep -c 'handover: handed over')" -ge 3 ] && break
+  compose logs releases 2>&1 | grep -q 'handover: handed over.*sending paused' && [ "$(compose logs releases 2>&1 | grep -c 'handover: handed over')" -ge 2 ] && break
   sleep 0.2
 done
 echo "   $(compose logs --no-log-prefix releases 2>&1 | grep 'handover: handed over' | tail -1 | sed 's/.*handover: //')"
@@ -146,9 +147,11 @@ echo "   PID 1: $pid1; docker stop: exit code $code2"
 
 fail=""
 grep -q '✓ handed over to a new engine in this process' "$WORK/deploy1.log" || fail+=" first-deploy"
-grep -q '✓ handed over to a new engine in this process' "$WORK/deploy2.log" || fail+=" second-deploy"
+# Only the code changed: in place (0.7.5.1), no new engine.
+grep -q '✓ applied in place' "$WORK/deploy2.log" || fail+=" second-deploy"
 grep -q 'rejected 0, refused 0' "$WORK/gen2.log" || fail+=" refused-during-deploy"
-[ "$(compose logs releases 2>&1 | grep -c 'handover: handed over')" -ge 3 ] || fail+=" sighup-reload"
+# The first deploy's handover and the SIGHUP's.
+[ "$(compose logs releases 2>&1 | grep -c 'handover: handed over')" -ge 2 ] || fail+=" sighup-reload"
 [ "$before" = "$after" ] || fail+=" container-restarted"
 [ "$pid1" = ductus ] || fail+=" pid1"
 [ "$code2" = 0 ] || fail+=" release-mode-exit-code"

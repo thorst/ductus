@@ -1,9 +1,9 @@
 # Deploys to the Windows service (0.7.4.4.2-0.7.4.4.3), end to end (needs an elevated PowerShell):
 #   install the MSI -> the service in release mode (DUCTUS_RELEASES), nothing deployed yet ->
 #   `ductus deploy` of a release: handed over in the service's own process (the same pid, the
-#   service Running throughout) -> the next release under traffic (nothing refused) -> `ductus
-#   handover` (the service's paramchange reload) -> `ductus deploy --rollback` -> uninstall, and
-#   everything it made removed.
+#   service Running throughout) -> the next release under traffic, only code changed: applied in
+#   place (0.7.5.1; nothing refused) -> `ductus handover` (the service's paramchange reload) ->
+#   `ductus deploy --rollback` (in place too) -> uninstall, and everything it made removed.
 #
 # Refuses to run where Ductus is installed or C:\ProgramData\Ductus exists: it never touches a
 # real install.
@@ -108,7 +108,7 @@ try {
     Check "the same process, the service Running" ((Service-Pid) -eq $pid0 -and (Get-Service Ductus).Status -eq "Running")
     Check "recorded in the file" ($r.Out -match "recorded in .*: deployed to prod")
 
-    Write-Host "== 3. the next release under traffic: nothing refused"
+    Write-Host "== 3. the next release under traffic (only code changed: in place): nothing refused"
     $archive = "$p\interfaces\adt-in\archive.ts"
     if (Test-Path $archive) { Add-Content $archive "// second" } else { Add-Content $yaml "# second" }
     & $git @("commit", "-qam", "second") | Out-Null
@@ -117,7 +117,7 @@ try {
     $gen = Start-Process $tools -ArgumentList "gen --count 600 --patients 60 --rate 100 --connections 2" -PassThru -NoNewWindow -RedirectStandardOutput "$work\gen.log" -RedirectStandardError "$work\gen.err"
     Start-Sleep 1
     $r = Deploy @($secondFile, "-m", "second deploy") "deploy2"
-    Check "deployed" ($r.Ok -and $r.Out -match "handed over to a new engine in this process") $r.Out
+    Check "deployed in place" ($r.Ok -and $r.Out -match "applied in place") $r.Out
     $gen.WaitForExit()
     $sent = Get-Content "$work\gen.log" -Raw
     Write-Host "      sender: $(($sent -split "`n" | Select-Object -Last 2) -join ' ')"
@@ -136,7 +136,7 @@ try {
 
     Write-Host "== 5. rolled back"
     $r = Deploy @("--rollback", "-m", "back to the first") "rollback"
-    Check "rolled back to release 1" ($r.Ok -and $r.Out -match "rollback to release" -and $r.Out -match "handed over") $r.Out
+    Check "rolled back to release 1, in place" ($r.Ok -and $r.Out -match "rollback to release" -and $r.Out -match "applied in place") $r.Out
     $id1 = ([regex]::Match($firstFile, "-([0-9a-f]{12})\.tar\.gz$")).Groups[1].Value
     Check "release 1 runs" ((Engine-Json).deployment.release -like "$id1*")
     Check "the same process, the service Running" ((Service-Pid) -eq $pid0 -and (Get-Service Ductus).Status -eq "Running")
