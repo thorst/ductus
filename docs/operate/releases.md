@@ -590,15 +590,17 @@ deploy`) in DUCTUS_API_TOKEN, the engine's API in DUCTUS_API_URL (or `--to`), an
 ```text
 $ ductus deploy .ductus/releases/integrations-7427b4d0a2b8.tar.gz -m "first release"
 stored release 7427b4d0a2b8 on the engine
-deploying: the gate runs (or a recent passing check is reused), then the handover…
-release 7427b4d0a2b8 (project integrations) to environment `prod`
-gate: passed in 0.91 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
-  started /home/todd/target/release/ductus (pid 4598): it reads the project, migrates the database and loads every interface's code while this one runs
-  ductus 0.7.0-dev (pid 4598) is ready after 438 ms and receives beside this one: stopping this one
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
+release 7427b4d0a2b8 (project integrations, branch main) to environment `prod`
+gate: passed in 0.95 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+  needs the handover: nothing ran here before: the first release starts by the handover
+  started /home/todd/target/release/ductus (pid 1740): it reads the project, migrates the database and loads every interface's code while this one runs
+  ductus 0.7.0-dev (pid 1740) is ready after 501 ms and receives beside this one: stopping this one
   this engine stopped in 0 ms and let go of its interfaces: the new one takes them
-✓ handed over to ductus 0.7.0-dev (pid 4598): receiving never stopped, sending paused 51 ms
+✓ handed over to ductus 0.7.0-dev (pid 1740): receiving never stopped, sending paused 63 ms
 changed 1 interface:
   release-demo-adt new here dc57f91f79d2
+recorded in .ductus/releases/integrations-7427b4d0a2b8.tar.gz: deployed to prod
 ```
 
 The release can be a file (stored first when the engine hasn't got it) or the id of one stored
@@ -625,37 +627,41 @@ since, by the same Ductus version
 
 ```text
 $ ductus deploy 212583ebcc72 -m "archive: MSH-6"
-deploying: the gate runs (or a recent passing check is reused), then the handover…
-release 212583ebcc72 (project integrations) to environment `prod`
-gate: reused check #24 (2026-11-11T17:06:08.209069Z by release-demo-deploy-3870: passed; nothing deployed here since)
-  started /home/todd/target/release/ductus (pid 4685): it reads the project, migrates the database and loads every interface's code while this one runs
-  ductus 0.7.0-dev (pid 4685) is ready after 412 ms and receives beside this one: stopping this one
-  this engine stopped in 2 ms and let go of its interfaces: the new one takes them
-✓ handed over to ductus 0.7.0-dev (pid 4685): receiving never stopped, sending paused 62 ms
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
+release 212583ebcc72 (project integrations, branch main) to environment `prod`
+gate: reused check #350 (2026-11-14T21:49:44.709686Z by release-demo-deploy-910: passed; nothing deployed here since)
+· release-demo-adt: code (in place)
+  release-demo-adt: code → bb37528fc711, applied in place (4 ms)
+✓ applied in place: 1 interface took its new code between two messages; the others never paused
 changed 1 interface:
   release-demo-adt dc57f91f79d2 → bb37528fc711
 ```
+
+Only the interface's code changed, so it went in place ([below](#in-place-or-by-the-handover)).
 
 A gate that finds problems refuses the deploy (exit 1, the problems listed, the check kept with
 the release). A new engine that can't take over leaves the running one as it was, as any
 handover does. For the rare failure after the old engine let go, see
 [Troubleshooting](../troubleshooting.md#the-engine-stopped-during-a-deploy-or-reload).
 
-**On Windows, in a container, under a plain `ductus run`**, the same deploy hands over inside the
-engine's own process: the steps say "in this process" instead of a pid, and the service or the
-container goes on as it was (here the engine is a container's PID 1, `scripts/demo-docker.sh`):
+**On Windows, in a container, under a plain `ductus run`**, a deploy that needs the handover hands
+over inside the engine's own process: the steps say "in this process" instead of a pid, and the
+service or the container goes on as it was (here a plain `ductus run`, `scripts/demo-promote.sh`):
 
 ```text
-$ ductus deploy /project/.ductus/releases/project-c85ec701a9c3.tar.gz --to http://127.0.0.1:7701 -m "first deploy"
-stored release c85ec701a9c3 on the engine
-deploying: the gate runs (or a recent passing check is reused), then the handover…
-release c85ec701a9c3 (project project) to environment `dev`
-gate: passed in 0.62 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `dev` since)
+$ DUCTUS_API_TOKEN=$DEV_TOKEN ductus deploy .ductus/releases/integrations-7fc9677466dd.tar.gz --to $DEV -m "the lab feed"
+stored release 7fc9677466dd on the engine
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
+release 7fc9677466dd (project integrations, branch main) to environment `dev`
+gate: passed in 0.96 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `dev` since)
+  needs the handover: nothing ran here before: the first release starts by the handover
   started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
-  the new engine (ductus 0.7.0-dev, in this process) is ready after 151 ms and receives beside this one: stopping this one
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 418 ms and receives beside this one: stopping this one
   this engine stopped in 0 ms and let go of its interfaces: the new one takes them
-✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 27 ms
-no interface's code changed (the project's own files may have)
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 29 ms
+changed 1 interface:
+  promote-demo new here 0db7a1e1454e
+recorded in .ductus/releases/integrations-7fc9677466dd.tar.gz: deployed to dev
 ```
 
 ### In place, or by the handover
@@ -675,6 +681,24 @@ Anything else needs the **handover**, and the answer says which change did (`nee
 interface added or removed; the project's own files (`ductus.yaml`, `resources.yaml`,
 `docs-schema.yaml`, `environments/`, `secrets/`); the first release on an engine
 ([nuance](../nuances/releases.md#a-deploy-goes-in-place-only-when-it-changes-interfaces-code-destinations-or-destination-settings-level-1)).
+Here a release raises an interface's lanes (`scripts/demo-promote.sh`, step 11):
+
+```text
+$ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy 2f235eaa1d28 --from $TEST --to $PROD -m "8 lanes, tested"
+fetched release 2f235eaa1d28 from http://127.0.0.1:17793 (1.4 KB, deployed to: test)
+stored release 2f235eaa1d28 on the engine (1 record of where it went added)
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
+release 2f235eaa1d28 (project integrations, branch main) to environment `prod`
+gate: passed in 0.93 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+· promote-demo: ordering (needs the handover: `ordering` changed (how messages are received, stored or laid out in lanes is set at a start))
+  needs the handover: promote-demo: `ordering` changed (how messages are received, stored or laid out in lanes is set at a start)
+  started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 427 ms and receives beside this one: stopping this one
+  this engine stopped in 1 ms and let go of its interfaces: the new one takes them
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 18 ms
+changed 1 interface:
+  promote-demo 0db7a1e1454e → b2d89c0907a5
+```
 
 **When to use `--in-place-only`:** where a handover's short pause of every interface's sending
 should happen in a change window. Such a release is refused before the gate runs, with the reason;
@@ -700,9 +724,9 @@ Otherwise the deploy is refused before the gate runs, saying whose work and why:
 
 ```text
 $ DUCTUS_API_TOKEN=$OPS ductus deploy 7427b4d0a2b8 -m "back to the first"
-deploying: the gate runs (or a recent passing check is reused), then the handover…
-release 7427b4d0a2b8 (project integrations) to environment `prod`
-✗ would undo release-demo-adt: replaces bb37528fc711 (deployed 2026-11-11 17:06 UTC by release-demo-deploy-3870 on DESKTOP-GCT6E6V): it came from commit a324857afd23, which this release's history doesn't have, so their change may be undone (`ductus history release-demo-adt`)
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
+release 7427b4d0a2b8 (project integrations, branch main) to environment `prod`
+✗ would undo release-demo-adt: replaces bb37528fc711 (deployed 2026-11-14 21:49 UTC by release-demo-deploy-910 on DESKTOP-GCT6E6V): it came from commit a2c7ae68146f, which this release's history doesn't have, so their change may be undone (`ductus history release-demo-adt`)
 ✗ refused: it would undo someone else's work (release-demo-adt): merge their commit and release again, or deploy with `force` (`ductus deploy --force`) and a reason to undo it on purpose
 ```
 
@@ -760,7 +784,7 @@ A release that wasn't deployed to `test` is refused before anything runs (409, n
 ```text
 $ DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy .ductus/releases/integrations-7fc9677466dd.tar.gz --to $PROD -m "the lab feed"
 stored release 7fc9677466dd on the engine
-deploying: the gate runs (or a recent passing check is reused), then the handover…
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
 release 7fc9677466dd (project integrations, branch main) to environment `prod`
 ✗ this environment takes only releases deployed to test first (DUCTUS_DEPLOY_REQUIRES), and it hasn't been deployed anywhere that this engine knows of: deploy it there, then bring it here with its record (`ductus deploy 7fc9677466dd --from <test's engine> --to <this engine>`)
 ✗ refused by this environment's rules (`rules` says why)
@@ -773,13 +797,14 @@ record isn't part of it):
 ```text
 $ DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy .ductus/releases/integrations-7fc9677466dd.tar.gz --to $TEST -m "the lab feed"
 stored release 7fc9677466dd on the engine (1 record of where it went added)
-deploying: the gate runs (or a recent passing check is reused), then the handover…
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
 release 7fc9677466dd (project integrations, branch main) to environment `test`
-gate: passed in 0.99 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `test` since)
+gate: passed in 0.82 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `test` since)
+  needs the handover: nothing ran here before: the first release starts by the handover
   started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
-  the new engine (ductus 0.7.0-dev, in this process) is ready after 362 ms and receives beside this one: stopping this one
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 376 ms and receives beside this one: stopping this one
   this engine stopped in 0 ms and let go of its interfaces: the new one takes them
-✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 29 ms
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 18 ms
 changed 1 interface:
   promote-demo new here 0db7a1e1454e
 recorded in .ductus/releases/integrations-7fc9677466dd.tar.gz: deployed to test
@@ -802,13 +827,14 @@ from, DUCTUS_API_TOKEN for the one it goes to:
 $ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy 7fc9677466dd --from $TEST --to $PROD -m "tested in test"
 fetched release 7fc9677466dd from http://127.0.0.1:17793 (1.3 KB, deployed to: dev, test)
 release 7fc9677466dd was stored on the engine before (2 records of where it went added)
-deploying: the gate runs (or a recent passing check is reused), then the handover…
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
 release 7fc9677466dd (project integrations, branch main) to environment `prod`
-gate: passed in 0.87 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+gate: passed in 1.12 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+  needs the handover: nothing ran here before: the first release starts by the handover
   started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
-  the new engine (ductus 0.7.0-dev, in this process) is ready after 365 ms and receives beside this one: stopping this one
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 391 ms and receives beside this one: stopping this one
   this engine stopped in 0 ms and let go of its interfaces: the new one takes them
-✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 33 ms
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 17 ms
 changed 1 interface:
   promote-demo new here 0db7a1e1454e
 ```
@@ -846,13 +872,12 @@ $ curl -sS -X POST -H "Authorization: Bearer $PROD_TOKEN" $PROD/api/v1/upstream/
 brought e16ad8ac6cdb from test (new) with 1 record(s) of where it went
 
 $ DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy e16ad8ac6cdb --to $PROD -m "lab: LAB2, tested"
-deploying: the gate runs (or a recent passing check is reused), then the handover…
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
 release e16ad8ac6cdb (project integrations, branch main) to environment `prod`
-gate: passed in 0.77 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
-  started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
-  the new engine (ductus 0.7.0-dev, in this process) is ready after 265 ms and receives beside this one: stopping this one
-  this engine stopped in 0 ms and let go of its interfaces: the new one takes them
-✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 17 ms
+gate: passed in 0.9 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+· promote-demo: code (in place)
+  promote-demo: code → 9242851858df, applied in place (6 ms)
+✓ applied in place: 1 interface took its new code between two messages; the others never paused
 changed 1 interface:
   promote-demo 0db7a1e1454e → 9242851858df
 ```
@@ -894,7 +919,7 @@ there and deploys it. Two locks, the second one optional:
 ```text
 $ DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy .ductus/releases/integrations-d74871d958b0.tar.gz --to $PROD --force -m "just this once"
 stored release d74871d958b0 on the engine
-deploying: the gate runs (or a recent passing check is reused), then the handover…
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
 release d74871d958b0 (project integrations, branch feature/lab-codes) to environment `prod`
 ✗ this environment takes only releases deployed to test first (DUCTUS_DEPLOY_REQUIRES), and it hasn't been deployed anywhere that this engine knows of: deploy it there, then bring it here with its record (`ductus deploy d74871d958b0 --from <test's engine> --to <this engine>`)
 ✗ this environment takes only releases made on main (DUCTUS_DEPLOY_BRANCHES), and this one was made on `feature/lab-codes`: merge it, then release from there
@@ -918,19 +943,19 @@ refusing (undoing is the point), and the gate always runs (the database may have
 
 ```text
 $ DUCTUS_API_TOKEN=$OPS_PROD ductus deploy --rollback --to $PROD -m "LAB3 broke the lab feed"
-rolling back: the gate runs, then the handover…
+rolling back: the gate runs, then it's applied (in place when it can be, else by the handover)…
 rollback to release e16ad8ac6cdb (project integrations, branch main) to environment `prod`
 · a rollback isn't held to this environment's rules (DUCTUS_DEPLOY_REQUIRES, DUCTUS_DEPLOY_BRANCHES): release e16ad8ac6cdb ran here before
-⚠ undoes promote-demo: replaces 1df6c3410060 (deployed 2026-11-12 16:36 UTC by ci on DESKTOP-GCT6E6V): it came from commit bc7b61dc0197, which this release's history doesn't have, so their change may be undone (`ductus history promote-demo`)
-gate: passed in 0.81 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
-  started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
-  ⚠ promote-demo: replaces 1df6c3410060 (deployed 2026-11-12 16:36 UTC by ci on DESKTOP-GCT6E6V): it came from commit bc7b61dc0197, which this release's history doesn't have, so their change may be undone (`ductus history promote-demo`)
-  the new engine (ductus 0.7.0-dev, in this process) is ready after 328 ms and receives beside this one: stopping this one
-  this engine stopped in 1 ms and let go of its interfaces: the new one takes them
-✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 33 ms
+⚠ undoes promote-demo: replaces 1df6c3410060 (deployed 2026-11-14 21:47 UTC by ci on DESKTOP-GCT6E6V): it came from commit b2f7f1fc49d9, which this release's history doesn't have, so their change may be undone (`ductus history promote-demo`)
+gate: passed in 0.92 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+· promote-demo: code (in place)
+  promote-demo: code → 9242851858df, applied in place (1 ms)
+✓ applied in place: 1 interface took its new code between two messages; the others never paused
 changed 1 interface:
   promote-demo 1df6c3410060 → 9242851858df
 ```
+
+A rollback goes in place by the same rule as a deploy: here only the interface's code differs.
 
 The audit log has a `release.rollback` row (`detail.from`, the release it left; `detail.undoes`),
 and the deployment is marked as a rollback. **A second `--rollback` doesn't go back to what the
@@ -961,14 +986,16 @@ Here prod is rolled back from 8 lanes to 2 while a sender sends and the receiver
 ```text
 waiting on prod: 62; lanes (first+count): 2+8
 $ DUCTUS_API_TOKEN=$OPS_PROD ductus deploy --rollback --to $PROD -m "8 lanes broke the lab feed"
-rolling back: the gate runs, then the handover…
+rolling back: the gate runs, then it's applied (in place when it can be, else by the handover)…
 rollback to release 7fc9677466dd (project integrations, branch main) to environment `prod`
 …
-gate: passed in 0.9 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+gate: passed in 1.01 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+· promote-demo: ordering (needs the handover: `ordering` changed (how messages are received, stored or laid out in lanes is set at a start))
+  needs the handover: promote-demo: `ordering` changed (how messages are received, stored or laid out in lanes is set at a start)
   …
-  the new engine (ductus 0.7.0-dev, in this process) is ready after 264 ms and receives beside this one: stopping this one
-  this engine stopped in 8 ms and let go of its interfaces: the new one takes them
-✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 128 ms
+  the new engine (ductus 0.7.0-dev, in this process) is ready after 362 ms and receives beside this one: stopping this one
+  this engine stopped in 11 ms and let go of its interfaces: the new one takes them
+✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 66 ms
 changed 1 interface:
   promote-demo b2d89c0907a5 → 0db7a1e1454e
 
