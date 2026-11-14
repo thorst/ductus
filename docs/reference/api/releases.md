@@ -14,7 +14,7 @@ The releases this engine's project ran in its environment, newest first, one ent
 
 ## `POST /api/v1/deployments`
 
-Deploy a stored release to this engine (release mode): this environment's rules, the "replaces" check, the gate (or a recent passing check reused), then the handover to an engine running it; or roll back (`rollback`) to a release that ran here before. Answers when the new engine sends, or when it couldn't (this one goes on): seconds, plus the gate's time when it runs. 200: deployed. 409: refused before anything ran (folder mode, another deploy or check running, the release already runs, this environment's rules, its "replaces" check names someone's work, a rollback to a release that never ran here), the report says why. 422: the gate found problems. 500: the new engine couldn't take over (this one goes on). Needs the `deploy` permission. One deploy or check at a time per engine.
+Deploy a stored release to this engine (release mode): this environment's rules, the "replaces" check, what it changes here (`plan`), the gate (or a recent passing check reused), then **in place** when only interfaces' code, destinations and destination settings change (those interfaces' workers restart between two messages on the new code; the others never pause), else the handover to an engine running it (`plan.handover_because` says why); or roll back (`rollback`) to a release that ran here before, the same way. Answers once it runs (in place: milliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as it was), plus the gate's time when it runs. 200: deployed (`applied` says how). 409: refused before anything ran (folder mode, another deploy or check running, the release already runs, this environment's rules, its "replaces" check names someone's work, a rollback to a release that never ran here, `in_place_only` and it needs the handover), the report says why. 422: the gate found problems. 500: it couldn't be applied (this engine goes on as it was). Needs the `deploy` permission. One deploy or check at a time per engine.
 
 **Who may call it:** an operator or admin with the `deploy` permission (admins have it).
 
@@ -22,12 +22,12 @@ Deploy a stored release to this engine (release mode): this environment's rules,
 
 **Answers**
 
-- `200` Deployed: the release runs here (application/json): [`DeployReport`](#deployreport)
+- `200` Deployed: the release runs here (`applied`: in place or by the handover) (application/json): [`DeployReport`](#deployreport)
 - `400` No reason given, no release named, or no such release (application/json): [`ErrorBody`](#errorbody)
 - `403` (application/json): [`ErrorBody`](#errorbody)
 - `409` Refused before anything ran: `outcome` says why (application/json): [`DeployReport`](#deployreport)
 - `422` The gate found problems: `gate.check.report` (application/json): [`DeployReport`](#deployreport)
-- `500` The new engine couldn't take over: this one goes on (application/json): [`DeployReport`](#deployreport)
+- `500` It couldn't be applied: this engine goes on as it was (application/json): [`DeployReport`](#deployreport)
 
 ## `GET /api/v1/releases`
 
@@ -211,22 +211,24 @@ What a deploy did, or why it didn't.
 
 | Field | Type | |
 |---|---|---|
+| `applied` (optional) | text or null | How it was applied: `in_place` (only the changed interfaces restarted their workers, between two messages; the others never paused) or `handover` (a new engine took over: every interface's sending paused for a moment); absent when refused. |
 | `branches` | list of text | The branches it was made on, as its files said (the same files made on two branches are one release); empty: a detached HEAD without `--branch`, or made without git. |
 | `changes` | list of [`DeployChange`](#deploychange) |  |
-| `deployment` (optional) | number or null | The deployment the new engine recorded and what it changed (absent if it wasn't recorded within seconds: `GET /engine` shows it then). |
+| `deployment` (optional) | number or null | The deployment recorded and what it changed (absent if the new engine's wasn't recorded within seconds: `GET /engine` shows it then). |
 | `environment` | text |  |
 | `forced` | true or false | Deployed over the work `replaces` names. |
 | `gate` (optional) | [`DeployGate`](#deploygate) or null |  |
 | `ok` | true or false | The new release runs here. |
 | `outcome` | text | What happened, in a sentence. |
 | `place` (optional) | [`PlaceInfo`](#placeinfo) or null |  |
+| `plan` (optional) | [`PlanInfo`](#planinfo) or null |  |
 | `project` | text |  |
 | `release` | text | The release, in hex, and its first 12 characters. |
 | `replaces` | map of name to text | Each interface (and "the project's own files") whose running version is someone else's work this release would undo, with why. A deploy is refused when any is named, unless forced; a rollback names them and goes on. |
 | `rollback` | true or false | A rollback: to a release that ran here before. |
 | `rules` | list of text | What this environment's rules said (`DUCTUS_DEPLOY_REQUIRES`, `DUCTUS_DEPLOY_BRANCHES`): each reason a deploy is refused, or (a rollback) that they don't hold it. |
 | `short` | text |  |
-| `steps` | list of text | What the handover said as it went. |
+| `steps` | list of text | What applying it said as it went: each interface applied in place, or the handover's steps. |
 
 ### `DeployRequest`
 
@@ -234,6 +236,7 @@ What a deploy did, or why it didn't.
 |---|---|---|
 | `all_tests` (optional) | true or false | Run every interface's tests in the gate, not only those of what the release changes here (a passing check is reused only when it ran them all too: never, then). |
 | `force` (optional) | true or false | Deploy over someone else's work the "replaces" check names: their change is undone. The interfaces and whose work go into the audit log (`release.force`) and the deployment's history. Doesn't skip this environment's rules (`DUCTUS_DEPLOY_REQUIRES`, `DUCTUS_DEPLOY_BRANCHES`). |
+| `in_place_only` (optional) | true or false | Only in place: refuse (409, before the gate runs) when the release changes something only the handover applies (`plan.handover_because` says what), and (500) when applying in place fails, instead of taking the handover. For sites that schedule handovers. |
 | `reason` (optional) | text or null | Why: required, except in an environment named `dev`. Recorded with the deployment, in its history and in the audit log. |
 | `release` (optional) | text or null | The release: its id, or its first 12 characters. Store it first (`POST /releases`). Required, except for a rollback (default: the last release run here before the current one, skipping any a rollback left). |
 | `rollback` (optional) | true or false | Roll back: go back to a release that ran in this environment before. Not held to this environment's rules; the "replaces" check names whose work it undoes without refusing; the gate runs. Audited as `release.rollback`. |
@@ -252,6 +255,7 @@ What a release would change in this engine's environment, compared with what run
 |---|---|---|
 | `changes` | list of [`HereChange`](#herechange) | Each interface it changes, adds or removes here, by name. |
 | `environment` | text |  |
+| `plan` (optional) | [`PlanInfo`](#planinfo) or null |  |
 | `project_files_change` (optional) | true or false or null | The files outside every interface (`ductus.yaml`, `resources.yaml`, `environments/`, `secrets/`) differ from the running release's. None when this engine doesn't run a release (folder mode, or nothing deployed yet). |
 | `ran_before` | true or false | It ran in this environment before (a rollback may go back to it). |
 | `running` | true or false | It runs here now: deploying it changes nothing. |
@@ -279,6 +283,24 @@ Where a release was deployed: one entry of a release file's record (`deployed`).
 | `environment` | text |  |
 | `here` (optional) | true or false | Recorded on this engine's database; false: a release file said so when it was stored here. |
 | `host` | text | The engine's server. |
+
+### `PlanInfo`
+
+What a release changes here, by kind (`changes::plan`).
+
+| Field | Type | |
+|---|---|---|
+| `changes` | list of [`PlannedChange`](#plannedchange) | Every interface whose code version changes, is added or is removed. |
+| `handover_because` | list of text | Why it needs the handover, a line per reason (the project's own files, then each interface); empty: it applies in place. |
+
+### `PlannedChange`
+
+| Field | Type | |
+|---|---|---|
+| `handover_because` (optional) | text or null | Why only the handover applies it; absent when it goes in place. |
+| `in_place` | true or false | It can be applied in place (its workers restarted between messages). |
+| `interface` | text |  |
+| `what` | list of text | What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`, `source`, `added`, `removed`, ... |
 
 ### `Pulled`
 

@@ -462,6 +462,28 @@ fn code_loads_while_another_interface_s_call_is_in_flight() {
     drop(in_flight);
 }
 
+/// A module that throws at its top level doesn't load, and says why: deno_core resolves its
+/// evaluation with Ok and reports the exception through the event loop (a load that only
+/// watched the evaluation took it as loaded: "entry not installed", 0.7.5.1).
+#[test]
+fn a_module_that_throws_at_its_top_level_doesn_t_load() {
+    let dir = project(&[
+        (
+            "bad/transform.ts",
+            "throw new Error(\"read the table in a transform\");\nexport function transform(m: unknown) { return m; }\n",
+        ),
+        ("good/transform.ts", "export function transform(m: unknown) { return m; }\n"),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let err = rt.block_on(host.add_interface(&dir.path().join("bad/transform.ts"))).unwrap_err();
+    assert!(format!("{err:#}").contains("read the table in a transform"), "{err:#}");
+    // The isolate goes on: the next interface loads and runs.
+    let good = rt.block_on(host.add_interface(&dir.path().join("good/transform.ts"))).unwrap();
+    assert!(rt.block_on(host.transform_with(good, ADT)).unwrap().is_some());
+}
+
 /// Hundreds of interfaces load into one isolate, each importing a shared file (a pool thread at a
 /// thousand interfaces): the 0.7.5.1 load that stopped driving the event loop once idle failed
 /// from about the 129th, its module's result coming a tick after the loop said it was idle.

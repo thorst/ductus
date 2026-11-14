@@ -178,10 +178,10 @@ What an interface runs, and the deployment it came with.
 | Field | Type | |
 |---|---|---|
 | `at` | time (RFC 3339) |  |
-| `by` | text | The account that started it, the person who asked for the handover, or `systemd (systemctl reload)`. |
+| `by` | text | The account that started it, the person who asked for the handover or deploy, or `systemd (systemctl reload)`. |
 | `changed` | number | Interfaces whose code version is new for them with this deployment. |
 | `git_commit` (optional) | text or null | The project's git commit (HEAD); none without a git repository. |
-| `how` | text | `start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`. |
+| `how` | text | `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`, or `deploy` (a deploy applied in place: the engine kept running, only the changed interfaces took their new code). |
 | `id` | number | The deployment's id (`deployments.id`). |
 | `reason` (optional) | text or null | Why (`ductus handover -m`); none when nobody said. |
 | `release` (optional) | text or null | Release mode (`ductus run --releases`): the release it runs, in hex; none in folder mode. Its commit and files not committed are then the release's. |
@@ -359,7 +359,7 @@ The first message waiting in a lane: the next one its worker handles.
 | `from` (optional) | text or null | The code version before (12 hex characters); none when new here, or unchanged. |
 | `git_commit` (optional) | text or null | The project's commit then (hex); none without git. |
 | `host` | text |  |
-| `how` | text | `start`, `service` or `handover`. |
+| `how` | text | `start`, `service`, `handover` or `deploy` (a deploy applied in place, without a handover). |
 | `id` | number |  |
 | `reason` (optional) | text or null |  |
 | `to` (optional) | text or null | The code version from then; none when unchanged. |

@@ -548,19 +548,31 @@ __setFixtures({fixtures_json}, {formats_json});
         self.guard.arm(timeout, false);
         let mut evaluated = std::pin::pin!(self.runtime.mod_evaluate(id));
         let runtime = &mut self.runtime;
-        // The module's result can come a tick after the loop says it's idle: poll again then,
-        // and only after many idle ticks in a row conclude that nothing will settle it.
+        // The loop first, its error winning: a module that throws at its top level resolves
+        // `evaluated` with Ok and reports the exception through the loop. The module's result
+        // can also come a tick after the loop says it's idle: poll again then, and only after
+        // many idle ticks in a row conclude that nothing will settle it.
         let mut idle = 0;
         let result = std::future::poll_fn(|cx| {
+            let event_loop = runtime.poll_event_loop(cx, PollEventLoopOptions::default());
+            if let Poll::Ready(Err(e)) = event_loop {
+                return Poll::Ready(Err(anyhow!("{e}")));
+            }
             if let Poll::Ready(done) = evaluated.as_mut().poll(cx) {
+                // Its exception, if it threw, may surface on the loop's next turn.
+                if done.is_ok()
+                    && let Poll::Ready(Err(e)) = runtime.poll_event_loop(cx, PollEventLoopOptions::default())
+                {
+                    return Poll::Ready(Err(anyhow!("{e}")));
+                }
                 return Poll::Ready(done.map_err(|e| anyhow!("{e}")));
             }
-            match runtime.poll_event_loop(cx, PollEventLoopOptions::default()) {
+            match event_loop {
                 Poll::Pending => {
                     idle = 0;
                     Poll::Pending
                 }
-                Poll::Ready(Err(e)) => Poll::Ready(Err(anyhow!("{e}"))),
+                Poll::Ready(Err(_)) => unreachable!("returned above"),
                 Poll::Ready(Ok(())) if idle < 1_000 => {
                     idle += 1;
                     cx.waker().wake_by_ref();
