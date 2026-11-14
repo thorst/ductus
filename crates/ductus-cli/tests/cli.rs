@@ -32,6 +32,32 @@ fn without_a_database(dir: &Path, args: &[&str]) -> (bool, String) {
     (out.status.success(), format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)))
 }
 
+/// A command's stdout is its result, which scripts capture (`TOKEN=$(ductus token create …)`);
+/// its log lines go to stderr. Under load sqlx warns about a slow statement (its summary has a
+/// `…`): when that went to stdout, tests took it for the token and the engine answered "missing
+/// `Authorization`" (a header that isn't ASCII). `RUST_LOG=debug` logs every statement.
+#[test]
+fn a_commands_log_never_reaches_its_output() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("log-test-{nanos}");
+    let run = |args: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(args)
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("RUST_LOG", "debug")
+            .output()
+            .unwrap()
+    };
+    let out = run(&["token", "create", &name, "--role", "viewer"]);
+    let _ = run(&["token", "revoke", &name]);
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(out.status.success(), "{stdout}{stderr}");
+    assert!(stderr.contains("DEBUG"), "the log is on stderr: {stderr}");
+    assert_eq!(stdout.lines().count(), 1, "only the token: {stdout}");
+    assert!(stdout.starts_with("dux_") && stdout.trim().is_ascii(), "{stdout}");
+}
+
 /// The docs' reference pages are made by `ductus reference docs` and committed: a change to a
 /// command, an API operation, a setting, an Event Log ID, a metric or an audit action that isn't
 /// written into them fails here.
@@ -4177,12 +4203,17 @@ async fn history_tells_who_changed_what_and_why() {
     };
     let mut new = running().await;
     let deployed = |n: usize| read_log().matches("deployed:").count() >= n;
-    for _ in 0..100 {
-        if deployed(2) {
-            break;
+    // A handover's start under a parallel run can take a while: up to a minute each.
+    let wait_deployed = async |n: usize| {
+        for _ in 0..600 {
+            if deployed(n) {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+        panic!("deployment {n} wasn't logged: {}", read_log());
+    };
+    wait_deployed(2).await;
     let logged = read_log();
     assert!(logged.contains("deployed over someone else's change"), "{logged}");
     // Nothing changed: a start that ran it as it was (`--all` only).
@@ -4190,31 +4221,29 @@ async fn history_tells_who_changed_what_and_why() {
     assert!(ok && !out.contains('⚠'), "{out}");
     // The second engine stopped; the third runs it (left running, it would hold the interface on
     // the shared database: CI's one-owner demo saw it).
-    for _ in 0..100 {
+    for _ in 0..600 {
         if !new.alive() {
             break;
         }
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
+    assert!(!new.alive(), "the second engine stopped after the handover: {}", read_log());
     new = running().await;
-    for _ in 0..100 {
-        if deployed(3) {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+    wait_deployed(3).await;
 
-    let history = |args: &[&str], database: bool| {
+    let history =|args: &[&str], database: bool| {
         let mut command = Command::new(env!("CARGO_BIN_EXE_ductus"));
         command.arg("history").arg(&name).args(args).arg("--root").arg(&root);
         command.env_remove("DUCTUS_PROJECT").env_remove("DUCTUS_ENV").env_remove("DUCTUS_DATABASE_URL");
         if database {
             command.args(["--database-url", &db]);
         }
+        // Its output only: a log line on stderr (a slow statement under a parallel run) would
+        // break `--json`'s.
         let out = command.output().unwrap();
-        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
-        assert!(out.status.success(), "{said}");
-        said
+        let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+        assert!(out.status.success(), "{stdout}{}", String::from_utf8_lossy(&out.stderr));
+        stdout
     };
     let text = history(&[], true);
     let lines: Vec<&str> = text.lines().collect();

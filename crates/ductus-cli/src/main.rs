@@ -23,6 +23,7 @@ mod upgrade;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
+use tracing_subscriber::fmt::writer::BoxMakeWriter;
 
 #[derive(Parser)]
 #[command(name = "ductus", version, about = "Code-first healthcare integration engine")]
@@ -1358,9 +1359,20 @@ fn service_command(_: ServiceAction) -> Result<()> {
 }
 
 async fn run(cli: Cli) -> Result<()> {
+    // The engine's log is its output (`run`, `dev`: stdout, where journald, Docker and the
+    // guides' `> run.log` take it). Every other command's stdout is its result, which scripts
+    // capture (`TOKEN=$(ductus token create …)`): their log lines go to stderr, or a slow
+    // database's warning would be read as the token.
+    let engine = matches!(cli.command, Command::Run(_) | Command::Dev { .. });
+    let (writer, terminal) = if engine {
+        (BoxMakeWriter::new(std::io::stdout), std::io::IsTerminal::is_terminal(&std::io::stdout()))
+    } else {
+        (BoxMakeWriter::new(std::io::stderr), std::io::IsTerminal::is_terminal(&std::io::stderr()))
+    };
     tracing_subscriber::fmt()
+        .with_writer(writer)
         // Plain text when logging to a file or pipe (no color codes in log files).
-        .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stdout()))
+        .with_ansi(terminal)
         .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| {
             // Doctor's report says what failed; the TLS verifier would log each failure again.
             if matches!(cli.command, Command::Doctor { .. }) {

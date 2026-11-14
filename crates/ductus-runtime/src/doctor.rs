@@ -2569,7 +2569,13 @@ mod tests {
     }
 
     async fn one(target: Target) -> Check {
-        check(vec![probe(target)], Duration::from_secs(2), &Default::default()).await.remove(0)
+        one_within(target, Duration::from_secs(2)).await
+    }
+
+    /// With a longer timeout, for checks that aren't about one: a login to the shared test
+    /// database (and doctor's 20 timed commits) can take over 2 s while the whole suite runs.
+    async fn one_within(target: Target, timeout: Duration) -> Check {
+        check(vec![probe(target)], timeout, &Default::default()).await.remove(0)
     }
 
     fn https(url: &str) -> Target {
@@ -2770,7 +2776,7 @@ mod tests {
     #[tokio::test]
     async fn logs_in_to_the_store_and_times_commits() {
         let Ok(url) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
-        let c = one(Target::Store(url.clone())).await;
+        let c = one_within(Target::Store(url.clone()), Duration::from_secs(15)).await;
         assert_eq!(step(&c, "login").outcome, Outcome::Ok, "{c:#?}");
         assert!(step(&c, "login").detail.contains("PostgreSQL"), "{c:#?}");
         assert!(step(&c, "commits").detail.contains(&format!("median of {COMMITS}")), "{c:#?}");
@@ -2778,7 +2784,7 @@ mod tests {
         // A wrong password is named as such.
         let mut wrong: url::Url = url.parse().unwrap();
         wrong.set_password(Some("wrong-password")).unwrap();
-        let c = one(Target::Store(wrong.to_string())).await;
+        let c = one_within(Target::Store(wrong.to_string()), Duration::from_secs(15)).await;
         assert_eq!(step(&c, "login").outcome, Outcome::Fail, "{c:#?}");
         assert!(c.advice.iter().any(|a| a.contains("was refused")), "{c:#?}");
     }
@@ -3008,9 +3014,21 @@ mod tests {
         ca: bool,
         issuer: Option<&rcgen::Issuer<'_, rcgen::KeyPair>>,
     ) -> (rcgen::Certificate, rcgen::CertificateParams, rcgen::KeyPair) {
+        certificate_from(Utc::now(), name, days, ca, issuer)
+    }
+
+    /// The same, `days` from `now`'s date: a test counting the days left counts from the same
+    /// `now`, or one run across UTC midnight is a day off.
+    fn certificate_from(
+        now: DateTime<Utc>,
+        name: &str,
+        days: i64,
+        ca: bool,
+        issuer: Option<&rcgen::Issuer<'_, rcgen::KeyPair>>,
+    ) -> (rcgen::Certificate, rcgen::CertificateParams, rcgen::KeyPair) {
         use chrono::Datelike;
         let date = |d: i64| {
-            let day = (Utc::now() + chrono::Duration::days(d)).date_naive();
+            let day = (now + chrono::Duration::days(d)).date_naive();
             rcgen::date_time_ymd(day.year(), day.month() as u8, day.day() as u8)
         };
         let key = rcgen::KeyPair::generate().unwrap();
@@ -3066,12 +3084,13 @@ mod tests {
     async fn reads_certificates_with_40_20_10_3_days_left_and_an_expired_one() {
         let warn = [30, 14, 7];
         for (days, stage) in [(40, None), (20, Some(30)), (10, Some(14)), (3, Some(7)), (-2, Some(0))] {
-            let (cert, _, key) = certificate("Test Server", days, false, None);
+            let now = Utc::now();
+            let (cert, _, key) = certificate_from(now, "Test Server", days, false, None);
             let port = tls_server(tls_config(&[&cert], &key)).await;
             let (c, seen) = certificate_of(https(&format!("https://localhost:{port}/orders"))).await;
             let ends = seen.chain_not_after.expect("read though not trusted");
-            assert_eq!(ductus_core::alerts::days_left(ends, Utc::now()), days, "{seen:#?}");
-            assert_eq!(ductus_core::alerts::certificate_stage(ends, Utc::now(), &warn), stage, "{days} days");
+            assert_eq!(ductus_core::alerts::days_left(ends, now), days, "{seen:#?}");
+            assert_eq!(ductus_core::alerts::certificate_stage(ends, now, &warn), stage, "{days} days");
             assert_eq!((seen.host.as_str(), seen.port, seen.resource.as_str()), ("localhost", port, "test"));
             assert_eq!((seen.subject.as_deref(), seen.chain_earliest.as_deref()), (Some("Test Server"), None));
             assert_eq!(seen.not_after, seen.chain_not_after, "a chain of one");
@@ -3087,14 +3106,15 @@ mod tests {
 
     #[tokio::test]
     async fn the_earliest_expiry_in_the_chain_counts() {
-        let (_, ca_params, ca_key) = certificate("Test Root", 3650, true, None);
+        let now = Utc::now();
+        let (_, ca_params, ca_key) = certificate_from(now, "Test Root", 3650, true, None);
         let root = rcgen::Issuer::new(ca_params, ca_key);
-        let (intermediate, int_params, int_key) = certificate("Test Intermediate", 5, true, Some(&root));
+        let (intermediate, int_params, int_key) = certificate_from(now, "Test Intermediate", 5, true, Some(&root));
         let intermediate_issuer = rcgen::Issuer::new(int_params, int_key);
-        let (leaf, _, leaf_key) = certificate("Test Server", 60, false, Some(&intermediate_issuer));
+        let (leaf, _, leaf_key) = certificate_from(now, "Test Server", 60, false, Some(&intermediate_issuer));
         let port = tls_server(tls_config(&[&leaf, &intermediate], &leaf_key)).await;
         let (_, seen) = certificate_of(https(&format!("https://localhost:{port}/"))).await;
-        let days = |t: Option<DateTime<Utc>>| ductus_core::alerts::days_left(t.unwrap(), Utc::now());
+        let days = |t: Option<DateTime<Utc>>| ductus_core::alerts::days_left(t.unwrap(), now);
         assert_eq!((days(seen.not_after), days(seen.chain_not_after)), (60, 5), "{seen:#?}");
         assert_eq!(seen.chain_earliest.as_deref(), Some("Test Intermediate"));
         assert_eq!(seen.issuer.as_deref(), Some("Test Intermediate"));

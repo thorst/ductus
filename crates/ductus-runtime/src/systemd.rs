@@ -430,8 +430,36 @@ mod tests {
         std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
     }
 
-    fn free(port: u16) -> bool {
-        std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+    /// Nothing in this process listens on `port` any more. On Linux it's read from `/proc`, not
+    /// tried by binding: under a parallel test run another test can take a port the moment it's
+    /// free (`free_port` hands out ports the system just gave back), and the bind then fails.
+    pub(super) fn free(port: u16) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            !listens_here(port)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            std::net::TcpListener::bind(("127.0.0.1", port)).is_ok()
+        }
+    }
+
+    /// One of this process's descriptors is a socket listening on `port`: `/proc/self/fd` names
+    /// each socket's inode, `/proc/self/net/tcp{,6}` each socket's port and state (0A: listening).
+    #[cfg(target_os = "linux")]
+    fn listens_here(port: u16) -> bool {
+        let ours: std::collections::HashSet<String> = std::fs::read_dir("/proc/self/fd")
+            .unwrap()
+            .filter_map(|entry| std::fs::read_link(entry.ok()?.path()).ok())
+            .filter_map(|link| Some(link.to_str()?.strip_prefix("socket:[")?.strip_suffix(']')?.to_string()))
+            .collect();
+        ["/proc/self/net/tcp", "/proc/self/net/tcp6"].iter().any(|table| {
+            std::fs::read_to_string(table).unwrap_or_default().lines().skip(1).any(|line| {
+                let f: Vec<&str> = line.split_whitespace().collect();
+                let local = f.get(1).and_then(|a| a.rsplit(':').next()).and_then(|p| u16::from_str_radix(p, 16).ok());
+                f.len() > 9 && f[3] == "0A" && local == Some(port) && ours.contains(f[9])
+            })
+        })
     }
 
     async fn takes_connections(listener: &TcpListener, port: u16) -> bool {
@@ -776,7 +804,7 @@ mod linux {
             assert_eq!(fake.receive().0, format!("FDSTOREREMOVE=1\nFDNAME=tcp-127.0.0.1-{b}"));
             assert!(fake.nothing_more());
             // Ours is closed (the port is free again for whatever is configured now) ...
-            drop(std::net::TcpListener::bind(("127.0.0.1", b)).expect("b's port is free"));
+            assert!(super::super::tests::free(b), "b's port is free");
             // ... and the configured one is still there to listen on.
             let listener = systemd.listen("127.0.0.1", a).await.unwrap();
             assert_eq!(listener.local_addr().unwrap().port(), a);
@@ -839,7 +867,7 @@ mod linux {
             systemd.release(&name("127.0.0.1", b));
             drop(held_b);
             assert_eq!(names(systemd.copies().unwrap()), vec![name("127.0.0.1", a)]);
-            drop(std::net::TcpListener::bind(("127.0.0.1", b)).expect("the drained one is closed for real"));
+            assert!(super::super::tests::free(b), "the drained one is closed for real");
         }
 
         #[tokio::test]

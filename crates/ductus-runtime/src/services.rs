@@ -520,20 +520,28 @@ mod tests {
         .unwrap();
         let busy = EngineServices::new(shared.clone(), Default::default());
         let own = EngineServices::new(shared.clone(), shared.dedicated_pools(&config));
+        let one = || vec![serde_json::json!({"one": 1})];
+        // Judged by order, not by time: under a parallel test run a query (and above all a pool's
+        // first connection) can take longer than any margin chosen here. Both pools connect first.
+        assert_eq!(own.db_query("db", "SELECT 1 AS one", vec![]).await.unwrap(), one());
+        assert_eq!(busy.db_query("db", "SELECT 1 AS one", vec![]).await.unwrap(), one());
 
-        // Another interface holds the shared pool's only connection for a second.
-        let slow = busy.db_query("db", "SELECT 1 AS slept FROM pg_sleep(1)", vec![]);
-        tokio::time::sleep(Duration::from_millis(200)).await;
+        // Another interface holds the shared pool's only connection for two seconds; the
+        // dedicated pool answers meanwhile.
+        let mut slow = busy.db_query("db", "SELECT 1 AS slept FROM pg_sleep(2)", vec![]);
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        tokio::select! {
+            biased;
+            got = own.db_query("db", "SELECT 1 AS one", vec![]) => assert_eq!(got.unwrap(), one()),
+            got = &mut slow => panic!("the dedicated pool waited for the shared one to be free: {got:?}"),
+        }
 
-        let start = std::time::Instant::now();
-        assert_eq!(own.db_query("db", "SELECT 1 AS one", vec![]).await.unwrap(), [serde_json::json!({"one": 1})]);
-        assert!(start.elapsed() < Duration::from_millis(500), "own pool waited {:?}", start.elapsed());
-
-        // The same query through the shared pool waits its turn.
-        let start = std::time::Instant::now();
-        busy.db_query("db", "SELECT 1 AS one", vec![]).await.unwrap();
-        assert!(start.elapsed() >= Duration::from_millis(500), "shared pool took {:?}", start.elapsed());
-        assert_eq!(slow.await.unwrap(), [serde_json::json!({"slept": 1})]);
+        // The same query through the shared pool waits its turn: it ends after the slow one.
+        let ended = async |call: BoxFuture<Vec<Value>>| (call.await.unwrap(), std::time::Instant::now());
+        let ((slept, slept_at), (queued, queued_at)) =
+            tokio::join!(ended(slow), ended(busy.db_query("db", "SELECT 1 AS one", vec![])));
+        assert_eq!((slept, queued), (vec![serde_json::json!({"slept": 1})], one()));
+        assert!(queued_at >= slept_at, "the shared pool's next query didn't wait for its only connection");
     }
 
     /// `db()` over TLS from resources.yaml (a throwaway Postgres with its own CA): verify-full with

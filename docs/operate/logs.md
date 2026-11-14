@@ -21,6 +21,12 @@ Lines are plain text with fields (`interface=adt-in destination=lab`), so grep f
 message comes first, then the fields (`grep 'delivery failed.*interface=adt-in'`). Under
 `ductus run` in a terminal they're colored; elsewhere plain.
 
+The engine (`ductus run`, `ductus dev`) writes its log to standard output, where the journal,
+Docker and a `> run.log` take it. Every other command writes its log lines (a slow database's
+warning, say) to standard error, so its standard output is only its result, safe to capture:
+`TOKEN=$(ductus token create ci --role operator)` holds the token and nothing else, however
+busy the database.
+
 ## What the lines mean
 
 From a real engine, a start, a pause and resume, then a receiver that went down and a drain:

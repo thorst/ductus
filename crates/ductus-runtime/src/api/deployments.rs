@@ -49,8 +49,10 @@ use utoipa_axum::routes;
 /// loads every interface's code), as `ductus handover`'s default.
 const READY_WITHIN: Duration = Duration::from_secs(5 * 60);
 /// How long the answer waits for the new engine's record of the deployment (it lands beside its
-/// start, tens of milliseconds after it sends).
-const RECORDED_WITHIN: Duration = Duration::from_secs(3);
+/// start, tens of milliseconds after it sends; the answer goes as soon as it's there). 3 s was
+/// once too short on a busy database (a test run with three engines), and without the record the
+/// release file isn't stamped with where it went: a deploy already takes seconds, so wait longer.
+const RECORDED_WITHIN: Duration = Duration::from_secs(15);
 
 pub fn routes() -> OpenApiRouter<super::Shared> {
     OpenApiRouter::new().routes(routes!(deploy, runs))
