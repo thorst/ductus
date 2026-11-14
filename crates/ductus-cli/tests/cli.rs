@@ -5043,8 +5043,9 @@ fn a_release_is_the_commit_with_its_versions_and_tests() {
 /// API up); `ductus deploy` stores Ann's release, runs the gate and hands over to an engine running
 /// it. Bob's release (Ann's commit in its history) deploys over hers. Ann's next release, from a
 /// branch without Bob's commit, is refused naming his work; checked, then forced, it reuses that
-/// check (the pre-run) and the new engine records the warning. A folder-mode engine refuses
-/// deploys, saying how to switch.
+/// check (the pre-run) and the new engine records the warning. Bob's release from a squashed
+/// history is accepted over Ann's version once a deploy brought it from his (0.7.5). A
+/// folder-mode engine refuses deploys, saying how to switch.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work() {
@@ -5185,6 +5186,30 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     assert!(warning.contains(&format!("by {name}-bob")), "{report:#}");
     drop(engine);
     let engine = running().await;
+
+    // A rewritten history (0.7.5): Bob squashes main into a new root commit. His first release
+    // from it leaves the interface as it runs (only a note changed), so it's deployed without a
+    // check and records his commit; his next one changes it, over Ann's version from a commit
+    // the squash doesn't have, and is accepted: a deploy brought that version from his history.
+    git(dir.path(), &["checkout", "-q", "--orphan", "squashed"]);
+    std::fs::write(dir.path().join("notes.md"), "squashed\n").unwrap();
+    git(dir.path(), &["add", "notes.md"]);
+    git(dir.path(), &["commit", "-qm", "one commit"]);
+    let s = release_json(dir.path(), &["-m", "squashed"]);
+    let (ok, out) = deploy(&bob, &[s["file"].as_str().unwrap(), "-m", "the squash"]);
+    assert!(ok && !out.contains("⚠"), "{out}\n{}", read(&log));
+    drop(engine);
+    let engine = running().await;
+    std::fs::write(dir.path().join("lib/codes.ts"), "export const LAB = \"LAB\"; // bob, squashed\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "bob's change after the squash"]);
+    let t = release_json(dir.path(), &["-m", "bob after the squash"]);
+    let (ok, out) = deploy(&bob, &[t["file"].as_str().unwrap(), "-m", "bob's change again", "--json"]);
+    assert!(ok, "{out}\n{}", read(&log));
+    let report: serde_json::Value = serde_json::from_str(&out[out.find("{\n").unwrap()..]).unwrap();
+    assert_eq!(report["replaces"], serde_json::json!({}), "{report:#}");
+    assert_eq!(report["changes"][0]["warning"], serde_json::Value::Null, "{report:#}");
+    drop(engine);
+    let engine = running().await;
     drop(engine);
     let unpacked = std::fs::read_dir(&releases).unwrap().flatten().filter(|e| e.file_name().len() == 64).count();
     assert!(unpacked <= 3, "the running release and the two used last are kept: {unpacked}");
@@ -5199,8 +5224,10 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     for who in ["ann", "bob"] {
         let _ = ductus(dir.path(), &["token", "revoke", &format!("{name}-{who}")]);
     }
-    let ids: Vec<Vec<u8>> =
-        [&a, &b, &c].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
+    let ids: Vec<Vec<u8>> = [&a, &b, &c, &s, &t]
+        .iter()
+        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
+        .collect();
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 

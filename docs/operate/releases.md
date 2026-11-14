@@ -658,7 +658,11 @@ no interface's code changed (the project's own files may have)
 For each interface a release changes, the version running there must be yours, or come from a
 commit in the release's history (a colleague's merged work), and not from files never committed;
 the project's own files (`ductus.yaml`, `resources.yaml`, `environments/`) are held to the same
-rule. Otherwise the deploy is refused before the gate runs, saying whose work and why:
+rule. A version counts as coming from your history when *any* deploy brought it from a commit
+there, not only the first: after a squash or a move to a fresh repository, the same files
+deployed once from the new history are accepted from then on
+([nuance](../nuances/releases.md#a-rewritten-history-is-accepted-once-a-deploy-brings-the-same-files-from-it-level-3)).
+Otherwise the deploy is refused before the gate runs, saying whose work and why:
 
 ```text
 $ DUCTUS_API_TOKEN=$OPS ductus deploy 7427b4d0a2b8 -m "back to the first"

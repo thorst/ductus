@@ -388,6 +388,64 @@ impl Store {
             })
             .collect())
     }
+
+    /// Where else each `(interface, deployment)`'s running version came from: the git commits of
+    /// later deployments that ran the interface (each ran the version `interface_versions` names,
+    /// since a change would have moved it there), with the files they hadn't committed. A version
+    /// first brought from a commit a release's history lacks (a rewritten history: a fresh
+    /// repository, a squash) may have come again from one it has. Read only for the "replaces"
+    /// check's suspects; deployments without git are left out.
+    pub async fn later_sources(&self, after: &[(&str, i32)]) -> Result<HashMap<String, Vec<Brought>>> {
+        if after.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let (names, ids): (Vec<&str>, Vec<i32>) = after.iter().copied().unzip();
+        let rows: Vec<(String, String, Option<Vec<String>>)> = sqlx::query_as(
+            "SELECT DISTINCT u.interface, d.git_commit, d.uncommitted
+             FROM unnest($1::text[], $2::int[]) AS u(interface, after)
+             JOIN interface_sets s ON u.interface = ANY(s.interfaces)
+             JOIN deployments d ON d.interface_set = s.id AND d.id > u.after
+             WHERE d.git_commit IS NOT NULL",
+        )
+        .bind(&names)
+        .bind(&ids)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the later deployments of what runs")?;
+        let mut found: HashMap<String, Vec<Brought>> = HashMap::new();
+        for (interface, git_commit, uncommitted) in rows {
+            found.entry(interface).or_default().push(Brought { git_commit, uncommitted });
+        }
+        Ok(found)
+    }
+
+    /// The same for a project version (release mode): later deployments in `environment` that ran
+    /// `version`, after `deployment`, with their commits.
+    pub async fn later_project_sources(
+        &self,
+        environment: &str,
+        version: &[u8],
+        deployment: i32,
+    ) -> Result<Vec<Brought>> {
+        let rows: Vec<(String, Option<Vec<String>>)> = sqlx::query_as(
+            "SELECT DISTINCT git_commit, uncommitted FROM deployments
+             WHERE environment = $1 AND project_version = $2 AND id > $3 AND git_commit IS NOT NULL",
+        )
+        .bind(environment)
+        .bind(version)
+        .bind(deployment)
+        .fetch_all(&self.pool)
+        .await
+        .context("reading the later deployments of the project version")?;
+        Ok(rows.into_iter().map(|(git_commit, uncommitted)| Brought { git_commit, uncommitted }).collect())
+    }
+}
+
+/// Where a deployment's code came from: its commit and the files it ran that weren't committed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Brought {
+    pub git_commit: String,
+    pub uncommitted: Option<Vec<String>>,
 }
 
 /// An interface a deployment changed (`deployment_changes`), with the versions' hashes.

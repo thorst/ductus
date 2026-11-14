@@ -3934,6 +3934,71 @@ async fn history_reads_one_interface() {
     forget_deployments(&pool, &env).await;
 }
 
+/// Where else a running version came from (0.7.5, the "replaces" check): the commits of later
+/// deployments that ran it, with what they hadn't committed; none from before the deployment
+/// asked about, none without git; a project version's the same way, in its environment.
+#[tokio::test]
+async fn later_deployments_say_where_else_a_version_came_from() {
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let env = format!("test-later-{}-{nanos}", std::process::id());
+    let a = format!("{env}-a");
+    let a1 = TestVersion::new(&a, &[("interfaces/a/interface.yaml", &format!("name: a # {env}\n"))]);
+    let versions = [a1.borrow()];
+    let ids = store.save_versions(&versions).await.unwrap();
+    let project = vec![7u8; 32];
+    let record = |commit: Option<&'static str>, uncommitted: Option<Vec<String>>| {
+        let (store, env, versions, ids, project) = (&store, &env, &versions, &ids, &project);
+        async move {
+            let d = ductus_store::NewDeployment {
+                environment: env,
+                instance: env,
+                host: "test-host",
+                version: "0.7.0-test",
+                how: "handover",
+                by: "ann",
+                reason: None,
+                git_commit: commit,
+                uncommitted: uncommitted.as_deref(),
+                versions,
+                warnings: &Default::default(),
+                docs: None,
+                release: None,
+                project_version: Some(project),
+                rollback: false,
+            };
+            store.record_deployment(&d, ids).await.unwrap()
+        }
+    };
+    let first = record(Some("1111"), Some(Vec::new())).await;
+    assert!(store.later_sources(&[(a.as_str(), first.id)]).await.unwrap().is_empty(), "nothing later yet");
+    record(Some("2222"), Some(Vec::new())).await;
+    record(None, None).await; // without git: says nothing
+    record(Some("3333"), Some(vec!["interfaces/a/interface.yaml".into()])).await;
+    record(Some("2222"), Some(Vec::new())).await; // the same again: once
+
+    let later = store.later_sources(&[(a.as_str(), first.id), ("nobody-ran-this", 0)]).await.unwrap();
+    assert_eq!(later.len(), 1, "{later:?}");
+    let mut seen: Vec<(&str, usize)> =
+        later[&a].iter().map(|b| (b.git_commit.as_str(), b.uncommitted.as_ref().map_or(0, Vec::len))).collect();
+    seen.sort();
+    assert_eq!(seen, [("2222", 0), ("3333", 1)]);
+
+    let mut project_later: Vec<String> = store
+        .later_project_sources(&env, &project, first.id)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|b| b.git_commit)
+        .collect();
+    project_later.sort();
+    assert_eq!(project_later, ["2222", "3333"]);
+    assert!(store.later_project_sources("another-env", &project, first.id).await.unwrap().is_empty());
+    assert!(store.later_project_sources(&env, &[8u8; 32], first.id).await.unwrap().is_empty());
+    forget_deployments(&pool, &env).await;
+}
+
 /// History by part (0.7.4.2): each version keeps which files each part runs (a version saved
 /// before gets them the next time an engine runs it, once); a deployment's change comes with both
 /// versions' files and parts; the audit log narrowed to a destination (a pause by its subject, a

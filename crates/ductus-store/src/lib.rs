@@ -36,7 +36,7 @@ pub use api::{
 };
 pub use audit::{ACTIONS as AUDIT_ACTIONS, Audit, AuditFilter, AuditRow, By, PreviousRun};
 pub use certificates::{CertificateRow, DOCTOR_RUNS_KEPT, DoctorRunRow};
-pub use deployments::{Changed, Current, Deployed, NewDeployment, NewVersion, Running, Since, VersionIds};
+pub use deployments::{Brought, Changed, Current, Deployed, NewDeployment, NewVersion, Running, Since, VersionIds};
 pub use directory::{DirectoryAccount, DirectoryPerson, DirectoryUpdate};
 pub use docs::DocsRow;
 pub use engines::{EngineLock, EngineRow, NewEngine, Owned};

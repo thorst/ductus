@@ -353,11 +353,35 @@ pub async fn replaced(
         .filter(|c| hashes.get(c.interface.as_str()).is_some_and(|h| *h != c.version.as_slice()))
         .filter(|c| suspect(c, source, who))
         .collect();
-    let ancestry = ancestry(source, suspects.iter().any(|c| c.git_commit.is_some())).await;
+    // Where else the suspects' versions came from: read only when there's a history to judge by.
+    let after: Vec<(&str, i32)> = suspects.iter().map(|c| (c.interface.as_str(), c.deployment)).collect();
+    let later = match source {
+        Source::Release { commit: None, .. } => HashMap::new(),
+        _ => store.later_sources(&after).await?,
+    };
+    let needed = suspects.iter().any(|c| c.git_commit.is_some() || later.contains_key(&c.interface));
+    let ancestry = ancestry(source, needed).await;
     Ok(suspects
         .iter()
+        .filter(|c| !brought_again(c, later.get(&c.interface).map(Vec::as_slice), ancestry.as_ref()))
         .filter_map(|c| Some((c.interface.clone(), judge(c, ancestry.as_ref(), source, true)?)))
         .collect())
+}
+
+/// A later deployment ran `before`'s version from a commit in this history, every file of it
+/// committed there: the version is that commit's too, so replacing it undoes nothing the history
+/// lacks (0.7.5: the same files from a rewritten history, a fresh repository or a squash, are
+/// accepted once any deploy brought them from a commit the history has).
+fn brought_again(
+    before: &Current,
+    later: Option<&[ductus_store::Brought]>,
+    ancestry: Option<&crate::git::Ancestry>,
+) -> bool {
+    let Some(ancestry) = ancestry.filter(|a| a.head.is_some()) else { return false };
+    later.unwrap_or_default().iter().any(|b| {
+        let uncommitted = b.uncommitted.as_deref().unwrap_or_default();
+        ancestry.contains(&b.git_commit) && !before.files.iter().any(|f| uncommitted.contains(f))
+    })
 }
 
 /// The same for the files outside every interface: the project version `project` runs now in
@@ -391,7 +415,18 @@ pub async fn project_replaced(
     if !suspect(&before, source, who) {
         return Ok(None);
     }
-    let ancestry = ancestry(source, before.git_commit.is_some()).await;
+    let later = match source {
+        Source::Release { commit: None, .. } => Vec::new(),
+        _ => store.later_project_sources(environment, &before.version, before.deployment).await?,
+    };
+    // `before.files` names only the project files it ran uncommitted: a later deployment vouches
+    // for the version only with every project file committed.
+    let later: Vec<_> =
+        later.into_iter().filter(|b| b.uncommitted.iter().flatten().all(|f| f.starts_with("interfaces/"))).collect();
+    let ancestry = ancestry(source, before.git_commit.is_some() || !later.is_empty()).await;
+    if brought_again(&before, Some(&later), ancestry.as_ref()) {
+        return Ok(None);
+    }
     Ok(judge(&before, ancestry.as_ref(), source, false))
 }
 
@@ -535,6 +570,25 @@ mod tests {
         assert!(refused.contains("by ann") && refused.ends_with("(`ductus history adt`)"), "{refused}");
         assert!(!suspect(&current("bob", Some(theirs), None), &source, &who("bob")), "bob's own work");
         assert!(suspect(&current("ann", Some(theirs), None), &source, &who("bob")));
+    }
+
+    /// A version first brought from a commit the release lacks (a rewritten history) is accepted
+    /// once a later deploy ran it from a commit the release has, its files committed there; not
+    /// when that deploy had its files uncommitted, nor from a commit the release lacks too.
+    #[test]
+    fn a_version_brought_again_from_the_releases_history_is_accepted() {
+        let (theirs, ours) = ("2".repeat(40), "1".repeat(40));
+        let ancestry = crate::git::Ancestry::of_release(&"3".repeat(40), &[[0x11u8; 20], [0x33u8; 20]].concat());
+        let before = current("ann", Some(&theirs), None);
+        let brought = |commit: &str, uncommitted: &[&str]| ductus_store::Brought {
+            git_commit: commit.into(),
+            uncommitted: Some(uncommitted.iter().map(|s| s.to_string()).collect()),
+        };
+        assert!(brought_again(&before, Some(&[brought(&ours, &[])]), Some(&ancestry)));
+        assert!(!brought_again(&before, Some(&[brought(&ours, &["interfaces/adt/interface.yaml"])]), Some(&ancestry)));
+        assert!(!brought_again(&before, Some(&[brought(&theirs, &[])]), Some(&ancestry)));
+        assert!(!brought_again(&before, None, Some(&ancestry)), "nothing later");
+        assert!(!brought_again(&before, Some(&[brought(&ours, &[])]), None), "no history to judge by");
     }
 
     /// Without git a release is held against the release it names as its base.
