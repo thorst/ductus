@@ -281,7 +281,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         }
     };
     let root = root.as_path();
-    let running_release = releases.as_ref().and_then(|r| r.running.clone());
+    let running_release = releases.as_ref().and_then(|r| r.running());
     let env = Environment::load(root, &options.env)?;
     // Said in the start's line: which of the code's `console` lines this environment logs.
     let console = env.console().as_str();
@@ -294,7 +294,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let heap_mb = settings.isolates.heap_mb;
     let api_address = settings.api.address(options.api_listen.as_deref())?;
     // Release mode before the first deploy runs none, waiting for one.
-    let waiting_for_a_release = releases.as_ref().is_some_and(|r| r.running.is_none());
+    let waiting_for_a_release = releases.as_ref().is_some_and(|r| r.running().is_none());
     if configs.is_empty() && !waiting_for_a_release {
         bail!("no interfaces found under {}", root.join("interfaces").display());
     }
@@ -543,7 +543,6 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         store: store.clone(),
         ownership: owner.ownership.clone(),
         waiting: waiting.clone(),
-        decided: decided.clone(),
         certificates: certificates.clone(),
         resources: resources.clone(),
         intakes,
@@ -598,6 +597,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             lanes: lanes.clone(),
             outlets,
             intake: intakes.get(&config.name).cloned(),
+            decided: decided.clone(),
             threads: Vec::new(), // once they're spawned (below)
         };
         for slot in 0..config.slots() {
@@ -871,13 +871,17 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     });
     // Recorded beside the start, not in its way (tens of milliseconds at a thousand interfaces, the
     // first time far more): a task that ends once it's written. The API shows it from then on.
-    let record = |engine: &Arc<control::Engine>| {
+    // Held from now until the start's deployment is recorded (or found it couldn't be): a deploy in
+    // place, possible once the API serves, records after it.
+    let mut recording = Some(engine.recording.clone().try_lock_owned().expect("a new engine has recorded nothing"));
+    let record = |engine: &Arc<control::Engine>, recording: tokio::sync::OwnedMutexGuard<()>| {
         let engine = engine.clone();
         let docs = snapshot.clone();
         let (mut code, decided, warned, root, who) =
             (code.clone(), decided.clone(), warned.clone(), root.to_path_buf(), who.clone());
         let release = running_release.clone();
         tokio::spawn(async move {
+            let _recording = recording;
             // Once they're computed (beside the start).
             let versions = code.wait_for(Option::is_some).await.ok().and_then(|v| v.clone().flatten());
             let Some(versions) = versions else {
@@ -889,7 +893,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             let host = audit::host_name();
             let recorded = deployment::record(&engine, &host, &who, recording).await;
             if let Some(d) = recorded {
-                let _ = engine.deployment.set(d);
+                engine.now_runs(d);
             }
         });
     };
@@ -898,7 +902,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     {
         start(engine.clone(), None);
         settle_in(engine.retention.clone(), &ended);
-        record(&engine);
+        if let Some(recording) = recording.take() {
+            record(&engine, recording);
+        }
     }
     let mut api_server = None;
     if let Some((host, port)) = &api_address {
@@ -949,7 +955,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         if let Some(start) = background.take() {
             start(engine.clone(), Some(handed.clone()));
         }
-        record(&engine);
+        if let Some(recording) = recording.take() {
+            record(&engine, recording);
+        }
         let _ = engine.handed_over.set(handed);
         t.running(sending_paused).await;
         if t.in_process() {

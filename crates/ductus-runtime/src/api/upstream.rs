@@ -167,7 +167,7 @@ async fn list(engine: Eng, _caller: Caller) -> Result<Json<UpstreamInfo>, ApiErr
     let project = engine.releases.as_ref().and_then(|r| r.project());
     let mut releases: Vec<UpstreamRelease> = serde_json::from_value(releases)
         .map_err(|e| unreachable(from, format!("reading its list of releases: {e}")))?;
-    releases.retain(|r| project.is_none_or(|p| r.project == p));
+    releases.retain(|r| project.as_deref().is_none_or(|p| r.project == p));
     let ids: Vec<Vec<u8>> = releases.iter().filter_map(|r| crate::deploy::unhex(&r.id)).collect();
     let stored = engine.store.stored_releases(&ids).await?;
     for r in &mut releases {

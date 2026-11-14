@@ -78,8 +78,8 @@ pub struct RunInfo {
 )]
 async fn runs(engine: Eng, _caller: Caller) -> Result<Json<Vec<RunInfo>>, ApiError> {
     let Some(project) = engine.releases.as_ref().and_then(|r| r.project()) else { return Ok(Json(Vec::new())) };
-    let runs = engine.store.release_runs(&engine.environment, project).await?;
-    let current = engine.releases.as_ref().and_then(|r| r.running.as_ref()).map(|r| r.id.clone());
+    let runs = engine.store.release_runs(&engine.environment, &project).await?;
+    let current = engine.releases.as_ref().and_then(|r| r.running()).map(|r| r.id.clone());
     let target = current.as_deref().and_then(|c| deploy::rollback_target(&runs, c)).map(|r| r.deployment);
     let last = runs.len().checked_sub(1);
     Ok(Json(
@@ -277,10 +277,10 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
 
     // Which release: the one named, or (a rollback) the last one run here before the current run.
     let runs = match (asked.rollback, releases.project()) {
-        (true, Some(project)) => engine.store.release_runs(&engine.environment, project).await?,
+        (true, Some(project)) => engine.store.release_runs(&engine.environment, &project).await?,
         _ => Vec::new(),
     };
-    let current = releases.running.as_ref().map(|r| r.id.clone());
+    let current = releases.running().map(|r| r.id.clone());
     let id = match (&asked.release, asked.rollback) {
         (Some(named), _) => find(&engine, named).await?,
         (None, false) => return Err(ApiError::bad_request("name the release to deploy (`release`)")),

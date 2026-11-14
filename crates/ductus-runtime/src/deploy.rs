@@ -184,16 +184,31 @@ impl Running {
 }
 
 /// Release mode, as an engine runs it: its settings and its release (None before the first deploy).
+/// Clones share the release: a deploy in place moves it for all of them.
 #[derive(Debug, Clone)]
 pub struct Releases {
     pub mode: Mode,
-    pub running: Option<Arc<Running>>,
+    running: Arc<std::sync::RwLock<Option<Arc<Running>>>>,
 }
 
 impl Releases {
+    pub fn new(mode: Mode, running: Option<Arc<Running>>) -> Self {
+        Self { mode, running: Arc::new(std::sync::RwLock::new(running)) }
+    }
+
+    /// The release it runs now (a deploy in place changes it).
+    pub fn running(&self) -> Option<Arc<Running>> {
+        self.running.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// It runs `release` from now on (a deploy in place applied it).
+    pub fn now_runs(&self, release: Arc<Running>) {
+        *self.running.write().unwrap_or_else(|e| e.into_inner()) = Some(release);
+    }
+
     /// The project this engine runs: its release's, else the one its settings name.
-    pub fn project(&self) -> Option<&str> {
-        self.running.as_ref().map(|r| r.manifest.project.as_str()).or(self.mode.project.as_deref())
+    pub fn project(&self) -> Option<String> {
+        self.running().map(|r| r.manifest.project.clone()).or_else(|| self.mode.project.clone())
     }
 }
 
@@ -232,7 +247,7 @@ pub async fn resolve(
             project = mode.project.as_deref(),
             "release mode: nothing is deployed to this environment yet; the engine runs no interface until a release is (`ductus deploy`)"
         );
-        return Ok((root, Releases { mode: mode.clone(), running: None }));
+        return Ok((root, Releases::new(mode.clone(), None)));
     };
     let hex = code::hex(&id);
     let (manifest, ancestry) = store
@@ -268,7 +283,7 @@ pub async fn resolve(
         release::short(&hex)
     );
     let running = Arc::new(Running { id, manifest, ancestry });
-    Ok((folder, Releases { mode: mode.clone(), running: Some(running) }))
+    Ok((folder, Releases::new(mode.clone(), Some(running))))
 }
 
 /// Write a release's files into `dir/<hex>/`: into a temporary folder first, its id checked, the

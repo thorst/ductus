@@ -1,6 +1,8 @@
 //! Recording what runs (0.7.3.1): at every start and handover, each interface's code version
 //! (`code`), the project's git commit (`git`), who and why, as a deployment
-//! (`Store::record_deployment`). The engine keeps what it recorded for the API.
+//! (`Store::record_deployment`); and at every deploy applied in place (0.7.5,
+//! `record_in_place`), the same for the whole engine with the changed interfaces' new versions.
+//! The engine keeps what it recorded last for the API.
 //!
 //! The versions are saved first, on their own (`save`): every delivery records the version that
 //! decided it (0.7.3.2), so the workers wait for its id before saving a decision (`Decided`),
@@ -153,7 +155,7 @@ pub async fn check(
 /// Who started this engine and why.
 #[derive(Debug, Clone)]
 pub struct Who {
-    /// `start`, `service` or `handover`.
+    /// `start`, `service`, `handover` or `deploy` (applied in place: `record_in_place`).
     pub how: &'static str,
     pub by: String,
     pub reason: Option<String>,
@@ -176,6 +178,11 @@ impl Who {
             reason: asked.reason.clone(),
             rollback: asked.rollback,
         }
+    }
+
+    /// A deploy applied in place: whoever asked for it (`ductus deploy`), and why.
+    pub fn deploy(by: &str, reason: Option<String>, rollback: bool) -> Self {
+        Self { how: "deploy", by: by.to_string(), reason, rollback }
     }
 }
 
@@ -253,11 +260,7 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
     let started = std::time::Instant::now();
     let Recording { versions, decided, warned, root, docs, release } = r;
     let commit = match &release {
-        Some(r) => r
-            .manifest
-            .git
-            .as_ref()
-            .map(|g| crate::git::Commit { id: Some(g.commit.clone()), uncommitted: r.manifest.uncommitted.clone() }),
+        Some(r) => release_commit(r),
         None => {
             let reading = versions.clone();
             tokio::task::spawn_blocking(move || self::commit(&root, &reading)).await.ok().flatten()
@@ -301,6 +304,115 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
             return None;
         }
     };
+    Some(said(recorded, who, commit, release.as_deref(), &warnings, started))
+}
+
+/// A release's commit and the files it ran that weren't committed, as its manifest says (its
+/// folder has no git); None when it was made without git.
+fn release_commit(r: &crate::deploy::Running) -> Option<crate::git::Commit> {
+    let git = r.manifest.git.as_ref()?;
+    Some(crate::git::Commit { id: Some(git.commit.clone()), uncommitted: r.manifest.uncommitted.clone() })
+}
+
+/// An interface a deploy applied in place (`Engine::replace_interface`): the version it runs now
+/// and that version's id once saved. None: it couldn't be worked out or saved (said in the log);
+/// its decisions are then saved without a version, and the deploy can't be recorded.
+#[derive(Debug, Clone)]
+pub struct Applied {
+    pub interface: String,
+    pub version: Option<Version>,
+    pub id: Option<i32>,
+}
+
+/// Record a deploy in place (0.7.5): one deployment of every interface the engine runs, the
+/// `applied` ones on their new versions and the rest on what they ran (no file read again,
+/// nothing saved for them), with `release` (release mode: it runs from now on, `GET /engine` says
+/// so), its commit, the warnings the deploy was let through with and the documentation as the
+/// engine now runs it. One at a time, after the start's (`Engine::recording`): each starts from
+/// what the one before left. Unlike a start's, an `Err` here is the deploy's to say: the
+/// interfaces run their new code all the same, recorded at the next start or deploy.
+pub async fn record_in_place(
+    engine: &crate::control::Engine,
+    who: &Who,
+    applied: &[Applied],
+    release: Option<Arc<crate::deploy::Running>>,
+    warnings: &HashMap<String, String>,
+) -> Result<Deployment> {
+    let started = std::time::Instant::now();
+    let _one_at_a_time = engine.recording.lock().await;
+    let Some(before) = engine.deployment() else {
+        anyhow::bail!(
+            "this engine's start wasn't recorded (its log says why), so there's nothing to record this deploy over: \
+             its interfaces run the new code, and the next start records what runs"
+        );
+    };
+    let interfaces = engine.interfaces();
+    let mut ids = ductus_store::VersionIds::new();
+    let mut versions = Vec::with_capacity(interfaces.len());
+    for running in interfaces.iter() {
+        let name = running.config.name.as_str();
+        let hash: &[u8] = match applied.iter().find(|a| a.interface == name) {
+            Some(Applied { version: Some(v), id: Some(id), .. }) => {
+                ids.insert(v.hash.to_vec(), *id);
+                &v.hash
+            }
+            Some(_) => anyhow::bail!(
+                "`{name}`'s new code version couldn't be saved (the log says why), so this deploy isn't recorded: it \
+                 runs the new code all the same, and the next start records it"
+            ),
+            None => {
+                &before
+                    .interfaces
+                    .get(name)
+                    .with_context(|| format!("`{name}` isn't in the deployment this engine recorded"))?
+                    .version
+            }
+        };
+        versions.push(NewVersion { interface: name, hash, files: Vec::new(), parts: String::new() });
+    }
+    let commit = release.as_deref().and_then(release_commit);
+    let project_version = release.as_ref().and_then(|r| r.project_version());
+    let configs: Vec<Arc<InterfaceConfig>> = interfaces.iter().map(|i| i.config.clone()).collect();
+    let docs: Vec<ductus_store::DocsRow> = ductus_core::docs::snapshot(configs.iter().map(|c| &**c), &engine.resources)
+        .into_iter()
+        .map(|(kind, name, docs)| ductus_store::DocsRow { kind, name, docs: docs.to_string() })
+        .collect();
+    let deployment = NewDeployment {
+        environment: &engine.environment,
+        instance: &engine.instance,
+        host: &engine.host,
+        version: env!("CARGO_PKG_VERSION"),
+        how: who.how,
+        by: &who.by,
+        reason: who.reason.as_deref(),
+        git_commit: commit.as_ref().and_then(|c| c.id.as_deref()),
+        uncommitted: commit.as_ref().map(|c| c.uncommitted.as_slice()),
+        versions: &versions,
+        warnings,
+        docs: Some(&docs),
+        release: release.as_ref().map(|r| r.id.as_slice()),
+        project_version: project_version.as_deref(),
+        rollback: who.rollback,
+    };
+    let recorded = engine.store.record_deployment(&deployment, &ids).await.context("recording the deploy")?;
+    let deployment = said(recorded, who, commit.as_ref(), release.as_deref(), warnings, started);
+    engine.now_runs(deployment.clone());
+    if let (Some(releases), Some(release)) = (&engine.releases, release) {
+        releases.now_runs(release);
+    }
+    Ok(deployment)
+}
+
+/// Say `recorded` in the log (what changed, by whom, from which commit or release, and each
+/// warning) and make it what the engine shows.
+fn said(
+    recorded: ductus_store::Deployed,
+    who: &Who,
+    commit: Option<&crate::git::Commit>,
+    release: Option<&crate::deploy::Running>,
+    warnings: &HashMap<String, String>,
+    started: std::time::Instant,
+) -> Deployment {
     for (interface, warning) in warnings.iter() {
         tracing::warn!(%interface, deployment = recorded.id, "deployed over someone else's change: {warning}");
     }
@@ -335,14 +447,14 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
         by = %who.by,
         how = who.how,
         reason = who.reason.as_deref(),
-        release = release.as_ref().map(|r| crate::release::short(&r.hex()).to_string()),
+        release = release.map(|r| crate::release::short(&r.hex()).to_string()),
         git = %git,
         took = ?started.elapsed(),
         "deployed: {}{}",
         if named.is_empty() { "nothing changed".to_string() } else { named.join(", ") },
         if more > 0 { format!(" and {more} more") } else { String::new() }
     );
-    Some(Deployment {
+    Deployment {
         id: recorded.id,
         at: recorded.at,
         how: who.how,
@@ -351,9 +463,9 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
         git_commit: commit.and_then(|c| c.id.clone()),
         uncommitted: commit.map(|c| c.uncommitted.clone()),
         changed,
-        release: release.as_ref().map(|r| r.hex()),
+        release: release.map(|r| r.hex()),
         interfaces: recorded.interfaces.into_iter().map(|i| (i.interface.clone(), i)).collect(),
-    })
+    }
 }
 
 /// The account this process runs as.

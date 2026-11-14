@@ -127,7 +127,7 @@ pub struct FileChange {
 #[schema(as = HistoryDeployment)]
 pub struct DeploymentDetail {
     pub id: i32,
-    /// `start`, `service` or `handover`.
+    /// `start`, `service`, `handover` or `deploy` (a deploy applied in place, without a handover).
     pub how: String,
     pub reason: Option<String>,
     pub host: String,
@@ -466,8 +466,10 @@ fn deployment(d: DeploymentEntry, touches: Touches) -> Entry {
         (None, Some(t), _) => format!("deployed {t} (new here)"),
         _ => format!("ran it unchanged ({})", d.how),
     };
-    if d.changed && d.how == "handover" {
-        what.push_str(" by a handover");
+    match d.how.as_str() {
+        "handover" if d.changed => what.push_str(" by a handover"),
+        "deploy" if d.changed => what.push_str(" in place"),
+        _ => {}
     }
     if let Some(reason) = &d.reason {
         what.push_str(&format!(": {reason}"));

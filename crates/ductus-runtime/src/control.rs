@@ -160,9 +160,13 @@ pub struct Engine {
     /// How this engine took over from the one before it (`systemctl reload`); unset after a
     /// plain start.
     pub handed_over: std::sync::OnceLock<crate::handover::HandedOver>,
-    /// What this engine runs, as its start recorded it (`deployment`); unset until then, or when
-    /// it couldn't be recorded.
-    pub deployment: std::sync::OnceLock<crate::deployment::Deployment>,
+    /// What this engine runs, as recorded (`deployment()`): by its start, then by each deploy in
+    /// place; None until the start's is, or when that couldn't be.
+    deployment: std::sync::RwLock<Option<Arc<crate::deployment::Deployment>>>,
+    /// Held while a deployment is recorded: the start's first (taken before the engine serves
+    /// anything), then each deploy in place in turn, each recording the set the one before it left
+    /// (two at once would each put back the other's interface).
+    pub(crate) recording: Arc<tokio::sync::Mutex<()>>,
     /// Release mode (`ductus run --releases`): where releases are unpacked, the project, the
     /// release it runs and how long a passing check may be reused. None: folder mode.
     pub releases: Option<crate::deploy::Releases>,
@@ -276,7 +280,8 @@ impl Engine {
             api,
             host,
             handed_over: std::sync::OnceLock::new(),
-            deployment: std::sync::OnceLock::new(),
+            deployment: Default::default(),
+            recording: Default::default(),
             releases,
             asker: std::sync::OnceLock::new(),
             ended,
@@ -291,6 +296,16 @@ impl Engine {
         self.interfaces.read().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// What this engine runs, as last recorded.
+    pub fn deployment(&self) -> Option<Arc<crate::deployment::Deployment>> {
+        self.deployment.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// What it runs from now on, recorded (hold `recording` while recording it).
+    pub(crate) fn now_runs(&self, deployment: crate::deployment::Deployment) {
+        *self.deployment.write().unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(deployment));
+    }
+
     pub fn interface(&self, name: &str) -> Option<Arc<Running>> {
         self.interfaces().iter().find(|i| i.config.name == name).cloned()
     }
@@ -300,17 +315,43 @@ impl Engine {
     /// metrics see its new destinations and their certificates, and what its code uses is worked
     /// out again when next asked. A certificate it connects to for the first time is checked
     /// now, beside the deploy (unless `doctor.schedule: off`), so its expiry shows without
-    /// waiting for the next round. Answers the files its new code loaded.
-    /// `in_place::NeedsHandover` when only the handover can apply it.
+    /// waiting for the next round. Its new code version (`root`: the project it was loaded from,
+    /// the new release's folder) is saved once applied, and its new workers save their decisions
+    /// with it (they wait for it). Answers the version, for the deploy's record
+    /// (`deployment::record_in_place`). `in_place::NeedsHandover` when only the handover can
+    /// apply it; any other `Err` leaves it running as it was.
     // The deploy endpoint calls this (0.7.5.1 item 7).
     #[allow(dead_code)]
     pub(crate) async fn replace_interface(
         self: &Arc<Self>,
         config: InterfaceConfig,
-    ) -> Result<Vec<ductus_script::CodeFile>> {
+        root: &std::path::Path,
+    ) -> Result<crate::deployment::Applied> {
         let name = config.name.clone();
         let running = self.interface(&name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
-        let replaced = self.kept.replace(config, &self.activity).await?;
+        let (saving, decided) = crate::deployment::Decided::channel();
+        let replaced = self.kept.replace(config, &self.activity, decided.clone()).await?;
+        // Its version from here on: the files its code loaded (V8's, so exactly what runs) and its
+        // interface.yaml read again. Its new workers wait for the id before saving a decision.
+        let (config, files, root) = (replaced.config.clone(), replaced.files, root.to_path_buf());
+        let version = tokio::task::spawn_blocking(move || {
+            let root = anyhow::Context::with_context(ductus_script::loaded_path(&root), || {
+                format!("finding {}", root.display())
+            })?;
+            crate::code::Version::of(&root, &config, &files)
+        })
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|v| v);
+        let version = match version {
+            Ok(v) => Some(v),
+            Err(e) => {
+                tracing::error!(interface = %name, error = %format!("{e:#}"), "couldn't work out the code version a deploy brought: its deliveries are saved without it, and the deploy isn't recorded");
+                None
+            }
+        };
+        crate::deployment::save(self.store.clone(), version.clone().map(|v| Arc::new(vec![v])), saving).await;
+        let id = decided.id(&name).await;
         self.swap_interface(Running {
             config: replaced.config,
             destinations: replaced.destinations,
@@ -329,9 +370,9 @@ impl Engine {
             }
         }
         if new && self.doctor.schedule.is_some() {
-            crate::certificates::check_beside(self, name);
+            crate::certificates::check_beside(self, name.clone());
         }
-        Ok(replaced.files)
+        Ok(crate::deployment::Applied { interface: name, version, id })
     }
 
     /// Put `running` in place of the running interface of its name (a deploy in place). What its

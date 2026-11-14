@@ -25,7 +25,7 @@ pub struct NewDeployment<'a> {
     pub host: &'a str,
     /// The binary's version.
     pub version: &'a str,
-    /// `start`, `service` or `handover`.
+    /// `start`, `service`, `handover` or `deploy` (applied in place, 0.7.5).
     pub how: &'a str,
     pub by: &'a str,
     pub reason: Option<&'a str>,
@@ -59,7 +59,7 @@ pub struct Current {
     pub files: Vec<String>,
     pub deployment: i32,
     pub at: DateTime<Utc>,
-    /// `start`, `service` or `handover`.
+    /// `start`, `service`, `handover` or `deploy`.
     pub how: String,
     pub by: String,
     pub host: String,
@@ -219,13 +219,12 @@ impl Store {
         Ok(ids)
     }
 
-    /// Record a start or handover: the deployment and the interfaces it changed, its versions
-    /// saved first (`save_versions`, whose `ids` these are). One transaction; a start that changes
-    /// nothing writes one row. Engines on one database may record at once (each its own interfaces).
+    /// Record a start, handover or deploy in place: the deployment and the interfaces it changed,
+    /// its versions saved first (`save_versions`, whose `ids` these are). A version missing from
+    /// `ids` must be the one its interface runs already (a deploy in place names the interfaces it
+    /// left alone by their hash only, files empty). One transaction; a start that changes nothing
+    /// writes one row. Engines on one database may record at once (each its own interfaces).
     pub async fn record_deployment(&self, d: &NewDeployment<'_>, ids: &VersionIds) -> Result<Deployed> {
-        if let Some(v) = d.versions.iter().find(|v| !ids.contains_key(v.hash)) {
-            anyhow::bail!("the code version of `{}` wasn't saved first", v.interface);
-        }
         let mut tx = self.pool.begin().await.context("starting to record the deployment")?;
         let names: Vec<&str> = d.versions.iter().map(|v| v.interface).collect();
         type Current = (String, i32, Vec<u8>, i32, DateTime<Utc>, String, Option<String>, Option<String>);
@@ -245,6 +244,16 @@ impl Store {
             (interface, (id, hash, Since { deployment, at, by, reason, git_commit }))
         })
         .collect();
+        let mut ids = ids.clone();
+        for v in d.versions {
+            if ids.contains_key(v.hash) {
+                continue;
+            }
+            match current.get(v.interface) {
+                Some((id, hash, _)) if hash.as_slice() == v.hash => ids.insert(hash.clone(), *id),
+                _ => anyhow::bail!("the code version of `{}` wasn't saved first", v.interface),
+            };
+        }
         let changed: Vec<&NewVersion> =
             d.versions.iter().filter(|v| current.get(v.interface).is_none_or(|(id, ..)| *id != ids[v.hash])).collect();
         let set = interface_set(&mut tx, &names).await?;

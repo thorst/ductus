@@ -374,8 +374,8 @@ One row per engine start and handover (migration 0026, 0.7.3), whether or not an
 | `instance` | text | The engine run, as in the audit log's `engine.start` and `engine.handover`. |
 | `host` | text | The machine's name. |
 | `version` | text | The binary's version. |
-| `how` | text | `start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`. |
-| `by_name` | text | Who: the account that started it, the person who asked for the handover (`sudo ductus handover`: the person behind `sudo`), or `systemd (systemctl reload)`. |
+| `how` | text | `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`, or `deploy` (0.7.5: a deploy applied in place; the engine kept running and only the changed interfaces took their new code; it names every interface the engine runs, the others with the version they already ran). |
+| `by_name` | text | Who: the account that started it, the person who asked for the handover (`sudo ductus handover`: the person behind `sudo`) or the deploy, or `systemd (systemctl reload)`. |
 | `reason` | text | Why (`ductus handover -m`); null when nobody said. |
 | `git_commit` | text | The project's git commit (HEAD, in hex); null when the project isn't in a git repository, or the repository has no commit yet. |
 | `uncommitted` | text[] | Files the interfaces run that aren't the commit's (changed since, or never committed), as `code_versions.files` names them; null without git, empty when everything is committed. |

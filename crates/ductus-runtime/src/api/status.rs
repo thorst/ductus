@@ -230,8 +230,8 @@ pub struct ReleaseMode {
 impl ReleaseMode {
     fn of(r: &crate::deploy::Releases) -> Self {
         Self {
-            project: r.project().map(str::to_string),
-            running: r.running.as_ref().map(|r| r.hex()),
+            project: r.project(),
+            running: r.running().map(|r| r.hex()),
             requires: r.mode.requires.clone(),
             branches: r.mode.branches.clone(),
             reuse_check_seconds: r.mode.reuse_check.as_secs(),
@@ -245,9 +245,11 @@ pub struct DeploymentInfo {
     /// The deployment's id (`deployments.id`).
     id: i32,
     at: DateTime<Utc>,
-    /// `start` (someone ran it), `service` (systemd or the Windows service started it) or `handover`.
+    /// `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`,
+    /// or `deploy` (a deploy applied in place: the engine kept running, only the changed
+    /// interfaces took their new code).
     how: &'static str,
-    /// The account that started it, the person who asked for the handover, or
+    /// The account that started it, the person who asked for the handover or deploy, or
     /// `systemd (systemctl reload)`.
     by: String,
     /// Why (`ductus handover -m`); none when nobody said.
@@ -396,7 +398,7 @@ async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
             sending_paused_ms: h.sending_paused.as_millis() as u64,
             in_process: h.in_process,
         }),
-        deployment: engine.deployment.get().map(DeploymentInfo::of),
+        deployment: engine.deployment().as_deref().map(DeploymentInfo::of),
         releases: engine.releases.as_ref().map(ReleaseMode::of),
     }))
 }
@@ -951,7 +953,7 @@ async fn interface(engine: Eng, _caller: Caller, Path(name): Path<String>) -> Ap
         folder: i.config.dir.display().to_string(),
         source_tls: source_tls(&i.config.source),
         source_allow: i.config.source.allow().map(|a| SourceAllow::of(a, &i.config.source)),
-        code: engine.deployment.get().and_then(|d| d.interfaces.get(&name)).map(CodeInfo::of),
+        code: engine.deployment().and_then(|d| d.interfaces.get(&name).map(CodeInfo::of)),
         lanes: LanesInfo::of(&i.lanes, i.destinations.len()),
     }))
 }

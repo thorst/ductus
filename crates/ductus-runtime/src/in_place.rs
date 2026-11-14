@@ -57,7 +57,6 @@ pub(crate) struct Shared {
     pub store: Store,
     pub ownership: Arc<crate::ownership::Ownership>,
     pub waiting: Arc<Waiting>,
-    pub decided: crate::deployment::Decided,
     pub certificates: Arc<crate::tls::Certificates>,
     pub resources: Resources,
     /// Every queued interface's intake (routes store into their target's).
@@ -76,6 +75,9 @@ pub(crate) struct Interface {
     pub outlets: Vec<Outlet>,
     /// Where its messages are stored (none in respond mode).
     pub intake: Option<Arc<Intake>>,
+    /// Its code version's id, which its workers save with every decision: the start's, then each
+    /// deploy's (its workers wait for it before saving one).
+    pub decided: crate::deployment::Decided,
     /// Where its slots run: each thread's commands and the slots on it.
     pub threads: Vec<Placed>,
 }
@@ -185,7 +187,7 @@ impl Interface {
             stats: self.stats.clone(),
             ownership: shared.ownership.clone(),
             waiting: waiting.clone(),
-            decided: shared.decided.clone(),
+            decided: self.decided.clone(),
             lanes: self.lanes.clone(),
         }
     }
@@ -273,13 +275,20 @@ impl Kept {
 
     /// Run `config`'s interface on its new code and settings from its next message (see
     /// `worker::Command::Replace`), on every thread its slots run on, its destinations added or
-    /// removed as the module says. Answers what it runs now.
+    /// removed as the module says. Its new workers save their decisions with the version id
+    /// `decided` gives (they wait for it; the workers they replace keep the old one for the
+    /// message in hand). Answers what it runs now.
     ///
     /// A thread that can't load the new code leaves the interface as it was: threads that already
     /// switched are given the old code back (the same files: V8's own modules, so nothing loads
     /// twice) before the error is returned. A destination change while its lanes are changing is
     /// refused with `NeedsHandover`, nothing changed.
-    pub async fn replace(&self, config: InterfaceConfig, activity: &Activity) -> Result<Replaced> {
+    pub async fn replace(
+        &self,
+        config: InterfaceConfig,
+        activity: &Activity,
+        decided: crate::deployment::Decided,
+    ) -> Result<Replaced> {
         let name = config.name.clone();
         let mut interface =
             self.interfaces.get(&name).with_context(|| format!("interface `{name}` isn't running here"))?.lock().await;
@@ -312,6 +321,7 @@ impl Kept {
             std::mem::replace(&mut interface.config, config),
             std::mem::replace(&mut interface.outlets, outlets),
             std::mem::replace(&mut interface.wake, wake),
+            std::mem::replace(&mut interface.decided, decided),
         );
         let mut switched = Vec::new();
         let mut files = Vec::new();
@@ -329,7 +339,7 @@ impl Kept {
             }
         }
         if let Some(error) = failed {
-            (interface.config, interface.outlets, interface.wake) = old;
+            (interface.config, interface.outlets, interface.wake, interface.decided) = old;
             self.put_back(&interface, &switched).await;
             if retarget && let Err(e) = activity.watch(interface.watched()).await {
                 tracing::warn!(interface = %name, error = %format!("{e:#}"), "couldn't watch its old destinations again: their last activity isn't saved until the next start");
@@ -415,6 +425,14 @@ mod tests {
         serde_yaml_ng::from_str(yaml).unwrap()
     }
 
+    /// `adt`'s version id is `id`, saved.
+    fn decided(id: i32) -> crate::deployment::Decided {
+        let (saving, decided) = crate::deployment::Decided::channel();
+        let by_interface = [("adt".to_string(), id)].into();
+        saving.send_replace(Some(Arc::new(crate::deployment::Saved { ids: Default::default(), by_interface })));
+        decided
+    }
+
     const ONE: &str = "name: adt\nsource: { mllp: { port: 6661 } }\ndestinations:\n  lab: { file: { dir: lab }, rate_limit: { per_minute: 60 } }\n  ris: { file: { dir: ris }, rate_limit: { per_minute: 60 } }\n";
 
     /// A thread that answers each `Replace` with `answer(n)` (n: how many it got before), and
@@ -468,7 +486,6 @@ mod tests {
             store,
             ownership: Arc::new(crate::ownership::Ownership::new(true)),
             waiting: Default::default(),
-            decided: crate::deployment::Decided::channel().1,
             certificates: Default::default(),
             resources: Default::default(),
             intakes: HashMap::from([(config.name.clone(), intake.clone())]),
@@ -493,6 +510,7 @@ mod tests {
             lanes,
             outlets,
             intake: Some(intake),
+            decided: decided(1),
             threads: threads.into_iter().map(|commands| Placed { commands, slots: vec![0] }).collect(),
             config,
         };
@@ -522,11 +540,12 @@ mod tests {
             "ris: { file: { dir: ris }, rate_limit: { per_minute: 60 } }",
             "ris: { file: { dir: ris2 }, rate_limit: { per_minute: 30 } }",
         );
-        let replaced = kept.replace(config(&two), &activity).await.unwrap();
+        let replaced = kept.replace(config(&two), &activity, decided(2)).await.unwrap();
         for seen in [&mut seen_a, &mut seen_b] {
             let job = seen.recv().await.unwrap();
             assert!(job.config.destinations().any(|(_, d)| d.rate_limit.as_ref().unwrap().per_minute == 30));
             assert!(job.waiting.get().is_none(), "a replacement reads first");
+            assert_eq!(job.decided.id("adt").await, Some(2), "its decisions are saved with the new version");
             assert!(Arc::ptr_eq(&job.wake, &wake), "same destinations: same wake-ups");
         }
         let (now, after, _) = running(&kept, "adt").await;
@@ -551,10 +570,12 @@ mod tests {
         let (kept, activity) = kept([a, b]);
         let (old, _, _) = running(&kept, "adt").await;
         let two = ONE.replace("dir: lab", "dir: lab2");
-        let error = kept.replace(config(&two), &activity).await.map(drop).unwrap_err();
+        let error = kept.replace(config(&two), &activity, decided(2)).await.map(drop).unwrap_err();
         assert!(format!("{error:#}").contains("SyntaxError"));
         assert!(!Arc::ptr_eq(&seen_a.recv().await.unwrap().config, &old), "the first thread switched");
-        assert!(Arc::ptr_eq(&seen_a.recv().await.unwrap().config, &old), "and was given the old config back");
+        let back = seen_a.recv().await.unwrap();
+        assert!(Arc::ptr_eq(&back.config, &old), "and was given the old config back");
+        assert_eq!(back.decided.id("adt").await, Some(1), "and the old version");
         let (now, _, _) = running(&kept, "adt").await;
         assert!(Arc::ptr_eq(&now, &old), "the old config is what runs");
     }
@@ -568,13 +589,15 @@ mod tests {
         let generation = |first, lanes| Generation { first, lanes, key: Some(String::new()), mixed: false };
         let changing = Layout { generations: vec![generation(0, 2), generation(2, 1)] };
         let (kept, activity) = kept_with(ONE, vec![a, b], store, 1, changing);
-        let error = kept.replace(config(&ONE.replace("ris:", "pacs:")), &activity).await.map(drop).unwrap_err();
+        let error =
+            kept.replace(config(&ONE.replace("ris:", "pacs:")), &activity, decided(2)).await.map(drop).unwrap_err();
         assert!(error.is::<NeedsHandover>(), "{error:#}");
         assert!(format!("{error:#}").contains("while its lanes are changing"), "{error:#}");
         assert!(seen_a.try_recv().is_err());
         // A change to a destination's settings still goes in place.
-        kept.replace(config(&ONE.replace("dir: lab", "dir: lab2")), &activity).await.unwrap();
-        let error = kept.replace(config(&ONE.replace("adt", "nope")), &activity).await.map(drop).unwrap_err();
+        kept.replace(config(&ONE.replace("dir: lab", "dir: lab2")), &activity, decided(2)).await.unwrap();
+        let error =
+            kept.replace(config(&ONE.replace("adt", "nope")), &activity, decided(2)).await.map(drop).unwrap_err();
         assert!(format!("{error:#}").contains("interface `nope` isn't running here"), "{error:#}");
     }
 
@@ -607,7 +630,7 @@ mod tests {
         assert_eq!(pending(&ids).await, [2, 2]);
 
         let swapped = yaml.replace("ris: { file: { dir: ris }", "pacs: { file: { dir: pacs }");
-        let replaced = kept.replace(config(&swapped), &activity).await.unwrap();
+        let replaced = kept.replace(config(&swapped), &activity, decided(2)).await.unwrap();
         let shown: Vec<&str> = replaced.destinations.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(shown, ["lab", "pacs"]);
         let (lab, pacs) = (&replaced.destinations[0], &replaced.destinations[1]);

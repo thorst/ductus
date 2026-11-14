@@ -199,7 +199,7 @@ pub struct Stored {
 
 /// The release this engine runs (release mode), in raw bytes.
 fn running(engine: &Shared) -> Option<Vec<u8>> {
-    engine.releases.as_ref()?.running.as_ref().map(|r| r.id.clone())
+    engine.releases.as_ref()?.running().map(|r| r.id.clone())
 }
 
 fn info(r: ductus_store::ReleaseRow, running: Option<&[u8]>) -> ReleaseInfo {
@@ -413,7 +413,7 @@ async fn one_check(engine: Eng, _caller: Caller, Path((id, check)): Path<(String
 /// What release `id` (its stored manifest) would change here; None while this engine's start is
 /// still being recorded.
 async fn here(engine: &Shared, id: &[u8], manifest: &serde_json::Value) -> Result<Option<Here>, ApiError> {
-    let Some(deployment) = engine.deployment.get() else { return Ok(None) };
+    let Some(deployment) = engine.deployment() else { return Ok(None) };
     let to: BTreeMap<String, String> = manifest["interfaces"]
         .as_object()
         .map(|all| {
@@ -423,11 +423,14 @@ async fn here(engine: &Shared, id: &[u8], manifest: &serde_json::Value) -> Resul
     let now: BTreeMap<String, String> =
         deployment.interfaces.iter().map(|(name, r)| (name.clone(), crate::code::hex(&r.version))).collect();
     let (changes, unchanged) = changes_here(&to, &now);
-    let current = engine.releases.as_ref().and_then(|r| r.running.as_ref());
+    let current = engine.releases.as_ref().and_then(|r| r.running());
     let project_files_change = current
+        .as_ref()
         .map(|r| manifest["project_version"]["version"].as_str() != Some(r.manifest.project_version.version.as_str()));
     let ran_before = match engine.releases.as_ref().and_then(|r| r.project()) {
-        Some(project) => engine.store.release_runs(&engine.environment, project).await?.iter().any(|r| r.release == id),
+        Some(project) => {
+            engine.store.release_runs(&engine.environment, &project).await?.iter().any(|r| r.release == id)
+        }
         None => false,
     };
     Ok(Some(Here {

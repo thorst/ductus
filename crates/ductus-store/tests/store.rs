@@ -3848,6 +3848,70 @@ async fn deployments_record_what_changed() {
     forget_deployments(&pool, &env).await;
 }
 
+/// A deploy in place (0.7.5) saves only the versions it brings and names the interfaces it left
+/// alone by their hash: they keep the deployment their version came with. A hash an interface
+/// doesn't run, and wasn't saved, is refused.
+#[tokio::test]
+async fn a_deploy_in_place_names_what_it_left_alone_by_hash() {
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let env = format!("test-in-place-{}-{nanos}", std::process::id());
+    let (a, b) = (format!("{env}-a"), format!("{env}-b"));
+    let a1 = TestVersion::new(&a, &[("interfaces/a/interface.yaml", &format!("name: a # {env}\n"))]);
+    let a2 = TestVersion::new(&a, &[("interfaces/a/interface.yaml", &format!("name: a # {env} 2\n"))]);
+    let b1 = TestVersion::new(&b, &[("interfaces/b/interface.yaml", &format!("name: b # {env}\n"))]);
+    let first = deploy(&store, &env, "ann", &[&a1, &b1]).await.unwrap();
+
+    let brought = [a2.borrow()];
+    let ids = store.save_versions(&brought).await.unwrap();
+    fn left(v: &TestVersion) -> ductus_store::NewVersion<'_> {
+        ductus_store::NewVersion { interface: &v.interface, hash: &v.hash, files: Vec::new(), parts: String::new() }
+    }
+    let none = Default::default();
+    fn in_place<'a>(
+        env: &'a str,
+        versions: &'a [ductus_store::NewVersion<'a>],
+        none: &'a std::collections::HashMap<String, String>,
+    ) -> ductus_store::NewDeployment<'a> {
+        ductus_store::NewDeployment {
+            environment: env,
+            instance: env,
+            host: "test-host",
+            version: "0.7.0-test",
+            how: "deploy",
+            by: "bob",
+            reason: Some("a fix"),
+            git_commit: None,
+            uncommitted: None,
+            versions,
+            warnings: none,
+            docs: None,
+            release: None,
+            project_version: None,
+            rollback: false,
+        }
+    }
+    let versions = [a2.borrow(), left(&b1)];
+    let deployed = store.record_deployment(&in_place(&env, &versions, &none), &ids).await.unwrap();
+    assert_eq!(deployed.changed(), 1);
+    assert_eq!(deployed.interfaces[0].previous.as_deref(), Some(a1.hash.as_slice()));
+    assert_eq!(deployed.interfaces[1].since.deployment, first.id, "b keeps the deployment it came with");
+    let how: String = sqlx::query_scalar("SELECT how FROM deployments WHERE id = $1")
+        .bind(deployed.id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(how, "deploy");
+
+    // b's hash once more is fine; a hash b never ran, not saved, isn't.
+    let b2 = TestVersion::new(&b, &[("interfaces/b/interface.yaml", &format!("name: b # {env} 2\n"))]);
+    let versions = [a2.borrow(), left(&b2)];
+    let error = store.record_deployment(&in_place(&env, &versions, &none), &ids).await.unwrap_err();
+    assert!(format!("{error:#}").contains("wasn't saved first"), "{error:#}");
+    forget_deployments(&pool, &env).await;
+}
+
 /// What `ductus history` reads for one interface (0.7.3.3): the deployments that changed it (all
 /// that ran it with `all`, never one that didn't run it), with what they replaced and any warning;
 /// the audit log's changes naming it (reads and refusals with `all`); its documentation's changes
