@@ -143,7 +143,7 @@ pub(super) fn ours(engine: &Shared, row: &AlertRow) -> bool {
         return engine.certificates.iter().any(|t| t.key == row.key);
     }
     engine.interface(&row.interface).is_some_and(|i| match &row.destination {
-        Some(d) => i.destinations.iter().any(|(name, _)| name == d),
+        Some(d) => i.destinations.iter().any(|t| t.name == *d),
         None => true,
     })
 }

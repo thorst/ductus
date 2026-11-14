@@ -15,8 +15,8 @@ use ductus_core::config::{Durability, Source};
 use ductus_core::format::Format;
 use ductus_hl7::{AckCode, Message};
 use ductus_store::{Batch, BatchMessage, DedupeKey, DestinationId, Done, MessageRef, NewMessage, Store};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI16, Ordering::Relaxed};
+use std::sync::{Arc, RwLock};
 use tokio::net::TcpStream;
 
 /// What happened to an accepted message.
@@ -31,11 +31,11 @@ pub enum Accepted {
 pub struct Intake {
     pub config: Arc<InterfaceConfig>,
     store: Store,
-    wake: Arc<Wake>,
+    /// Its destinations and their workers' wake-ups: read once per store, swapped by a deploy in
+    /// place that adds or removes destinations (`retarget`).
+    targets: RwLock<Arc<Targets>>,
     /// Closed while draining: nothing new is stored.
     pub gate: Arc<Gate>,
-    /// The interface's destinations: each stored message is queued for all of them.
-    destinations: Vec<DestinationId>,
     /// The retention tier new messages go to (changes when a retention change starts).
     tier: Arc<AtomicI16>,
     ordering: Option<KeyPath>,
@@ -67,11 +67,30 @@ impl Intake {
         let ordering = config.ordering.key.as_deref().map(compile).transpose()?;
         let dedupe = config.dedupe.iter().flat_map(|d| d.keys.iter()).map(|k| compile(k)).collect::<Result<_>>()?;
         let control_id = (config.format == Format::Hl7).then(|| compile("MSH-10")).transpose()?;
-        Ok(Self { config, store, wake, gate, destinations, tier, ordering, dedupe, control_id, stats, lanes })
+        let targets = RwLock::new(Arc::new(Targets { destinations, wake }));
+        Ok(Self { config, store, targets, gate, tier, ordering, dedupe, control_id, stats, lanes })
     }
 
     pub fn store(&self) -> &Store {
         &self.store
+    }
+
+    /// Its destinations and wake-ups now. Held for the whole of a store, so `retarget` knows when
+    /// nothing stores with the old ones any more.
+    fn targets(&self) -> Arc<Targets> {
+        self.targets.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Queue messages for `targets`' destinations and wake their workers from now on (a deploy in
+    /// place that adds or removes destinations). Returns once every store that began with the
+    /// old ones has finished (committed or failed), so matching what's stored to the new
+    /// destinations after this misses nothing (`Store::reconcile`).
+    pub(crate) async fn retarget(&self, targets: Targets) {
+        let old = std::mem::replace(&mut *self.targets.write().unwrap_or_else(|p| p.into_inner()), Arc::new(targets));
+        // A store holds its targets for a database round trip or two: milliseconds.
+        while Arc::strong_count(&old) > 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
     }
 
     /// Read a message's lane, ordering key, control ID and dedupe key.
@@ -101,7 +120,7 @@ impl Intake {
     /// Wake only the lane's owners: one worker per destination. (Also after a resend, which puts
     /// a delivery back in the lane's queue.)
     pub(crate) fn wake(&self, partition: i32) {
-        self.wake.lane(partition);
+        self.targets().wake.lane(partition);
     }
 
     /// Queue an operator's corrected copy of message `original` for `destinations` (see
@@ -162,6 +181,7 @@ impl Intake {
     async fn accept_one(&self, payload: &[u8]) -> Result<Accepted> {
         let _pass = self.gate.enter()?;
         let keys = self.keys(payload);
+        let targets = self.targets();
         let new = NewMessage {
             interface: &self.config.name,
             partition_key: keys.partition,
@@ -169,7 +189,7 @@ impl Intake {
             control_id: keys.control_id.as_deref(),
             payload,
             relaxed: self.relaxed(),
-            destinations: &self.destinations,
+            destinations: &targets.destinations,
             tier: self.tier(),
         };
         let accepted = match (&self.config.dedupe, &keys.dedupe) {
@@ -185,7 +205,7 @@ impl Intake {
             _ => Accepted::Queued(self.store.insert(new).await?),
         };
         if matches!(accepted, Accepted::Queued(_)) {
-            self.wake(keys.partition);
+            targets.wake.lane(keys.partition);
         }
         Ok(accepted)
     }
@@ -201,6 +221,7 @@ impl Intake {
     async fn accept_many(&self, payloads: &[Vec<u8>], state: Option<(&str, &str)>) -> Result<usize> {
         let _pass = self.gate.enter()?;
         let keys: Vec<Keys> = payloads.iter().map(|p| self.keys(p)).collect();
+        let targets = self.targets();
         let batch = Batch {
             interface: &self.config.name,
             messages: keys
@@ -218,17 +239,17 @@ impl Intake {
             dedupe_window: self.config.dedupe.as_ref().map(|d| d.window).unwrap_or_default(),
             relaxed: self.relaxed(),
             state,
-            destinations: &self.destinations,
+            destinations: &targets.destinations,
             tier: self.tier(),
         };
         let duplicates = self.store.insert_batch(&batch).await?;
-        let mut woken = vec![false; self.wake.slots()];
+        let mut woken = vec![false; targets.wake.slots()];
         let mut queued = 0;
         for (k, _) in keys.iter().zip(&duplicates).filter(|(_, duplicate)| !**duplicate) {
             queued += 1;
-            let slot = k.partition as usize % self.wake.slots();
+            let slot = k.partition as usize % targets.wake.slots();
             if !std::mem::replace(&mut woken[slot], true) {
-                self.wake(k.partition);
+                targets.wake.lane(k.partition);
             }
         }
         Ok(queued)
@@ -245,6 +266,7 @@ impl Intake {
             return self.store.finish(destination, done).await;
         }
         let keys: Vec<Keys> = routed.iter().map(|r| self.keys(&r.payload)).collect();
+        let targets = self.targets();
         let batch = Batch {
             interface: &self.config.name,
             messages: keys
@@ -262,14 +284,14 @@ impl Intake {
             dedupe_window: self.config.dedupe.as_ref().map(|d| d.window).unwrap_or_default(),
             relaxed: true, // see `Store::finish_routed`
             state: None,
-            destinations: &self.destinations,
+            destinations: &targets.destinations,
             tier: self.tier(),
         };
         let queued = self.store.finish_routed(destination, done, &batch).await;
         // Not queued here: a duplicate, or already routed by an earlier try of this flush.
         self.count(&queued, |q| (q.iter().filter(|q| **q).count() as u64, 0));
         for (k, _) in keys.iter().zip(&queued?).filter(|(_, queued)| **queued) {
-            self.wake(k.partition);
+            targets.wake.lane(k.partition);
         }
         Ok(())
     }
@@ -279,6 +301,7 @@ impl Intake {
     pub async fn accept_scheduled(&self, payload: &[u8], key: &str, state: &str, skipped_state: &str) -> Result<bool> {
         let _pass = self.gate.enter()?;
         let lane = self.lanes.lane_of("");
+        let targets = self.targets();
         let new = NewMessage {
             interface: &self.config.name,
             partition_key: lane,
@@ -286,17 +309,24 @@ impl Intake {
             control_id: None,
             payload,
             relaxed: self.relaxed(),
-            destinations: &self.destinations,
+            destinations: &targets.destinations,
             tier: self.tier(),
         };
         let queued = self.store.insert_scheduled(new, key, state, skipped_state).await.map(|q| q.is_some());
         self.count(&queued, |&q| (u64::from(q), 0));
         let queued = queued?;
         if queued {
-            self.wake(lane);
+            targets.wake.lane(lane);
         }
         Ok(queued)
     }
+}
+
+/// Where an intake's messages go: each is queued for every one of `destinations` (the ids of the
+/// interface's destinations, in config order) and wakes their workers.
+pub(crate) struct Targets {
+    pub destinations: Vec<DestinationId>,
+    pub wake: Arc<Wake>,
 }
 
 /// A message a destination routes to another interface: what it sent, and the id of the

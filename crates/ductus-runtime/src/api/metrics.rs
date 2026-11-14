@@ -282,7 +282,7 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
 
     family(&mut out, "ductus_deliveries_total");
     for i in queued() {
-        for d in &i.stats.destinations {
+        for d in i.destinations.iter().map(|d| &d.stats) {
             let labels = dest(&i.config.name, &d.name);
             out.sample("ductus_deliveries_total", &format!("{labels},outcome=\"sent\""), stats::get(&d.sent))
                 .sample("ductus_deliveries_total", &format!("{labels},outcome=\"filtered\""), stats::get(&d.filtered))
@@ -295,7 +295,7 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
     }
     family(&mut out, "ductus_delivery_retries_total");
     for i in queued() {
-        for d in &i.stats.destinations {
+        for d in i.destinations.iter().map(|d| &d.stats) {
             out.sample("ductus_delivery_retries_total", &dest(&i.config.name, &d.name), stats::get(&d.retries));
         }
     }
@@ -309,7 +309,7 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
     ] {
         family(&mut out, name);
         for i in queued() {
-            for d in &i.stats.destinations {
+            for d in i.destinations.iter().map(|d| &d.stats) {
                 out.histogram(name, &dest(&i.config.name, &d.name), pick(d));
             }
         }
@@ -317,29 +317,29 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
 
     family(&mut out, "ductus_queue_pending");
     for i in queued() {
-        for ((name, id), _) in i.destinations.iter().zip(&i.stats.destinations) {
-            out.sample("ductus_queue_pending", &dest(&i.config.name, name), snapshot.queue(*id).pending);
+        for d in &i.destinations {
+            out.sample("ductus_queue_pending", &dest(&i.config.name, &d.name), snapshot.queue(d.id).pending);
         }
     }
     family(&mut out, "ductus_queue_quarantined");
     for i in queued() {
-        for (name, id) in &i.destinations {
-            out.sample("ductus_queue_quarantined", &dest(&i.config.name, name), snapshot.queue(*id).quarantined);
+        for d in &i.destinations {
+            out.sample("ductus_queue_quarantined", &dest(&i.config.name, &d.name), snapshot.queue(d.id).quarantined);
         }
     }
     family(&mut out, "ductus_queue_oldest_seconds");
     for i in queued() {
-        for (name, id) in &i.destinations {
-            let age = snapshot.oldest_age(*id).map_or(0.0, |a| a.as_secs_f64());
-            out.sample("ductus_queue_oldest_seconds", &dest(&i.config.name, name), age);
+        for d in &i.destinations {
+            let age = snapshot.oldest_age(d.id).map_or(0.0, |a| a.as_secs_f64());
+            out.sample("ductus_queue_oldest_seconds", &dest(&i.config.name, &d.name), age);
         }
     }
     let now = chrono::Utc::now();
     family(&mut out, "ductus_destination_state");
     for i in queued() {
-        for (n, (name, _)) in i.destinations.iter().enumerate() {
+        for (n, d) in i.destinations.iter().enumerate() {
             let state = engine.diagnose(i, n, &snapshot, now).state as u8;
-            out.sample("ductus_destination_state", &dest(&i.config.name, name), state);
+            out.sample("ductus_destination_state", &dest(&i.config.name, &d.name), state);
         }
     }
     family(&mut out, "ductus_interface_state");
@@ -348,11 +348,11 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
     }
     family(&mut out, "ductus_destination_paused");
     for i in queued() {
-        for (name, id) in &i.destinations {
+        for d in &i.destinations {
             out.sample(
                 "ductus_destination_paused",
-                &dest(&i.config.name, name),
-                u8::from(engine.paused(*id).is_some()),
+                &dest(&i.config.name, &d.name),
+                u8::from(engine.paused(d.id).is_some()),
             );
         }
     }

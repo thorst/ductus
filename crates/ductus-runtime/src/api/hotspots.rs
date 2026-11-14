@@ -141,7 +141,8 @@ async fn hotspots(engine: Eng, _caller: Caller, Query(q): Query<HotspotQuery>) -
     for i in engine.interfaces().iter().filter(|i| q.interface.as_ref().is_none_or(|n| *n == i.config.name)) {
         let generations = i.lanes.layout.generations.iter().map(|g| (g.first, g.lanes as u32)).collect();
         let layout = Layout { generations, workers: i.config.slots() };
-        for (n, (name, id)) in i.destinations.iter().enumerate() {
+        for (n, d) in i.destinations.iter().enumerate() {
+            let (name, id) = (&d.name, &d.id);
             if snapshot.queue(*id).pending == 0 {
                 continue;
             }
@@ -164,7 +165,7 @@ async fn hotspots(engine: Eng, _caller: Caller, Query(q): Query<HotspotQuery>) -
                 })
                 .collect();
             let paused = engine.paused(*id).is_some();
-            let last_sent = i.stats.destinations.get(n).and_then(|s| s.last_sent.get());
+            let last_sent = d.stats.last_sent.get();
             let held = i.lanes.holding(n);
             let h = hotspots::analyze(&lanes, &layout, &held, paused, last_sent, now);
             let blocked: Vec<i32> = h.workers.iter().filter_map(|w| w.blocked_by).collect();

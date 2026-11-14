@@ -1057,7 +1057,7 @@ mod tests {
             requests,
             health: Default::default(),
             outlets: Vec::new(),
-            stats: Arc::new(InterfaceStats::new(&config.name, [])),
+            stats: Arc::new(InterfaceStats::new(&config.name)),
             ownership: Arc::new(crate::ownership::Ownership::new(true)),
             waiting: Default::default(),
             decided: crate::deployment::Decided::channel().1,

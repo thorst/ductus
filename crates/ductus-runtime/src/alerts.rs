@@ -298,7 +298,7 @@ pub async fn start(engine: &Arc<Engine>) {
             std::iter::once((alerts::interface_key(&name), name.clone(), None)).chain(
                 i.destinations
                     .iter()
-                    .map(move |(d, _)| (alerts::destination_key(&name, d), name.clone(), Some(d.clone()))),
+                    .map(move |d| (alerts::destination_key(&name, &d.name), name.clone(), Some(d.name.clone()))),
             )
         })
         .chain(engine.certificates.iter().map(|t| {
@@ -498,7 +498,7 @@ pub async fn evaluate(engine: &Engine) -> Result<()> {
             owner: owner.clone(),
             options: i.config.alert.clone(),
         });
-        for (n, ((name, _), (_, d))) in i.destinations.iter().zip(i.config.destinations()).enumerate() {
+        for (n, (name, d)) in i.config.destinations().enumerate() {
             let diagnosis = engine.diagnose(i, n, &snapshot, now);
             let now = match diagnosis.state {
                 ductus_core::monitor::State::Paused => Now::Hold,

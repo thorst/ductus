@@ -39,12 +39,21 @@ pub struct Running {
     pub gate: Arc<Gate>,
     /// What it received and delivered since the engine started.
     pub stats: Arc<crate::stats::InterfaceStats>,
-    /// Its destinations' names and store ids, in config order.
-    pub destinations: Vec<(String, DestinationId)>,
+    /// Its destinations, in config order.
+    pub destinations: Vec<RunningDestination>,
     /// Where its messages are stored and its workers woken (none in respond mode: no queue).
     pub intake: Option<Arc<crate::ingest::Intake>>,
     /// Its lanes: which generations are listed, and while they change, which lanes are held.
     pub lanes: Arc<crate::lanes::Lanes>,
+}
+
+/// One of a running interface's destinations: its name, its id in the store and its counts. A
+/// destination added by a deploy in place starts at zero; one that stays keeps its counts.
+#[derive(Clone)]
+pub struct RunningDestination {
+    pub name: String,
+    pub id: DestinationId,
+    pub stats: Arc<crate::stats::DestinationStats>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -280,11 +289,27 @@ impl Engine {
         self.interfaces().iter().find(|i| i.config.name == name).cloned()
     }
 
-    /// Put `running` in place of the running interface of its name (a deploy in place).
+    /// Run `config`'s interface on its new code and settings (`in_place::Kept::replace`: its
+    /// destinations added or removed too), and show it so from then on. Answers the files its new
+    /// code loaded. `in_place::NeedsHandover` when only the handover can apply it.
     // TODO(0.7.5.1 item 4): `code` (what the code uses) and `certificates` (destinations' TLS)
     // were worked out from the start's configs; the deploy endpoint calls this (item 7).
     #[allow(dead_code)]
-    pub(crate) fn swap_interface(&self, running: Running) {
+    pub(crate) async fn replace_interface(&self, config: InterfaceConfig) -> Result<Vec<ductus_script::CodeFile>> {
+        let name = config.name.clone();
+        let running = self.interface(&name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
+        let replaced = self.kept.replace(config, &self.activity).await?;
+        self.swap_interface(Running {
+            config: replaced.config,
+            destinations: replaced.destinations,
+            ..(*running).clone()
+        });
+        self.monitor.send_modify(|_| {}); // live updates show the new destinations at once
+        Ok(replaced.files)
+    }
+
+    /// Put `running` in place of the running interface of its name (a deploy in place).
+    fn swap_interface(&self, running: Running) {
         let mut interfaces = self.interfaces.write().unwrap_or_else(|e| e.into_inner());
         let running = Arc::new(running);
         *interfaces = interfaces
@@ -294,30 +319,30 @@ impl Engine {
     }
 
     fn destination_ids(&self) -> Vec<DestinationId> {
-        self.interfaces().iter().flat_map(|i| i.destinations.iter().map(|(_, id)| *id)).collect()
+        self.interfaces().iter().flat_map(|i| i.destinations.iter().map(|d| d.id)).collect()
     }
 
     /// A destination's pause, if it's paused.
     pub fn paused(&self, destination: DestinationId) -> Option<Paused> {
-        self.activity.pauses.get(&destination).and_then(|p| p.get())
+        self.activity.pause(destination).and_then(|p| p.get())
     }
 
     /// An interface's destination by name: `Err` says what's wrong in plain words (no such
     /// interface or destination).
     pub fn destination(&self, interface: &str, destination: &str) -> Result<(Arc<Running>, DestinationId), String> {
         let i = self.interface(interface).ok_or_else(|| format!("no interface named `{interface}`"))?;
-        match i.destinations.iter().find(|(name, _)| name == destination) {
-            Some((_, id)) => Ok((i.clone(), *id)),
+        match i.destinations.iter().find(|d| d.name == destination) {
+            Some(d) => Ok((i.clone(), d.id)),
             None if i.destinations.is_empty() => Err(format!("`{interface}` has no destinations (respond mode)")),
             None => {
-                let names: Vec<&str> = i.destinations.iter().map(|(n, _)| n.as_str()).collect();
+                let names: Vec<&str> = i.destinations.iter().map(|d| d.name.as_str()).collect();
                 Err(format!("`{interface}` has no destination `{destination}` (it has {})", names.join(", ")))
             }
         }
     }
 
-    fn pause_switch(&self, destination: DestinationId) -> Result<&Arc<Pause>> {
-        self.activity.pauses.get(&destination).ok_or_else(|| anyhow::anyhow!("destination {destination} isn't watched"))
+    fn pause_switch(&self, destination: DestinationId) -> Result<Arc<Pause>> {
+        self.activity.pause(destination).ok_or_else(|| anyhow::anyhow!("destination {destination} isn't watched"))
     }
 
     /// Pause a destination: from now on its workers send nothing and retry nothing (a send under
@@ -359,12 +384,7 @@ impl Engine {
     /// Deliveries each destination finished since the engine started (sent, filtered or
     /// quarantined), from the workers' counters: no query.
     pub fn finished(&self) -> Vec<u64> {
-        use std::sync::atomic::Ordering::Relaxed;
-        self.interfaces()
-            .iter()
-            .flat_map(|i| i.stats.destinations.iter())
-            .map(|d| d.sent.load(Relaxed) + d.filtered.load(Relaxed) + d.quarantined.load(Relaxed))
-            .collect()
+        self.interfaces().iter().flat_map(|i| i.destinations.iter().map(|d| d.stats.done())).collect()
     }
 
     /// The health state of every interface and destination (see `Snapshot::states`).
@@ -388,15 +408,14 @@ impl Engine {
 
     /// A destination's state and why (`n`: its place in `i.destinations`).
     pub fn diagnose(&self, i: &Running, n: usize, snapshot: &Snapshot, now: DateTime<Utc>) -> Diagnosis {
-        let (Some((_, id)), Some(stats), Some((_, config))) =
-            (i.destinations.get(n), i.stats.destinations.get(n), i.config.destinations().nth(n))
-        else {
+        let (Some(d), Some((_, config))) = (i.destinations.get(n), i.config.destinations().nth(n)) else {
             return monitor::diagnose(&Facts::default(), now);
         };
-        let queue = snapshot.queue(*id);
-        let (recent, normal_inflow, normal_send_ms) = self.activity.trend(*id, now);
+        let (id, stats) = (d.id, &d.stats);
+        let queue = snapshot.queue(id);
+        let (recent, normal_inflow, normal_send_ms) = self.activity.trend(id, now);
         let last_error = stats.last_error();
-        let paused = self.paused(*id).map(|p| {
+        let paused = self.paused(id).map(|p| {
             let day = |t: DateTime<Utc>| t.with_timezone(&chrono::Local).date_naive();
             let at = if day(p.at) == day(now) { "%H:%M" } else { "%Y-%m-%d %H:%M" };
             let at = p.at.with_timezone(&chrono::Local).format(at);
@@ -407,7 +426,7 @@ impl Engine {
         });
         let facts = Facts {
             waiting: queue.pending.max(0) as u64,
-            oldest: snapshot.oldest_age(*id),
+            oldest: snapshot.oldest_age(id),
             quarantined: queue.quarantined.max(0) as u64,
             last_sent: stats.last_sent.get(),
             last_error: last_error.as_ref().map(|(at, e)| (*at, e.as_str())),

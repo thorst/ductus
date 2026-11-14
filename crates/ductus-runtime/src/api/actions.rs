@@ -65,9 +65,10 @@ fn destination_ids(engine: &Engine, i: &Running, names: &[String]) -> Result<Vec
 }
 
 fn destination_name(engine: &Engine, id: DestinationId) -> Option<(String, String)> {
-    engine.interfaces().iter().find_map(|i| {
-        i.destinations.iter().find(|(_, d)| *d == id).map(|(name, _)| (i.config.name.clone(), name.clone()))
-    })
+    engine
+        .interfaces()
+        .iter()
+        .find_map(|i| i.destinations.iter().find(|d| d.id == id).map(|d| (i.config.name.clone(), d.name.clone())))
 }
 
 /// Wake the workers of every lane that got a delivery back.
@@ -148,7 +149,7 @@ async fn resend(
     let i = owner(&engine, id).await?;
     let (destinations, quarantined_only) = match &request.destinations {
         Some(names) if !names.is_empty() => (destination_ids(&engine, &i, names)?, false),
-        _ => (i.destinations.iter().map(|(_, id)| *id).collect(), true),
+        _ => (i.destinations.iter().map(|d| d.id).collect(), true),
     };
     let r = Resend { messages: &[id], destinations: &destinations, quarantined_only };
     let resent = engine.store.resend(r, caller.actor(request.reason.as_deref())).await?;
@@ -233,8 +234,8 @@ async fn resend_many(
         .interfaces()
         .iter()
         .flat_map(|i| i.destinations.iter())
-        .filter(|(name, _)| named.is_none_or(|n| n == name))
-        .map(|(_, id)| *id)
+        .filter(|d| named.is_none_or(|n| n == d.name))
+        .map(|d| d.id)
         .collect();
     if let Some(name) = named
         && destinations.is_empty()
@@ -322,7 +323,7 @@ async fn edit(
             let deliveries = engine.store.deliveries(reference).await?;
             let quarantined: Vec<String> = deliveries
                 .into_iter()
-                .filter(|d| d.status == Status::Quarantined && i.destinations.iter().any(|(n, _)| *n == d.destination))
+                .filter(|d| d.status == Status::Quarantined && i.destinations.iter().any(|t| t.name == d.destination))
                 .map(|d| d.destination)
                 .collect();
             if quarantined.is_empty() {
@@ -414,7 +415,7 @@ async fn dismiss(
     let i = owner(&engine, id).await?;
     let destinations = match &request.destinations {
         Some(names) if !names.is_empty() => destination_ids(&engine, &i, names)?,
-        _ => i.destinations.iter().map(|(_, id)| *id).collect(),
+        _ => i.destinations.iter().map(|d| d.id).collect(),
     };
     let r = Resend { messages: &[id], destinations: &destinations, quarantined_only: true };
     let done = engine.store.dismiss(r, caller.actor(Some(reason))).await?;
@@ -459,8 +460,8 @@ async fn dismiss_many(
         .interfaces()
         .iter()
         .flat_map(|i| i.destinations.iter())
-        .filter(|(name, _)| named.is_none_or(|n| n == name))
-        .map(|(_, id)| *id)
+        .filter(|d| named.is_none_or(|n| n == d.name))
+        .map(|d| d.id)
         .collect();
     if let Some(name) = named
         && destinations.is_empty()
@@ -539,8 +540,8 @@ async fn quarantine(engine: Eng, _caller: Caller, Query(q): Query<QuarantineQuer
         .iter()
         .filter(|i| interface.is_none_or(|n| n == i.config.name))
         .flat_map(|i| i.destinations.iter())
-        .filter(|(name, _)| destination.is_none_or(|d| d == name))
-        .map(|(_, id)| *id)
+        .filter(|t| destination.is_none_or(|d| d == t.name))
+        .map(|t| t.id)
         .collect();
     if let Some(name) = destination
         && destinations.is_empty()

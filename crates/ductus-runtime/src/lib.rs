@@ -500,8 +500,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         let wake = Arc::new(Wake::new(config.slots(), config.destinations().count()));
         let destination_ids: Vec<_> = ids.by_ref().take(config.destinations().count()).collect();
         let gate = Arc::new(gate::Gate::default());
-        let stats =
-            Arc::new(stats::InterfaceStats::new(&config.name, config.destinations().map(|(name, _)| name.to_string())));
+        let stats = Arc::new(stats::InterfaceStats::new(&config.name));
+        let destination_stats: Vec<_> =
+            config.destinations().map(|(name, _)| Arc::new(stats::DestinationStats::new(name))).collect();
         // Respond mode has no queue: one lane, never read.
         let layout = layouts.remove(&config.name).unwrap_or_else(|| lanes::Layout::single(1, ""));
         let lanes = Arc::new(lanes::Lanes::new(layout, config.slots(), config.destinations().count()));
@@ -519,13 +520,16 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             )?;
             intakes.insert(config.name.clone(), Arc::new(intake));
         }
-        parts.push((config, wake, destination_ids, gate, stats, lanes));
+        parts.push((config, wake, destination_ids, gate, stats, destination_stats, lanes));
     }
     // Last activity and pauses, before any worker starts (a paused destination sends nothing).
     let watched = parts
         .iter()
         .filter(|(config, ..)| !config.responds())
-        .map(|(_, _, ids, _, stats, _)| activity::Watched { stats: stats.clone(), destinations: ids.clone() })
+        .map(|(_, _, ids, _, stats, destinations, _)| activity::Watched {
+            stats: stats.clone(),
+            destinations: ids.iter().copied().zip(destinations.iter().cloned()).collect(),
+        })
         .collect();
     // The engine is stopping: workers finish what's in hand, save it and end (see `stop`).
     let stopping = tokio_util::sync::CancellationToken::new();
@@ -536,6 +540,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     phases.mark("last activity loaded");
     // What every interface's jobs and outlets are built with, kept for a deploy in place.
     let shared = in_place::Shared {
+        store: store.clone(),
         ownership: owner.ownership.clone(),
         waiting: waiting.clone(),
         decided: decided.clone(),
@@ -545,19 +550,15 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     };
     let intakes = &shared.intakes;
     let mut kept: std::collections::HashMap<String, in_place::Interface> = Default::default();
-    for (config, wake, destination_ids, gate, stats, lanes) in parts {
+    for (config, wake, destination_ids, gate, stats, destination_stats, lanes) in parts {
         let health = Arc::new(health::Health::reporting(&config.name, stopped_tx.clone()));
         let outlets: Vec<worker::Outlet> = config
             .destinations()
             .zip(&destination_ids)
-            .zip(&stats.destinations)
+            .zip(&destination_stats)
             .map(|(((name, d), &id), destination_stats)| {
-                let kept = in_place::KeptDestination {
-                    id,
-                    stats: destination_stats.clone(),
-                    pause: activity.pauses[&id].clone(),
-                    limiter: None,
-                };
+                let pause = activity.pause(id).context("a destination's pause switch")?;
+                let kept = in_place::KeptDestination { id, stats: destination_stats.clone(), pause, limiter: None };
                 shared.outlet(&config, name, d, kept)
             })
             .collect::<Result<_>>()?;
@@ -596,10 +597,11 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             stats: stats.clone(),
             lanes: lanes.clone(),
             outlets,
+            intake: intakes.get(&config.name).cloned(),
             threads: Vec::new(), // once they're spawned (below)
         };
         for slot in 0..config.slots() {
-            let job = parts.job(&shared, slot, requests.take());
+            let job = parts.job(&shared, slot, requests.take(), &shared.waiting);
             if inspected.as_ref().is_some_and(|i| i.interfaces.contains(&config.name)) {
                 debugged.entry(config.name.clone()).or_default().push(job);
                 continue;
@@ -613,7 +615,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             }
         }
         kept.insert(config.name.clone(), parts);
-        interfaces.push((config, wake, destination_ids, health, gate, stats, lanes));
+        interfaces.push((config, wake, destination_ids, health, gate, stats, destination_stats, lanes));
     }
 
     let services = Arc::new(services::SharedServices::new(env, &resources, &certificates)?);
@@ -796,12 +798,21 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     phases.mark("listening");
     let running: Vec<control::Running> = interfaces
         .iter()
-        .map(|(config, _, ids, health, gate, stats, lanes)| control::Running {
+        .map(|(config, _, ids, health, gate, stats, destination_stats, lanes)| control::Running {
             config: config.clone(),
             health: health.clone(),
             gate: gate.clone(),
             stats: stats.clone(),
-            destinations: config.destinations().map(|(name, _)| name.to_string()).zip(ids.iter().copied()).collect(),
+            destinations: config
+                .destinations()
+                .zip(ids)
+                .zip(destination_stats)
+                .map(|(((name, _), &id), stats)| control::RunningDestination {
+                    name: name.to_string(),
+                    id,
+                    stats: stats.clone(),
+                })
+                .collect(),
             intake: intakes.get(&config.name).cloned(),
             lanes: lanes.clone(),
         })
@@ -1266,7 +1277,7 @@ pub(crate) struct Wake {
 }
 
 impl Wake {
-    fn new(slots: u32, destinations: usize) -> Self {
+    pub(crate) fn new(slots: u32, destinations: usize) -> Self {
         let destinations = destinations.max(1); // respond mode has none, and no queue
         Self { destinations, notify: (0..slots as usize * destinations).map(|_| Notify::new()).collect() }
     }
@@ -1283,6 +1294,11 @@ impl Wake {
 
     pub(crate) fn get(&self, slot: usize, destination: usize) -> &Notify {
         &self.notify[slot * self.destinations + destination]
+    }
+
+    /// Wake every worker (each reads its lanes again).
+    pub(crate) fn everyone(&self) {
+        self.notify.iter().for_each(Notify::notify_one);
     }
 }
 

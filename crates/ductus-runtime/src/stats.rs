@@ -105,7 +105,9 @@ impl Moment {
     }
 }
 
-/// One interface's counts: what it received, and each destination's.
+/// One interface's own counts: what it received. Each destination's are its own
+/// (`DestinationStats`, kept with the interface's destination list: `control::RunningDestination`),
+/// so destinations can be added or removed while these go on counting.
 pub struct InterfaceStats {
     pub name: String,
     /// Messages stored and queued.
@@ -114,8 +116,6 @@ pub struct InterfaceStats {
     pub duplicates: AtomicU64,
     /// Couldn't be stored (the sender was told to retry: AE, 503, the file stays).
     pub store_failures: AtomicU64,
-    /// In `config.destinations()` order.
-    pub destinations: Vec<std::sync::Arc<DestinationStats>>,
     /// Respond-mode HTTP: each request's time in the engine, from the transform's start to its
     /// answer (the HTTP server adds microseconds).
     pub requests: Histogram,
@@ -125,13 +125,12 @@ pub struct InterfaceStats {
 }
 
 impl InterfaceStats {
-    pub fn new(name: &str, destinations: impl IntoIterator<Item = String>) -> Self {
+    pub fn new(name: &str) -> Self {
         Self {
             name: name.to_string(),
             received: AtomicU64::new(0),
             duplicates: AtomicU64::new(0),
             store_failures: AtomicU64::new(0),
-            destinations: destinations.into_iter().map(|d| std::sync::Arc::new(DestinationStats::new(d))).collect(),
             requests: Histogram::default(),
             request_errors: AtomicU64::new(0),
             last_received: Moment::default(),
@@ -175,9 +174,9 @@ impl DestinationStats {
         get(&self.sent) + get(&self.filtered) + get(&self.quarantined)
     }
 
-    fn new(name: String) -> Self {
+    pub fn new(name: &str) -> Self {
         Self {
-            name,
+            name: name.to_string(),
             sent: AtomicU64::new(0),
             filtered: AtomicU64::new(0),
             quarantined: AtomicU64::new(0),

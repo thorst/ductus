@@ -292,6 +292,12 @@ impl Store {
         Ok(Self { pool })
     }
 
+    /// A store that connects on its first query, with nothing checked, migrated or made: for
+    /// tests of code that holds a store but doesn't reach the database.
+    pub fn lazy(url: &str) -> Result<Self> {
+        Ok(Self { pool: PgPoolOptions::new().max_connections(1).connect_lazy(url)? })
+    }
+
     /// The TLS version of a connection to this database as the server reports it (`TLSv1.3`),
     /// None when plain. Every pool connection is made the same way, so one tells for all.
     pub async fn tls_version(&self) -> Result<Option<String>> {

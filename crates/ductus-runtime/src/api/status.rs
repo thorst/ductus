@@ -156,12 +156,12 @@ fn drain_report(engine: &Engine, snapshot: &Snapshot) -> DrainStatus {
         DrainState::Draining { since, stop } | DrainState::Drained { since, stop } => (Some(since), stop),
     };
     let pending = |i: &Running| {
-        let live = i.destinations.iter().filter(|(_, id)| engine.paused(*id).is_none());
-        live.map(|(_, id)| snapshot.queue(*id).pending).sum::<i64>()
+        let live = i.destinations.iter().filter(|d| engine.paused(d.id).is_none());
+        live.map(|d| snapshot.queue(d.id).pending).sum::<i64>()
     };
     let paused = interfaces.iter().flat_map(|i| {
-        let paused = i.destinations.iter().filter(|(_, id)| engine.paused(*id).is_some());
-        paused.map(|(name, _)| format!("{}/{name}", i.config.name))
+        let paused = i.destinations.iter().filter(|d| engine.paused(d.id).is_some());
+        paused.map(|d| format!("{}/{}", i.config.name, d.name))
     });
     DrainStatus {
         state: drain_label(state),
@@ -491,8 +491,7 @@ fn destination_health(engine: &Engine, i: &Running, n: usize, snapshot: &Snapsho
     use ductus_core::monitor::{Cause, Trend, Tripped};
     let now = Utc::now();
     let d = engine.diagnose(i, n, snapshot, now);
-    let id = i.destinations[n].1;
-    let stats = &i.stats.destinations[n];
+    let (id, stats) = (i.destinations[n].id, &i.destinations[n].stats);
     let (recent, normal_inflow, normal_send_ms) = engine.activity.trend(id, now);
     DestinationHealth {
         state: d.state.label(),
@@ -900,9 +899,9 @@ fn interface_status(engine: &Engine, i: &Running, snapshot: &Snapshot) -> Interf
         destinations: c
             .destinations()
             .zip(&i.destinations)
-            .zip(&i.stats.destinations)
             .enumerate()
-            .map(|(n, (((name, d), (_, id)), stats))| {
+            .map(|(n, ((name, d), running))| {
+                let (id, stats) = (&running.id, &running.stats);
                 let queue = snapshot.queue(*id);
                 DestinationStatus {
                     name: name.into(),
@@ -1132,7 +1131,8 @@ fn live_update(engine: &Engine, snapshot: &Snapshot) -> LiveUpdate {
                     .destinations
                     .iter()
                     .enumerate()
-                    .map(|(n, (name, id))| {
+                    .map(|(n, running)| {
+                        let (name, id) = (&running.name, &running.id);
                         let q = snapshot.queue(*id);
                         let d = engine.diagnose(i, n, snapshot, now);
                         LiveDestination {

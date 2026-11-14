@@ -15,7 +15,7 @@ use chrono::{DateTime, Utc};
 use ductus_core::monitor::{Baseline, Recent, hour_of_week};
 use ductus_store::{BaselineRow, DestinationId, PauseRow, Seen, Store};
 use std::collections::{HashMap, VecDeque};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -158,21 +158,27 @@ impl Pause {
     }
 }
 
-/// An interface to watch: its counts (with their last-seen times) and its destinations' ids, in
+/// An interface to watch: its counts (with their last-seen times) and its destinations', in
 /// `config.destinations()` order.
+#[derive(Clone)]
 pub struct Watched {
     pub stats: Arc<InterfaceStats>,
-    pub destinations: Vec<DestinationId>,
+    pub destinations: Vec<(DestinationId, Arc<DestinationStats>)>,
 }
 
-/// What was loaded at startup.
+type TrendsById = HashMap<DestinationId, Arc<Mutex<Trends>>>;
+
+/// What was loaded at startup, and what a deploy in place adds (`Activity::watch`).
 pub struct Activity {
     /// When an engine first ran each interface: deadlines before it don't count.
     pub watched_since: HashMap<String, DateTime<Utc>>,
     /// Every destination's pause switch.
-    pub pauses: HashMap<DestinationId, Arc<Pause>>,
-    /// Every destination's recent rates and normal.
-    pub trends: HashMap<DestinationId, Arc<Mutex<Trends>>>,
+    pauses: RwLock<HashMap<DestinationId, Arc<Pause>>>,
+    /// Every destination's recent rates and normal (the saver samples them).
+    trends: Arc<RwLock<TrendsById>>,
+    /// The interfaces the saver samples and saves.
+    watched: Arc<Mutex<Vec<Watched>>>,
+    store: Store,
     /// The task that saves them (see `saved`).
     saver: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -180,11 +186,59 @@ pub struct Activity {
 impl Activity {
     /// A destination's last few minutes, and what's normal now: (recent, inflow per minute, send ms).
     pub fn trend(&self, destination: DestinationId, now: DateTime<Utc>) -> (Option<Recent>, Option<f64>, Option<f64>) {
-        let Some(trends) = self.trends.get(&destination) else { return (None, None, None) };
-        let t = trends.lock().unwrap_or_else(|p| p.into_inner());
+        let Some(trends) = read(&self.trends).get(&destination).cloned() else { return (None, None, None) };
+        let t = lock(&trends);
         let hour = hour_of_week(now);
         (t.recent(now), t.baseline.inflow(hour), t.baseline.send_ms(hour))
     }
+
+    /// A destination's pause switch (shared by its workers and the API); None for one that isn't
+    /// watched here.
+    pub fn pause(&self, destination: DestinationId) -> Option<Arc<Pause>> {
+        read(&self.pauses).get(&destination).cloned()
+    }
+}
+
+fn read<T>(lock: &RwLock<T>) -> std::sync::RwLockReadGuard<'_, T> {
+    lock.read().unwrap_or_else(|p| p.into_inner())
+}
+
+fn write<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, T> {
+    lock.write().unwrap_or_else(|p| p.into_inner())
+}
+
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+/// What's stored for `w`'s destinations (`by_id`) put into their counts: last sent, last error,
+/// pause and what's normal. Returns each one's pause switch and trends.
+fn load_destinations(
+    w: &Watched,
+    by_id: &mut HashMap<DestinationId, ductus_store::DestinationActivity>,
+    now: DateTime<Utc>,
+) -> Vec<(DestinationId, Arc<Pause>, Arc<Mutex<Trends>>)> {
+    w.destinations
+        .iter()
+        .map(|(id, stats)| {
+            let pause = Arc::new(Pause::default());
+            let mut baseline = Baseline::default();
+            if let Some(stored) = by_id.get_mut(id) {
+                baseline = Baseline::from_stored(stored.baseline_inflow.take(), stored.baseline_send_ms.take());
+                if let Some(t) = stored.last_sent {
+                    stats.last_sent.at(t);
+                }
+                if let (Some(at), Some(error)) = (stored.last_error_at, &stored.last_error) {
+                    *lock(&stats.last_error) = Some((at, error.clone()));
+                }
+                pause.set(stored.pause.clone());
+                if let Some(p) = pause.get() {
+                    tracing::warn!(interface = %w.stats.name, destination = %stats.name, by = %p.by, since = %p.at, "destination is paused: nothing is sent until `ductus resume`");
+                }
+            }
+            (*id, pause, Arc::new(Mutex::new(Trends::new(baseline, now))))
+        })
+        .collect()
 }
 
 impl Activity {
@@ -192,31 +246,16 @@ impl Activity {
     /// changes every few seconds until `stop` (and once more then).
     pub async fn start(store: Store, watched: Vec<Watched>, stop: CancellationToken) -> Result<Self> {
         let names: Vec<&str> = watched.iter().map(|w| w.stats.name.as_str()).collect();
-        let ids: Vec<DestinationId> = watched.iter().flat_map(|w| w.destinations.iter().copied()).collect();
+        let ids: Vec<DestinationId> = watched.iter().flat_map(|w| w.destinations.iter().map(|(id, _)| *id)).collect();
         let (interfaces, destinations) = store.activity(&names, &ids).await?;
         let mut by_id: HashMap<DestinationId, _> = destinations.into_iter().map(|d| (d.destination_id, d)).collect();
         let mut pauses = HashMap::new();
         let mut trends = HashMap::new();
         let now = Utc::now();
         for w in &watched {
-            for (id, stats) in w.destinations.iter().zip(&w.stats.destinations) {
-                let pause = Arc::new(Pause::default());
-                let mut baseline = Baseline::default();
-                if let Some(stored) = by_id.get_mut(id) {
-                    baseline = Baseline::from_stored(stored.baseline_inflow.take(), stored.baseline_send_ms.take());
-                    if let Some(t) = stored.last_sent {
-                        stats.last_sent.at(t);
-                    }
-                    if let (Some(at), Some(error)) = (stored.last_error_at, &stored.last_error) {
-                        *stats.last_error.lock().unwrap_or_else(|p| p.into_inner()) = Some((at, error.clone()));
-                    }
-                    pause.set(stored.pause.clone());
-                    if let Some(p) = pause.get() {
-                        tracing::warn!(interface = %w.stats.name, destination = %stats.name, by = %p.by, since = %p.at, "destination is paused: nothing is sent until `ductus resume`");
-                    }
-                }
-                pauses.insert(*id, pause);
-                trends.insert(*id, Arc::new(Mutex::new(Trends::new(baseline, now))));
+            for (id, pause, trend) in load_destinations(w, &mut by_id, now) {
+                pauses.insert(id, pause);
+                trends.insert(id, trend);
             }
         }
         let mut watched_since = HashMap::new();
@@ -228,17 +267,64 @@ impl Activity {
             }
             watched_since.insert(i.interface, i.watched_since);
         }
-        let saver = tokio::spawn(save(store, watched, trends.clone(), stop));
-        Ok(Self { watched_since, pauses, trends, saver: Mutex::new(Some(saver)) })
+        let trends = Arc::new(RwLock::new(trends));
+        let watched = Arc::new(Mutex::new(watched));
+        let saver = tokio::spawn(save(store.clone(), watched.clone(), trends.clone(), stop));
+        Ok(Self { watched_since, pauses: RwLock::new(pauses), trends, watched, store, saver: Mutex::new(Some(saver)) })
+    }
+
+    /// Watch `w` from now on in place of the interface of its name (a deploy in place that adds
+    /// or removes destinations). A destination new here gets what's stored for it first (a pause,
+    /// last sent and error, what's normal): its workers start paused if it was. Removed
+    /// destinations are no longer sampled or saved; their switches stay (nothing reaches them).
+    pub async fn watch(&self, w: Watched) -> Result<()> {
+        let new: Vec<DestinationId> = {
+            let pauses = read(&self.pauses);
+            w.destinations.iter().map(|(id, _)| *id).filter(|id| !pauses.contains_key(id)).collect()
+        };
+        if !new.is_empty() {
+            let (_, stored) = self.store.activity(&[], &new).await?;
+            let mut by_id: HashMap<DestinationId, _> = stored.into_iter().map(|d| (d.destination_id, d)).collect();
+            let fresh = Watched {
+                stats: w.stats.clone(),
+                destinations: w.destinations.iter().filter(|(id, _)| new.contains(id)).cloned().collect(),
+            };
+            let loaded = load_destinations(&fresh, &mut by_id, Utc::now());
+            let (mut pauses, mut trends) = (write(&self.pauses), write(&self.trends));
+            for (id, pause, trend) in loaded {
+                pauses.entry(id).or_insert(pause);
+                trends.entry(id).or_insert(trend);
+            }
+        }
+        let mut watched = lock(&self.watched);
+        match watched.iter_mut().find(|o| o.stats.name == w.stats.name) {
+            Some(old) => *old = w,
+            None => watched.push(w),
+        }
+        Ok(())
+    }
+
+    /// Nothing watched and nothing saved: for tests that never reach the store.
+    #[cfg(test)]
+    pub(crate) fn idle(store: Store, pauses: impl IntoIterator<Item = DestinationId>) -> Self {
+        let pauses = pauses.into_iter().map(|id| (id, Arc::default())).collect();
+        Self {
+            watched_since: HashMap::new(),
+            pauses: RwLock::new(pauses),
+            trends: Default::default(),
+            watched: Default::default(),
+            store,
+            saver: Mutex::new(None),
+        }
     }
 
     /// Read the pauses again: a takeover's, once the engine it took over from let go (a
     /// destination paused or resumed there meanwhile is so here too).
     pub async fn refresh_pauses(&self, store: &Store) -> Result<()> {
-        let ids: Vec<DestinationId> = self.pauses.keys().copied().collect();
+        let ids: Vec<DestinationId> = read(&self.pauses).keys().copied().collect();
         let (_, destinations) = store.activity(&[], &ids).await?;
         for d in destinations {
-            if let Some(pause) = self.pauses.get(&d.destination_id) {
+            if let Some(pause) = self.pause(d.destination_id) {
                 pause.set(d.pause);
             }
         }
@@ -247,7 +333,7 @@ impl Activity {
 
     /// After the engine's stop: wait for the last save.
     pub async fn saved(&self) {
-        let saver = self.saver.lock().unwrap_or_else(|p| p.into_inner()).take();
+        let saver = lock(&self.saver).take();
         if let Some(saver) = saver {
             let _ = saver.await;
         }
@@ -258,22 +344,16 @@ impl Activity {
 /// changed; once an hour, save what was learned about it.
 async fn save(
     store: Store,
-    watched: Vec<Watched>,
-    trends: HashMap<DestinationId, Arc<Mutex<Trends>>>,
+    watching: Arc<Mutex<Vec<Watched>>>,
+    trends: Arc<RwLock<TrendsById>>,
     stop: CancellationToken,
 ) {
     let mut unsaved: Vec<BaselineRow> = Vec::new();
     // What was saved last (or loaded): only changes are written.
-    let mut received: HashMap<String, Option<DateTime<Utc>>> =
-        watched.iter().map(|w| (w.stats.name.clone(), w.stats.last_received.get())).collect();
+    let mut received: HashMap<String, Option<DateTime<Utc>>> = HashMap::new();
     // (last sent, last error's time) per destination.
-    type Saved = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
     let mut seen: HashMap<DestinationId, Saved> = HashMap::new();
-    for w in &watched {
-        for (id, s) in w.destinations.iter().zip(&w.stats.destinations) {
-            seen.insert(*id, (s.last_sent.get(), s.last_error().map(|e| e.0)));
-        }
-    }
+    loaded(&lock(&watching), &mut received, &mut seen);
     loop {
         // Stopping: one last save, so a restart starts from now rather than a few seconds ago.
         let last = tokio::select! {
@@ -281,11 +361,15 @@ async fn save(
             _ = stop.cancelled() => true,
         };
         let now = Utc::now();
+        // This round's list: a deploy in place may change it meanwhile.
+        let watched = lock(&watching).clone();
+        loaded(&watched, &mut received, &mut seen);
+        let trends = read(&trends).clone();
         for w in &watched {
             let arrived = crate::stats::get(&w.stats.received);
-            for (id, s) in w.destinations.iter().zip(&w.stats.destinations) {
+            for (id, s) in &w.destinations {
                 let Some(trend) = trends.get(id) else { continue };
-                let mut t = trend.lock().unwrap_or_else(|p| p.into_inner());
+                let mut t = lock(trend);
                 if t.sample(Sample::of(arrived, s, now)) {
                     unsaved.retain(|r| r.destination != *id);
                     let b = &t.baseline;
@@ -313,7 +397,7 @@ async fn save(
             {
                 changed_received.push((w.stats.name.clone(), t));
             }
-            for (id, s) in w.destinations.iter().zip(&w.stats.destinations) {
+            for (id, s) in &w.destinations {
                 let (sent, error) = (s.last_sent.get(), s.last_error());
                 if seen.get(id) != Some(&(sent, error.as_ref().map(|e| e.0))) {
                     changed_seen.push(Seen { destination: *id, last_sent: sent, last_error: error });
@@ -341,6 +425,24 @@ async fn save(
         }
         if last {
             return;
+        }
+    }
+}
+
+/// (last sent, last error's time) as saved.
+type Saved = (Option<DateTime<Utc>>, Option<DateTime<Utc>>);
+
+/// What `watched` has that the saver hasn't seen yet (at its start, or a destination a deploy in
+/// place added) was just loaded from the store: count it as saved.
+fn loaded(
+    watched: &[Watched],
+    received: &mut HashMap<String, Option<DateTime<Utc>>>,
+    seen: &mut HashMap<DestinationId, Saved>,
+) {
+    for w in watched {
+        received.entry(w.stats.name.clone()).or_insert_with(|| w.stats.last_received.get());
+        for (id, s) in &w.destinations {
+            seen.entry(*id).or_insert_with(|| (s.last_sent.get(), s.last_error().map(|e| e.0)));
         }
     }
 }
