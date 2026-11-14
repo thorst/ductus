@@ -36,6 +36,13 @@ if [ ! -x "$CERTS" ]; then
   echo "   building the cert-server example..."
   (cd "$(dirname "${BASH_SOURCE[0]}")/.." && cargo build --release -q -p ductus-runtime --example cert-server)
 fi
+# Days left are counted in UTC dates, the certificates made from one clock and judged by another
+# minutes later: a run across UTC midnight is a day off. Close to it, start just after it instead.
+to_midnight=$(( 86400 - $(date -u +%s) % 86400 ))
+if [ "$to_midnight" -lt 600 ]; then
+  echo "   UTC midnight is ${to_midnight}s away: waiting until just after it (days left would be a day off)"
+  sleep $(( to_midnight + 5 ))
+fi
 DB=$DUCTUS_DATABASE_URL
 P=$(mktemp -d)
 export DUCTUS_DATABASE_URL=$DB
