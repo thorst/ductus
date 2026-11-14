@@ -359,6 +359,143 @@ fn remove(path: &Path) {
     }
 }
 
+/// An interface's interface.yaml among a release's files (`interfaces/<folder>/interface.yaml`).
+fn interface_yaml(i: &release::Interface) -> Option<&str> {
+    i.files.iter().map(String::as_str).find(|f| f.starts_with("interfaces/") && f.ends_with("/interface.yaml"))
+}
+
+/// What deploying `next` (unpacked in `folder`) over `running` (unpacked in `dir`) changes, by
+/// kind (`changes::plan`): from the two manifests, each interface.yaml read only where the
+/// versions differ (an unchanged interface costs nothing). Read beside nothing: the deploy waits
+/// for it (milliseconds for a handful of changes).
+pub fn plan_over(dir: &Path, running: &Running, next: &Manifest, folder: &Path) -> Result<crate::changes::Plan> {
+    /// `from`'s interfaces by name: version, and interface.yaml's text where `other`'s version
+    /// differs (empty elsewhere: never compared).
+    fn texts<'a>(from: &'a Manifest, root: &Path, other: &Manifest) -> Result<BTreeMap<&'a str, (&'a str, String)>> {
+        let mut side = BTreeMap::new();
+        for (name, i) in &from.interfaces {
+            let text = match other.interfaces.get(name).is_none_or(|o| o.version != i.version) {
+                true => {
+                    let path = interface_yaml(i)
+                        .with_context(|| format!("release {}: `{name}` has no interface.yaml", from.id))?;
+                    let path = root.join(path);
+                    std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?
+                }
+                false => String::new(),
+            };
+            side.insert(name.as_str(), (i.version.as_str(), text));
+        }
+        Ok(side)
+    }
+    fn side<'a>(s: &'a BTreeMap<&'a str, (&'a str, String)>) -> crate::changes::Side<'a> {
+        s.iter().map(|(n, (v, t))| (*n, (*v, t.as_str()))).collect()
+    }
+    let before = texts(&running.manifest, &dir.join(running.hex()), next)?;
+    let after = texts(next, folder, &running.manifest)?;
+    let project_changed = running.manifest.project_version.version != next.project_version.version;
+    crate::changes::plan(&side(&before), &side(&after), project_changed)
+}
+
+/// A deploy applied in place (`apply_in_place`).
+pub struct InPlace {
+    /// What it did, a line per interface (and the record), for the deploy's answer.
+    pub steps: Vec<String>,
+    /// What it recorded; None when it couldn't be (said in `steps`): the interfaces run their new
+    /// code all the same.
+    pub deployment: Option<crate::deployment::Deployment>,
+}
+
+/// Apply release `next` (unpacked in `folder`) in place: each interface `plan` changes runs its
+/// new code and settings from its next message (`Engine::replace_interface`; all at once, each on
+/// its own threads), the others untouched; then the deployment is recorded (by `who`, with the
+/// warnings it was let through with), the engine runs `next` from then on, and unpacked releases
+/// nothing runs from are tidied. `plan` must be `in_place()`.
+///
+/// All or nothing: when one interface can't be applied (its new interface.yaml doesn't load, its
+/// code doesn't load on a thread, `in_place::NeedsHandover`), those already applied are put back
+/// on what they ran (the code their threads loaded before) and the `Err` says why, so the engine
+/// runs one release, never a mix: the deploy then takes the handover (or, `--in-place-only`,
+/// refuses).
+pub async fn apply_in_place(
+    engine: &Arc<crate::control::Engine>,
+    plan: &crate::changes::Plan,
+    next: Arc<Running>,
+    folder: &Path,
+    who: &Who,
+    warnings: &HashMap<String, String>,
+) -> Result<InPlace> {
+    let started = std::time::Instant::now();
+    let env = ductus_core::Environment::load(folder, &engine.environment)?;
+    let mut configs = Vec::with_capacity(plan.changes.len());
+    for change in &plan.changes {
+        let name = &change.interface;
+        let yaml = next.manifest.interfaces.get(name).and_then(interface_yaml);
+        let dir = yaml
+            .and_then(|y| Path::new(y).parent())
+            .with_context(|| format!("`{name}`: the release has no interface.yaml for it"))?;
+        let config = ductus_core::InterfaceConfig::load_in(&folder.join(dir), &env)
+            .with_context(|| format!("`{name}`: loading its new interface.yaml"))?;
+        let running = engine.interface(name).with_context(|| format!("`{name}` isn't running here"))?;
+        configs.push((config, running.config.clone()));
+    }
+    let applying = configs.iter().map(|(config, _)| async {
+        let started = std::time::Instant::now();
+        (engine.replace_interface(config.clone(), folder).await, started.elapsed())
+    });
+    let results = futures_util::future::join_all(applying).await;
+    if results.iter().any(|(r, _)| r.is_err()) {
+        // Back on what they ran: the same files, from the release each came from.
+        let mut first = None;
+        for ((result, _), (_, before)) in results.into_iter().zip(&configs) {
+            match result {
+                Err(e) => {
+                    first.get_or_insert(e);
+                }
+                Ok(_) => {
+                    let root = before.dir.parent().and_then(Path::parent).unwrap_or(folder);
+                    if let Err(e) = engine.replace_interface((**before).clone(), root).await {
+                        tracing::error!(interface = %before.name, error = %format!("{e:#}"), "couldn't put an interface back on what it ran after a deploy in place failed: it runs the new release's code");
+                    }
+                }
+            }
+        }
+        return Err(first.expect("one failed"));
+    }
+    let mut steps = Vec::with_capacity(results.len() + 1);
+    let mut applied = Vec::with_capacity(results.len());
+    for ((result, took), change) in results.into_iter().zip(&plan.changes) {
+        let a = result.expect("none failed");
+        let version = a.version.as_ref().map_or("its version unknown".to_string(), |v| v.short());
+        steps.push(format!(
+            "{}: {} → {version}, applied in place ({} ms)",
+            a.interface,
+            change.what.join(", "),
+            took.as_millis()
+        ));
+        applied.push(a);
+    }
+    let deployment = match crate::deployment::record_in_place(engine, who, &applied, Some(next.clone()), warnings).await
+    {
+        Ok(d) => Some(d),
+        Err(e) => {
+            tracing::error!(error = %format!("{e:#}"), "a deploy applied in place wasn't recorded");
+            steps.push(format!("⚠ not recorded: {e:#}"));
+            if let Some(releases) = &engine.releases {
+                releases.now_runs(next.clone()); // what runs all the same
+            }
+            None
+        }
+    };
+    engine.tidy_releases();
+    tracing::info!(
+        release = release::short(&next.hex()),
+        interfaces = applied.len(),
+        took = ?started.elapsed(),
+        "deploy applied in place: the other interfaces never paused"
+    );
+    Ok(InPlace { steps, deployment })
+}
+
 /// Where the code a deployment brings came from, for the "replaces" check.
 #[derive(Debug, Clone)]
 pub enum Source {

@@ -20,7 +20,7 @@ At every start and every handover, once the engine holds its interfaces:
 | **What changed** | The interfaces whose version is new for them, with what they ran before | `adt-in 36792608ed03 → ab2dae752eb7` |
 | **Who** | The account that started it, or the person who asked for the handover ([below](#who-and-why)) | `todd` |
 | **Why** | What the person said (`-m`), when they said | `lab wants MSH-5 set` |
-| **How** | `start` (someone ran it), `service` (systemd or the Windows service started it), `handover` | `handover` |
+| **How** | `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`, `deploy` (a release deployed in place: the engine went on, only the changed interfaces took their new code; [releases](releases.md#in-place-or-by-the-handover)) | `handover` |
 | **The git commit** | The project's HEAD, and the files the interfaces run that aren't that commit's | `commit 71be1444e8bc, 1 file not committed` |
 | **The engine** | Its version, environment, host and run (as the audit log names it) | `0.7.0`, `prod`, `ductus-01` |
 

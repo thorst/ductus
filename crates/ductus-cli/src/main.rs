@@ -427,8 +427,11 @@ enum Command {
     /// Deploy a release to an engine in release mode (`ductus run --releases`): the engine holds
     /// it against what runs there (the "replaces" check: refused when it would undo someone
     /// else's work), runs the gate (`ductus release check`) against its environment unless a
-    /// recent passing check can be reused, then hands over to an engine running it: receiving
-    /// never stops. Exits 1 when it wasn't deployed. Needs a token with the `deploy` permission.
+    /// recent passing check can be reused, then applies it **in place** when only interfaces'
+    /// code, destinations and destination settings change (those interfaces take their new code
+    /// between two messages; the others never pause), else hands over to an engine running it
+    /// (receiving never stops; the answer says which change needed it). Exits 1 when it wasn't
+    /// deployed. Needs a token with the `deploy` permission.
     /// A file deployed gets the record of where it went written into it (its id unchanged), which
     /// an environment requiring this one first reads (DUCTUS_DEPLOY_REQUIRES). Promote from one
     /// engine to the next with `--from`; go back with `--rollback`. Example: `ductus deploy
@@ -476,11 +479,16 @@ enum Command {
         /// there (never reuses a check).
         #[arg(long)]
         all_tests: bool,
+        /// Only in place: refuse (before the gate runs) when the release changes something only a
+        /// handover applies (a source, lanes, an interface added or removed, the project's own
+        /// files), and when applying in place fails, instead of handing over. For sites that
+        /// schedule handovers.
+        #[arg(long)]
+        in_place_only: bool,
         /// The engine's report as JSON.
         #[arg(long)]
         json: bool,
-        /// How long to wait for the engine's answer (the gate, up to 30 minutes, then the
-        /// handover).
+        /// How long to wait for the engine's answer (the gate, up to 30 minutes, then applying it).
         #[arg(long, default_value = "40m", value_parser = parse_duration)]
         timeout: std::time::Duration,
     },
@@ -1459,7 +1467,20 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Release {
             action: Some(ReleaseAction::Check { bundle, env, all_tests, database_url, json }), ..
         } => exit_on_failure(release::check(release::Check { bundle, env, all_tests, database_url, json }).await),
-        Command::Deploy { release, to, token, from, from_token, rollback, reason, force, all_tests, json, timeout } => {
+        Command::Deploy {
+            release,
+            to,
+            token,
+            from,
+            from_token,
+            rollback,
+            reason,
+            force,
+            all_tests,
+            in_place_only,
+            json,
+            timeout,
+        } => {
             let d = deploy::Deploy {
                 release,
                 to,
@@ -1470,6 +1491,7 @@ async fn run(cli: Cli) -> Result<()> {
                 reason,
                 force,
                 all_tests,
+                in_place_only,
                 json,
                 timeout,
             };

@@ -5139,15 +5139,37 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     assert_eq!(d["by"], format!("{name}-ann"), "{got}");
     assert_eq!(d["git_commit"], a["git"]["commit"], "the release's commit: {got}");
 
-    // Bob's change, on a branch from Ann's commit: deployed over hers, no warning.
+    // The engine running the interface is still `engine` (a deploy in place).
+    let same = async |engine: &Terminate| {
+        let now = running().await;
+        let pid = now.0;
+        std::mem::forget(now); // the same process: `engine` stops it
+        assert_eq!(pid, engine.0, "the same engine runs it");
+    };
+
+    // Bob's change, on a branch from Ann's commit: deployed over hers, no warning. Code only, so
+    // in place (0.7.5): the same engine, a deployment `deploy`.
     git(dir.path(), &["checkout", "-qb", "bob"]);
     std::fs::write(dir.path().join("lib/codes.ts"), "export const LAB = \"LAB\"; // bob\n").unwrap();
     git(dir.path(), &["commit", "-qam", "bob's change"]);
     let b = release_json(dir.path(), &["-m", "bob"]);
     let (ok, out) = deploy(&bob, &[b["file"].as_str().unwrap(), "-m", "bob's change"]);
     assert!(ok && !out.contains("⚠"), "{out}\n{}", read(&log));
-    drop(engine); // stopped by the handover already; nothing to do
-    let engine = running().await;
+    assert!(out.contains(&format!("· {name}: code (in place)")) && out.contains("✓ applied in place"), "{out}");
+    same(&engine).await;
+    let got: serde_json::Value = reqwest::Client::new()
+        .get(format!("{to}/api/v1/engine"))
+        .bearer_auth(&bob)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let d = &got["deployment"];
+    assert_eq!((d["how"].as_str(), d["release"].as_str()), (Some("deploy"), b["id"].as_str()), "{got}");
+    assert_eq!((d["by"].as_str(), d["changed"].as_u64()), (Some(format!("{name}-bob").as_str()), Some(1)), "{got}");
+    assert_eq!(got["releases"]["running"], b["id"], "{got}");
 
     // Ann's next release, from main without Bob's commit: refused, naming his work.
     git(dir.path(), &["checkout", "-q", "main"]);
@@ -5184,13 +5206,14 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     assert_eq!(report["gate"]["check"]["id"], check["id"], "{report:#}");
     let warning = report["changes"][0]["warning"].as_str().unwrap_or_default();
     assert!(warning.contains(&format!("by {name}-bob")), "{report:#}");
-    drop(engine);
-    let engine = running().await;
+    assert_eq!(report["applied"], "in_place", "{report:#}");
+    same(&engine).await;
 
     // A rewritten history (0.7.5): Bob squashes main into a new root commit. His first release
     // from it leaves the interface as it runs (only a note changed), so it's deployed without a
-    // check and records his commit; his next one changes it, over Ann's version from a commit
-    // the squash doesn't have, and is accepted: a deploy brought that version from his history.
+    // check and records his commit (in place, with nothing to apply: a note isn't code, nor one of
+    // the project's own files); his next one changes it, over Ann's version from a commit the
+    // squash doesn't have, and is accepted: a deploy brought that version from his history.
     git(dir.path(), &["checkout", "-q", "--orphan", "squashed"]);
     std::fs::write(dir.path().join("notes.md"), "squashed\n").unwrap();
     git(dir.path(), &["add", "notes.md"]);
@@ -5198,8 +5221,8 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     let s = release_json(dir.path(), &["-m", "squashed"]);
     let (ok, out) = deploy(&bob, &[s["file"].as_str().unwrap(), "-m", "the squash"]);
     assert!(ok && !out.contains("⚠"), "{out}\n{}", read(&log));
-    drop(engine);
-    let engine = running().await;
+    assert!(out.contains("✓ applied in place: no interface's code or settings changed"), "{out}");
+    same(&engine).await;
     std::fs::write(dir.path().join("lib/codes.ts"), "export const LAB = \"LAB\"; // bob, squashed\n").unwrap();
     git(dir.path(), &["commit", "-qam", "bob's change after the squash"]);
     let t = release_json(dir.path(), &["-m", "bob after the squash"]);
@@ -5208,8 +5231,7 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     let report: serde_json::Value = serde_json::from_str(&out[out.find("{\n").unwrap()..]).unwrap();
     assert_eq!(report["replaces"], serde_json::json!({}), "{report:#}");
     assert_eq!(report["changes"][0]["warning"], serde_json::Value::Null, "{report:#}");
-    drop(engine);
-    let engine = running().await;
+    same(&engine).await;
     drop(engine);
     let unpacked = std::fs::read_dir(&releases).unwrap().flatten().filter(|e| e.file_name().len() == 64).count();
     assert!(unpacked <= 3, "the running release and the two used last are kept: {unpacked}");
@@ -5233,8 +5255,9 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
 
 /// Deploys without a control socket (0.7.4.4.2): Windows, a container, a plain `ductus run`. The
 /// handover runs in the engine's own process: the same process before and after, `GET /engine`
-/// says so, and a sender sending through a deploy is refused nothing. A release that can't start
-/// here (its port is taken) is refused and the engine goes on.
+/// says so, and a sender sending through a deploy is refused nothing, whether it's applied in
+/// place (code only, 0.7.5) or by the handover (a project file). A release that can't start here
+/// (its port is taken) is refused and the engine goes on.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_process() {
     let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
@@ -5303,39 +5326,55 @@ async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_proces
     assert!(engine.0.try_wait().unwrap().is_none(), "the same process goes on");
     assert_eq!(runner().await.pid as u32, pid, "the engine running it is in the same process");
 
-    // The next, under traffic: refused nothing.
+    // Under traffic (a sender at 200 a second while it deploys): refused nothing.
+    let output = |name: &str| std::fs::File::create(work.path().join(name)).unwrap();
+    let under_traffic = async |release: &serde_json::Value, reason: &str| -> String {
+        let mut sender = Child(
+            Command::new(bin)
+                .args(["gen", "--to", &format!("127.0.0.1:{mllp}"), "--count", "400", "--patients", "40"])
+                .args(["--connections", "2", "--rate", "200"])
+                .stdout(output("gen.log"))
+                .stderr(output("gen.err"))
+                .spawn()
+                .unwrap(),
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        let (ok, out) = deploy(&[release["file"].as_str().unwrap(), "-m", reason]);
+        assert!(ok, "{out}\n{}", read(&log));
+        sender.0.wait().unwrap();
+        let sent = read(&work.path().join("gen.log"));
+        assert!(sent.contains("rejected 0, refused 0,"), "{sent}\n{}", read(&work.path().join("gen.err")));
+        out
+    };
+    let engine_now = async || -> serde_json::Value {
+        let answer = reqwest::Client::new().get(format!("{to}/api/v1/engine")).bearer_auth(&token).send();
+        answer.await.unwrap().json().await.unwrap()
+    };
+
+    // Code only: in place (0.7.5), the same engine, recorded as a deploy.
     std::fs::write(dir.path().join("lib/codes.ts"), "export const LAB = \"LAB\"; // second\n").unwrap();
     git(dir.path(), &["commit", "-qam", "second"]);
     let b = release_json(dir.path(), &["-m", "second"]);
-    let output = |name: &str| std::fs::File::create(work.path().join(name)).unwrap();
-    let mut sender = Child(
-        Command::new(bin)
-            .args(["gen", "--to", &format!("127.0.0.1:{mllp}"), "--count", "400", "--patients", "40"])
-            .args(["--connections", "2", "--rate", "200"])
-            .stdout(output("gen.log"))
-            .stderr(output("gen.err"))
-            .spawn()
-            .unwrap(),
-    );
-    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    let (ok, out) = deploy(&[b["file"].as_str().unwrap(), "-m", "second deploy"]);
-    assert!(ok, "{out}\n{}", read(&log));
-    sender.0.wait().unwrap();
-    let sent = read(&work.path().join("gen.log"));
-    assert!(sent.contains("rejected 0, refused 0,"), "{sent}\n{}", read(&work.path().join("gen.err")));
-    let got: serde_json::Value = reqwest::Client::new()
-        .get(format!("{to}/api/v1/engine"))
-        .bearer_auth(&token)
-        .send()
-        .await
-        .unwrap()
-        .json()
-        .await
-        .unwrap();
+    let out = under_traffic(&b, "second deploy").await;
+    assert!(out.contains("✓ applied in place"), "{out}");
+    let got = engine_now().await;
+    assert_eq!((got["deployment"]["how"].as_str(), &got["deployment"]["release"]), (Some("deploy"), &b["id"]), "{got}");
+    let in_place = runner().await;
+
+    // One of the project's own files changed (the environment's values): by the handover, in
+    // this process.
+    std::fs::write(dir.path().join("environments/prod.yaml"), "variables: { third: \"yes\" }\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "third"]);
+    let b2 = release_json(dir.path(), &["-m", "third"]);
+    let out = under_traffic(&b2, "third deploy").await;
+    assert!(out.contains("needs the handover: the project's own files changed"), "{out}");
+    assert!(out.contains("✓ handed over to a new engine in this process"), "{out}");
+    let got = engine_now().await;
     assert_eq!(got["handover"]["in_process"], true, "{got}");
     assert_eq!(got["handover"]["from_pid"], pid, "{got}");
-    assert_eq!(got["deployment"]["release"], b["id"], "{got}");
+    assert_eq!(got["deployment"]["release"], b2["id"], "{got}");
     let running = runner().await;
+    assert_ne!(running.instance, in_place.instance, "a new engine, in the same process");
 
     // A release whose port another program holds: refused, the engine goes on as it was.
     let held = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -5347,6 +5386,10 @@ async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_proces
     );
     git(dir.path(), &["commit", "-qam", "a port that's taken"]);
     let c = release_json(dir.path(), &["-m", "taken port"]);
+    // Only in place: a source change is refused before the gate runs.
+    let (ok, out) = deploy(&[c["file"].as_str().unwrap(), "-m", "taken port", "--in-place-only"]);
+    assert!(!ok && out.contains("`in_place_only` was asked") && out.contains("`source` changed"), "{out}");
+    assert!(out.contains(&format!("· {name}: source (needs the handover:")) && !out.contains("gate:"), "{out}");
     let (ok, out) = deploy(&[c["file"].as_str().unwrap(), "-m", "taken port"]);
     assert!(!ok, "{out}");
     assert!(out.contains("can't take over") && out.contains(&format!("port {held_port} is in use")), "{out}");
@@ -5358,7 +5401,7 @@ async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_proces
     drop(engine);
     let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
     let ids: Vec<Vec<u8>> =
-        [&a, &b, &c].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
+        [&a, &b, &b2, &c].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 

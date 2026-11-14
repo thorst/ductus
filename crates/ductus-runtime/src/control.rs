@@ -320,8 +320,6 @@ impl Engine {
     /// with it (they wait for it). Answers the version, for the deploy's record
     /// (`deployment::record_in_place`). `in_place::NeedsHandover` when only the handover can
     /// apply it; any other `Err` leaves it running as it was.
-    // The deploy endpoint calls this (0.7.5.1 item 7).
-    #[allow(dead_code)]
     pub(crate) async fn replace_interface(
         self: &Arc<Self>,
         config: InterfaceConfig,

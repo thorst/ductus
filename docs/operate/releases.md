@@ -528,9 +528,12 @@ check's `ok` is false. Retry after a pause on 409 (another check is running ther
 
 `ductus deploy` sends a release to an engine and deploys it there: the engine holds it against
 what runs (would it undo someone else's work?), runs the gate against its own environment (or
-reuses a recent passing check), then hands over to a new engine running it. Receiving never
-stops; sending pauses while the two engines swap (tens of milliseconds for one interface, under
-half a second at a thousand). Every deploy is recorded: who, why, which release, what changed
+reuses a recent passing check), then applies it. **In place** when it changes only interfaces'
+code, destinations and destination settings: those interfaces take their new code between two
+messages, and every other interface goes on without a pause ([below](#in-place-or-by-the-handover)).
+Otherwise it **hands over** to a new engine running it: receiving never stops; sending pauses
+while the two engines swap (tens of milliseconds for one interface, under half a second at a
+thousand). Every deploy is recorded: who, why, which release, what changed
 ([what runs, recorded](deployments.md)), and in the audit log.
 
 **When to use it:** an engine whose project should only ever be a release that passed the gate:
@@ -550,7 +553,8 @@ DUCTUS_RELEASES=/var/lib/ductus/releases
 
 then `sudo systemctl restart ductus`. The engine runs the release last deployed to its
 environment for its project on its database, unpacked from the database into that folder (each
-release in a folder named by its id; the running one and the two used last are kept). Before the
+release in a folder named by its id; the running one, any an interface still runs from after
+deploys in place, and the two used last are kept). Before the
 first deploy there is none: it starts with no interfaces and says so
 ([nuance](../nuances/releases.md#an-engine-in-release-mode-runs-nothing-until-a-release-is-deployed-and-its-api-starts-on-its-defaults-level-1)):
 
@@ -571,7 +575,7 @@ On Windows, the same two lines in `C:\ProgramData\Ductus\ductus.env` (`DUCTUS_RE
 DUCTUS_RELEASES=/tmp/ductus-releases`: no volume needed, the engine unpacks the release from the
 database at every start ([Docker](../install/docker.md)).
 
-Deploys apply by the [handover](high-availability.md#deploying-and-upgrading-without-a-gap):
+Deploys that can't go in place apply by the [handover](high-availability.md#deploying-and-upgrading-without-a-gap):
 under the package's systemd unit the new engine is a new process; on Windows, in a container
 and under a plain `ductus run` it runs in the engine's own process, so the service stays Running
 and the container never restarts
@@ -609,8 +613,9 @@ there. It exits 1 when nothing was deployed; `--json` prints the engine's report
 | `--from-token` | The token for `--from` (DUCTUS_FROM_TOKEN; default: `--token`'s) |
 | `--rollback [ID]` | Go back to a release that ran there before ([roll back](#roll-back)) |
 | `--all-tests` | The gate runs every interface's tests, not only those of what changes there (never reuses a check) |
+| `--in-place-only` | Refuse a release that only the handover applies (before the gate runs), and don't fall back to the handover when applying in place fails ([below](#in-place-or-by-the-handover)) |
 | `--json` | The engine's report, as JSON |
-| `--timeout` | How long to wait for the answer (default 40 min: the gate, then the handover) |
+| `--timeout` | How long to wait for the answer (default 40 min: the gate, then applying it) |
 
 **The gate, or a check reused.** Checked on the engine first (`POST /releases/{id}/check`, as
 when you want the answer before the change window), a deploy within the hour reuses that check
@@ -653,6 +658,34 @@ gate: passed in 0.62 s (no passing check of it here by Ductus 0.7.0-dev in the l
 no interface's code changed (the project's own files may have)
 ```
 
+### In place, or by the handover
+
+Before the gate runs, the engine works out what the release changes here, per interface, from the
+two releases' code versions and interface.yaml files, and the answer lists it (a `·` line per
+interface). When every change is to interfaces' code, `script`, `destinations` (added, removed or
+changed), `output`, `retry`, `rate_limit`, `timeout`, `about`, `custom`, `monitor` or `alert`, the
+release is **applied in place**: each changed interface's workers finish the message in hand on
+the old code and take the next on the new one; a destination added gets a delivery for every
+message waiting, a removed one's waiting deliveries are filtered; the other interfaces never
+pause, and no new engine starts. The deployment is recorded as `how` = `deploy`.
+
+Anything else needs the **handover**, and the answer says which change did (`needs the handover:
+…`): a source (its port, TLS, folder, schedule), `format`, `ordering`, `workers`, `isolation`,
+`dedupe`, `retention` and the other settings of how messages are received and stored; an
+interface added or removed; the project's own files (`ductus.yaml`, `resources.yaml`,
+`docs-schema.yaml`, `environments/`, `secrets/`); the first release on an engine
+([nuance](../nuances/releases.md#a-deploy-goes-in-place-only-when-it-changes-interfaces-code-destinations-or-destination-settings-level-1)).
+
+**When to use `--in-place-only`:** where a handover's short pause of every interface's sending
+should happen in a change window. Such a release is refused before the gate runs, with the reason;
+deploy it again without the flag in the window.
+
+A deploy in place is all or nothing: if one interface can't be applied, those already applied are
+put back and the deploy goes by the handover
+([nuance](../nuances/releases.md#a-deploy-in-place-is-all-or-nothing-level-2)). While its code
+loads, the changed interface waits for every async call in flight on its threads
+([nuance](../nuances/releases.md#a-deploy-in-place-pauses-the-changed-interface-while-its-code-loads-level-3)).
+
 ### It won't undo someone else's work
 
 For each interface a release changes, the version running there must be yours, or come from a
@@ -681,15 +714,17 @@ so a colleague's deployed but unmerged work on *another* interface refuses yours
 ### Through the API
 
 `POST /api/v1/deployments` with `{"release": "<id>", "reason": "…", "force": false,
-"all_tests": false, "rollback": false}` (the `deploy` permission; `release` may be left out of a
-rollback). It answers when the new engine sends: 200 with the report (`ok`, `outcome`, `branch`,
-`rules`, `gate`, `replaces`, `steps`, `changes`, and `place`: this deployment's record, as a
-release file carries it), 409 when refused before anything ran (folder mode, another deploy or
+"all_tests": false, "rollback": false, "in_place_only": false}` (the `deploy` permission;
+`release` may be left out of a rollback). It answers once the release runs (in place:
+milliseconds; a handover: when the new engine sends): 200 with the report (`ok`, `outcome`,
+`branch`, `rules`, `gate`, `replaces`, `plan`: what it changes here and whether that goes in place,
+`applied`: `in_place` or `handover`, `steps`, `changes`, and `place`: this deployment's record, as
+a release file carries it), 409 when refused before anything ran (folder mode, another deploy or
 check running, the release already runs, the environment's rules, the "replaces" check, a
-rollback to a release that never ran there), 422 when the gate found problems, 500 when the new
-engine couldn't take over (the running one goes on). One deploy or check at a time per engine.
-Every attempt is in the audit log (`release.deploy`, or `release.rollback`, with `detail.ok` and
-`detail.outcome`).
+rollback to a release that never ran there, `in_place_only` and it needs the handover), 422 when
+the gate found problems, 500 when it couldn't be applied (the engine goes on as it was). One
+deploy or check at a time per engine. Every attempt is in the audit log (`release.deploy`, or
+`release.rollback`, with `detail.ok`, `detail.applied` and `detail.outcome`).
 
 `GET /api/v1/releases/{id}/file` (the `deploy` or `download` permission, audited as
 `release.download`) gives the release's file with its record brought up to date;

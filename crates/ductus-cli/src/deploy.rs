@@ -27,6 +27,8 @@ pub struct Deploy {
     pub reason: Option<String>,
     pub force: bool,
     pub all_tests: bool,
+    /// Refuse what only a handover applies (`--in-place-only`).
+    pub in_place_only: bool,
     pub json: bool,
     pub timeout: Duration,
 }
@@ -88,14 +90,19 @@ pub async fn run(d: Deploy) -> Result<bool> {
         (Some(given), None, None) => given.clone(),
         (None, _, _) => String::new(), // a rollback to the default
     };
-    let mut request = json!({ "reason": d.reason, "force": d.force, "all_tests": d.all_tests, "rollback": d.rollback });
+    let mut request = json!({
+        "reason": d.reason, "force": d.force, "all_tests": d.all_tests, "rollback": d.rollback,
+        "in_place_only": d.in_place_only,
+    });
     if !id.is_empty() {
         request["release"] = id.clone().into();
     }
     say(if d.rollback {
-        "rolling back: the gate runs, then the handover…".to_string()
+        "rolling back: the gate runs, then it's applied (in place when it can be, else by the handover)…".to_string()
     } else {
-        "deploying: the gate runs (or a recent passing check is reused), then the handover…".to_string()
+        "deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can \
+         be, else by the handover)…"
+            .to_string()
     });
     let response = client
         .post(format!("{base}/deployments"))
@@ -242,6 +249,15 @@ fn text(r: &Value) -> String {
             }
         }
     }
+    // What it changes here, by kind: each interface, and what it needed.
+    for c in r["plan"]["changes"].as_array().into_iter().flatten() {
+        let what: Vec<&str> = c["what"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        let how = match c["handover_because"].as_str() {
+            None => "in place".to_string(),
+            Some(why) => format!("needs the handover: {why}"),
+        };
+        out += &format!("· {}: {} ({how})\n", s(&c["interface"]), what.join(", "));
+    }
     for step in r["steps"].as_array().into_iter().flatten() {
         out += &format!("  {}\n", s(step));
     }
@@ -250,6 +266,9 @@ fn text(r: &Value) -> String {
     let changes = r["changes"].as_array().cloned().unwrap_or_default();
     if r["ok"] == true {
         match changes.len() {
+            0 if r["deployment"].is_null() && r["applied"] == "in_place" => {
+                out += "⚠ applied, but not recorded (the step above says why): `ductus history` won't show it\n"
+            }
             0 if r["deployment"].is_null() => {
                 out += "the new engine's record isn't in yet: `ductus history` shows it\n"
             }
@@ -299,6 +318,34 @@ mod tests {
                 && t.contains("  lab new here cccccccccccc"),
             "{t}"
         );
+    }
+
+    /// A deploy in place says what it changed by kind, each interface applied, and what needs the
+    /// handover when one does.
+    #[test]
+    fn a_deploy_says_what_went_in_place_and_what_needs_the_handover() {
+        let r = json!({
+            "ok": true, "outcome": "applied in place: 1 interface took its new code between two messages; the others never paused",
+            "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "prod", "replaces": {}, "forced": false,
+            "gate": null, "applied": "in_place",
+            "plan": { "changes": [{ "interface": "adt", "what": ["code", "destination pacs added"], "in_place": true }], "handover_because": [] },
+            "steps": ["adt: code, destination pacs added → bbbbbbbbbbbb, applied in place (3 ms)"], "deployment": 42,
+            "changes": [{ "interface": "adt", "from": "aaaaaaaaaaaa", "to": "bbbbbbbbbbbb" }]
+        });
+        let t = text(&r);
+        assert!(t.contains("· adt: code, destination pacs added (in place)"), "{t}");
+        assert!(t.contains("  adt: code, destination pacs added → bbbbbbbbbbbb, applied in place (3 ms)"), "{t}");
+        assert!(t.contains("✓ applied in place") && t.contains("  adt aaaaaaaaaaaa → bbbbbbbbbbbb"), "{t}");
+        let port = json!({
+            "ok": false, "outcome": "refused: only the handover applies it (adt: `source` changed (…)), and `in_place_only` was asked",
+            "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "prod", "replaces": {}, "forced": false,
+            "gate": null, "plan": { "changes": [{ "interface": "adt", "what": ["source"], "in_place": false,
+            "handover_because": "`source` changed (…)" }], "handover_because": ["adt: `source` changed (…)"] },
+            "steps": [], "deployment": null, "changes": []
+        });
+        let t = text(&port);
+        assert!(t.contains("· adt: source (needs the handover: `source` changed (…))"), "{t}");
+        assert!(t.contains("✗ refused: only the handover applies it"), "{t}");
     }
 
     /// The environment's rules refuse with what to do; a rollback names what it undoes and that

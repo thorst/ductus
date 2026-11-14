@@ -2,6 +2,13 @@
 //! another stored here, through the handover: receiving never stops, sending pauses while the
 //! engines swap (well under a second at a thousand interfaces).
 //!
+//! **In place (0.7.5):** when the release changes only interfaces' code, destinations and
+//! destination settings (`changes::plan`, from the two manifests), it's applied without a handover
+//! (`deploy::apply_in_place`): each changed interface's workers restart between two messages on the
+//! new code, the others never pause, and a deployment `how = deploy` is recorded. Anything else
+//! (a source, lanes, an interface added or removed, the project's own files) goes by the handover,
+//! the answer saying which change needed it; `in_place_only` refuses instead.
+//!
 //! In order, each step able to refuse with what to do: the engine runs releases (folder mode
 //! refuses, saying how to switch); the release is stored and of this engine's project, and isn't
 //! the one running; a reason is given (except in `dev`); **this environment's rules** (0.7.4.4.3:
@@ -130,6 +137,11 @@ pub struct DeployRequest {
     /// gate runs. Audited as `release.rollback`.
     #[serde(default)]
     rollback: bool,
+    /// Only in place: refuse (409, before the gate runs) when the release changes something only
+    /// the handover applies (`plan.handover_because` says what), and (500) when applying in place
+    /// fails, instead of taking the handover. For sites that schedule handovers.
+    #[serde(default)]
+    in_place_only: bool,
 }
 
 /// What a deploy did, or why it didn't.
@@ -160,9 +172,16 @@ pub struct DeployReport {
     forced: bool,
     /// The gate: a check run now, or the passing check reused (`reused`).
     gate: Option<DeployGate>,
-    /// What the handover said as it went.
+    /// What it changes here, by kind, and whether that applies in place; absent when refused
+    /// before it was worked out, or on the first deploy here (nothing to compare: the handover).
+    plan: Option<PlanInfo>,
+    /// How it was applied: `in_place` (only the changed interfaces restarted their workers,
+    /// between two messages; the others never paused) or `handover` (a new engine took over:
+    /// every interface's sending paused for a moment); absent when refused.
+    applied: Option<&'static str>,
+    /// What applying it said as it went: each interface applied in place, or the handover's steps.
     steps: Vec<String>,
-    /// The deployment the new engine recorded and what it changed (absent if it wasn't recorded
+    /// The deployment recorded and what it changed (absent if the new engine's wasn't recorded
     /// within seconds: `GET /engine` shows it then).
     deployment: Option<i32>,
     changes: Vec<DeployChange>,
@@ -180,6 +199,51 @@ pub struct DeployGate {
     #[serde(skip_serializing_if = "Option::is_none")]
     why_not_reused: Option<String>,
     check: CheckInfo,
+}
+
+/// What a release changes here, by kind (`changes::plan`).
+#[derive(Serialize, ToSchema)]
+pub struct PlanInfo {
+    /// Every interface whose code version changes, is added or is removed.
+    changes: Vec<PlannedChange>,
+    /// Why it needs the handover, a line per reason (the project's own files, then each
+    /// interface); empty: it applies in place.
+    handover_because: Vec<String>,
+}
+
+#[derive(Serialize, ToSchema)]
+pub struct PlannedChange {
+    interface: String,
+    /// What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`,
+    /// `source`, `added`, `removed`, ...
+    what: Vec<String>,
+    /// It can be applied in place (its workers restarted between messages).
+    in_place: bool,
+    /// Why only the handover applies it; absent when it goes in place.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handover_because: Option<String>,
+}
+
+impl PlanInfo {
+    fn of(plan: &crate::changes::Plan) -> Self {
+        use crate::changes::Apply;
+        Self {
+            changes: plan
+                .changes
+                .iter()
+                .map(|c| PlannedChange {
+                    interface: c.interface.clone(),
+                    what: c.what.clone(),
+                    in_place: c.apply == Apply::InPlace,
+                    handover_because: match &c.apply {
+                        Apply::InPlace => None,
+                        Apply::Handover(why) => Some(why.clone()),
+                    },
+                })
+                .collect(),
+            handover_because: plan.handover_because(),
+        }
+    }
 }
 
 #[derive(Serialize, ToSchema)]
@@ -224,22 +288,26 @@ impl PlaceInfo {
 }
 
 /// Deploy a stored release to this engine (release mode): this environment's rules, the "replaces"
-/// check, the gate (or a recent passing check reused), then the handover to an engine running it;
-/// or roll back (`rollback`) to a release that ran here before. Answers when the new engine sends,
-/// or when it couldn't (this one goes on): seconds, plus the gate's time when it runs. 200:
-/// deployed. 409: refused before anything ran (folder mode, another deploy or check running, the
-/// release already runs, this environment's rules, its "replaces" check names someone's work, a
-/// rollback to a release that never ran here), the report says why. 422: the gate found problems.
-/// 500: the new engine couldn't take over (this one goes on). Needs the `deploy` permission. One
-/// deploy or check at a time per engine.
+/// check, what it changes here (`plan`), the gate (or a recent passing check reused), then **in
+/// place** when only interfaces' code, destinations and destination settings change (those
+/// interfaces' workers restart between two messages on the new code; the others never pause), else
+/// the handover to an engine running it (`plan.handover_because` says why); or roll back
+/// (`rollback`) to a release that ran here before, the same way. Answers once it runs (in place:
+/// milliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as
+/// it was), plus the gate's time when it runs. 200: deployed (`applied` says how). 409: refused
+/// before anything ran (folder mode, another deploy or check running, the release already runs,
+/// this environment's rules, its "replaces" check names someone's work, a rollback to a release
+/// that never ran here, `in_place_only` and it needs the handover), the report says why. 422: the
+/// gate found problems. 500: it couldn't be applied (this engine goes on as it was). Needs the
+/// `deploy` permission. One deploy or check at a time per engine.
 #[utoipa::path(
     post, path = "/deployments", operation_id = "deploy_release", tag = "releases",
     request_body = DeployRequest,
     responses(
-        (status = 200, body = DeployReport, description = "Deployed: the release runs here"),
+        (status = 200, body = DeployReport, description = "Deployed: the release runs here (`applied`: in place or by the handover)"),
         (status = 409, body = DeployReport, description = "Refused before anything ran: `outcome` says why"),
         (status = 422, body = DeployReport, description = "The gate found problems: `gate.check.report`"),
-        (status = 500, body = DeployReport, description = "The new engine couldn't take over: this one goes on"),
+        (status = 500, body = DeployReport, description = "It couldn't be applied: this engine goes on as it was"),
         (status = 400, body = super::ErrorBody, description = "No reason given, no release named, or no such release"),
         (status = 403, body = super::ErrorBody)
     )
@@ -325,6 +393,8 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
         replaces: BTreeMap::new(),
         forced: false,
         gate: None,
+        plan: None,
+        applied: None,
         steps: Vec::new(),
         deployment: None,
         changes: Vec::new(),
@@ -409,7 +479,7 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
     let who = Who { how: "handover", by: caller.name().to_string(), reason: reason.clone(), rollback: asked.rollback };
     let source = deploy::Source::Release {
         commit: manifest.git.as_ref().map(|g| g.commit.clone()),
-        ancestry: std::sync::Arc::new(ancestry),
+        ancestry: std::sync::Arc::new(ancestry.clone()),
         over: manifest.over.as_deref().and_then(deploy::unhex),
     };
     let versions: Vec<(String, Vec<u8>)> =
@@ -434,6 +504,37 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
         return refuse(report, StatusCode::CONFLICT, outcome);
     }
     report.forced = asked.force && !report.replaces.is_empty();
+
+    // What it changes here, by kind: in place when only code, destinations and their settings
+    // change (those interfaces' workers restart between messages, nothing else pauses), else by
+    // the handover. Before the gate, so `in_place_only` refuses without running it.
+    let (folder, _) = deploy::unpacked(&engine.store, &releases.mode, &id).await?;
+    let running = releases.running();
+    let plan = match &running {
+        Some(r) => {
+            let (dir, r, next, folder) = (releases.mode.dir.clone(), r.clone(), manifest.clone(), folder.clone());
+            let plan = tokio::task::spawn_blocking(move || deploy::plan_over(&dir, &r, &next, &folder))
+                .await
+                .map_err(anyhow::Error::from)??;
+            Some(plan)
+        }
+        None => None,
+    };
+    report.plan = plan.as_ref().map(PlanInfo::of);
+    let handover_because = match &plan {
+        Some(p) => p.handover_because(),
+        None => vec!["nothing ran here before: the first release starts by the handover".to_string()],
+    };
+    if asked.in_place_only && !handover_because.is_empty() {
+        let outcome = format!(
+            "refused: only the handover applies it ({}), and `in_place_only` was asked: deploy it without that flag \
+             when a handover suits",
+            handover_because.join("; ")
+        );
+        let detail = serde_json::json!({ "environment": engine.environment, "ok": false, "outcome": outcome });
+        audit(action, detail).await;
+        return refuse(report, StatusCode::CONFLICT, outcome);
+    }
 
     // The gate, or a recent passing check of the same release here (the pre-run).
     let reuse = releases.mode.reuse_check;
@@ -482,7 +583,85 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
         audit("release.force", detail).await;
     }
 
+    // In place when it can: only the changed interfaces take their new code, between two messages.
+    let deployer = Who::deploy(caller.name(), reason.clone(), asked.rollback);
+    let warnings: std::collections::HashMap<String, String> =
+        report.replaces.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+    if let Some(plan) = plan.as_ref().filter(|_| handover_because.is_empty()) {
+        let next = std::sync::Arc::new(deploy::Running { id: id.clone(), manifest: manifest.clone(), ancestry });
+        match deploy::apply_in_place(&engine, plan, next, &folder, &deployer, &warnings).await {
+            Ok(done) => {
+                report.ok = true;
+                report.applied = Some("in_place");
+                report.steps = done.steps;
+                let n = plan.changes.len();
+                report.outcome = match n {
+                    0 => "applied in place: no interface's code or settings changed".to_string(),
+                    1 => {
+                        "applied in place: 1 interface took its new code between two messages; the others never paused"
+                            .to_string()
+                    }
+                    n => format!(
+                        "applied in place: {n} interfaces took their new code between two messages; the others never paused"
+                    ),
+                };
+                if let Some(d) = &done.deployment {
+                    report.deployment = Some(d.id);
+                    report.changes = d
+                        .interfaces
+                        .values()
+                        .filter(|i| i.changed)
+                        .map(|i| DeployChange {
+                            interface: i.interface.clone(),
+                            from: i.previous.as_deref().map(crate::code::short),
+                            to: crate::code::short(&i.version),
+                            warning: warnings.get(&i.interface).cloned(),
+                        })
+                        .collect();
+                    report.place = engine
+                        .store
+                        .release_places(&id)
+                        .await?
+                        .iter()
+                        .find(|p| p.here && p.environment == engine.environment)
+                        .map(PlaceInfo::of);
+                }
+                let mut detail = serde_json::json!({
+                    "environment": engine.environment,
+                    "ok": true,
+                    "applied": "in_place",
+                    "reason": reason,
+                    "forced": report.forced,
+                    "check": report.gate.as_ref().map(|g| g.check.id),
+                    "reused_check": report.gate.as_ref().is_some_and(|g| g.reused),
+                    "outcome": report.outcome,
+                });
+                if asked.rollback {
+                    detail["undoes"] = serde_json::to_value(&report.replaces).unwrap_or_default();
+                }
+                audit(action, detail).await;
+                return Ok((StatusCode::OK, Json(report)).into_response());
+            }
+            Err(e) if asked.in_place_only => {
+                let outcome = format!(
+                    "couldn't apply it in place ({e:#}): every interface runs what it ran, and `in_place_only` was \
+                     asked, so no handover was tried"
+                );
+                let detail = serde_json::json!({ "environment": engine.environment, "ok": false, "outcome": outcome });
+                audit(action, detail).await;
+                return refuse(report, StatusCode::INTERNAL_SERVER_ERROR, outcome);
+            }
+            Err(e) => {
+                tracing::warn!(error = %format!("{e:#}"), "a deploy couldn't be applied in place: every interface was put back, and the handover applies it");
+                report.steps.push(format!("couldn't apply it in place ({e:#}): put back, applying it by the handover"));
+            }
+        }
+    } else {
+        report.steps.extend(handover_because.iter().map(|why| format!("needs the handover: {why}")));
+    }
+
     // The handover: a new engine running the release takes over from this one.
+    report.applied = Some("handover");
     let request = crate::handover::Request {
         timeout_secs: READY_WITHIN.as_secs(),
         environment: None,
@@ -494,13 +673,14 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
         },
     };
     let started = Utc::now();
-    let mut steps = Vec::new();
+    let mut steps = std::mem::take(&mut report.steps);
     let (ok, text) = asker.ask(request, |line| steps.push(line.to_string())).await?;
     report.steps = steps;
     report.ok = ok;
     let mut detail = serde_json::json!({
         "environment": engine.environment,
         "ok": ok,
+        "applied": "handover",
         "reason": reason,
         "forced": report.forced,
         "check": report.gate.as_ref().map(|g| g.check.id),
