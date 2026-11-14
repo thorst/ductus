@@ -5282,6 +5282,205 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
+/// A deploy in place under traffic (0.7.5.1): interfaces A and B both receive while a release
+/// that changes only A's code is deployed. The same engine runs both after; neither sender is
+/// refused, retried or dropped; every message is delivered once; B's deliveries were all decided
+/// by the code B ran before (it was never replaced); A's switch to the new version, and every A
+/// message received after the deploy answered is decided by it, recorded with the deploy's reason.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (port_a, port_b, api) = (free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let (a, b) = (format!("ipa-{nanos}"), format!("ipb-{nanos}"));
+    let work = tempfile::tempdir().unwrap();
+    // Outside the project: each release runs from its own unpacked folder.
+    let out_dir = |name: &str| work.path().join(format!("out-{name}"));
+    let interface = |name: &str, port: u16| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\ndestinations:\n  out: {{ file: {{ dir: '{}' }}, script: tag.ts }}\n",
+            out_dir(name).display()
+        )
+    };
+    let tag = "import type { Message } from \"@ductus/sdk\";\nimport { TAG } from \"./value.ts\";\n\nexport function transform(m: Message) {\n  m.set(\"MSH-5\", TAG);\n  return m;\n}\n";
+    let test = "import { parse, test, expect } from \"@ductus/sdk\";\nimport { transform } from \"./tag.ts\";\nimport { TAG } from \"./value.ts\";\n\ntest(\"tags it\", () => {\n  expect(transform(parse(\"MSH|^~\\\\&|A|B|C|D|20260101||ADT^A01|1|P|2.5\\r\")).get(\"MSH-5\")).toBe(TAG);\n});\n";
+    let (a_yaml, b_yaml) = (interface(&a, port_a), interface(&b, port_b));
+    let files = |name: &str, file: &str| format!("interfaces/{name}/{file}");
+    let dir = project(&[
+        (".gitignore", "out/\n*.log\n"),
+        ("ductus.yaml", "{}\n"),
+        ("environments/dev.yaml", "variables: {}\n"),
+        ("environments/prod.yaml", "variables: {}\n"),
+        (files(&a, "interface.yaml").as_str(), a_yaml.as_str()),
+        (files(&a, "tag.ts").as_str(), tag),
+        (files(&a, "tag.test.ts").as_str(), test),
+        (files(&a, "value.ts").as_str(), "export const TAG = \"A1\";\n"),
+        (files(&b, "interface.yaml").as_str(), b_yaml.as_str()),
+        (files(&b, "tag.ts").as_str(), tag),
+        (files(&b, "tag.test.ts").as_str(), test),
+        (files(&b, "value.ts").as_str(), "export const TAG = \"B1\";\n"),
+    ]);
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let (control, releases) = (work.path().join("control"), work.path().join("releases"));
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let token_name = format!("{a}-deployer");
+    let args = ["token", "create", &token_name, "--role", "operator", "--permission", "deploy"];
+    let out = Command::new(bin).args(args).current_dir(dir.path()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let to = format!("http://127.0.0.1:{api}");
+    let deploy = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(bin)
+            .arg("deploy")
+            .args(args)
+            .args(["--to", &to])
+            .env("DUCTUS_API_TOKEN", &token)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), said)
+    };
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let running = async || -> u32 {
+        for _ in 0..600 {
+            let engines = store.live_engines().await.unwrap();
+            if let Some(e) = engines.iter().find(|e| e.interfaces.contains(&a) && e.interfaces.contains(&b)) {
+                return e.pid as u32;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("no engine runs {a} and {b}");
+    };
+
+    let log = work.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let mut first = Child(
+        Command::new(bin)
+            .args(["run", "--releases", &releases.to_string_lossy(), "--release-project", &project_name])
+            .args(["--env", "prod", "--threads", "2", "--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", &control)
+            .env_remove("DUCTUS_PROJECT")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "started interfaces=0", 60), "{}", read(&log));
+
+    // The first release: both new, by the handover (the engine before ran nothing).
+    let one = release_json(dir.path(), &["-m", "first"]);
+    let (ok, out) = deploy(&[one["file"].as_str().unwrap(), "-m", "both interfaces"]);
+    assert!(ok && out.contains("✓ handed over"), "{out}\n{}", read(&log));
+    let exited = tokio::task::spawn_blocking(move || first.0.wait()).await.unwrap().unwrap();
+    assert!(exited.success(), "the engine before stops cleanly: {exited}");
+    let engine = Terminate(running().await);
+
+    // Both under traffic: 50 a second for 8 s each, A's numbered apart from B's.
+    let send = |port: u16, offset: &str| {
+        Command::new(bin)
+            .args(["gen", "--to", &format!("127.0.0.1:{port}"), "--count", "400", "--rate", "50"])
+            .args(["--patients", "20", "--offset", offset])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let (send_a, send_b) = (send(port_a, "0"), send(port_b, "100000"));
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    // A's code changes; B's doesn't: in place, the same engine.
+    std::fs::write(dir.path().join(files(&a, "value.ts")), "export const TAG = \"A2\";\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "A tags A2"]);
+    let two = release_json(dir.path(), &["-m", "A2"]);
+    let (ok, out) = deploy(&[two["file"].as_str().unwrap(), "-m", "A tags A2", "--in-place-only"]);
+    let answered = chrono::Utc::now();
+    assert!(ok, "{out}\n{}", read(&log));
+    assert!(out.contains(&format!("· {a}: code (in place)")) && out.contains("✓ applied in place"), "{out}");
+    assert!(!out.contains(&format!("· {b}")), "B isn't changed: {out}");
+    assert_eq!(running().await, engine.0, "the same engine runs both");
+
+    // Every message sent and delivered once; nothing refused, retried or dropped.
+    let sent = |child: std::process::Child| {
+        let out = child.wait_with_output().unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "{said}");
+        said
+    };
+    let (said_a, said_b) = tokio::task::spawn_blocking(move || (sent(send_a), sent(send_b))).await.unwrap();
+    for said in [&said_a, &said_b] {
+        assert!(said.contains("sent 400 messages"), "{said}");
+        assert!(said.contains("retries 0, rejected 0, refused 0, dropped 0"), "{said}");
+    }
+    let delivered = |name: &str| std::fs::read_dir(out_dir(name)).map_or(0, |d| d.count());
+    for _ in 0..600 {
+        if delivered(&a) >= 400 && delivered(&b) >= 400 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!((delivered(&a), delivered(&b)), (400, 400), "each message delivered once");
+
+    // What decided each delivery: B one version throughout; A the old, then the new.
+    let decided = async |name: &str| {
+        let (mut rows, mut before) = (Vec::new(), None);
+        loop {
+            let page = ductus_store::Browse { interface: name, status: None, before, limit: 200 };
+            let messages = store.browse(&page).await.unwrap();
+            let Some(last) = messages.last() else { break };
+            before = Some(last.id);
+            for m in &messages {
+                let at = ductus_store::MessageRef { id: m.id, received_at: m.received_at };
+                let d = store.deliveries(at).await.unwrap().remove(0);
+                assert_eq!(d.status, ductus_store::Status::Sent, "{name} message {}", m.id);
+                let version = d.code_version.as_deref().map(ductus_runtime::code::hex).expect("decided by code");
+                rows.push((m.id, m.received_at, version, d.deployed_reason));
+            }
+        }
+        rows.sort_by_key(|r| r.0);
+        rows
+    };
+    let versions = |rows: &[(i64, chrono::DateTime<chrono::Utc>, String, Option<String>)]| {
+        let mut v: Vec<String> = rows.iter().map(|r| r.2.clone()).collect();
+        v.dedup();
+        v
+    };
+    let (rows_a, rows_b) = (decided(&a).await, decided(&b).await);
+    assert_eq!(versions(&rows_b).len(), 1, "B was never replaced: {:?}", versions(&rows_b));
+    assert!(rows_b.iter().all(|r| r.3.as_deref() == Some("both interfaces")), "B's version came with the first deploy");
+    let switched = versions(&rows_a);
+    assert!(switched.len() >= 2, "A ran the old code, then the new: {switched:?}");
+    let new = switched.last().unwrap();
+    // After the deploy answered, every message A receives is decided by the new code.
+    let after: Vec<_> = rows_a.iter().filter(|r| r.1 > answered).collect();
+    assert!(!after.is_empty(), "A received messages after the deploy");
+    for r in &after {
+        assert_eq!((&r.2, r.3.as_deref()), (new, Some("A tags A2")), "message {} after the deploy", r.0);
+    }
+    let tags = |name: &str, tag: &str| {
+        std::fs::read_dir(out_dir(name))
+            .unwrap()
+            .flatten()
+            .filter(|f| read(&f.path()).contains(&format!("|{tag}|")))
+            .count()
+    };
+    assert_eq!(tags(&b, "B1"), 400, "B's code is what it was");
+    assert_eq!(tags(&a, "A1") + tags(&a, "A2"), 400, "A's messages: some A1, then A2");
+    assert!(tags(&a, "A2") >= after.len(), "A2 from the new code");
+
+    drop(engine);
+    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
+    let ids: Vec<Vec<u8>> =
+        [&one, &two].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
+    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
+}
+
 /// Deploys without a control socket (0.7.4.4.2): Windows, a container, a plain `ductus run`. The
 /// handover runs in the engine's own process: the same process before and after, `GET /engine`
 /// says so, and a sender sending through a deploy is refused nothing, whether it's applied in
