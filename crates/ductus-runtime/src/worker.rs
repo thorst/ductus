@@ -27,7 +27,7 @@ use crate::stats::{self, DestinationStats, InterfaceStats};
 use anyhow::{Context, Result, anyhow};
 use ductus_core::InterfaceConfig;
 use ductus_core::config::Retry;
-use ductus_script::{Call, Function, FunctionId, InterfaceId, Isolate, Runaway};
+use ductus_script::{Call, CodeFile, Function, FunctionId, InterfaceId, Isolate, Runaway};
 use ductus_store::{DestinationId, Done, MessageRef, Pending, Status, Store};
 use std::cell::RefCell;
 use std::path::Path;
@@ -98,13 +98,31 @@ pub struct Outlet {
 
 /// Readiness report for one job: its interface name and whether its code loaded, with the files
 /// it loaded (its code version's: `code`; none without `script:`).
-pub type Ready = (String, Result<Vec<ductus_script::CodeFile>>);
+pub type Ready = (String, Result<Vec<CodeFile>>);
+
+/// What the engine asks of a running worker thread (`spawn_thread`'s `commands`).
+pub enum Command {
+    /// Run `interface` from now on as `jobs` (its slots on this thread; none: it stops running
+    /// here). The new code loads first, beside the old: a failure answers `Err` and the old
+    /// workers go on. Then the interface's workers stop between messages as at the engine's stop
+    /// (a transform or send in hand finishes on the old code, what's done is saved), and the new
+    /// ones start: the next message runs the new code. A respond-mode interface's requests waiting
+    /// go to its new code; those in flight finish on the old. Answers the files the new code loaded
+    /// (its code version's). Other interfaces on the thread aren't stopped; their calls wait while
+    /// the code loads (`Gate`).
+    ///
+    /// The code must come from paths not loaded on this thread before (a release's own folder):
+    /// V8 keys modules by URL, so a file loaded again from the same path is the old module.
+    // TODO(0.7.5.1): sent by a deploy in place once the engine keeps each interface's parts.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Replace { interface: String, jobs: Vec<Job>, answer: tokio::sync::oneshot::Sender<Result<Vec<CodeFile>>> },
+}
 
 /// Start a worker thread for `jobs`, with one isolate of `heap_mb`. Each job reports on
 /// `ready` once its interface code has loaded (or failed to); then the thread processes
-/// messages until `stop`, and ends once its workers have saved what they finished. With
-/// `inspector` (`ductus dev --inspect`: the thread holds one interface), its isolate is offered
-/// to debuggers there before its code loads.
+/// messages until `stop`, and ends once its workers have saved what they finished. Meanwhile it
+/// does what `commands` asks, one at a time. With `inspector` (`ductus dev --inspect`: the thread
+/// holds one interface), its isolate is offered to debuggers there before its code loads.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_thread(
     name: String,
@@ -115,6 +133,7 @@ pub fn spawn_thread(
     ready: std::sync::mpsc::Sender<Ready>,
     stop: CancellationToken,
     inspector: Option<Arc<Inspector>>,
+    mut commands: mpsc::UnboundedReceiver<Command>,
 ) -> Result<std::thread::JoinHandle<()>> {
     let io = tokio::runtime::Handle::current(); // the main runtime (see `Worker::db`)
     std::thread::Builder::new()
@@ -134,73 +153,236 @@ pub fn spawn_thread(
                 }
                 let mut loaded = Vec::with_capacity(jobs.len());
                 for job in jobs {
-                    let config = &job.config;
-                    let mut files = Vec::new();
-                    let functions = config.functions();
-                    let script = match functions.iter().any(Option::is_some) {
-                        true => {
-                            match host.add_functions(&Function::all(&functions), config.timeout).await {
-                                Ok(loaded) => {
-                                    files = host.code_files(&config.modules()).unwrap_or_else(|e| {
-                                        tracing::warn!(interface = %config.name, error = %format!("{e:#}"), "couldn't tell which files its code loaded: its code version counts its interface.yaml only");
-                                        Vec::new()
-                                    });
-                                    Some(loaded)
-                                }
-                                Err(e) => {
-                                    let _ = ready.send((job.config.name.clone(), Err(e)));
-                                    continue;
-                                }
-                            }
+                    match load(&mut host, &job.config).await {
+                        Ok((script, files)) => {
+                            let _ = ready.send((job.config.name.clone(), Ok(files)));
+                            loaded.push((job, script));
                         }
-                        false => None,
-                    };
-                    let _ = ready.send((job.config.name.clone(), Ok(files)));
-                    loaded.push((job, script));
+                        Err(e) => {
+                            let _ = ready.send((job.config.name.clone(), Err(e)));
+                        }
+                    }
                 }
                 drop(ready);
                 host.forget_code_files();
 
-                let host = Rc::new(RefCell::new(host));
-                let kick = Rc::new(Notify::new());
-                let interrupted = Rc::new(watch::Sender::new(None));
-                tokio::task::spawn_local(drive_event_loop(name, host.clone(), kick.clone(), interrupted.clone()));
-                let mut tasks = Vec::new();
-                for (mut job, script) in loaded {
-                    // The functions, in `config.functions()` order: one per destination (None for
-                    // one without code).
-                    let script = |i: usize| {
-                        let (interface, functions) = script.as_ref()?;
-                        Some(Script {
-                            host: host.clone(),
-                            interface: *interface,
-                            function: functions[i]?,
-                            kick: kick.clone(),
-                            interrupted: interrupted.clone(),
-                        })
-                    };
-                    if let Some(requests) = job.requests.take() {
-                        let worker =
-                            Responder { config: job.config, script: script(0), health: job.health, stats: job.stats };
-                        // Ends once its HTTP server has stopped and answered what was in flight.
-                        tasks.push(tokio::task::spawn_local(worker.answer(requests)));
-                        continue;
-                    }
-                    for (i, outlet) in job.outlets.iter().enumerate() {
-                        let worker =
-                            Worker::new(&job, i, outlet.clone(), script(i), store.clone(), io.clone(), stop.clone());
-                        tasks.push(tokio::task::spawn_local(worker.run()));
-                    }
+                let mut thread = Thread {
+                    name,
+                    host: Rc::new(RefCell::new(host)),
+                    kick: Rc::new(Notify::new()),
+                    interrupted: Rc::new(watch::Sender::new(None)),
+                    loading: Gate::default(),
+                    store,
+                    io,
+                    stop: stop.clone(),
+                    hosted: std::collections::HashMap::new(),
+                };
+                tokio::task::spawn_local(drive_event_loop(
+                    thread.name.clone(),
+                    thread.host.clone(),
+                    thread.kick.clone(),
+                    thread.interrupted.clone(),
+                ));
+                for (job, script) in loaded {
+                    thread.start(job, script, &mut None);
                 }
                 // Until the engine stops, even if every worker here has ended (an interface the
                 // runaway guard stopped): the isolate stays.
-                stop.cancelled().await;
-                for task in tasks {
-                    let _ = task.await;
+                loop {
+                    tokio::select! {
+                        _ = stop.cancelled() => break,
+                        command = commands.recv() => match command {
+                            Some(Command::Replace { interface, jobs, answer }) => {
+                                let _ = answer.send(thread.replace(&interface, jobs).await);
+                            }
+                            None => {
+                                stop.cancelled().await;
+                                break;
+                            }
+                        },
+                    }
+                }
+                for (_, hosted) in thread.hosted.drain() {
+                    for task in hosted.tasks {
+                        let _ = task.await;
+                    }
                 }
             });
         })
         .context("spawning worker thread")
+}
+
+/// An interface's code as loaded into a thread's isolate: its id there and its functions, in
+/// `config.functions()` order (None for a destination without code). None without `script:`.
+type Loaded = Option<(InterfaceId, Vec<Option<FunctionId>>)>;
+
+/// Load `config`'s code into `host`, with the files it loaded (its code version's).
+async fn load(host: &mut Isolate, config: &InterfaceConfig) -> Result<(Loaded, Vec<CodeFile>)> {
+    let functions = config.functions();
+    if !functions.iter().any(Option::is_some) {
+        return Ok((None, Vec::new()));
+    }
+    let loaded = host.add_functions(&Function::all(&functions), config.timeout).await?;
+    let files = host.code_files(&config.modules()).unwrap_or_else(|e| {
+        tracing::warn!(interface = %config.name, error = %format!("{e:#}"), "couldn't tell which files its code loaded: its code version counts its interface.yaml only");
+        Vec::new()
+    });
+    Ok((Some(loaded), files))
+}
+
+/// A respond-mode interface's requests, handed from its responder to the next one (`Command::Replace`).
+type Requests = mpsc::Receiver<HttpCall>;
+
+/// What a worker thread's interfaces share once it runs.
+struct Thread {
+    name: String,
+    host: Rc<RefCell<Isolate>>,
+    /// Wakes the event-loop driver (`drive_event_loop`).
+    kick: Rc<Notify>,
+    interrupted: Rc<watch::Sender<Option<Runaway>>>,
+    loading: Gate,
+    store: Store,
+    io: tokio::runtime::Handle,
+    /// The engine's stop.
+    stop: CancellationToken,
+    /// Each interface's tasks on this thread, by name.
+    hosted: std::collections::HashMap<String, Hosted>,
+}
+
+/// One interface's tasks on a thread, and what stops them for a `Command::Replace`.
+struct Hosted {
+    /// Its queue workers': a child of the engine's stop.
+    workers: CancellationToken,
+    /// Its responder's (respond mode). Not the engine's stop: at that stop a responder answers what
+    /// its HTTP server still hands it, and ends when the server has stopped.
+    responder: CancellationToken,
+    /// A responder's task gives its requests back when told to stop.
+    tasks: Vec<tokio::task::JoinHandle<Option<Requests>>>,
+}
+
+impl Thread {
+    /// Start `job`'s workers (or its responder, taking `requests` when the job brings none).
+    fn start(&mut self, mut job: Job, loaded: Loaded, requests: &mut Option<Requests>) {
+        let hosted = self.hosted.entry(job.config.name.clone()).or_insert_with(|| Hosted {
+            workers: self.stop.child_token(),
+            responder: CancellationToken::new(),
+            tasks: Vec::new(),
+        });
+        let script = |i: usize| {
+            let (interface, functions) = loaded.as_ref()?;
+            Some(Script {
+                host: self.host.clone(),
+                interface: *interface,
+                function: functions[i]?,
+                kick: self.kick.clone(),
+                interrupted: self.interrupted.clone(),
+                loading: self.loading.clone(),
+            })
+        };
+        let given = job.requests.take().or_else(|| if job.config.responds() { requests.take() } else { None });
+        if let Some(requests) = given {
+            let worker = Responder { config: job.config, script: script(0), health: job.health, stats: job.stats };
+            // Ends once its HTTP server has stopped and answered what was in flight, or when told.
+            hosted.tasks.push(tokio::task::spawn_local(worker.answer(requests, hosted.responder.clone())));
+            return;
+        }
+        for (i, outlet) in job.outlets.iter().enumerate() {
+            let (store, io, stop) = (self.store.clone(), self.io.clone(), hosted.workers.clone());
+            let worker = Worker::new(&job, i, outlet.clone(), script(i), store, io, stop);
+            hosted.tasks.push(tokio::task::spawn_local(async move {
+                worker.run().await;
+                None
+            }));
+        }
+    }
+
+    /// `Command::Replace`.
+    // The isolate is borrowed across the loads' awaits: the gate is closed meanwhile, so nothing
+    // else on the thread borrows it (transforms wait at `Gate::opened`, the driver skips its poll).
+    #[allow(clippy::await_holding_refcell_ref)]
+    async fn replace(&mut self, interface: &str, jobs: Vec<Job>) -> Result<Vec<CodeFile>> {
+        let started = std::time::Instant::now();
+        self.loading.close();
+        let loaded = {
+            let mut host = self.host.borrow_mut();
+            let mut loaded = Vec::with_capacity(jobs.len());
+            let mut files = None;
+            let mut failed = None;
+            for job in &jobs {
+                match load(&mut host, &job.config).await {
+                    Ok((script, f)) => {
+                        files.get_or_insert(f);
+                        loaded.push(script);
+                    }
+                    Err(e) => {
+                        failed = Some(e);
+                        break;
+                    }
+                }
+            }
+            host.forget_code_files();
+            match failed {
+                Some(e) => Err(e),
+                None => Ok((loaded, files.unwrap_or_default())),
+            }
+        };
+        self.loading.open();
+        self.kick.notify_one(); // the event loop wasn't polled while the code loaded
+        let (loaded, files) = match loaded {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                if let Some(ductus_script::LoadRanAway(runaway)) = e.downcast_ref() {
+                    // Every continuation queued on the isolate was dropped: no call in flight here
+                    // will finish, whoever's it was (they're retried).
+                    self.interrupted.send_replace(Some(*runaway));
+                }
+                return Err(e.context(format!("loading `{interface}`'s new code (its running code goes on)")));
+            }
+        };
+        let loading = started.elapsed();
+        let mut requests = None;
+        if let Some(old) = self.hosted.remove(interface) {
+            old.workers.cancel();
+            old.responder.cancel();
+            for task in old.tasks {
+                if let Ok(Some(handed)) = task.await {
+                    requests = Some(handed);
+                }
+            }
+        }
+        for (job, script) in jobs.into_iter().zip(loaded) {
+            self.start(job, script, &mut requests);
+        }
+        tracing::info!(
+            thread = %self.name,
+            %interface,
+            loading = ?loading,
+            paused = ?started.elapsed() - loading,
+            "its new code runs from the next message"
+        );
+        Ok(files)
+    }
+}
+
+/// Closed while code loads into a running thread's isolate (`Command::Replace`): loading holds the
+/// isolate across awaits, so nothing else on the thread may borrow it until it opens again.
+#[derive(Clone, Default)]
+struct Gate(Rc<watch::Sender<bool>>);
+
+impl Gate {
+    fn close(&self) {
+        self.0.send_replace(true);
+    }
+
+    fn open(&self) {
+        self.0.send_replace(false);
+    }
+
+    /// Once the gate is open (at once when it is).
+    async fn opened(&self) {
+        // The sender lives in this gate, so the wait can't fail.
+        let _ = self.0.subscribe().wait_for(|closed| !closed).await;
+    }
 }
 
 /// Offer the thread's isolate (one interface's: `ductus dev --inspect`) to debuggers, and say in
@@ -243,6 +425,9 @@ fn offer(inspector: &Inspector, host: &mut Isolate, config: &InterfaceConfig) {
 ///
 /// If code resumed after an `await` runs away, V8 drops every queued continuation on the
 /// isolate, so no async transform in flight will ever finish: `interrupted` tells them all.
+///
+/// While code loads into the isolate (`Command::Replace`, which holds it), a wake-up here polls
+/// nothing: the load runs the event loop itself, and kicks this driver when it's done.
 async fn drive_event_loop(
     thread: String,
     host: Rc<RefCell<Isolate>>,
@@ -250,8 +435,8 @@ async fn drive_event_loop(
     interrupted: Rc<watch::Sender<Option<Runaway>>>,
 ) {
     loop {
-        let failed = std::future::poll_fn(|cx| match host.borrow_mut().poll_event_loop(cx) {
-            std::task::Poll::Ready(Err(e)) => std::task::Poll::Ready(e),
+        let failed = std::future::poll_fn(|cx| match host.try_borrow_mut().map(|mut h| h.poll_event_loop(cx)) {
+            Ok(std::task::Poll::Ready(Err(e))) => std::task::Poll::Ready(e),
             _ => std::task::Poll::Pending,
         });
         let e = tokio::select! {
@@ -281,11 +466,14 @@ struct Script {
     kick: Rc<Notify>,
     /// Set when runaway code was stopped in the event loop (see `drive_event_loop`).
     interrupted: Rc<watch::Sender<Option<Runaway>>>,
+    /// Closed while other code loads into the isolate: wait before borrowing it.
+    loading: Gate,
 }
 
 impl Script {
     /// Run the function on `input`; `meta` (JSON) is its second argument.
     async fn transform(&self, input: &str, meta: Option<&str>) -> Result<Option<String>> {
+        self.loading.opened().await;
         let started = self.host.borrow_mut().begin_function(self.function, input, meta)?;
         match started {
             Call::Done(output) => Ok(output),
@@ -293,7 +481,11 @@ impl Script {
                 let mut interrupted = self.interrupted.subscribe();
                 self.kick.notify_one();
                 tokio::select! {
-                    value = pending => self.host.borrow_mut().settle(value),
+                    // A loading module's event loop can settle it: wait for the load to finish.
+                    value = pending => {
+                        self.loading.opened().await;
+                        self.host.borrow_mut().settle(value)
+                    }
                     // Whose code it was is known by interface, not by function: every call of
                     // that interface in flight takes the blame.
                     _ = interrupted.changed() => match *interrupted.borrow() {
@@ -319,11 +511,19 @@ struct Responder {
 
 impl Responder {
     /// Run each HTTP request through the transform, concurrently (one local task per request,
-    /// so slow lookups don't hold up other callers).
-    async fn answer(self, mut requests: mpsc::Receiver<HttpCall>) {
-        let Some(script) = self.script else { return };
+    /// so slow lookups don't hold up other callers). Ends when its HTTP server has stopped, or
+    /// at `replaced`: then the requests not yet taken are handed back (for the interface's new
+    /// code), and those taken finish here.
+    async fn answer(self, mut requests: Requests, replaced: CancellationToken) -> Option<Requests> {
+        let script = self.script?;
         let name: Rc<str> = self.config.name.as_str().into();
-        while let Some(call) = requests.recv().await {
+        loop {
+            let call = tokio::select! {
+                biased;
+                _ = replaced.cancelled() => return Some(requests),
+                call = requests.recv() => call,
+            };
+            let call = call?; // its HTTP server has stopped
             if let Some(reason) = self.health.stopped() {
                 let _ = call.reply.send(Err(anyhow!("{} interface stopped: {reason}", ductus_script::TRANSIENT)));
                 continue;
@@ -849,6 +1049,124 @@ fn ran_away(interface: &str, health: &Health, runaway: &Runaway) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A respond-mode interface's job, from `dir`'s interface.yaml.
+    fn respond_job(dir: &Path, requests: Option<Requests>) -> Job {
+        let config = Arc::new(InterfaceConfig::load(dir).unwrap());
+        Job {
+            slot: 0,
+            wake: Arc::new(crate::Wake::new(1, 0)),
+            requests,
+            health: Default::default(),
+            outlets: Vec::new(),
+            stats: Arc::new(InterfaceStats::new(&config.name, [])),
+            ownership: Arc::new(crate::ownership::Ownership::new(true)),
+            waiting: Default::default(),
+            decided: crate::deployment::Decided::channel().1,
+            lanes: Arc::new(Lanes::new(crate::lanes::Layout::single(1, "x"), 1, 1)),
+            config,
+        }
+    }
+
+    /// One release's copy of the interface `api` (respond mode) answering `{ "v": <v> }`, or with
+    /// `code` as its transform.ts.
+    fn release(root: &Path, id: &str, code: &str) -> std::path::PathBuf {
+        let dir = root.join(id).join("interfaces/api");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("interface.yaml"),
+            "name: api\nsource: { http: { port: 1, path: /p, mode: respond } }\nformat: json\nscript: transform.ts\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("transform.ts"), code).unwrap();
+        dir
+    }
+
+    /// `Command::Replace` on a running thread: the new code answers the requests from then on
+    /// (those waiting too), a request in flight finishes on the old code, and code that doesn't
+    /// load is refused with the old code still answering.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn an_interface_s_code_is_replaced_on_a_running_thread() {
+        let Ok(url) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+        let store = Store::connect(&url, 2).await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        // A receiver that answers after 300 ms: the old code's request is in flight meanwhile.
+        let slow_server = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = slow_server.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            while let Ok((mut socket, _)) = slow_server.accept().await {
+                tokio::spawn(async move {
+                    let _ = socket.read(&mut [0; 4096]).await;
+                    tokio::time::sleep(Duration::from_millis(300)).await;
+                    let _ =
+                        socket.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 0\r\nconnection: close\r\n\r\n").await;
+                });
+            }
+        });
+        let answer = |v: &str| format!("export function transform() {{ return {{ v: \"{v}\" }}; }}\n");
+        let slow = format!(
+            "import {{ fetch }} from \"@ductus/sdk\";\nexport async function transform() {{\n  await fetch(\"http://127.0.0.1:{port}/\");\n  return {{ v: \"slow one\" }};\n}}\n"
+        );
+        let (one, two) = (release(root.path(), "r1", &slow), release(root.path(), "r2", &answer("two")));
+        let broken = release(root.path(), "r3", "export function transform() { return {; }\n");
+
+        let (calls, requests) = mpsc::channel(16);
+        let (ready, readied) = std::sync::mpsc::channel();
+        let (commands, received) = mpsc::unbounded_channel();
+        let stop = CancellationToken::new();
+        let env = ductus_core::Environment::with_variables("dev", &[]);
+        let shared = crate::services::SharedServices::new(env, &Default::default(), &Default::default()).unwrap();
+        let services = EngineServices::new(Arc::new(shared), Default::default());
+        let thread = spawn_thread(
+            "test".into(),
+            vec![respond_job(&one, Some(requests))],
+            store,
+            services,
+            64,
+            ready,
+            stop.clone(),
+            None,
+            received,
+        )
+        .unwrap();
+        let (name, loaded) = tokio::task::spawn_blocking(move || readied.recv().unwrap()).await.unwrap();
+        assert_eq!(name, "api");
+        assert!(loaded.unwrap().iter().any(|f| f.path.ends_with("r1/interfaces/api/transform.ts")));
+
+        let call = |calls: &mpsc::Sender<HttpCall>| {
+            let (reply, replied) = tokio::sync::oneshot::channel();
+            let envelope = r#"{"method":"GET","path":"/p","params":{},"query":{},"headers":{},"body":""}"#;
+            let calls = calls.clone();
+            async move {
+                calls.send(HttpCall { envelope: envelope.into(), reply }).await.unwrap();
+                replied.await.unwrap().unwrap()
+            }
+        };
+        let replace = |dir: &Path| {
+            let (answer, answered) = tokio::sync::oneshot::channel();
+            let jobs = vec![respond_job(dir, None)];
+            commands.send(Command::Replace { interface: "api".into(), jobs, answer }).ok().unwrap();
+            answered
+        };
+
+        // A request in flight on the old code while the new loads.
+        let in_flight = tokio::spawn(call(&calls));
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let files = replace(&two).await.unwrap().unwrap();
+        assert!(files.iter().any(|f| f.path.ends_with("r2/interfaces/api/transform.ts")), "{files:?}");
+        assert!(in_flight.await.unwrap().contains("slow one"));
+        assert!(call(&calls).await.contains("two"));
+
+        // Code that doesn't load: refused, saying so; the running code goes on.
+        let error = format!("{:#}", replace(&broken).await.unwrap().unwrap_err());
+        assert!(error.contains("loading `api`'s new code (its running code goes on)"), "{error}");
+        assert!(call(&calls).await.contains("two"));
+
+        stop.cancel();
+        drop(calls); // the HTTP server's side: its responder ends once it's gone
+        tokio::task::spawn_blocking(move || thread.join().unwrap()).await.unwrap();
+    }
 
     /// The reason a thrown error quarantines a message with names the `.ts` line it was thrown on
     /// (after type-only lines the JavaScript doesn't have), sync and async, relative to the

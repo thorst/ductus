@@ -961,7 +961,10 @@ fn endless_loops_while_loading_are_reported() {
     let _guard = rt.enter();
     let mut host = Isolate::host();
     let err = rt.block_on(host.add_interface_with(&dir.path().join("transform.ts"), DEFAULT_FORMATS, SPIN));
-    let err = format!("{:#}", err.unwrap_err());
+    let err = err.unwrap_err();
+    // Typed, so an engine loading into a live isolate knows the calls in flight there are lost.
+    assert!(err.downcast_ref::<ductus_script::LoadRanAway>().is_some(), "{err:#}");
+    let err = format!("{err:#}");
     assert!(err.contains("loading the module") && err.contains("200ms timeout"), "{err}");
 }
 

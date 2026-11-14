@@ -64,7 +64,7 @@ impl Default for Ownership {
 }
 
 impl Ownership {
-    fn new(held: bool) -> Self {
+    pub(crate) fn new(held: bool) -> Self {
         Self(watch::Sender::new(held))
     }
 

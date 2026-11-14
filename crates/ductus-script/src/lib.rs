@@ -58,6 +58,20 @@ impl std::fmt::Display for Runaway {
 
 impl std::error::Error for Runaway {}
 
+/// Top-level code (or what it awaited) ran away while a module loaded (`Isolate::add_functions`).
+/// Like any runaway in the event loop, V8 then dropped every queued continuation on the isolate:
+/// an engine loading code into a live isolate must give up on the calls in flight there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LoadRanAway(pub Runaway);
+
+impl std::fmt::Display for LoadRanAway {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "loading the module: {}", self.0)
+    }
+}
+
+impl std::error::Error for LoadRanAway {}
+
 /// What `Isolate::tests_inspected` calls with the isolate before any code loads.
 pub type BeforeLoading<'a> = &'a mut dyn FnMut(&mut Isolate) -> Result<()>;
 
@@ -532,7 +546,7 @@ __setFixtures({fixtures_json}, {formats_json});
             Err(e) => Err(anyhow!("{e}")),
         };
         match self.guard.disarm(self.runtime.v8_isolate()) {
-            Some(trip) => Err(anyhow!("loading the module: {}", Runaway { interface: None, cause: trip.cause })),
+            Some(trip) => Err(LoadRanAway(Runaway { interface: None, cause: trip.cause }).into()),
             None => result,
         }
     }

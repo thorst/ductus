@@ -634,13 +634,29 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let (ready_tx, ready_rx) = std::sync::mpsc::channel();
     let mut jobs = 0;
     let mut threads = Vec::new();
+    // Each interface's threads, to ask them for changes while the engine runs (a deploy in place).
+    // TODO(0.7.5.1): kept with each interface's parts once a deploy uses them.
+    let mut _commands: std::collections::HashMap<String, Vec<tokio::sync::mpsc::UnboundedSender<worker::Command>>> =
+        Default::default();
+    let mut commands_for = |thread_jobs: &[worker::Job]| {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut names: Vec<&str> = thread_jobs.iter().map(|j| j.config.name.as_str()).collect();
+        names.dedup();
+        for name in names {
+            _commands.entry(name.to_string()).or_default().push(tx.clone());
+        }
+        rx
+    };
     for (i, thread_jobs) in pool.into_iter().enumerate().filter(|(_, j)| !j.is_empty()) {
         jobs += thread_jobs.len();
         let engine = services::EngineServices::new(services.clone(), Default::default());
         let name = format!("pool-{i}");
         let ready = ready_tx.clone();
         let stop = stopping.clone();
-        threads.push(worker::spawn_thread(name, thread_jobs, store.clone(), engine, heap_mb, ready, stop, None)?);
+        let commands = commands_for(&thread_jobs);
+        let thread =
+            worker::spawn_thread(name, thread_jobs, store.clone(), engine, heap_mb, ready, stop, None, commands);
+        threads.push(thread?);
     }
     // A dedicated interface's own pools are shared by all its worker threads.
     let mut own_pools = std::collections::HashMap::new();
@@ -651,7 +667,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         let engine = services::EngineServices::new(services.clone(), own);
         let ready = ready_tx.clone();
         let stop = stopping.clone();
-        threads.push(worker::spawn_thread(name, vec![job], store.clone(), engine, heap_mb, ready, stop, None)?);
+        let jobs = vec![job];
+        let commands = commands_for(&jobs);
+        threads.push(worker::spawn_thread(name, jobs, store.clone(), engine, heap_mb, ready, stop, None, commands)?);
     }
     let inspector = inspected.map(|i| i.inspector);
     let (debugged_jobs, debugged_interfaces) = (debugged.values().map(Vec::len).sum::<usize>(), debugged.len());
@@ -665,6 +683,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         let engine = services::EngineServices::new(services.clone(), own);
         let (ready, stop) = (ready_tx.clone(), stopping.clone());
         let thread = format!("{name}-debug");
+        let commands = commands_for(&interface_jobs);
         threads.push(worker::spawn_thread(
             thread,
             interface_jobs,
@@ -674,6 +693,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             ready,
             stop,
             inspector.clone(),
+            commands,
         )?);
     }
     drop(ready_tx);
