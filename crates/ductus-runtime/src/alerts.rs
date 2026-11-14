@@ -285,13 +285,14 @@ fn without_url(e: reqwest::Error) -> String {
     text
 }
 
-/// Start judging, sending and the heartbeat. Ends with the engine.
-pub async fn start(engine: &Arc<Engine>) {
-    // Its rounds end with the engine's run (Engine::ended).
-    let ended = engine.ended.clone();
-    let Some(a) = engine.alerts.clone() else { return };
-    let keys: Vec<(String, String, Option<String>)> = engine
-        .interfaces()
+/// Every alert `interfaces` and `certificates` can raise, as `(key, interface, destination)`
+/// (a certificate's: its resource and where it is): the rows judging updates, made at the start
+/// and for an interface changed in place.
+pub(crate) fn alert_keys(
+    interfaces: &[Arc<crate::control::Running>],
+    certificates: &[crate::certificates::CertificateTarget],
+) -> Vec<(String, String, Option<String>)> {
+    interfaces
         .iter()
         .flat_map(|i| {
             let name = i.config.name.clone();
@@ -301,7 +302,7 @@ pub async fn start(engine: &Arc<Engine>) {
                     .map(move |d| (alerts::destination_key(&name, &d.name), name.clone(), Some(d.name.clone()))),
             )
         })
-        .chain(engine.certificates.iter().map(|t| {
+        .chain(certificates.iter().map(|t| {
             // Ours is on this server, on as many ports as it is presented on.
             let place = match t.side {
                 crate::certificates::Side::Ours => t.host.clone(),
@@ -309,7 +310,15 @@ pub async fn start(engine: &Arc<Engine>) {
             };
             (t.key.clone(), t.resource.clone(), Some(place))
         }))
-        .collect();
+        .collect()
+}
+
+/// Start judging, sending and the heartbeat. Ends with the engine.
+pub async fn start(engine: &Arc<Engine>) {
+    // Its rounds end with the engine's run (Engine::ended).
+    let ended = engine.ended.clone();
+    let Some(a) = engine.alerts.clone() else { return };
+    let keys = alert_keys(&engine.interfaces(), &engine.certificates());
     if let Err(e) = engine.store.ensure_alerts(&keys).await {
         tracing::error!(error = %format!("{e:#}"), "could not set up alerts: none will be sent");
         return;
@@ -563,17 +572,18 @@ pub async fn evaluate(engine: &Engine) -> Result<()> {
 /// it loaded (no database read for those): its step, and the words.
 async fn judge_certificates(engine: &Engine, a: &Alerts, now: DateTime<Utc>) -> Result<Vec<Judged>> {
     use crate::certificates::Side;
-    if engine.certificates.is_empty() {
+    let certificates = engine.certificates();
+    if certificates.is_empty() {
         return Ok(Vec::new());
     }
-    let seen = if engine.certificates.iter().any(|t| t.side == Side::Remote) {
+    let seen = if certificates.iter().any(|t| t.side == Side::Remote) {
         engine.store.certificates().await?
     } else {
         Vec::new()
     };
     let rule = a.settings.rule_for(Condition::Certificate).map(|r| r.severity);
     let mut out = Vec::new();
-    for t in &engine.certificates {
+    for t in certificates.iter() {
         let ours = crate::certificates::our_row(t, &engine.tls, now);
         let row = ours.as_ref().or_else(|| {
             seen.iter().find(|c| c.resource == t.resource && c.host == t.host && c.port == i32::from(t.port))

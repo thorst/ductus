@@ -136,7 +136,7 @@ pub fn our_row(
 async fn save_ours(engine: &Engine, only: &[String]) -> Result<usize> {
     let now = Utc::now();
     let rows: Vec<CertificateRow> = engine
-        .certificates
+        .certificates()
         .iter()
         .filter(|t| only.is_empty() || only.contains(&t.resource))
         .filter_map(|t| our_row(t, &engine.tls, now))
@@ -222,6 +222,22 @@ pub fn targets(
 /// Run a check now: `who` is `schedule` or the person or token who asked. Keeps the run and the
 /// certificates it saw, after reading our certificates' files again.
 pub async fn run(engine: &Engine, mode: Mode, who: &str, only: &[String], timeout: Duration) -> Result<Report> {
+    let (report, at) = check(engine, mode, only, timeout).await?;
+    let run = DoctorRunRow {
+        id: 0,
+        at,
+        mode: mode.label().into(),
+        started_by: who.into(),
+        seconds: report.seconds,
+        checks: report.checks.len() as i32,
+        failed: report.failed() as i32,
+    };
+    engine.store.record_doctor_run(&run, &serde_json::to_value(&report)?).await?;
+    Ok(report)
+}
+
+/// Check, and keep the certificates seen (not the run: `run` does).
+async fn check(engine: &Engine, mode: Mode, only: &[String], timeout: Duration) -> Result<(Report, DateTime<Utc>)> {
     // Our certificates' files first: a renewal (or a broken one) shows now, not at the next
     // minute's check.
     let changed = engine.tls.reload().await;
@@ -233,19 +249,15 @@ pub async fn run(engine: &Engine, mode: Mode, who: &str, only: &[String], timeou
     // What code uses only adds names to "used by" (every resource is checked anyway), and working
     // it out runs the TypeScript compiler: a certificates run (every few hours, by itself) goes
     // without, and a broken analysis mustn't stop a full one.
-    let empty = ductus_core::impact::CodeUses::default();
     let code = match mode {
-        Mode::Certificates => &empty,
-        Mode::Full => match engine.code_uses().await {
-            Ok(code) => code,
-            Err(e) => {
-                tracing::warn!(error = %format!("{e:#}"), "couldn't work out what code uses; checking without it");
-                &empty
-            }
-        },
+        Mode::Certificates => Default::default(),
+        Mode::Full => engine.code_uses().await.unwrap_or_else(|e| {
+            tracing::warn!(error = %format!("{e:#}"), "couldn't work out what code uses; checking without it");
+            Default::default()
+        }),
     };
     let alerts = engine.alerts.as_ref().map(|a| &a.settings);
-    let mut probes = probes(&configs, &engine.resources, &engine.database_url, code, alerts, only);
+    let mut probes = probes(&configs, &engine.resources, &engine.database_url, &code, alerts, only);
     if let Some(api) = engine.api.as_ref().filter(|_| only.is_empty())
         && let Some(tls) = &api.tls
     {
@@ -289,17 +301,7 @@ pub async fn run(engine: &Engine, mode: Mode, who: &str, only: &[String], timeou
         })
         .collect();
     engine.store.save_certificates(&rows).await?;
-    let run = DoctorRunRow {
-        id: 0,
-        at,
-        mode: mode.label().into(),
-        started_by: who.into(),
-        seconds: report.seconds,
-        checks: report.checks.len() as i32,
-        failed: report.failed() as i32,
-    };
-    engine.store.record_doctor_run(&run, &serde_json::to_value(&report)?).await?;
-    Ok(report)
+    Ok((report, at))
 }
 
 /// Save our certificates' rows, keep them current as `changes` (the names of pairs whose files
@@ -329,15 +331,24 @@ pub async fn start(engine: &Arc<Engine>, mut changes: tokio::sync::mpsc::Receive
         return;
     };
     let mode = engine.doctor.mode;
-    if mode == Mode::Certificates && !engine.certificates.iter().any(|t| t.side == Side::Remote) {
+    // Nothing to read: each round asks again (in memory), since a deploy in place can add a
+    // destination with a certificate.
+    let idle = move |engine: &Engine| {
+        mode == Mode::Certificates && !engine.certificates().iter().any(|t| t.side == Side::Remote)
+    };
+    if idle(engine) {
         tracing::info!("no connection has a certificate: scheduled checks have nothing to do");
-        return;
     }
     let weak = Arc::downgrade(engine);
     tokio::spawn(ended.clone().run_until_cancelled_owned(async move {
         tokio::time::sleep(FIRST_AFTER + jitter(FIRST_AFTER)).await;
         loop {
             let Some(engine) = weak.upgrade() else { return };
+            if idle(&engine) {
+                drop(engine);
+                tokio::time::sleep(every).await;
+                continue;
+            }
             match run(&engine, mode, "schedule", &[], STEP_TIMEOUT).await {
                 Ok(r) => {
                     let certificates = r.checks.iter().filter(|c| c.certificate.is_some()).count();
@@ -355,6 +366,20 @@ pub async fn start(engine: &Arc<Engine>, mut changes: tokio::sync::mpsc::Receive
             }
             drop(engine);
             tokio::time::sleep(every).await;
+        }
+    }));
+}
+
+/// Check `interface`'s certificates now, beside what asked (a deploy in place that connects it
+/// somewhere new): its rows are there for alerts and the API without waiting for the next round.
+/// Not kept as a run: the Doctor page goes on showing the last whole one. A failure is logged,
+/// and the next round checks it anyway.
+pub fn check_beside(engine: &Arc<Engine>, interface: String) {
+    let weak = Arc::downgrade(engine);
+    tokio::spawn(engine.ended.clone().run_until_cancelled_owned(async move {
+        let Some(engine) = weak.upgrade() else { return };
+        if let Err(e) = check(&engine, Mode::Certificates, std::slice::from_ref(&interface), STEP_TIMEOUT).await {
+            tracing::warn!(interface, error = %format!("{e:#}"), "couldn't check the certificates a deploy added; the next scheduled check does");
         }
     }));
 }
@@ -425,6 +450,38 @@ mod tests {
                 "0.0.0.0:8443 HTTPS (orders)"
             ]
         );
+    }
+
+    /// What a deploy in place works out again (`Engine::certificates_again`): a destination over
+    /// TLS added to a running interface is a new server to check, owned by that interface; one
+    /// removed is gone; the pairs we present don't move (sources change only by the handover).
+    #[test]
+    fn a_destination_added_in_place_is_a_new_certificate_to_check() {
+        let resources: ductus_core::Resources =
+            serde_yaml_ng::from_str("certificates:\n  web: { cert: C, key: K }\n").unwrap();
+        let before = config(
+            "name: adt\nabout: { owner: ADT Team }\nsource: { mllp: { port: 6661, tls: { certificate: web } } }\ndestinations: { files: { file: { dir: o } } }\n",
+        );
+        let after = config(
+            "name: adt\nabout: { owner: ADT Team }\nsource: { mllp: { port: 6661, tls: { certificate: web } } }\ndestinations: { hie: { mllp: { host: hie.example.org, port: 7443, tls: {} } } }\n",
+        );
+        let targets =
+            |c: &InterfaceConfig| crate::control::certificate_targets(&[c], &resources, "", None, None, "engine-1");
+        let (before, after) = (targets(&before), targets(&after));
+        let remote: Vec<_> = after
+            .iter()
+            .filter(|t| t.side == Side::Remote && !before.iter().any(|b| b.key == t.key))
+            .map(|t| (t.host.as_str(), t.port, t.interface.as_deref(), t.owner.as_str()))
+            .collect();
+        assert_eq!(remote, [("hie.example.org", 7443, Some("adt"), "ADT Team")]);
+        let ours = |all: &[CertificateTarget]| -> Vec<String> {
+            all.iter().filter(|t| t.side == Side::Ours).map(|t| t.key.clone()).collect()
+        };
+        assert_eq!(ours(&before), ours(&after));
+        let removed = targets(&config(
+            "name: adt\nsource: { mllp: { port: 6661, tls: { certificate: web } } }\ndestinations: { files: { file: { dir: o } } }\n",
+        ));
+        assert!(!removed.iter().any(|t| t.side == Side::Remote), "removed with its destination");
     }
 
     /// Our row is the loaded pair's chain: its leaf, the earliest expiry (an intermediate's here),

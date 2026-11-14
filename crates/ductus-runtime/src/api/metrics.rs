@@ -231,17 +231,18 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
             out.sample("ductus_alert_send_failures_total", &format!("channel=\"{}\"", label(&channel)), failed);
         }
     }
-    if !engine.certificates.is_empty() {
+    let certificates = engine.certificates();
+    if !certificates.is_empty() {
         use crate::certificates::Side;
         // Ours are read from memory; the table only for the servers the engine checks.
-        let seen = if engine.certificates.iter().any(|t| t.side == Side::Remote) {
+        let seen = if certificates.iter().any(|t| t.side == Side::Remote) {
             engine.store.certificates().await?
         } else {
             Vec::new()
         };
         family(&mut out, "ductus_certificate_expiry_seconds");
         let now = chrono::Utc::now();
-        for t in &engine.certificates {
+        for t in certificates.iter() {
             let ends = match crate::certificates::our_row(t, &engine.tls, now) {
                 Some(ours) => ours.chain_min_not_after,
                 None => seen

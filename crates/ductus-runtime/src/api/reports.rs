@@ -183,7 +183,7 @@ async fn impact_report(engine: Eng, _caller: Caller, Query(p): Query<ImpactParam
     };
     // DNS lookups block: off the async threads.
     let hits = tokio::task::block_in_place(|| {
-        impact::impact(configs.iter().copied(), &engine.resources, code, &query, &lookup)
+        impact::impact(configs.iter().copied(), &engine.resources, &code, &query, &lookup)
     });
     let affected: std::collections::BTreeSet<&str> = hits.iter().map(|h| h.interface.as_str()).collect();
     let known = match &query {

@@ -30,6 +30,9 @@ const MONITOR_EVERY: Duration = Duration::from_secs(2);
 /// The running interfaces at one moment, in engine order (`Engine::interfaces`).
 pub type Interfaces = Arc<[Arc<Running>]>;
 
+/// The certificates the engine connects to and presents (`Engine::certificates`), as a snapshot.
+pub type Certificates = Arc<[crate::certificates::CertificateTarget]>;
+
 /// One running interface. A deploy in place swaps it whole (`Engine::swap_interface`): whoever
 /// reads it sees the old interface or the new one, never a mix of the two.
 #[derive(Clone)]
@@ -120,8 +123,9 @@ pub struct Engine {
     drain: watch::Sender<DrainState>,
     monitor: watch::Sender<Arc<Snapshot>>,
     /// What each interface's code uses, worked out on first request (it needs the TypeScript
-    /// analysis, which takes a moment; code doesn't change while the engine runs).
-    code: OnceCell<CodeUses>,
+    /// analysis, which takes a moment). A deploy in place puts an empty cell here, so the next
+    /// request works it out from the new code; nothing is analysed until someone asks.
+    code: std::sync::Mutex<Arc<OnceCell<Arc<CodeUses>>>>,
     /// Cancelled when the engine should stop (drained with `stop`).
     pub shutdown: CancellationToken,
     /// How people sign in (`auth:` in ductus.yaml).
@@ -135,9 +139,12 @@ pub struct Engine {
     pub alerts: Option<Arc<crate::alerts::Alerts>>,
     /// The engine's own connection checks (`doctor:` in ductus.yaml).
     pub doctor: ductus_core::settings::DoctorSettings,
-    /// The certificates the engine connects to and those it presents (worked out from the
-    /// project at start).
-    pub certificates: Vec<crate::certificates::CertificateTarget>,
+    /// The certificates the engine connects to and those it presents: worked out from the
+    /// project at start and again after a deploy in place. Read with `certificates()`.
+    certificates: std::sync::RwLock<Certificates>,
+    /// Held while `certificates` is worked out again, so two deploys in place finishing together
+    /// can't leave the earlier one's list.
+    certificates_again: std::sync::Mutex<()>,
     /// The directory people sign in with (`auth.ldap`), if configured.
     pub directory: Option<crate::ldap::Directory>,
     /// Teams and lists that own things (`owners:` in ductus.yaml).
@@ -236,9 +243,7 @@ impl Engine {
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
             let alerts = alerts.as_ref().map(|a| &a.settings);
-            let mut all = crate::certificates::targets(&configs, &resources, &database_url, alerts);
-            all.extend(crate::certificates::ours(&configs, &resources, alerts, api.as_ref(), &host));
-            all
+            certificate_targets(&configs, &resources, &database_url, alerts, api.as_ref(), &host)
         };
         let engine = Arc::new(Self {
             started_at: Utc::now(),
@@ -255,14 +260,15 @@ impl Engine {
             activity,
             drain: watch::Sender::new(DrainState::Accepting),
             monitor: watch::Sender::new(Arc::default()),
-            code: OnceCell::new(),
+            code: Default::default(),
             shutdown: CancellationToken::new(),
             auth,
             audit,
             instance,
             alerts,
             doctor,
-            certificates,
+            certificates: std::sync::RwLock::new(certificates),
+            certificates_again: std::sync::Mutex::new(()),
             directory,
             teams,
             ownership,
@@ -290,12 +296,18 @@ impl Engine {
     }
 
     /// Run `config`'s interface on its new code and settings (`in_place::Kept::replace`: its
-    /// destinations added or removed too), and show it so from then on. Answers the files its new
-    /// code loaded. `in_place::NeedsHandover` when only the handover can apply it.
-    // TODO(0.7.5.1 item 4): `code` (what the code uses) and `certificates` (destinations' TLS)
-    // were worked out from the start's configs; the deploy endpoint calls this (item 7).
+    /// destinations added or removed too), and show it so from then on: the API, alerts and
+    /// metrics see its new destinations and their certificates, and what its code uses is worked
+    /// out again when next asked. A certificate it connects to for the first time is checked
+    /// now, beside the deploy (unless `doctor.schedule: off`), so its expiry shows without
+    /// waiting for the next round. Answers the files its new code loaded.
+    /// `in_place::NeedsHandover` when only the handover can apply it.
+    // The deploy endpoint calls this (0.7.5.1 item 7).
     #[allow(dead_code)]
-    pub(crate) async fn replace_interface(&self, config: InterfaceConfig) -> Result<Vec<ductus_script::CodeFile>> {
+    pub(crate) async fn replace_interface(
+        self: &Arc<Self>,
+        config: InterfaceConfig,
+    ) -> Result<Vec<ductus_script::CodeFile>> {
         let name = config.name.clone();
         let running = self.interface(&name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
         let replaced = self.kept.replace(config, &self.activity).await?;
@@ -304,11 +316,27 @@ impl Engine {
             destinations: replaced.destinations,
             ..(*running).clone()
         });
+        let new = self.certificates_again();
         self.monitor.send_modify(|_| {}); // live updates show the new destinations at once
+        if self.alerts.is_some()
+            && let Some(running) = self.interface(&name)
+        {
+            // Judging updates only rows that exist: a new destination's or certificate's is made
+            // now (the others are there already, untouched).
+            let keys = crate::alerts::alert_keys(&[running], &self.certificates());
+            if let Err(e) = self.store.ensure_alerts(&keys).await {
+                tracing::warn!(interface = name, error = %format!("{e:#}"), "couldn't make the alerts of a destination or certificate a deploy added; the next start does");
+            }
+        }
+        if new && self.doctor.schedule.is_some() {
+            crate::certificates::check_beside(self, name);
+        }
         Ok(replaced.files)
     }
 
-    /// Put `running` in place of the running interface of its name (a deploy in place).
+    /// Put `running` in place of the running interface of its name (a deploy in place). What its
+    /// code uses is forgotten with it: a request that took its snapshot just before may see the
+    /// new analysis (names of databases and APIs only), never one older than what it shows.
     fn swap_interface(&self, running: Running) {
         let mut interfaces = self.interfaces.write().unwrap_or_else(|e| e.into_inner());
         let running = Arc::new(running);
@@ -316,6 +344,28 @@ impl Engine {
             .iter()
             .map(|i| if i.config.name == running.config.name { running.clone() } else { i.clone() })
             .collect();
+        *self.code.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+    }
+
+    /// The certificates the engine connects to and those it presents, now.
+    pub fn certificates(&self) -> Certificates {
+        self.certificates.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Work out the certificates again from the running interfaces (after a deploy in place);
+    /// true when one is connected to that wasn't before.
+    fn certificates_again(&self) -> bool {
+        let _one_at_a_time = self.certificates_again.lock().unwrap_or_else(|e| e.into_inner());
+        let interfaces = self.interfaces();
+        let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
+        let alerts = self.alerts.as_ref().map(|a| &a.settings);
+        let new =
+            certificate_targets(&configs, &self.resources, &self.database_url, alerts, self.api.as_ref(), &self.host);
+        let before = self.certificates();
+        let added =
+            new.iter().any(|t| t.side == crate::certificates::Side::Remote && !before.iter().any(|b| b.key == t.key));
+        *self.certificates.write().unwrap_or_else(|e| e.into_inner()) = new;
+        added
     }
 
     fn destination_ids(&self) -> Vec<DestinationId> {
@@ -498,28 +548,45 @@ impl Engine {
         Ok(Some(ids.filter(|d| self.paused(*d).is_none()).map(|d| snapshot.queue(d).pending).sum()))
     }
 
-    /// What each interface's code uses (`db`/`api` names), worked out once.
-    pub async fn code_uses(&self) -> Result<&CodeUses> {
-        self.code
-            .get_or_try_init(|| async {
-                let root = self.root.clone();
-                let configs: Vec<InterfaceConfig> = self.interfaces().iter().map(|i| (*i.config).clone()).collect();
-                // The analysis runs the TypeScript compiler in V8: on a thread of its own, so
-                // it never holds up the runtime that serves intake.
-                let (tx, rx) = tokio::sync::oneshot::channel();
-                std::thread::Builder::new().name("code-analysis".into()).spawn(move || {
-                    let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
-                    let result = runtime.map_err(anyhow::Error::from).and_then(|rt| {
-                        let dirs: Vec<&std::path::Path> = configs.iter().map(|c| c.dir.as_path()).collect();
-                        let refs: Vec<&InterfaceConfig> = configs.iter().collect();
-                        rt.block_on(crate::project::code_uses(&root, &dirs, &refs))
-                    });
-                    let _ = tx.send(result);
-                })?;
-                rx.await?
-            })
-            .await
+    /// What each interface's code uses (`db`/`api` names), worked out once (and again after a
+    /// deploy in place).
+    pub async fn code_uses(&self) -> Result<Arc<CodeUses>> {
+        let cell = self.code.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        cell.get_or_try_init(|| async {
+            let root = self.root.clone();
+            let configs: Vec<InterfaceConfig> = self.interfaces().iter().map(|i| (*i.config).clone()).collect();
+            // The analysis runs the TypeScript compiler in V8: on a thread of its own, so
+            // it never holds up the runtime that serves intake.
+            let (tx, rx) = tokio::sync::oneshot::channel();
+            std::thread::Builder::new().name("code-analysis".into()).spawn(move || {
+                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
+                let result = runtime.map_err(anyhow::Error::from).and_then(|rt| {
+                    let dirs: Vec<&std::path::Path> = configs.iter().map(|c| c.dir.as_path()).collect();
+                    let refs: Vec<&InterfaceConfig> = configs.iter().collect();
+                    rt.block_on(crate::project::code_uses(&root, &dirs, &refs))
+                });
+                let _ = tx.send(result.map(Arc::new));
+            })?;
+            rx.await?
+        })
+        .await
+        .cloned()
     }
+}
+
+/// The certificates the engine connects to (destinations', resources', its own database's when it
+/// verifies it, alerts') and the pairs it presents.
+pub(crate) fn certificate_targets(
+    configs: &[&InterfaceConfig],
+    resources: &Resources,
+    database_url: &str,
+    alerts: Option<&ductus_core::alerts::AlertSettings>,
+    api: Option<&ApiListener>,
+    host: &str,
+) -> Certificates {
+    let mut all = crate::certificates::targets(configs, resources, database_url, alerts);
+    all.extend(crate::certificates::ours(configs, resources, alerts, api, host));
+    all.into()
 }
 
 /// Counts queues every few seconds while anyone watches them, and moves a drain to drained.

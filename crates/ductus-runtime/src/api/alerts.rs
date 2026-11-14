@@ -140,7 +140,7 @@ pub struct AlertsOverview {
 /// engine's, or ones no longer configured).
 pub(super) fn ours(engine: &Shared, row: &AlertRow) -> bool {
     if row.key.starts_with("cert:") {
-        return engine.certificates.iter().any(|t| t.key == row.key);
+        return engine.certificates().iter().any(|t| t.key == row.key);
     }
     engine.interface(&row.interface).is_some_and(|i| match &row.destination {
         Some(d) => i.destinations.iter().any(|t| t.name == *d),

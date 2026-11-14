@@ -129,7 +129,7 @@ async fn list(engine: Eng, _caller: Caller) -> ApiResult<CertificatesOverview> {
         Default::default()
     };
     let mut certificates: Vec<CertificateInfo> = engine
-        .certificates
+        .certificates()
         .iter()
         .map(|t| {
             let ours = crate::certificates::our_row(t, &engine.tls, now);
