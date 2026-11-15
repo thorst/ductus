@@ -32,10 +32,11 @@ use crate::health::Health;
 use crate::ingest::{Intake, Targets};
 use crate::lanes::Lanes;
 use crate::limiter::Limiter;
+use crate::services::SharedServices;
 use crate::stats::{DestinationStats, InterfaceStats};
-use crate::worker::{Command, Job, Outlet, Waiting};
+use crate::worker::{Command, Job, Outlet, Requests, Waiting};
 use anyhow::{Context, Result, anyhow, bail};
-use ductus_core::config::{Destination, DestinationConfig};
+use ductus_core::config::{Destination, DestinationConfig, Isolation};
 use ductus_core::{InterfaceConfig, Resources};
 use ductus_script::CodeFile;
 use ductus_store::{DestinationId, Store};
@@ -47,9 +48,10 @@ use tokio::sync::{Mutex, mpsc::UnboundedSender, oneshot};
 /// Every running interface's parts, and what their jobs share.
 pub struct Kept {
     /// One lock per interface: deploys of different interfaces go at once, two of the same one
-    /// in turn.
-    interfaces: HashMap<String, Mutex<Interface>>,
+    /// in turn. A deploy adds and removes interfaces here too (0.7.5.2).
+    interfaces: std::sync::RwLock<HashMap<String, Arc<Mutex<Interface>>>>,
     shared: Shared,
+    threads: Threads,
 }
 
 /// What every interface's jobs and outlets are built with.
@@ -59,8 +61,37 @@ pub(crate) struct Shared {
     pub waiting: Arc<Waiting>,
     pub certificates: Arc<crate::tls::Certificates>,
     pub resources: Resources,
-    /// Every queued interface's intake (routes store into their target's).
-    pub intakes: HashMap<String, Arc<Intake>>,
+    /// Every queued interface's intake (routes store into their target's): changed as interfaces
+    /// are added and removed.
+    pub intakes: std::sync::RwLock<HashMap<String, Arc<Intake>>>,
+}
+
+/// The worker threads, to place an interface a deploy adds and to join at the engine's stop.
+pub(crate) struct Threads {
+    /// The shared pool's threads (made as the start needs them, then as added interfaces do, up
+    /// to `Spawn::pool_threads`), each with how many slots it runs.
+    pub pool: std::sync::Mutex<Vec<PoolThread>>,
+    /// What new threads are made with; None: none can be (tests).
+    pub spawn: Option<Spawn>,
+    /// Every worker thread's handle (`Kept::take_threads`).
+    pub handles: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+}
+
+/// One of the shared pool's threads.
+pub(crate) struct PoolThread {
+    pub commands: UnboundedSender<Command>,
+    /// The slots it runs, of every interface on it: an added interface's go where there are fewest.
+    pub slots: usize,
+}
+
+/// What a new worker thread is made with.
+pub(crate) struct Spawn {
+    pub services: Arc<SharedServices>,
+    pub heap_mb: usize,
+    /// How many threads the shared pool may have.
+    pub pool_threads: usize,
+    /// The engine's stop, the workers' (`spawn_thread`'s `stop`).
+    pub stop: tokio_util::sync::CancellationToken,
 }
 
 /// One interface's parts, shared by its slots' jobs.
@@ -80,6 +111,8 @@ pub(crate) struct Interface {
     pub decided: crate::deployment::Decided,
     /// Where its slots run: each thread's commands and the slots on it.
     pub threads: Vec<Placed>,
+    /// Removed by a deploy (`Kept::remove`): a change that waited for its lock finds it gone.
+    pub removed: bool,
 }
 
 /// Some of an interface's slots, on one worker thread.
@@ -118,6 +151,11 @@ impl std::fmt::Display for NeedsHandover {
 impl std::error::Error for NeedsHandover {}
 
 impl Shared {
+    /// Queued interface `name`'s intake, if it runs here.
+    pub fn intake(&self, name: &str) -> Option<Arc<Intake>> {
+        self.intakes.read().unwrap_or_else(|e| e.into_inner()).get(name).cloned()
+    }
+
     /// `config`'s destination `name`'s outlet. TLS settings are built from the engine's
     /// certificates (destinations naming the same CA and certificate share them).
     pub fn outlet(
@@ -139,7 +177,7 @@ impl Shared {
         };
         let tls = tls.transpose().with_context(|| format!("{}: TLS", config.label_destination(name)))?;
         let route = match d.route() {
-            Some(target) => Some(self.intakes.get(target).cloned().with_context(|| {
+            Some(target) => Some(self.intake(target).with_context(|| {
                 format!("{}: routes to `{target}`, which isn't a queued interface here", config.label_destination(name))
             })?),
             None => None,
@@ -263,14 +301,203 @@ impl Interface {
 
 impl Kept {
     /// What a start built: `interfaces` with the threads their slots run on.
-    pub(crate) fn new(shared: Shared, interfaces: impl IntoIterator<Item = Interface>) -> Self {
-        let interfaces = interfaces.into_iter().map(|i| (i.config.name.clone(), Mutex::new(i))).collect();
-        Self { interfaces, shared }
+    pub(crate) fn new(shared: Shared, interfaces: impl IntoIterator<Item = Interface>, threads: Threads) -> Self {
+        let interfaces = interfaces.into_iter().map(|i| (i.config.name.clone(), Arc::new(Mutex::new(i)))).collect();
+        Self { interfaces: std::sync::RwLock::new(interfaces), shared, threads }
+    }
+
+    /// What every interface's jobs and outlets are built with (an added interface's too).
+    #[cfg_attr(not(test), expect(dead_code, reason = "a deploy adding an interface uses it (0.7.5.2.1 item 5)"))]
+    pub(crate) fn shared(&self) -> &Shared {
+        &self.shared
+    }
+
+    fn get(&self, name: &str) -> Option<Arc<Mutex<Interface>>> {
+        self.interfaces.read().unwrap_or_else(|e| e.into_inner()).get(name).cloned()
     }
 
     /// Whether `name` runs here.
     pub fn contains(&self, name: &str) -> bool {
-        self.interfaces.contains_key(name)
+        self.interfaces.read().unwrap_or_else(|e| e.into_inner()).contains_key(name)
+    }
+
+    /// Every worker thread's handle, to join at the engine's stop (a thread made after this is
+    /// left to end by itself: the stop has begun, so it does at once).
+    pub(crate) fn take_threads(&self) -> Vec<std::thread::JoinHandle<()>> {
+        std::mem::take(&mut *self.threads.handles.lock().unwrap_or_else(|e| e.into_inner()))
+    }
+
+    /// Run `interface` from now on (added by a deploy: its parts built, its `threads` empty).
+    /// A shared interface's slots go on one new pool thread while the pool has fewer threads than
+    /// it may (the start made only as many as it needed), else each on the pool thread running the
+    /// fewest slots; a dedicated interface's each on a new thread of its own (sharing its own
+    /// pools). Its code loads there first; a respond-mode interface's first slot answers
+    /// `requests`; its workers read first (`Interface::job`). A queued interface's intake is
+    /// registered for routes to it once it runs. Answers the files its code loaded (its code
+    /// version's).
+    ///
+    /// All or nothing: when a thread can't load its code, nothing of it runs (every thread it was
+    /// given to is told to stop running it; a dedicated thread made for it then ends; a new pool
+    /// thread stays, empty, for the next) and the error says why.
+    #[cfg_attr(not(test), expect(dead_code, reason = "a deploy adding an interface uses it (0.7.5.2.1 item 5)"))]
+    pub(crate) async fn add(&self, mut interface: Interface, mut requests: Option<Requests>) -> Result<Vec<CodeFile>> {
+        let name = interface.config.name.clone();
+        if self.contains(&name) {
+            bail!("interface `{name}` already runs here");
+        }
+        let spawn = self.threads.spawn.as_ref();
+        let fresh: Arc<Waiting> = Arc::default();
+        let jobs: Vec<Job> =
+            (0..interface.config.slots()).map(|slot| interface.job(&self.shared, slot, requests.take(), &fresh)).collect();
+        // Existing pool threads given jobs, and new threads to make (name, jobs, its own pools).
+        let mut existing: Vec<(UnboundedSender<Command>, Vec<Job>)> = Vec::new();
+        let mut new: Vec<(String, Vec<Job>, crate::services::Pools)> = Vec::new();
+        let mut new_pool = None; // the new pool thread's commands, once registered
+        if interface.config.isolation == Isolation::Dedicated {
+            let spawn = spawn.with_context(|| format!("`{name}`: no worker threads can be made here"))?;
+            let own = spawn.services.dedicated_pools(&interface.config);
+            new.extend(jobs.into_iter().map(|job| (format!("{name}-w{}", job.slot), vec![job], own.clone())));
+        } else {
+            let mut pool = self.threads.pool.lock().unwrap_or_else(|e| e.into_inner());
+            if spawn.is_some_and(|s| pool.len() < s.pool_threads) {
+                let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+                pool.push(PoolThread { commands: commands.clone(), slots: jobs.len() });
+                new_pool = Some((commands, receiver));
+                new.push((format!("pool-{}", pool.len() - 1), jobs, Default::default()));
+            } else {
+                for job in jobs {
+                    let thread = pool.iter_mut().min_by_key(|p| p.slots).context("the pool has no threads")?;
+                    thread.slots += 1;
+                    match existing.iter_mut().find(|(c, _)| c.same_channel(&thread.commands)) {
+                        Some((_, jobs)) => jobs.push(job),
+                        None => existing.push((thread.commands.clone(), vec![job])),
+                    }
+                }
+            }
+        }
+
+        // New threads load their code as they start (as a start's do), reporting on `ready`.
+        let mut placed: Vec<Placed> = Vec::new();
+        let mut failed: Option<anyhow::Error> = None;
+        let mut files = None;
+        let (ready, answers) = std::sync::mpsc::channel();
+        let mut waiting_for = 0;
+        for (thread, jobs, own) in new {
+            let (commands, receiver) = match new_pool.take() {
+                Some(channel) => channel,
+                None => tokio::sync::mpsc::unbounded_channel(),
+            };
+            placed.push(Placed { commands, slots: jobs.iter().map(|j| j.slot).collect() });
+            waiting_for += jobs.len();
+            let spawn = spawn.expect("new threads only when they can be made");
+            let services = crate::services::EngineServices::new(spawn.services.clone(), own);
+            let stop = spawn.stop.clone();
+            let store = self.shared.store.clone();
+            match crate::worker::spawn_thread(
+                thread,
+                jobs,
+                store,
+                services,
+                spawn.heap_mb,
+                ready.clone(),
+                stop,
+                None,
+                receiver,
+            ) {
+                Ok(handle) => self.threads.handles.lock().unwrap_or_else(|e| e.into_inner()).push(handle),
+                Err(e) => {
+                    failed.get_or_insert(e);
+                    break;
+                }
+            }
+        }
+        drop(ready);
+        let reported = tokio::task::spawn_blocking(move || answers.iter().collect::<Vec<_>>())
+            .await
+            .context("waiting for the new worker threads to load the code")?;
+        if failed.is_none() && reported.len() < waiting_for {
+            failed = Some(anyhow!("`{name}`: a new worker thread stopped before loading its code (see the errors above)"));
+        }
+        for (_, result) in reported {
+            match result {
+                Ok(f) => {
+                    files.get_or_insert(f);
+                }
+                Err(e) => {
+                    failed.get_or_insert(e);
+                }
+            }
+        }
+        // Existing pool threads load it beside what they run (`Command::Replace` from nothing), one
+        // after another; each is counted already (above), sent to or not.
+        let mut counted: Vec<Placed> = Vec::new();
+        for (commands, jobs) in existing {
+            let slots = jobs.iter().map(|j| j.slot).collect();
+            if failed.is_none() {
+                match send(&commands, &name, jobs).await {
+                    Ok(f) => {
+                        files.get_or_insert(f);
+                    }
+                    Err(e) => failed = Some(e),
+                }
+            }
+            counted.push(Placed { commands, slots });
+        }
+        if let Some(error) = failed {
+            // Told to stop running it, wherever it may run (a thread that never got it: nothing).
+            for p in placed.iter().chain(&counted) {
+                if let Err(e) = send(&p.commands, &name, Vec::new()).await {
+                    tracing::warn!(interface = %name, error = %format!("{e:#}"), "couldn't stop an added interface that failed to load on another thread");
+                }
+            }
+            placed.extend(counted);
+            self.counted_off(&placed);
+            return Err(error);
+        }
+        placed.extend(counted);
+        interface.threads = placed;
+        if let Some(intake) = &interface.intake {
+            self.shared.intakes.write().unwrap_or_else(|e| e.into_inner()).insert(name.clone(), intake.clone());
+        }
+        self.interfaces.write().unwrap_or_else(|e| e.into_inner()).insert(name, Arc::new(Mutex::new(interface)));
+        Ok(files.unwrap_or_default())
+    }
+
+    /// Stop running `name` (removed by a deploy): its workers end between messages as at the
+    /// engine's stop (the message in hand finishes, what's done is saved), each thread it ran on
+    /// told so (a dedicated thread then ends), and nothing of it is kept, its intake no longer
+    /// found by routes. Close its gate and let what it was storing finish first. A change of it
+    /// waiting for its lock finds it gone. Errors only when it isn't running here.
+    #[cfg_attr(not(test), expect(dead_code, reason = "a deploy removing an interface uses it (0.7.5.2.1 item 5)"))]
+    pub(crate) async fn remove(&self, name: &str) -> Result<()> {
+        let interface = self
+            .interfaces
+            .write()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(name)
+            .with_context(|| format!("interface `{name}` isn't running here"))?;
+        let mut interface = interface.lock().await;
+        interface.removed = true;
+        for placed in &interface.threads {
+            if let Err(e) = send(&placed.commands, name, Vec::new()).await {
+                tracing::warn!(interface = %name, error = %format!("{e:#}"), "couldn't tell a worker thread to stop running a removed interface (it ends with the engine)");
+            }
+        }
+        self.counted_off(&interface.threads);
+        self.shared.intakes.write().unwrap_or_else(|e| e.into_inner()).remove(name);
+        Ok(())
+    }
+
+    /// The pool threads among `placed` run their slots no more. A pool thread that couldn't be
+    /// made (or stopped) leaves the pool.
+    fn counted_off(&self, placed: &[Placed]) {
+        let mut pool = self.threads.pool.lock().unwrap_or_else(|e| e.into_inner());
+        for p in placed {
+            if let Some(thread) = pool.iter_mut().find(|t| t.commands.same_channel(&p.commands)) {
+                thread.slots = thread.slots.saturating_sub(p.slots.len());
+            }
+        }
+        pool.retain(|t| !t.commands.is_closed());
     }
 
     /// Run `config`'s interface on its new code and settings from its next message (see
@@ -290,8 +517,11 @@ impl Kept {
         decided: crate::deployment::Decided,
     ) -> Result<Replaced> {
         let name = config.name.clone();
-        let mut interface =
-            self.interfaces.get(&name).with_context(|| format!("interface `{name}` isn't running here"))?.lock().await;
+        let interface = self.get(&name).with_context(|| format!("interface `{name}` isn't running here"))?;
+        let mut interface = interface.lock().await;
+        if interface.removed {
+            bail!("interface `{name}` was removed meanwhile");
+        }
         let config = Arc::new(config);
         let retarget = interface.config.destinations().map(|(n, _)| n).ne(config.destinations().map(|(n, _)| n));
         if retarget && interface.lanes.is_changing() {
@@ -445,7 +675,9 @@ mod tests {
         tokio::spawn(async move {
             let mut n = 0;
             while let Some(Command::Replace { mut jobs, answer: reply, .. }) = rx.recv().await {
-                let _ = seen.send(jobs.swap_remove(0));
+                if !jobs.is_empty() {
+                    let _ = seen.send(jobs.swap_remove(0));
+                }
                 let _ = reply.send(answer(n));
                 n += 1;
             }
@@ -453,26 +685,107 @@ mod tests {
         (tx, jobs)
     }
 
-    /// `yaml`'s interface on `threads`, slot 0 on each, storing into `store` (its destinations
-    /// numbered from `first_id`), with `lanes`; and the activity its destinations are watched by.
-    fn kept_with(
-        yaml: &str,
-        threads: Vec<UnboundedSender<Command>>,
-        store: Store,
-        first_id: DestinationId,
-        lanes: Layout,
-    ) -> (Kept, Activity) {
+    /// A thread that answers each `Replace` with `answer(n)` and tells the test each one's
+    /// interface and slots (none: stop running it here).
+    fn recording(
+        answer: impl Fn(usize) -> Result<Vec<CodeFile>> + Send + 'static,
+    ) -> (UnboundedSender<Command>, mpsc::UnboundedReceiver<(String, Vec<u32>)>) {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let (seen, commands) = mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            let mut n = 0;
+            while let Some(Command::Replace { interface, jobs, answer: reply }) = rx.recv().await {
+                let _ = seen.send((interface, jobs.iter().map(|j| j.slot).collect()));
+                let _ = reply.send(answer(n));
+                n += 1;
+            }
+        });
+        (tx, commands)
+    }
+
+    /// A shared interface (one slot: `workers` is a dedicated interface's).
+    const TWO: &str = "name: two\nsource: { mllp: { port: 6662 } }\ndestinations:\n  lab: { file: { dir: lab } }\n";
+
+    fn pool_slots(kept: &Kept) -> Vec<usize> {
+        kept.threads.pool.lock().unwrap().iter().map(|p| p.slots).collect()
+    }
+
+    /// An added interface runs on the pool thread running the fewest slots (the first of equals),
+    /// its intake is found by routes, and adding it again is refused. Removed: the thread it ran
+    /// on is told to stop running it, the count and its intake go, and a change of it after is
+    /// refused.
+    #[tokio::test]
+    async fn an_added_interface_runs_where_fewest_slots_run_and_a_removed_one_leaves_nothing() {
+        let ((a, mut seen_a), (b, mut seen_b)) = (recording(|_| Ok(Vec::new())), recording(|_| Ok(Vec::new())));
+        let store = Store::lazy("postgres://nobody@127.0.0.1:1/none").unwrap();
+        let (kept, activity) = kept_with(ONE, vec![a], store, 1, Layout::single(1, "x"));
+        kept.threads.pool.lock().unwrap().push(PoolThread { commands: b, slots: 0 });
+        let (two, _) = parts(TWO, kept.shared(), 10, Layout::single(1, "x"));
+        kept.add(two, None).await.unwrap();
+        assert_eq!(seen_b.recv().await.unwrap(), ("two".to_string(), vec![0]), "where none ran");
+        let (three, _) = parts(&TWO.replace("two", "three"), kept.shared(), 20, Layout::single(1, "x"));
+        kept.add(three, None).await.unwrap();
+        assert_eq!(seen_a.recv().await.unwrap(), ("three".to_string(), vec![0]), "on the first of equals");
+        assert_eq!(pool_slots(&kept), [2, 1]);
+        assert!(kept.contains("two") && kept.shared().intake("two").is_some());
+        let (again, _) = parts(TWO, kept.shared(), 30, Layout::single(1, "x"));
+        let error = kept.add(again, None).await.map(drop).unwrap_err();
+        assert!(format!("{error:#}").contains("`two` already runs here"), "{error:#}");
+
+        kept.remove("two").await.unwrap();
+        assert_eq!(seen_b.recv().await.unwrap(), ("two".to_string(), vec![]), "told to stop running it");
+        assert_eq!(pool_slots(&kept), [2, 0]);
+        assert!(!kept.contains("two") && kept.shared().intake("two").is_none());
+        let error = kept.replace(config(TWO), &activity, decided(2)).await.map(drop).unwrap_err();
+        assert!(format!("{error:#}").contains("`two` isn't running here"), "{error:#}");
+        assert!(kept.remove("two").await.is_err());
+        assert!(kept.contains("adt") && kept.contains("three"), "the others run on");
+        assert!(seen_a.try_recv().is_err(), "and their thread was told nothing");
+    }
+
+    /// A thread that can't load an added interface's code leaves nothing of it: the thread is
+    /// told to stop running it, its count given back, its intake not registered.
+    #[tokio::test]
+    async fn an_added_interface_that_fails_to_load_leaves_nothing() {
+        let (a, mut seen_a) =
+            recording(|n| if n == 0 { Err(anyhow!("loading `two`'s code: SyntaxError")) } else { Ok(Vec::new()) });
+        let store = Store::lazy("postgres://nobody@127.0.0.1:1/none").unwrap();
+        let (kept, _) = kept_with(ONE, vec![a], store, 1, Layout::single(1, "x"));
+        let (two, _) = parts(TWO, kept.shared(), 10, Layout::single(1, "x"));
+        let error = kept.add(two, None).await.map(drop).unwrap_err();
+        assert!(format!("{error:#}").contains("SyntaxError"), "{error:#}");
+        assert_eq!(seen_a.recv().await.unwrap(), ("two".to_string(), vec![0]));
+        assert_eq!(seen_a.recv().await.unwrap(), ("two".to_string(), vec![]), "told to stop running it");
+        assert_eq!(pool_slots(&kept), [1], "its count given back");
+        assert!(!kept.contains("two") && kept.shared().intake("two").is_none());
+    }
+
+    /// What jobs share, storing into `store`, with no interface yet.
+    fn shared(store: Store) -> Shared {
+        Shared {
+            store,
+            ownership: Arc::new(crate::ownership::Ownership::new(true)),
+            waiting: Default::default(),
+            certificates: Default::default(),
+            resources: Default::default(),
+            intakes: Default::default(),
+        }
+    }
+
+    /// `yaml`'s interface's parts, its destinations numbered from `first_id` (watched by the
+    /// activity returned), with `lanes`, on no thread yet; its slots as configured.
+    fn parts(yaml: &str, shared: &Shared, first_id: DestinationId, lanes: Layout) -> (Interface, Activity) {
         let config = Arc::new(config(yaml));
         let ids: Vec<DestinationId> =
             (0..config.destinations().count() as DestinationId).map(|i| first_id + i).collect();
-        let activity = Activity::idle(store.clone(), ids.clone());
+        let activity = Activity::idle(shared.store.clone(), ids.clone());
         let stats = Arc::new(InterfaceStats::new(&config.name));
-        let wake = Arc::new(Wake::new(1, ids.len()));
-        let lanes = Arc::new(Lanes::new(lanes, 1, ids.len()));
+        let wake = Arc::new(Wake::new(config.slots(), ids.len()));
+        let lanes = Arc::new(Lanes::new(lanes, config.slots(), ids.len()));
         let tier = Arc::new(std::sync::atomic::AtomicI16::new(ductus_core::Retention::DEFAULT.days() as i16));
         let intake = Intake::new(
             config.clone(),
-            store.clone(),
+            shared.store.clone(),
             wake.clone(),
             Default::default(),
             ids.clone(),
@@ -481,15 +794,6 @@ mod tests {
             lanes.clone(),
         )
         .unwrap();
-        let intake = Arc::new(intake);
-        let shared = Shared {
-            store,
-            ownership: Arc::new(crate::ownership::Ownership::new(true)),
-            waiting: Default::default(),
-            certificates: Default::default(),
-            resources: Default::default(),
-            intakes: HashMap::from([(config.name.clone(), intake.clone())]),
-        };
         let outlets = config
             .destinations()
             .zip(&ids)
@@ -509,12 +813,33 @@ mod tests {
             stats,
             lanes,
             outlets,
-            intake: Some(intake),
+            intake: Some(Arc::new(intake)),
             decided: decided(1),
-            threads: threads.into_iter().map(|commands| Placed { commands, slots: vec![0] }).collect(),
+            threads: Vec::new(),
+            removed: false,
             config,
         };
-        (Kept::new(shared, [interface]), activity)
+        (interface, activity)
+    }
+
+    /// `yaml`'s interface on `threads`, slot 0 on each, storing into `store` (its destinations
+    /// numbered from `first_id`), with `lanes`; and the activity its destinations are watched by.
+    /// The pool is `threads`, each running that one slot.
+    fn kept_with(
+        yaml: &str,
+        threads: Vec<UnboundedSender<Command>>,
+        store: Store,
+        first_id: DestinationId,
+        lanes: Layout,
+    ) -> (Kept, Activity) {
+        let shared = shared(store);
+        let (mut interface, activity) = parts(yaml, &shared, first_id, lanes);
+        let name = interface.config.name.clone();
+        shared.intakes.write().unwrap().insert(name, interface.intake.clone().unwrap());
+        interface.threads = threads.iter().map(|commands| Placed { commands: commands.clone(), slots: vec![0] }).collect();
+        let pool = threads.into_iter().map(|commands| PoolThread { commands, slots: 1 }).collect();
+        let threads = Threads { pool: std::sync::Mutex::new(pool), spawn: None, handles: Default::default() };
+        (Kept::new(shared, [interface], threads), activity)
     }
 
     /// `adt` (ONE) on two threads, with a store it never reaches.
@@ -524,7 +849,8 @@ mod tests {
     }
 
     async fn running(kept: &Kept, name: &str) -> (Arc<InterfaceConfig>, Vec<Outlet>, Arc<Wake>) {
-        let i = kept.interfaces[name].lock().await;
+        let i = kept.get(name).unwrap();
+        let i = i.lock().await;
         (i.config.clone(), i.outlets.clone(), i.wake.clone())
     }
 
@@ -617,7 +943,7 @@ mod tests {
         let (a, mut seen) = thread(|_| Ok(Vec::new()));
         let (kept, activity) = kept_with(&yaml, vec![a], store.clone(), ids[0], Layout::single(1, ""));
         let (_, before, old_wake) = running(&kept, &name).await;
-        let intake = kept.shared.intakes[&name].clone();
+        let intake = kept.shared.intake(&name).unwrap();
         for n in 0..2 {
             intake.accept(format!("MSH|^~\\&|A|B|C|D|20261113||ADT^A01|{n}|P|2.5\r").as_bytes()).await.unwrap();
         }

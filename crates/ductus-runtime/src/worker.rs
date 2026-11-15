@@ -185,7 +185,8 @@ pub fn spawn_thread(
                     thread.start(job, script, &mut None);
                 }
                 // Until the engine stops, even if every worker here has ended (an interface the
-                // runaway guard stopped): the isolate stays.
+                // runaway guard stopped): the isolate stays. A thread no one can command any more
+                // that hosts nothing (a dedicated interface removed while the engine runs) ends.
                 loop {
                     tokio::select! {
                         _ = stop.cancelled() => break,
@@ -193,6 +194,7 @@ pub fn spawn_thread(
                             Some(Command::Replace { interface, jobs, answer }) => {
                                 let _ = answer.send(thread.replace(&interface, jobs).await);
                             }
+                            None if thread.hosted.is_empty() => break,
                             None => {
                                 stop.cancelled().await;
                                 break;

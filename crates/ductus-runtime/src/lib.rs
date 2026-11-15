@@ -73,6 +73,59 @@ pub fn load_interfaces(root: &Path, env: &Environment) -> Result<Vec<InterfaceCo
     Ok(configs)
 }
 
+/// What a start refuses about its interfaces taken together, with the project's files: two
+/// wanting one port or HTTP route, routes to interfaces that can't take them, the REST API's port
+/// (`api_port`) wanted by an interface, names missing from resources.yaml, certificates that a
+/// listener (or the API, `api_tls`) presents or a connection trusts that aren't there or can't
+/// be used, and `alert:` naming what ductus.yaml's `alerts` (`alerts`) doesn't have. The first
+/// kind found refuses, every problem of it listed. An interface nothing routes to is a warning.
+///
+/// The start runs it over every interface; a deploy in place that adds or removes interfaces runs
+/// it over the set it would leave running (the project's files are the engine's: a change to them
+/// is a handover), so it refuses what the next start would.
+pub(crate) fn check_together(
+    configs: &[&InterfaceConfig],
+    resources: &ductus_core::Resources,
+    api_port: Option<u16>,
+    api_tls: Option<&ductus_core::tls::ListenTls>,
+    alerts: Option<&ductus_core::alerts::AlertSettings>,
+) -> Result<()> {
+    let configs = || configs.iter().copied();
+    let conflicts = ductus_core::config::check_endpoints(configs());
+    if !conflicts.is_empty() {
+        bail!("port conflicts:\n  {}", conflicts.join("\n  "));
+    }
+    let routes = ductus_core::config::check_routes(configs());
+    if !routes.is_empty() {
+        bail!("routes between interfaces:\n  {}", routes.join("\n  "));
+    }
+    for name in ductus_core::config::unrouted(configs()) {
+        tracing::warn!(interface = %name, "has `source: internal` but no interface routes to it: it will get nothing");
+    }
+    if let Some(port) = api_port
+        && let Some(l) = ductus_core::ports::listeners(configs()).into_iter().find(|l| l.port == port)
+    {
+        bail!("port {port}: the REST API (`api.listen` in ductus.yaml) and interface `{}` both want it", l.interface);
+    }
+    let missing = resources.missing_references(configs());
+    if !missing.is_empty() {
+        bail!("{}", missing.join("\n"));
+    }
+    let mut tls_problems = ductus_core::tls::check(&ductus_core::tls::listeners(configs(), api_tls), resources);
+    let outbound = ductus_core::tls::outbound(configs(), resources, alerts);
+    tls_problems.extend(ductus_core::tls::check_outbound(&outbound, resources));
+    if !tls_problems.is_empty() {
+        bail!("{}", tls_problems.join("\n"));
+    }
+    if let Some(a) = alerts {
+        let wrong: Vec<_> = configs().flat_map(|c| a.check_interface(&c.name, &c.alert)).collect();
+        if !wrong.is_empty() {
+            bail!("{}", wrong.join("\n"));
+        }
+    }
+    Ok(())
+}
+
 /// Engine-wide settings.
 pub struct EngineOptions {
     /// Threads in the shared worker pool. Default: one per CPU core.
@@ -305,33 +358,13 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     if let Some(inspect) = &inspected {
         inspect.check(&configs)?;
     }
-    let conflicts = ductus_core::config::check_endpoints(&configs);
-    if !conflicts.is_empty() {
-        bail!("port conflicts:\n  {}", conflicts.join("\n  "));
-    }
-    let routes = ductus_core::config::check_routes(&configs);
-    if !routes.is_empty() {
-        bail!("routes between interfaces:\n  {}", routes.join("\n  "));
-    }
-    for name in ductus_core::config::unrouted(&configs) {
-        tracing::warn!(interface = %name, "has `source: internal` but no interface routes to it: it will get nothing");
-    }
-    if let Some((_, port)) = &api_address
-        && let Some(l) = ductus_core::ports::listeners(&configs).into_iter().find(|l| l.port == *port)
-    {
-        bail!("port {port}: the REST API (`api.listen` in ductus.yaml) and interface `{}` both want it", l.interface);
-    }
-    let missing = resources.missing_references(&configs);
-    if !missing.is_empty() {
-        bail!("{}", missing.join("\n"));
-    }
-    let mut tls_problems =
-        ductus_core::tls::check(&ductus_core::tls::listeners(&configs, settings.api.tls.as_ref()), &resources);
-    let outbound = ductus_core::tls::outbound(&configs, &resources, alert_settings.as_ref());
-    tls_problems.extend(ductus_core::tls::check_outbound(&outbound, &resources));
-    if !tls_problems.is_empty() {
-        bail!("{}", tls_problems.join("\n"));
-    }
+    check_together(
+        &configs.iter().collect::<Vec<_>>(),
+        &resources,
+        api_address.as_ref().map(|(_, port)| *port),
+        settings.api.tls.as_ref(),
+        alert_settings.as_ref(),
+    )?;
     // Every certificate, before the database: a broken or expired one stops the start here.
     let certificates = Arc::new(tls::Certificates::load(&resources.certificates)?);
     let server_tls = |t: &Option<ductus_core::tls::ListenTls>, alpn: &[&[u8]]| {
@@ -380,10 +413,6 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     }
     let alerts = match alert_settings {
         Some(a) => {
-            let wrong: Vec<_> = configs.iter().flat_map(|c| a.check_interface(&c.name, &c.alert)).collect();
-            if !wrong.is_empty() {
-                bail!("{}", wrong.join("\n"));
-            }
             for warning in a.warnings() {
                 tracing::warn!("{warning}");
             }
@@ -545,9 +574,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         waiting: waiting.clone(),
         certificates: certificates.clone(),
         resources: resources.clone(),
-        intakes,
+        intakes: std::sync::RwLock::new(intakes.clone()),
     };
-    let intakes = &shared.intakes;
     let mut kept: std::collections::HashMap<String, in_place::Interface> = Default::default();
     for (config, wake, destination_ids, gate, stats, destination_stats, lanes) in parts {
         let health = Arc::new(health::Health::reporting(&config.name, stopped_tx.clone()));
@@ -599,6 +627,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             intake: intakes.get(&config.name).cloned(),
             decided: decided.clone(),
             threads: Vec::new(), // once they're spawned (below)
+            removed: false,
         };
         for slot in 0..config.slots() {
             let job = parts.job(&shared, slot, requests.take(), &shared.waiting);
@@ -633,17 +662,20 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 _ => threads.push(in_place::Placed { commands: tx.clone(), slots: vec![job.slot] }),
             }
         }
-        rx
+        (tx, rx)
     };
+    // The pool's threads, for an interface a deploy adds (only those the start needs are made).
+    let mut pool_threads_made = Vec::new();
     for (i, thread_jobs) in pool.into_iter().enumerate().filter(|(_, j)| !j.is_empty()) {
         jobs += thread_jobs.len();
         let engine = services::EngineServices::new(services.clone(), Default::default());
         let name = format!("pool-{i}");
         let ready = ready_tx.clone();
         let stop = stopping.clone();
-        let commands = commands_for(&thread_jobs);
+        let (commands, receiver) = commands_for(&thread_jobs);
+        pool_threads_made.push(in_place::PoolThread { commands, slots: thread_jobs.len() });
         let thread =
-            worker::spawn_thread(name, thread_jobs, store.clone(), engine, heap_mb, ready, stop, None, commands);
+            worker::spawn_thread(name, thread_jobs, store.clone(), engine, heap_mb, ready, stop, None, receiver);
         threads.push(thread?);
     }
     // A dedicated interface's own pools are shared by all its worker threads.
@@ -656,7 +688,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         let ready = ready_tx.clone();
         let stop = stopping.clone();
         let jobs = vec![job];
-        let commands = commands_for(&jobs);
+        let (_, commands) = commands_for(&jobs);
         threads.push(worker::spawn_thread(name, jobs, store.clone(), engine, heap_mb, ready, stop, None, commands)?);
     }
     let inspector = inspected.map(|i| i.inspector);
@@ -671,7 +703,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         let engine = services::EngineServices::new(services.clone(), own);
         let (ready, stop) = (ready_tx.clone(), stopping.clone());
         let thread = format!("{name}-debug");
-        let commands = commands_for(&interface_jobs);
+        let (_, commands) = commands_for(&interface_jobs);
         threads.push(worker::spawn_thread(
             thread,
             interface_jobs,
@@ -825,7 +857,20 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         resources: resources.clone(),
         docs,
         interfaces: running,
-        kept: in_place::Kept::new(shared, kept.into_values()),
+        kept: in_place::Kept::new(
+            shared,
+            kept.into_values(),
+            in_place::Threads {
+                pool: std::sync::Mutex::new(pool_threads_made),
+                spawn: Some(in_place::Spawn {
+                    services: services.clone(),
+                    heap_mb,
+                    pool_threads,
+                    stop: stopping.clone(),
+                }),
+                handles: std::sync::Mutex::new(threads),
+            },
+        ),
         retention,
         calls: services.calls(),
         activity,
@@ -1066,7 +1111,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     if let Some(inspector) = &inspector {
         inspector.close();
     }
-    let stop = stop(&engine, &stopping, threads);
+    let stop = stop(&engine, &stopping);
     let mut forced = false;
     tokio::select! {
         finished = tokio::time::timeout(limit, stop) => match finished {
@@ -1228,11 +1273,7 @@ fn settle_in(retention: Arc<retention::Retention>, ended: &tokio_util::sync::Can
 /// so each gets its ACK; then the workers finish the message in hand and save their statuses;
 /// then last activity is saved (the API answers what's in flight after: `run_engine`). What's
 /// still pending stays in the queue for the next start, as in a drain.
-async fn stop(
-    engine: &control::Engine,
-    stopping: &tokio_util::sync::CancellationToken,
-    threads: Vec<std::thread::JoinHandle<()>>,
-) {
+async fn stop(engine: &control::Engine, stopping: &tokio_util::sync::CancellationToken) {
     for i in engine.interfaces().iter() {
         i.gate.set_open(false);
     }
@@ -1241,6 +1282,8 @@ async fn stop(
     }
     stopping.cancel();
     engine.shutdown.cancel(); // the API takes no new requests
+    // Every worker thread, the start's and those deploys added since.
+    let threads = engine.kept.take_threads();
     let _ = tokio::task::spawn_blocking(move || {
         for thread in threads {
             let _ = thread.join();
