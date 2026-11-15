@@ -263,7 +263,7 @@ Indexes: primary key `instance`; unique `lock_key`.
 
 ## `interface_owners`
 
-Which engine runs each interface's workers, file pickup and schedule: one engine per interface across every engine on the database. An engine claims all of its (queued) interfaces at start, before changing anything for them, all or none; a row whose engine isn't alive any more is taken over. Respond-mode HTTP interfaces aren't claimed (no queue). A clean stop deletes its rows.
+Which engine runs each interface's workers, file pickup and schedule: one engine per interface across every engine on the database. An engine claims all of its (queued) interfaces at start, before changing anything for them, all or none; a row whose engine isn't alive any more is taken over. A deploy in place claims an interface it adds the same way (refused when a live engine has its row) and deletes the row of one it removes. Respond-mode HTTP interfaces aren't claimed (no queue). A clean stop deletes its rows.
 
 | column | type | |
 |---|---|---|

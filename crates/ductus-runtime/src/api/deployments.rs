@@ -600,17 +600,7 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
                 report.ok = true;
                 report.applied = Some("in_place");
                 report.steps = done.steps;
-                let n = plan.changes.len();
-                report.outcome = match n {
-                    0 => "applied in place: no interface's code or settings changed".to_string(),
-                    1 => {
-                        "applied in place: 1 interface took its new code between two messages; the others never paused"
-                            .to_string()
-                    }
-                    n => format!(
-                        "applied in place: {n} interfaces took their new code between two messages; the others never paused"
-                    ),
-                };
+                report.outcome = in_place_outcome(&plan.changes);
                 if let Some(d) = &done.deployment {
                     report.deployment = Some(d.id);
                     report.changes = d
@@ -749,5 +739,66 @@ fn span(d: Duration) -> String {
         s if s >= 3600 && s % 3600 == 0 => format!("{} h", s / 3600),
         s if s >= 60 && s % 60 == 0 => format!("{} min", s / 60),
         s => format!("{s} s"),
+    }
+}
+
+/// What a deploy applied in place did, by kind: interfaces changed (their new code between two
+/// messages), added (started) and removed (stopped).
+fn in_place_outcome(changes: &[crate::changes::Change]) -> String {
+    let added = changes.iter().filter(|c| c.is_added()).count();
+    let removed = changes.iter().filter(|c| c.is_removed()).count();
+    let changed = changes.len() - added - removed;
+    let mut parts: Vec<String> = Vec::new();
+    match changed {
+        0 => {}
+        1 => parts.push("1 interface took its new code between two messages".into()),
+        n => parts.push(format!("{n} interfaces took their new code between two messages")),
+    }
+    // The first part names what's counted; the ones after it don't need to.
+    let noun = |n: usize, first: bool| match (n, first) {
+        (1, true) => "1 interface was".to_string(),
+        (n, true) => format!("{n} interfaces were"),
+        (1, false) => "1 was".to_string(),
+        (n, false) => format!("{n} were"),
+    };
+    if added > 0 {
+        parts.push(format!("{} added and started", noun(added, parts.is_empty())));
+    }
+    if removed > 0 {
+        parts.push(format!("{} removed and stopped", noun(removed, parts.is_empty())));
+    }
+    match parts.is_empty() {
+        true => "applied in place: no interface's code or settings changed".to_string(),
+        false => format!("applied in place: {}; the others never paused", parts.join(", ")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::in_place_outcome;
+    use crate::changes::{Apply, Change};
+
+    /// The answer says what changed, what started and what stopped, in that order.
+    #[test]
+    fn a_deploy_in_place_says_what_it_changed_added_and_removed() {
+        let change = |what: &str| Change { interface: "x".into(), what: vec![what.to_string()], apply: Apply::InPlace };
+        let said = |c: &[Change]| in_place_outcome(c);
+        assert_eq!(said(&[]), "applied in place: no interface's code or settings changed");
+        assert_eq!(
+            said(&[change("code")]),
+            "applied in place: 1 interface took its new code between two messages; the others never paused"
+        );
+        assert_eq!(
+            said(&[change("added")]),
+            "applied in place: 1 interface was added and started; the others never paused"
+        );
+        assert_eq!(
+            said(&[change("code"), change("removed")]),
+            "applied in place: 1 interface took its new code between two messages, 1 was removed and stopped; the others never paused"
+        );
+        assert_eq!(
+            said(&[change("added"), change("added"), change("removed"), change("removed")]),
+            "applied in place: 2 interfaces were added and started, 2 were removed and stopped; the others never paused"
+        );
     }
 }

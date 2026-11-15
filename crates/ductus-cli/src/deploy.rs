@@ -264,8 +264,16 @@ fn text(r: &Value) -> String {
     let mark = if r["ok"] == true { "✓" } else { "✗" };
     out += &format!("{mark} {}\n", s(&r["outcome"]));
     let changes = r["changes"].as_array().cloned().unwrap_or_default();
+    // An interface the deploy removed has no new version, so the record's changes leave it out.
+    let removed: Vec<&str> = r["plan"]["changes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["what"] == serde_json::json!(["removed"]))
+        .filter_map(|c| c["interface"].as_str())
+        .collect();
     if r["ok"] == true {
-        match changes.len() {
+        match changes.len() + removed.len() {
             0 if r["deployment"].is_null() && r["applied"] == "in_place" => {
                 out += "⚠ applied, but not recorded (the step above says why): `ductus history` won't show it\n"
             }
@@ -278,6 +286,9 @@ fn text(r: &Value) -> String {
                 for c in &changes {
                     let from = c["from"].as_str().map_or("new here".to_string(), |f| format!("{f} →"));
                     out += &format!("  {} {from} {}\n", s(&c["interface"]), s(&c["to"]));
+                }
+                for name in &removed {
+                    out += &format!("  {name} removed\n");
                 }
             }
         }
@@ -336,6 +347,17 @@ mod tests {
         assert!(t.contains("· adt: code, destination pacs added (in place)"), "{t}");
         assert!(t.contains("  adt: code, destination pacs added → bbbbbbbbbbbb, applied in place (3 ms)"), "{t}");
         assert!(t.contains("✓ applied in place") && t.contains("  adt aaaaaaaaaaaa → bbbbbbbbbbbb"), "{t}");
+        // An interface removed (0.7.5.2.1) has no new version: listed as removed.
+        let gone = json!({
+            "ok": true, "outcome": "applied in place: 1 interface was removed and stopped; the others never paused",
+            "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "prod", "replaces": {}, "forced": false,
+            "gate": null, "applied": "in_place",
+            "plan": { "changes": [{ "interface": "lab", "what": ["removed"], "in_place": true }], "handover_because": [] },
+            "steps": ["lab: removed in place (2 ms)"], "deployment": 43, "changes": []
+        });
+        let t = text(&gone);
+        assert!(t.contains("· lab: removed (in place)") && t.contains("changed 1 interface:\n  lab removed\n"), "{t}");
+        assert!(!t.contains("no interface's code changed"), "{t}");
         let port = json!({
             "ok": false, "outcome": "refused: only the handover applies it (adt: `source` changed (…)), and `in_place_only` was asked",
             "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "prod", "replaces": {}, "forced": false,

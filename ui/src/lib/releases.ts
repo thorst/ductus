@@ -84,9 +84,16 @@ export function applySummary(here: Schemas["Here"]): string | null {
     return `It needs the handover (a new engine takes over; every interface's sending pauses a moment): ${plan.handover_because.join("; ")}.`;
   }
   if (plan.changes.length === 0) return null;
-  return plan.changes.length === 1
-    ? "It applies in place: the interface it changes takes its new code between two messages; the others never pause."
-    : "It applies in place: the interfaces it changes take their new code between two messages; the others never pause.";
+  // An interface added or removed (0.7.5.2.1) says only that (`what` is ["added"] or ["removed"]).
+  const only = (word: string) => plan.changes.filter((c) => c.what.length === 1 && c.what[0] === word).length;
+  const [added, removed] = [only("added"), only("removed")];
+  const changed = plan.changes.length - added - removed;
+  const parts: string[] = [];
+  if (changed === 1) parts.push("the interface it changes takes its new code between two messages");
+  if (changed > 1) parts.push("the interfaces it changes take their new code between two messages");
+  if (added) parts.push(added === 1 ? "the one it adds starts" : `the ${count(added)} it adds start`);
+  if (removed) parts.push(removed === 1 ? "the one it removes stops" : `the ${count(removed)} it removes stop`);
+  return `It applies in place: ${parts.join(", ")}; the others never pause.`;
 }
 
 /** One interface's line of the plan: what changes, and "in place" or "the handover: why". */

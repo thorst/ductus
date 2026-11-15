@@ -681,6 +681,28 @@ removed one stops taking messages, its port closes and its claim is given back. 
 a removed interface to an added one, or an HTTP interface on a port it shares with another, still
 takes the handover
 ([nuance](../nuances/releases.md#an-interface-added-or-removed-in-place-starts-or-stops-alone-level-2)).
+Here a release adds an archive interface listening where the lab's receiver was
+(`scripts/demo-promote.sh`, step 13; the lab feed's code changes in the same release):
+
+```text
+$ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy 8788802da211 --from $TEST --to $PROD -m "the archive, tested"
+fetched release 8788802da211 from http://127.0.0.1:17793 (9.8 KB, deployed to: test)
+stored release 8788802da211 on the engine (1 record of where it went added)
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
+release 8788802da211 (project integrations, branch main) to environment `prod`
+gate: passed in 0.8 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+· promote-demo: code (in place)
+· promote-demo-archive: added (in place)
+  promote-demo-archive: added → 061235fee21b, applied in place (390 ms)
+  promote-demo: code → 96e5d793f01b, applied in place (6 ms)
+✓ applied in place: 1 interface took its new code between two messages, 1 was added and started; the others never paused
+changed 2 interfaces:
+  promote-demo 20182614d985 → 96e5d793f01b
+  promote-demo-archive new here 061235fee21b
+```
+
+Removing it again, in the next release, took 22 ms (`· promote-demo-archive: removed (in
+place)`, then `changed 1 interface: promote-demo-archive removed`).
 
 Anything else needs the **handover**, and the answer says which change did (`needs the handover:
 …`): a source (its port, TLS, folder, schedule), `format`, `ordering`, `workers`, `isolation`,
@@ -1163,6 +1185,23 @@ phases, one of them with no deploy, every interface's ACKs and sends waited toge
 a pause of the whole engine's database writes on this machine, not of the deploy (its cause
 isn't confirmed; it hits the intake of interfaces the deploy doesn't touch). Every message
 arrived once, in order.
+
+Interfaces **added and removed** in place, the same engine and traffic (0.7.5.2.1, one round
+each; the added interfaces are shaped like the others, MLLP on ports of their own, with no traffic
+of their own; this run's phase without a deploy: the others' p99 22–33 ms, max 92–95 ms):
+
+| | Applied in | `ductus deploy` answered in | The other interfaces' send latency, p99 / max |
+|---|---|---|---|
+| 1 interface added | 174 ms | 0.45 s | 23–34 ms / 38–45 ms |
+| 1 interface removed | 119 ms | 0.23 s | 21 ms / 30–32 ms |
+| 50 interfaces added | 439 ms (their code loaded in 2.1 ms each on average, 8.7 ms at most) | 0.63 s | 44–47 ms / 65–70 ms |
+| 50 interfaces removed | 560 ms (each stopped in turn, its stores in flight finished first) | 0.66 s | 21–25 ms / 30–45 ms |
+
+Adding 50 at once is the one that shows in the others' latency: their p99 roughly 15 ms higher
+for that deploy, as fifty modules load on the four threads they share. To add many interfaces
+during a busy hour without that, deploy them in a few smaller releases. 100 cycles of one
+interface added and removed again (200 deploys): the engine went from 245 MB to 268 MB over the
+first 25 cycles, then stayed at 270–271 MB through the 100th: it doesn't grow with each cycle.
 
 **Memory over many deploys:** the engine went from 242 MB to 278 MB over 100 deploys of one
 interface in a row: 26 MB over the first 25, then about 130 KB a deploy (code an interface no

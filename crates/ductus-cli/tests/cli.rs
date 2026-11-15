@@ -1934,14 +1934,22 @@ impl Drop for Child {
 }
 
 /// Wait up to 2.5 s for `check` to hold.
-async fn eventually(mut check: impl AsyncFnMut() -> bool) -> bool {
-    for _ in 0..50 {
+async fn eventually(check: impl AsyncFnMut() -> bool) -> bool {
+    within(2.5, check).await
+}
+
+/// Wait up to `seconds` for `check` to hold (for what waits on polls, retries or a deploy).
+async fn within(seconds: f64, mut check: impl AsyncFnMut() -> bool) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds);
+    loop {
         if check().await {
             return true;
         }
+        if std::time::Instant::now() >= until {
+            return false;
+        }
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-    false
 }
 
 /// The engine with its REST API: tokens and roles, status and queues, the message browser, the
@@ -5593,6 +5601,204 @@ async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
         .iter()
         .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
         .collect();
+    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
+}
+
+/// What waits for an interface removed in place stays (0.7.5.2.1): F, a file pickup whose
+/// receiver is down, is added in place beside K and stores what lands in its folder; removed in
+/// place, its claim is given back and its messages wait, stored, while its folder fills (no one
+/// picks up). A deploy adding it again with G, which another engine runs, is refused whole: F
+/// isn't claimed either. Added again once G's engine stops, F picks up what landed meanwhile and
+/// sends everything, old and new, once its receiver is up. One engine throughout.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn an_interface_removed_in_place_keeps_what_waits_and_sends_it_when_added_again() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (api, receiver, port_g) = (free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let (k, f, g) = (format!("rak-{nanos}"), format!("raf-{nanos}"), format!("rag-{nanos}"));
+    let work = tempfile::tempdir().unwrap();
+    let (inbox, staging) = (work.path().join("in"), work.path().join("staging"));
+    std::fs::create_dir_all(&inbox).unwrap();
+    std::fs::create_dir_all(&staging).unwrap();
+    let k_yaml = format!(
+        "name: {k}\nsource: internal\ndestinations:\n  out: {{ file: {{ dir: '{}' }} }}\n",
+        work.path().join("out-k").display()
+    );
+    let f_yaml = format!(
+        "name: {f}\nsource: {{ file: {{ dir: '{}', poll: 200ms }} }}\nretry: {{ initial_backoff_ms: 100, max_backoff_ms: 200 }}\ndestinations: {{ receiver: {{ mllp: {{ host: 127.0.0.1, port: {receiver}, timeout_ms: 200 }} }} }}\n",
+        inbox.display()
+    );
+    let g_yaml = format!(
+        "name: {g}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port_g} }} }}\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n"
+    );
+    let dir = project(&[
+        (".gitignore", "*.log\n"),
+        ("ductus.yaml", "{}\n"),
+        ("environments/dev.yaml", "variables: {}\n"),
+        ("environments/prod.yaml", "variables: {}\n"),
+        (format!("interfaces/{k}/interface.yaml").as_str(), k_yaml.as_str()),
+    ]);
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "K"]);
+    let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let token_name = format!("{k}-deployer");
+    let (ok, out) =
+        ductus(dir.path(), &["token", "create", &token_name, "--role", "operator", "--permission", "deploy"]);
+    assert!(ok, "{out}");
+    let token = out.lines().next().unwrap().to_string();
+    let to = format!("http://127.0.0.1:{api}");
+    let deploy = |args: &[&str]| -> (bool, String) {
+        let out = Command::new(bin)
+            .arg("deploy")
+            .args(args)
+            .args(["--to", &to])
+            .env("DUCTUS_API_TOKEN", &token)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), said)
+    };
+    // The project as the next release has it: F and G in or out.
+    let with = |name: &str, yaml: Option<&str>, why: &str| {
+        let folder = dir.path().join(format!("interfaces/{name}"));
+        match yaml {
+            Some(yaml) => {
+                std::fs::create_dir_all(&folder).unwrap();
+                std::fs::write(folder.join("interface.yaml"), yaml).unwrap();
+            }
+            None => std::fs::remove_dir_all(&folder).unwrap(),
+        }
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-qm", why]);
+    };
+    // Files land whole (written beside the folder, then moved in), as a sender's should.
+    let land = |n: u32| {
+        let file = staging.join(format!("{n}.hl7"));
+        std::fs::write(&file, format!("MSH|^~\\&|A|B|C|D|20260101||ADT^A01|{nanos}-{n}|P|2.5\r")).unwrap();
+        std::fs::rename(&file, inbox.join(format!("{n}.hl7"))).unwrap();
+    };
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let engine_of = async |name: &str| {
+        store.live_engines().await.unwrap().into_iter().find(|e| e.interfaces.iter().any(|i| i == name))
+    };
+    let stored = async |name: &str| {
+        let page = ductus_store::Browse { interface: name, status: None, before: None, limit: 100 };
+        store.browse(&page).await.unwrap().len()
+    };
+    let waiting = async |name: &str| -> i64 {
+        store.waiting_by_interface(&[name.to_string()]).await.unwrap().first().map_or(0, |w| w.1)
+    };
+
+    let log = work.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let mut first = Child(
+        Command::new(bin)
+            .args(["run", "--releases", &work.path().join("releases").to_string_lossy()])
+            .args(["--release-project", &project_name, "--env", "prod", "--threads", "1"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", work.path().join("control"))
+            .env_remove("DUCTUS_PROJECT")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "started interfaces=0", 60), "{}", read(&log));
+    let mut released = Vec::new();
+    let mut release = |why: &str| {
+        let r = release_json(dir.path(), &["-m", why]);
+        released.push(r["id"].as_str().unwrap().to_string());
+        r["file"].as_str().unwrap().to_string()
+    };
+
+    // K by the handover (the engine before ran nothing); then F added in place.
+    let (ok, out) = deploy(&[&release("K"), "-m", "K"]);
+    assert!(ok && out.contains("✓ handed over"), "{out}\n{}", read(&log));
+    let exited = tokio::task::spawn_blocking(move || first.0.wait()).await.unwrap().unwrap();
+    assert!(exited.success(), "the engine before stops cleanly: {exited}");
+    let mut pid = None;
+    for _ in 0..600 {
+        if let Some(e) = engine_of(&k).await {
+            pid = Some(e.pid as u32);
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let engine = Terminate(pid.expect("an engine runs K"));
+    let same = async || assert_eq!(engine_of(&k).await.map(|e| e.pid as u32), Some(engine.0), "one engine throughout");
+
+    with(&f, Some(&f_yaml), "F");
+    let (ok, out) = deploy(&[&release("F added"), "-m", "F added", "--in-place-only"]);
+    assert!(ok && out.contains(&format!("· {f}: added (in place)")), "{out}\n{}", read(&log));
+    same().await;
+    assert_eq!(engine_of(&f).await.map(|e| e.pid as u32), Some(engine.0), "F is claimed by the engine that runs it");
+    for n in 1..=5 {
+        land(n);
+    }
+    assert!(within(30.0, async || stored(&f).await == 5).await, "F picks up what lands: {}", read(&log));
+    assert!(within(30.0, async || waiting(&f).await == 5).await, "its receiver is down: all five wait");
+
+    // F removed in place: its claim given back, its five still waiting; its folder no longer read.
+    with(&f, None, "F gone");
+    let (ok, out) = deploy(&[&release("F removed"), "-m", "F removed", "--in-place-only"]);
+    assert!(ok && out.contains(&format!("· {f}: removed (in place)")), "{out}\n{}", read(&log));
+    same().await;
+    assert!(engine_of(&f).await.is_none(), "F's claim given back");
+    land(6);
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    assert_eq!((stored(&f).await, waiting(&f).await), (5, 5), "what waits for F stays; no one picks up");
+    assert!(inbox.join("6.hl7").exists(), "the sixth waits in the folder");
+
+    // F again, with G, which another engine runs: refused whole, nothing claimed.
+    let neighbour = project(&[(format!("interfaces/{g}/interface.yaml").as_str(), g_yaml.as_str())]);
+    let (mut other, other_log) = start_engine(neighbour.path(), &db, None, "neighbour.log");
+    assert!(wait_for_log(&other_log, "started interfaces=1", 60), "{}", read(&other_log));
+    with(&f, Some(&f_yaml), "F again");
+    with(&g, Some(&g_yaml), "G too");
+    let (ok, out) = deploy(&[&release("F and G"), "-m", "F and G", "--in-place-only"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("another engine is running one of this engine's interfaces"), "{out}");
+    assert!(out.contains(&g) && out.contains(&format!("pid {}", other.0.id())), "names G and its engine: {out}");
+    assert!(out.contains("Nothing changed"), "{out}");
+    same().await;
+    assert!(engine_of(&f).await.is_none(), "F isn't claimed either: the deploy was refused whole");
+    assert!(inbox.join("6.hl7").exists(), "nor did F start reading its folder");
+    other.0.kill().unwrap();
+    other.0.wait().unwrap();
+
+    // F alone again: it resumes what waited and picks up the sixth; all six go once the
+    // receiver is up.
+    with(&g, None, "G gone");
+    let (ok, out) = deploy(&[&release("F again"), "-m", "F again", "--in-place-only"]);
+    assert!(ok && out.contains(&format!("· {f}: added (in place)")), "{out}\n{}", read(&log));
+    same().await;
+    assert!(within(30.0, async || stored(&f).await == 6).await, "F picks up what landed while it was gone");
+    let _sink = Child(
+        Command::new(bin)
+            .args(["sink", "--port", &receiver.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    assert!(within(30.0, async || waiting(&f).await == 0).await, "all six sent: {}", read(&log));
+    let page = ductus_store::Browse { interface: &f, status: None, before: None, limit: 100 };
+    for m in store.browse(&page).await.unwrap() {
+        let at = ductus_store::MessageRef { id: m.id, received_at: m.received_at };
+        let d = store.deliveries(at).await.unwrap();
+        assert_eq!(d.len(), 1, "one delivery per message {}", m.id);
+        assert_eq!(d[0].status, ductus_store::Status::Sent, "message {}", m.id);
+    }
+
+    drop(engine);
+    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
+    let ids: Vec<Vec<u8>> = released.iter().map(|id| ductus_runtime::deploy::unhex(id).unwrap()).collect();
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 

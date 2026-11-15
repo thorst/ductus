@@ -3,7 +3,8 @@
 // releases made on main, pulling from the demo's engine). Release 1 runs; release 2 (a file, only
 // its code changed) is uploaded, checked and deployed here in place (0.7.5.1: the page says so
 // first); release 3, made on a feature branch, is refused by the rule; then staging is rolled
-// back to release 1, in place too. A viewer sees it all and can change nothing.
+// back to release 1, in place too. Release 4 adds an interface (0.7.5.2.1): deployed in place, then
+// rolled back (the interface removed in place). A viewer sees it all and can change nothing.
 // Runs last (playwright.config.ts): it deploys.
 
 import AxeBuilder from "@axe-core/playwright";
@@ -13,7 +14,7 @@ const base = process.env.DUCTUS_RELEASES_URL ?? "http://127.0.0.1:7795";
 const deployer = process.env.DUCTUS_DEPLOYER_TOKEN ?? "";
 const viewer = process.env.DUCTUS_VIEWER_TOKEN ?? "";
 const file = process.env.DUCTUS_RELEASE_FILE ?? "";
-const [r1 = "", r2 = "", r3 = ""] = (process.env.DUCTUS_RELEASES ?? "").split(" ");
+const [r1 = "", r2 = "", r3 = "", r4 = ""] = (process.env.DUCTUS_RELEASES ?? "").split(" ");
 
 async function signIn(page: Page, path: string, token = deployer) {
   await page.goto(`${base}${path}`);
@@ -121,6 +122,41 @@ test("staging is rolled back to the release that ran before", async ({ page }) =
   await expect(first).toContainText(r1);
   await expect(first).toContainText("Rollback");
   await expect(first).toContainText("TWO broke the archive");
+});
+
+test("a release adding an interface goes in place, and a rollback removes it in place", async ({ page }) => {
+  const added = `${process.env.DUCTUS_RELEASE_INTERFACE ?? ""}-copies`;
+  await signIn(page, `/releases/${r4}`);
+  await expect(page.getByText("1 interface changes, 1 interface new here; 0 as they run now.")).toBeVisible();
+  await expect(page.getByTestId("applies")).toHaveText(
+    "It applies in place: the interface it changes takes its new code between two messages, the one it adds starts; the others never pause.",
+  );
+  const changes = page.getByRole("table", { name: "What it changes in staging" });
+  const line = changes.getByRole("row", { name: new RegExp(added) });
+  await expect(line).toContainText("new here");
+  await expect(line).toContainText("in place");
+  await page.getByRole("button", { name: "Deploy to staging…" }).click();
+  const dialog = page.getByRole("dialog", { name: `Deploy release ${r4} to staging` });
+  await dialog.getByLabel(/Reason/).fill("copies of the archive");
+  await dialog.getByRole("button", { name: "Deploy", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText("applied in place", { timeout: 60_000 });
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("Running here");
+
+  await page.goto(`${base}/releases`);
+  const ran = page.getByRole("table", { name: "What ran in staging" });
+  await expect(ran.locator("tbody tr").first()).toContainText(r4);
+  await ran
+    .getByRole("row", { name: new RegExp(r1) })
+    .first()
+    .getByRole("button", { name: "Roll back to it…" })
+    .click();
+  const back = page.getByRole("dialog", { name: `Roll staging back to release ${r1}` });
+  await back.getByLabel(/Reason/).fill("no copies after all");
+  await back.getByRole("button", { name: "Roll back" }).click();
+  await expect(back.getByRole("status")).toContainText("applied in place", { timeout: 60_000 });
+  await back.getByRole("button", { name: "Done" }).click();
+  await expect(ran.locator("tbody tr").first()).toContainText("no copies after all");
 });
 
 test("a viewer sees the releases and changes nothing", async ({ page }) => {

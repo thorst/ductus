@@ -285,7 +285,8 @@ echo "== releases: an engine in release mode beside this one (the Releases page)
 # Project `ui-releases`, environment `staging`, only releases made on main, pulling from this demo's
 # engine (folder mode, `dev`: same database, so what it lists is stored here already). Release 1 is
 # deployed now; release 2 the browser uploads and deploys; release 3 (a feature branch) is stored
-# for the browser to see refused; then a rollback. The interface is named for this run
+# for the browser to see refused; then a rollback; release 4 (adds an interface) is stored for the
+# browser to deploy in place, then rolled back (the interface removed in place). The interface is named for this run
 # (`ui-release-<pid>`): what earlier runs deployed of it, from commits this run's git doesn't have,
 # would make the "replaces" check refuse. This project's releases are forgotten before and after.
 R=$P/ui-releases
@@ -320,6 +321,14 @@ R2=$(release_of "archive: TWO")
 rgit checkout -qb feature/x && archive_code THREE && rgit commit -qam "not reviewed"
 R3=$(release_of "trying THREE")
 rgit checkout -q main
+# Release 4 (0.7.5.2.1) adds an interface, fed by a route from the first: in place on the page.
+mkdir -p "$R/interfaces/$IFACE-copies"
+printf 'name: %s-copies\nsource: internal\ndestinations: { files: { file: { dir: out/copies } } }\n' "$IFACE" \
+  >"$R/interfaces/$IFACE-copies/interface.yaml"
+printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: 6727 } }\ndestinations: { archive: { file: { dir: out }, script: archive.ts }, copies: { interface: %s-copies } }\n' \
+  "$IFACE" "$IFACE" >"$R/interfaces/$IFACE/interface.yaml"
+rgit add . && rgit commit -qm "copies of the archive"
+R4=$(release_of "copies")
 DEPLOYER=$("$BIN" token create "ui-demo-deployer-$$" --role operator --permission deploy 2>/dev/null)
 PULL=$("$BIN" token create "ui-demo-pull-$$" --role viewer --permission download 2>/dev/null)
 RELEASES_URL=http://127.0.0.1:7795
@@ -332,12 +341,14 @@ until grep "started interfaces=" "$P/releases.log" >/dev/null; do kill -0 $RELEA
 DUCTUS_API_TOKEN=$DEPLOYER "$BIN" deploy "$R1" --to "$RELEASES_URL" -m "the archive" | tail -1 | sed 's/^/   release 1: /'
 curl -sf -o /dev/null -H "Authorization: Bearer $DEPLOYER" -H "Content-Type: application/gzip" --data-binary "@$R3" \
   "$RELEASES_URL/api/v1/releases" || { echo "FAIL: release 3 wasn't stored"; exit 1; }
-echo "   release 3 (feature/x) stored; release 2 is for the browser to upload"
+curl -sf -o /dev/null -H "Authorization: Bearer $DEPLOYER" -H "Content-Type: application/gzip" --data-binary "@$R4" \
+  "$RELEASES_URL/api/v1/releases" || { echo "FAIL: release 4 wasn't stored"; exit 1; }
+echo "   releases 3 (feature/x) and 4 (adds an interface) stored; release 2 is for the browser to upload"
 
 echo "== the browser (Playwright)"
 cd "$UI"
 export DUCTUS_RELEASES_URL=$RELEASES_URL DUCTUS_DEPLOYER_TOKEN=$DEPLOYER DUCTUS_RELEASE_FILE=$R2 \
-  DUCTUS_RELEASES="$(short_of "$R1") $(short_of "$R2") $(short_of "$R3")"
+  DUCTUS_RELEASES="$(short_of "$R1") $(short_of "$R2") $(short_of "$R3") $(short_of "$R4")" DUCTUS_RELEASE_INTERFACE=$IFACE
 export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN \
   DUCTUS_ADMIN_TOKEN=$ADMIN DUCTUS_PEOPLE_PREFIX=$PEOPLE_PREFIX DUCTUS_PERSON_ADMIN="${PEOPLE_PREFIX}admin:$PASSWORD" \
   DUCTUS_PERSON_OPERATOR="${PEOPLE_PREFIX}operator:$PASSWORD" DUCTUS_PERSON_VIEWER="${PEOPLE_PREFIX}viewer:$PASSWORD" \

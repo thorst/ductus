@@ -22,7 +22,10 @@
 #      patients) while the receiver is down, and prod is rolled back to release 1 (8 → 2 lanes):
 #      nothing refused, new messages go to new lanes (numbered after the old), the old ones go first;
 #  12. the receiver comes up: every message arrives once, each patient's in order, and the old
-#      lanes settle (`interface.lanes_settled`).
+#      lanes settle (`interface.lanes_settled`);
+#  13. release 5 adds an archive interface listening where the lab's receiver did (0.7.5.2.1):
+#      promoted, it's added in place on prod (claimed, receiving what the feed sends the lab);
+#      release 6 removes it, in place too (its claim given back).
 # `TRANSCRIPT=file` keeps what each step printed (docs/operate/releases.md shows it).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
@@ -80,13 +83,14 @@ printf 'out/\n*.key\n' >.gitignore
 for e in "${ENVS[@]}"; do
   printf 'variables:\n  MLLP_PORT: %s\n  RECEIVER_PORT: %s\n' "${MLLP[$e]}" "${SINK[$e]}" >"environments/$e.yaml"
 done
-lanes() {
+lanes() { # lanes <partitions> [another destination's line]
   cat >"$P/interfaces/$NAME/interface.yaml" <<EOF
 name: $NAME
 source: { mllp: { host: 127.0.0.1, port: \${MLLP_PORT} } }
 ordering: { key: PID-3.1, partitions: $1 }
 destinations:
   lab: { mllp: { host: 127.0.0.1, port: \${RECEIVER_PORT}, timeout_ms: 500 }, script: lab.ts }
+${2:-}
 EOF
 }
 lanes 2
@@ -250,5 +254,38 @@ for _ in $(seq 1 50); do grep -q "final:" "$W/sink.log" && break; sleep 0.1; don
 RECEIVER=""
 grep "final:" "$W/sink.log" | tee -a "$OUT"
 grep -q "| duplicates 0 | out of order 0 |" "$W/sink.log" && grep -q "unique 200 |" "$W/sink.log" || fail+=" lanes-order"
+
+echo "== 13. an interface added in place (release 5: an archive on the lab's port), then removed (release 6)"
+# The archive listens where the lab's receiver did (stopped after step 12), so promote-demo sends
+# to it unchanged: its lanes changed since prod's engine started (step 11), and while they are,
+# its destinations change only by the handover.
+ARCHIVE=$NAME-archive
+mkdir -p "$P/interfaces/$ARCHIVE"
+printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: ${RECEIVER_PORT} } }\ndestinations:\n  files: { file: { dir: out/archive } }\n' "$ARCHIVE" >"$P/interfaces/$ARCHIVE/interface.yaml"
+lanes 2
+g add . && g commit -qm "an archive where the lab's receiver was"
+step r5 'env -u DUCTUS_DATABASE_URL ductus release -m "the archive"'
+REL5=.ductus/releases/$(basename "$(released r5)") S5=$(short_id r5)
+step test5 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL5"' --to $TEST -m "the archive"'
+step promote5 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S5"' --from $TEST --to $PROD -m "the archive, tested"'
+[ "$(code test5)" = 0 ] && [ "$(code promote5)" = 0 ] || fail+=" promote5"
+has promote5 "^· $ARCHIVE: added (in place)" && has promote5 "^✓ applied in place" || fail+=" archive-added-in-place"
+claimed() { q prod "SELECT count(*) FROM interface_owners WHERE interface = '$ARCHIVE'"; }
+[ "$(claimed)" = 1 ] || fail+=" archive-claimed"
+"$BIN" gen --to "127.0.0.1:${MLLP[prod]}" --count 20 --patients 5 --offset 1000 >"$W/gen2.log" 2>&1
+archived() { q prod "SELECT count(*) FROM messages WHERE interface = '$ARCHIVE'"; }
+for _ in $(seq 1 100); do [ "$(archived)" = 20 ] && break; sleep 0.1; done
+echo "archived on prod: $(archived)" | tee -a "$OUT"
+[ "$(archived)" = 20 ] || fail+=" archive-receives"
+g rm -rq "interfaces/$ARCHIVE"
+lanes 2
+g commit -qam "no archive after all"
+step r6 'env -u DUCTUS_DATABASE_URL ductus release -m "no archive"'
+S6=$(short_id r6) REL6=.ductus/releases/$(basename "$(released r6)")
+step test6 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL6"' --to $TEST -m "no archive"'
+step promote6 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S6"' --from $TEST --to $PROD -m "no archive after all"'
+[ "$(code test6)" = 0 ] && [ "$(code promote6)" = 0 ] || fail+=" promote6"
+has promote6 "^· $ARCHIVE: removed (in place)" && has promote6 "^✓ applied in place" || fail+=" archive-removed-in-place"
+[ "$(claimed)" = 0 ] || fail+=" archive-claim-kept"
 
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

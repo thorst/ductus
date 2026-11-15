@@ -71,6 +71,20 @@ describe("applySummary and applyOf", () => {
     expect(applyOf(h, "lab")).toBeNull();
   });
 
+  it("says an interface added or removed in place starts or stops", () => {
+    const plan = (changes: Schemas["PlannedChange"][]) => ({ ...here, plan: { changes, handover_because: [] } });
+    expect(applySummary(plan([planned("orders", ["added"])]))).toBe(
+      "It applies in place: the one it adds starts; the others never pause.",
+    );
+    expect(
+      applySummary(
+        plan([planned("adt", ["code"]), planned("a", ["added"]), planned("b", ["added"]), planned("x", ["removed"])]),
+      ),
+    ).toBe(
+      "It applies in place: the interface it changes takes its new code between two messages, the 2 it adds start, the one it removes stops; the others never pause.",
+    );
+  });
+
   it("says what needs the handover, and why", () => {
     const why = "`source` changed (its listener is opened at a start)";
     const plan = {

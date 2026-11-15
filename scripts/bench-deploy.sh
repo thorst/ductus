@@ -18,11 +18,14 @@
 #   1. no deploy (the baseline);
 #   2. a code change to A (ROUNDS times);
 #   3. a code change to 50 interfaces (v-0000 … v-0049; A and its neighbours among them);
-#   4. a code change to A while S's lookups take SLOW ms.
-# Then DEPLOYS deploys of A in a row (no traffic) with the engine's memory before, every 25, and
-# after; and that every message sent arrived once.
+#   4. a code change to A while S's lookups take SLOW ms;
+#   5. (0.7.5.2.1) an interface added, then removed; 50 added, then removed (w-0000 …, MLLP on
+#      ports of their own, no traffic to them).
+# Then CYCLES interfaces added and removed again (two deploys each) and DEPLOYS deploys of A in a
+# row (no traffic), each with the engine's memory before, every 25, and after; and that every
+# message sent arrived once.
 #
-#   bash scripts/bench-deploy.sh            # COUNT=1001 ROUNDS=3 DEPLOYS=100 by default
+#   bash scripts/bench-deploy.sh            # COUNT=1001 ROUNDS=3 CYCLES=100 DEPLOYS=100 by default
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
@@ -30,6 +33,7 @@ BIN=$(realpath "${BIN:-${CARGO_TARGET_DIR:-target}/release/ductus}")
 COUNT=${COUNT:-1001}
 ROUNDS=${ROUNDS:-3}
 DEPLOYS=${DEPLOYS:-100}
+CYCLES=${CYCLES:-100}
 RATE=${RATE:-100}
 SECONDS_=${SECONDS_:-8}
 SLOW=${SLOW:-300}
@@ -262,6 +266,43 @@ echo "$SLOW" >"$WORK/delay"
 phase "no deploy, S's lookups take $SLOW ms (baseline)"
 for r in $(seq 1 "$ROUNDS"); do deploy_round 0 0 "a code change to A, S's lookups take $SLOW ms" "$r"; done
 echo 0 >"$WORK/delay"
+
+# Interfaces added and removed in place (0.7.5.2.1): w-0000 … on ports after the v- ones, shaped
+# like them (no traffic: what's measured is the others' latency and the time to applied).
+add_interfaces() { # $1 first, $2 last
+  for j in $(seq "$1" "$2"); do
+    local n d
+    n=$(printf 'w-%04d' "$j") d="$P/interfaces/$(printf 'w-%04d' "$j")"
+    mkdir -p "$d"
+    printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: %d } }\ndestinations: { receiver: { mllp: { host: 127.0.0.1, port: %d }, script: transform.ts } }\n' \
+      "$n" $((BASE + COUNT + j)) "$SINK" >"$d/interface.yaml"
+    printf 'import type { Message } from "@ductus/sdk";\nimport { code%d } from "../../lib/codes%d.ts";\n\nexport function transform(msg: Message) {\n  msg.PV1[3][2] = code%d(msg.PV1[3][2]);\n  return msg;\n}\n' \
+      $((j % 10)) $((j % 10)) $((j % 10)) >"$d/transform.ts"
+  done
+  g add . && g commit -qm "w-$1 … w-$2 added"
+}
+remove_interfaces() { # $1 first, $2 last
+  for j in $(seq "$1" "$2"); do g rm -rq "interfaces/$(printf 'w-%04d' "$j")"; done
+  g commit -qm "w-$1 … w-$2 removed"
+}
+add_interfaces 0 0
+phase "1 interface added" deploy "$(release "w-0000 added")" in_place
+remove_interfaces 0 0
+phase "1 interface removed" deploy "$(release "w-0000 removed")" in_place
+add_interfaces 0 49
+phase "50 interfaces added" deploy "$(release "50 added")" in_place
+remove_interfaces 0 49
+phase "50 interfaces removed" deploy "$(release "50 removed")" in_place
+
+echo "== $CYCLES interfaces added and removed again in a row (no traffic)"
+echo "   before: $(memory)"
+for r in $(seq 1 "$CYCLES"); do
+  add_interfaces 0 0
+  deploy "$(release "w-0000 added, $r")" in_place
+  remove_interfaces 0 0
+  deploy "$(release "w-0000 removed, $r")" in_place
+  [ $((r % 25)) = 0 ] && echo "   after $r: $(memory)"
+done
 
 echo "== $DEPLOYS deploys of A in a row (no traffic)"
 echo "   before: $(memory)"
