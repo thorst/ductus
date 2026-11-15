@@ -5089,6 +5089,11 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
     let (mllp, api) = (free_port(), free_port());
     let (dir, name) = release_project(mllp);
+    // An environment of its own: a check is reused only while nothing was deployed to its
+    // environment on this database since, and other tests deploy to `prod` meanwhile.
+    std::fs::write(dir.path().join("environments/colleagues.yaml"), "variables: {}\n").unwrap();
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "an environment of its own"]);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
     let work = tempfile::tempdir().unwrap();
     let (control, releases) = (work.path().join("control"), work.path().join("releases"));
@@ -5135,7 +5140,7 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     let mut first = Child(
         Command::new(bin)
             .args(["run", "--releases", &releases.to_string_lossy(), "--release-project", &project_name])
-            .args(["--env", "prod", "--threads", "1", "--api-listen", &format!("127.0.0.1:{api}")])
+            .args(["--env", "colleagues", "--threads", "1", "--api-listen", &format!("127.0.0.1:{api}")])
             .env("DUCTUS_DATABASE_URL", &db)
             .env("DUCTUS_CONTROL", &control)
             .env_remove("DUCTUS_PROJECT")
