@@ -484,7 +484,8 @@ pub async fn apply_in_place(
         }
     }
     // The set it leaves running, checked as a start checks it, before anything changes.
-    if !added.is_empty() || !removed.is_empty() {
+    let sources_change = changed.iter().any(|(new, before, _)| new.source != before.source);
+    if !added.is_empty() || !removed.is_empty() || sources_change {
         let running = engine.interfaces();
         let mut next_set: Vec<&ductus_core::InterfaceConfig> = running
             .iter()
@@ -499,11 +500,15 @@ pub async fn apply_in_place(
         if let Err(e) = crate::check_together(&next_set, &engine.resources, api.map(|a| a.port), api_tls, alerts) {
             return Err(crate::ownership::Refused(format!("the interfaces it would leave running: {e:#}")).into());
         }
-        // Their sources start and stop alone, unless a port moves or is shared.
+        // Their sources start, change and stop alone, unless a port moves between interfaces.
         let now: Vec<&ductus_core::InterfaceConfig> = running.iter().map(|r| &*r.config).collect();
         let adding: Vec<&ductus_core::InterfaceConfig> = added.iter().map(|(c, _)| c).collect();
-        let removing: Vec<&str> = removed.iter().map(|(n, _)| n.as_str()).collect();
-        crate::sources::in_place(&now, &adding, &removing)?;
+        let changing: Vec<(&ductus_core::InterfaceConfig, &ductus_core::InterfaceConfig)> = changed
+            .iter()
+            .filter(|(new, before, _)| new.source != before.source)
+            .map(|(new, before, _)| (&**before, new))
+            .collect();
+        crate::sources::in_place(&now, &adding, &changing)?;
     }
     let timed = |result, started: std::time::Instant| (result, started.elapsed());
     // Added first: a changed interface may route to one.

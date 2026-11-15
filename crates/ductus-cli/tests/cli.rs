@@ -5609,6 +5609,262 @@ async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
+/// Sources changed in place (0.7.5.2.2), one engine throughout. While a sender sends to M's
+/// MLLP port and a caller posts to H1's HTTP route, one deploy moves M to another port, moves
+/// F's pickup to another folder, moves H2's route on the port it shares with H1, and adds H3
+/// beside them: M's sender gets an ACK for everything it sent to the old port, finds it closed,
+/// and goes on at the new one (open before the old closed) without a refusal; every message is
+/// delivered once; H1's caller never sees an error. A second deploy narrows M's `allow:` (its
+/// open connection is closed after its message, a new one refused unread) and removes H2 from
+/// the shared port (its route answers 404, H1's goes on).
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn sources_change_in_place_while_their_senders_send() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (p0, p1, ph, api) = (free_port(), free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let [m, f, h1, h2, h3] = ["m", "f", "h1", "h2", "h3"].map(|n| format!("sc{n}-{nanos}"));
+    let work = tempfile::tempdir().unwrap();
+    let out_dir = |name: &str| work.path().join(format!("out-{name}"));
+    let folder = |name: &str| work.path().join(name);
+    let to_file = |name: &str| format!("destinations:\n  out: {{ file: {{ dir: '{}' }} }}\n", out_dir(name).display());
+    let mllp = |port: u16, allow: &str| {
+        format!("name: {m}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port}{allow} }} }}\n{}", to_file(&m))
+    };
+    let pickup = |dir: &str| {
+        format!(
+            "name: {f}\nsource: {{ file: {{ dir: '{}', poll: 100ms }} }}\nformat: text\n{}",
+            folder(dir).display(),
+            to_file(&f)
+        )
+    };
+    let http = |name: &str, path: &str| {
+        format!(
+            "name: {name}\nsource: {{ http: {{ host: 127.0.0.1, port: {ph}, path: {path} }} }}\nformat: text\n{}",
+            to_file(name)
+        )
+    };
+    for dir in ["in1", "in2"] {
+        std::fs::create_dir_all(folder(dir)).unwrap();
+    }
+    let yaml = |name: &str| format!("interfaces/{name}/interface.yaml");
+    let dir = project(&[
+        (".gitignore", "out/\n*.log\n"),
+        ("ductus.yaml", "{}\n"),
+        ("environments/dev.yaml", "variables: {}\n"),
+        ("environments/prod.yaml", "variables: {}\n"),
+        (yaml(&m).as_str(), mllp(p0, "").as_str()),
+        (yaml(&f).as_str(), pickup("in1").as_str()),
+        (yaml(&h1).as_str(), http(&h1, "/one").as_str()),
+        (yaml(&h2).as_str(), http(&h2, "/two").as_str()),
+    ]);
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let token_name = format!("{m}-deployer");
+    let args = ["token", "create", &token_name, "--role", "operator", "--permission", "deploy"];
+    let out = Command::new(bin).args(args).current_dir(dir.path()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let to = format!("http://127.0.0.1:{api}");
+    let deploy = |file: &serde_json::Value, why: &str| -> (bool, String) {
+        let out = Command::new(bin)
+            .args(["deploy", file["file"].as_str().unwrap(), "-m", why, "--in-place-only", "--to", &to])
+            .env("DUCTUS_API_TOKEN", &token)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let running = async || -> u32 {
+        for _ in 0..600 {
+            let engines = store.live_engines().await.unwrap();
+            if let Some(e) = engines.iter().find(|e| e.interfaces.contains(&m) && e.interfaces.contains(&h1)) {
+                return e.pid as u32;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("no engine runs {m} and {h1}");
+    };
+    let log = work.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let releases = work.path().join("releases");
+    let mut first = Child(
+        Command::new(bin)
+            .args(["run", "--releases", &releases.to_string_lossy(), "--release-project", &project_name])
+            .args(["--env", "prod", "--threads", "2", "--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", work.path().join("control"))
+            .env_remove("DUCTUS_PROJECT")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "started interfaces=0", 60), "{}", read(&log));
+    let one = release_json(dir.path(), &["-m", "first"]);
+    let out = Command::new(bin)
+        .args(["deploy", one["file"].as_str().unwrap(), "-m", "first", "--to", &to])
+        .env("DUCTUS_API_TOKEN", &token)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), read(&log));
+    let exited = tokio::task::spawn_blocking(move || first.0.wait()).await.unwrap().unwrap();
+    assert!(exited.success(), "the engine before stops cleanly: {exited}");
+    let engine = Terminate(running().await);
+    let delivered = |name: &str| std::fs::read_dir(out_dir(name)).map_or(0, |d| d.count());
+
+    // M's sender: one message at a time to the old port until it closes, then to the new one,
+    // 100 more there. A refusal at either port fails the test.
+    let moved = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let sender = {
+        let moved = moved.clone();
+        tokio::spawn(async move {
+            let timeout = std::time::Duration::from_secs(5);
+            let mut client = ductus_mllp::Client::new(format!("127.0.0.1:{p0}"), timeout);
+            let (mut seq, mut on_old, mut on_new) = (0u64, 0u64, 0u64);
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(90);
+            while on_new < 100 {
+                assert!(std::time::Instant::now() < until, "the port never moved");
+                seq += 1;
+                let message = format!("MSH|^~\\&|T|T|R|R|20260101||ADT^A01|SC{seq}|P|2.5\rPID|1||{seq}\r");
+                match client.send(message.as_bytes()).await {
+                    Ok(ack) => {
+                        assert!(String::from_utf8_lossy(&ack).contains("MSA|AA"), "message {seq}");
+                        match moved.load(std::sync::atomic::Ordering::Relaxed) {
+                            false => on_old += 1,
+                            true => on_new += 1,
+                        }
+                    }
+                    Err(e) if !moved.load(std::sync::atomic::Ordering::Relaxed) => {
+                        // Closed after the ACK of the message before: this one wasn't stored.
+                        assert_ne!(
+                            e.kind(),
+                            std::io::ErrorKind::ConnectionRefused,
+                            "the old port closed between messages: {e}"
+                        );
+                        moved.store(true, std::sync::atomic::Ordering::Relaxed);
+                        client = ductus_mllp::Client::new(format!("127.0.0.1:{p1}"), timeout);
+                        seq -= 1; // sent again
+                    }
+                    Err(e) => panic!("the new port: {e}"),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            (seq, on_old)
+        })
+    };
+    // H1's caller: a POST every 10 ms until told to stop; any answer but 202 counts.
+    let calling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let caller = {
+        let calling = calling.clone();
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let (mut sent, mut failed) = (0u32, Vec::new());
+            while calling.load(std::sync::atomic::Ordering::Relaxed) {
+                sent += 1;
+                match client.post(format!("http://127.0.0.1:{ph}/one")).body(format!("call {sent}")).send().await {
+                    Ok(r) if r.status() == 202 => {}
+                    Ok(r) => failed.push(r.status().to_string()),
+                    Err(e) => failed.push(e.to_string()),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            (sent, failed)
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // M moves port, F folder, H2 path (on the shared port); H3 joins that port.
+    std::fs::write(dir.path().join(yaml(&m)), mllp(p1, "")).unwrap();
+    std::fs::write(dir.path().join(yaml(&f)), pickup("in2")).unwrap();
+    std::fs::write(dir.path().join(yaml(&h2)), http(&h2, "/three")).unwrap();
+    std::fs::create_dir_all(dir.path().join(format!("interfaces/{h3}"))).unwrap();
+    std::fs::write(dir.path().join(yaml(&h3)), http(&h3, "/four")).unwrap();
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "sources moved"]);
+    let two = release_json(dir.path(), &["-m", "sources moved"]);
+    let (ok, out) = deploy(&two, "sources moved");
+    assert!(ok && out.contains("✓ applied in place"), "{out}\n{}", read(&log));
+    for name in [&m, &f, &h2] {
+        assert!(out.contains(&format!("· {name}: source (in place)")), "{out}");
+    }
+    assert!(out.contains(&format!("· {h3}: added (in place)")), "{out}");
+    assert_eq!(running().await, engine.0, "the same engine");
+    assert!(std::net::TcpStream::connect(("127.0.0.1", p0)).is_err(), "M's old port closed");
+    let (sent_m, on_old) = sender.await.unwrap();
+    assert!(on_old > 0, "some went to the old port before it moved");
+    for _ in 0..300 {
+        if delivered(&m) as u64 >= sent_m {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(delivered(&m) as u64, sent_m, "every message M's sender had an ACK for, delivered once");
+
+    // F reads its new folder, not the old one.
+    std::fs::write(folder("in1").join("old.txt"), "left alone").unwrap();
+    std::fs::write(folder("in2").join("new.txt"), "picked up").unwrap();
+    for _ in 0..100 {
+        if delivered(&f) >= 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(delivered(&f), 1, "{}", read(&log));
+    assert!(folder("in1").join("old.txt").exists(), "the old folder is no longer read");
+
+    // H2 at its new path, H3 beside it, H1 throughout.
+    let post = async |path: &str| -> u16 {
+        let answer = reqwest::Client::new().post(format!("http://127.0.0.1:{ph}{path}")).body("x").send();
+        answer.await.unwrap().status().as_u16()
+    };
+    assert_eq!((post("/three").await, post("/four").await, post("/two").await), (202, 202, 404));
+
+    // M's `allow:` narrowed to an address the test doesn't connect from; H2 removed.
+    let mut open = ductus_mllp::Client::new(format!("127.0.0.1:{p1}"), std::time::Duration::from_secs(5));
+    assert!(open.send(b"MSH|^~\\&|T|T|R|R|20260101||ADT^A01|SCopen|P|2.5\r").await.is_ok(), "open before");
+    std::fs::write(dir.path().join(yaml(&m)), mllp(p1, ", allow: [127.0.0.2]")).unwrap();
+    std::fs::remove_dir_all(dir.path().join(format!("interfaces/{h2}"))).unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-qm", "M narrowed, H2 gone"]);
+    let three = release_json(dir.path(), &["-m", "narrowed"]);
+    let (ok, out) = deploy(&three, "narrowed");
+    assert!(ok && out.contains("✓ applied in place"), "{out}\n{}", read(&log));
+    assert!(
+        out.contains(&format!("· {m}: source (in place)")) && out.contains(&format!("· {h2}: removed (in place)")),
+        "{out}"
+    );
+    assert!(
+        open.send(b"MSH|^~\\&|T|T|R|R|20260101||ADT^A01|SCclosed|P|2.5\r").await.is_err(),
+        "its open connection closed"
+    );
+    let mut new = ductus_mllp::Client::new(format!("127.0.0.1:{p1}"), std::time::Duration::from_secs(5));
+    assert!(new.send(b"MSH|^~\\&|T|T|R|R|20260101||ADT^A01|SCnew|P|2.5\r").await.is_err(), "a new one refused");
+    assert!(read(&log).contains("allow: closing a connection its new list refuses"), "said in the log");
+    assert_eq!(post("/three").await, 404, "H2's route is gone");
+    calling.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (calls, failed) = caller.await.unwrap();
+    assert!(calls > 50 && failed.is_empty(), "H1 answered every call ({calls}): {failed:?}");
+    assert_eq!(running().await, engine.0, "the same engine still");
+
+    drop(engine);
+    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
+    let ids: Vec<Vec<u8>> = [&one, &two, &three]
+        .iter()
+        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
+        .collect();
+    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
+}
+
 /// What waits for an interface removed in place stays (0.7.5.2.1): F, a file pickup whose
 /// receiver is down, is added in place beside K and stores what lands in its folder; removed in
 /// place, its claim is given back and its messages wait, stored, while its folder fills (no one
@@ -5940,10 +6196,12 @@ async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_proces
     );
     git(dir.path(), &["commit", "-qam", "a port that's taken"]);
     let c = release_json(dir.path(), &["-m", "taken port"]);
-    // Only in place: a source change is refused before the gate runs.
+    // Only in place (a moved port goes in place since 0.7.5.2.2): the new port can't be bound, so
+    // it's refused and everything runs what it ran.
     let (ok, out) = deploy(&[c["file"].as_str().unwrap(), "-m", "taken port", "--in-place-only"]);
-    assert!(!ok && out.contains("`in_place_only` was asked") && out.contains("`source` changed"), "{out}");
-    assert!(out.contains(&format!("· {name}: source (needs the handover:")) && !out.contains("gate:"), "{out}");
+    assert!(!ok && out.contains("couldn't apply it in place") && out.contains("`in_place_only` was asked"), "{out}");
+    assert!(out.contains(&format!(":{held_port}")) && out.contains("changing its source"), "{out}");
+    // Without it: in place fails the same way, then the handover is tried and refused too.
     let (ok, out) = deploy(&[c["file"].as_str().unwrap(), "-m", "taken port"]);
     assert!(!ok, "{out}");
     assert!(out.contains("can't take over") && out.contains(&format!("port {held_port} is in use")), "{out}");

@@ -12,6 +12,7 @@ use crate::ingest::Intake;
 use crate::sftp::{self, Connection};
 use crate::split::{Records, Splitter};
 use anyhow::{Context, Result, bail};
+use ductus_core::InterfaceConfig;
 use ductus_core::config::{After, FileSource, Source, Split};
 use ductus_core::format::Format;
 use ductus_core::resources::SftpServer;
@@ -173,13 +174,15 @@ pub struct FileWatcher {
 }
 
 impl FileWatcher {
-    /// For a `file` or `sftp` source. `server` is the SFTP server from resources.yaml.
+    /// For `config`'s `file` or `sftp` source (the interface's settings now: a deploy in place may
+    /// have changed its source since `intake` was made). `server` is the SFTP server from
+    /// resources.yaml.
     pub fn new(
+        config: &InterfaceConfig,
         intake: Arc<Intake>,
         server: Option<SftpServer>,
         ownership: Arc<crate::ownership::Ownership>,
     ) -> Result<Self> {
-        let config = intake.config.clone();
         let (Source::File(source) | Source::Sftp(source)) = &config.source else {
             bail!("interface `{}` doesn't have a file source", config.name)
         };
@@ -192,7 +195,7 @@ impl FileWatcher {
             (Source::Sftp(_), None) => bail!("interface `{}`: SFTP server not found", config.name),
             _ => Backend::Local { dir: config.dir.join(&source.dir), archive: config.dir.join(source.archive()) },
         };
-        let splitter = (source.split == Split::Records).then(|| match &config.format {
+        let splitter = (source.split == Split::Records).then_some(match &config.format {
             Format::Hl7 => Splitter::Hl7,
             Format::Csv(options) => Splitter::Csv { header: options.header },
             _ => Splitter::Lines,

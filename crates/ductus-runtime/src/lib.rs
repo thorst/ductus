@@ -1,5 +1,6 @@
 //! Runs interfaces: receive → persist → ACK, then workers transform and deliver.
 
+pub mod accepting;
 pub mod activity;
 pub mod alerts;
 pub mod allow;
@@ -601,6 +602,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                 method: method.clone(),
                 path: path.clone(),
                 route,
+                listen: http::Listen { tls: tls.clone(), allow: allow.clone() },
                 tls: server_tls(tls, HTTP1)?,
                 admission: match http_admissions.get(&(host.clone(), *port)) {
                     Some(a) => a.clone(),

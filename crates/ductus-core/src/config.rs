@@ -227,7 +227,7 @@ pub struct InterfaceConfig {
     pub dir: PathBuf,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(rename_all = "lowercase", deny_unknown_fields)]
 pub enum Source {
@@ -347,7 +347,7 @@ impl Source {
 
 /// Watch a folder for files. Each file (or each record in it, with `split: records`) becomes a
 /// message. A file is moved or deleted only after everything in it is stored.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct FileSource {
@@ -428,7 +428,7 @@ pub enum Split {
 }
 
 /// When a schedule source runs: `every: 15m`, or `cron: "0 2 * * *"` (server local time).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Schedule {

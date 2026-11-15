@@ -482,8 +482,8 @@ enum Command {
         #[arg(long)]
         all_tests: bool,
         /// Only in place: refuse (before the gate runs) when the release changes something only a
-        /// handover applies (a source changed, lanes, the project's own files, a port moving from
-        /// one interface to another), and when applying in place fails, instead of handing over.
+        /// handover applies (how messages are stored, lanes, the project's own files, a port moving
+        /// from one interface to another), and when applying in place fails, instead of handing over.
         /// For sites that schedule handovers.
         #[arg(long)]
         in_place_only: bool,

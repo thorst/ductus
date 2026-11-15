@@ -48,7 +48,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Local development](dev.md) (2)
 - [Upgrades](upgrades.md) (17)
 - [What runs, recorded](deployments.md) (17)
-- [Releases](releases.md) (32)
+- [Releases](releases.md) (33)
 - [Windows](windows.md) (9)
 
 ## Level 1: Foundations (39)
@@ -88,12 +88,12 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A committed private key refuses the release](releases.md#a-committed-private-key-refuses-the-release-level-1) (Releases)
 - [An engine in release mode runs nothing until a release is deployed, and its API starts on its defaults](releases.md#an-engine-in-release-mode-runs-nothing-until-a-release-is-deployed-and-its-api-starts-on-its-defaults-level-1) (Releases)
 - [A deploy applies by a handover: to a new process under systemd, in the engine's own process elsewhere](releases.md#a-deploy-applies-by-a-handover-to-a-new-process-under-systemd-in-the-engines-own-process-elsewhere-level-1) (Releases)
-- [A deploy goes in place only when it changes interfaces' code, destinations or destination settings](releases.md#a-deploy-goes-in-place-only-when-it-changes-interfaces-code-destinations-or-destination-settings-level-1) (Releases)
+- [A deploy goes in place unless it changes how messages are stored, lanes or the project's files](releases.md#a-deploy-goes-in-place-unless-it-changes-how-messages-are-stored-lanes-or-the-projects-files-level-1) (Releases)
 - [A deploy from the Releases page waits for the gate and the handover](releases.md#a-deploy-from-the-releases-page-waits-for-the-gate-and-the-handover-level-1) (Releases)
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (120)
+## Level 2: Practitioner (121)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -201,6 +201,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A deploy reuses a recent passing check only when nothing was deployed there since](releases.md#a-deploy-reuses-a-recent-passing-check-only-when-nothing-was-deployed-there-since-level-2) (Releases)
 - [In release mode the files on the server are the database's copy](releases.md#in-release-mode-the-files-on-the-server-are-the-databases-copy-level-2) (Releases)
 - [An interface added or removed in place starts or stops alone](releases.md#an-interface-added-or-removed-in-place-starts-or-stops-alone-level-2) (Releases)
+- [A source changed in place moves, swaps or restarts alone](releases.md#a-source-changed-in-place-moves-swaps-or-restarts-alone-level-2) (Releases)
 - [A deploy in place is all or nothing](releases.md#a-deploy-in-place-is-all-or-nothing-level-2) (Releases)
 - [Where a release went, and its branch, are labels in its file, not proof](releases.md#where-a-release-went-and-its-branch-are-labels-in-its-file-not-proof-level-2) (Releases)
 - [An environment's rules aren't skipped by `--force`; a rollback isn't held to them](releases.md#an-environments-rules-arent-skipped-by---force-a-rollback-isnt-held-to-them-level-2) (Releases)

@@ -2,13 +2,14 @@
 //! another stored here, through the handover: receiving never stops, sending pauses while the
 //! engines swap (well under a second at a thousand interfaces).
 //!
-//! **In place (0.7.5):** when the release changes only interfaces' code, destinations and
-//! destination settings (`changes::plan`, from the two manifests), it's applied without a handover
+//! **In place (0.7.5):** when the release changes only interfaces' code, destinations, destination
+//! settings and sources (`changes::plan`, from the two manifests), it's applied without a handover
 //! (`deploy::apply_in_place`): each changed interface's workers restart between two messages on the
-//! new code, the others never pause, and a deployment `how = deploy` is recorded; interfaces added
-//! or removed start or stop alone (0.7.5.2.1, `sources`). Anything else (a source changed, lanes,
-//! the project's own files, a port moving between interfaces) goes by the handover, the answer
-//! saying which change needed it; `in_place_only` refuses instead.
+//! new code, the others never pause, and a deployment `how = deploy` is recorded; a changed source
+//! moves, swaps or restarts alone (0.7.5.2.2), and interfaces added or removed start or stop alone
+//! (0.7.5.2.1, `sources`). Anything else (how messages are stored, lanes, the project's own files, a
+//! port moving between interfaces) goes by the handover, the answer saying which change needed it;
+//! `in_place_only` refuses instead.
 //!
 //! In order, each step able to refuse with what to do: the engine runs releases (folder mode
 //! refuses, saying how to switch); the release is stored and of this engine's project, and isn't
@@ -292,9 +293,9 @@ impl PlaceInfo {
 
 /// Deploy a stored release to this engine (release mode): this environment's rules, the "replaces"
 /// check, what it changes here (`plan`), the gate (or a recent passing check reused), then **in
-/// place** when only interfaces' code, destinations and destination settings change, or
-/// interfaces are added or removed (those interfaces' workers and sources restart, start or stop
-/// between two messages; the others never pause), else
+/// place** when only interfaces' code, destinations, destination settings and sources change, or
+/// interfaces are added or removed (those interfaces' workers and sources restart, move, start or
+/// stop between two messages; the others never pause), else
 /// the handover to an engine running it (`plan.handover_because` says why); or roll back
 /// (`rollback`) to a release that ran here before, the same way. Answers once it runs (in place:
 /// milliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as

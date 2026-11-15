@@ -11,7 +11,7 @@
 use crate::activity::{Activity, Pause, Paused};
 use crate::gate::Gate;
 use crate::health::Health;
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use chrono::{DateTime, Utc};
 use ductus_core::impact::CodeUses;
 use ductus_core::monitor::{self, Diagnosis, Facts, InterfaceState};
@@ -339,7 +339,21 @@ impl Engine {
         let name = config.name.clone();
         let running = self.interface(&name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
         let (saving, decided) = crate::deployment::Decided::channel();
-        let replaced = self.kept.replace(config, &self.activity, decided.clone()).await?;
+        // Its source first (`sources::Sources::change`: nothing to do when it's the same), so a
+        // failure (its new port in use) leaves everything as it was; what it receives meanwhile
+        // waits for the workers like any message.
+        let intake = || running.intake.clone();
+        let changing = self.sources.change(&running.config, &config, intake());
+        changing.await.with_context(|| format!("`{name}`: changing its source"))?;
+        let replaced = match self.kept.replace(config.clone(), &self.activity, decided.clone()).await {
+            Ok(replaced) => replaced,
+            Err(e) => {
+                if let Err(again) = self.sources.change(&config, &running.config, intake()).await {
+                    tracing::error!(interface = %name, error = %format!("{again:#}"), "couldn't put its source back after its new code didn't load");
+                }
+                return Err(e);
+            }
+        };
         let (version, id) = self.saved_version(&replaced.config, replaced.files, root, saving, &decided).await;
         self.swap_interface(Running {
             config: replaced.config,

@@ -276,6 +276,13 @@ impl Admission {
         false
     }
 
+    /// Whether the list lets `peer` in now, without counting or logging a refusal: for open
+    /// connections judged again when the list changes (`accepting::Accepting::swap`).
+    pub fn permits(&self, peer: SocketAddr) -> bool {
+        self.rules.permits(peer.ip(), |name, ip| self.names.has(name, ip))
+            || crate::tls::Refusals::global().is_our_own(peer)
+    }
+
     /// The list with each name's addresses: `10.1.20.0/24, epic-bridge01 (10.1.30.22)`.
     pub fn describe(&self) -> String {
         self.allow

@@ -1206,32 +1206,22 @@ impl AsyncWrite for Conn {
     }
 }
 
-/// An HTTP listener (axum), plain or TLS. With TLS, handshakes run on tasks of their own, so a
-/// slow or silent client holds up no one else; finished ones are handed to the server.
+/// An HTTP listener (axum), plain or TLS, as its `Accepting` says now (a deploy in place swaps
+/// it). Connections are accepted on a task of its own; TLS handshakes run on tasks of their own,
+/// so a slow or silent client holds up no one else; opened ones are handed to the server.
 pub struct Listener {
     local: SocketAddr,
-    inner: Inner,
+    accepting: Arc<crate::accepting::Accepting>,
+    ready: tokio::sync::mpsc::Receiver<(crate::accepting::Admitted, SocketAddr)>,
+    task: tokio::task::AbortHandle,
 }
 
 /// Who may connect: the listener's `allow:` list, checked before anything else.
 pub type Admission = Option<Arc<crate::allow::Admission>>;
 
-enum Inner {
-    Plain(TcpListener, Admission),
-    Tls { ready: tokio::sync::mpsc::Receiver<(Conn, SocketAddr)>, task: tokio::task::AbortHandle },
-}
-
-/// A connection just accepted: keepalive on, and whether its address may connect.
-fn admitted(admission: &Admission, tcp: &TcpStream, peer: SocketAddr) -> bool {
-    crate::allow::keepalive(tcp);
-    admission.as_ref().is_none_or(|a| a.admits(peer))
-}
-
 impl Drop for Listener {
     fn drop(&mut self) {
-        if let Inner::Tls { task, .. } = &self.inner {
-            task.abort();
-        }
+        self.task.abort();
     }
 }
 
@@ -1244,36 +1234,50 @@ impl Listener {
         name: &str,
         admission: Admission,
     ) -> std::io::Result<Self> {
+        Self::with(tcp, crate::accepting::Accepting::new(name, tls, admission))
+    }
+
+    /// Listen on `tcp` with what `accepting` says at each connection.
+    pub fn with(tcp: TcpListener, accepting: Arc<crate::accepting::Accepting>) -> std::io::Result<Self> {
         let local = tcp.local_addr()?;
-        let Some(tls) = tls else { return Ok(Self { local, inner: Inner::Plain(tcp, admission) }) };
-        let acceptor = tokio_rustls::TlsAcceptor::from(tls);
         let (tx, ready) = tokio::sync::mpsc::channel(64);
-        let name = name.to_string();
-        let task = tokio::spawn(async move {
-            loop {
-                let (stream, peer) = tokio::select! {
-                    accepted = tcp.accept() => match accepted {
-                        Ok(a) => a,
-                        Err(e) => {
-                            accept_error(e).await;
-                            continue;
+        let task = {
+            let accepting = accepting.clone();
+            tokio::spawn(async move {
+                loop {
+                    let (stream, peer) = tokio::select! {
+                        accepted = tcp.accept() => match accepted {
+                            Ok(a) => a,
+                            Err(e) => {
+                                accept_error(e).await;
+                                continue;
+                            }
+                        },
+                        _ = tx.closed() => return,
+                    };
+                    let Some(settings) = accepting.admits(&stream, peer) else { continue };
+                    let tls = settings.tls.is_some();
+                    let (accepting, tx) = (accepting.clone(), tx.clone());
+                    let open = async move {
+                        if let Some(conn) = accepting.open(&settings, stream, peer).await {
+                            let _ = tx.send((conn, peer)).await;
                         }
-                    },
-                    _ = tx.closed() => return,
-                };
-                if !admitted(&admission, &stream, peer) {
-                    continue;
-                }
-                let (acceptor, tx, name) = (acceptor.clone(), tx.clone(), name.clone());
-                tokio::spawn(async move {
-                    if let Some(tls) = handshake(&acceptor, &name, stream, peer).await {
-                        let _ = tx.send((Conn::Tls(Box::new(tls)), peer)).await;
+                    };
+                    match tls {
+                        // A handshake can take seconds: on its own task.
+                        true => drop(tokio::spawn(open)),
+                        false => open.await,
                     }
-                });
-            }
-        })
-        .abort_handle();
-        Ok(Self { local, inner: Inner::Tls { ready, task } })
+                }
+            })
+            .abort_handle()
+        };
+        Ok(Self { local, accepting, ready, task })
+    }
+
+    /// What it accepts with (a deploy in place swaps it).
+    pub fn accepting(&self) -> Arc<crate::accepting::Accepting> {
+        self.accepting.clone()
     }
 }
 
@@ -1288,22 +1292,13 @@ async fn accept_error(e: std::io::Error) {
 }
 
 impl axum::serve::Listener for Listener {
-    type Io = Conn;
+    type Io = crate::accepting::Admitted;
     type Addr = SocketAddr;
 
-    async fn accept(&mut self) -> (Conn, SocketAddr) {
-        match &mut self.inner {
-            Inner::Plain(tcp, admission) => loop {
-                match TcpListener::accept(tcp).await {
-                    Ok((stream, peer)) if admitted(admission, &stream, peer) => return (Conn::Plain(stream), peer),
-                    Ok(_) => {}
-                    Err(e) => accept_error(e).await,
-                }
-            },
-            Inner::Tls { ready, .. } => match ready.recv().await {
-                Some(conn) => conn,
-                None => std::future::pending().await,
-            },
+    async fn accept(&mut self) -> (crate::accepting::Admitted, SocketAddr) {
+        match self.ready.recv().await {
+            Some(conn) => conn,
+            None => std::future::pending().await,
         }
     }
 
@@ -1559,8 +1554,11 @@ mod tests {
     }
 
     async fn echo_with(config: Arc<rustls::ServerConfig>, admission: Admission) -> SocketAddr {
-        let mut listener =
-            Listener::new(TcpListener::bind("127.0.0.1:0").await.unwrap(), Some(config), "test", admission).unwrap();
+        echo_on(crate::accepting::Accepting::new("test", Some(config), admission)).await
+    }
+
+    async fn echo_on(accepting: Arc<crate::accepting::Accepting>) -> SocketAddr {
+        let mut listener = Listener::with(TcpListener::bind("127.0.0.1:0").await.unwrap(), accepting).unwrap();
         let addr = axum::serve::Listener::local_addr(&listener).unwrap();
         tokio::spawn(async move {
             loop {
@@ -1620,6 +1618,45 @@ mod tests {
         assert!(talk(addr, with(&stranger)).await.is_err(), "a subject no pattern allows");
         assert!(talk(addr, with(&forged)).await.is_err(), "issued by another CA");
         assert!(talk(addr, client_config(&server_ca, None)).await.is_err(), "no client certificate");
+    }
+
+    /// A listener's TLS swapped while it listens (a deploy in place, 0.7.5.2.2): a connection
+    /// open before keeps its session (and the certificate it was shown); a new one is shown the
+    /// new certificate; swapped to none, a new one speaks plain.
+    #[tokio::test]
+    async fn a_listener_s_tls_is_swapped_while_it_listens() {
+        let server_ca = ca("server CA");
+        let first = leaf(&server_ca, &[(rcgen::DnType::CommonName, "first")], &["localhost"], 90);
+        let second = leaf(&server_ca, &[(rcgen::DnType::CommonName, "second")], &["localhost"], 90);
+        let entries = BTreeMap::from([
+            ("one".to_string(), entry(&first.0, &first.1)),
+            ("two".to_string(), entry(&second.0, &second.1)),
+        ]);
+        let certificates = Certificates::load(&entries).unwrap();
+        let tls =
+            |name: &str| certificates.server(&ListenTls { certificate: name.into(), clients: None }, &[]).unwrap();
+        let accepting = crate::accepting::Accepting::new("test", Some(tls("one")), None);
+        let addr = echo_on(accepting.clone()).await;
+
+        let tcp = TcpStream::connect(addr).await.unwrap();
+        let name = rustls::pki_types::ServerName::try_from("localhost").unwrap();
+        let mut open =
+            tokio_rustls::TlsConnector::from(client_config(&server_ca, None)).connect(name, tcp).await.unwrap();
+        assert_eq!(About::read(&open.get_ref().1.peer_certificates().unwrap()[0]).unwrap().subject, "CN=first");
+
+        assert_eq!(accepting.swap(Some(tls("two")), None), 0, "no list: nothing closed");
+        open.write_all(b"still").await.unwrap();
+        let mut buf = [0u8; 5];
+        open.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"still", "the open connection keeps its session");
+        let (echoed, seen) = talk(addr, client_config(&server_ca, None)).await.unwrap();
+        assert_eq!((echoed.as_str(), seen.subject.as_str()), ("hello", "CN=second"));
+
+        accepting.swap(None, None);
+        let mut plain = TcpStream::connect(addr).await.unwrap();
+        plain.write_all(b"plain").await.unwrap();
+        plain.read_exact(&mut buf).await.unwrap();
+        assert_eq!(&buf, b"plain");
     }
 
     /// Post-quantum key exchange (X25519 + ML-KEM-768, the hybrid browsers use) between our own

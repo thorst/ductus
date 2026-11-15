@@ -4,18 +4,20 @@
 //! text the code version hashes, before `${...}`) and the code versions: no gate, microseconds.
 //!
 //! In place: the code (any file a version counts), `script`, `destinations` (added, removed or
-//! changed), `output`, `retry`, `rate_limit`, `timeout`, and what only people and alerts read
-//! (`about`, `custom`, `monitor`, `alert`). Everything else in interface.yaml shapes how messages
-//! are received, stored or laid out in lanes (`source`, `format`, `ordering`, `isolation`,
-//! `workers`, `dedicated_pools`, `durability`, `dedupe`, `retention`, `quarantined`): those and
-//! the project's own files (`ductus.yaml`, `resources.yaml`, `environments/`, `secrets/`) go by
-//! the handover, the answer saying which (0.7.5.2.2 moves sources changed in place next).
+//! changed), `output`, `retry`, `rate_limit`, `timeout`, what only people and alerts read
+//! (`about`, `custom`, `monitor`, `alert`), and `source` (0.7.5.2.2: a listener moved, its TLS or
+//! `allow:` swapped, an HTTP route changed, a file pickup or schedule restarted: `sources`),
+//! except a change between queue and respond mode. Everything else in interface.yaml shapes how
+//! messages are stored or laid out in lanes (`format`, `ordering`, `isolation`, `workers`,
+//! `dedicated_pools`, `durability`, `dedupe`, `retention`, `quarantined`): those and the
+//! project's own files (`ductus.yaml`, `resources.yaml`, `environments/`, `secrets/`) go by the
+//! handover, the answer saying which.
 //!
 //! An interface added or removed goes in place whatever its source (0.7.5.2.1): its listener,
 //! file pickup or schedule starts or stops alone (`sources`). What only the settings resolved
 //! can tell (`${...}` filled in) is decided as it's applied, the deploy then taking the handover
-//! with the reason (`sources::in_place`: a port moving from a removed interface to an added one,
-//! HTTP interfaces sharing a port).
+//! with the reason (`sources::in_place`: a port or HTTP route moving from one interface to
+//! another, a listener changing kind or host on its own port).
 
 use anyhow::{Context, Result};
 use ductus_core::yaml::Value;
@@ -23,8 +25,25 @@ use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// interface.yaml's keys a change to which is applied in place.
-const IN_PLACE: &[&str] =
-    &["script", "destinations", "output", "retry", "rate_limit", "timeout", "about", "custom", "monitor", "alert"];
+const IN_PLACE: &[&str] = &[
+    "script",
+    "destinations",
+    "output",
+    "retry",
+    "rate_limit",
+    "timeout",
+    "about",
+    "custom",
+    "monitor",
+    "alert",
+    "source",
+];
+
+/// Whether a `source` as written answers requests itself (`http: { mode: respond }`).
+fn responds(source: Option<&Value>) -> bool {
+    let mode = source.and_then(|s| s.get("http")).and_then(|h| h.get("mode")).and_then(Value::as_str);
+    mode == Some("respond")
+}
 
 /// How one interface's change is applied.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -142,8 +161,12 @@ fn interface(name: &str, before: &str, after: &str) -> Result<Change> {
     if what.is_empty() {
         what.push("code".into());
     }
-    let apply = match handover.len() {
-        0 => Apply::InPlace,
+    let mode = responds(before.get("source")) != responds(after.get("source"));
+    let apply = match (handover.len(), mode) {
+        (0, false) => Apply::InPlace,
+        (0, true) => Apply::Handover(
+            "`source` changes between queue and respond mode (its workers are made another way at a start)".into(),
+        ),
         _ => Apply::Handover(format!(
             "{} changed (how messages are received, stored or laid out in lanes is set at a start)",
             handover.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
@@ -205,22 +228,40 @@ mod tests {
         assert!(plan.in_place());
     }
 
-    /// A source, lanes or the project's files: by the handover, each saying why (the interfaces
-    /// added and removed beside them would go in place).
+    /// How messages are stored, lanes, queue ↔ respond, or the project's files: by the handover,
+    /// each saying why (the interfaces added and removed beside them would go in place).
     #[test]
-    fn what_shapes_receiving_or_lanes_needs_the_handover() {
-        let port = LAB.replace("6661", "6662");
+    fn what_shapes_storing_or_lanes_needs_the_handover() {
+        let format = format!("{LAB}format: json\n");
         let lanes = format!("{LAB}ordering: {{ key: PID-3.1 }}\n");
-        let running = side(&[("adt", "v1", LAB), ("b", "b1", LAB), ("gone", "g", LAB)]);
-        let next = side(&[("adt", "v2", &port), ("b", "b2", &lanes), ("new", "n", LAB)]);
+        let queue = "name: api\nsource: { http: { port: 8081, path: /a } }\ndestinations: {}\n";
+        let respond = queue.replace("/a }", "/a, mode: respond }");
+        let running = side(&[("adt", "v1", LAB), ("b", "b1", LAB), ("api", "a1", queue), ("gone", "g", LAB)]);
+        let next = side(&[("adt", "v2", &format), ("b", "b2", &lanes), ("api", "a2", &respond), ("new", "n", LAB)]);
         let plan = plan(&running, &next, true).unwrap();
         assert!(!plan.in_place());
         let why = plan.handover_because();
-        assert_eq!(why.len(), 3, "{why:#?}");
+        assert_eq!(why.len(), 4, "{why:#?}");
         assert!(why[0].starts_with("the project's own files changed"), "{why:#?}");
-        assert!(why[1].starts_with("adt: `source` changed"), "{why:#?}");
-        assert!(why[2].starts_with("b: `ordering` changed"), "{why:#?}");
+        assert!(why[1].starts_with("adt: `format` changed"), "{why:#?}");
+        assert!(why[2].starts_with("api: `source` changes between queue and respond mode"), "{why:#?}");
+        assert!(why[3].starts_with("b: `ordering` changed"), "{why:#?}");
         assert!(super::plan(&running, &running, false).unwrap().changes.is_empty(), "nothing changes");
+    }
+
+    /// A source changed (a port moved, TLS or `allow:`, an HTTP path, a folder): in place, said
+    /// as `source`.
+    #[test]
+    fn a_changed_source_goes_in_place() {
+        let port = LAB.replace("6661", "6662");
+        let allow = LAB.replace("port: 6661 }", "port: 6661, allow: [10.1.20.0/24] }");
+        let queue = "name: api\nsource: { http: { port: 8081, path: /a } }\ndestinations: {}\n";
+        let path = queue.replace("/a", "/b");
+        let running = side(&[("adt", "v1", LAB), ("lab", "l1", LAB), ("api", "a1", queue)]);
+        let next = side(&[("adt", "v2", &port), ("lab", "l2", &allow), ("api", "a2", &path)]);
+        let plan = plan(&running, &next, false).unwrap();
+        assert!(plan.in_place(), "{plan:#?}");
+        assert!(plan.changes.iter().all(|c| c.what == ["source"]), "{plan:#?}");
     }
 
     /// An interface added or removed, whatever its source (a listener, file pickup, a schedule,

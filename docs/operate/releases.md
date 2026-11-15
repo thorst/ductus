@@ -669,17 +669,27 @@ recorded in .ductus/releases/integrations-7fc9677466dd.tar.gz: deployed to dev
 Before the gate runs, the engine works out what the release changes here, per interface, from the
 two releases' code versions and interface.yaml files, and the answer lists it (a `·` line per
 interface). When every change is to interfaces' code, `script`, `destinations` (added, removed or
-changed), `output`, `retry`, `rate_limit`, `timeout`, `about`, `custom`, `monitor` or `alert`, the
-release is **applied in place**: each changed interface's workers finish the message in hand on
-the old code and take the next on the new one; a destination added gets a delivery for every
-message waiting, a removed one's waiting deliveries are filtered; the other interfaces never
+changed), `output`, `retry`, `rate_limit`, `timeout`, `about`, `custom`, `monitor`, `alert` or
+`source`, the release is **applied in place**: each changed interface's workers finish the message
+in hand on the old code and take the next on the new one; a destination added gets a delivery for
+every message waiting, a removed one's waiting deliveries are filtered; the other interfaces never
 pause, and no new engine starts. The deployment is recorded as `how` = `deploy`.
 
+A changed **source** is applied alone, by kind: a moved MLLP port listens before the old one
+closes (each connection there finishes the message in hand, so its sender loses nothing and
+reconnects where it's pointed); new TLS or `allow:` on the same port is swapped in the running
+listener (open connections keep their TLS session; those the new `allow:` refuses are closed after
+the message in hand); an HTTP route moves on its port's server beside the others, or to a new one;
+a file or SFTP pickup or a schedule stops between messages and starts again with its new settings.
+A port or HTTP route moving from one interface to another, a listener changing kind or host on its
+own port, and a change between queue and respond mode still take the handover
+([nuance](../nuances/releases.md#a-source-changed-in-place-moves-swaps-or-restarts-alone-level-2)).
+
 An interface the release **adds or removes** goes in place too, whatever its source: an added one
-is claimed, its code loaded and its listener, file pickup, schedule or HTTP route started; a
-removed one stops taking messages, its port closes and its claim is given back. A port moving from
-a removed interface to an added one, or an HTTP interface on a port it shares with another, still
-takes the handover
+is claimed, its code loaded and its listener, file pickup, schedule or HTTP route started (beside
+the others on a shared port); a removed one stops taking messages, its port closes (or, shared, its
+route goes) and its claim is given back. A port moving from a removed interface to an added one
+still takes the handover
 ([nuance](../nuances/releases.md#an-interface-added-or-removed-in-place-starts-or-stops-alone-level-2)).
 Here a release adds an archive interface listening where the lab's receiver was
 (`scripts/demo-promote.sh`, step 13; the lab feed's code changes in the same release):
@@ -705,11 +715,10 @@ Removing it again, in the next release, took 22 ms (`· promote-demo-archive: re
 place)`, then `changed 1 interface: promote-demo-archive removed`).
 
 Anything else needs the **handover**, and the answer says which change did (`needs the handover:
-…`): a source (its port, TLS, folder, schedule), `format`, `ordering`, `workers`, `isolation`,
-`dedupe`, `retention` and the other settings of how messages are received and stored; the
-project's own files (`ductus.yaml`, `resources.yaml`,
-`docs-schema.yaml`, `environments/`, `secrets/`); the first release on an engine
-([nuance](../nuances/releases.md#a-deploy-goes-in-place-only-when-it-changes-interfaces-code-destinations-or-destination-settings-level-1)).
+…`): `format`, `ordering`, `workers`, `isolation`, `dedupe`, `retention` and the other
+settings of how messages are stored or laid out in lanes; the project's own files (`ductus.yaml`,
+`resources.yaml`, `docs-schema.yaml`, `environments/`, `secrets/`); the first release on an engine
+([nuance](../nuances/releases.md#a-deploy-goes-in-place-unless-it-changes-how-messages-are-stored-lanes-or-the-projects-files-level-1)).
 Here a release raises an interface's lanes (`scripts/demo-promote.sh`, step 11):
 
 ```text

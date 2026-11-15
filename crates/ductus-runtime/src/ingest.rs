@@ -7,11 +7,10 @@ use crate::hl7_now;
 use crate::keys::{self, KeyPath};
 use crate::lanes::Lanes;
 use crate::stats::{self, InterfaceStats};
-use crate::tls::Conn;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use ductus_core::InterfaceConfig;
-use ductus_core::config::{Durability, Source};
+use ductus_core::config::Durability;
 use ductus_core::format::Format;
 use ductus_hl7::{AckCode, Message};
 use ductus_store::{Batch, BatchMessage, DedupeKey, DestinationId, Done, MessageRef, NewMessage, Store};
@@ -344,21 +343,19 @@ struct Keys {
     dedupe: Option<String>,
 }
 
-/// Start an MLLP listener feeding `intake`, over TLS with `tls`; connections from addresses
-/// `admission` refuses are closed before the handshake or any read. While its gate is closed
+/// Start an MLLP listener on `host:port` feeding `intake`, accepting as `accepting` says at each
+/// connection (its TLS and `allow:`, which a deploy in place can swap: connections from
+/// addresses it refuses are closed before the handshake or any read). While its gate is closed
 /// (draining) the listener is closed, so senders see the engine as down and keep their messages;
 /// it opens again when the gate does. On `stop` (the engine ended, or a deploy in place removed
-/// the interface: `sources::Sources::stop`) it closes as for a drain (each connection finishes
-/// the message in hand) and its task, returned, ends.
+/// the interface or moved its port: `sources::Sources`) it closes as for a drain (each connection
+/// finishes the message in hand) and its task, returned, ends.
 pub async fn spawn_mllp(
     intake: Arc<Intake>,
-    tls: Option<Arc<rustls::ServerConfig>>,
-    admission: crate::tls::Admission,
+    (host, port): (String, u16),
+    accepting: Arc<crate::accepting::Accepting>,
     stop: tokio_util::sync::CancellationToken,
 ) -> Result<tokio::task::JoinHandle<()>> {
-    let config = intake.config.clone();
-    let Source::Mllp { host, port, .. } = &config.source else { anyhow::bail!("`{}` has no MLLP source", config.name) };
-    let (host, port) = (host.clone(), *port);
     let bind = {
         let host = host.clone();
         move || {
@@ -367,7 +364,7 @@ pub async fn spawn_mllp(
         }
     };
     // The first bind is part of startup: a port in use stops the engine.
-    let mut listener = Some(bind().await.with_context(|| format!("interface `{}`", config.name))?);
+    let mut listener = Some(bind().await.with_context(|| format!("interface `{}`", intake.config.name))?);
 
     let handler = {
         let intake = intake.clone();
@@ -376,20 +373,9 @@ pub async fn spawn_mllp(
             async move { receive_hl7(&intake, &frame).await.map(Bytes::from) }
         }
     };
-    let acceptor = tls.map(tokio_rustls::TlsAcceptor::from);
-    let label = format!("interface `{}` (MLLP)", config.name);
     let open = move |tcp: TcpStream, peer: std::net::SocketAddr| {
-        let (acceptor, label, admission) = (acceptor.clone(), label.clone(), admission.clone());
-        async move {
-            crate::allow::keepalive(&tcp);
-            if admission.is_some_and(|a| !a.admits(peer)) {
-                return None;
-            }
-            match acceptor {
-                None => Some(Conn::Plain(tcp)),
-                Some(a) => crate::tls::handshake(&a, &label, tcp, peer).await.map(|s| Conn::Tls(Box::new(s))),
-            }
-        }
+        let accepting = accepting.clone();
+        async move { accepting.accept(tcp, peer).await }
     };
     // Until `stop`: after the engine's stop its gate stays closed, and this would wait forever.
     Ok(tokio::spawn(async move {

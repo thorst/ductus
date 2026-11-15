@@ -32,25 +32,43 @@ pub enum Route {
     Respond { interface: String, calls: mpsc::Sender<HttpCall> },
 }
 
+#[derive(Clone)]
 pub struct Endpoint {
     pub host: String,
     pub port: u16,
     pub method: String,
     pub path: String,
     pub route: Route,
+    /// Its `tls:` and `allow:` as written: a server whose differ from what an endpoint joining
+    /// or changing it says takes the endpoint's (`Server::reroute`).
+    pub listen: Listen,
     /// HTTPS (every endpoint on a port has the same: `check_endpoints`).
     pub tls: Option<Arc<rustls::ServerConfig>>,
     /// Who may connect (the port's `allow:`, the same on every endpoint: `check_endpoints`).
     pub admission: crate::tls::Admission,
 }
 
+/// An HTTP source's `tls:` and `allow:` as written.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Listen {
+    pub tls: Option<ductus_core::tls::ListenTls>,
+    pub allow: Option<ductus_core::allow::Allow>,
+}
+
 const RESPOND_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// One HTTP server: an address, the interfaces it routes to, and its own stop.
+/// One HTTP server: an address, its routes, and its own stop.
 pub struct Server {
     pub host: String,
     pub port: u16,
-    pub interfaces: Vec<String>,
+    /// Every route it answers, each its interface's.
+    pub endpoints: Vec<Endpoint>,
+    /// The router answering them: each request is answered by the one current when it came, so
+    /// one in flight when a deploy in place swaps it finishes on the one it started on.
+    router: Arc<std::sync::RwLock<Router>>,
+    /// What it accepts connections with now, and the `tls:`/`allow:` that was made from.
+    pub accepting: Arc<crate::accepting::Accepting>,
+    listen: Listen,
     /// A child of the `stop` it was served with: cancelled alone, only this server stops.
     pub stop: tokio_util::sync::CancellationToken,
     /// Ends once it answered the requests in flight and closed.
@@ -58,7 +76,7 @@ pub struct Server {
 }
 
 impl Route {
-    fn interface(&self) -> &str {
+    pub(crate) fn interface(&self) -> &str {
         match self {
             Route::Queue(intake) => &intake.config.name,
             Route::Respond { interface, .. } => interface,
@@ -70,56 +88,109 @@ impl Route {
 /// answers the requests in flight, then closes (respond-mode workers end once nothing can reach
 /// them); its task ends then.
 pub async fn serve(endpoints: Vec<Endpoint>, stop: &tokio_util::sync::CancellationToken) -> Result<Vec<Server>> {
-    let mut tasks = Vec::new();
     let mut servers: BTreeMap<(String, u16), Vec<Endpoint>> = BTreeMap::new();
     for e in endpoints {
         servers.entry((e.host.clone(), e.port)).or_default().push(e);
     }
+    let mut started = Vec::with_capacity(servers.len());
     for ((host, port), endpoints) in servers {
-        let tls = endpoints.first().and_then(|e| e.tls.clone());
-        let admission = endpoints.first().and_then(|e| e.admission.clone());
-        let interfaces: Vec<String> = endpoints.iter().map(|e| e.route.interface().to_string()).collect();
-        let mut router = Router::new();
-        let mut seen = HashSet::new();
-        // Group methods per path: axum wants one route per path.
-        let mut by_path: BTreeMap<String, Vec<Endpoint>> = BTreeMap::new();
-        for e in endpoints {
-            let method = e.method.to_ascii_uppercase();
-            if !seen.insert((method.clone(), e.path.clone())) {
-                bail!("two interfaces both handle {method} {} on port {port}", e.path);
-            }
-            by_path.entry(e.path.clone()).or_default().push(Endpoint { method, ..e });
+        started.push(Server::start(host, port, endpoints, stop).await?);
+    }
+    Ok(started)
+}
+
+/// A router for `endpoints` (all on `port`); two with the same method and path are an error.
+fn routes(port: u16, endpoints: &[Endpoint]) -> Result<Router> {
+    let mut router = Router::new();
+    let mut seen = HashSet::new();
+    // Group methods per path: axum wants one route per path.
+    let mut by_path: BTreeMap<&str, Vec<(String, &Route)>> = BTreeMap::new();
+    for e in endpoints {
+        let method = e.method.to_ascii_uppercase();
+        if !seen.insert((method.clone(), e.path.as_str())) {
+            bail!("two interfaces both handle {method} {} on port {port}", e.path);
         }
-        for (path, endpoints) in by_path {
-            let mut method_router = axum::routing::MethodRouter::new();
-            for e in endpoints {
-                let filter = MethodFilter::try_from(Method::from_bytes(e.method.as_bytes())?)
-                    .map_err(|e| anyhow!("unsupported HTTP method: {e}"))?;
-                let route = e.route.clone();
-                method_router = method_router.merge(on(
-                    filter,
-                    move |params: RawPathParams, method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
-                        handle(route.clone(), params, method, uri, headers, body)
-                    },
-                ));
-            }
-            router = router.route(&path, method_router);
+        by_path.entry(&e.path).or_default().push((method, &e.route));
+    }
+    for (path, endpoints) in by_path {
+        let mut method_router = axum::routing::MethodRouter::new();
+        for (method, route) in endpoints {
+            let filter = MethodFilter::try_from(Method::from_bytes(method.as_bytes())?)
+                .map_err(|e| anyhow!("unsupported HTTP method: {e}"))?;
+            let route = route.clone();
+            method_router = method_router.merge(on(
+                filter,
+                move |params: RawPathParams, method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+                    handle(route.clone(), params, method, uri, headers, body)
+                },
+            ));
         }
+        router = router.route(path, method_router);
+    }
+    Ok(router)
+}
+
+impl Server {
+    /// Listen on `host:port` and answer `endpoints` (their first's TLS and `allow:`), until
+    /// `stop` or its own.
+    pub async fn start(
+        host: String,
+        port: u16,
+        endpoints: Vec<Endpoint>,
+        stop: &tokio_util::sync::CancellationToken,
+    ) -> Result<Self> {
+        let router = Arc::new(std::sync::RwLock::new(routes(port, &endpoints)?));
+        let first = endpoints.first().context("an HTTP server with no routes")?;
+        let (tls, admission, listen) = (first.tls.clone(), first.admission.clone(), first.listen.clone());
         let protocol = if tls.is_some() { "HTTPS" } else { "HTTP" };
         let listener =
             crate::systemd::listen(&host, port).await.with_context(|| format!("binding {protocol} {host}:{port}"))?;
-        let listener = crate::tls::Listener::new(listener, tls, &format!("{protocol} {host}:{port}"), admission)?;
+        let accepting = crate::accepting::Accepting::new(&format!("{protocol} {host}:{port}"), tls, admission);
+        let listener = crate::tls::Listener::with(listener, accepting.clone())?;
         tracing::info!(%host, port, "listening ({protocol})");
+        // Every request goes to the router current when it came (`reroute` swaps it).
+        let current = router.clone();
+        let app = Router::new().fallback(move |request: axum::extract::Request| {
+            let router = current.read().unwrap_or_else(|e| e.into_inner()).clone();
+            async move {
+                use tower::ServiceExt;
+                router.oneshot(request).await.unwrap_or_else(|never| match never {})
+            }
+        });
         let own = stop.child_token();
         let shutdown = own.clone().cancelled_owned();
         let task = tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, router).with_graceful_shutdown(shutdown).await {
+            if let Err(e) = axum::serve(listener, app).with_graceful_shutdown(shutdown).await {
                 tracing::error!(error = %e, "HTTP server stopped");
             }
         });
-        tasks.push(Server { host, port, interfaces, stop: own, task });
+        Ok(Self { host, port, endpoints, router, accepting, listen, stop: own, task })
     }
-    Ok(tasks)
+
+    /// The interfaces it routes to.
+    pub fn interfaces(&self) -> impl Iterator<Item = &str> {
+        self.endpoints.iter().map(|e| e.route.interface())
+    }
+
+    /// Answer `endpoints` from now on (none: the caller stops it): requests in flight finish on
+    /// the router they started on. When `changed` (an endpoint joining or changed) says other
+    /// `tls:`/`allow:` than the server's, it accepts with that one's from now on (every
+    /// interface on a port changes them together: `check_together` saw the set it leaves).
+    pub fn reroute(&mut self, endpoints: Vec<Endpoint>, changed: Option<&Endpoint>) -> Result<()> {
+        let router = routes(self.port, &endpoints)?;
+        *self.router.write().unwrap_or_else(|e| e.into_inner()) = router;
+        self.endpoints = endpoints;
+        if let Some(e) = changed.filter(|e| e.listen != self.listen) {
+            let closed = self.accepting.swap(e.tls.clone(), e.admission.clone());
+            tracing::info!(host = %self.host, port = self.port, closed, "its TLS or allow: changed in place");
+            self.listen = e.listen.clone();
+            // One admission per port, as at a start (what `allow::on_port` finds counts refusals).
+            for other in &mut self.endpoints {
+                (other.tls, other.admission, other.listen) = (e.tls.clone(), e.admission.clone(), e.listen.clone());
+            }
+        }
+        Ok(())
+    }
 }
 
 fn json(status: StatusCode, body: serde_json::Value) -> Response {

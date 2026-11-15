@@ -1746,6 +1746,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-util",
+ "tower",
  "tracing",
  "url",
  "utoipa",

@@ -24,7 +24,7 @@ ductus deploy [OPTIONS] [RELEASE]
 | `-m, --message <REASON>` | Why: required, except to an environment named `dev`; recorded with the deployment, in its history and in the audit log. |  |  |
 | `--force` | Deploy over someone else's work the "replaces" check names: their change is undone (recorded in the audit log as `release.force`, and in the history). Needs `-m`. Doesn't skip the environment's DUCTUS_DEPLOY_REQUIRES or DUCTUS_DEPLOY_BRANCHES. |  |  |
 | `--all-tests` | Run every interface's tests in the gate, not only those of what the release changes there (never reuses a check). |  |  |
-| `--in-place-only` | Only in place: refuse (before the gate runs) when the release changes something only a handover applies (a source changed, lanes, the project's own files, a port moving from one interface to another), and when applying in place fails, instead of handing over. For sites that schedule handovers. |  |  |
+| `--in-place-only` | Only in place: refuse (before the gate runs) when the release changes something only a handover applies (how messages are stored, lanes, the project's own files, a port moving from one interface to another), and when applying in place fails, instead of handing over. For sites that schedule handovers. |  |  |
 | `--json` | The engine's report as JSON. |  |  |
 | `--timeout <TIMEOUT>` | How long to wait for the engine's answer (the gate, up to 30 minutes, then applying it). | `40m` |  |
 
