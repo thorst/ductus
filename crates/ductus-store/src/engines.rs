@@ -229,6 +229,18 @@ impl Store {
         .context("reading who owns the interfaces")
     }
 
+    /// Engine `instance` no longer runs `interfaces` (removed from it by a deploy in place): let
+    /// go of them, so another engine may claim them. Those it didn't own are left alone.
+    pub async fn unclaim(&self, instance: &str, interfaces: &[String]) -> Result<()> {
+        sqlx::query("DELETE FROM interface_owners WHERE instance = $1 AND interface = ANY($2)")
+            .bind(instance)
+            .bind(interfaces)
+            .execute(&self.pool)
+            .await
+            .context("letting go of interfaces")?;
+        Ok(())
+    }
+
     /// A clean stop: let go of the interfaces and record when.
     pub async fn release_engine(&self, instance: &str) -> Result<()> {
         let mut tx = self.pool.begin().await.context("releasing interfaces")?;

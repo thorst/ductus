@@ -9,8 +9,10 @@
 //! are received, stored or laid out in lanes (`source`, `format`, `ordering`, `isolation`,
 //! `workers`, `dedicated_pools`, `durability`, `dedupe`, `retention`, `quarantined`): those, an
 //! interface added or removed, and the project's own files (`ductus.yaml`, `resources.yaml`,
-//! `environments/`, `secrets/`) go by the handover, the answer saying which (0.7.5.2 moves sources
-//! and added or removed interfaces in place).
+//! `environments/`, `secrets/`) go by the handover, the answer saying which. An interface added or
+//! removed goes in place when it has no source of its own (`source: internal`, fed by routes); one
+//! with a listener, file pickup or schedule still by the handover (0.7.5.2.1 moves those in place
+//! next, then 0.7.5.2.2 sources changed).
 
 use anyhow::{Context, Result};
 use ductus_core::yaml::Value;
@@ -78,15 +80,18 @@ pub fn plan(running: &Side, next: &Side, project_changed: bool) -> Result<Plan> 
         let change = match (running.get(name), next.get(name)) {
             (Some((before, _)), Some((after, _))) if before == after => continue,
             (Some((_, before)), Some((_, after))) => interface(name, before, after)?,
-            (None, Some(_)) => Change {
+            (None, Some((_, yaml))) => Change {
                 interface: name.into(),
-                what: vec!["added".into()],
-                apply: Apply::Handover("a new interface (it's claimed, received and listened for at a start)".into()),
+                what: vec![ADDED.into()],
+                apply: added_or_removed(
+                    yaml,
+                    "a new interface with a source of its own (its source starts at a start)",
+                ),
             },
-            (Some(_), None) => Change {
+            (Some((_, yaml)), None) => Change {
                 interface: name.into(),
-                what: vec!["removed".into()],
-                apply: Apply::Handover("removed (its claim and listener end with the engine)".into()),
+                what: vec![REMOVED.into()],
+                apply: added_or_removed(yaml, "removed, with a source of its own (its source stops with the engine)"),
             },
             (None, None) => unreachable!("from either side"),
         };
@@ -98,6 +103,34 @@ pub fn plan(running: &Side, next: &Side, project_changed: bool) -> Result<Plan> 
             .to_string()
     });
     Ok(Plan { changes, project })
+}
+
+/// What `Change::what` says of an interface added or removed.
+const ADDED: &str = "added";
+const REMOVED: &str = "removed";
+
+impl Change {
+    /// The interface is new: the deploy adds it.
+    pub fn is_added(&self) -> bool {
+        self.what == [ADDED]
+    }
+
+    /// The interface is gone: the deploy removes it.
+    pub fn is_removed(&self) -> bool {
+        self.what == [REMOVED]
+    }
+}
+
+/// How an interface added or removed (its interface.yaml `yaml`) applies: in place when it has
+/// no source of its own to start or stop (`source: internal`: other interfaces route to it), else
+/// by the handover (`why`).
+fn added_or_removed(yaml: &str, why: &str) -> Apply {
+    let source =
+        ductus_core::yaml::parse(yaml).ok().and_then(|v| entries(Some(&v))).and_then(|e| e.get("source").cloned());
+    match source.as_ref().and_then(Value::as_str) {
+        Some("internal") => Apply::InPlace,
+        _ => Apply::Handover(why.into()),
+    }
 }
 
 /// One interface whose version changed: which keys of its interface.yaml differ, and how it applies.
@@ -206,9 +239,25 @@ mod tests {
         assert!(why[0].starts_with("the project's own files changed"), "{why:#?}");
         assert!(why[1].starts_with("adt: `source` changed"), "{why:#?}");
         assert!(why[2].starts_with("b: `ordering` changed"), "{why:#?}");
-        assert!(why[3].starts_with("gone: removed"), "{why:#?}");
-        assert!(why[4].starts_with("new: a new interface"), "{why:#?}");
+        assert!(why[3].starts_with("gone: removed, with a source of its own"), "{why:#?}");
+        assert!(why[4].starts_with("new: a new interface with a source of its own"), "{why:#?}");
         assert!(super::plan(&running, &running, false).unwrap().changes.is_empty(), "nothing changes");
+    }
+
+    /// An interface added or removed with no source of its own (`source: internal`, fed by
+    /// routes): in place, said as added or removed.
+    #[test]
+    fn an_internal_interface_is_added_and_removed_in_place() {
+        let internal = "name: inbox\nsource: internal\ndestinations:\n  out: { file: { dir: out } }\n";
+        let routes = format!("{LAB}  inbox: {{ interface: inbox }}\n");
+        let running = side(&[("adt", "v1", LAB), ("old", "o", internal)]);
+        let next = side(&[("adt", "v2", &routes), ("inbox", "i", internal)]);
+        let plan = plan(&running, &next, false).unwrap();
+        assert!(plan.in_place(), "{plan:#?}");
+        let by_name = |n: &str| plan.changes.iter().find(|c| c.interface == n).unwrap();
+        assert!(by_name("inbox").is_added() && !by_name("inbox").is_removed());
+        assert!(by_name("old").is_removed() && !by_name("old").is_added());
+        assert!(!by_name("adt").is_added() && !by_name("adt").is_removed());
     }
 
     /// Formatting alone (quotes, flow or block style, key order) isn't a change of settings.

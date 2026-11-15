@@ -107,8 +107,8 @@ pub struct Owner {
     me: Me,
     key: i64,
     lock: tokio::sync::Mutex<Option<EngineLock>>,
-    /// The interfaces it claimed.
-    interfaces: Vec<String>,
+    /// The interfaces it claimed (a deploy in place adds and removes some: `add`, `remove`).
+    interfaces: std::sync::Mutex<Vec<String>>,
     pub ownership: Arc<Ownership>,
     /// Cancelled when another engine took an interface while the lock was lost (`why`).
     taken: CancellationToken,
@@ -123,10 +123,11 @@ impl Owner {
         let started = std::time::Instant::now();
         let lock = store.lock_engine(&me.row(), None).await?;
         let owned = store.claim(&me.instance, &interfaces).await?;
+        let count = interfaces.len();
         let owner = Self {
             key: lock.key,
             lock: tokio::sync::Mutex::new(Some(lock)),
-            interfaces,
+            interfaces: std::sync::Mutex::new(interfaces),
             ownership: Arc::new(Ownership::default()),
             taken: CancellationToken::new(),
             why: std::sync::Mutex::new(None),
@@ -141,7 +142,7 @@ impl Owner {
             });
             return Err(owner.refuse(store, detail, owned_message(&owned)).await);
         }
-        tracing::debug!(interfaces = owner.interfaces.len(), took = ?started.elapsed(), "interfaces claimed");
+        tracing::debug!(interfaces = count, took = ?started.elapsed(), "interfaces claimed");
         Ok(owner)
     }
 
@@ -153,13 +154,13 @@ impl Owner {
         let owner = Self {
             key: lock.key,
             lock: tokio::sync::Mutex::new(Some(lock)),
-            interfaces,
+            interfaces: std::sync::Mutex::new(interfaces),
             ownership: Arc::new(Ownership::new(false)),
             taken: CancellationToken::new(),
             why: std::sync::Mutex::new(None),
             me,
         };
-        let owned = store.live_owners(&owner.interfaces, &[&owner.me.instance, from]).await?;
+        let owned = store.live_owners(&owner.claimed(), &[&owner.me.instance, from]).await?;
         if !owned.is_empty() {
             let detail = json!({
                 "reason": "owned",
@@ -175,7 +176,7 @@ impl Owner {
     /// A takeover, once the engine it took over from let go: claim, as a start does (refused only
     /// if a third engine took one of them meanwhile).
     pub async fn claim_now(&self, store: &Store) -> Result<()> {
-        let owned = store.claim(&self.me.instance, &self.interfaces).await?;
+        let owned = store.claim(&self.me.instance, &self.claimed()).await?;
         if owned.is_empty() {
             return Ok(());
         }
@@ -186,6 +187,38 @@ impl Owner {
             "owners": owners_detail(&owned),
         });
         Err(self.refuse(store, detail, owned_message(&owned)).await)
+    }
+
+    /// The interfaces it claims now.
+    fn claimed(&self) -> Vec<String> {
+        self.interfaces.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Claim `names` too (interfaces a deploy in place adds), all or none, as a start claims: a
+    /// `Refused` error naming the engines that run any of them, nothing claimed. Not written to the
+    /// audit log here: the deploy refused records itself.
+    pub async fn add(&self, store: &Store, names: &[String]) -> Result<()> {
+        if names.is_empty() {
+            return Ok(());
+        }
+        let owned = store.claim(&self.me.instance, names).await?;
+        if !owned.is_empty() {
+            return Err(Refused(owned_message(&owned)).into());
+        }
+        let mut interfaces = self.interfaces.lock().unwrap_or_else(|e| e.into_inner());
+        for name in names {
+            if !interfaces.contains(name) {
+                interfaces.push(name.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Let go of `names` (interfaces a deploy in place removed, once their workers stopped): from
+    /// then on another engine may claim them, and a lost lock doesn't claim them again.
+    pub async fn remove(&self, store: &Store, names: &[String]) -> Result<()> {
+        self.interfaces.lock().unwrap_or_else(|e| e.into_inner()).retain(|i| !names.contains(i));
+        store.unclaim(&self.me.instance, names).await
     }
 
     /// The interfaces are this engine's: workers, file pickup and schedules go.
@@ -257,7 +290,7 @@ impl Owner {
                 }
             };
             *self.lock.lock().await = Some(lock);
-            match store.claim(&self.me.instance, &self.interfaces).await {
+            match store.claim(&self.me.instance, &self.claimed()).await {
                 Ok(owned) if owned.is_empty() => {
                     self.ownership.set(true);
                     tracing::info!("the engine's lock is back: sending, file pickup and schedules go on");

@@ -646,6 +646,14 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
                 audit(action, detail).await;
                 return Ok((StatusCode::OK, Json(report)).into_response());
             }
+            // What a start would refuse too (another engine runs an added interface, or the set it
+            // would leave running doesn't pass the start's checks): no handover is tried.
+            Err(e) if e.downcast_ref::<crate::ownership::Refused>().is_some() => {
+                let outcome = format!("refused: {e:#}\nNothing changed: every interface runs what it ran.");
+                let detail = serde_json::json!({ "environment": engine.environment, "ok": false, "outcome": outcome });
+                audit(action, detail).await;
+                return refuse(report, StatusCode::CONFLICT, outcome);
+            }
             Err(e) if asked.in_place_only => {
                 let outcome = format!(
                     "couldn't apply it in place ({e:#}): every interface runs what it ran, and `in_place_only` was \

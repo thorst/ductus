@@ -64,6 +64,8 @@ pub(crate) struct Shared {
     /// Every queued interface's intake (routes store into their target's): changed as interfaces
     /// are added and removed.
     pub intakes: std::sync::RwLock<HashMap<String, Arc<Intake>>>,
+    /// Where an interface's health reports its stop (the audit log): an added one's too.
+    pub stopped: crate::health::StoppedTx,
 }
 
 /// The worker threads, to place an interface a deploy adds and to join at the engine's stop.
@@ -307,7 +309,6 @@ impl Kept {
     }
 
     /// What every interface's jobs and outlets are built with (an added interface's too).
-    #[cfg_attr(not(test), expect(dead_code, reason = "a deploy adding an interface uses it (0.7.5.2.1 item 5)"))]
     pub(crate) fn shared(&self) -> &Shared {
         &self.shared
     }
@@ -339,7 +340,6 @@ impl Kept {
     /// All or nothing: when a thread can't load its code, nothing of it runs (every thread it was
     /// given to is told to stop running it; a dedicated thread made for it then ends; a new pool
     /// thread stays, empty, for the next) and the error says why.
-    #[cfg_attr(not(test), expect(dead_code, reason = "a deploy adding an interface uses it (0.7.5.2.1 item 5)"))]
     pub(crate) async fn add(&self, mut interface: Interface, mut requests: Option<Requests>) -> Result<Vec<CodeFile>> {
         let name = interface.config.name.clone();
         if self.contains(&name) {
@@ -347,8 +347,9 @@ impl Kept {
         }
         let spawn = self.threads.spawn.as_ref();
         let fresh: Arc<Waiting> = Arc::default();
-        let jobs: Vec<Job> =
-            (0..interface.config.slots()).map(|slot| interface.job(&self.shared, slot, requests.take(), &fresh)).collect();
+        let jobs: Vec<Job> = (0..interface.config.slots())
+            .map(|slot| interface.job(&self.shared, slot, requests.take(), &fresh))
+            .collect();
         // Existing pool threads given jobs, and new threads to make (name, jobs, its own pools).
         let mut existing: Vec<(UnboundedSender<Command>, Vec<Job>)> = Vec::new();
         let mut new: Vec<(String, Vec<Job>, crate::services::Pools)> = Vec::new();
@@ -416,7 +417,8 @@ impl Kept {
             .await
             .context("waiting for the new worker threads to load the code")?;
         if failed.is_none() && reported.len() < waiting_for {
-            failed = Some(anyhow!("`{name}`: a new worker thread stopped before loading its code (see the errors above)"));
+            failed =
+                Some(anyhow!("`{name}`: a new worker thread stopped before loading its code (see the errors above)"));
         }
         for (_, result) in reported {
             match result {
@@ -468,7 +470,6 @@ impl Kept {
     /// told so (a dedicated thread then ends), and nothing of it is kept, its intake no longer
     /// found by routes. Close its gate and let what it was storing finish first. A change of it
     /// waiting for its lock finds it gone. Errors only when it isn't running here.
-    #[cfg_attr(not(test), expect(dead_code, reason = "a deploy removing an interface uses it (0.7.5.2.1 item 5)"))]
     pub(crate) async fn remove(&self, name: &str) -> Result<()> {
         let interface = self
             .interfaces
@@ -769,6 +770,7 @@ mod tests {
             certificates: Default::default(),
             resources: Default::default(),
             intakes: Default::default(),
+            stopped: tokio::sync::mpsc::unbounded_channel().0,
         }
     }
 
@@ -836,7 +838,8 @@ mod tests {
         let (mut interface, activity) = parts(yaml, &shared, first_id, lanes);
         let name = interface.config.name.clone();
         shared.intakes.write().unwrap().insert(name, interface.intake.clone().unwrap());
-        interface.threads = threads.iter().map(|commands| Placed { commands: commands.clone(), slots: vec![0] }).collect();
+        interface.threads =
+            threads.iter().map(|commands| Placed { commands: commands.clone(), slots: vec![0] }).collect();
         let pool = threads.into_iter().map(|commands| PoolThread { commands, slots: 1 }).collect();
         let threads = Threads { pool: std::sync::Mutex::new(pool), spawn: None, handles: Default::default() };
         (Kept::new(shared, [interface], threads), activity)

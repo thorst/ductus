@@ -434,15 +434,19 @@ pub struct InPlace {
     pub deployment: Option<crate::deployment::Deployment>,
 }
 
-/// Apply release `next` (unpacked in `folder`) in place: each interface `plan` changes runs its
-/// new code and settings from its next message (`Engine::replace_interface`; all at once, each on
-/// its own threads), the others untouched; then the deployment is recorded (by `who`, with the
+/// Apply release `next` (unpacked in `folder`) in place: the interfaces `plan` adds start
+/// (`Engine::add_interface`), then each interface it changes runs its new code and settings from
+/// its next message (`Engine::replace_interface`; all at once, each on its own threads), then
+/// those it removes stop (`Engine::remove_interface`), the others untouched. When it adds or
+/// removes any, the set it would leave running is checked first as a start checks it
+/// (`check_together`: ports, routes, resources, TLS). Then the deployment is recorded (by `who`, with the
 /// warnings it was let through with), the engine runs `next` from then on, and unpacked releases
 /// nothing runs from are tidied. `plan` must be `in_place()`.
 ///
 /// All or nothing: when one interface can't be applied (its new interface.yaml doesn't load, its
-/// code doesn't load on a thread, `in_place::NeedsHandover`), those already applied are put back
-/// on what they ran (the code their threads loaded before) and the `Err` says why, so the engine
+/// code doesn't load on a thread, another engine runs an added one, `in_place::NeedsHandover`),
+/// those already applied are put back on what they ran (the code their threads loaded before),
+/// those added removed again, and the `Err` says why, so the engine
 /// runs one release, never a mix: the deploy then takes the handover (or, `--in-place-only`,
 /// refuses).
 pub async fn apply_in_place(
@@ -455,28 +459,83 @@ pub async fn apply_in_place(
 ) -> Result<InPlace> {
     let started = std::time::Instant::now();
     let env = ductus_core::Environment::load(folder, &engine.environment)?;
-    let mut configs = Vec::with_capacity(plan.changes.len());
-    for change in &plan.changes {
-        let name = &change.interface;
+    let load = |name: &str| -> Result<ductus_core::InterfaceConfig> {
         let yaml = next.manifest.interfaces.get(name).and_then(interface_yaml);
         let dir = yaml
             .and_then(|y| Path::new(y).parent())
             .with_context(|| format!("`{name}`: the release has no interface.yaml for it"))?;
-        let config = ductus_core::InterfaceConfig::load_in(&folder.join(dir), &env)
-            .with_context(|| format!("`{name}`: loading its new interface.yaml"))?;
-        let running = engine.interface(name).with_context(|| format!("`{name}` isn't running here"))?;
-        configs.push((config, running.config.clone()));
+        ductus_core::InterfaceConfig::load_in(&folder.join(dir), &env)
+            .with_context(|| format!("`{name}`: loading its new interface.yaml"))
+    };
+    // Added, changed (each with what it ran) and removed, in the plan's order.
+    let mut added = Vec::new();
+    let mut changed = Vec::new();
+    let mut removed = Vec::new();
+    for change in &plan.changes {
+        let name = &change.interface;
+        if change.is_removed() {
+            engine.interface(name).with_context(|| format!("`{name}` isn't running here"))?;
+            removed.push((name.clone(), change));
+        } else if change.is_added() {
+            added.push((load(name)?, change));
+        } else {
+            let running = engine.interface(name).with_context(|| format!("`{name}` isn't running here"))?;
+            changed.push((load(name)?, running.config.clone(), change));
+        }
     }
-    let applying = configs.iter().map(|(config, _)| async {
+    // The set it leaves running, checked as a start checks it, before anything changes.
+    if !added.is_empty() || !removed.is_empty() {
+        let running = engine.interfaces();
+        let mut next_set: Vec<&ductus_core::InterfaceConfig> = running
+            .iter()
+            .filter(|r| !removed.iter().any(|(n, _)| *n == r.config.name))
+            .map(|r| changed.iter().find(|(c, ..)| c.name == r.config.name).map_or(&*r.config, |(c, ..)| c))
+            .collect();
+        next_set.extend(added.iter().map(|(c, _)| c));
+        let api = engine.api.as_ref();
+        let alerts = engine.alerts.as_ref().map(|a| &a.settings);
+        // Refused as the next start would be (a handover would fail the same way).
+        let api_tls = api.and_then(|a| a.tls.as_ref());
+        if let Err(e) = crate::check_together(&next_set, &engine.resources, api.map(|a| a.port), api_tls, alerts) {
+            return Err(crate::ownership::Refused(format!("the interfaces it would leave running: {e:#}")).into());
+        }
+    }
+    let timed = |result, started: std::time::Instant| (result, started.elapsed());
+    // Added first: a changed interface may route to one.
+    let adding = added.iter().map(|(config, _)| async {
         let started = std::time::Instant::now();
-        (engine.replace_interface(config.clone(), folder).await, started.elapsed())
+        timed(engine.add_interface(config.clone(), folder).await, started)
+    });
+    let added_results = futures_util::future::join_all(adding).await;
+    let names: Vec<String> =
+        added.iter().map(|(c, _)| c.name.clone()).chain(changed.iter().map(|(c, ..)| c.name.clone())).collect();
+    // On a failure: those added removed again.
+    let take_back_added = |results: &[(Result<crate::deployment::Applied>, std::time::Duration)]| {
+        let names: Vec<String> =
+            results.iter().filter_map(|(r, _)| r.as_ref().ok().map(|a| a.interface.clone())).collect();
+        async move {
+            for name in names {
+                if let Err(e) = engine.remove_interface(&name).await {
+                    tracing::error!(interface = %name, error = %format!("{e:#}"), "couldn't remove an interface a failed deploy in place added");
+                }
+            }
+        }
+    };
+    if added_results.iter().any(|(r, _)| r.is_err()) {
+        take_back_added(&added_results).await;
+        engine.shown_after_replacing(&names).await;
+        let first = added_results.into_iter().find_map(|(r, _)| r.err());
+        return Err(first.expect("one failed"));
+    }
+    let applying = changed.iter().map(|(config, ..)| async {
+        let started = std::time::Instant::now();
+        timed(engine.replace_interface(config.clone(), folder).await, started)
     });
     let results = futures_util::future::join_all(applying).await;
-    let names: Vec<String> = configs.iter().map(|(config, _)| config.name.clone()).collect();
     if results.iter().any(|(r, _)| r.is_err()) {
         // Back on what they ran: the same files, from the release each came from.
         let mut first = None;
-        for ((result, _), (_, before)) in results.into_iter().zip(&configs) {
+        for ((result, _), (_, before, _)) in results.into_iter().zip(&changed) {
             match result {
                 Err(e) => {
                     first.get_or_insert(e);
@@ -489,13 +548,23 @@ pub async fn apply_in_place(
                 }
             }
         }
+        take_back_added(&added_results).await;
         engine.shown_after_replacing(&names).await;
         return Err(first.expect("one failed"));
     }
+    // Removed last: nothing to put back after them. Each stops between messages.
+    let mut steps = Vec::with_capacity(plan.changes.len() + 1);
+    for (name, _) in &removed {
+        let started = std::time::Instant::now();
+        match engine.remove_interface(name).await {
+            Ok(()) => steps.push(format!("{name}: removed in place ({} ms)", started.elapsed().as_millis())),
+            Err(e) => steps.push(format!("⚠ {name}: {e:#}")),
+        }
+    }
     engine.shown_after_replacing(&names).await;
-    let mut steps = Vec::with_capacity(results.len() + 1);
-    let mut applied = Vec::with_capacity(results.len());
-    for ((result, took), change) in results.into_iter().zip(&plan.changes) {
+    let mut applied = Vec::with_capacity(names.len());
+    let done = added_results.into_iter().zip(added.iter().map(|(_, c)| *c));
+    for ((result, took), change) in done.chain(results.into_iter().zip(changed.iter().map(|(.., c)| *c))) {
         let a = result.expect("none failed");
         let version = a.version.as_ref().map_or("its version unknown".to_string(), |v| v.short());
         steps.push(format!(

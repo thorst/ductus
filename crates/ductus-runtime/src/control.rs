@@ -151,6 +151,9 @@ pub struct Engine {
     pub teams: BTreeMap<String, ductus_core::alerts::OwnerContact>,
     /// Whether the engine holds its interfaces now (`ownership`).
     pub ownership: Arc<crate::ownership::Ownership>,
+    /// Its lock and claims: a deploy in place claims the interfaces it adds and lets go of those
+    /// it removes.
+    pub(crate) owner: Arc<crate::ownership::Owner>,
     /// Every `certificates:` entry, loaded (what connections trust and present).
     pub tls: Arc<crate::tls::Certificates>,
     /// Where the REST API listens, if it does.
@@ -209,6 +212,7 @@ pub struct Parts {
     pub directory: Option<crate::ldap::Directory>,
     pub teams: BTreeMap<String, ductus_core::alerts::OwnerContact>,
     pub ownership: Arc<crate::ownership::Ownership>,
+    pub owner: Arc<crate::ownership::Owner>,
     pub tls: Arc<crate::tls::Certificates>,
     pub api: Option<ApiListener>,
     pub host: String,
@@ -238,6 +242,7 @@ impl Engine {
             directory,
             teams,
             ownership,
+            owner,
             tls,
             api,
             host,
@@ -276,6 +281,7 @@ impl Engine {
             directory,
             teams,
             ownership,
+            owner,
             tls,
             api,
             host,
@@ -328,9 +334,27 @@ impl Engine {
         let running = self.interface(&name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
         let (saving, decided) = crate::deployment::Decided::channel();
         let replaced = self.kept.replace(config, &self.activity, decided.clone()).await?;
-        // Its version from here on: the files its code loaded (V8's, so exactly what runs) and its
-        // interface.yaml read again. Its new workers wait for the id before saving a decision.
-        let (config, files, root) = (replaced.config.clone(), replaced.files, root.to_path_buf());
+        let (version, id) = self.saved_version(&replaced.config, replaced.files, root, saving, &decided).await;
+        self.swap_interface(Running {
+            config: replaced.config,
+            destinations: replaced.destinations,
+            ..(*running).clone()
+        });
+        Ok(crate::deployment::Applied { interface: name, version, id })
+    }
+
+    /// The code version an interface runs from now on (the files its code loaded, V8's so exactly
+    /// what runs, and its interface.yaml read again from `root`), saved; its new workers wait for
+    /// the id (`decided`) before saving a decision. None when it couldn't be worked out (said).
+    async fn saved_version(
+        &self,
+        config: &Arc<InterfaceConfig>,
+        files: Vec<ductus_script::CodeFile>,
+        root: &std::path::Path,
+        saving: crate::deployment::Saving,
+        decided: &crate::deployment::Decided,
+    ) -> (Option<crate::code::Version>, Option<i32>) {
+        let (name, config, root) = (config.name.clone(), config.clone(), root.to_path_buf());
         let version = tokio::task::spawn_blocking(move || {
             let root = anyhow::Context::with_context(ductus_script::loaded_path(&root), || {
                 format!("finding {}", root.display())
@@ -348,13 +372,168 @@ impl Engine {
             }
         };
         crate::deployment::save(self.store.clone(), version.clone().map(|v| Arc::new(vec![v])), saving).await;
-        let id = decided.id(&name).await;
-        self.swap_interface(Running {
-            config: replaced.config,
-            destinations: replaced.destinations,
-            ..(*running).clone()
-        });
+        (version, decided.id(&name).await)
+    }
+
+    /// Run `config`'s interface from now on (a deploy in place added it), as a start would: a
+    /// queued one claimed first (a `Refused` error naming the engine that runs it, nothing done),
+    /// its lanes decided, its destinations registered, its configured retention applied, what
+    /// waits for it from before matched to its destinations now (as a start matches them), what's
+    /// stored about it loaded (last activity, pauses), its code loaded and its workers started
+    /// (`in_place::Kept::add`), its version saved, and shown. Its gate stays closed while the
+    /// engine drains. Answers its version, for the deploy's record.
+    ///
+    /// All or nothing: an error leaves it unclaimed and unwatched (its lanes and destinations
+    /// stay registered: a start would register them the same way).
+    pub(crate) async fn add_interface(
+        self: &Arc<Self>,
+        config: InterfaceConfig,
+        root: &std::path::Path,
+    ) -> Result<crate::deployment::Applied> {
+        let name = config.name.clone();
+        if self.interface(&name).is_some() || self.kept.contains(&name) {
+            anyhow::bail!("interface `{name}` already runs here");
+        }
+        if config.responds() {
+            return Err(crate::in_place::NeedsHandover(format!(
+                "`{name}` was added in respond mode: its HTTP route is served by a handover"
+            ))
+            .into());
+        }
+        self.owner.add(&self.store, std::slice::from_ref(&name)).await?;
+        match self.add_claimed(Arc::new(config), root).await {
+            Ok(applied) => Ok(applied),
+            Err(e) => {
+                self.let_go(&name).await;
+                Err(e)
+            }
+        }
+    }
+
+    /// `add_interface` once it is this engine's.
+    async fn add_claimed(
+        self: &Arc<Self>,
+        config: Arc<InterfaceConfig>,
+        root: &std::path::Path,
+    ) -> Result<crate::deployment::Applied> {
+        use anyhow::Context;
+        let (name, store, shared) = (config.name.clone(), &self.store, self.kept.shared());
+        let mut layouts = match crate::lanes::Wanted::of(&config) {
+            Some(wanted) => crate::lanes::start(store, &[wanted]).await?,
+            None => HashMap::new(),
+        };
+        let layout = layouts.remove(&name).unwrap_or_else(|| crate::lanes::Layout::single(1, ""));
+        let names: Vec<(String, String)> = config.destinations().map(|(d, _)| (name.clone(), d.to_string())).collect();
+        let ids = match names.is_empty() {
+            true => Vec::new(),
+            false => store.destination_ids(&names).await.context("registering its destinations")?,
+        };
+        let wake = Arc::new(crate::Wake::new(config.slots(), ids.len()));
+        let gate = Arc::new(Gate::default());
+        let stats = Arc::new(crate::stats::InterfaceStats::new(&name));
+        let destinations: Vec<RunningDestination> = config
+            .destinations()
+            .zip(&ids)
+            .map(|((d, _), &id)| RunningDestination {
+                name: d.to_string(),
+                id,
+                stats: Arc::new(crate::stats::DestinationStats::new(d)),
+            })
+            .collect();
+        let lanes = Arc::new(crate::lanes::Lanes::new(layout, config.slots(), ids.len()));
+        crate::lanes::retire_when_settled(store.clone(), name.clone(), lanes.clone(), self.ended.clone());
+        let tier = self.retention.add(self.retention.configured(&config)).await?;
+        let intake = Arc::new(crate::ingest::Intake::new(
+            config.clone(),
+            store.clone(),
+            wake.clone(),
+            gate.clone(),
+            ids.clone(),
+            tier,
+            stats.clone(),
+            lanes.clone(),
+        )?);
+        if !names.is_empty() {
+            let reconciled =
+                store.reconcile(&names, &ids).await.context("matching what waits for it to its destinations")?;
+            for (_, count) in &reconciled.added {
+                tracing::info!(interface = %name, count, "queued messages waiting for destinations they had no delivery for");
+            }
+            for (_, destination, count) in &reconciled.removed {
+                tracing::warn!(interface = %name, %destination, count, "destination is no longer in interface.yaml: its pending deliveries were marked filtered");
+            }
+        }
+        let watched = crate::activity::Watched {
+            stats: stats.clone(),
+            destinations: destinations.iter().map(|d| (d.id, d.stats.clone())).collect(),
+        };
+        self.activity.watch(watched).await.context("loading its last activity")?;
+        let outlets = config
+            .destinations()
+            .zip(&destinations)
+            .map(|((d_name, d), running)| {
+                let pause = self.activity.pause(running.id).context("a destination's pause switch")?;
+                let kept = crate::in_place::KeptDestination {
+                    id: running.id,
+                    stats: running.stats.clone(),
+                    pause,
+                    limiter: None,
+                };
+                shared.outlet(&config, d_name, d, kept)
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let health = Arc::new(Health::reporting(&name, shared.stopped.clone()));
+        let (saving, decided) = crate::deployment::Decided::channel();
+        let interface = crate::in_place::Interface {
+            config: config.clone(),
+            wake,
+            health: health.clone(),
+            stats: stats.clone(),
+            lanes: lanes.clone(),
+            outlets,
+            intake: Some(intake.clone()),
+            decided: decided.clone(),
+            threads: Vec::new(),
+            removed: false,
+        };
+        let files = self.kept.add(interface, None).await?;
+        let (version, id) = self.saved_version(&config, files, root, saving, &decided).await;
+        let running = Running { config, health, gate: gate.clone(), stats, destinations, intake: Some(intake), lanes };
+        self.add_running(running);
+        if !matches!(self.drain_state(), DrainState::Accepting) {
+            gate.set_open(false);
+        }
         Ok(crate::deployment::Applied { interface: name, version, id })
+    }
+
+    /// Stop running interface `name` (a deploy in place removed it): its gate closed and what it
+    /// was storing finished, its workers stopped between messages (the message in hand finishes
+    /// and is saved), then it is no longer shown, watched or managed (retention), and its claim is
+    /// given back, so another engine may run it. What waits for it stays stored, for whichever
+    /// engine runs it next. Its alerts stay as they were, no longer judged (as after a handover
+    /// that leaves it out). Errors only when it isn't running here.
+    pub(crate) async fn remove_interface(self: &Arc<Self>, name: &str) -> Result<()> {
+        let running = self.interface(name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
+        running.gate.set_open(false);
+        while running.gate.in_flight() > 0 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        self.kept.remove(name).await?;
+        self.remove_running(name);
+        self.let_go(name).await;
+        Ok(())
+    }
+
+    /// Interface `name` is no longer this engine's: not watched, not managed, its claim given
+    /// back. A failure is said, not returned: the rest still goes.
+    async fn let_go(&self, name: &str) {
+        self.retention.remove(name);
+        if let Err(e) = self.activity.unwatch(name).await {
+            tracing::warn!(interface = %name, error = %format!("{e:#}"), "couldn't save its last activity");
+        }
+        if let Err(e) = self.owner.remove(&self.store, &[name.to_string()]).await {
+            tracing::warn!(interface = %name, error = %format!("{e:#}"), "couldn't give back its claim: another engine may run it once this one stops");
+        }
     }
 
     /// After a deploy in place applied (or put back) the interfaces `names`: what reads the whole
@@ -405,6 +584,26 @@ impl Engine {
             .map(|i| if i.config.name == running.config.name { running.clone() } else { i.clone() })
             .collect();
         *self.code.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+    }
+
+    /// Show `running` from now on (a deploy in place added it), after those running already.
+    pub(crate) fn add_running(&self, running: Running) {
+        let mut interfaces = self.interfaces.write().unwrap_or_else(|e| e.into_inner());
+        let mut next: Vec<Arc<Running>> =
+            interfaces.iter().filter(|i| i.config.name != running.config.name).cloned().collect();
+        next.push(Arc::new(running));
+        *interfaces = next.into();
+        *self.code.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+    }
+
+    /// Show interface `name` no more (a deploy in place removed it). A reader holding a snapshot
+    /// from before still sees it whole. Answers what was shown, if it was.
+    pub(crate) fn remove_running(&self, name: &str) -> Option<Arc<Running>> {
+        let mut interfaces = self.interfaces.write().unwrap_or_else(|e| e.into_inner());
+        let removed = interfaces.iter().find(|i| i.config.name == name).cloned()?;
+        *interfaces = interfaces.iter().filter(|i| i.config.name != name).cloned().collect();
+        *self.code.lock().unwrap_or_else(|e| e.into_inner()) = Default::default();
+        Some(removed)
     }
 
     /// The certificates the engine connects to and those it presents, now.
@@ -513,7 +712,7 @@ impl Engine {
 
     /// An interface's own state: what it should have received (`monitor:`), or stopped.
     pub fn interface_state(&self, i: &Running, now: DateTime<Utc>) -> (InterfaceState, String) {
-        let watched_since = self.activity.watched_since.get(&i.config.name).copied().unwrap_or(self.started_at);
+        let watched_since = self.activity.watched_since(&i.config.name).unwrap_or(self.started_at);
         let stopped = i.health.stopped();
         monitor::interface_state(&i.config.monitor, i.stats.last_received.get(), watched_since, stopped, now)
     }

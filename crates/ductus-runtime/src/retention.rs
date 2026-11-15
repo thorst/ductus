@@ -7,7 +7,7 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ductus_store::{HeldArea, Kept, RetentionState, Store, Tier};
 use std::sync::atomic::{AtomicI16, Ordering::Relaxed};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tokio::sync::Notify;
 
@@ -17,6 +17,7 @@ const BATCH: i64 = 1_000;
 const DROP_EVERY: Duration = Duration::from_secs(3600);
 
 /// One interface whose messages are stored (respond-mode interfaces store none).
+#[derive(Clone)]
 pub struct Managed {
     pub name: String,
     /// What interface.yaml (or ductus.yaml) says.
@@ -27,7 +28,8 @@ pub struct Managed {
 
 pub struct Retention {
     store: Store,
-    pub interfaces: Vec<Managed>,
+    /// This engine's interfaces (a deploy in place adds and removes some: `add`, `remove`).
+    interfaces: RwLock<Vec<Managed>>,
     /// `quarantined: purge` per interface, set by `apply`.
     purge: Vec<(String, bool)>,
     /// Wakes the change runner (a confirmation came in).
@@ -38,6 +40,8 @@ pub struct Retention {
     last_drop: Mutex<Option<LastDrop>>,
     /// The engine's run ended: the background work ends with it.
     ended: tokio_util::sync::CancellationToken,
+    /// ductus.yaml's, for an interface a deploy adds (`configured`).
+    defaults: Defaults,
 }
 
 /// What the last hourly run found.
@@ -58,6 +62,24 @@ pub struct Configured {
     pub purge_quarantined: bool,
 }
 
+/// What ductus.yaml says for interfaces that don't say (`retention:`, `quarantined:`).
+#[derive(Debug, Clone, Copy)]
+pub struct Defaults {
+    pub retention: ductus_core::Retention,
+    pub quarantined: ductus_core::Quarantined,
+}
+
+impl Configured {
+    /// `config`'s, with ductus.yaml's `defaults` where it doesn't say.
+    pub fn of(config: &ductus_core::InterfaceConfig, defaults: Defaults) -> Self {
+        Self {
+            name: config.name.clone(),
+            days: config.retention.unwrap_or(defaults.retention).days() as Tier,
+            purge_quarantined: config.quarantined.unwrap_or(defaults.quarantined) == ductus_core::Quarantined::Purge,
+        }
+    }
+}
+
 impl Retention {
     /// Each interface's tier as stored now (a new interface's: its configured one), changing
     /// nothing: a takeover stores messages before it may change an interface's rows. `apply`
@@ -65,6 +87,7 @@ impl Retention {
     pub async fn new(
         store: Store,
         configured: Vec<Configured>,
+        defaults: Defaults,
         ended: tokio_util::sync::CancellationToken,
     ) -> Result<Arc<Self>> {
         let stored: std::collections::HashMap<String, Tier> =
@@ -79,34 +102,24 @@ impl Retention {
             .collect();
         Ok(Arc::new(Self {
             store,
-            interfaces,
+            interfaces: RwLock::new(interfaces),
             purge: configured.into_iter().map(|c| (c.name, c.purge_quarantined)).collect(),
             kick: Arc::new(Notify::new()),
             drop_now: Arc::new(Notify::new()),
             last_drop: Mutex::new(None),
             ended,
+            defaults,
         }))
     }
 
     /// Apply every interface's configured retention and start the background work (once the
     /// interfaces are this engine's).
     pub async fn apply(self: &Arc<Self>) -> Result<()> {
-        let wanted: Vec<(String, Tier)> = self.interfaces.iter().map(|m| (m.name.clone(), m.configured)).collect();
+        let interfaces = self.interfaces.read().unwrap_or_else(|e| e.into_inner()).clone();
+        let wanted: Vec<(String, Tier)> = interfaces.iter().map(|m| (m.name.clone(), m.configured)).collect();
         let states = self.store.apply_retention_all(&wanted).await?;
-        for (m, state) in self.interfaces.iter().zip(states) {
-            report(&state, m.configured);
-            // A change that just began is a decision about patient data worth keeping a record of.
-            if state.changing_from.is_some() && Utc::now() - state.changed_at < chrono::TimeDelta::minutes(1) {
-                let detail =
-                    serde_json::json!({ "from": state.changing_from, "to": state.days, "waiting": state.waiting });
-                let audit = ductus_store::Audit::new(ductus_store::By::engine(), "retention.change")
-                    .interface(&m.name)
-                    .detail(detail);
-                if let Err(e) = self.store.record(&audit).await {
-                    tracing::error!(error = %format!("{e:#}"), interface = %m.name, "could not write the audit log (retention change)");
-                }
-            }
-            m.tier.store(state.days, Relaxed);
+        for (m, state) in interfaces.iter().zip(states) {
+            self.applied(m, &state).await;
         }
         self.store.set_quarantined(&self.purge).await?;
         tokio::spawn(self.ended.clone().run_until_cancelled_owned(run_changes(Arc::downgrade(self))));
@@ -114,8 +127,71 @@ impl Retention {
         Ok(())
     }
 
-    pub fn get(&self, interface: &str) -> Option<&Managed> {
-        self.interfaces.iter().find(|m| m.name == interface)
+    /// `m`'s configured retention applied (`state`): said, recorded when a change began, and its
+    /// new messages' tier set.
+    async fn applied(&self, m: &Managed, state: &RetentionState) {
+        report(state, m.configured);
+        // A change that just began is a decision about patient data worth keeping a record of.
+        if state.changing_from.is_some() && Utc::now() - state.changed_at < chrono::TimeDelta::minutes(1) {
+            let detail = serde_json::json!({ "from": state.changing_from, "to": state.days, "waiting": state.waiting });
+            let audit = ductus_store::Audit::new(ductus_store::By::engine(), "retention.change")
+                .interface(&m.name)
+                .detail(detail);
+            if let Err(e) = self.store.record(&audit).await {
+                tracing::error!(error = %format!("{e:#}"), interface = %m.name, "could not write the audit log (retention change)");
+            }
+        }
+        m.tier.store(state.days, Relaxed);
+    }
+
+    /// `config`'s retention as configured (ductus.yaml's defaults where it doesn't say).
+    pub fn configured(&self, config: &ductus_core::InterfaceConfig) -> Configured {
+        Configured::of(config, self.defaults)
+    }
+
+    /// Manage `c`'s interface from now on (a deploy in place added it, and it is this engine's
+    /// now): its configured retention applied as a start applies it (a shorter one than stored
+    /// waits for a confirmation; a change runs in the background) and its `quarantined:` setting
+    /// saved. Answers the tier its intake stores into. Called again for one it manages: its
+    /// settings applied again, the same tier answered.
+    pub async fn add(&self, c: Configured) -> Result<Arc<AtomicI16>> {
+        let state = self.store.apply_retention(&c.name, c.days).await?;
+        self.store.set_quarantined(&[(c.name.clone(), c.purge_quarantined)]).await?;
+        let m = {
+            let mut interfaces = self.interfaces.write().unwrap_or_else(|e| e.into_inner());
+            match interfaces.iter_mut().find(|m| m.name == c.name) {
+                // Its tier kept (its intake holds it); only the configured value changes.
+                Some(m) => {
+                    m.configured = c.days;
+                    m.clone()
+                }
+                None => {
+                    let m = Managed {
+                        name: c.name.clone(),
+                        configured: c.days,
+                        tier: Arc::new(AtomicI16::new(state.days)),
+                    };
+                    interfaces.push(m.clone());
+                    m
+                }
+            }
+        };
+        self.applied(&m, &state).await;
+        if state.changing_from.is_some() {
+            self.kick.notify_one();
+        }
+        Ok(m.tier)
+    }
+
+    /// Stop managing `interface` (a deploy in place removed it): a change of its running here
+    /// stops after its batch in hand; its stored rows and retention stay as they are, for the
+    /// engine that runs it next (whose start carries the change on).
+    pub fn remove(&self, interface: &str) {
+        self.interfaces.write().unwrap_or_else(|e| e.into_inner()).retain(|m| m.name != interface);
+    }
+
+    pub fn get(&self, interface: &str) -> Option<Managed> {
+        self.interfaces.read().unwrap_or_else(|e| e.into_inner()).iter().find(|m| m.name == interface).cloned()
     }
 
     /// The tier an interface's new messages go to (shared with its intake).
@@ -218,6 +294,11 @@ impl Retention {
         tracing::info!(interface = %name, from = state.changing_from.unwrap_or_default(), to = days, rows, "retention change: moving messages into the new tier (deleting those past it)");
         let (mut deleted, mut moved) = (0, 0);
         loop {
+            if self.get(name).is_none() {
+                // Removed by a deploy: the engine that runs it next carries the change on.
+                tracing::info!(interface = %name, moved, deleted, "retention change paused: the interface no longer runs here");
+                return Ok(());
+            }
             let started = Instant::now();
             let step = self.store.retention_step(name, days, BATCH).await?;
             if step.is_empty() {
@@ -273,7 +354,7 @@ async fn run_changes(retention: std::sync::Weak<Retention>) {
             Ok(states) => {
                 for state in states.iter().filter(|s| s.changing_from.is_some()) {
                     let Some(m) = r.get(&state.interface) else { continue };
-                    if let Err(e) = r.run_change(m, state).await {
+                    if let Err(e) = r.run_change(&m, state).await {
                         tracing::warn!(interface = %m.name, error = %format!("{e:#}"), "retention change interrupted; trying again in a minute");
                     }
                 }

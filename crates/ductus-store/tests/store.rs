@@ -1889,6 +1889,32 @@ async fn an_interface_runs_on_one_engine_and_a_dead_ones_are_taken_over() {
     lock_b.release().await;
 }
 
+/// A deploy in place removing an interface lets go of it alone: another live engine may claim it
+/// at once, the engine's other interfaces stay its own, and one it didn't own is left alone.
+#[tokio::test]
+async fn an_engine_lets_go_of_one_interface_while_it_runs() {
+    let Some(store) = store().await else { return };
+    let (a, b) = (unique("engine-a"), unique("engine-b"));
+    let [x, y, z] = ["x", "y", "z"].map(|n| unique(&format!("let-go-{n}")));
+    let lock_a = lock(&store, &a, "host-a").await;
+    let lock_b = lock(&store, &b, "host-b").await;
+    assert!(store.claim(&a, &[x.clone(), y.clone()]).await.unwrap().is_empty());
+    assert!(store.claim(&b, std::slice::from_ref(&z)).await.unwrap().is_empty());
+    assert_eq!(store.claim(&b, std::slice::from_ref(&x)).await.unwrap().len(), 1, "A runs x");
+
+    store.unclaim(&a, &[x.clone(), z.clone()]).await.unwrap();
+    assert!(store.claim(&b, std::slice::from_ref(&x)).await.unwrap().is_empty(), "x let go: B may claim it");
+    assert!(store.lost_claims(&b, std::slice::from_ref(&z)).await.unwrap().is_empty(), "B's z untouched by A");
+    let owned = store.claim(&b, std::slice::from_ref(&y)).await.unwrap();
+    assert_eq!(owned.len(), 1, "A still runs y");
+    assert_eq!(owned[0].instance, a);
+
+    store.release_engine(&a).await.unwrap();
+    store.release_engine(&b).await.unwrap();
+    lock_a.release().await;
+    lock_b.release().await;
+}
+
 /// A takeover's check before it claims: interfaces owned by a live engine other than itself and
 /// the one it takes over from; a dead owner's don't count.
 #[tokio::test]

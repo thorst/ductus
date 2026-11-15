@@ -477,19 +477,14 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         .collect();
     let charge = Charge { destinations, ids: all_ids.clone(), queued };
     // Each interface's retention, before anything is stored: intake needs the tier.
-    let configured: Vec<retention::Configured> = configs
-        .iter()
-        .filter(|c| !c.responds())
-        .map(|c| retention::Configured {
-            name: c.name.clone(),
-            days: c.retention.unwrap_or(settings.retention).days() as ductus_store::Tier,
-            purge_quarantined: c.quarantined.unwrap_or(settings.quarantined) == ductus_core::Quarantined::Purge,
-        })
-        .collect();
+    let defaults = retention::Defaults { retention: settings.retention, quarantined: settings.quarantined };
+    let configured: Vec<retention::Configured> =
+        configs.iter().filter(|c| !c.responds()).map(|c| retention::Configured::of(c, defaults)).collect();
     // What the audit log's hourly job needs: how long each interface keeps its messages.
     let retention_days: Vec<(String, i32)> = configured.iter().map(|c| (c.name.clone(), i32::from(c.days))).collect();
-    let retention =
-        retention::Retention::new(store.clone(), configured, ended.clone()).await.context("reading retention")?;
+    let retention = retention::Retention::new(store.clone(), configured, defaults, ended.clone())
+        .await
+        .context("reading retention")?;
     // Which interfaces have messages waiting, known once they're this engine's (`take_charge`).
     let waiting = Arc::new(worker::Waiting::new());
     // Each interface's code version id, saved once computed (below): workers record it with every
@@ -575,6 +570,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         certificates: certificates.clone(),
         resources: resources.clone(),
         intakes: std::sync::RwLock::new(intakes.clone()),
+        stopped: stopped_tx.clone(),
     };
     let mut kept: std::collections::HashMap<String, in_place::Interface> = Default::default();
     for (config, wake, destination_ids, gate, stats, destination_stats, lanes) in parts {
@@ -882,6 +878,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         directory,
         teams: settings.owners.clone(),
         ownership: owner.ownership.clone(),
+        owner: owner.clone(),
         tls: certificates.clone(),
         api: api_address.clone().map(|(host, port)| control::ApiListener {
             host,

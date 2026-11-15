@@ -5287,6 +5287,7 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
 /// refused, retried or dropped; every message is delivered once; B's deliveries were all decided
 /// by the code B ran before (it was never replaced); A's switch to the new version, and every A
 /// message received after the deploy answered is decided by it, recorded with the deploy's reason.
+/// Then (0.7.5.2.1) an interface fed by a route from A is added in place and removed in place.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
@@ -5474,10 +5475,59 @@ async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
     assert_eq!(tags(&a, "A1") + tags(&a, "A2"), 400, "A's messages: some A1, then A2");
     assert!(tags(&a, "A2") >= after.len(), "A2 from the new code");
 
+    // An interface added in place (0.7.5.2.1): C, fed by a route from A (no source of its own),
+    // claimed by this engine, receiving what A routes, recorded with the deploy; then removed in
+    // place, its claim given back. The engine and B never restart.
+    let c = format!("ipc-{nanos}");
+    let routed = format!("{a_yaml}  {c}: {{ interface: {c} }}\n");
+    let c_yaml = format!(
+        "name: {c}\nsource: internal\ndestinations:\n  out: {{ file: {{ dir: '{}' }} }}\n",
+        out_dir(&c).display()
+    );
+    std::fs::create_dir_all(dir.path().join(format!("interfaces/{c}"))).unwrap();
+    std::fs::write(dir.path().join(files(&c, "interface.yaml")), &c_yaml).unwrap();
+    std::fs::write(dir.path().join(files(&a, "interface.yaml")), &routed).unwrap();
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "A routes to C"]);
+    let three = release_json(dir.path(), &["-m", "C added"]);
+    let (ok, out) = deploy(&[three["file"].as_str().unwrap(), "-m", "C added", "--in-place-only"]);
+    assert!(ok && out.contains("✓ applied in place"), "{out}\n{}", read(&log));
+    assert!(out.contains(&format!("· {c}: added (in place)")), "{out}");
+    assert_eq!(running().await, engine.0, "the same engine runs A and B");
+    let owner = store.live_engines().await.unwrap().into_iter().find(|e| e.pid as u32 == engine.0).unwrap();
+    assert!(owner.interfaces.contains(&c), "C is claimed by the engine that runs it: {:?}", owner.interfaces);
+    let more = send(port_a, "200000");
+    let said = tokio::task::spawn_blocking(move || sent(more)).await.unwrap();
+    assert!(said.contains("sent 400 messages"), "{said}");
+    for _ in 0..600 {
+        if delivered(&c) >= 400 && delivered(&a) >= 800 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!((delivered(&a), delivered(&c)), (800, 400), "A delivers, and routes each message to C once");
+    let c_rows = decided(&c).await;
+    assert!(c_rows.iter().all(|r| r.3.as_deref() == Some("C added")), "C's version came with its deploy");
+
+    // C removed (and A's route to it): in place too; C's claim given back.
+    std::fs::remove_dir_all(dir.path().join(format!("interfaces/{c}"))).unwrap();
+    std::fs::write(dir.path().join(files(&a, "interface.yaml")), &a_yaml).unwrap();
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-qm", "C gone"]);
+    let four = release_json(dir.path(), &["-m", "C removed"]);
+    let (ok, out) = deploy(&[four["file"].as_str().unwrap(), "-m", "C removed", "--in-place-only"]);
+    assert!(ok && out.contains("✓ applied in place"), "{out}\n{}", read(&log));
+    assert!(out.contains(&format!("· {c}: removed (in place)")), "{out}");
+    assert_eq!(running().await, engine.0, "the same engine still");
+    let owner = store.live_engines().await.unwrap().into_iter().find(|e| e.pid as u32 == engine.0).unwrap();
+    assert!(!owner.interfaces.contains(&c), "C's claim given back: {:?}", owner.interfaces);
+
     drop(engine);
     let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
-    let ids: Vec<Vec<u8>> =
-        [&one, &two].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
+    let ids: Vec<Vec<u8>> = [&one, &two, &three, &four]
+        .iter()
+        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
+        .collect();
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 

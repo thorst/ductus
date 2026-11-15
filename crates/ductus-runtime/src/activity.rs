@@ -170,8 +170,9 @@ type TrendsById = HashMap<DestinationId, Arc<Mutex<Trends>>>;
 
 /// What was loaded at startup, and what a deploy in place adds (`Activity::watch`).
 pub struct Activity {
-    /// When an engine first ran each interface: deadlines before it don't count.
-    pub watched_since: HashMap<String, DateTime<Utc>>,
+    /// When an engine first ran each interface: deadlines before it don't count
+    /// (`watched_since`).
+    since: RwLock<HashMap<String, DateTime<Utc>>>,
     /// Every destination's pause switch.
     pauses: RwLock<HashMap<DestinationId, Arc<Pause>>>,
     /// Every destination's recent rates and normal (the saver samples them).
@@ -270,20 +271,36 @@ impl Activity {
         let trends = Arc::new(RwLock::new(trends));
         let watched = Arc::new(Mutex::new(watched));
         let saver = tokio::spawn(save(store.clone(), watched.clone(), trends.clone(), stop));
-        Ok(Self { watched_since, pauses: RwLock::new(pauses), trends, watched, store, saver: Mutex::new(Some(saver)) })
+        Ok(Self {
+            since: RwLock::new(watched_since),
+            pauses: RwLock::new(pauses),
+            trends,
+            watched,
+            store,
+            saver: Mutex::new(Some(saver)),
+        })
     }
 
     /// Watch `w` from now on in place of the interface of its name (a deploy in place that adds
-    /// or removes destinations). A destination new here gets what's stored for it first (a pause,
-    /// last sent and error, what's normal): its workers start paused if it was. Removed
+    /// or removes destinations, or adds the interface). A destination new here gets what's stored
+    /// for it first (a pause, last sent and error, what's normal): its workers start paused if it
+    /// was; an interface new here, when it last received and since when it is watched. Removed
     /// destinations are no longer sampled or saved; their switches stay (nothing reaches them).
     pub async fn watch(&self, w: Watched) -> Result<()> {
         let new: Vec<DestinationId> = {
             let pauses = read(&self.pauses);
             w.destinations.iter().map(|(id, _)| *id).filter(|id| !pauses.contains_key(id)).collect()
         };
-        if !new.is_empty() {
-            let (_, stored) = self.store.activity(&[], &new).await?;
+        let new_interface = !lock(&self.watched).iter().any(|o| o.stats.name == w.stats.name);
+        if new_interface || !new.is_empty() {
+            let names: &[&str] = if new_interface { &[w.stats.name.as_str()] } else { &[] };
+            let (interfaces, stored) = self.store.activity(names, &new).await?;
+            for i in interfaces {
+                if let Some(t) = i.last_received {
+                    w.stats.last_received.at(t);
+                }
+                write(&self.since).insert(i.interface, i.watched_since);
+            }
             let mut by_id: HashMap<DestinationId, _> = stored.into_iter().map(|d| (d.destination_id, d)).collect();
             let fresh = Watched {
                 stats: w.stats.clone(),
@@ -304,12 +321,37 @@ impl Activity {
         Ok(())
     }
 
+    /// Watch interface `name` no more (a deploy in place removed it): its last activity saved
+    /// now (the saver saves only what it watches), then no longer sampled or saved. Its
+    /// destinations' switches stay: one added again later finds its pause as it was.
+    pub async fn unwatch(&self, name: &str) -> Result<()> {
+        let removed = {
+            let mut watched = lock(&self.watched);
+            let Some(at) = watched.iter().position(|w| w.stats.name == name) else { return Ok(()) };
+            watched.remove(at)
+        };
+        let received: Vec<(&str, DateTime<Utc>)> =
+            removed.stats.last_received.get().map(|t| (name, t)).into_iter().collect();
+        let seen: Vec<Seen> = removed
+            .destinations
+            .iter()
+            .map(|(id, s)| Seen { destination: *id, last_sent: s.last_sent.get(), last_error: s.last_error() })
+            .collect();
+        self.store.save_activity(&received, &seen).await
+    }
+
+    /// When an engine first ran `interface` (deadlines before it don't count); None for one
+    /// never watched here.
+    pub fn watched_since(&self, interface: &str) -> Option<DateTime<Utc>> {
+        read(&self.since).get(interface).copied()
+    }
+
     /// Nothing watched and nothing saved: for tests that never reach the store.
     #[cfg(test)]
     pub(crate) fn idle(store: Store, pauses: impl IntoIterator<Item = DestinationId>) -> Self {
         let pauses = pauses.into_iter().map(|id| (id, Arc::default())).collect();
         Self {
-            watched_since: HashMap::new(),
+            since: Default::default(),
             pauses: RwLock::new(pauses),
             trends: Default::default(),
             watched: Default::default(),
