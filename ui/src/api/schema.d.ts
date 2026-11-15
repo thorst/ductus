@@ -172,8 +172,9 @@ export interface paths {
         /**
          * Deploy a stored release to this engine (release mode): this environment's rules, the "replaces"
          *     check, what it changes here (`plan`), the gate (or a recent passing check reused), then **in
-         *     place** when only interfaces' code, destinations and destination settings change (those
-         *     interfaces' workers restart between two messages on the new code; the others never pause), else
+         *     place** when only interfaces' code, destinations and destination settings change, or
+         *     interfaces are added or removed (those interfaces' workers and sources restart, start or stop
+         *     between two messages; the others never pause), else
          *     the handover to an engine running it (`plan.handover_because` says why); or roll back
          *     (`rollback`) to a release that ran here before, the same way. Answers once it runs (in place:
          *     milliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as

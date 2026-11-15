@@ -7,12 +7,15 @@
 //! changed), `output`, `retry`, `rate_limit`, `timeout`, and what only people and alerts read
 //! (`about`, `custom`, `monitor`, `alert`). Everything else in interface.yaml shapes how messages
 //! are received, stored or laid out in lanes (`source`, `format`, `ordering`, `isolation`,
-//! `workers`, `dedicated_pools`, `durability`, `dedupe`, `retention`, `quarantined`): those, an
-//! interface added or removed, and the project's own files (`ductus.yaml`, `resources.yaml`,
-//! `environments/`, `secrets/`) go by the handover, the answer saying which. An interface added or
-//! removed goes in place when it has no source of its own (`source: internal`, fed by routes); one
-//! with a listener, file pickup or schedule still by the handover (0.7.5.2.1 moves those in place
-//! next, then 0.7.5.2.2 sources changed).
+//! `workers`, `dedicated_pools`, `durability`, `dedupe`, `retention`, `quarantined`): those and
+//! the project's own files (`ductus.yaml`, `resources.yaml`, `environments/`, `secrets/`) go by
+//! the handover, the answer saying which (0.7.5.2.2 moves sources changed in place next).
+//!
+//! An interface added or removed goes in place whatever its source (0.7.5.2.1): its listener,
+//! file pickup or schedule starts or stops alone (`sources`). What only the settings resolved
+//! can tell (`${...}` filled in) is decided as it's applied, the deploy then taking the handover
+//! with the reason (`sources::in_place`: a port moving from a removed interface to an added one,
+//! HTTP interfaces sharing a port).
 
 use anyhow::{Context, Result};
 use ductus_core::yaml::Value;
@@ -80,19 +83,8 @@ pub fn plan(running: &Side, next: &Side, project_changed: bool) -> Result<Plan> 
         let change = match (running.get(name), next.get(name)) {
             (Some((before, _)), Some((after, _))) if before == after => continue,
             (Some((_, before)), Some((_, after))) => interface(name, before, after)?,
-            (None, Some((_, yaml))) => Change {
-                interface: name.into(),
-                what: vec![ADDED.into()],
-                apply: added_or_removed(
-                    yaml,
-                    "a new interface with a source of its own (its source starts at a start)",
-                ),
-            },
-            (Some((_, yaml)), None) => Change {
-                interface: name.into(),
-                what: vec![REMOVED.into()],
-                apply: added_or_removed(yaml, "removed, with a source of its own (its source stops with the engine)"),
-            },
+            (None, Some(_)) => Change { interface: name.into(), what: vec![ADDED.into()], apply: Apply::InPlace },
+            (Some(_), None) => Change { interface: name.into(), what: vec![REMOVED.into()], apply: Apply::InPlace },
             (None, None) => unreachable!("from either side"),
         };
         changes.push(change);
@@ -118,18 +110,6 @@ impl Change {
     /// The interface is gone: the deploy removes it.
     pub fn is_removed(&self) -> bool {
         self.what == [REMOVED]
-    }
-}
-
-/// How an interface added or removed (its interface.yaml `yaml`) applies: in place when it has
-/// no source of its own to start or stop (`source: internal`: other interfaces route to it), else
-/// by the handover (`why`).
-fn added_or_removed(yaml: &str, why: &str) -> Apply {
-    let source =
-        ductus_core::yaml::parse(yaml).ok().and_then(|v| entries(Some(&v))).and_then(|e| e.get("source").cloned());
-    match source.as_ref().and_then(Value::as_str) {
-        Some("internal") => Apply::InPlace,
-        _ => Apply::Handover(why.into()),
     }
 }
 
@@ -225,8 +205,8 @@ mod tests {
         assert!(plan.in_place());
     }
 
-    /// A source, lanes, an interface added or removed, or the project's files: by the handover,
-    /// each saying why.
+    /// A source, lanes or the project's files: by the handover, each saying why (the interfaces
+    /// added and removed beside them would go in place).
     #[test]
     fn what_shapes_receiving_or_lanes_needs_the_handover() {
         let port = LAB.replace("6661", "6662");
@@ -236,27 +216,29 @@ mod tests {
         let plan = plan(&running, &next, true).unwrap();
         assert!(!plan.in_place());
         let why = plan.handover_because();
+        assert_eq!(why.len(), 3, "{why:#?}");
         assert!(why[0].starts_with("the project's own files changed"), "{why:#?}");
         assert!(why[1].starts_with("adt: `source` changed"), "{why:#?}");
         assert!(why[2].starts_with("b: `ordering` changed"), "{why:#?}");
-        assert!(why[3].starts_with("gone: removed, with a source of its own"), "{why:#?}");
-        assert!(why[4].starts_with("new: a new interface with a source of its own"), "{why:#?}");
         assert!(super::plan(&running, &running, false).unwrap().changes.is_empty(), "nothing changes");
     }
 
-    /// An interface added or removed with no source of its own (`source: internal`, fed by
+    /// An interface added or removed, whatever its source (a listener, file pickup, a schedule,
     /// routes): in place, said as added or removed.
     #[test]
-    fn an_internal_interface_is_added_and_removed_in_place() {
+    fn interfaces_are_added_and_removed_in_place() {
         let internal = "name: inbox\nsource: internal\ndestinations:\n  out: { file: { dir: out } }\n";
+        let files = "name: drop\nsource: { file: { dir: in } }\ndestinations:\n  out: { file: { dir: out } }\n";
         let routes = format!("{LAB}  inbox: {{ interface: inbox }}\n");
-        let running = side(&[("adt", "v1", LAB), ("old", "o", internal)]);
-        let next = side(&[("adt", "v2", &routes), ("inbox", "i", internal)]);
+        let running = side(&[("adt", "v1", LAB), ("old", "o", internal), ("mllp", "m", LAB)]);
+        let next = side(&[("adt", "v2", &routes), ("inbox", "i", internal), ("drop", "d", files)]);
         let plan = plan(&running, &next, false).unwrap();
         assert!(plan.in_place(), "{plan:#?}");
         let by_name = |n: &str| plan.changes.iter().find(|c| c.interface == n).unwrap();
         assert!(by_name("inbox").is_added() && !by_name("inbox").is_removed());
+        assert!(by_name("drop").is_added());
         assert!(by_name("old").is_removed() && !by_name("old").is_added());
+        assert!(by_name("mllp").is_removed());
         assert!(!by_name("adt").is_added() && !by_name("adt").is_removed());
     }
 

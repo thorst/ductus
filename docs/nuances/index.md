@@ -48,7 +48,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Local development](dev.md) (2)
 - [Upgrades](upgrades.md) (17)
 - [What runs, recorded](deployments.md) (17)
-- [Releases](releases.md) (31)
+- [Releases](releases.md) (32)
 - [Windows](windows.md) (9)
 
 ## Level 1: Foundations (39)
@@ -93,7 +93,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (119)
+## Level 2: Practitioner (120)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -200,6 +200,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A deploy is refused when it would undo someone else's work, and a release is the whole project](releases.md#a-deploy-is-refused-when-it-would-undo-someone-elses-work-and-a-release-is-the-whole-project-level-2) (Releases)
 - [A deploy reuses a recent passing check only when nothing was deployed there since](releases.md#a-deploy-reuses-a-recent-passing-check-only-when-nothing-was-deployed-there-since-level-2) (Releases)
 - [In release mode the files on the server are the database's copy](releases.md#in-release-mode-the-files-on-the-server-are-the-databases-copy-level-2) (Releases)
+- [An interface added or removed in place starts or stops alone](releases.md#an-interface-added-or-removed-in-place-starts-or-stops-alone-level-2) (Releases)
 - [A deploy in place is all or nothing](releases.md#a-deploy-in-place-is-all-or-nothing-level-2) (Releases)
 - [Where a release went, and its branch, are labels in its file, not proof](releases.md#where-a-release-went-and-its-branch-are-labels-in-its-file-not-proof-level-2) (Releases)
 - [An environment's rules aren't skipped by `--force`; a rollback isn't held to them](releases.md#an-environments-rules-arent-skipped-by---force-a-rollback-isnt-held-to-them-level-2) (Releases)

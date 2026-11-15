@@ -675,10 +675,17 @@ the old code and take the next on the new one; a destination added gets a delive
 message waiting, a removed one's waiting deliveries are filtered; the other interfaces never
 pause, and no new engine starts. The deployment is recorded as `how` = `deploy`.
 
+An interface the release **adds or removes** goes in place too, whatever its source: an added one
+is claimed, its code loaded and its listener, file pickup, schedule or HTTP route started; a
+removed one stops taking messages, its port closes and its claim is given back. A port moving from
+a removed interface to an added one, or an HTTP interface on a port it shares with another, still
+takes the handover
+([nuance](../nuances/releases.md#an-interface-added-or-removed-in-place-starts-or-stops-alone-level-2)).
+
 Anything else needs the **handover**, and the answer says which change did (`needs the handover:
 …`): a source (its port, TLS, folder, schedule), `format`, `ordering`, `workers`, `isolation`,
-`dedupe`, `retention` and the other settings of how messages are received and stored; an
-interface added or removed; the project's own files (`ductus.yaml`, `resources.yaml`,
+`dedupe`, `retention` and the other settings of how messages are received and stored; the
+project's own files (`ductus.yaml`, `resources.yaml`,
 `docs-schema.yaml`, `environments/`, `secrets/`); the first release on an engine
 ([nuance](../nuances/releases.md#a-deploy-goes-in-place-only-when-it-changes-interfaces-code-destinations-or-destination-settings-level-1)).
 Here a release raises an interface's lanes (`scripts/demo-promote.sh`, step 11):

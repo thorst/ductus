@@ -38,6 +38,7 @@ pub mod retention;
 mod schedule;
 mod services;
 mod sftp;
+pub mod sources;
 mod split;
 pub mod stats;
 pub mod systemd;
@@ -420,7 +421,6 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         }
         None => None,
     };
-    let sftp_server = |name: &str| resources.sftp.get(name).cloned();
     // Host names in `allow:` lists, looked up while the database connects (needed before
     // anything listens); nothing at all when no list names a host.
     let allow_lists = configs.iter().filter_map(|c| c.source.allow()).chain(settings.api.allow.iter());
@@ -794,34 +794,21 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     systemd::keep_only(
         listening.iter().map(|l| (l.host.as_str(), l.port)).chain(api_address.iter().map(|(h, p)| (h.as_str(), *p))),
     );
-    for (config, ..) in &interfaces {
-        let intake = || intakes[&config.name].clone();
-        match &config.source {
-            Source::Mllp { host, port, tls, allow } => {
-                let label = format!("interface `{}` (MLLP)", config.name);
-                let admission = admission(&label, host, *port, allow.as_ref())?;
-                ingest::spawn_mllp(intake(), server_tls(tls, &[])?, admission, ended.clone()).await?
-            }
-            Source::File(f) | Source::Sftp(f) => {
-                let server = f.server.as_deref().and_then(sftp_server);
-                let watcher = files::FileWatcher::new(intake(), server, owner.ownership.clone())?;
-                tokio::spawn(ended.clone().run_until_cancelled_owned(watcher.run()));
-            }
-            Source::Schedule(s) => {
-                let timing = ductus_core::schedule::Timing::new(s)?;
-                tokio::spawn(ended.clone().run_until_cancelled_owned(schedule::run(
-                    intake(),
-                    timing,
-                    owner.ownership.clone(),
-                )));
-            }
-            Source::Http { .. } => {} // served below, with the other HTTP interfaces on its port
-            Source::Internal => {}    // other interfaces' workers store its messages (routes)
-        }
-    }
-    // HTTP sources stop with the workers, or first in a handover (`receiving`).
+    // HTTP sources stop with the workers, or first in a handover (`receiving`); the others with
+    // the engine's run. Each also alone, when a deploy in place removes its interface.
     let receiving = stopping.child_token();
-    let http_servers = http::serve(http_endpoints, receiving.clone()).await?;
+    let sources = sources::Sources::new(
+        names.clone(),
+        certificates.clone(),
+        resources.sftp.clone(),
+        owner.ownership.clone(),
+        ended.clone(),
+        receiving.clone(),
+    );
+    for (config, ..) in &interfaces {
+        sources.start(config, intakes.get(&config.name).cloned()).await?;
+    }
+    sources.serve(http_endpoints).await?;
     let certificate_changes = certificates.watch(stopping.clone());
     phases.mark("listening");
     let running: Vec<control::Running> = interfaces
@@ -889,6 +876,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         host: audit::host_name(),
         releases: releases.clone(),
         ended: ended.clone(),
+        sources,
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse
@@ -1096,7 +1084,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         systemd::handing_over();
         receiving.cancel();
         let until = tokio::time::Instant::now() + Duration::from_secs(5);
-        for server in http_servers {
+        for server in engine.sources.take_servers() {
             let _ = tokio::time::timeout_at(until, server).await;
         }
     } else {

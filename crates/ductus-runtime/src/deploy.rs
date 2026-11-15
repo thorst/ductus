@@ -499,6 +499,11 @@ pub async fn apply_in_place(
         if let Err(e) = crate::check_together(&next_set, &engine.resources, api.map(|a| a.port), api_tls, alerts) {
             return Err(crate::ownership::Refused(format!("the interfaces it would leave running: {e:#}")).into());
         }
+        // Their sources start and stop alone, unless a port moves or is shared.
+        let now: Vec<&ductus_core::InterfaceConfig> = running.iter().map(|r| &*r.config).collect();
+        let adding: Vec<&ductus_core::InterfaceConfig> = added.iter().map(|(c, _)| c).collect();
+        let removing: Vec<&str> = removed.iter().map(|(n, _)| n.as_str()).collect();
+        crate::sources::in_place(&now, &adding, &removing)?;
     }
     let timed = |result, started: std::time::Instant| (result, started.elapsed());
     // Added first: a changed interface may route to one.

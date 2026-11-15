@@ -347,15 +347,17 @@ struct Keys {
 /// Start an MLLP listener feeding `intake`, over TLS with `tls`; connections from addresses
 /// `admission` refuses are closed before the handshake or any read. While its gate is closed
 /// (draining) the listener is closed, so senders see the engine as down and keep their messages;
-/// it opens again when the gate does.
+/// it opens again when the gate does. On `stop` (the engine ended, or a deploy in place removed
+/// the interface: `sources::Sources::stop`) it closes as for a drain (each connection finishes
+/// the message in hand) and its task, returned, ends.
 pub async fn spawn_mllp(
     intake: Arc<Intake>,
     tls: Option<Arc<rustls::ServerConfig>>,
     admission: crate::tls::Admission,
-    ended: tokio_util::sync::CancellationToken,
-) -> Result<()> {
+    stop: tokio_util::sync::CancellationToken,
+) -> Result<tokio::task::JoinHandle<()>> {
     let config = intake.config.clone();
-    let Source::Mllp { host, port, .. } = &config.source else { return Ok(()) };
+    let Source::Mllp { host, port, .. } = &config.source else { anyhow::bail!("`{}` has no MLLP source", config.name) };
     let (host, port) = (host.clone(), *port);
     let bind = {
         let host = host.clone();
@@ -389,11 +391,14 @@ pub async fn spawn_mllp(
             }
         }
     };
-    // Until the engine ended: after a stop its gate stays closed, and this would wait forever.
-    tokio::spawn(ended.run_until_cancelled_owned(async move {
+    // Until `stop`: after the engine's stop its gate stays closed, and this would wait forever.
+    Ok(tokio::spawn(async move {
         let name = &intake.config.name;
         loop {
-            intake.gate.opened().await;
+            tokio::select! {
+                _ = intake.gate.opened() => {}
+                _ = stop.cancelled() => return,
+            }
             let listener = match listener.take() {
                 Some(l) => l,
                 None => match bind().await {
@@ -408,8 +413,8 @@ pub async fn spawn_mllp(
             // Debug: one line per interface is a thousand lines at every start, stop and drain of
             // a big engine; the `started` line counts them, and `ductus ports` lists them.
             tracing::debug!(interface = %name, address = %listener.local_addr().map(|a| a.to_string()).unwrap_or_default(), "listening (MLLP)");
-            let stop = ductus_mllp::CancellationToken::new();
-            let serve = ductus_mllp::serve_with(listener, open.clone(), handler.clone(), stop.clone());
+            let serving = ductus_mllp::CancellationToken::new();
+            let serve = ductus_mllp::serve_with(listener, open.clone(), handler.clone(), serving.clone());
             tokio::pin!(serve);
             tokio::select! {
                 result = &mut serve => {
@@ -421,14 +426,20 @@ pub async fn spawn_mllp(
                 _ = intake.gate.closed() => {
                     // A drain: closed for real (a stop keeps the socket in systemd's store).
                     crate::systemd::release(&host, port);
-                    stop.cancel();
+                    serving.cancel();
                     let _ = serve.await;
                     tracing::debug!(interface = %name, "MLLP listener closed: not taking new messages");
                 }
+                // The socket isn't released here: at the engine's end it stays kept for the next
+                // start (or the engine taking over); a removal released it before this.
+                _ = stop.cancelled() => {
+                    serving.cancel();
+                    let _ = serve.await;
+                    return;
+                }
             }
         }
-    }));
-    Ok(())
+    }))
 }
 
 /// Store an HL7 message and build its ACK. `None`: it came in after the gate closed, so the

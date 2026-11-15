@@ -54,6 +54,9 @@ pub struct Names {
     /// When each name was last looked up because of a refusal.
     rechecked: Mutex<HashMap<String, Instant>>,
     resolve: Resolver,
+    /// The refresh not started because there were no names yet (how often, and until when): it
+    /// starts with the first names added (`add`).
+    idle: Mutex<Option<(Duration, CancellationToken)>>,
 }
 
 impl Names {
@@ -65,7 +68,25 @@ impl Names {
 
     pub fn new(names: impl IntoIterator<Item = String>, resolve: Resolver) -> Arc<Self> {
         let state = names.into_iter().map(|n| (n, Resolved::default())).collect();
-        Arc::new(Self { state: RwLock::new(state), rechecked: Mutex::default(), resolve })
+        Arc::new(Self { state: RwLock::new(state), rechecked: Mutex::default(), resolve, idle: Mutex::default() })
+    }
+
+    /// Keep `names` resolved too (an interface a deploy in place adds names hosts in `allow:`):
+    /// those new here are looked up now, so its listener lets them in from its first connection,
+    /// and with the others from then on (the refresh starts now if the start had no names).
+    pub async fn add(self: &Arc<Self>, names: impl IntoIterator<Item = String>) {
+        let new: Vec<String> = {
+            let mut state = self.state.write().expect("names lock");
+            names.into_iter().filter(|n| state.insert(n.clone(), Resolved::default()).is_none()).collect()
+        };
+        if new.is_empty() {
+            return;
+        }
+        futures_util::future::join_all(new.iter().map(|n| self.resolve_one(n))).await;
+        let idle = self.idle.lock().expect("names lock").take();
+        if let Some((every, stop)) = idle {
+            self.start_every(every, stop);
+        }
     }
 
     pub fn is_empty(&self) -> bool {
@@ -181,6 +202,7 @@ impl Names {
 
     fn start_every(self: &Arc<Self>, every: Duration, stop: CancellationToken) {
         if self.is_empty() {
+            *self.idle.lock().expect("names lock") = Some((every, stop));
             return;
         }
         let me = Arc::downgrade(self);
@@ -430,6 +452,32 @@ mod tests {
         none.start_every(Duration::from_millis(1), CancellationToken::new());
         tokio::time::sleep(Duration::from_millis(30)).await;
         assert_eq!(calls.load(Ordering::SeqCst), 0, "no names, no task, no lookups");
+    }
+
+    /// An interface a deploy in place adds names a host: it is looked up before `add` returns
+    /// (its listener lets it in from the first connection), and the refresh the start had no
+    /// names for starts then. A name already kept isn't looked up again.
+    #[tokio::test]
+    async fn names_added_later_are_looked_up_at_once_and_then_on_the_timer() {
+        let (resolver, map, calls) = table(&[("epic.local", "10.1.30.22")]);
+        let names = Names::new(Vec::<String>::new(), resolver);
+        names.start_every(Duration::from_millis(20), CancellationToken::new());
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no names yet");
+
+        names.add(["epic.local".to_string()]).await;
+        assert!(names.has("epic.local", "10.1.30.22".parse().unwrap()), "looked up before add returned");
+        names.add(["epic.local".to_string()]).await;
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "kept already: not looked up again");
+
+        map.lock().unwrap().insert("epic.local".into(), vec!["10.1.30.23".parse().unwrap()]);
+        for _ in 0..100 {
+            if names.has("epic.local", "10.1.30.23".parse().unwrap()) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(names.has("epic.local", "10.1.30.23".parse().unwrap()), "the refresh started with it");
     }
 
     #[tokio::test]

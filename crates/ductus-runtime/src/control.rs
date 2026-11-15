@@ -179,6 +179,9 @@ pub struct Engine {
     /// step (its API server, hourly jobs, alert rounds) ends with it, so an engine started again
     /// in the same process (an in-process handover) leaves nothing of it behind.
     pub ended: CancellationToken,
+    /// Every interface's source: a deploy in place starts an added one's and stops a removed
+    /// one's, alone.
+    pub sources: crate::sources::Sources,
 }
 
 /// Where the engine's REST API (and web UI) listens, and its `tls` (none: plain HTTP).
@@ -218,6 +221,7 @@ pub struct Parts {
     pub host: String,
     pub releases: Option<crate::deploy::Releases>,
     pub ended: CancellationToken,
+    pub sources: crate::sources::Sources,
 }
 
 impl Engine {
@@ -248,6 +252,7 @@ impl Engine {
             host,
             releases,
             ended,
+            sources,
         } = parts;
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
@@ -291,6 +296,7 @@ impl Engine {
             releases,
             asker: std::sync::OnceLock::new(),
             ended,
+            sources,
         });
         tokio::spawn(engine.ended.clone().run_until_cancelled_owned(monitor(Arc::downgrade(&engine))));
         engine
@@ -380,11 +386,14 @@ impl Engine {
     /// its lanes decided, its destinations registered, its configured retention applied, what
     /// waits for it from before matched to its destinations now (as a start matches them), what's
     /// stored about it loaded (last activity, pauses), its code loaded and its workers started
-    /// (`in_place::Kept::add`), its version saved, and shown. Its gate stays closed while the
-    /// engine drains. Answers its version, for the deploy's record.
+    /// (`in_place::Kept::add`), its source started (`sources::Sources::add`: its listener, file
+    /// pickup or schedule; an HTTP route on a server of its own, respond mode too), its version
+    /// saved, and shown. Its gate stays closed while the engine drains. Answers its version, for
+    /// the deploy's record. A respond-mode interface stores nothing: it is neither claimed nor
+    /// managed (as at a start).
     ///
-    /// All or nothing: an error leaves it unclaimed and unwatched (its lanes and destinations
-    /// stay registered: a start would register them the same way).
+    /// All or nothing: an error leaves it unclaimed, unwatched and with no workers or source (its
+    /// lanes and destinations stay registered: a start would register them the same way).
     pub(crate) async fn add_interface(
         self: &Arc<Self>,
         config: InterfaceConfig,
@@ -394,13 +403,9 @@ impl Engine {
         if self.interface(&name).is_some() || self.kept.contains(&name) {
             anyhow::bail!("interface `{name}` already runs here");
         }
-        if config.responds() {
-            return Err(crate::in_place::NeedsHandover(format!(
-                "`{name}` was added in respond mode: its HTTP route is served by a handover"
-            ))
-            .into());
+        if !config.responds() {
+            self.owner.add(&self.store, std::slice::from_ref(&name)).await?;
         }
-        self.owner.add(&self.store, std::slice::from_ref(&name)).await?;
         match self.add_claimed(Arc::new(config), root).await {
             Ok(applied) => Ok(applied),
             Err(e) => {
@@ -442,18 +447,30 @@ impl Engine {
             .collect();
         let lanes = Arc::new(crate::lanes::Lanes::new(layout, config.slots(), ids.len()));
         crate::lanes::retire_when_settled(store.clone(), name.clone(), lanes.clone(), self.ended.clone());
-        let tier = self.retention.add(self.retention.configured(&config)).await?;
-        let intake = Arc::new(crate::ingest::Intake::new(
-            config.clone(),
-            store.clone(),
-            wake.clone(),
-            gate.clone(),
-            ids.clone(),
-            tier,
-            stats.clone(),
-            lanes.clone(),
-        )?);
-        if !names.is_empty() {
+        // Respond mode: no queue, so no intake, retention or stored activity (as at a start); its
+        // requests come over a channel to its first worker.
+        let queued = !config.responds();
+        let (calls, requests) = match queued {
+            true => (None, None),
+            false => {
+                let (calls, requests) = tokio::sync::mpsc::channel(1024);
+                (Some(calls), Some(requests))
+            }
+        };
+        let intake = match queued {
+            true => Some(Arc::new(crate::ingest::Intake::new(
+                config.clone(),
+                store.clone(),
+                wake.clone(),
+                gate.clone(),
+                ids.clone(),
+                self.retention.add(self.retention.configured(&config)).await?,
+                stats.clone(),
+                lanes.clone(),
+            )?)),
+            false => None,
+        };
+        if queued && !names.is_empty() {
             let reconciled =
                 store.reconcile(&names, &ids).await.context("matching what waits for it to its destinations")?;
             for (_, count) in &reconciled.added {
@@ -463,11 +480,13 @@ impl Engine {
                 tracing::warn!(interface = %name, %destination, count, "destination is no longer in interface.yaml: its pending deliveries were marked filtered");
             }
         }
-        let watched = crate::activity::Watched {
-            stats: stats.clone(),
-            destinations: destinations.iter().map(|d| (d.id, d.stats.clone())).collect(),
-        };
-        self.activity.watch(watched).await.context("loading its last activity")?;
+        if queued {
+            let watched = crate::activity::Watched {
+                stats: stats.clone(),
+                destinations: destinations.iter().map(|d| (d.id, d.stats.clone())).collect(),
+            };
+            self.activity.watch(watched).await.context("loading its last activity")?;
+        }
         let outlets = config
             .destinations()
             .zip(&destinations)
@@ -491,33 +510,45 @@ impl Engine {
             stats: stats.clone(),
             lanes: lanes.clone(),
             outlets,
-            intake: Some(intake.clone()),
+            intake: intake.clone(),
             decided: decided.clone(),
             threads: Vec::new(),
             removed: false,
         };
-        let files = self.kept.add(interface, None).await?;
-        let (version, id) = self.saved_version(&config, files, root, saving, &decided).await;
-        let running = Running { config, health, gate: gate.clone(), stats, destinations, intake: Some(intake), lanes };
-        self.add_running(running);
+        let files = self.kept.add(interface, requests).await?;
+        // Closed before it receives anything while the engine drains (an MLLP listener then
+        // waits for the gate to open).
         if !matches!(self.drain_state(), DrainState::Accepting) {
             gate.set_open(false);
         }
+        // Its workers run: now its source (as a start listens once the code loaded).
+        if let Err(e) = self.sources.add(&config, intake.clone(), calls).await {
+            if let Err(e) = self.kept.remove(&name).await {
+                tracing::error!(interface = %name, error = %format!("{e:#}"), "couldn't stop the workers of an interface whose source didn't start");
+            }
+            return Err(e.context(format!("`{name}`: starting its source")));
+        }
+        let (version, id) = self.saved_version(&config, files, root, saving, &decided).await;
+        let running = Running { config, health, gate, stats, destinations, intake, lanes };
+        self.add_running(running);
         Ok(crate::deployment::Applied { interface: name, version, id })
     }
 
     /// Stop running interface `name` (a deploy in place removed it): its gate closed and what it
-    /// was storing finished, its workers stopped between messages (the message in hand finishes
-    /// and is saved), then it is no longer shown, watched or managed (retention), and its claim is
-    /// given back, so another engine may run it. What waits for it stays stored, for whichever
-    /// engine runs it next. Its alerts stay as they were, no longer judged (as after a handover
-    /// that leaves it out). Errors only when it isn't running here.
+    /// was storing finished, its source stopped (`sources::Sources::stop`: its port given back,
+    /// an HTTP server's requests in flight answered, respond mode's too), its workers stopped
+    /// between messages (the message in hand finishes and is saved), then it is no longer shown,
+    /// watched or managed (retention), and its claim is given back, so another engine may run it.
+    /// What waits for it stays stored, for whichever engine runs it next. Its alerts stay as they
+    /// were, no longer judged (as after a handover that leaves it out). Errors only when it isn't
+    /// running here.
     pub(crate) async fn remove_interface(self: &Arc<Self>, name: &str) -> Result<()> {
         let running = self.interface(name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
         running.gate.set_open(false);
         while running.gate.in_flight() > 0 {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
+        self.sources.stop(name).await;
         self.kept.remove(name).await?;
         self.remove_running(name);
         self.let_go(name).await;

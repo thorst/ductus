@@ -429,8 +429,9 @@ enum Command {
     /// it against what runs there (the "replaces" check: refused when it would undo someone
     /// else's work), runs the gate (`ductus release check`) against its environment unless a
     /// recent passing check can be reused, then applies it **in place** when only interfaces'
-    /// code, destinations and destination settings change (those interfaces take their new code
-    /// between two messages; the others never pause), else hands over to an engine running it
+    /// code, destinations and destination settings change, or interfaces are added or removed
+    /// (those interfaces take their new code, start or stop between two messages; the others
+    /// never pause), else hands over to an engine running it
     /// (receiving never stops; the answer says which change needed it). Exits 1 when it wasn't
     /// deployed. Needs a token with the `deploy` permission.
     /// A file deployed gets the record of where it went written into it (its id unchanged), which
@@ -481,9 +482,9 @@ enum Command {
         #[arg(long)]
         all_tests: bool,
         /// Only in place: refuse (before the gate runs) when the release changes something only a
-        /// handover applies (a source, lanes, an interface added or removed, the project's own
-        /// files), and when applying in place fails, instead of handing over. For sites that
-        /// schedule handovers.
+        /// handover applies (a source changed, lanes, the project's own files, a port moving from
+        /// one interface to another), and when applying in place fails, instead of handing over.
+        /// For sites that schedule handovers.
         #[arg(long)]
         in_place_only: bool,
         /// The engine's report as JSON.

@@ -46,13 +46,30 @@ pub struct Endpoint {
 
 const RESPOND_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Start one server per (host, port) with every endpoint's route. On `stop` each answers the
-/// requests in flight, then closes (respond-mode workers end once nothing can reach them); the
-/// tasks returned end then.
-pub async fn serve(
-    endpoints: Vec<Endpoint>,
-    stop: tokio_util::sync::CancellationToken,
-) -> Result<Vec<tokio::task::JoinHandle<()>>> {
+/// One HTTP server: an address, the interfaces it routes to, and its own stop.
+pub struct Server {
+    pub host: String,
+    pub port: u16,
+    pub interfaces: Vec<String>,
+    /// A child of the `stop` it was served with: cancelled alone, only this server stops.
+    pub stop: tokio_util::sync::CancellationToken,
+    /// Ends once it answered the requests in flight and closed.
+    pub task: tokio::task::JoinHandle<()>,
+}
+
+impl Route {
+    fn interface(&self) -> &str {
+        match self {
+            Route::Queue(intake) => &intake.config.name,
+            Route::Respond { interface, .. } => interface,
+        }
+    }
+}
+
+/// Start one server per (host, port) with every endpoint's route. On `stop` (or its own) each
+/// answers the requests in flight, then closes (respond-mode workers end once nothing can reach
+/// them); its task ends then.
+pub async fn serve(endpoints: Vec<Endpoint>, stop: &tokio_util::sync::CancellationToken) -> Result<Vec<Server>> {
     let mut tasks = Vec::new();
     let mut servers: BTreeMap<(String, u16), Vec<Endpoint>> = BTreeMap::new();
     for e in endpoints {
@@ -61,6 +78,7 @@ pub async fn serve(
     for ((host, port), endpoints) in servers {
         let tls = endpoints.first().and_then(|e| e.tls.clone());
         let admission = endpoints.first().and_then(|e| e.admission.clone());
+        let interfaces: Vec<String> = endpoints.iter().map(|e| e.route.interface().to_string()).collect();
         let mut router = Router::new();
         let mut seen = HashSet::new();
         // Group methods per path: axum wants one route per path.
@@ -92,12 +110,14 @@ pub async fn serve(
             crate::systemd::listen(&host, port).await.with_context(|| format!("binding {protocol} {host}:{port}"))?;
         let listener = crate::tls::Listener::new(listener, tls, &format!("{protocol} {host}:{port}"), admission)?;
         tracing::info!(%host, port, "listening ({protocol})");
-        let stop = stop.clone();
-        tasks.push(tokio::spawn(async move {
-            if let Err(e) = axum::serve(listener, router).with_graceful_shutdown(stop.cancelled_owned()).await {
+        let own = stop.child_token();
+        let shutdown = own.clone().cancelled_owned();
+        let task = tokio::spawn(async move {
+            if let Err(e) = axum::serve(listener, router).with_graceful_shutdown(shutdown).await {
                 tracing::error!(error = %e, "HTTP server stopped");
             }
-        }));
+        });
+        tasks.push(Server { host, port, interfaces, stop: own, task });
     }
     Ok(tasks)
 }

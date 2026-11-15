@@ -5287,7 +5287,8 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
 /// refused, retried or dropped; every message is delivered once; B's deliveries were all decided
 /// by the code B ran before (it was never replaced); A's switch to the new version, and every A
 /// message received after the deploy answered is decided by it, recorded with the deploy's reason.
-/// Then (0.7.5.2.1) an interface fed by a route from A is added in place and removed in place.
+/// Then (0.7.5.2.1) an interface fed by a route from A is added in place and removed in place,
+/// and two with sources of their own (MLLP, respond-mode HTTP) while B receives.
 #[cfg(target_os = "linux")]
 #[tokio::test(flavor = "multi_thread")]
 async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
@@ -5522,9 +5523,73 @@ async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
     let owner = store.live_engines().await.unwrap().into_iter().find(|e| e.pid as u32 == engine.0).unwrap();
     assert!(!owner.interfaces.contains(&c), "C's claim given back: {:?}", owner.interfaces);
 
+    // Interfaces with sources of their own, added in place while B receives (0.7.5.2.1): D on an
+    // MLLP port of its own, E answering HTTP in respond mode on a port of its own. Each takes
+    // traffic at once; then both are removed in place and their ports close. B never notices.
+    let (d, e) = (format!("ipd-{nanos}"), format!("ipe-{nanos}"));
+    let (port_d, port_e) = (free_port(), free_port());
+    let e_yaml = format!(
+        "name: {e}\nsource: {{ http: {{ host: 127.0.0.1, port: {port_e}, path: /hello, method: GET, mode: respond }} }}\nformat: text\nscript: hello.ts\n"
+    );
+    let hello = "import type { HttpRequest } from \"@ductus/sdk\";\n\nexport function transform(req: HttpRequest) {\n  return `hello ${req.query.name ?? \"world\"}`;\n}\n";
+    let new_files = [
+        (&d, "interface.yaml", interface(&d, port_d)),
+        (&d, "tag.ts", tag.to_string()),
+        (&d, "value.ts", "export const TAG = \"D1\";\n".to_string()),
+        (&e, "interface.yaml", e_yaml),
+        (&e, "hello.ts", hello.to_string()),
+    ];
+    for (name, file, text) in &new_files {
+        std::fs::create_dir_all(dir.path().join(format!("interfaces/{name}"))).unwrap();
+        std::fs::write(dir.path().join(files(name, file)), text).unwrap();
+    }
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "D and E"]);
+    let five = release_json(dir.path(), &["-m", "D and E added"]);
+    let during = send(port_b, "300000");
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let (ok, out) = deploy(&[five["file"].as_str().unwrap(), "-m", "D and E added", "--in-place-only"]);
+    assert!(ok && out.contains("✓ applied in place"), "{out}\n{}", read(&log));
+    for name in [&d, &e] {
+        assert!(out.contains(&format!("· {name}: added (in place)")), "{out}");
+    }
+    assert_eq!(running().await, engine.0, "the same engine runs A and B");
+    let to_d = send(port_d, "400000");
+    let answer = reqwest::get(format!("http://127.0.0.1:{port_e}/hello?name=Todd")).await.unwrap();
+    assert_eq!(answer.text().await.unwrap(), "hello Todd", "E answers from its first request");
+    let (said_d, said_b) = tokio::task::spawn_blocking(move || (sent(to_d), sent(during))).await.unwrap();
+    for said in [&said_d, &said_b] {
+        assert!(said.contains("sent 400 messages"), "{said}");
+        assert!(said.contains("retries 0, rejected 0, refused 0, dropped 0"), "{said}");
+    }
+    for _ in 0..600 {
+        if delivered(&d) >= 400 && delivered(&b) >= 800 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!((delivered(&d), delivered(&b)), (400, 800), "D delivers each message once; B went on");
+
+    // Both removed in place: their ports closed by the time the deploy answers.
+    for name in [&d, &e] {
+        std::fs::remove_dir_all(dir.path().join(format!("interfaces/{name}"))).unwrap();
+    }
+    git(dir.path(), &["add", "-A"]);
+    git(dir.path(), &["commit", "-qm", "D and E gone"]);
+    let six = release_json(dir.path(), &["-m", "D and E removed"]);
+    let (ok, out) = deploy(&[six["file"].as_str().unwrap(), "-m", "D and E removed", "--in-place-only"]);
+    assert!(ok && out.contains("✓ applied in place"), "{out}\n{}", read(&log));
+    for name in [&d, &e] {
+        assert!(out.contains(&format!("· {name}: removed (in place)")), "{out}");
+    }
+    assert_eq!(running().await, engine.0, "the same engine still");
+    for port in [port_d, port_e] {
+        assert!(std::net::TcpStream::connect(("127.0.0.1", port)).is_err(), "port {port} closed with its interface");
+    }
+
     drop(engine);
     let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
-    let ids: Vec<Vec<u8>> = [&one, &two, &three, &four]
+    let ids: Vec<Vec<u8>> = [&one, &two, &three, &four, &five, &six]
         .iter()
         .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
         .collect();
