@@ -404,9 +404,9 @@ mod tests {
               "project": ["environments/prod.yaml: MLLP_PORT \"6661\" → \"6666\""] },
             "steps": [], "deployment": 44, "changes": []
         });
-        let t = text(&moved);
-        assert!(t.contains("· feed: source (MLLP_PORT) (in place)\n· environments/prod.yaml: MLLP_PORT"), "{t}");
-        assert!(t.contains("changed 1 interface:\n  feed new values: MLLP_PORT \"6661\" → \"6666\"\n"), "{t}");
+        let v = text(&moved);
+        assert!(v.contains("· feed: source (MLLP_PORT) (in place)\n· environments/prod.yaml: MLLP_PORT"), "{v}");
+        assert!(v.contains("changed 1 interface:\n  feed new values: MLLP_PORT \"6661\" → \"6666\"\n"), "{v}");
         assert!(t.contains("✗ refused: only the handover applies it"), "{t}");
     }
 

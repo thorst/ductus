@@ -215,7 +215,9 @@ test("a release changing only a variable's value moves the port in place, the ve
   // The interface's history has the values.
   await page.goto(`${base}/interfaces/${name}`);
   await page.getByRole("tab", { name: "History" }).click();
-  await expect(page.getByText('deployed new values: ARCHIVE_PORT "6728" → "6729" in place: the archive on 6729')).toBeVisible();
+  await expect(
+    page.getByText('deployed new values: ARCHIVE_PORT "6728" → "6729" in place: the archive on 6729'),
+  ).toBeVisible();
 });
 
 test("a viewer sees the releases and changes nothing", async ({ page }) => {

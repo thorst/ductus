@@ -270,6 +270,16 @@ What a release would change in this engine's environment, compared with what run
 | `interface` | text |  |
 | `to` (optional) | text or null | The release's (12 hex characters); none: removed. |
 
+### `HistoryVariable`
+
+A variable of the engine's environment file whose value a deploy changes (0.7.5.2.3).
+
+| Field | Type | |
+|---|---|---|
+| `after` (optional) | text or null | None: the variable is gone. |
+| `before` (optional) | text or null | As text (how code reads it); None: the variable is new. |
+| `name` | text |  |
+
 ### `PlaceInfo`
 
 Where a release was deployed: one entry of a release file's record (`deployed`).
@@ -292,6 +302,7 @@ What a release changes here, by kind (`changes::plan`).
 |---|---|---|
 | `changes` | list of [`PlannedChange`](#plannedchange) | Every interface whose code version changes, is added or is removed. |
 | `handover_because` | list of text | Why it needs the handover, a line per reason (the project's own files, then each interface); empty: it applies in place. |
+| `project` | list of text | What the project's own files change in place, a line each: the engine's environment file's variables (`environments/prod.yaml: MLLP_PORT "6661" → "6666"`) and `console:`, another environment's file changing nothing here. |
 
 ### `PlannedChange`
 
@@ -300,7 +311,8 @@ What a release changes here, by kind (`changes::plan`).
 | `handover_because` (optional) | text or null | Why only the handover applies it; absent when it goes in place. |
 | `in_place` | true or false | It can be applied in place (its workers restarted between messages). |
 | `interface` | text |  |
-| `what` | list of text | What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`, `source`, `added`, `removed`, ... |
+| `variables` (optional) | list of [`HistoryVariable`](#historyvariable) | The environment variables whose new values reach it, with their values before and after; absent when none do. |
+| `what` | list of text | What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`, `source`, `source (MLLP_PORT)` (a variable's new value moved it), `code reads EMPI_URL` (reloaded for a variable its code names), `added`, `removed`, ... |
 
 ### `Pulled`
 

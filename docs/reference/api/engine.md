@@ -354,7 +354,7 @@ The first message waiting in a lane: the next one its worker handles.
 
 | Field | Type | |
 |---|---|---|
-| `changed` | true or false | It changed this interface's code (false: it ran it as it was; `all` only). |
+| `changed` | true or false | It changed this interface: its code, or the value of a variable it uses (false: it ran it as it was; `all` only). |
 | `environment` | text |  |
 | `from` (optional) | text or null | The code version before (12 hex characters); none when new here, or unchanged. |
 | `git_commit` (optional) | text or null | The project's commit then (hex); none without git. |
@@ -362,8 +362,10 @@ The first message waiting in a lane: the next one its worker handles.
 | `how` | text | `start`, `service`, `handover` or `deploy` (a deploy applied in place, without a handover). |
 | `id` | number |  |
 | `reason` (optional) | text or null |  |
-| `to` (optional) | text or null | The code version from then; none when unchanged. |
+| `to` (optional) | text or null | The code version from then; none when unchanged (also when only `variables` changed). |
 | `uncommitted` (optional) | list of text or null | Files it ran that weren't the commit's; none without git. |
+| `variables` | list of [`HistoryVariable`](#historyvariable) | The environment variables whose new values reached it (0.7.5.2.3: its settings filled in moved, or its code names one), each with its value before and after; empty for most. Its code version doesn't change for these (it's the files as written, the same everywhere). |
+| `variables_changed` | list of text | What those variables changed, in words (`source (MLLP_PORT)`, `code reads EMPI_URL`). |
 | `version` | text | The binary's version. |
 | `warning` (optional) | text or null | Why this change may undo someone else's (folder mode), when it may. |
 
@@ -435,6 +437,16 @@ The parts of the interface an entry touches. None of them: the interface as a wh
 | `everything` | true or false | Every part alike: the interface came or went (or was renamed), its interface.yaml stopped or started parsing, a start ran it unchanged. |
 | `source` | true or false | Where messages come from: `source:`, `format`, `ordering`, `dedupe`, `durability`, `about.from`, the `monitor` times; an HTTP `respond` interface's code. |
 | `unsure` | true or false | Its code changed, but which part's wasn't recorded (a version saved before 0.7.4.2, or a file only such versions named): it may touch any part, so every part's history shows it, marked. |
+
+### `HistoryVariable`
+
+A variable of the engine's environment file whose value a deploy changes (0.7.5.2.3).
+
+| Field | Type | |
+|---|---|---|
+| `after` (optional) | text or null | None: the variable is gone. |
+| `before` (optional) | text or null | As text (how code reads it); None: the variable is new. |
+| `name` | text |  |
 
 ### `InterfaceCounts`
 
