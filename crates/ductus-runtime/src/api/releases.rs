@@ -467,11 +467,18 @@ async fn plan_here(
         let next: Manifest = serde_json::from_value(manifest.clone()).map_err(anyhow::Error::from)?;
         let before =
             engine.store.release_texts(&running.id, &crate::deploy::plan_reads(&running.manifest, &next)).await?;
-        let after = engine.store.release_texts(id, &crate::deploy::plan_reads(&next, &running.manifest)).await?;
+        let mut after = engine.store.release_texts(id, &crate::deploy::plan_reads(&next, &running.manifest)).await?;
         let read = |texts: &BTreeMap<String, String>, path: &str| {
             texts.get(path).cloned().ok_or_else(|| anyhow::anyhow!("`{path}` isn't stored with the release"))
         };
-        crate::deploy::plan_between(&running.manifest, |p| read(&before, p), &next, |p| read(&after, p))
+        let env = &engine.environment;
+        // A variable's new value: every interface.yaml and code file of the release, read once more.
+        if crate::deploy::variables_change(&running.manifest, |p| read(&before, p), &next, |p| read(&after, p), env)? {
+            let all = crate::deploy::plan_reads_for_variables(&next);
+            let missing: Vec<String> = all.into_iter().filter(|p| !after.contains_key(p)).collect();
+            after.extend(engine.store.release_texts(id, &missing).await?);
+        }
+        crate::deploy::plan_between(&running.manifest, |p| read(&before, p), &next, |p| read(&after, p), env)
     };
     match worked_out.await {
         Ok(plan) => Some(super::deployments::PlanInfo::of(&plan)),

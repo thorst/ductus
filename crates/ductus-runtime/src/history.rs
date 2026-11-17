@@ -73,7 +73,8 @@ pub enum Kind {
     Audit,
     /// Its documentation fields changed.
     Documentation,
-    /// An engine start or handover that changed its code (or ran it, with `all`).
+    /// An engine start, handover or deploy that changed its code or a variable's value it uses
+    /// (or ran it, with `all`).
     Deployment,
 }
 
@@ -138,14 +139,21 @@ pub struct DeploymentDetail {
     pub git_commit: Option<String>,
     /// Files it ran that weren't the commit's; none without git.
     pub uncommitted: Option<Vec<String>>,
-    /// It changed this interface's code (false: it ran it as it was; `all` only).
+    /// It changed this interface: its code, or the value of a variable it uses (false: it ran it
+    /// as it was; `all` only).
     pub changed: bool,
     /// The code version before (12 hex characters); none when new here, or unchanged.
     pub from: Option<String>,
-    /// The code version from then; none when unchanged.
+    /// The code version from then; none when unchanged (also when only `variables` changed).
     pub to: Option<String>,
     /// Why this change may undo someone else's (folder mode), when it may.
     pub warning: Option<String>,
+    /// The environment variables whose new values reached it (0.7.5.2.3: its settings filled in
+    /// moved, or its code names one), each with its value before and after; empty for most. Its
+    /// code version doesn't change for these (it's the files as written, the same everywhere).
+    pub variables: Vec<crate::changes::VariableChange>,
+    /// What those variables changed, in words (`source (MLLP_PORT)`, `code reads EMPI_URL`).
+    pub variables_changed: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, ToSchema)]
@@ -392,14 +400,25 @@ async fn deployments(
 
 /// What a deployment that changed the interface touches: everything when it's new here; else its
 /// interface.yaml compared (the two texts come with the row when they differ) and its code by each
-/// part's files.
+/// part's files; and what the variables it changed reach, as recorded.
 fn changed(d: &DeploymentEntry) -> Touches {
-    let (Some(from), Some(to)) = (&d.from, &d.to) else { return Touches { everything: true, ..Touches::default() } };
-    let touches = parts::code(from, to);
-    match (&d.from_yaml, &d.to_yaml) {
-        (Some(a), Some(b)) => touches.with(parts::yaml(Some(a), Some(b))),
-        (None, None) => touches,                  // the same interface.yaml
-        _ => Touches { unsure: true, ..touches }, // never: a version's files are kept
+    let by_variables: Option<Touches> = d.variables_touches.as_deref().and_then(|t| serde_json::from_str(t).ok());
+    let by_version = match (&d.from, &d.to) {
+        (Some(from), Some(to)) => {
+            let touches = parts::code(from, to);
+            match (&d.from_yaml, &d.to_yaml) {
+                (Some(a), Some(b)) => touches.with(parts::yaml(Some(a), Some(b))),
+                (None, None) => touches,                  // the same interface.yaml
+                _ => Touches { unsure: true, ..touches }, // never: a version's files are kept
+            }
+        }
+        (None, Some(_)) => Touches { everything: true, ..Touches::default() }, // new here
+        (_, None) => Touches::default(), // the same version: only variables changed
+    };
+    match by_variables {
+        Some(touches) => by_version.with(touches),
+        None if d.variables.is_some() => Touches { everything: true, ..by_version }, // unreadable: every part
+        None => by_version,
     }
 }
 
@@ -461,11 +480,18 @@ fn how(h: git::How) -> &'static str {
 
 fn deployment(d: DeploymentEntry, touches: Touches) -> Entry {
     let (from, to) = (d.from_version.as_deref().map(short), d.to_version.as_deref().map(short));
+    let variables: Vec<crate::changes::VariableChange> =
+        d.variables.as_deref().and_then(|v| serde_json::from_str(v).ok()).unwrap_or_default();
+    let values = variables.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ");
     let mut what = match (&from, &to, d.changed) {
         (Some(f), Some(t), _) => format!("deployed {f} → {t}"),
         (None, Some(t), _) => format!("deployed {t} (new here)"),
+        (_, None, true) if !variables.is_empty() => format!("deployed new values: {values}"),
         _ => format!("ran it unchanged ({})", d.how),
     };
+    if to.is_some() && !variables.is_empty() {
+        what.push_str(&format!(", with new values: {values}"));
+    }
     match d.how.as_str() {
         "handover" if d.changed => what.push_str(" by a handover"),
         "deploy" if d.changed => what.push_str(" in place"),
@@ -505,6 +531,8 @@ fn deployment(d: DeploymentEntry, touches: Touches) -> Entry {
             from,
             to,
             warning: d.warning,
+            variables,
+            variables_changed: d.variables_what.unwrap_or_default(),
         }),
         audit: None,
         documentation: None,

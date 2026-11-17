@@ -161,28 +161,48 @@ pub struct Who {
     pub reason: Option<String>,
     /// A rollback (`ductus deploy --rollback`): recorded on its deployment.
     pub rollback: bool,
+    /// What the deploy's new variable values change, by interface (0.7.5.2.3): recorded on its
+    /// deployment (`deployment_variables`). Empty for a start, a plain handover and most deploys.
+    pub variables: Vec<crate::changes::Reached>,
 }
 
 impl Who {
     /// A start: the account running it; `service` when a service manager started it (systemd, the
     /// Windows service), where that account is the service's.
     pub fn start(service: bool) -> Self {
-        Self { how: if service { "service" } else { "start" }, by: account(), reason: None, rollback: false }
+        let how = if service { "service" } else { "start" };
+        Self { how, by: account(), reason: None, rollback: false, variables: Vec::new() }
     }
 
-    /// A handover: whoever asked for it (`ductus handover`), and why if they said.
+    /// A handover: whoever asked for it (`ductus handover`), and why if they said; a deploy's
+    /// variables, worked out by the engine it replaces.
     pub fn handover(asked: &Asked) -> Self {
         Self {
             how: "handover",
             by: asked.by.clone().unwrap_or_else(|| "unknown (an engine before 0.7.3 asked)".into()),
             reason: asked.reason.clone(),
             rollback: asked.rollback,
+            variables: asked.variables.clone(),
         }
     }
 
-    /// A deploy applied in place: whoever asked for it (`ductus deploy`), and why.
-    pub fn deploy(by: &str, reason: Option<String>, rollback: bool) -> Self {
-        Self { how: "deploy", by: by.to_string(), reason, rollback }
+    /// A deploy applied in place: whoever asked for it (`ductus deploy`), and why, with what its
+    /// new variable values change (`changes::Plan::reached`).
+    pub fn deploy(by: &str, reason: Option<String>, rollback: bool, variables: Vec<crate::changes::Reached>) -> Self {
+        Self { how: "deploy", by: by.to_string(), reason, rollback, variables }
+    }
+
+    /// The rows `deployment_variables` gets.
+    fn new_variables(&self) -> Vec<ductus_store::NewVariables<'_>> {
+        self.variables
+            .iter()
+            .map(|r| ductus_store::NewVariables {
+                interface: &r.interface,
+                variables: serde_json::to_string(&r.variables).unwrap_or_default(),
+                what: &r.what,
+                touches: serde_json::to_string(&r.touches).unwrap_or_default(),
+            })
+            .collect()
     }
 }
 
@@ -276,6 +296,7 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
     };
     let warnings = self::warnings(&warned).await;
     let new = new_versions(&versions);
+    let variables = who.new_variables();
     let deployment = NewDeployment {
         environment: &engine.environment,
         instance: &engine.instance,
@@ -292,6 +313,7 @@ pub async fn record(engine: &crate::control::Engine, host: &str, who: &Who, r: R
         release: release.as_ref().map(|r| r.id.as_slice()),
         project_version: project_version.as_deref(),
         rollback: who.rollback,
+        variables: &variables,
     };
     let recorded = match store.record_deployment(&deployment, &saved.ids).await.context("recording the deployment") {
         Ok(r) => r,
@@ -372,6 +394,7 @@ pub async fn record_in_place(
     }
     let commit = release.as_deref().and_then(release_commit);
     let project_version = release.as_ref().and_then(|r| r.project_version());
+    let variables = who.new_variables();
     let configs: Vec<Arc<InterfaceConfig>> = interfaces.iter().map(|i| i.config.clone()).collect();
     let docs: Vec<ductus_store::DocsRow> = ductus_core::docs::snapshot(configs.iter().map(|c| &**c), &engine.resources)
         .into_iter()
@@ -393,6 +416,7 @@ pub async fn record_in_place(
         release: release.as_ref().map(|r| r.id.as_slice()),
         project_version: project_version.as_deref(),
         rollback: who.rollback,
+        variables: &variables,
     };
     let recorded = engine.store.record_deployment(&deployment, &ids).await.context("recording the deploy")?;
     let deployment = said(recorded, who, commit.as_ref(), release.as_deref(), warnings, started);

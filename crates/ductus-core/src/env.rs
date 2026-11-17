@@ -108,22 +108,16 @@ impl Environment {
     /// Load `<root>/environments/<name>.yaml` and `<root>/secrets/<name>.json` (both optional).
     pub fn load(root: &Path, name: &str) -> Result<Self> {
         let file = root.join("environments").join(format!("{name}.yaml"));
-        let parsed = if file.is_file() {
+        let (variables, console) = if file.is_file() {
             let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-            match serde_yaml_ng::from_str::<Value>(&text) {
-                Ok(Value::Null) => Ok(EnvironmentFile::default()),
-                Ok(value) => crate::yaml::from_value(value),
-                Err(e) => Err(e.into()),
-            }
-            .map_err(|e| crate::yaml::syntax(e, &text))
-            .with_context(|| format!("parsing {}", file.display()))?
+            read_file(&text).with_context(|| format!("parsing {}", file.display()))?
         } else if root.join("environments").is_dir() {
             bail!("unknown environment `{name}`: {} doesn't exist", file.display());
         } else {
-            EnvironmentFile::default()
+            (BTreeMap::new(), None)
         };
         let secrets = SecretStore::open(root, name)?;
-        Ok(Self { name: name.to_string(), variables: parsed.variables, secrets, console: parsed.console })
+        Ok(Self { name: name.to_string(), variables, secrets, console })
     }
 
     /// Which `console` lines from interface code reach the log here (`console:`, default `info`).
@@ -134,6 +128,11 @@ impl Environment {
     /// Whether the environment file says `console:` (else it's the default, `info`).
     pub fn console_written(&self) -> bool {
         self.console.is_some()
+    }
+
+    /// The environment file's variables by name, as written (secrets aren't among them).
+    pub fn variables(&self) -> &BTreeMap<String, Value> {
+        &self.variables
     }
 
     /// An environment with just these variables (for tests).
@@ -234,6 +233,91 @@ impl Environment {
         out.push_str(&text[last..]);
         Ok(Some(Value::String(out)))
     }
+}
+
+/// An environment file's text read as the engine reads it (`Environment::load`): its variables and
+/// its `console:` (None: not written). Empty text is an empty file. For a deploy's plan, which
+/// compares the file of two releases without loading either.
+pub fn read_file(text: &str) -> Result<(BTreeMap<String, Value>, Option<ConsoleLevel>)> {
+    let parsed = match serde_yaml_ng::from_str::<Value>(text) {
+        Ok(Value::Null) => Ok(EnvironmentFile::default()),
+        Ok(value) => crate::yaml::from_value::<EnvironmentFile>(value),
+        Err(e) => Err(e.into()),
+    }
+    .map_err(|e| crate::yaml::syntax(e, text))?;
+    Ok((parsed.variables, parsed.console))
+}
+
+/// Fill in `${NAME}` throughout a parsed document (`parse_yaml`) from `variables` alone, as
+/// `Environment::substitute` would, leaving `${secret:NAME}` and names `variables` doesn't have as
+/// written: what a deploy's plan compares, two releases' settings each filled in with its own
+/// environment file, without decrypting anything and without failing over a missing name (the
+/// gate and the apply report those).
+pub fn fill_variables(value: &mut Value, variables: &BTreeMap<String, Value>) {
+    match value {
+        Value::String(s) => {
+            if let Some(filled) = fill(s, variables) {
+                *value = filled;
+            }
+        }
+        Value::Sequence(items) => items.iter_mut().for_each(|item| fill_variables(item, variables)),
+        Value::Mapping(map) => map.iter_mut().for_each(|(_, v)| fill_variables(v, variables)),
+        Value::Tagged(tagged) => fill_variables(&mut tagged.value, variables),
+        _ => {}
+    }
+}
+
+/// One scalar of `fill_variables`; None when it names no variable `variables` has.
+fn fill(text: &str, variables: &BTreeMap<String, Value>) -> Option<Value> {
+    if !text.contains(OPEN) {
+        return None;
+    }
+    let refs = references(text);
+    let known = |r: &Ref| matches!(r, Ref::Variable(name) if variables.contains_key(name));
+    if !refs.iter().any(|(_, _, r)| known(r)) {
+        return None;
+    }
+    if let [(0, end, Ref::Variable(name))] = refs.as_slice()
+        && *end == text.len()
+    {
+        return variables.get(name).cloned();
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut last = 0;
+    for (start, end, r) in &refs {
+        out.push_str(&text[last..*start]);
+        match r {
+            Ref::Variable(name) if variables.contains_key(name) => out.push_str(&scalar_text(&variables[name])),
+            _ => out.push_str(&text[*start..*end]),
+        }
+        last = *end;
+    }
+    out.push_str(&text[last..]);
+    Some(Value::String(out))
+}
+
+/// Every variable a parsed document (`parse_yaml`) names as `${NAME}` (secrets not counted).
+pub fn variable_names(value: &Value, names: &mut BTreeSet<String>) {
+    match value {
+        Value::String(s) if s.contains(OPEN) => {
+            names.extend(references(s).into_iter().filter_map(|(_, _, r)| match r {
+                Ref::Variable(name) => Some(name),
+                _ => None,
+            }))
+        }
+        Value::Sequence(items) => items.iter().for_each(|item| variable_names(item, names)),
+        Value::Mapping(map) => map.iter().for_each(|(k, v)| {
+            variable_names(k, names);
+            variable_names(v, names)
+        }),
+        Value::Tagged(tagged) => variable_names(&tagged.value, names),
+        _ => {}
+    }
+}
+
+/// A variable's value as text (how it reads inside text, and how `env()` gives it to code).
+pub fn value_text(value: &Value) -> String {
+    scalar_text(value)
 }
 
 enum Ref {
@@ -357,6 +441,31 @@ mod tests {
         env.substitute(&mut v).unwrap();
         assert_eq!(v["x"], Value::String("pre a: b # c".into()));
         assert_eq!(v["y"], Value::String("other".into()));
+    }
+
+    #[test]
+    fn variables_fill_in_alone_and_secrets_and_unknown_names_stay_as_written() {
+        let variables = read_file("variables: { HOST: lab.local, PORT: 6661 }\nconsole: warn\n").unwrap().0;
+        let mut v = doc("a: ${PORT}\nb: 'tcp://${HOST}:${PORT}/${OTHER}'\nc: '${secret:KEY}'\nd: ${OTHER}\ne: 'x$${y}'");
+        let mut names = BTreeSet::new();
+        variable_names(&v, &mut names);
+        assert_eq!(names.into_iter().collect::<Vec<_>>(), ["HOST", "OTHER", "PORT"]);
+        fill_variables(&mut v, &variables);
+        assert!(v["a"].is_u64());
+        let b = v["b"].as_str().unwrap();
+        assert!(b.starts_with("tcp://lab.local:6661/") && b.contains("OTHER"), "{b}");
+        assert_eq!(v["c"], doc("c: '${secret:KEY}'")["c"]);
+        assert_eq!(v["d"], doc("d: ${OTHER}")["d"]);
+        assert_eq!(v["e"], doc("e: 'x$${y}'")["e"]);
+        // The same document filled in with the same values is the same; another value isn't.
+        let other = read_file("variables: { HOST: lab.local, PORT: 6666 }").unwrap().0;
+        let (mut x, mut y) = (doc("p: ${PORT}"), doc("p: ${PORT}"));
+        fill_variables(&mut x, &variables);
+        fill_variables(&mut y, &other);
+        assert_ne!(x, y);
+        assert_eq!(read_file("").unwrap().1, None);
+        assert_eq!(read_file("console: warn").unwrap().1, Some(ConsoleLevel::Warn));
+        assert!(read_file("colsone: warn").is_err());
     }
 
     #[test]

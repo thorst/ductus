@@ -47,6 +47,22 @@ pub struct NewDeployment<'a> {
     pub project_version: Option<&'a [u8]>,
     /// A rollback (`ductus deploy --rollback`, 0.7.4.4.3).
     pub rollback: bool,
+    /// The interfaces its environment variables' new values reached (`deployment_variables`,
+    /// 0.7.5.2.3); empty for most.
+    pub variables: &'a [NewVariables<'a>],
+}
+
+/// An interface a deployment reached by changing environment variables' values (a row of
+/// `deployment_variables`).
+#[derive(Debug, Clone)]
+pub struct NewVariables<'a> {
+    pub interface: &'a str,
+    /// `[{"name", "before", "after"}]` by name, as JSON.
+    pub variables: String,
+    /// What they changed, in words.
+    pub what: &'a [String],
+    /// The parts they reach (history's `touches`), as JSON.
+    pub touches: String,
 }
 
 /// What an interface runs now, as recorded (`interface_versions`), with the deployment it came
@@ -315,6 +331,28 @@ impl Store {
             .execute(&mut *tx)
             .await
             .context("saving what the interfaces run")?;
+        }
+        if !d.variables.is_empty() {
+            let interfaces: Vec<&str> = d.variables.iter().map(|v| v.interface).collect();
+            let variables: Vec<&str> = d.variables.iter().map(|v| v.variables.as_str()).collect();
+            // Each row's `what` as a JSON array (Postgres has no array of arrays of differing lengths).
+            let what: Vec<String> =
+                d.variables.iter().map(|v| serde_json::to_string(v.what).unwrap_or_default()).collect();
+            let touches: Vec<&str> = d.variables.iter().map(|v| v.touches.as_str()).collect();
+            sqlx::query(
+                "INSERT INTO deployment_variables (deployment_id, interface, variables, what, touches)
+                 SELECT $1, u.interface, u.variables::jsonb,
+                        ARRAY(SELECT jsonb_array_elements_text(u.what::jsonb)), u.touches::jsonb
+                 FROM unnest($2::text[], $3::text[], $4::text[], $5::text[]) AS u(interface, variables, what, touches)",
+            )
+            .bind(id)
+            .bind(&interfaces)
+            .bind(&variables)
+            .bind(&what)
+            .bind(&touches)
+            .execute(&mut *tx)
+            .await
+            .context("saving what the deployment's variables reached")?;
         }
         if let Some(docs) = d.docs {
             crate::docs::save(&mut tx, docs, Some(id)).await?;

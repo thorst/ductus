@@ -48,7 +48,7 @@ impl Part {
 
 /// The parts of the interface an entry touches. None of them: the interface as a whole only (its
 /// owner, its retention, its alerts' recipients), shown only when no part is picked.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, ToSchema)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, serde::Deserialize, ToSchema)]
 #[schema(as = HistoryTouches)]
 pub struct Touches {
     /// Every part alike: the interface came or went (or was renamed), its interface.yaml stopped or

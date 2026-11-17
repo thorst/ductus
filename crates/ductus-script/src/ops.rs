@@ -36,6 +36,12 @@ pub trait Services {
     fn fetch(&self, request: FetchRequest) -> BoxFuture<FetchResponse>;
     fn variable(&self, name: &str) -> Option<String>;
     fn secret(&self, name: &str) -> anyhow::Result<Option<String>>;
+    /// The environment's `console:` now, when it can change while the code runs (the engine's: a
+    /// deploy swaps the environment in place), read for each line; None (the default): the level
+    /// given to `Isolate::console_to_log`.
+    fn console(&self) -> Option<ConsoleLevel> {
+        None
+    }
 }
 
 /// An HTTP request from interface code (`fetch()` in the SDK).
@@ -123,7 +129,8 @@ fn op_ductus_secret(state: &mut OpState, #[string] name: String) -> Result<Optio
 /// and every level when nothing was set).
 pub enum Console {
     /// The engine's log (target `script`), each line with the place in the project it was
-    /// written from; `lowest` is the environment's `console:`.
+    /// written from; `lowest` is the environment's `console:` (`Services::console` overrides it
+    /// when it says one).
     Log { root: Option<crate::errors::Root>, lowest: ConsoleLevel },
     /// Kept for whoever reads them (`ductus test`, per test): every level, no places.
     Captured(String),
@@ -154,7 +161,10 @@ fn logged(lowest: ConsoleLevel, level: ConsoleLevel) -> bool {
 fn op_ductus_console_wants(state: &mut OpState, level: u32) -> u32 {
     match state.try_borrow::<Console>() {
         Some(Console::Captured(_)) => 1,
-        Some(Console::Log { lowest, .. }) => 2 * logged(*lowest, console_level(level)) as u32,
+        Some(Console::Log { lowest, .. }) => {
+            let now = services(state).ok().and_then(|s| s.console()).unwrap_or(*lowest);
+            2 * logged(now, console_level(level)) as u32
+        }
         None => 2 * logged(ConsoleLevel::Debug, console_level(level)) as u32,
     }
 }

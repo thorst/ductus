@@ -102,6 +102,16 @@ pub struct DeploymentEntry {
     to_files: Option<String>,
     #[sqlx(default)]
     to_parts: Option<String>,
+    /// The environment variables whose new values reached it (`deployment_variables.variables`,
+    /// JSON; 0.7.5.2.3): None when none did.
+    #[sqlx(default)]
+    pub variables: Option<String>,
+    /// What they changed, in words (`deployment_variables.what`).
+    #[sqlx(default)]
+    pub variables_what: Option<Vec<String>>,
+    /// The parts they reach (`deployment_variables.touches`, JSON).
+    #[sqlx(default)]
+    pub variables_touches: Option<String>,
 }
 
 impl DeploymentEntry {
@@ -138,18 +148,29 @@ fn yaml_hash(files: &str) -> String {
 }
 
 impl Store {
-    /// The deployments that changed `page.interface`, newest first; with `all`, also those that
-    /// ran it as it was (recorded since 0.7.3.3: before that, which interfaces a start ran unchanged
-    /// wasn't kept).
+    /// The deployments that changed `page.interface`, newest first: its code version, or (0.7.5.2.3)
+    /// the values of environment variables it uses (`deployment_variables`), or both; with `all`,
+    /// also those that ran it as it was (recorded since 0.7.3.3: before that, which interfaces a
+    /// start ran unchanged wasn't kept).
     ///
-    /// Each change comes with both versions' files and parts (what history by destination compares).
-    /// With `page.below`, only the changes of deployments below it, and no unchanged ones: the next
+    /// Each change comes with both versions' files and parts (what history by destination compares;
+    /// none when only variables changed) and the variables' values before and after. With
+    /// `page.below`, only the changes of deployments below it, and no unchanged ones: the next
     /// batch of a page.
     pub async fn history_deployments(&self, page: Page<'_>, all: bool) -> Result<Vec<DeploymentEntry>> {
         // Each version's interface.yaml text comes with it when the two differ (what tells which
         // parts the change touched), in this statement: another round trip costs more than the
         // texts (a statement with a large parameter waits ~40 ms for a delayed ACK until sqlx
-        // sets TCP_NODELAY).
+        // sets TCP_NODELAY). Which deployments: a page from each table (each through its
+        // `(interface, deployment_id)` index), merged.
+        let page_of = |table: &str| {
+            format!(
+                "(SELECT x.deployment_id FROM {table} x JOIN deployments d ON d.id = x.deployment_id
+                  WHERE x.interface = $1 AND ($2::timestamptz IS NULL OR d.at <= $2)
+                    AND ($4::integer IS NULL OR x.deployment_id < $4)
+                  ORDER BY x.deployment_id DESC LIMIT $3)"
+            )
+        };
         let changed = format!(
             "SELECT {DEPLOYMENT}, true AS changed, f.hash AS from_version, t.hash AS to_version, c.warning,
                     f.files::text AS from_files, f.parts::text AS from_parts,
@@ -157,16 +178,19 @@ impl Store {
                     CASE WHEN fy.hash <> ty.hash THEN (SELECT content FROM code_files WHERE hash = fy.hash) END
                         AS from_yaml,
                     CASE WHEN fy.hash <> ty.hash THEN (SELECT content FROM code_files WHERE hash = ty.hash) END
-                        AS to_yaml
-             FROM deployment_changes c
-             JOIN deployments d ON d.id = c.deployment_id
-             JOIN code_versions t ON t.id = c.to_version
+                        AS to_yaml,
+                    v.variables::text AS variables, v.what AS variables_what, v.touches::text AS variables_touches
+             FROM ({} UNION {}) ids
+             JOIN deployments d ON d.id = ids.deployment_id
+             LEFT JOIN deployment_changes c ON c.deployment_id = d.id AND c.interface = $1
+             LEFT JOIN deployment_variables v ON v.deployment_id = d.id AND v.interface = $1
+             LEFT JOIN code_versions t ON t.id = c.to_version
              LEFT JOIN code_versions f ON f.id = c.from_version
              LEFT JOIN LATERAL ({}) fy ON true
              LEFT JOIN LATERAL ({}) ty ON true
-             WHERE c.interface = $1 AND ($2::timestamptz IS NULL OR d.at <= $2)
-               AND ($4::integer IS NULL OR c.deployment_id < $4)
-             ORDER BY c.deployment_id DESC LIMIT $3",
+             ORDER BY d.id DESC LIMIT $3",
+            page_of("deployment_changes"),
+            page_of("deployment_variables"),
             yaml_hash("f.files"),
             yaml_hash("t.files"),
         );
@@ -198,6 +222,7 @@ impl Store {
              FROM deployments d
              WHERE d.interface_set IN (SELECT id FROM interface_sets WHERE interfaces @> ARRAY[$1])
                AND NOT EXISTS (SELECT 1 FROM deployment_changes c WHERE c.deployment_id = d.id AND c.interface = $1)
+               AND NOT EXISTS (SELECT 1 FROM deployment_variables v WHERE v.deployment_id = d.id AND v.interface = $1)
                AND ($2::timestamptz IS NULL OR d.at <= $2)
              ORDER BY d.id DESC LIMIT $3"
         );

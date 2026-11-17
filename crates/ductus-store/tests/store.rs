@@ -3787,6 +3787,7 @@ async fn deploy_with(
         release: None,
         project_version: None,
         rollback: false,
+        variables: &[],
     };
     let ids = store.save_versions(&versions).await?;
     store.record_deployment(&d, &ids).await
@@ -3916,6 +3917,7 @@ async fn a_deploy_in_place_names_what_it_left_alone_by_hash() {
             release: None,
             project_version: None,
             rollback: false,
+            variables: &[],
         }
     }
     let versions = [a2.borrow(), left(&b1)];
@@ -3935,6 +3937,82 @@ async fn a_deploy_in_place_names_what_it_left_alone_by_hash() {
     let versions = [a2.borrow(), left(&b2)];
     let error = store.record_deployment(&in_place(&env, &versions, &none), &ids).await.unwrap_err();
     assert!(format!("{error:#}").contains("wasn't saved first"), "{error:#}");
+    forget_deployments(&pool, &env).await;
+}
+
+/// A deploy that changed only a variable's value (0.7.5.2.3): every interface keeps its version, and
+/// the deployment's `deployment_variables` row puts it in the history of the interface it reached,
+/// with the values, the words and the parts it touches; an interface it didn't reach shows it as a
+/// deployment that ran it unchanged (`all`), as before.
+#[tokio::test]
+async fn a_variable_s_new_value_is_in_the_history_of_the_interfaces_it_reached() {
+    use ductus_store::HistoryPage;
+    let Some(store) = store().await else { return };
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let env = format!("test-variables-{}-{nanos}", std::process::id());
+    let (a, b) = (format!("{env}-a"), format!("{env}-b"));
+    let ya = format!("name: a # {env}\nsource: {{ mllp: {{ port: ${{MLLP_PORT}} }} }}\n");
+    let a1 = TestVersion::new(&a, &[("interfaces/a/interface.yaml", &ya)]);
+    let b1 = TestVersion::new(&b, &[("interfaces/b/interface.yaml", &format!("name: b # {env}\n"))]);
+    let first = deploy(&store, &env, "ann", &[&a1, &b1]).await.unwrap();
+
+    let left = |v: &TestVersion| -> (String, Vec<u8>) { (v.interface.clone(), v.hash.to_vec()) };
+    let (la, lb) = (left(&a1), left(&b1));
+    let versions = [
+        ductus_store::NewVersion { interface: &la.0, hash: &la.1, files: Vec::new(), parts: String::new() },
+        ductus_store::NewVersion { interface: &lb.0, hash: &lb.1, files: Vec::new(), parts: String::new() },
+    ];
+    let what = vec!["source (MLLP_PORT)".to_string()];
+    let reached = [ductus_store::NewVariables {
+        interface: &a,
+        variables: r#"[{"name": "MLLP_PORT", "before": "6661", "after": "6666"}]"#.into(),
+        what: &what,
+        touches: r#"{"everything": false, "source": true, "destinations": [], "unsure": false}"#.into(),
+    }];
+    let none = Default::default();
+    let d = ductus_store::NewDeployment {
+        environment: &env,
+        instance: &env,
+        host: "test-host",
+        version: "0.7.0-test",
+        how: "deploy",
+        by: "bob",
+        reason: Some("the feed moves"),
+        git_commit: None,
+        uncommitted: None,
+        versions: &versions,
+        warnings: &none,
+        docs: None,
+        release: None,
+        project_version: None,
+        rollback: false,
+        variables: &reached,
+    };
+    let deployed = store.record_deployment(&d, &ductus_store::VersionIds::new()).await.unwrap();
+    assert_eq!(deployed.changed(), 0, "no version changed");
+    assert_eq!(deployed.interfaces[0].since.deployment, first.id, "a keeps the deployment its version came with");
+
+    let page = HistoryPage { interface: &a, until: None, limit: 50, below: None };
+    let changed = store.history_deployments(page, false).await.unwrap();
+    let ids: Vec<i32> = changed.iter().map(|d| d.id).collect();
+    assert_eq!(ids, [deployed.id, first.id]);
+    let by_variables = &changed[0];
+    assert!(by_variables.changed && by_variables.to_version.is_none() && by_variables.from_version.is_none());
+    let values: serde_json::Value = serde_json::from_str(by_variables.variables.as_deref().unwrap()).unwrap();
+    assert_eq!(values[0]["after"], "6666");
+    assert_eq!(by_variables.variables_what.as_deref(), Some(what.as_slice()));
+    let touches: serde_json::Value = serde_json::from_str(by_variables.variables_touches.as_deref().unwrap()).unwrap();
+    assert_eq!(touches["source"], true);
+    assert!(changed[1].variables.is_none(), "the first deployment changed no variable");
+    let all: Vec<(i32, bool)> =
+        store.history_deployments(page, true).await.unwrap().iter().map(|d| (d.id, d.changed)).collect();
+    assert_eq!(all, [(deployed.id, true), (first.id, true)], "not also as run unchanged");
+
+    let page = HistoryPage { interface: &b, ..page };
+    let all: Vec<(i32, bool)> =
+        store.history_deployments(page, true).await.unwrap().iter().map(|d| (d.id, d.changed)).collect();
+    assert_eq!(all, [(deployed.id, false), (first.id, true)], "b wasn't reached: run unchanged");
     forget_deployments(&pool, &env).await;
 }
 
@@ -4057,6 +4135,7 @@ async fn later_deployments_say_where_else_a_version_came_from() {
                 release: None,
                 project_version: Some(project),
                 rollback: false,
+                variables: &[],
             };
             store.record_deployment(&d, ids).await.unwrap()
         }
@@ -4527,6 +4606,7 @@ async fn a_deploy_reuses_only_a_recent_passing_check_with_nothing_deployed_since
             release: Some(release.as_slice()),
             project_version: Some([9u8; 32].as_slice()),
             rollback: false,
+            variables: &[],
         };
         let ids = store.save_versions(&versions).await.unwrap();
         store.record_deployment(&d, &ids).await.unwrap();
@@ -4587,6 +4667,7 @@ async fn where_a_release_went_and_the_runs_a_rollback_chooses_from() {
             release: Some(release.as_slice()),
             project_version: None,
             rollback,
+            variables: &[],
         };
         let saved = store.save_versions(&versions).await.unwrap();
         ids.push(store.record_deployment(&d, &saved).await.unwrap().id);

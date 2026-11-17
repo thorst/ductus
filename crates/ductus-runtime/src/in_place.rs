@@ -302,6 +302,12 @@ impl Interface {
 }
 
 impl Kept {
+    /// From the next call on, every interface's code reads `env` (its variables, secrets and
+    /// `console:`); the one it replaces is returned (None: no worker threads, as in unit tests).
+    pub(crate) fn swap_environment(&self, env: Arc<ductus_core::Environment>) -> Option<Arc<ductus_core::Environment>> {
+        self.threads.spawn.as_ref().map(|s| s.services.swap_environment(env))
+    }
+
     /// What a start built: `interfaces` with the threads their slots run on.
     pub(crate) fn new(shared: Shared, interfaces: impl IntoIterator<Item = Interface>, threads: Threads) -> Self {
         let interfaces = interfaces.into_iter().map(|i| (i.config.name.clone(), Arc::new(Mutex::new(i)))).collect();

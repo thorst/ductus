@@ -49,7 +49,9 @@ fn make_pool(name: &str, db: &Database, size: Option<u32>, tls: Option<&DbTls>, 
 
 /// Shared by every worker thread: connection pools are created once per resource.
 pub struct SharedServices {
-    env: Environment,
+    /// The environment's variables, secrets and `console:`; swapped by a deploy that changes its
+    /// file (0.7.5.2.3), read at each call (`env()`, `secret()`, each `console` line).
+    env: std::sync::RwLock<Arc<Environment>>,
     definitions: BTreeMap<String, Database>,
     /// Database resources' CA and client certificate, loaded once (dedicated pools use them too).
     db_tls: HashMap<String, DbTls>,
@@ -110,7 +112,7 @@ impl SharedServices {
             api_http.insert(name.clone(), client);
         }
         Ok(Self {
-            env,
+            env: std::sync::RwLock::new(Arc::new(env)),
             definitions: resources.databases.clone(),
             db_tls,
             databases,
@@ -120,6 +122,17 @@ impl SharedServices {
             calls: Arc::new(ResourceCalls::new(resources.databases.keys().cloned(), resources.apis.keys().cloned())),
             io: tokio::runtime::Handle::current(),
         })
+    }
+
+    /// The environment the code reads now.
+    pub(crate) fn environment(&self) -> Arc<Environment> {
+        self.env.read().unwrap_or_else(std::sync::PoisonError::into_inner).clone()
+    }
+
+    /// From the next call on, code reads `env` (a deploy changed the environment file); the one it
+    /// replaces is returned, to put back when the deploy fails.
+    pub(crate) fn swap_environment(&self, env: Arc<Environment>) -> Arc<Environment> {
+        std::mem::replace(&mut *self.env.write().unwrap_or_else(std::sync::PoisonError::into_inner), env)
     }
 
     /// Each resource's call counts and timings (for the API and `/metrics`).
@@ -431,7 +444,7 @@ impl EngineServices {
 
     /// Which `console` lines from interface code reach the log (the environment's `console:`).
     pub(crate) fn console(&self) -> ductus_core::ConsoleLevel {
-        self.shared.env.console()
+        self.shared.environment().console()
     }
 }
 
@@ -475,11 +488,15 @@ impl Services for EngineServices {
     }
 
     fn variable(&self, name: &str) -> Option<String> {
-        self.shared.env.variable(name)
+        self.shared.environment().variable(name)
     }
 
     fn secret(&self, name: &str) -> Result<Option<String>> {
-        self.shared.env.secret(name)
+        self.shared.environment().secret(name)
+    }
+
+    fn console(&self) -> Option<ductus_core::ConsoleLevel> {
+        Some(self.shared.environment().console())
     }
 }
 

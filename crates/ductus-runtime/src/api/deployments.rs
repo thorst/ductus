@@ -213,14 +213,23 @@ pub struct PlanInfo {
     /// Why it needs the handover, a line per reason (the project's own files, then each
     /// interface); empty: it applies in place.
     handover_because: Vec<String>,
+    /// What the project's own files change in place, a line each: the engine's environment file's
+    /// variables (`environments/prod.yaml: MLLP_PORT "6661" → "6666"`) and `console:`, another
+    /// environment's file changing nothing here.
+    project: Vec<String>,
 }
 
 #[derive(Serialize, ToSchema)]
 pub struct PlannedChange {
     interface: String,
     /// What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`,
-    /// `source`, `added`, `removed`, ...
+    /// `source`, `source (MLLP_PORT)` (a variable's new value moved it), `code reads EMPI_URL`
+    /// (reloaded for a variable its code names), `added`, `removed`, ...
     what: Vec<String>,
+    /// The environment variables whose new values reach it, with their values before and after;
+    /// absent when none do.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    variables: Vec<crate::changes::VariableChange>,
     /// It can be applied in place (its workers restarted between messages).
     in_place: bool,
     /// Why only the handover applies it; absent when it goes in place.
@@ -238,6 +247,7 @@ impl PlanInfo {
                 .map(|c| PlannedChange {
                     interface: c.interface.clone(),
                     what: c.what.clone(),
+                    variables: c.reached.as_ref().map(|r| r.variables.clone()).unwrap_or_default(),
                     in_place: c.apply == Apply::InPlace,
                     handover_because: match &c.apply {
                         Apply::InPlace => None,
@@ -246,6 +256,7 @@ impl PlanInfo {
                 })
                 .collect(),
             handover_because: plan.handover_because(),
+            project: plan.project_in_place.clone(),
         }
     }
 }
@@ -481,7 +492,13 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
     }
 
     // The "replaces" check: what this release changes over someone else's work.
-    let who = Who { how: "handover", by: caller.name().to_string(), reason: reason.clone(), rollback: asked.rollback };
+    let who = Who {
+        how: "handover",
+        by: caller.name().to_string(),
+        reason: reason.clone(),
+        rollback: asked.rollback,
+        variables: Vec::new(),
+    };
     let source = deploy::Source::Release {
         commit: manifest.git.as_ref().map(|g| g.commit.clone()),
         ancestry: std::sync::Arc::new(ancestry.clone()),
@@ -518,8 +535,9 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
     let plan = match &running {
         Some(r) => {
             let (dir, r, next, folder) = (releases.mode.dir.clone(), r.clone(), manifest.clone(), folder.clone());
+            let environment = engine.environment.clone();
             let started = std::time::Instant::now();
-            let plan = tokio::task::spawn_blocking(move || deploy::plan_over(&dir, &r, &next, &folder))
+            let plan = tokio::task::spawn_blocking(move || deploy::plan_over(&dir, &r, &next, &folder, &environment))
                 .await
                 .map_err(anyhow::Error::from)??;
             tracing::debug!(changes = plan.changes.len(), took = ?started.elapsed(), "deploy: what it changes here worked out");
@@ -591,7 +609,8 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
     }
 
     // In place when it can: only the changed interfaces take their new code, between two messages.
-    let deployer = Who::deploy(caller.name(), reason.clone(), asked.rollback);
+    let reached = plan.as_ref().map(crate::changes::Plan::reached).unwrap_or_default();
+    let deployer = Who::deploy(caller.name(), reason.clone(), asked.rollback, reached.clone());
     let warnings: std::collections::HashMap<String, String> =
         report.replaces.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     if let Some(plan) = plan.as_ref().filter(|_| handover_because.is_empty()) {
@@ -675,6 +694,7 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
             reason: reason.clone(),
             release: Some(hex.clone()),
             rollback: asked.rollback,
+            variables: reached,
         },
     };
     let started = Utc::now();
@@ -749,8 +769,9 @@ fn span(d: Duration) -> String {
 fn in_place_outcome(changes: &[crate::changes::Change]) -> String {
     let added = changes.iter().filter(|c| c.is_added()).count();
     let removed = changes.iter().filter(|c| c.is_removed()).count();
-    let sources =
-        changes.iter().filter(|c| !c.is_added() && !c.is_removed() && c.what.iter().any(|w| w == "source")).count();
+    // `source`, or `source (MLLP_PORT)` when a variable moved it.
+    let source = |w: &String| w == "source" || w.starts_with("source (");
+    let sources = changes.iter().filter(|c| !c.is_added() && !c.is_removed() && c.what.iter().any(source)).count();
     let changed = changes.len() - added - removed - sources;
     let mut parts: Vec<String> = Vec::new();
     match changed {
@@ -792,9 +813,18 @@ mod tests {
     /// The answer says what changed, what started and what stopped, in that order.
     #[test]
     fn a_deploy_in_place_says_what_it_changed_added_and_removed() {
-        let change = |what: &str| Change { interface: "x".into(), what: vec![what.to_string()], apply: Apply::InPlace };
+        let change = |what: &str| Change {
+            interface: "x".into(),
+            what: vec![what.to_string()],
+            apply: Apply::InPlace,
+            reached: None,
+        };
         let said = |c: &[Change]| in_place_outcome(c);
         assert_eq!(said(&[]), "applied in place: no interface's code or settings changed");
+        assert_eq!(
+            said(&[change("source (MLLP_PORT)")]),
+            "applied in place: 1 interface's source changed; the others never paused"
+        );
         assert_eq!(
             said(&[change("code")]),
             "applied in place: 1 interface took its new code between two messages; the others never paused"

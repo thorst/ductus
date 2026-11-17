@@ -92,6 +92,11 @@ pub struct Asked {
     /// deployment says so. Engines before ignore it.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub rollback: bool,
+    /// What that deploy's new variable values change, by interface (0.7.5.2.3), worked out by
+    /// the engine asked (it has both releases): the new engine records it with its deployment.
+    /// Engines before ignore it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<crate::changes::Reached>,
 }
 
 impl Asked {
@@ -105,7 +110,7 @@ impl Asked {
             (None, Some(_)) => "systemd (systemctl reload)".into(),
             (None, None) => crate::deployment::account(),
         };
-        Self { by: Some(by), reason: reason.filter(|r| !r.trim().is_empty()), release: None, rollback: false }
+        Self { by: Some(by), reason: reason.filter(|r| !r.trim().is_empty()), ..Self::default() }
     }
 }
 

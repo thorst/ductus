@@ -414,6 +414,20 @@ The interfaces a deployment changed (migration 0026): one row each, none for int
 
 Indexes: primary key `(deployment_id, interface)`; `deployment_changes_interface (interface, deployment_id)`.
 
+## `deployment_variables`
+
+The interfaces a deployment reached by changing an environment variable's value (migration 0034, 0.7.5.2.3): one row each. An interface's code version is the hash of its files as written (`port: ${MLLP_PORT}`), the same in every environment, so a new value in `environments/<env>.yaml` doesn't change it; this is how its history (`ductus history`, the History tab) says what moved. Written with the deployment, by a deploy in place or by the handover it asked for (`ductus deploy`); a restart in folder mode compares with nothing and writes none. Kept.
+
+| column | type | |
+|---|---|---|
+| `deployment_id` | integer | `deployments.id` (deleted with it). |
+| `interface` | text | The interface's name. |
+| `variables` | jsonb | Each variable that reached it, by name: `[{"name": "MLLP_PORT", "before": "6661", "after": "6666"}]`, values as text as code reads them (`env()`); `before` null: new in the file, `after` null: gone from it. Variables aren't secrets (those are `${secret:NAME}`, never written here). |
+| `what` | text[] | What they changed, in words, as the deploy's answer said: `source (MLLP_PORT)`, `destinations.lab (LAB_HOST)`, `code reads EMPI_URL`. |
+| `touches` | jsonb | The parts they reach, as history narrows by part (`--source`, `--destination NAME`): `{"everything": false, "source": true, "destinations": [], "unsure": false}`. |
+
+Indexes: primary key `(deployment_id, interface)`; `deployment_variables_interface (interface, deployment_id)`.
+
 ## `interface_versions`
 
 What each interface runs now (migration 0026): its last deployment's version, read at every start to tell what changed. One row per interface ever run on this database.

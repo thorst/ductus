@@ -22,6 +22,7 @@
 
 use crate::code;
 use crate::deployment::Who;
+use crate::history::parts::Touches;
 use crate::release::{self, Manifest};
 use anyhow::{Context, Result, bail};
 use ductus_store::{Current, Store};
@@ -365,47 +366,219 @@ fn interface_yaml(i: &release::Interface) -> Option<&str> {
 }
 
 /// What deploying `next` (unpacked in `folder`) over `running` (unpacked in `dir`) changes, by
-/// kind (`changes::plan`): from the two manifests, each interface.yaml read only where the
-/// versions differ (an unchanged interface costs nothing). Read beside nothing: the deploy waits
-/// for it (milliseconds for a handful of changes).
-pub fn plan_over(dir: &Path, running: &Running, next: &Manifest, folder: &Path) -> Result<crate::changes::Plan> {
+/// kind (`changes::plan`), for an engine in `environment`: from the two manifests, each
+/// interface.yaml read only where the versions differ (an unchanged interface costs nothing),
+/// unless the environment's variables change: then every interface.yaml and code file of `next`
+/// (to find what each variable reaches). Read beside nothing: the deploy waits for it
+/// (milliseconds for a handful of changes).
+pub fn plan_over(
+    dir: &Path,
+    running: &Running,
+    next: &Manifest,
+    folder: &Path,
+    environment: &str,
+) -> Result<crate::changes::Plan> {
     let read = |root: PathBuf| {
         move |path: &str| {
             let path = root.join(path);
             std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))
         }
     };
-    plan_between(&running.manifest, read(dir.join(running.hex())), next, read(folder.to_path_buf()))
+    plan_between(&running.manifest, read(dir.join(running.hex())), next, read(folder.to_path_buf()), environment)
 }
 
-/// The interface.yaml files of `from` that working out the plan against `other` reads: those of
-/// the interfaces whose versions differ, or that `other` doesn't have (paths in the release).
+/// The files of `from` that working out the plan against `other` reads first (paths in the
+/// release): the project's own files when the project versions differ, and the interface.yaml of
+/// the interfaces whose versions differ or that `other` doesn't have. When the environment's
+/// variables change (`variables_change`), `next`'s `plan_reads_for_variables` too.
 pub fn plan_reads(from: &Manifest, other: &Manifest) -> Vec<String> {
+    let project = (from.project_version.version != other.project_version.version)
+        .then(|| from.project_version.files.iter().cloned())
+        .into_iter()
+        .flatten();
     from.interfaces
         .iter()
         .filter(|(name, i)| other.interfaces.get(*name).is_none_or(|o| o.version != i.version))
         .filter_map(|(_, i)| interface_yaml(i).map(str::to_string))
+        .chain(project)
         .collect()
 }
 
+/// Every interface.yaml and code file of `next`: what the plan reads when the environment's
+/// variables change (each interface's settings filled in, its code searched for their names).
+pub fn plan_reads_for_variables(next: &Manifest) -> Vec<String> {
+    let all: BTreeSet<&str> = next.interfaces.values().flat_map(|i| i.files.iter().map(String::as_str)).collect();
+    all.into_iter().map(str::to_string).collect()
+}
+
+/// Whether the environment file of `environment` (`environments/<name>.yaml`) gives other
+/// variables in `next` than in `running` (each read by its reader, among `plan_reads`).
+pub fn variables_change(
+    running: &Manifest,
+    before: impl Fn(&str) -> Result<String>,
+    next: &Manifest,
+    after: impl Fn(&str) -> Result<String>,
+    environment: &str,
+) -> Result<bool> {
+    if running.project_version.version == next.project_version.version {
+        return Ok(false);
+    }
+    let path = environment_file(environment);
+    let (b, a) = (variables_of(running, &before, &path)?, variables_of(next, &after, &path)?);
+    Ok(b.0 != a.0)
+}
+
+/// `environments/<name>.yaml`.
+fn environment_file(environment: &str) -> String {
+    format!("environments/{environment}.yaml")
+}
+
+/// A release's file among its project files, read; None when it hasn't one.
+fn project_text(release: &Manifest, read: &impl Fn(&str) -> Result<String>, path: &str) -> Result<Option<String>> {
+    match release.project_version.files.iter().any(|f| f == path) {
+        true => read(path).map(Some),
+        false => Ok(None),
+    }
+}
+
+type EnvironmentFile = (BTreeMap<String, ductus_core::yaml::Value>, Option<ductus_core::ConsoleLevel>);
+
+/// A release's environment file's variables and `console:` (none when it hasn't the file).
+fn variables_of(release: &Manifest, read: &impl Fn(&str) -> Result<String>, path: &str) -> Result<EnvironmentFile> {
+    match project_text(release, read, path)? {
+        Some(text) => ductus_core::env::read_file(&text)
+            .with_context(|| format!("release {}: reading {path}", release::short(&release.id))),
+        None => Ok((BTreeMap::new(), None)),
+    }
+}
+
+/// What the project's own files change for an engine in `environment` (0.7.5.2.3), file by file:
+/// another environment's `environments/` or `secrets/` file changes nothing here; this
+/// environment's file goes in place (its variables reach the interfaces `changes::plan` finds,
+/// `console:` is swapped), unless a variable changes what `resources.yaml` or ductus.yaml's
+/// `alerts:` fill in; `secrets/<env>.json`, ductus.yaml, resources.yaml and docs-schema.yaml
+/// changed as written go by the handover (each read at a start), the reason naming each.
+pub fn project_plan(
+    running: &Manifest,
+    before: impl Fn(&str) -> Result<String>,
+    next: &Manifest,
+    after: impl Fn(&str) -> Result<String>,
+    environment: &str,
+) -> Result<crate::changes::Project> {
+    let mut project = crate::changes::Project::default();
+    if running.project_version.version == next.project_version.version {
+        return Ok(project);
+    }
+    let (env_file, secrets_file) = (environment_file(environment), format!("secrets/{environment}.json"));
+    let paths: BTreeSet<&str> =
+        running.project_version.files.iter().chain(&next.project_version.files).map(String::as_str).collect();
+    let mut handover = Vec::new();
+    for path in paths {
+        let (b, a) = (project_text(running, &before, path)?, project_text(next, &after, path)?);
+        if b == a {
+            continue;
+        }
+        let why = match path {
+            p if p == env_file => continue, // compared below, by what it says
+            p if p == secrets_file => "secrets are decrypted at a start",
+            p if p.starts_with("environments/") || p.starts_with("secrets/") => {
+                project.in_place.push(format!("{path}: another environment's file, nothing changes here"));
+                continue;
+            }
+            "ductus.yaml" => "the engine's settings are read at a start",
+            "resources.yaml" => "databases, APIs and their pools are made at a start",
+            "docs-schema.yaml" => "documentation fields are read at a start",
+            _ => "it's read at a start",
+        };
+        handover.push(format!("{path} changed ({why})"));
+    }
+    let ((vars_before, console_before), (vars_after, console_after)) =
+        (variables_of(running, &before, &env_file)?, variables_of(next, &after, &env_file)?);
+    project.variables.before = vars_before;
+    project.variables.after = vars_after;
+    let changed: Vec<String> = {
+        let vars = &project.variables;
+        vars.changed().into_iter().map(|n| vars.change(n).to_string()).collect()
+    };
+    if !changed.is_empty() {
+        project.in_place.push(format!("{env_file}: {}", changed.join(", ")));
+    }
+    if console_before != console_after {
+        let level = |c: Option<ductus_core::ConsoleLevel>| c.unwrap_or_default().as_str();
+        project.in_place.push(format!("{env_file}: console {} → {}", level(console_before), level(console_after)));
+    }
+    project.environment_changes = !changed.is_empty() || console_before != console_after;
+    // What a start fills in from the variables, beside the interfaces: compared filled in when
+    // the file itself is the same (a changed file is a handover already).
+    if !changed.is_empty() {
+        let filled = |text: &str, variables| -> Result<ductus_core::yaml::Value> {
+            let mut value = ductus_core::yaml::parse(text)?;
+            ductus_core::env::fill_variables(&mut value, variables);
+            Ok(value)
+        };
+        for (path, key) in [("resources.yaml", None), ("ductus.yaml", Some("alerts"))] {
+            let (Some(b), Some(a)) = (project_text(running, &before, path)?, project_text(next, &after, path)?) else {
+                continue;
+            };
+            if b != a {
+                continue;
+            }
+            let pick = |v: ductus_core::yaml::Value| match key {
+                Some(k) => v.get(k).cloned().unwrap_or_default(),
+                None => v,
+            };
+            let vars = &project.variables;
+            let (fb, fa) = (pick(filled(&b, &vars.before)?), pick(filled(&a, &vars.after)?));
+            if fb != fa {
+                let mut named = BTreeSet::new();
+                ductus_core::env::variable_names(&pick(ductus_core::yaml::parse(&a)?), &mut named);
+                let by: Vec<&str> = vars.changed().into_iter().filter(|n| named.contains(*n)).collect();
+                let what = match key {
+                    Some(k) => format!("{path}'s `{k}:`"),
+                    None => path.to_string(),
+                };
+                let why = match key {
+                    Some(_) => "alert rules are read at a start",
+                    None => "databases, APIs and their pools are made at a start",
+                };
+                handover.push(format!("{} changes what {what} fills in ({why})", by.join(", ")));
+            }
+        }
+    }
+    if !handover.is_empty() {
+        project.handover = Some(handover.join("; "));
+    }
+    Ok(project)
+}
+
+/// Whether code text names `variable` as a string (`env("EMPI_URL")`, `'EMPI_URL'`, `` `EMPI_URL` ``):
+/// how an interface whose code reads a changed variable is found to be reloaded. A name built at
+/// run time isn't found (said in the releases nuance).
+fn names_in_code(text: &str, variable: &str) -> bool {
+    ['"', '\'', '`'].iter().any(|q| text.contains(&format!("{q}{variable}{q}")))
+}
+
 /// `plan_over` with each side's files read by `before` and `after` (a path in the release: only
-/// those `plan_reads` names are asked for).
+/// those `plan_reads` names are asked for, and `plan_reads_for_variables`' when
+/// `variables_change`).
 pub fn plan_between(
     running: &Manifest,
     before: impl Fn(&str) -> Result<String>,
     next: &Manifest,
     after: impl Fn(&str) -> Result<String>,
+    environment: &str,
 ) -> Result<crate::changes::Plan> {
     /// `from`'s interfaces by name: version, and interface.yaml's text where `other`'s version
-    /// differs (empty elsewhere: never compared).
+    /// differs or `all` (empty elsewhere: never compared).
     fn texts<'a>(
         from: &'a Manifest,
-        read: impl Fn(&str) -> Result<String>,
+        read: &impl Fn(&str) -> Result<String>,
         other: &Manifest,
+        all: bool,
     ) -> Result<BTreeMap<&'a str, (&'a str, String)>> {
         let mut side = BTreeMap::new();
         for (name, i) in &from.interfaces {
-            let text = match other.interfaces.get(name).is_none_or(|o| o.version != i.version) {
+            let text = match all || other.interfaces.get(name).is_none_or(|o| o.version != i.version) {
                 true => read(
                     interface_yaml(i)
                         .with_context(|| format!("release {}: `{name}` has no interface.yaml", from.id))?,
@@ -419,10 +592,64 @@ pub fn plan_between(
     fn side<'a>(s: &'a BTreeMap<&'a str, (&'a str, String)>) -> crate::changes::Side<'a> {
         s.iter().map(|(n, (v, t))| (*n, (*v, t.as_str()))).collect()
     }
-    let before = texts(running, before, next)?;
-    let after = texts(next, after, running)?;
-    let project_changed = running.project_version.version != next.project_version.version;
-    crate::changes::plan(&side(&before), &side(&after), project_changed)
+    let mut project = project_plan(running, &before, next, &after, environment)?;
+    let changed: Vec<String> = project.variables.changed().into_iter().map(str::to_string).collect();
+    let all = !changed.is_empty();
+    let mut code_reach: BTreeMap<&str, Touches> = BTreeMap::new();
+    let after_texts = texts(next, &after, running, all)?;
+    let mut before_texts = texts(running, &before, next, false)?;
+    if all {
+        // An interface whose version is the same has the same interface.yaml: read once.
+        for (name, (version, text)) in before_texts.iter_mut() {
+            if let Some((v, t)) = after_texts.get(name)
+                && v == version
+            {
+                text.clone_from(t);
+            }
+        }
+        // Each interface whose code names a changed variable, read once per file, and the parts
+        // whose code those files are.
+        let mut code: BTreeMap<&str, BTreeSet<String>> = BTreeMap::new();
+        for (name, i) in &next.interfaces {
+            let mut touches = Touches::default();
+            for file in i.files.iter().filter(|f| !f.ends_with("/interface.yaml")) {
+                if !code.contains_key(file.as_str()) {
+                    let text = after(file)?;
+                    code.insert(file, changed.iter().filter(|v| names_in_code(&text, v)).cloned().collect());
+                }
+                let named = &code[file.as_str()];
+                if !named.is_empty() {
+                    project.variables.in_code.entry(name.clone()).or_default().extend(named.iter().cloned());
+                    touches = touches.with(code_touches(&i.parts, file));
+                }
+            }
+            if touches != Touches::default() {
+                code_reach.insert(name.as_str(), touches);
+            }
+        }
+    }
+    let mut plan = crate::changes::plan(&side(&before_texts), &side(&after_texts), &project)?;
+    for change in &mut plan.changes {
+        if let (Some(reached), Some(touches)) = (&mut change.reached, code_reach.remove(change.interface.as_str())) {
+            reached.touches = std::mem::take(&mut reached.touches).with(touches);
+        }
+    }
+    Ok(plan)
+}
+
+/// The parts whose code `file` is (a version's `parts`): every part when none names it (a version
+/// saved before 0.7.4.2 has none).
+fn code_touches(parts: &code::Parts, file: &str) -> Touches {
+    let mut touches = Touches { source: parts.source.iter().any(|f| f == file), ..Touches::default() };
+    for (destination, files) in &parts.destinations {
+        if files.iter().any(|f| f == file) {
+            touches = touches.with(Touches { destinations: vec![destination.clone()], ..Touches::default() });
+        }
+    }
+    match touches == Touches::default() {
+        true => Touches { everything: true, ..Touches::default() },
+        false => touches,
+    }
 }
 
 /// A deploy applied in place (`apply_in_place`).
@@ -437,7 +664,10 @@ pub struct InPlace {
 /// Apply release `next` (unpacked in `folder`) in place: the interfaces `plan` adds start
 /// (`Engine::add_interface`), then each interface it changes runs its new code and settings from
 /// its next message (`Engine::replace_interface`; all at once, each on its own threads), then
-/// those it removes stop (`Engine::remove_interface`), the others untouched. When it adds or
+/// those it removes stop (`Engine::remove_interface`), the others untouched. When the engine's
+/// environment file changes (`Plan::environment_changes`), its new variables and `console:` are
+/// what code reads from before the first of those (`SharedServices::swap_environment`; an
+/// interface whose code names a changed variable is among the changed, so it loads again). When it adds or
 /// removes any, the set it would leave running is checked first as a start checks it
 /// (`check_together`: ports, routes, resources, TLS). Then the deployment is recorded (by `who`, with the
 /// warnings it was let through with), the engine runs `next` from then on, and unpacked releases
@@ -458,7 +688,7 @@ pub async fn apply_in_place(
     warnings: &HashMap<String, String>,
 ) -> Result<InPlace> {
     let started = std::time::Instant::now();
-    let env = ductus_core::Environment::load(folder, &engine.environment)?;
+    let env = Arc::new(ductus_core::Environment::load(folder, &engine.environment)?);
     let load = |name: &str| -> Result<ductus_core::InterfaceConfig> {
         let yaml = next.manifest.interfaces.get(name).and_then(interface_yaml);
         let dir = yaml
@@ -510,6 +740,14 @@ pub async fn apply_in_place(
             .collect();
         crate::sources::in_place(&now, &adding, &changing)?;
     }
+    // The environment file's new values, before any interface loads (code reading `env()` at its
+    // top level gets them); put back if the deploy fails.
+    let swapped = plan.environment_changes.then(|| engine.kept.swap_environment(env.clone())).flatten();
+    let put_back = || {
+        if let Some(before) = &swapped {
+            engine.kept.swap_environment(before.clone());
+        }
+    };
     let timed = |result, started: std::time::Instant| (result, started.elapsed());
     // Added first: a changed interface may route to one.
     let adding = added.iter().map(|(config, _)| async {
@@ -532,6 +770,7 @@ pub async fn apply_in_place(
         }
     };
     if added_results.iter().any(|(r, _)| r.is_err()) {
+        put_back();
         take_back_added(&added_results).await;
         engine.shown_after_replacing(&names).await;
         let first = added_results.into_iter().find_map(|(r, _)| r.err());
@@ -543,7 +782,9 @@ pub async fn apply_in_place(
     });
     let results = futures_util::future::join_all(applying).await;
     if results.iter().any(|(r, _)| r.is_err()) {
-        // Back on what they ran: the same files, from the release each came from.
+        // Back on what they ran: the same files, from the release each came from, with the
+        // environment they ran with.
+        put_back();
         let mut first = None;
         for ((result, _), (_, before, _)) in results.into_iter().zip(&changed) {
             match result {
@@ -563,7 +804,8 @@ pub async fn apply_in_place(
         return Err(first.expect("one failed"));
     }
     // Removed last: nothing to put back after them. Each stops between messages.
-    let mut steps = Vec::with_capacity(plan.changes.len() + 1);
+    let mut steps = Vec::with_capacity(plan.changes.len() + plan.project_in_place.len() + 1);
+    steps.extend(plan.project_in_place.iter().cloned());
     for (name, _) in &removed {
         let started = std::time::Instant::now();
         match engine.remove_interface(name).await {
@@ -832,7 +1074,7 @@ mod tests {
     }
 
     fn who(by: &str) -> Who {
-        Who { how: "handover", by: by.into(), reason: None, rollback: false }
+        Who { how: "handover", by: by.into(), reason: None, rollback: false, variables: Vec::new() }
     }
 
     /// After deploys in place an engine runs from several unpacked releases: `tidy` keeps every
@@ -1031,6 +1273,89 @@ mod tests {
         let no_git = rules(&mode(&[], &["main"]), &manifest(None), &[], &[]);
         assert!(no_git[0].contains("made without git"), "{}", no_git[0]);
         assert!(!branch_matches("main", "main-old") && branch_matches("*", "anything"));
+    }
+
+    /// A release of `files` (path, text) with one interface `adt` (version `version`): its manifest
+    /// and a reader of its files.
+    fn released(
+        version: &str,
+        files: &[(&str, &str)],
+    ) -> (Manifest, impl Fn(&str) -> Result<String> + use<>) {
+        let mut m = manifest(None);
+        let project: Vec<String> =
+            files.iter().map(|(p, _)| p.to_string()).filter(|p| code::is_project_file(p)).collect();
+        m.project_version = crate::release::ProjectVersion { version: format!("{:?}", files), files: project };
+        let own = files.iter().map(|(p, _)| p.to_string()).filter(|p| p.starts_with("interfaces/")).collect();
+        m.interfaces.insert(
+            "adt".into(),
+            crate::release::Interface { version: version.into(), files: own, parts: code::Parts::default() },
+        );
+        let texts: BTreeMap<String, String> = files.iter().map(|(p, t)| (p.to_string(), t.to_string())).collect();
+        (m, move |p: &str| texts.get(p).cloned().with_context(|| format!("no {p}")))
+    }
+
+    /// The project's own files judged one by one (0.7.5.2.3): another environment's file changes
+    /// nothing here; this environment's variables reach the interface that fills one in, and the
+    /// code that names one; `console:` swaps; a variable that changes what resources.yaml fills in,
+    /// a secrets file or resources.yaml itself takes the handover.
+    #[test]
+    fn the_project_files_are_judged_one_by_one() {
+        let yaml = ("interfaces/adt/interface.yaml", "name: adt\nsource: { mllp: { port: ${MLLP_PORT} } }\ndestinations: {}\n");
+        let code = ("interfaces/adt/transform.ts", "const url = env(\"EMPI_URL\");\n");
+        let resources = ("resources.yaml", "databases:\n  emr: { host: ${DB_HOST} }\n");
+        let prod = |vars: &str| ("environments/prod.yaml", format!("variables: {{ {vars} }}\n"));
+        let base = "MLLP_PORT: 6661, EMPI_URL: a, DB_HOST: db1";
+        let plan = |before: &[(&str, &str)], after: &[(&str, &str)]| {
+            let (running, read_before) = released("v1", before);
+            let (next, read_after) = released("v1", after);
+            plan_between(&running, read_before, &next, read_after, "prod").unwrap()
+        };
+        let (p1, test) = (prod(base), ("environments/test.yaml", "variables: { MLLP_PORT: 1 }\n"));
+        let files = |p: &(&'static str, String), extra: &[(&'static str, &'static str)]| {
+            let mut all = vec![yaml, code, resources, (p.0, p.1.as_str())];
+            all.extend_from_slice(extra);
+            all.into_iter().map(|(a, b)| (a, b.to_string())).collect::<Vec<_>>()
+        };
+        fn refs<'a>(v: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
+            v.iter().map(|(a, b)| (*a, b.as_str())).collect()
+        }
+        let (before, after) = (files(&p1, &[test]), files(&p1, &[("environments/test.yaml", "variables: { MLLP_PORT: 2 }\n")]));
+
+        // Another environment's file: nothing changes, in place.
+        let other = plan(&refs(&before), &refs(&after));
+        assert!(other.in_place() && other.changes.is_empty() && !other.environment_changes, "{other:#?}");
+        assert_eq!(other.project_in_place, ["environments/test.yaml: another environment's file, nothing changes here"]);
+
+        // This environment's port and the variable the code names: in place, both interfaces' reasons said.
+        let moved = files(&prod("MLLP_PORT: 6666, EMPI_URL: b, DB_HOST: db1"), &[test]);
+        let reached = plan(&refs(&before), &refs(&moved));
+        assert!(reached.in_place() && reached.environment_changes, "{reached:#?}");
+        assert_eq!(reached.changes.len(), 1);
+        assert_eq!(reached.changes[0].what, ["source (MLLP_PORT)", "code reads EMPI_URL"]);
+        let by = reached.changes[0].reached.as_ref().unwrap();
+        let names: Vec<&str> = by.variables.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["EMPI_URL", "MLLP_PORT"]);
+        // Its source by the port; every part by the code (this version records no parts).
+        assert!(by.touches.source && by.touches.everything, "{by:#?}");
+        assert_eq!(reached.project_in_place, ["environments/prod.yaml: EMPI_URL \"a\" → \"b\", MLLP_PORT \"6661\" → \"6666\""]);
+
+        // console: alone swaps, reaching no interface.
+        let quiet = files(&("environments/prod.yaml", format!("variables: {{ {base} }}\nconsole: warn\n")), &[test]);
+        let console = plan(&refs(&before), &refs(&quiet));
+        assert!(console.in_place() && console.changes.is_empty() && console.environment_changes);
+        assert_eq!(console.project_in_place, ["environments/prod.yaml: console info → warn"]);
+
+        // What resources.yaml fills in, a secrets file, resources.yaml as written: the handover.
+        let db = files(&prod("MLLP_PORT: 6661, EMPI_URL: a, DB_HOST: db2"), &[test]);
+        let why = plan(&refs(&before), &refs(&db)).handover_because();
+        assert_eq!(why, ["DB_HOST changes what resources.yaml fills in (databases, APIs and their pools are made at a start)"]);
+        let secret = files(&p1, &[test, ("secrets/prod.json", "{}")]);
+        let why = plan(&refs(&before), &refs(&secret)).handover_because();
+        assert_eq!(why, ["secrets/prod.json changed (secrets are decrypted at a start)"]);
+        let mut edited = files(&p1, &[test]);
+        edited[2].1 = "databases:\n  emr: { host: other }\n".into();
+        let why = plan(&refs(&before), &refs(&edited)).handover_because();
+        assert_eq!(why, ["resources.yaml changed (databases, APIs and their pools are made at a start)"]);
     }
 
     #[test]
