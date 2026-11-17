@@ -63,7 +63,7 @@ ENGINE="" HELD=""
 cleanup() {
   for pid in $ENGINE $HELD; do kill -INT "$pid" 2>/dev/null || true; done
   wait 2>/dev/null || true
-  "$BIN" token revoke "allow-demo-$$" >/dev/null 2>&1 || true
+  forget_tokens "allow-demo-$$" "allow-demo-ops-$$" || true
 }
 trap cleanup EXIT
 wait_for() { # seconds condition

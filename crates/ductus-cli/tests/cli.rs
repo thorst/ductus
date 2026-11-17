@@ -1933,6 +1933,31 @@ impl Drop for Child {
     }
 }
 
+/// The tokens a test makes with `ductus token create`, revoked when the test ends, also when it
+/// fails half-way: revoked only at its end, a failing test left them on the shared database, where
+/// they piled up (`rel-*`, `api-test-*`… by 2026-11-17) and the Tokens page lists every one.
+/// Made before the tokens, so a test that fails while making them still revokes those it made.
+struct Tokens(Vec<String>);
+
+impl Tokens {
+    fn new<S: Into<String>>(names: impl IntoIterator<Item = S>) -> Self {
+        Tokens(names.into_iter().map(Into::into).collect())
+    }
+}
+
+impl Drop for Tokens {
+    fn drop(&mut self) {
+        for name in &self.0 {
+            let mut revoke = Command::new(env!("CARGO_BIN_EXE_ductus"));
+            revoke.args(["token", "revoke", name]);
+            if let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") {
+                revoke.env("DUCTUS_DATABASE_URL", db);
+            }
+            let _ = revoke.output();
+        }
+    }
+}
+
 /// Wait up to 2.5 s for `check` to hold.
 async fn eventually(check: impl AsyncFnMut() -> bool) -> bool {
     within(2.5, check).await
@@ -1977,6 +2002,7 @@ async fn the_api_shows_the_engine_and_drains_it() {
         assert!(ok, "{out}");
         out.lines().next().unwrap().to_string()
     };
+    let _tokens = Tokens::new(["admin", "viewer"].map(|role| format!("{name}-{role}")));
     let (admin, viewer) = (token("admin"), token("viewer"));
 
     let mut engine = Child(
@@ -2213,10 +2239,6 @@ async fn the_api_shows_the_engine_and_drains_it() {
     let exit = engine.0.wait().unwrap();
     assert!(exit.success(), "the engine exits cleanly once drained: {exit}");
     assert_eq!(delivered.load(std::sync::atomic::Ordering::SeqCst), 3);
-
-    for role in ["admin", "viewer"] {
-        run(&["token", "revoke", &format!("{name}-{role}")]);
-    }
 }
 
 /// Pausing a destination (act first, explain after): nothing is sent to it while the others
@@ -2241,6 +2263,7 @@ async fn a_paused_destination_waits_until_resumed() {
             format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
         )
     };
+    let _tokens = Tokens::new([format!("{name}-ops")]);
     let (ok, out) = run(&["token", "create", &format!("{name}-ops"), "--role", "operator"]);
     assert!(ok, "{out}");
     let ops = out.lines().next().unwrap().to_string();
@@ -2355,7 +2378,6 @@ async fn a_paused_destination_waits_until_resumed() {
     assert!(lab().await["paused"].is_null());
 
     drop(engine);
-    run(&["token", "revoke", &format!("{name}-ops")]);
 }
 
 /// Acting on messages through the API: the quarantine across interfaces, an edited copy that
@@ -2386,6 +2408,7 @@ async fn messages_are_resent_and_corrected_through_the_api() {
         assert!(ok, "{out}");
         out.lines().next().unwrap().to_string()
     };
+    let _tokens = Tokens::new(["operator", "viewer", "auditor"].map(|role| format!("{name}-{role}")));
     let (ops, viewer) = (token("operator"), token("viewer"));
 
     // The lab rejects (AR) anything with BAD in it, and keeps the control ids it accepted.
@@ -2647,9 +2670,6 @@ async fn messages_are_resent_and_corrected_through_the_api() {
     ] {
         assert!(spec["paths"][path].is_object(), "{path} missing from the OpenAPI document");
     }
-    for role in ["operator", "viewer", "auditor"] {
-        run(&["token", "revoke", &format!("{name}-{role}")]);
-    }
 }
 
 /// The web UI comes with the engine: any path outside `/api` is the app (its router shows the
@@ -2671,6 +2691,8 @@ async fn the_ui_is_served_and_a_browser_signs_in_with_a_session() {
             Command::new(env!("CARGO_BIN_EXE_ductus")).args(args).env("DUCTUS_DATABASE_URL", &db).output().unwrap();
         (out.status.success(), String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
+    // Revoked by the test itself (its session ends with it); this covers a failure before that.
+    let _tokens = Tokens::new([format!("{name}-ops")]);
     let (ok, token) = run(&["token", "create", &format!("{name}-ops"), "--role", "operator"]);
     assert!(ok, "{token}");
     let _engine = Child(
@@ -3634,6 +3656,7 @@ async fn an_interface_runs_on_one_engine_at_a_time() {
     );
     let token_name = format!("{name}-viewer");
     let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
+    let _tokens = Tokens::new([token_name.clone()]);
     let (ok, token) = ductus(dir.path(), &["token", "create", &token_name, "--role", "viewer"]);
     assert!(ok, "{token}");
     let token = token.lines().next().unwrap().to_string();
@@ -3649,7 +3672,6 @@ async fn an_interface_runs_on_one_engine_at_a_time() {
     assert_eq!(engine["holds_interfaces"], true);
     let others = engine["others"].as_array().unwrap();
     assert!(others.iter().any(|e| e["interfaces"] == serde_json::json!([other])), "{engine}");
-    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
 
     // The first dies without a word (kill -9): its lock goes with it, so the next start takes over.
     first.0.kill().unwrap();
@@ -3931,6 +3953,7 @@ async fn a_handover_refuses_nothing_and_a_failed_one_leaves_the_engine_running()
 
     // How it took over, as the API tells.
     let token_name = format!("{name}-viewer");
+    let _tokens = Tokens::new([token_name.clone()]);
     let (ok, token) = ductus(dir.path(), &["token", "create", &token_name, "--role", "viewer"]);
     assert!(ok, "{token}");
     let token = token.lines().next().unwrap().to_string();
@@ -3940,7 +3963,6 @@ async fn a_handover_refuses_nothing_and_a_failed_one_leaves_the_engine_running()
     };
     let engine = get("/engine").await;
     let interface = get(&format!("/interfaces/{name}")).await;
-    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
     assert_eq!(engine["handover"]["from_pid"], old_pid, "{engine}");
     assert!(engine["handover"]["sending_paused_ms"].as_u64().is_some(), "{engine}");
     // What it runs, recorded (0.7.3): the handover by this account, with its reason; nothing
@@ -4289,6 +4311,7 @@ async fn history_tells_who_changed_what_and_why() {
 
     // The API, a page at a time.
     let token_name = format!("{name}-viewer");
+    let _tokens = Tokens::new([token_name.clone()]);
     let (ok, token) = ductus(&root, &["token", "create", &token_name, "--role", "viewer"]);
     assert!(ok, "{token}");
     let token = token.lines().next().unwrap().to_string();
@@ -4312,7 +4335,6 @@ async fn history_tells_who_changed_what_and_why() {
     assert_eq!(paged, keys(&all), "two pages are the whole");
     assert_eq!(get("/interfaces/nobody-has-this/history").await.0, 404);
     assert_eq!(get(&format!("/interfaces/{name}/history?before=yesterday")).await.0, 400);
-    let _ = ductus(&root, &["token", "revoke", &token_name]);
     drop(new);
 }
 
@@ -4439,6 +4461,7 @@ async fn history_by_source_and_destination() {
 
     // A pause of lab, through the API.
     let token_name = format!("{name}-operator");
+    let _tokens = Tokens::new([token_name.clone()]);
     let (ok, token) = ductus(&root, &["token", "create", &token_name, "--role", "operator"]);
     assert!(ok, "{token}");
     let token = token.lines().next().unwrap().to_string();
@@ -4532,7 +4555,6 @@ async fn history_by_source_and_destination() {
     );
 
     let _ = client.delete(&pause).bearer_auth(&token).send().await;
-    let _ = ductus(&root, &["token", "revoke", &token_name]);
     drop(engine);
 }
 
@@ -5106,6 +5128,7 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
         assert!(ok, "{out}");
         out.lines().next().unwrap().to_string()
     };
+    let _tokens = Tokens::new(["ann", "bob"].map(|who| format!("{name}-{who}")));
     let (ann, bob) = (token("ann"), token("bob"));
     let to = format!("http://127.0.0.1:{api}");
     let deploy = |token: &str, args: &[&str]| -> (bool, String) {
@@ -5285,9 +5308,6 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     assert!(!ok && out.contains("(folder mode)") && out.contains("DUCTUS_RELEASES"), "{out}");
     drop(folder);
 
-    for who in ["ann", "bob"] {
-        let _ = ductus(dir.path(), &["token", "revoke", &format!("{name}-{who}")]);
-    }
     let ids: Vec<Vec<u8>> = [&a, &b, &c, &s, &t]
         .iter()
         .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
@@ -5344,6 +5364,7 @@ async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let token_name = format!("{a}-deployer");
+    let _tokens = Tokens::new([token_name.clone()]);
     let args = ["token", "create", &token_name, "--role", "operator", "--permission", "deploy"];
     let out = Command::new(bin).args(args).current_dir(dir.path()).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -5601,7 +5622,6 @@ async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
     }
 
     drop(engine);
-    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
     let ids: Vec<Vec<u8>> = [&one, &two, &three, &four, &five, &six]
         .iter()
         .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
@@ -5665,6 +5685,7 @@ async fn sources_change_in_place_while_their_senders_send() {
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let token_name = format!("{m}-deployer");
+    let _tokens = Tokens::new([token_name.clone()]);
     let args = ["token", "create", &token_name, "--role", "operator", "--permission", "deploy"];
     let out = Command::new(bin).args(args).current_dir(dir.path()).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
@@ -5857,7 +5878,6 @@ async fn sources_change_in_place_while_their_senders_send() {
     assert_eq!(running().await, engine.0, "the same engine still");
 
     drop(engine);
-    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
     let ids: Vec<Vec<u8>> = [&one, &two, &three]
         .iter()
         .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
@@ -5907,6 +5927,7 @@ async fn an_interface_removed_in_place_keeps_what_waits_and_sends_it_when_added_
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let token_name = format!("{k}-deployer");
+    let _tokens = Tokens::new([token_name.clone()]);
     let (ok, out) =
         ductus(dir.path(), &["token", "create", &token_name, "--role", "operator", "--permission", "deploy"]);
     assert!(ok, "{out}");
@@ -6058,7 +6079,6 @@ async fn an_interface_removed_in_place_keeps_what_waits_and_sends_it_when_added_
     }
 
     drop(engine);
-    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
     let ids: Vec<Vec<u8>> = released.iter().map(|id| ductus_runtime::deploy::unhex(id).unwrap()).collect();
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
@@ -6079,6 +6099,7 @@ async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_proces
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let token_name = format!("{name}-deployer");
+    let _tokens = Tokens::new([token_name.clone()]);
     let (ok, out) =
         ductus(dir.path(), &["token", "create", &token_name, "--role", "operator", "--permission", "deploy"]);
     assert!(ok, "{out}");
@@ -6211,7 +6232,6 @@ async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_proces
     drop(held);
 
     drop(engine);
-    let _ = ductus(dir.path(), &["token", "revoke", &token_name]);
     let ids: Vec<Vec<u8>> =
         [&a, &b, &b2, &c].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
@@ -6235,6 +6255,7 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
     let work = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let _tokens = Tokens::new(["ann", "bob", "pull"].map(|who| format!("{name}-{who}")));
     let (ann, bob) = {
         let token = |who: &str| {
             let token_name = format!("{name}-{who}");
@@ -6516,9 +6537,6 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
     assert_eq!(page["deployed"].as_array().map(Vec::len), Some(3), "{page:#}");
 
     drop(prod_engine);
-    for who in ["ann", "bob", "pull"] {
-        let _ = ductus(dir.path(), &["token", "revoke", &format!("{name}-{who}")]);
-    }
     let store = ductus_store::Store::connect(&db, 2).await.unwrap();
     let ids: Vec<Vec<u8>> =
         [&a, &b, &d].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();

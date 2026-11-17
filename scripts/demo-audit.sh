@@ -57,12 +57,14 @@ start_engine() {
 cleanup() {
   kill -INT $ENGINE 2>/dev/null || true
   psql -q "$DB" -c "DROP TRIGGER IF EXISTS audit_demo_refuse ON audit_log" -c "DROP FUNCTION IF EXISTS audit_demo_refuse()" 2>/dev/null || true
+  # This run's tokens, also when it ends early (a failed wait's `exit`).
+  for token in ops auditor reader; do "$BIN" token revoke "audit-demo-$token-$SUFFIX" >/dev/null 2>&1 || true; done
 }
+SUFFIX=$$
 trap cleanup EXIT
 
 start_engine 1
 echo "engine log: $P/run-1.log"
-SUFFIX=$$
 OPS=$("$BIN" token create "audit-demo-ops-$SUFFIX" --role operator --permission payloads 2>/dev/null)
 AUDITOR=$("$BIN" token create "audit-demo-auditor-$SUFFIX" --role viewer --permission audit 2>/dev/null)
 READER=$("$BIN" token create "audit-demo-reader-$SUFFIX" --role viewer --permission payloads 2>/dev/null)
@@ -160,5 +162,4 @@ printf 'api: { listen: 127.0.0.1:7795 }\naudit: { keep: 90d }\n' >"$P/ductus.yam
 refusal=$(timeout 30 "$BIN" run 2>&1 || true)
 grep "audit.keep must be at least a year" <<<"$refusal" >/dev/null || fail+=" keep-accepted($refusal)"
 
-for token in ops auditor reader; do "$BIN" token revoke "audit-demo-$token-$SUFFIX" >/dev/null 2>&1 || true; done
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; tail -20 "$P/run-1.log"; exit 1; fi

@@ -22,6 +22,8 @@ export PGOPTIONS="--client-min-messages=warning" # no "does not exist, skipping"
 ENGINE=; SSHD_PID=
 cleanup() {
   for pid in $ENGINE $SSHD_PID; do kill "$pid" 2>/dev/null || true; done
+  # dev's token (prod's database is dropped by the next run).
+  DUCTUS_DATABASE_URL=$DB forget_tokens "demo-v04-dev-$$" || true
 }
 trap cleanup EXIT
 

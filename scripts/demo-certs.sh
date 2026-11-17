@@ -101,6 +101,8 @@ cleanup() {
   [ -n "$TLS" ] && kill "$TLS" 2>/dev/null || true
   [ -n "$ENGINE" ] && wait "$ENGINE" 2>/dev/null || true
   [ -n "$PG" ] && bash "$DEV/pgtls.sh" stop "$PG" || true
+  # The first token is on the main database (the others on the throwaway TLS Postgres).
+  DUCTUS_DATABASE_URL=$DB forget_tokens "$OPS_NAME" || true
 }
 trap cleanup EXIT
 echo 40 >"$P/days"

@@ -41,3 +41,20 @@ forget_test_users() {
     -c "DELETE FROM user_settings WHERE user_id IN ($users)" \
     -c "DELETE FROM users WHERE id IN ($users)"
 }
+
+# forget_tokens NAME...: revokes the tokens a test or demo made without a person (`ductus token
+# create`), by name; `%` matches any run's (`'ui-demo-%'`). Call it in the script's EXIT trap, not
+# at its end: a script that ends early otherwise leaves them, and the Tokens page lists every one
+# (243 left by demo-ui alone made its browser test overrun, 2026-11-17). A name must have at least
+# four characters before any `%`, so no pattern can revoke everything.
+forget_tokens() {
+  local p list=""
+  for p in "$@"; do
+    case ${p%%\%*} in
+      ????*) list+="${list:+,}'$p'" ;;
+      *) echo "forget_tokens: '$p' would match too much" >&2; return 1 ;;
+    esac
+  done
+  [ -n "$list" ] || return 0
+  psql -q "$DUCTUS_DATABASE_URL" -c "UPDATE api_tokens SET revoked_at = now() WHERE revoked_at IS NULL AND user_id IS NULL AND name LIKE ANY (ARRAY[$list])"
+}

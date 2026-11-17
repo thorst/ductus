@@ -688,14 +688,14 @@ Here a release moves the lab feed's MLLP port (`scripts/demo-promote.sh`, step 1
 pointed at the new port afterwards, is taken there:
 
 ```text
-$ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy 244ae794c367 --from $TEST --to $PROD -m "prod on a new port"
-fetched release 244ae794c367 from http://127.0.0.1:17793 (9.8 KB, deployed to: test)
-stored release 244ae794c367 on the engine (1 record of where it went added)
+$ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy f55273299b91 --from $TEST --to $PROD -m "the feed on a new port, tested"
+fetched release f55273299b91 from http://127.0.0.1:17793 (9.8 KB, deployed to: test)
+stored release f55273299b91 on the engine (1 record of where it went added)
 deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
-release 244ae794c367 (project integrations, branch main) to environment `prod`
-gate: passed in 0.82 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+release f55273299b91 (project integrations, branch main) to environment `prod`
+gate: passed in 0.8 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
 · promote-demo: source (in place)
-  promote-demo: source → d587ba4f2a03, applied in place (5 ms)
+  promote-demo: source → d587ba4f2a03, applied in place (6 ms)
 ✓ applied in place: 1 interface's source changed; the others never paused
 changed 1 interface:
   promote-demo 96e5d793f01b → d587ba4f2a03

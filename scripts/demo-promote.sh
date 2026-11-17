@@ -301,12 +301,12 @@ MOVED=$((MLLP[prod] + 5))
 FEED_PORT=NEW_MLLP_PORT
 lanes 2
 g commit -qam "the feed on NEW_MLLP_PORT"
-step r7 'env -u DUCTUS_DATABASE_URL ductus release -m "prod on a new port"'
+step r7 'env -u DUCTUS_DATABASE_URL ductus release -m "the feed on a new port"'
 S7=$(short_id r7) REL7=.ductus/releases/$(basename "$(released r7)")
-step test7 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL7"' --to $TEST -m "prod on a new port"'
+step test7 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL7"' --to $TEST -m "the feed on a new port"'
 received() { q prod "SELECT count(*) FROM messages WHERE interface = '$NAME'"; }
 BEFORE=$(received)
-step promote7 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S7"' --from $TEST --to $PROD -m "prod on a new port"'
+step promote7 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S7"' --from $TEST --to $PROD -m "the feed on a new port, tested"'
 [ "$(code test7)" = 0 ] && [ "$(code promote7)" = 0 ] || fail+=" promote7"
 for s in test7 promote7; do has $s "^· $NAME: source (in place)" && has $s "^✓ applied in place" || fail+=" $s-not-in-place"; done
 # The old port is closed (connecting is refused); the sender, repointed, is taken at the new one.

@@ -59,6 +59,7 @@ cd "$P"
 ENGINE="" MAIL="" HOOK="" LAB=""
 cleanup() {
   for pid in $ENGINE $MAIL $HOOK $LAB; do kill -INT "$pid" 2>/dev/null || true; done
+  forget_tokens "alerts-demo-ops-$$" "alerts-demo-viewer-$$" || true
 }
 trap cleanup EXIT
 "$BIN" sink --smtp 2526 --dir "$P/mail" >"$P/mail.log" 2>&1 &

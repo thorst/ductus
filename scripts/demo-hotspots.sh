@@ -62,7 +62,7 @@ forget_waiting() {
   psql -q "$DB" -c "UPDATE deliveries SET status = 2, last_error = 'demo-hotspots ended' WHERE status = 0 AND destination_id IN (SELECT id FROM destinations WHERE interface IN ('adt', 'lab-api'))" \
     -c "UPDATE messages SET status = 2, last_error = 'demo-hotspots ended' WHERE status = 0 AND interface IN ('adt', 'lab-api')"
 }
-trap 'kill -INT $ENGINE 2>/dev/null || true; wait $ENGINE 2>/dev/null || true; forget_waiting || true' EXIT
+trap 'kill -INT $ENGINE 2>/dev/null || true; wait $ENGINE 2>/dev/null || true; forget_waiting || true; forget_tokens "demo-$$" || true' EXIT
 until grep "started interfaces=" "$P/run.log" >/dev/null; do kill -0 $ENGINE || { cat "$P/run.log"; exit 1; }; sleep 0.2; done
 echo "engine log: $P/run.log"
 # A token of this name left by an earlier run (process ids repeat after a reboot) would refuse the new one.

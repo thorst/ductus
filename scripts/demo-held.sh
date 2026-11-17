@@ -48,7 +48,7 @@ EOF
 
 cd "$P"
 ENGINE=""
-trap 'kill -INT $ENGINE 2>/dev/null || true' EXIT
+trap 'kill -INT $ENGINE 2>/dev/null || true; forget_tokens "demo-$$" || true' EXIT
 start_engine() {
   "$BIN" run >>"$P/run.log" 2>&1 &
   ENGINE=$!
