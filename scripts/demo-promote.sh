@@ -26,9 +26,10 @@
 #  13. release 5 adds an archive interface listening where the lab's receiver did (0.7.5.2.1):
 #      promoted, it's added in place on prod (claimed, receiving what the feed sends the lab);
 #      release 6 removes it, in place too (its claim given back);
-#  14. release 7 moves the interface's MLLP port (to NEW_MLLP_PORT, which every environment file
-#      named from the start): applied in place on test and prod (0.7.5.2.2), the new port open
-#      before the old closed; the sender repointed is taken there.
+#  14. release 7 moves the interface's MLLP port by its variable (MLLP_PORT's value in every
+#      environment file; interface.yaml unchanged): applied in place on test and prod (0.7.5.2.3:
+#      the filled-in source compared; 0.7.5.2.2: the new port open before the old closed), the
+#      values recorded in the interface's history; the sender repointed is taken there.
 # `TRANSCRIPT=file` keeps what each step printed (docs/operate/releases.md shows it).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
@@ -83,15 +84,14 @@ mkdir -p "$P/interfaces/$NAME" "$P/environments"
 cd "$P"
 echo "{}" >ductus.yaml
 printf 'out/\n*.key\n' >.gitignore
-for e in "${ENVS[@]}"; do
-  # NEW_MLLP_PORT: where the feed moves in step 14.
-  printf 'variables:\n  MLLP_PORT: %s\n  NEW_MLLP_PORT: %s\n  RECEIVER_PORT: %s\n' "${MLLP[$e]}" $((MLLP[$e] + 5)) "${SINK[$e]}" >"environments/$e.yaml"
-done
-FEED_PORT=MLLP_PORT
+variables() { # variables <environment> <its feed's MLLP port>
+  printf 'variables:\n  MLLP_PORT: %s\n  RECEIVER_PORT: %s\n' "$2" "${SINK[$1]}" >"$P/environments/$1.yaml"
+}
+for e in "${ENVS[@]}"; do variables "$e" "${MLLP[$e]}"; done
 lanes() { # lanes <partitions> [another destination's line]
   cat >"$P/interfaces/$NAME/interface.yaml" <<EOF
 name: $NAME
-source: { mllp: { host: 127.0.0.1, port: \${$FEED_PORT} } }
+source: { mllp: { host: 127.0.0.1, port: \${MLLP_PORT} } }
 ordering: { key: PID-3.1, partitions: $1 }
 destinations:
   lab: { mllp: { host: 127.0.0.1, port: \${RECEIVER_PORT}, timeout_ms: 500 }, script: lab.ts }
@@ -293,14 +293,13 @@ step promote6 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus
 has promote6 "^· $ARCHIVE: removed (in place)" && has promote6 "^✓ applied in place" || fail+=" archive-removed-in-place"
 [ "$(claimed)" = 0 ] || fail+=" archive-claim-kept"
 
-echo "== 14. the feed's MLLP port moved in place (release 7), the sender repointed"
-# The interface's source moves to the port each environment already names (a change under
-# environments/ goes by the handover: its variables are read at a start). Each engine opens the
-# new port before it closes the old one (0.7.5.2.2), no handover.
+echo "== 14. the feed's MLLP port moved in place by its variable (release 7), the sender repointed"
+# Only the environment files change (MLLP_PORT's value in each): the deploy compares the feed's
+# source filled in with the old and new values (0.7.5.2.3), and each engine opens the new port
+# before it closes the old one (0.7.5.2.2), no handover.
 MOVED=$((MLLP[prod] + 5))
-FEED_PORT=NEW_MLLP_PORT
-lanes 2
-g commit -qam "the feed on NEW_MLLP_PORT"
+for e in "${ENVS[@]}"; do variables "$e" $((MLLP[$e] + 5)); done
+g commit -qam "the feed on a new port"
 step r7 'env -u DUCTUS_DATABASE_URL ductus release -m "the feed on a new port"'
 S7=$(short_id r7) REL7=.ductus/releases/$(basename "$(released r7)")
 step test7 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL7"' --to $TEST -m "the feed on a new port"'
@@ -308,7 +307,13 @@ received() { q prod "SELECT count(*) FROM messages WHERE interface = '$NAME'"; }
 BEFORE=$(received)
 step promote7 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S7"' --from $TEST --to $PROD -m "the feed on a new port, tested"'
 [ "$(code test7)" = 0 ] && [ "$(code promote7)" = 0 ] || fail+=" promote7"
-for s in test7 promote7; do has $s "^· $NAME: source (in place)" && has $s "^✓ applied in place" || fail+=" $s-not-in-place"; done
+for s in test7 promote7; do
+  has $s "^· $NAME: source (MLLP_PORT) (in place)" && has $s "^✓ applied in place" || fail+=" $s-not-in-place"
+done
+has promote7 "^· environments/prod.yaml: MLLP_PORT \"${MLLP[prod]}\" → \"$MOVED\"" || fail+=" promote7-values"
+has promote7 "^  $NAME new values: MLLP_PORT" || fail+=" promote7-reached"
+# The interface's history names the values (its code version is the same).
+[ "$(q prod "SELECT count(*) FROM deployment_variables WHERE interface = '$NAME'")" = 1 ] || fail+=" history-values"
 # The old port is closed (connecting is refused); the sender, repointed, is taken at the new one.
 if (exec 3<>"/dev/tcp/127.0.0.1/${MLLP[prod]}") 2>/dev/null; then fail+=" old-port-open"; fi
 "$BIN" gen --to "127.0.0.1:$MOVED" --count 20 --patients 5 --offset 2000 >"$W/gen3.log" 2>&1

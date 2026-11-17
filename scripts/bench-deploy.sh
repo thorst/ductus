@@ -21,7 +21,9 @@
 #   4. a code change to A while S's lookups take SLOW ms;
 #   5. (0.7.5.2.1) an interface added, then removed; 50 added, then removed (w-0000 …, MLLP on
 #      ports of their own, no traffic to them);
-#   6. (0.7.5.2.2) a port moved: v-0012's MLLP port, then back.
+#   6. (0.7.5.2.2) a port moved: v-0012's MLLP port, then back;
+#   7. (0.7.5.2.3) a variable's new value: V13_PORT (v-0013's port), then SEND_TIMEOUT (every
+#      destination's `timeout_ms`: all COUNT interfaces reached).
 # Then CYCLES interfaces added and removed again (two deploys each) and DEPLOYS deploys of A in a
 # row (no traffic), each with the engine's memory before, every 25, and after; and that every
 # message sent arrived once.
@@ -49,9 +51,14 @@ BASE=21000
 
 echo "== a project with $COUNT interfaces (in $P)"
 mkdir -p "$P/lib" "$P/environments"
-for e in dev prod; do
-  printf 'variables: { SLOW_URL: "http://127.0.0.1:%d/" }\nconsole: warn\n' "$SLOW_PORT" >"$P/environments/$e.yaml"
-done
+# SEND_TIMEOUT: every destination's; V13_PORT: v-0013's port (phase 7 changes their values).
+variables() { # variables <SEND_TIMEOUT> <V13_PORT>
+  for e in dev prod; do
+    printf 'variables: { SLOW_URL: "http://127.0.0.1:%d/", SEND_TIMEOUT: %d, V13_PORT: %d }\nconsole: warn\n' \
+      "$SLOW_PORT" "$1" "$2" >"$P/environments/$e.yaml"
+  done
+}
+variables 5000 $((BASE + 13))
 printf 'api: { listen: "off" }\n' >"$P/ductus.yaml"
 printf '.ductus/\n' >"$P/.gitignore"
 for l in $(seq 0 9); do
@@ -65,8 +72,10 @@ for i in $(seq 0 $((COUNT - 1))); do
   n=$(printf 'v-%04d' "$i")
   d="$P/interfaces/$n"
   mkdir -p "$d"
-  printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: %d } }\ndestinations: { receiver: { mllp: { host: 127.0.0.1, port: %d }, script: transform.ts } }\n' \
-    "$n" $((BASE + i)) "$SINK" >"$d/interface.yaml"
+  port=$((BASE + i))
+  [ "$i" = 13 ] && port='${V13_PORT}'
+  printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: %s } }\ndestinations: { receiver: { mllp: { host: 127.0.0.1, port: %d, timeout_ms: ${SEND_TIMEOUT} }, script: transform.ts } }\n' \
+    "$n" "$port" "$SINK" >"$d/interface.yaml"
   printf 'export const ROUND = 0;\nexport function clean(s: string): string {\n  return s.trim().toUpperCase();\n}\n' >"$d/map.ts"
   if [ "$i" = 4 ]; then
     cat >"$d/transform.ts" <<'EOF'
@@ -307,6 +316,22 @@ phase "a port moved (v-0012)" deploy "$(release "v-0012 moved")" in_place
 grep -q 'source (in place)\|"source"' "$WORK/deploy.json" || { echo "not a source change:"; cat "$WORK/deploy.json"; exit 1; }
 move_port $((BASE + 12))
 phase "a port moved back (v-0012)" deploy "$(release "v-0012 moved back")" in_place
+
+# A variable's new value in place (0.7.5.2.3): only the environment files change. V13_PORT moves
+# v-0013's port (one interface reached); SEND_TIMEOUT is every destination's `timeout_ms` (all
+# COUNT reached, each restarted between messages). The plan reads every interface.yaml and code
+# file then: `plan_over` says how long.
+variables 5000 $((BASE + COUNT + 101))
+g commit -qam "V13_PORT moved"
+phase "a variable moved a port (v-0013)" deploy "$(release "V13_PORT moved")" in_place
+grep -q 'source (V13_PORT)' "$WORK/deploy.json" || { echo "V13_PORT reached nothing:"; cat "$WORK/deploy.json"; exit 1; }
+variables 6000 $((BASE + COUNT + 101))
+g commit -qam "SEND_TIMEOUT 6000"
+phase "a variable reaching all $COUNT interfaces" deploy "$(release "SEND_TIMEOUT 6000")" in_place
+reached=$(python3 -c 'import json, sys
+plan = json.load(open(sys.argv[1]))["plan"]
+print(sum("destinations.receiver (SEND_TIMEOUT)" in c["what"] for c in plan["changes"]))' "$WORK/deploy.json")
+[ "$reached" = "$COUNT" ] || { echo "SEND_TIMEOUT reached $reached of $COUNT"; exit 1; }
 
 echo "== $CYCLES interfaces added and removed again in a row (no traffic)"
 echo "   before: $(memory)"

@@ -684,28 +684,41 @@ a file or SFTP pickup or a schedule stops between messages and starts again with
 A port or HTTP route moving from one interface to another, a listener changing kind or host on its
 own port, and a change between queue and respond mode still take the handover
 ([nuance](../nuances/releases.md#a-source-changed-in-place-moves-swaps-or-restarts-alone-level-2)).
-Here a release moves the lab feed's MLLP port (`scripts/demo-promote.sh`, step 14); the sender,
-pointed at the new port afterwards, is taken there:
+Here a release moves the lab feed's MLLP port by its variable (`scripts/demo-promote.sh`, step
+14: `port: ${MLLP_PORT}`, the value changed in each environment file); the sender, pointed at the
+new port afterwards, is taken there:
 
 ```text
-$ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy f55273299b91 --from $TEST --to $PROD -m "the feed on a new port, tested"
-fetched release f55273299b91 from http://127.0.0.1:17793 (9.8 KB, deployed to: test)
-stored release f55273299b91 on the engine (1 record of where it went added)
+$ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy 51bde58e58d8 --from $TEST --to $PROD -m "the feed on a new port, tested"
+fetched release 51bde58e58d8 from http://127.0.0.1:17793 (9.7 KB, deployed to: test)
+stored release 51bde58e58d8 on the engine (1 record of where it went added)
 deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
-release f55273299b91 (project integrations, branch main) to environment `prod`
-gate: passed in 0.8 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
-· promote-demo: source (in place)
-  promote-demo: source → d587ba4f2a03, applied in place (6 ms)
+release 51bde58e58d8 (project integrations, branch main) to environment `prod`
+gate: passed in 0.76 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+· promote-demo: source (MLLP_PORT) (in place)
+· environments/dev.yaml: another environment's file, nothing changes here
+· environments/test.yaml: another environment's file, nothing changes here
+· environments/prod.yaml: MLLP_PORT "17801" → "17806"
+  promote-demo: source (MLLP_PORT) → 96e5d793f01b, applied in place (2 ms)
 ✓ applied in place: 1 interface's source changed; the others never paused
 changed 1 interface:
-  promote-demo 96e5d793f01b → d587ba4f2a03
+  promote-demo new values: MLLP_PORT "17801" → "17806"
 ```
 
-**When a port differs per environment**, name the one it moves to in each environment file first,
-in a release of its own (a change under `environments/` goes by the handover: its variables are
-read at a start), then point `port:` at it: that release goes in place. The demo's environment
-files carried `NEW_MLLP_PORT` from the start; its interface.yaml went from
-`port: ${MLLP_PORT}` to `port: ${NEW_MLLP_PORT}`.
+The interface's code version (`96e5d793f01b`) is the one it ran: only the value changed, and its
+history records it as `deployed new values: MLLP_PORT "17801" → "17806" in place: the feed on a
+new port, tested`.
+
+**A variable's new value** is planned the same way: the deploy fills every interface's
+interface.yaml in with the environment file's old values and its new ones, and an interface whose
+settings differ is changed by the rules above; one whose code names the variable
+(`env("EMPI_URL")`) loads its code again between messages. So a port that differs per environment,
+written `port: ${MLLP_PORT}`, moves in place when only `MLLP_PORT`'s value changes. The answer
+lists the environment file's changes and every interface they reach; the interface's code version
+stays (it's the files as written), and its history records the values
+([nuance](../nuances/releases.md#a-variables-new-value-reaches-what-it-fills-in-and-the-code-that-names-it-level-2)).
+Another environment's file changes nothing here. The demo's release above is one: it changes
+only `MLLP_PORT` in each environment file, and the feed's interface.yaml stays as it was.
 
 An interface the release **adds or removes** goes in place too, whatever its source: an added one
 is claimed, its code loaded and its listener, file pickup, schedule or HTTP route started (beside
@@ -738,8 +751,9 @@ place)`, then `changed 1 interface: promote-demo-archive removed`).
 
 Anything else needs the **handover**, and the answer says which change did (`needs the handover:
 …`): `format`, `ordering`, `workers`, `isolation`, `dedupe`, `retention` and the other
-settings of how messages are stored or laid out in lanes; the project's own files (`ductus.yaml`,
-`resources.yaml`, `docs-schema.yaml`, `environments/`, `secrets/`); the first release on an engine
+settings of how messages are stored or laid out in lanes; the project's own files read at a start
+(`ductus.yaml`, `resources.yaml`, `docs-schema.yaml`, this environment's `secrets/` file, or a
+variable whose new value changes what `resources.yaml` or `alerts:` fill in); the first release on an engine
 ([nuance](../nuances/releases.md#a-deploy-goes-in-place-unless-it-changes-how-messages-are-stored-lanes-or-the-projects-files-level-1)).
 Here a release raises an interface's lanes (`scripts/demo-promote.sh`, step 11):
 
