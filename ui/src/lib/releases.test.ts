@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import type { Schemas } from "@/api/client";
-import { applyOf, applySummary, changesSummary, gateSections, reuseCaveat, rulesText, sectionTitle } from "./releases";
+import {
+  applyOf,
+  applySummary,
+  changesSummary,
+  gateSections,
+  reachedOnly,
+  reuseCaveat,
+  rulesText,
+  sectionTitle,
+} from "./releases";
 
 const here: Schemas["Here"] = {
   environment: "prod",
@@ -62,7 +71,7 @@ describe("applySummary and applyOf", () => {
   });
 
   it("says a deploy goes in place, and each interface's line", () => {
-    const plan = { changes: [planned("adt", ["code", "destination pacs added"])], handover_because: [] };
+    const plan = { changes: [planned("adt", ["code", "destination pacs added"])], handover_because: [], project: [] };
     const h = { ...here, changes: [change("adt", "changed")], plan };
     expect(applySummary(h)).toBe(
       "It applies in place: the interface it changes takes its new code between two messages; the others never pause.",
@@ -72,7 +81,10 @@ describe("applySummary and applyOf", () => {
   });
 
   it("says an interface added or removed in place starts or stops", () => {
-    const plan = (changes: Schemas["PlannedChange"][]) => ({ ...here, plan: { changes, handover_because: [] } });
+    const plan = (changes: Schemas["PlannedChange"][]) => ({
+      ...here,
+      plan: { changes, handover_because: [], project: [] },
+    });
     expect(applySummary(plan([planned("orders", ["added"])]))).toBe(
       "It applies in place: the one it adds starts; the others never pause.",
     );
@@ -86,7 +98,10 @@ describe("applySummary and applyOf", () => {
   });
 
   it("says a source changed in place moves, swaps or restarts", () => {
-    const plan = (changes: Schemas["PlannedChange"][]) => ({ ...here, plan: { changes, handover_because: [] } });
+    const plan = (changes: Schemas["PlannedChange"][]) => ({
+      ...here,
+      plan: { changes, handover_because: [], project: [] },
+    });
     expect(applySummary(plan([planned("lab", ["source"])]))).toBe(
       "It applies in place: the source it changes moves, swaps its settings or restarts alone; the others never pause.",
     );
@@ -102,6 +117,7 @@ describe("applySummary and applyOf", () => {
     const plan = {
       changes: [planned("adt", ["code"]), planned("lab", ["ordering"], why)],
       handover_because: [`lab: ${why}`],
+      project: [],
     };
     const h = { ...here, plan };
     expect(applySummary(h)).toBe(
@@ -110,10 +126,36 @@ describe("applySummary and applyOf", () => {
     expect(applyOf(h, "lab")).toEqual({ what: "ordering", how: `the handover: ${why}`, inPlace: false });
   });
 
+  it("counts the interfaces a variable's new value reaches, a source it moved, and the environment file alone", () => {
+    const port = { name: "MLLP_PORT", before: "6661", after: "6666" };
+    const moved = { ...planned("feed", ["source (MLLP_PORT)"]), variables: [port] };
+    const both = { ...planned("adt", ["code", "code reads EMPI_URL"]), variables: [port] };
+    const h = {
+      ...here,
+      changes: [change("adt", "changed")],
+      unchanged: 4,
+      plan: {
+        changes: [both, moved],
+        handover_because: [],
+        project: ['environments/prod.yaml: MLLP_PORT "6661" → "6666"'],
+      },
+    };
+    expect(reachedOnly(h).map((c) => c.interface)).toEqual(["feed"]);
+    expect(changesSummary(h)).toBe("1 interface changes, 1 interface takes new variable values; 3 as they run now.");
+    expect(applySummary(h)).toBe(
+      "It applies in place: the interface it changes takes its new code between two messages, the source it changes moves, swaps its settings or restarts alone; the others never pause.",
+    );
+    const alone = {
+      ...here,
+      plan: { changes: [], handover_because: [], project: ["environments/prod.yaml: console info → warn"] },
+    };
+    expect(applySummary(alone)).toBe("It applies in place: no interface changes.");
+  });
+
   it("says nothing when the engine didn't, it runs it, or nothing changes", () => {
     expect(applySummary(here)).toBeNull();
-    expect(applySummary({ ...here, plan: { changes: [], handover_because: [] } })).toBeNull();
-    const plan = { changes: [planned("adt", ["code"])], handover_because: [] };
+    expect(applySummary({ ...here, plan: { changes: [], handover_because: [], project: [] } })).toBeNull();
+    const plan = { changes: [planned("adt", ["code"])], handover_because: [], project: [] };
     expect(applySummary({ ...here, running: true, plan })).toBeNull();
   });
 });

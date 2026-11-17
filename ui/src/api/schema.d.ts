@@ -2239,7 +2239,10 @@ export interface components {
             summary: string;
         };
         HistoryDeployment: {
-            /** @description It changed this interface's code (false: it ran it as it was; `all` only). */
+            /**
+             * @description It changed this interface: its code, or the value of a variable it uses (false: it ran it
+             *     as it was; `all` only).
+             */
             changed: boolean;
             environment: string;
             /** @description The code version before (12 hex characters); none when new here, or unchanged. */
@@ -2252,10 +2255,18 @@ export interface components {
             /** Format: int32 */
             id: number;
             reason?: string | null;
-            /** @description The code version from then; none when unchanged. */
+            /** @description The code version from then; none when unchanged (also when only `variables` changed). */
             to?: string | null;
             /** @description Files it ran that weren't the commit's; none without git. */
             uncommitted?: string[] | null;
+            /**
+             * @description The environment variables whose new values reached it (0.7.5.2.3: its settings filled in
+             *     moved, or its code names one), each with its value before and after; empty for most. Its
+             *     code version doesn't change for these (it's the files as written, the same everywhere).
+             */
+            variables: components["schemas"]["HistoryVariable"][];
+            /** @description What those variables changed, in words (`source (MLLP_PORT)`, `code reads EMPI_URL`). */
+            variables_changed: string[];
             /** @description The binary's version. */
             version: string;
             /** @description Why this change may undo someone else's (folder mode), when it may. */
@@ -2348,6 +2359,14 @@ export interface components {
              *     marked.
              */
             unsure: boolean;
+        };
+        /** @description A variable of the engine's environment file whose value a deploy changes (0.7.5.2.3). */
+        HistoryVariable: {
+            /** @description None: the variable is gone. */
+            after?: string | null;
+            /** @description As text (how code reads it); None: the variable is new. */
+            before?: string | null;
+            name: string;
         };
         ImpactHit: {
             /** @description Hosts and ports, listening ports, folders to look at. */
@@ -2853,6 +2872,12 @@ export interface components {
              *     interface); empty: it applies in place.
              */
             handover_because: string[];
+            /**
+             * @description What the project's own files change in place, a line each: the engine's environment file's
+             *     variables (`environments/prod.yaml: MLLP_PORT "6661" → "6666"`) and `console:`, another
+             *     environment's file changing nothing here.
+             */
+            project: string[];
         };
         PlannedChange: {
             /** @description Why only the handover applies it; absent when it goes in place. */
@@ -2861,8 +2886,14 @@ export interface components {
             in_place: boolean;
             interface: string;
             /**
+             * @description The environment variables whose new values reach it, with their values before and after;
+             *     absent when none do.
+             */
+            variables?: components["schemas"]["HistoryVariable"][];
+            /**
              * @description What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`,
-             *     `source`, `added`, `removed`, ...
+             *     `source`, `source (MLLP_PORT)` (a variable's new value moved it), `code reads EMPI_URL`
+             *     (reloaded for a variable its code names), `added`, `removed`, ...
              */
             what: string[];
         };

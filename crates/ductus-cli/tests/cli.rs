@@ -5885,6 +5885,185 @@ async fn sources_change_in_place_while_their_senders_send() {
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
+/// A variable's new value applied in place (0.7.5.2.3), one engine throughout. M listens on
+/// `${M_PORT}` and its code reads `env("STAMP")` once and keeps it; K listens on a port of its
+/// own, its sender sending throughout. A deploy that changes only `environments/prod.yaml` (both
+/// values) moves M's port (the old closed, the new taking messages) and reloads M's code (what
+/// it sends after carries the new stamp); K's sender is never refused. The answer names the
+/// environment file's change and M's, and M's history has the deployment with both values, K's
+/// doesn't. A deploy changing only another environment's file goes in place and changes nothing.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_variable_s_new_value_moves_a_port_and_reloads_the_code_that_reads_it_in_place() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (p0, p1, pk, api) = (free_port(), free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let [m, k] = ["m", "k"].map(|n| format!("vv{n}-{nanos}"));
+    let work = tempfile::tempdir().unwrap();
+    let out_dir = |name: &str| work.path().join(format!("out-{name}"));
+    let to_file = |name: &str| format!("destinations:\n  out: {{ file: {{ dir: '{}' }} }}\n", out_dir(name).display());
+    let yaml_m = format!(
+        "name: {m}\nsource: {{ mllp: {{ host: 127.0.0.1, port: ${{M_PORT}} }} }}\nscript: stamp.ts\n{}",
+        to_file(&m)
+    );
+    let yaml_k = format!("name: {k}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {pk} }} }}\n{}", to_file(&k));
+    let code = "import { env, type Message } from \"@ductus/sdk\";\n\n// Read once, at the first message, and kept.\nlet stamp: string | undefined;\n\nexport function transform(m: Message) {\n  stamp ??= env(\"STAMP\");\n  m.set(\"MSH-5\", stamp);\n  return m;\n}\n";
+    let variables = |port: u16, stamp: &str| format!("variables: {{ M_PORT: {port}, STAMP: {stamp} }}\n");
+    let dir = project(&[
+        (".gitignore", "out/\n*.log\n"),
+        ("ductus.yaml", "{}\n"),
+        ("environments/dev.yaml", variables(p0, "DEV").as_str()),
+        ("environments/test.yaml", variables(p0, "TESTING").as_str()),
+        ("environments/prod.yaml", variables(p0, "ONE").as_str()),
+        (format!("interfaces/{m}/interface.yaml").as_str(), yaml_m.as_str()),
+        (format!("interfaces/{m}/stamp.ts").as_str(), code),
+        (format!("interfaces/{k}/interface.yaml").as_str(), yaml_k.as_str()),
+    ]);
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let token_name = format!("{m}-deployer");
+    let _tokens = Tokens::new([token_name.clone()]);
+    let args = ["token", "create", &token_name, "--role", "operator", "--permission", "deploy"];
+    let out = Command::new(bin).args(args).current_dir(dir.path()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let to = format!("http://127.0.0.1:{api}");
+    let deploy = |file: &serde_json::Value, why: &str, only: bool| -> (bool, String) {
+        let mut command = Command::new(bin);
+        command.args(["deploy", file["file"].as_str().unwrap(), "-m", why, "--to", &to]);
+        if only {
+            command.arg("--in-place-only");
+        }
+        let out = command.env("DUCTUS_API_TOKEN", &token).current_dir(dir.path()).output().unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let running = async || -> u32 {
+        for _ in 0..600 {
+            let engines = store.live_engines().await.unwrap();
+            if let Some(e) = engines.iter().find(|e| e.interfaces.contains(&m) && e.interfaces.contains(&k)) {
+                return e.pid as u32;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("no engine runs {m} and {k}");
+    };
+    let log = work.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let releases = work.path().join("releases");
+    let mut first = Child(
+        Command::new(bin)
+            .args(["run", "--releases", &releases.to_string_lossy(), "--release-project", &project_name])
+            .args(["--env", "prod", "--threads", "2", "--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", work.path().join("control"))
+            .env_remove("DUCTUS_PROJECT")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "started interfaces=0", 60), "{}", read(&log));
+    let one = release_json(dir.path(), &["-m", "first"]);
+    let (ok, out) = deploy(&one, "first", false);
+    assert!(ok, "{out}\n{}", read(&log));
+    let exited = tokio::task::spawn_blocking(move || first.0.wait()).await.unwrap().unwrap();
+    assert!(exited.success(), "the engine before stops cleanly: {exited}");
+    let engine = Terminate(running().await);
+    let outputs = |name: &str| -> Vec<String> {
+        std::fs::read_dir(out_dir(name)).map_or(Vec::new(), |d| d.flatten().map(|f| read(&f.path())).collect())
+    };
+    let send = async |port: u16, id: &str| -> std::io::Result<()> {
+        let mut client = ductus_mllp::Client::new(format!("127.0.0.1:{port}"), std::time::Duration::from_secs(5));
+        client.send(format!("MSH|^~\\&|T|T|R|R|20260101||ADT^A01|{id}|P|2.5\rPID|1||1\r").as_bytes()).await.map(drop)
+    };
+    assert!(send(p0, "before").await.is_ok());
+
+    // K's sender, throughout: every message ACKed.
+    let sending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let sender = {
+        let sending = sending.clone();
+        tokio::spawn(async move {
+            let mut client = ductus_mllp::Client::new(format!("127.0.0.1:{pk}"), std::time::Duration::from_secs(5));
+            let (mut sent, mut failed) = (0u32, Vec::new());
+            while sending.load(std::sync::atomic::Ordering::Relaxed) {
+                sent += 1;
+                match client
+                    .send(format!("MSH|^~\\&|T|T|R|R|20260101||ADT^A01|K{sent}|P|2.5\rPID|1||1\r").as_bytes())
+                    .await
+                {
+                    Ok(ack) if String::from_utf8_lossy(&ack).contains("MSA|AA") => {}
+                    other => failed.push(format!("{other:?}")),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            (sent, failed)
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // Only the environment file changes: M's port and the stamp its code reads.
+    std::fs::write(dir.path().join("environments/prod.yaml"), variables(p1, "TWO")).unwrap();
+    git(dir.path(), &["commit", "-qam", "M moves, new stamp"]);
+    let two = release_json(dir.path(), &["-m", "M moves"]);
+    let (ok, out) = deploy(&two, "M moves", true);
+    assert!(ok && out.contains("✓ applied in place"), "{out}\n{}", read(&log));
+    assert!(out.contains(&format!("· {m}: source (M_PORT), code reads STAMP (in place)")), "{out}");
+    assert!(
+        out.contains(&format!("· environments/prod.yaml: M_PORT \"{p0}\" → \"{p1}\", STAMP \"ONE\" → \"TWO\"")),
+        "{out}"
+    );
+    assert!(out.contains(&format!("  {m} new values: M_PORT \"{p0}\" → \"{p1}\", STAMP \"ONE\" → \"TWO\"")), "{out}");
+    assert!(!out.contains(&format!("· {k}")), "K isn't reached: {out}");
+    assert_eq!(running().await, engine.0, "the same engine");
+    assert!(std::net::TcpStream::connect(("127.0.0.1", p0)).is_err(), "M's old port closed");
+    assert!(send(p1, "after").await.is_ok(), "M's new port takes messages");
+    for _ in 0..100 {
+        if outputs(&m).len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let stamps: Vec<bool> = ["|before|", "|after|"]
+        .iter()
+        .map(|id| outputs(&m).iter().any(|o| o.contains(id) && o.contains("|T|T|TWO|")))
+        .collect();
+    assert_eq!(stamps, [false, true], "the code loaded again with the new stamp: {:?}", outputs(&m));
+
+    // M's history has the values; K's doesn't name the deployment as a change.
+    let page = |interface| ductus_store::HistoryPage { interface, until: None, limit: 10, below: None };
+    let history = store.history_deployments(page(&m), false).await.unwrap();
+    let values = history[0].variables.as_deref().unwrap_or_default();
+    assert!(values.contains("M_PORT") && values.contains("\"TWO\"") && history[0].to_version.is_none(), "{history:?}");
+    let k_history = store.history_deployments(page(&k), false).await.unwrap();
+    assert!(k_history.iter().all(|d| d.variables.is_none()), "{k_history:?}");
+
+    // Another environment's file alone: in place, nothing applied.
+    std::fs::write(dir.path().join("environments/test.yaml"), variables(p0, "TESTING-2")).unwrap();
+    git(dir.path(), &["commit", "-qam", "test's stamp"]);
+    let three = release_json(dir.path(), &["-m", "test's stamp"]);
+    let (ok, out) = deploy(&three, "test's stamp", true);
+    assert!(ok && out.contains("· environments/test.yaml: another environment's file, nothing changes here"), "{out}");
+    assert_eq!(running().await, engine.0, "the same engine still");
+
+    sending.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (sent, failed) = sender.await.unwrap();
+    assert!(sent > 50 && failed.is_empty(), "K's sender was never refused ({sent}): {failed:?}");
+    drop(engine);
+    let ids: Vec<Vec<u8>> = [&one, &two, &three]
+        .iter()
+        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
+        .collect();
+    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
+}
+
 /// What waits for an interface removed in place stays (0.7.5.2.1): F, a file pickup whose
 /// receiver is down, is added in place beside K and stores what lands in its folder; removed in
 /// place, its claim is given back and its messages wait, stored, while its folder fills (no one
@@ -6192,13 +6371,16 @@ async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_proces
     assert_eq!((got["deployment"]["how"].as_str(), &got["deployment"]["release"]), (Some("deploy"), &b["id"]), "{got}");
     let in_place = runner().await;
 
-    // One of the project's own files changed (the environment's values): by the handover, in
-    // this process.
-    std::fs::write(dir.path().join("environments/prod.yaml"), "variables: { third: \"yes\" }\n").unwrap();
+    // One of the project's own files changed (the engine's settings): by the handover, in this
+    // process. (A new value in the environment file goes in place since 0.7.5.2.3.)
+    std::fs::write(dir.path().join("ductus.yaml"), "# third\n{}\n").unwrap();
     git(dir.path(), &["commit", "-qam", "third"]);
     let b2 = release_json(dir.path(), &["-m", "third"]);
     let out = under_traffic(&b2, "third deploy").await;
-    assert!(out.contains("needs the handover: the project's own files changed"), "{out}");
+    assert!(
+        out.contains("needs the handover: ductus.yaml changed (the engine's settings are read at a start)"),
+        "{out}"
+    );
     assert!(out.contains("✓ handed over to a new engine in this process"), "{out}");
     let got = engine_now().await;
     assert_eq!(got["handover"]["in_process"], true, "{got}");

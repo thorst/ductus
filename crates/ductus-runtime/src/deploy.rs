@@ -804,8 +804,7 @@ pub async fn apply_in_place(
         return Err(first.expect("one failed"));
     }
     // Removed last: nothing to put back after them. Each stops between messages.
-    let mut steps = Vec::with_capacity(plan.changes.len() + plan.project_in_place.len() + 1);
-    steps.extend(plan.project_in_place.iter().cloned());
+    let mut steps = Vec::with_capacity(plan.changes.len() + 1);
     for (name, _) in &removed {
         let started = std::time::Instant::now();
         match engine.remove_interface(name).await {

@@ -258,6 +258,10 @@ fn text(r: &Value) -> String {
         };
         out += &format!("· {}: {} ({how})\n", s(&c["interface"]), what.join(", "));
     }
+    // The project's own files that go in place: the environment file's variables and `console:`.
+    for line in r["plan"]["project"].as_array().into_iter().flatten() {
+        out += &format!("· {}\n", s(line));
+    }
     for step in r["steps"].as_array().into_iter().flatten() {
         out += &format!("  {}\n", s(step));
     }
@@ -272,8 +276,27 @@ fn text(r: &Value) -> String {
         .filter(|c| c["what"] == serde_json::json!(["removed"]))
         .filter_map(|c| c["interface"].as_str())
         .collect();
+    // An interface only a variable's new value reached (0.7.5.2.3) keeps its version: listed with
+    // the values.
+    let reached: Vec<(&str, String)> = r["plan"]["changes"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| !changes.iter().any(|v| v["interface"] == c["interface"]))
+        .filter_map(|c| {
+            let values: Vec<String> = c["variables"]
+                .as_array()?
+                .iter()
+                .map(|v| {
+                    let side = |x: &Value| x.as_str().map_or("(not set)".to_string(), |x| format!("{x:?}"));
+                    format!("{} {} → {}", s(&v["name"]), side(&v["before"]), side(&v["after"]))
+                })
+                .collect();
+            Some((c["interface"].as_str()?, values.join(", ")))
+        })
+        .collect();
     if r["ok"] == true {
-        match changes.len() + removed.len() {
+        match changes.len() + removed.len() + reached.len() {
             0 if r["deployment"].is_null() && r["applied"] == "in_place" => {
                 out += "⚠ applied, but not recorded (the step above says why): `ductus history` won't show it\n"
             }
@@ -289,6 +312,9 @@ fn text(r: &Value) -> String {
                 }
                 for name in &removed {
                     out += &format!("  {name} removed\n");
+                }
+                for (name, values) in &reached {
+                    out += &format!("  {name} new values: {values}\n");
                 }
             }
         }
@@ -367,6 +393,20 @@ mod tests {
         });
         let t = text(&port);
         assert!(t.contains("· adt: source (needs the handover: `source` changed (…))"), "{t}");
+        // A variable's new value (0.7.5.2.3): the environment file's line, and the interface it
+        // reached listed with the values, its version the same.
+        let moved = json!({
+            "ok": true, "outcome": "applied in place: 1 interface's source changed; the others never paused",
+            "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "prod", "replaces": {}, "forced": false,
+            "gate": null, "applied": "in_place",
+            "plan": { "changes": [{ "interface": "feed", "what": ["source (MLLP_PORT)"], "in_place": true,
+              "variables": [{ "name": "MLLP_PORT", "before": "6661", "after": "6666" }] }], "handover_because": [],
+              "project": ["environments/prod.yaml: MLLP_PORT \"6661\" → \"6666\""] },
+            "steps": [], "deployment": 44, "changes": []
+        });
+        let t = text(&moved);
+        assert!(t.contains("· feed: source (MLLP_PORT) (in place)\n· environments/prod.yaml: MLLP_PORT"), "{t}");
+        assert!(t.contains("changed 1 interface:\n  feed new values: MLLP_PORT \"6661\" → \"6666\"\n"), "{t}");
         assert!(t.contains("✗ refused: only the handover applies it"), "{t}");
     }
 

@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, Td, Th } from "@/components/ui/table";
 import { bytes, count, timestamp } from "@/lib/format";
-import { applyOf, applySummary, changesSummary } from "@/lib/releases";
+import { applyOf, applySummary, changesSummary, reachedOnly } from "@/lib/releases";
 
 /**
  * One release: what it is, what deploying it here would change, where it went, every check of
@@ -139,6 +139,7 @@ const CHANGE: Record<string, string> = { changed: "changes", new: "new here", re
 function Here({ here }: { here: Schemas["Here"] }) {
   const applies = applySummary(here);
   const planned = here.plan != null && here.plan.changes.length > 0;
+  const reached = here.running ? [] : reachedOnly(here);
   return (
     <Card className="mb-6">
       <CardHeader>
@@ -154,11 +155,20 @@ function Here({ here }: { here: Schemas["Here"] }) {
             {applies}
           </p>
         )}
+        {!here.running && (here.plan?.project.length ?? 0) > 0 && (
+          <ul className="mt-1 text-sm text-muted" data-testid="project-changes">
+            {here.plan?.project.map((line) => (
+              <li key={line} className="wrap-anywhere">
+                {line}
+              </li>
+            ))}
+          </ul>
+        )}
         {here.ran_before && !here.running && (
           <p className="mt-1 text-sm text-muted">It ran here before: a rollback can go back to it.</p>
         )}
       </CardBody>
-      {here.changes.length > 0 && (
+      {(here.changes.length > 0 || reached.length > 0) && (
         <Table aria-label={`What it changes in ${here.environment}`}>
           <thead>
             <tr>
@@ -193,6 +203,22 @@ function Here({ here }: { here: Schemas["Here"] }) {
                 </tr>
               );
             })}
+            {reached.map((c) => (
+              <tr key={c.interface}>
+                <Td className="font-medium">
+                  <Link to="/interfaces/$name" params={{ name: c.interface }}>
+                    {c.interface}
+                  </Link>
+                </Td>
+                <Td>
+                  new values<span className="text-muted">: {c.what.join(", ")}</span>
+                </Td>
+                <Td className="text-muted">the same</Td>
+                <Td className={c.in_place ? undefined : "text-warn"}>
+                  {c.in_place ? "in place" : `the handover: ${c.handover_because ?? "it needs one"}`}
+                </Td>
+              </tr>
+            ))}
           </tbody>
         </Table>
       )}

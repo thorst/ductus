@@ -6045,12 +6045,14 @@
           "host",
           "environment",
           "version",
-          "changed"
+          "changed",
+          "variables",
+          "variables_changed"
         ],
         "properties": {
           "changed": {
             "type": "boolean",
-            "description": "It changed this interface's code (false: it ran it as it was; `all` only)."
+            "description": "It changed this interface: its code, or the value of a variable it uses (false: it ran it\nas it was; `all` only)."
           },
           "environment": {
             "type": "string"
@@ -6091,7 +6093,7 @@
               "string",
               "null"
             ],
-            "description": "The code version from then; none when unchanged."
+            "description": "The code version from then; none when unchanged (also when only `variables` changed)."
           },
           "uncommitted": {
             "type": [
@@ -6102,6 +6104,20 @@
               "type": "string"
             },
             "description": "Files it ran that weren't the commit's; none without git."
+          },
+          "variables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryVariable"
+            },
+            "description": "The environment variables whose new values reached it (0.7.5.2.3: its settings filled in\nmoved, or its code names one), each with its value before and after; empty for most. Its\ncode version doesn't change for these (it's the files as written, the same everywhere)."
+          },
+          "variables_changed": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What those variables changed, in words (`source (MLLP_PORT)`, `code reads EMPI_URL`)."
           },
           "version": {
             "type": "string",
@@ -6344,6 +6360,32 @@
           "unsure": {
             "type": "boolean",
             "description": "Its code changed, but which part's wasn't recorded (a version saved before 0.7.4.2, or a\nfile only such versions named): it may touch any part, so every part's history shows it,\nmarked."
+          }
+        }
+      },
+      "HistoryVariable": {
+        "type": "object",
+        "description": "A variable of the engine's environment file whose value a deploy changes (0.7.5.2.3).",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "after": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "None: the variable is gone."
+          },
+          "before": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "As text (how code reads it); None: the variable is new."
+          },
+          "name": {
+            "type": "string"
           }
         }
       },
@@ -7696,7 +7738,8 @@
         "description": "What a release changes here, by kind (`changes::plan`).",
         "required": [
           "changes",
-          "handover_because"
+          "handover_because",
+          "project"
         ],
         "properties": {
           "changes": {
@@ -7712,6 +7755,13 @@
               "type": "string"
             },
             "description": "Why it needs the handover, a line per reason (the project's own files, then each\ninterface); empty: it applies in place."
+          },
+          "project": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What the project's own files change in place, a line each: the engine's environment file's\nvariables (`environments/prod.yaml: MLLP_PORT \"6661\" → \"6666\"`) and `console:`, another\nenvironment's file changing nothing here."
           }
         }
       },
@@ -7737,12 +7787,19 @@
           "interface": {
             "type": "string"
           },
+          "variables": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistoryVariable"
+            },
+            "description": "The environment variables whose new values reach it, with their values before and after;\nabsent when none do."
+          },
           "what": {
             "type": "array",
             "items": {
               "type": "string"
             },
-            "description": "What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`,\n`source`, `added`, `removed`, ..."
+            "description": "What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`,\n`source`, `source (MLLP_PORT)` (a variable's new value moved it), `code reads EMPI_URL`\n(reloaded for a variable its code names), `added`, `removed`, ..."
           }
         }
       },

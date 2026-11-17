@@ -54,6 +54,15 @@ export function gateSections(report: unknown): { section: string; checks: GateCh
 
 const interfaces = (n: number) => (n === 1 ? "1 interface" : `${count(n)} interfaces`);
 
+/**
+ * The interfaces whose code version stays but which a variable's new value reaches (0.7.5.2.3: their
+ * settings filled in move, or their code names it), as the plan says: not among `here.changes`.
+ */
+export function reachedOnly(here: Schemas["Here"]): Schemas["PlannedChange"][] {
+  const versioned = new Set(here.changes.map((c) => c.interface));
+  return (here.plan?.changes ?? []).filter((c) => (c.variables ?? []).length > 0 && !versioned.has(c.interface));
+}
+
 /** "2 interfaces change, 1 new here, 1 removed; 997 as they run now", or what's true when nothing does. */
 export function changesSummary(here: Schemas["Here"]): string {
   if (here.running) return "It runs here now: deploying it changes nothing.";
@@ -63,15 +72,21 @@ export function changesSummary(here: Schemas["Here"]): string {
   if (changed) parts.push(`${interfaces(changed)} ${changed === 1 ? "changes" : "change"}`);
   if (of("new")) parts.push(`${interfaces(of("new"))} new here`);
   if (of("removed")) parts.push(`${interfaces(of("removed"))} removed`);
+  const reached = reachedOnly(here).length;
+  if (reached) parts.push(`${interfaces(reached)} ${reached === 1 ? "takes" : "take"} new variable values`);
+  const unchanged = here.unchanged - reached;
   const files =
     here.project_files_change === true
       ? " The project's own files (ductus.yaml, resources.yaml, environments, secrets) change too."
       : "";
   if (parts.length === 0) {
-    return `No interface changes: all ${count(here.unchanged)} run here as they are.${files}`;
+    return `No interface changes: all ${count(unchanged)} run here as they are.${files}`;
   }
-  return `${parts.join(", ")}; ${count(here.unchanged)} as they run now.${files}`;
+  return `${parts.join(", ")}; ${count(unchanged)} as they run now.${files}`;
 }
+
+/** `source`, or `source (MLLP_PORT)` when a variable's new value moved it. */
+const isSource = (what: string) => what === "source" || what.startsWith("source (");
 
 /**
  * How deploying it here would apply (0.7.5.1): in place, or by the handover and why. Null when the
@@ -83,12 +98,15 @@ export function applySummary(here: Schemas["Here"]): string | null {
   if (plan.handover_because.length > 0) {
     return `It needs the handover (a new engine takes over; every interface's sending pauses a moment): ${plan.handover_because.join("; ")}.`;
   }
-  if (plan.changes.length === 0) return null;
+  if (plan.changes.length === 0) {
+    // Only the project's own files: another environment's, or this one's `console:`.
+    return plan.project.length > 0 ? "It applies in place: no interface changes." : null;
+  }
   // An interface added or removed (0.7.5.2.1) says only that (`what` is ["added"] or ["removed"]).
   const only = (word: string) => plan.changes.filter((c) => c.what.length === 1 && c.what[0] === word).length;
   const [added, removed] = [only("added"), only("removed")];
   // A source changed (0.7.5.2.2) moves, swaps or restarts: not "between two messages".
-  const sources = plan.changes.filter((c) => c.what.includes("source")).length;
+  const sources = plan.changes.filter((c) => c.what.some(isSource)).length;
   const changed = plan.changes.length - added - removed - sources;
   const parts: string[] = [];
   if (changed === 1) parts.push("the interface it changes takes its new code between two messages");
