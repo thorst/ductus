@@ -20,7 +20,8 @@
 #   3. a code change to 50 interfaces (v-0000 … v-0049; A and its neighbours among them);
 #   4. a code change to A while S's lookups take SLOW ms;
 #   5. (0.7.5.2.1) an interface added, then removed; 50 added, then removed (w-0000 …, MLLP on
-#      ports of their own, no traffic to them).
+#      ports of their own, no traffic to them);
+#   6. (0.7.5.2.2) a port moved: v-0012's MLLP port, then back.
 # Then CYCLES interfaces added and removed again (two deploys each) and DEPLOYS deploys of A in a
 # row (no traffic), each with the engine's memory before, every 25, and after; and that every
 # message sent arrived once.
@@ -293,6 +294,19 @@ add_interfaces 0 49
 phase "50 interfaces added" deploy "$(release "50 added")" in_place
 remove_interfaces 0 49
 phase "50 interfaces removed" deploy "$(release "50 removed")" in_place
+
+# A port moved in place (0.7.5.2.2): v-0012 (on A's thread, no traffic) to a port after the w- ones
+# and back: the new port bound before the old one closes; what's measured is the others' latency
+# and the time to applied.
+move_port() { # $1 the port
+  sed -i -E "s/port: $((BASE + 12)) |port: $((BASE + COUNT + 100)) /port: $1 /" "$P/interfaces/v-0012/interface.yaml"
+  g commit -qam "v-0012 on $1"
+}
+move_port $((BASE + COUNT + 100))
+phase "a port moved (v-0012)" deploy "$(release "v-0012 moved")" in_place
+grep -q 'source (in place)\|"source"' "$WORK/deploy.json" || { echo "not a source change:"; cat "$WORK/deploy.json"; exit 1; }
+move_port $((BASE + 12))
+phase "a port moved back (v-0012)" deploy "$(release "v-0012 moved back")" in_place
 
 echo "== $CYCLES interfaces added and removed again in a row (no traffic)"
 echo "   before: $(memory)"

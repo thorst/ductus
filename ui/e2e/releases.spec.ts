@@ -4,7 +4,8 @@
 // its code changed) is uploaded, checked and deployed here in place (0.7.5.1: the page says so
 // first); release 3, made on a feature branch, is refused by the rule; then staging is rolled
 // back to release 1, in place too. Release 4 adds an interface (0.7.5.2.1): deployed in place, then
-// rolled back (the interface removed in place). A viewer sees it all and can change nothing.
+// rolled back (the interface removed in place). Release 5 moves the interface's port (0.7.5.2.2):
+// its source changed in place. A viewer sees it all and can change nothing.
 // Runs last (playwright.config.ts): it deploys.
 
 import AxeBuilder from "@axe-core/playwright";
@@ -14,7 +15,7 @@ const base = process.env.DUCTUS_RELEASES_URL ?? "http://127.0.0.1:7795";
 const deployer = process.env.DUCTUS_DEPLOYER_TOKEN ?? "";
 const viewer = process.env.DUCTUS_VIEWER_TOKEN ?? "";
 const file = process.env.DUCTUS_RELEASE_FILE ?? "";
-const [r1 = "", r2 = "", r3 = "", r4 = ""] = (process.env.DUCTUS_RELEASES ?? "").split(" ");
+const [r1 = "", r2 = "", r3 = "", r4 = "", r5 = ""] = (process.env.DUCTUS_RELEASES ?? "").split(" ");
 
 async function signIn(page: Page, path: string, token = deployer) {
   await page.goto(`${base}${path}`);
@@ -157,6 +158,30 @@ test("a release adding an interface goes in place, and a rollback removes it in 
   await expect(back.getByRole("status")).toContainText("applied in place", { timeout: 60_000 });
   await back.getByRole("button", { name: "Done" }).click();
   await expect(ran.locator("tbody tr").first()).toContainText("no copies after all");
+});
+
+test("a release moving an interface's port changes its source in place", async ({ page }) => {
+  const name = process.env.DUCTUS_RELEASE_INTERFACE ?? "";
+  await signIn(page, `/releases/${r5}`);
+  await expect(page.getByText("1 interface changes; 0 as they run now.")).toBeVisible();
+  await expect(page.getByTestId("applies")).toHaveText(
+    "It applies in place: the source it changes moves, swaps its settings or restarts alone; the others never pause.",
+  );
+  const line = page
+    .getByRole("table", { name: "What it changes in staging" })
+    .getByRole("row", { name: new RegExp(name) });
+  await expect(line).toContainText("changes: source");
+  await expect(line).toContainText("in place");
+  await page.getByRole("button", { name: "Deploy to staging…" }).click();
+  const dialog = page.getByRole("dialog", { name: `Deploy release ${r5} to staging` });
+  await dialog.getByLabel(/Reason/).fill("the archive on 6728");
+  await dialog.getByRole("button", { name: "Deploy", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText(
+    "applied in place: 1 interface's source changed; the others never paused",
+    { timeout: 60_000 },
+  );
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("Running here");
 });
 
 test("a viewer sees the releases and changes nothing", async ({ page }) => {

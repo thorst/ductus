@@ -744,16 +744,26 @@ fn span(d: Duration) -> String {
 }
 
 /// What a deploy applied in place did, by kind: interfaces changed (their new code between two
-/// messages), added (started) and removed (stopped).
+/// messages), sources changed (a moved port opens before the old one closes, a pickup restarts:
+/// not "between two messages"), added (started) and removed (stopped).
 fn in_place_outcome(changes: &[crate::changes::Change]) -> String {
     let added = changes.iter().filter(|c| c.is_added()).count();
     let removed = changes.iter().filter(|c| c.is_removed()).count();
-    let changed = changes.len() - added - removed;
+    let sources =
+        changes.iter().filter(|c| !c.is_added() && !c.is_removed() && c.what.iter().any(|w| w == "source")).count();
+    let changed = changes.len() - added - removed - sources;
     let mut parts: Vec<String> = Vec::new();
     match changed {
         0 => {}
         1 => parts.push("1 interface took its new code between two messages".into()),
         n => parts.push(format!("{n} interfaces took their new code between two messages")),
+    }
+    match (sources, parts.is_empty()) {
+        (0, _) => {}
+        (1, true) => parts.push("1 interface's source changed".into()),
+        (n, true) => parts.push(format!("{n} interfaces' sources changed")),
+        (1, false) => parts.push("1 changed its source".into()),
+        (n, false) => parts.push(format!("{n} changed their sources")),
     }
     // The first part names what's counted; the ones after it don't need to.
     let noun = |n: usize, first: bool| match (n, first) {
@@ -788,6 +798,14 @@ mod tests {
         assert_eq!(
             said(&[change("code")]),
             "applied in place: 1 interface took its new code between two messages; the others never paused"
+        );
+        assert_eq!(
+            said(&[change("source")]),
+            "applied in place: 1 interface's source changed; the others never paused"
+        );
+        assert_eq!(
+            said(&[change("code"), change("source"), change("source")]),
+            "applied in place: 1 interface took its new code between two messages, 2 changed their sources; the others never paused"
         );
         assert_eq!(
             said(&[change("added")]),

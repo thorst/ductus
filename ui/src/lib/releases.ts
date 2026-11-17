@@ -87,10 +87,14 @@ export function applySummary(here: Schemas["Here"]): string | null {
   // An interface added or removed (0.7.5.2.1) says only that (`what` is ["added"] or ["removed"]).
   const only = (word: string) => plan.changes.filter((c) => c.what.length === 1 && c.what[0] === word).length;
   const [added, removed] = [only("added"), only("removed")];
-  const changed = plan.changes.length - added - removed;
+  // A source changed (0.7.5.2.2) moves, swaps or restarts: not "between two messages".
+  const sources = plan.changes.filter((c) => c.what.includes("source")).length;
+  const changed = plan.changes.length - added - removed - sources;
   const parts: string[] = [];
   if (changed === 1) parts.push("the interface it changes takes its new code between two messages");
   if (changed > 1) parts.push("the interfaces it changes take their new code between two messages");
+  if (sources === 1) parts.push("the source it changes moves, swaps its settings or restarts alone");
+  if (sources > 1) parts.push(`the ${count(sources)} sources it changes move, swap their settings or restart alone`);
   if (added) parts.push(added === 1 ? "the one it adds starts" : `the ${count(added)} it adds start`);
   if (removed) parts.push(removed === 1 ? "the one it removes stops" : `the ${count(removed)} it removes stop`);
   return `It applies in place: ${parts.join(", ")}; the others never pause.`;

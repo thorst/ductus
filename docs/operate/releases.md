@@ -684,6 +684,28 @@ a file or SFTP pickup or a schedule stops between messages and starts again with
 A port or HTTP route moving from one interface to another, a listener changing kind or host on its
 own port, and a change between queue and respond mode still take the handover
 ([nuance](../nuances/releases.md#a-source-changed-in-place-moves-swaps-or-restarts-alone-level-2)).
+Here a release moves the lab feed's MLLP port (`scripts/demo-promote.sh`, step 14); the sender,
+pointed at the new port afterwards, is taken there:
+
+```text
+$ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy 244ae794c367 --from $TEST --to $PROD -m "prod on a new port"
+fetched release 244ae794c367 from http://127.0.0.1:17793 (9.8 KB, deployed to: test)
+stored release 244ae794c367 on the engine (1 record of where it went added)
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
+release 244ae794c367 (project integrations, branch main) to environment `prod`
+gate: passed in 0.82 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+· promote-demo: source (in place)
+  promote-demo: source → d587ba4f2a03, applied in place (5 ms)
+✓ applied in place: 1 interface's source changed; the others never paused
+changed 1 interface:
+  promote-demo 96e5d793f01b → d587ba4f2a03
+```
+
+**When a port differs per environment**, name the one it moves to in each environment file first,
+in a release of its own (a change under `environments/` goes by the handover: its variables are
+read at a start), then point `port:` at it: that release goes in place. The demo's environment
+files carried `NEW_MLLP_PORT` from the start; its interface.yaml went from
+`port: ${MLLP_PORT}` to `port: ${NEW_MLLP_PORT}`.
 
 An interface the release **adds or removes** goes in place too, whatever its source: an added one
 is claimed, its code loaded and its listener, file pickup, schedule or HTTP route started (beside
@@ -1211,6 +1233,18 @@ for that deploy, as fifty modules load on the four threads they share. To add ma
 during a busy hour without that, deploy them in a few smaller releases. 100 cycles of one
 interface added and removed again (200 deploys): the engine went from 245 MB to 268 MB over the
 first 25 cycles, then stayed at 270–271 MB through the 100th: it doesn't grow with each cycle.
+
+A **port moved** in place, the same engine and traffic (0.7.5.2.2, one round each way: an MLLP
+interface on the deployed one's thread, no traffic of its own, moved to another port and back;
+this run's phases with a code change to 1 interface: the four sent to, p99 14–23 ms, max 14–38 ms):
+
+| | Applied in | `ductus deploy` answered in | The other interfaces' send latency, p99 / max |
+|---|---|---|---|
+| A port moved | 116 ms | 0.31 s | 18–20 ms / 19–38 ms |
+| Moved back | 133 ms | 0.26 s | 19–24 ms / 20–37 ms |
+
+As fast as a code change, and the others don't notice it: the new port is opened beside the old
+one, so a move costs no more than the interface's other parts being swapped.
 
 **Memory over many deploys:** the engine went from 242 MB to 278 MB over 100 deploys of one
 interface in a row: 26 MB over the first 25, then about 130 KB a deploy (code an interface no

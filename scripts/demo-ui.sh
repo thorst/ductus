@@ -193,6 +193,12 @@ RUN_ALERTS="key ~ '^(iface:(adt|orders|billing)|dest:(adt|orders|billing)/.+|cer
 forget_alerts() {
   psql -q "$DB" -c "DELETE FROM alert_events WHERE $RUN_ALERTS" -c "DELETE FROM alert_state WHERE $RUN_ALERTS"
 }
+# The tokens this demo and its browser tests make (any run's: one killed before its cleanup leaves
+# its own), revoked. Left behind, they piled up (243 over 81 runs by 2026-11-17) until the Tokens
+# page's accessibility checks ran past the browser test's 30 s.
+forget_tokens() {
+  psql -q "$DB" -c "UPDATE api_tokens SET revoked_at = now() WHERE revoked_at IS NULL AND (name LIKE 'ui-demo-%' OR name LIKE 'e2e-script-%')"
+}
 # What this run leaves waiting (billing is paused, the lab is down): filtered once the engine has
 # stopped, or later demos' interfaces of the same names would send it (or, with fewer lanes, be
 # refused for it).
@@ -201,14 +207,14 @@ forget_waiting() {
     -c "UPDATE messages SET status = 2, last_error = 'demo-ui ended' WHERE status = 0 AND interface IN ('adt', 'orders', 'billing', 'ui-neighbour')"
 }
 # The engine is stopped before its alerts are deleted, so it can't write more.
-trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE 2>/dev/null || true; forget_waiting || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true' EXIT
+trap 'kill -INT $ENGINE $HOOK 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE 2>/dev/null || true; forget_waiting || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true; forget_tokens || true' EXIT
 # Alerts of earlier runs of this demo (one killed before its cleanup): start clean.
 psql -q "$DB" -c "DELETE FROM alert_events WHERE $RUN_ALERTS" \
   -c "UPDATE alert_state SET state = 'ok', severity = NULL, since = NULL, ok_since = NULL, ack_by = NULL, ack_at = NULL, silenced_until = NULL, rev = rev + 1 WHERE interface IN ('adt', 'orders', 'billing')"
 until grep "started interfaces=" "$P/run.log" >/dev/null; do kill -0 $ENGINE || { cat "$P/run.log"; exit 1; }; sleep 0.2; done
 echo "engine log: $P/run.log"
-# A token of this name left by an earlier run (process ids repeat after a reboot) would refuse the new one.
-for t in operator viewer admin deployer pull; do "$BIN" token revoke "ui-demo-$t-$$" >/dev/null 2>&1 || true; done
+# Tokens left by an earlier run (one of this name, as process ids repeat after a reboot, would refuse the new one).
+forget_tokens
 export DUCTUS_API_TOKEN=$("$BIN" token create "ui-demo-operator-$$" --role operator --permission payloads 2>/dev/null)
 VIEWER=$("$BIN" token create "ui-demo-viewer-$$" --role viewer --permission payloads 2>/dev/null)
 ADMIN=$("$BIN" token create "ui-demo-admin-$$" --role admin 2>/dev/null)
@@ -243,7 +249,7 @@ printf 'name: ui-neighbour\nsource: { mllp: { port: 6726 } }\ndestinations: { ar
   >"$N/interfaces/ui-neighbour/interface.yaml"
 "$BIN" run --root "$N" --api-listen off >"$N/run.log" 2>&1 &
 NEIGHBOUR=$!
-trap 'kill -INT $ENGINE $HOOK $NEIGHBOUR 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE $NEIGHBOUR 2>/dev/null || true; forget_waiting || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true' EXIT
+trap 'kill -INT $ENGINE $HOOK $NEIGHBOUR 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE $NEIGHBOUR 2>/dev/null || true; forget_waiting || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true; forget_tokens || true' EXIT
 until grep "started interfaces=" "$N/run.log" >/dev/null; do kill -0 $NEIGHBOUR || { cat "$N/run.log"; exit 1; }; sleep 0.2; done
 code=0
 refused=$("$BIN" run --api-listen off 2>&1) || code=$?
@@ -286,7 +292,8 @@ echo "== releases: an engine in release mode beside this one (the Releases page)
 # engine (folder mode, `dev`: same database, so what it lists is stored here already). Release 1 is
 # deployed now; release 2 the browser uploads and deploys; release 3 (a feature branch) is stored
 # for the browser to see refused; then a rollback; release 4 (adds an interface) is stored for the
-# browser to deploy in place, then rolled back (the interface removed in place). The interface is named for this run
+# browser to deploy in place, then rolled back (the interface removed in place); release 5 (its
+# port moved) is deployed in place after that. The interface is named for this run
 # (`ui-release-<pid>`): what earlier runs deployed of it, from commits this run's git doesn't have,
 # would make the "replaces" check refuse. This project's releases are forgotten before and after.
 R=$P/ui-releases
@@ -329,6 +336,13 @@ printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: 6727 } }\ndestination
   "$IFACE" "$IFACE" >"$R/interfaces/$IFACE/interface.yaml"
 rgit add . && rgit commit -qm "copies of the archive"
 R4=$(release_of "copies")
+# Release 5 (0.7.5.2.2): release 1's files with only the port moved (6727 → 6728), deployed after
+# the rollback to release 1: its source changes, in place.
+rgit rm -rq "interfaces/$IFACE-copies" && archive_code ONE
+printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: 6728 } }\ndestinations: { archive: { file: { dir: out }, script: archive.ts } }\n' \
+  "$IFACE" >"$R/interfaces/$IFACE/interface.yaml"
+rgit add . && rgit commit -qm "the archive on 6728"
+R5=$(release_of "port 6728")
 DEPLOYER=$("$BIN" token create "ui-demo-deployer-$$" --role operator --permission deploy 2>/dev/null)
 PULL=$("$BIN" token create "ui-demo-pull-$$" --role viewer --permission download 2>/dev/null)
 RELEASES_URL=http://127.0.0.1:7795
@@ -336,19 +350,21 @@ env -u DUCTUS_PROJECT -u DUCTUS_CONTROL "$BIN" run --releases "$P/releases" --re
   --threads 1 --api-listen 127.0.0.1:7795 --deploy-branches main --promote-from "$DUCTUS_API_URL" \
   --promote-from-token "$PULL" >"$P/releases.log" 2>&1 &
 RELEASE_ENGINE=$!
-trap 'kill -INT $ENGINE $HOOK $NEIGHBOUR $RELEASE_ENGINE 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE $NEIGHBOUR $RELEASE_ENGINE 2>/dev/null || true; forget_waiting || true; forget_releases || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true' EXIT
+trap 'kill -INT $ENGINE $HOOK $NEIGHBOUR $RELEASE_ENGINE 2>/dev/null || true; kill $TLS 2>/dev/null || true; wait $ENGINE $NEIGHBOUR $RELEASE_ENGINE 2>/dev/null || true; forget_waiting || true; forget_releases || true; bash "$SLAPD_SCRIPT" stop "$L" || true; rm -rf "$L" || true; forget_people || true; forget_alerts || true; forget_tokens || true' EXIT
 until grep "started interfaces=" "$P/releases.log" >/dev/null; do kill -0 $RELEASE_ENGINE || { cat "$P/releases.log"; exit 1; }; sleep 0.2; done
 DUCTUS_API_TOKEN=$DEPLOYER "$BIN" deploy "$R1" --to "$RELEASES_URL" -m "the archive" | tail -1 | sed 's/^/   release 1: /'
 curl -sf -o /dev/null -H "Authorization: Bearer $DEPLOYER" -H "Content-Type: application/gzip" --data-binary "@$R3" \
   "$RELEASES_URL/api/v1/releases" || { echo "FAIL: release 3 wasn't stored"; exit 1; }
 curl -sf -o /dev/null -H "Authorization: Bearer $DEPLOYER" -H "Content-Type: application/gzip" --data-binary "@$R4" \
   "$RELEASES_URL/api/v1/releases" || { echo "FAIL: release 4 wasn't stored"; exit 1; }
-echo "   releases 3 (feature/x) and 4 (adds an interface) stored; release 2 is for the browser to upload"
+curl -sf -o /dev/null -H "Authorization: Bearer $DEPLOYER" -H "Content-Type: application/gzip" --data-binary "@$R5" \
+  "$RELEASES_URL/api/v1/releases" || { echo "FAIL: release 5 wasn't stored"; exit 1; }
+echo "   releases 3 (feature/x), 4 (adds an interface) and 5 (moves its port) stored; release 2 is for the browser to upload"
 
 echo "== the browser (Playwright)"
 cd "$UI"
 export DUCTUS_RELEASES_URL=$RELEASES_URL DUCTUS_DEPLOYER_TOKEN=$DEPLOYER DUCTUS_RELEASE_FILE=$R2 \
-  DUCTUS_RELEASES="$(short_of "$R1") $(short_of "$R2") $(short_of "$R3") $(short_of "$R4")" DUCTUS_RELEASE_INTERFACE=$IFACE
+  DUCTUS_RELEASES="$(short_of "$R1") $(short_of "$R2") $(short_of "$R3") $(short_of "$R4") $(short_of "$R5")" DUCTUS_RELEASE_INTERFACE=$IFACE
 export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN \
   DUCTUS_ADMIN_TOKEN=$ADMIN DUCTUS_PEOPLE_PREFIX=$PEOPLE_PREFIX DUCTUS_PERSON_ADMIN="${PEOPLE_PREFIX}admin:$PASSWORD" \
   DUCTUS_PERSON_OPERATOR="${PEOPLE_PREFIX}operator:$PASSWORD" DUCTUS_PERSON_VIEWER="${PEOPLE_PREFIX}viewer:$PASSWORD" \

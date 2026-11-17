@@ -85,17 +85,29 @@ describe("applySummary and applyOf", () => {
     );
   });
 
+  it("says a source changed in place moves, swaps or restarts", () => {
+    const plan = (changes: Schemas["PlannedChange"][]) => ({ ...here, plan: { changes, handover_because: [] } });
+    expect(applySummary(plan([planned("lab", ["source"])]))).toBe(
+      "It applies in place: the source it changes moves, swaps its settings or restarts alone; the others never pause.",
+    );
+    expect(
+      applySummary(plan([planned("adt", ["code"]), planned("lab", ["source", "code"]), planned("b", ["source"])])),
+    ).toBe(
+      "It applies in place: the interface it changes takes its new code between two messages, the 2 sources it changes move, swap their settings or restart alone; the others never pause.",
+    );
+  });
+
   it("says what needs the handover, and why", () => {
-    const why = "`source` changed (its listener is opened at a start)";
+    const why = "`ordering` changed (how messages are received, stored or laid out in lanes is set at a start)";
     const plan = {
-      changes: [planned("adt", ["code"]), planned("lab", ["source"], why)],
+      changes: [planned("adt", ["code"]), planned("lab", ["ordering"], why)],
       handover_because: [`lab: ${why}`],
     };
     const h = { ...here, plan };
     expect(applySummary(h)).toBe(
       `It needs the handover (a new engine takes over; every interface's sending pauses a moment): lab: ${why}.`,
     );
-    expect(applyOf(h, "lab")).toEqual({ what: "source", how: `the handover: ${why}`, inPlace: false });
+    expect(applyOf(h, "lab")).toEqual({ what: "ordering", how: `the handover: ${why}`, inPlace: false });
   });
 
   it("says nothing when the engine didn't, it runs it, or nothing changes", () => {
