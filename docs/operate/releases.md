@@ -1260,6 +1260,22 @@ this run's phases with a code change to 1 interface: the four sent to, p99 14–
 As fast as a code change, and the others don't notice it: the new port is opened beside the old
 one, so a move costs no more than the interface's other parts being swapped.
 
+A **variable's new value** in place, the same engine and traffic (0.7.5.2.3, one round each; only
+the environment file changes; this run's phases with a code change to 1 interface: p99 14–24 ms,
+max 19–43 ms):
+
+| | Working out the plan | Applied in | `ductus deploy` answered in | The other interfaces' send latency, p99 / max | Longest ACK wait |
+|---|---|---|---|---|---|
+| A variable moving 1 interface's port | 24 ms | 109 ms | 0.34 s | 20–22 ms / 25–43 ms | 26 ms |
+| A variable in every interface (each destination's `timeout_ms`): all 1,001 changed | 129 ms | 800 ms | 1.18 s | 448–481 ms / 494–504 ms | 186 ms |
+
+**When to act:** a variable that reaches a handful of interfaces costs what a code change costs;
+the plan reads every interface.yaml and code file once a variable changes (24 ms at 1,001,
+against 3–6 ms for a code change). A variable that reaches every interface restarts all of them
+at once: their sending waits up to about half a second and ACKs up to 0.2 s at 1,001 interfaces.
+Nothing is refused or lost, but deploy such a change (a timeout or URL every interface shares) in a
+quiet moment, as you would a handover.
+
 **Memory over many deploys:** the engine went from 242 MB to 278 MB over 100 deploys of one
 interface in a row: 26 MB over the first 25, then about 130 KB a deploy (code an interface no
 longer runs stays loaded until the next handover or restart:
