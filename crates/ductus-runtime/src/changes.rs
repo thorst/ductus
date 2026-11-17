@@ -233,12 +233,7 @@ const REMOVED: &str = "removed";
 
 impl Change {
     fn added_or_removed(name: &str, what: &str) -> Self {
-        Change {
-            interface: name.into(),
-            what: vec![what.into()],
-            apply: Apply::InPlace,
-            reached: None,
-        }
+        Change { interface: name.into(), what: vec![what.into()], apply: Apply::InPlace, reached: None }
     }
 
     /// The interface is new: the deploy adds it.
@@ -257,7 +252,9 @@ impl Change {
 /// None when nothing differs and its version is the same (a variable it names kept its value
 /// where it's used, or changed only to the same filled-in setting).
 fn interface(name: &str, before: &str, after: &str, version_changed: bool, vars: &Variables) -> Result<Option<Change>> {
-    let read = |text: &str, variables: &BTreeMap<String, Value>| -> Result<(BTreeMap<String, Value>, BTreeMap<String, Value>)> {
+    let read = |text: &str,
+                variables: &BTreeMap<String, Value>|
+     -> Result<(BTreeMap<String, Value>, BTreeMap<String, Value>)> {
         let written = ductus_core::yaml::parse(text).with_context(|| format!("reading {name}'s interface.yaml"))?;
         let mut filled = written.clone();
         ductus_core::env::fill_variables(&mut filled, variables);
@@ -475,7 +472,8 @@ mod tests {
     fn a_variable_reaches_the_interfaces_it_fills_in_or_their_code_reads() {
         let by_port = "name: adt\nsource: { mllp: { port: ${MLLP_PORT} } }\ndestinations:\n  lab: { mllp: { host: ${LAB_HOST}, port: 7001 } }\n";
         let by_days = "name: keep\nsource: internal\nretention: { days: ${DAYS} }\ndestinations: {}\n";
-        let in_text = "name: url\nsource: internal\ndestinations:\n  api: { http: { url: 'https://${LAB_HOST}/in' } }\n";
+        let in_text =
+            "name: url\nsource: internal\ndestinations:\n  api: { http: { url: 'https://${LAB_HOST}/in' } }\n";
         let unrelated = "name: other\nsource: { mllp: { port: ${OTHER_PORT} } }\ndestinations: {}\n";
         let code = "name: code\nsource: internal\ndestinations: {}\n";
         let all = [("adt", "a", by_port), ("keep", "k", by_days), ("url", "u", in_text), ("other", "o", unrelated)];
@@ -515,7 +513,10 @@ mod tests {
         let what: Vec<(&str, &[String])> = plan.changes.iter().map(|c| (c.interface.as_str(), &c.what[..])).collect();
         assert_eq!(
             what,
-            [("adt", &["destinations.lab (LAB_HOST)".to_string()][..]), ("url", &["destinations.api (LAB_HOST)".to_string()][..])]
+            [
+                ("adt", &["destinations.lab (LAB_HOST)".to_string()][..]),
+                ("url", &["destinations.api (LAB_HOST)".to_string()][..])
+            ]
         );
         assert!(plan.in_place());
         let touches = &plan.changes[0].reached.as_ref().unwrap().touches;
@@ -531,7 +532,11 @@ mod tests {
         };
         let plan = super::plan(&self::side(&[("adt", "a", by_port)]), &next, &project).unwrap();
         assert_eq!(plan.changes[0].what, ["destinations.lab", "source (MLLP_PORT)"]);
-        assert_eq!(plan.changes[0].reached.as_ref().unwrap().what, ["source (MLLP_PORT)"], "only what a variable moved");
+        assert_eq!(
+            plan.changes[0].reached.as_ref().unwrap().what,
+            ["source (MLLP_PORT)"],
+            "only what a variable moved"
+        );
         let gone = variables("variables: { NEW: x }", "variables: {}").change("NEW");
         assert_eq!(gone.to_string(), "NEW \"x\" → (not set)");
     }

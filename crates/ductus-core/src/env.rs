@@ -446,7 +446,8 @@ mod tests {
     #[test]
     fn variables_fill_in_alone_and_secrets_and_unknown_names_stay_as_written() {
         let variables = read_file("variables: { HOST: lab.local, PORT: 6661 }\nconsole: warn\n").unwrap().0;
-        let mut v = doc("a: ${PORT}\nb: 'tcp://${HOST}:${PORT}/${OTHER}'\nc: '${secret:KEY}'\nd: ${OTHER}\ne: 'x$${y}'");
+        let mut v =
+            doc("a: ${PORT}\nb: 'tcp://${HOST}:${PORT}/${OTHER}'\nc: '${secret:KEY}'\nd: ${OTHER}\ne: 'x$${y}'");
         let mut names = BTreeSet::new();
         variable_names(&v, &mut names);
         assert_eq!(names.into_iter().collect::<Vec<_>>(), ["HOST", "OTHER", "PORT"]);

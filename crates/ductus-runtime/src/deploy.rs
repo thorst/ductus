@@ -1277,10 +1277,7 @@ mod tests {
 
     /// A release of `files` (path, text) with one interface `adt` (version `version`): its manifest
     /// and a reader of its files.
-    fn released(
-        version: &str,
-        files: &[(&str, &str)],
-    ) -> (Manifest, impl Fn(&str) -> Result<String> + use<>) {
+    fn released(version: &str, files: &[(&str, &str)]) -> (Manifest, impl Fn(&str) -> Result<String> + use<>) {
         let mut m = manifest(None);
         let project: Vec<String> =
             files.iter().map(|(p, _)| p.to_string()).filter(|p| code::is_project_file(p)).collect();
@@ -1300,7 +1297,10 @@ mod tests {
     /// a secrets file or resources.yaml itself takes the handover.
     #[test]
     fn the_project_files_are_judged_one_by_one() {
-        let yaml = ("interfaces/adt/interface.yaml", "name: adt\nsource: { mllp: { port: ${MLLP_PORT} } }\ndestinations: {}\n");
+        let yaml = (
+            "interfaces/adt/interface.yaml",
+            "name: adt\nsource: { mllp: { port: ${MLLP_PORT} } }\ndestinations: {}\n",
+        );
         let code = ("interfaces/adt/transform.ts", "const url = env(\"EMPI_URL\");\n");
         let resources = ("resources.yaml", "databases:\n  emr: { host: ${DB_HOST} }\n");
         let prod = |vars: &str| ("environments/prod.yaml", format!("variables: {{ {vars} }}\n"));
@@ -1319,12 +1319,16 @@ mod tests {
         fn refs<'a>(v: &'a [(&'static str, String)]) -> Vec<(&'static str, &'a str)> {
             v.iter().map(|(a, b)| (*a, b.as_str())).collect()
         }
-        let (before, after) = (files(&p1, &[test]), files(&p1, &[("environments/test.yaml", "variables: { MLLP_PORT: 2 }\n")]));
+        let (before, after) =
+            (files(&p1, &[test]), files(&p1, &[("environments/test.yaml", "variables: { MLLP_PORT: 2 }\n")]));
 
         // Another environment's file: nothing changes, in place.
         let other = plan(&refs(&before), &refs(&after));
         assert!(other.in_place() && other.changes.is_empty() && !other.environment_changes, "{other:#?}");
-        assert_eq!(other.project_in_place, ["environments/test.yaml: another environment's file, nothing changes here"]);
+        assert_eq!(
+            other.project_in_place,
+            ["environments/test.yaml: another environment's file, nothing changes here"]
+        );
 
         // This environment's port and the variable the code names: in place, both interfaces' reasons said.
         let moved = files(&prod("MLLP_PORT: 6666, EMPI_URL: b, DB_HOST: db1"), &[test]);
@@ -1337,7 +1341,10 @@ mod tests {
         assert_eq!(names, ["EMPI_URL", "MLLP_PORT"]);
         // Its source by the port; every part by the code (this version records no parts).
         assert!(by.touches.source && by.touches.everything, "{by:#?}");
-        assert_eq!(reached.project_in_place, ["environments/prod.yaml: EMPI_URL \"a\" → \"b\", MLLP_PORT \"6661\" → \"6666\""]);
+        assert_eq!(
+            reached.project_in_place,
+            ["environments/prod.yaml: EMPI_URL \"a\" → \"b\", MLLP_PORT \"6661\" → \"6666\""]
+        );
 
         // console: alone swaps, reaching no interface.
         let quiet = files(&("environments/prod.yaml", format!("variables: {{ {base} }}\nconsole: warn\n")), &[test]);
@@ -1348,7 +1355,10 @@ mod tests {
         // What resources.yaml fills in, a secrets file, resources.yaml as written: the handover.
         let db = files(&prod("MLLP_PORT: 6661, EMPI_URL: a, DB_HOST: db2"), &[test]);
         let why = plan(&refs(&before), &refs(&db)).handover_because();
-        assert_eq!(why, ["DB_HOST changes what resources.yaml fills in (databases, APIs and their pools are made at a start)"]);
+        assert_eq!(
+            why,
+            ["DB_HOST changes what resources.yaml fills in (databases, APIs and their pools are made at a start)"]
+        );
         let secret = files(&p1, &[test, ("secrets/prod.json", "{}")]);
         let why = plan(&refs(&before), &refs(&secret)).handover_because();
         assert_eq!(why, ["secrets/prod.json changed (secrets are decrypted at a start)"]);
