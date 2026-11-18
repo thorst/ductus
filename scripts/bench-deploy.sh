@@ -258,7 +258,10 @@ phase() {
       grep -E "interface=${NAME[A]} " | sed -E 's/.*(thread=[^ ]+) (interface=[^ ]+) (loading=[^ ]+) (paused=[^ ]+).*/   \1 \2 \3 \4/' || true
     grep 'its new code runs from the next message' "$WORK/phase.log" | grep -o 'loading=[^ ]*' | sed 's/loading=//' |
       awk '{ v = $1; if (v ~ /µs$/) { sub(/µs$/, "", v); v /= 1000 } else if (v ~ /ms$/) sub(/ms$/, "", v); else { sub(/s$/, "", v); v *= 1000 }
-             n++; s += v; if (v > m) m = v } END { if (n > 1) printf "   loads: %d (interface × thread), mean %.2f ms, max %.2f ms\n", n, s / n, m }'
+             n++; s += v; if (v > m) m = v } END { if (n > 1) printf "   loads: %d (interface × thread), mean %.2f ms, max %.2f ms\n", n, s / n, m }' || true
+    # A restart in place (0.7.5.2.4): how long its sending paused.
+    grep -o 'restarted alone on its new settings.*' "$WORK/phase.log" | grep -oE 'interface=[^ ]+|workers=[^ ]+|lanes=[^ ]+|sending_paused=[^ ]+' |
+      paste -sd' ' | sed -n 's/^\(..*\)/   restart: \1/p' || true
   fi
 }
 deploy_round() { # $1 first interface, $2 last

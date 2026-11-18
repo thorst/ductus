@@ -763,7 +763,27 @@ them. Its own sending pauses while its code loads; the others never pause
 Here a release raises an interface's lanes (`scripts/demo-promote.sh`, step 11), a sender sending
 throughout:
 
-<!-- TRANSCRIPT 0.7.5.2.4: demo-promote.sh step 11, promote4, pasted at the step's close -->
+```text
+$ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy bda56fdf3082 --from $TEST --to $PROD -m "8 lanes, tested"
+fetched release bda56fdf3082 from http://127.0.0.1:17793 (1.4 KB, deployed to: test)
+stored release bda56fdf3082 on the engine (1 record of where it went added)
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
+release bda56fdf3082 (project integrations, branch main) to environment `prod`
+gate: passed in 0.81 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+· promote-demo: ordering (in place, restarting alone: `ordering` changed (what a start sets up for it: how it stores, lays out in lanes or runs its messages))
+  promote-demo: ordering → 8e8d1087e53b, restarted alone (24 ms)
+✓ applied in place: 1 interface was restarted alone on new settings; the others never paused
+changed 1 interface:
+  promote-demo 20182614d985 → 8e8d1087e53b
+```
+
+The engine's log has a line per restart with how long that interface's sending paused
+(`restarted alone on its new settings: its senders never noticed … sending_paused=…`). Measured
+on an engine running 1,001 interfaces with 100 messages a second to the one restarted and to three
+others (`scripts/bench-deploy.sh`, phase 8: an ordering key added, then 2 dedicated workers, then
+back): applied in 134–158 ms; that interface's sending paused 22–57 ms (its send latency's p99
+22–27 ms, against 22–50 ms with no deploy); the others' p99 18–24 ms, within noise; every message
+delivered once, in order.
 
 Only the project's own files read at a start need the **handover**, and the answer says which
 (`needs the handover: …`): `ductus.yaml`, `resources.yaml`, `docs-schema.yaml`, this
@@ -1055,11 +1075,25 @@ older ones
 Here prod is rolled back from 8 lanes to 2 while a sender sends and the receiver is down
 (`scripts/demo-promote.sh`, step 11):
 
-<!-- TRANSCRIPT 0.7.5.2.4: demo-promote.sh step 11, rollback-lanes with its waiting lines, pasted at the step's close -->
+```text
+waiting on prod: 62; lanes (first+count): 2+8
+$ DUCTUS_API_TOKEN=$OPS_PROD ductus deploy --rollback --to $PROD -m "8 lanes broke the lab feed"
+rolling back: the gate runs, then it's applied (in place when it can be, else by the handover)…
+rollback to release 640ca3e50404 (project integrations, branch main) to environment `prod`
+…
+gate: passed in 0.83 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
+· promote-demo: ordering (in place, restarting alone: `ordering` changed (what a start sets up for it: how it stores, lays out in lanes or runs its messages))
+  promote-demo: ordering → 20182614d985, restarted alone (29 ms)
+✓ applied in place: 1 interface was restarted alone on new settings; the others never paused
+changed 1 interface:
+  promote-demo 8e8d1087e53b → 20182614d985
+
+waiting on prod: 200; lanes (first+count): 2+8 10+2
+```
 
 
-The 8 lanes are numbered 2–9 (the first release's 2 lanes settled when release 4 started with
-nothing waiting), the 2 new ones 10–11. Once the receiver is back:
+The 8 lanes are numbered 2–9 (the first release's 2 lanes settled once release 4 was deployed,
+nothing waiting in them), the 2 new ones 10–11. Once the receiver is back:
 
 ```text
 waiting on prod: 0; lanes (first+count): 10+2
