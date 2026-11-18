@@ -212,7 +212,7 @@ impl FileWatcher {
     }
 
     fn name(&self) -> &str {
-        &self.intake.config.name
+        self.intake.name()
     }
 
     pub async fn run(mut self) {

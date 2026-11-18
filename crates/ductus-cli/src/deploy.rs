@@ -252,9 +252,10 @@ fn text(r: &Value) -> String {
     // What it changes here, by kind: each interface, and what it needed.
     for c in r["plan"]["changes"].as_array().into_iter().flatten() {
         let what: Vec<&str> = c["what"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
-        let how = match c["handover_because"].as_str() {
+        // Between two messages, or restarted alone (what a start sets up changes: 0.7.5.2.4).
+        let how = match c["restarts"].as_str() {
             None => "in place".to_string(),
-            Some(why) => format!("needs the handover: {why}"),
+            Some(why) => format!("in place, restarting alone: {why}"),
         };
         out += &format!("· {}: {} ({how})\n", s(&c["interface"]), what.join(", "));
     }
@@ -357,15 +358,15 @@ mod tests {
         );
     }
 
-    /// A deploy in place says what it changed by kind, each interface applied, and what needs the
-    /// handover when one does.
+    /// A deploy in place says what it changed by kind, each interface applied (between two
+    /// messages or restarted alone), and what needs the handover when something does.
     #[test]
     fn a_deploy_says_what_went_in_place_and_what_needs_the_handover() {
         let r = json!({
             "ok": true, "outcome": "applied in place: 1 interface took its new code between two messages; the others never paused",
             "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "prod", "replaces": {}, "forced": false,
             "gate": null, "applied": "in_place",
-            "plan": { "changes": [{ "interface": "adt", "what": ["code", "destination pacs added"], "in_place": true }], "handover_because": [] },
+            "plan": { "changes": [{ "interface": "adt", "what": ["code", "destination pacs added"] }], "handover_because": [] },
             "steps": ["adt: code, destination pacs added → bbbbbbbbbbbb, applied in place (3 ms)"], "deployment": 42,
             "changes": [{ "interface": "adt", "from": "aaaaaaaaaaaa", "to": "bbbbbbbbbbbb" }]
         });
@@ -378,28 +379,39 @@ mod tests {
             "ok": true, "outcome": "applied in place: 1 interface was removed and stopped; the others never paused",
             "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "prod", "replaces": {}, "forced": false,
             "gate": null, "applied": "in_place",
-            "plan": { "changes": [{ "interface": "lab", "what": ["removed"], "in_place": true }], "handover_because": [] },
+            "plan": { "changes": [{ "interface": "lab", "what": ["removed"] }], "handover_because": [] },
             "steps": ["lab: removed in place (2 ms)"], "deployment": 43, "changes": []
         });
         let t = text(&gone);
         assert!(t.contains("· lab: removed (in place)") && t.contains("changed 1 interface:\n  lab removed\n"), "{t}");
         assert!(!t.contains("no interface's code changed"), "{t}");
-        let port = json!({
-            "ok": false, "outcome": "refused: only the handover applies it (adt: `source` changed (…)), and `in_place_only` was asked",
+        // What a start sets up (0.7.5.2.4): restarted alone, said why.
+        let restart = json!({
+            "ok": true, "outcome": "applied in place: 1 interface was restarted alone on new settings; the others never paused",
             "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "prod", "replaces": {}, "forced": false,
-            "gate": null, "plan": { "changes": [{ "interface": "adt", "what": ["source"], "in_place": false,
-            "handover_because": "`source` changed (…)" }], "handover_because": ["adt: `source` changed (…)"] },
+            "gate": null, "applied": "in_place",
+            "plan": { "changes": [{ "interface": "adt", "what": ["workers"], "restarts": "`workers` changed (…)" }], "handover_because": [] },
+            "steps": ["adt: workers → bbbbbbbbbbbb, restarted alone (40 ms)"], "deployment": 45,
+            "changes": [{ "interface": "adt", "from": "aaaaaaaaaaaa", "to": "bbbbbbbbbbbb" }]
+        });
+        let r = text(&restart);
+        assert!(r.contains("· adt: workers (in place, restarting alone: `workers` changed (…))"), "{r}");
+        assert!(r.contains("  adt: workers → bbbbbbbbbbbb, restarted alone (40 ms)"), "{r}");
+        // The project's own files read at a start: the handover, refused here.
+        let project = json!({
+            "ok": false, "outcome": "refused: only the handover applies it (resources.yaml changed (…)), and `in_place_only` was asked",
+            "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "prod", "replaces": {}, "forced": false,
+            "gate": null, "plan": { "changes": [], "handover_because": ["resources.yaml changed (…)"] },
             "steps": [], "deployment": null, "changes": []
         });
-        let t = text(&port);
-        assert!(t.contains("· adt: source (needs the handover: `source` changed (…))"), "{t}");
+        let t = text(&project);
         // A variable's new value (0.7.5.2.3): the environment file's line, and the interface it
         // reached listed with the values, its version the same.
         let moved = json!({
             "ok": true, "outcome": "applied in place: 1 interface's source changed; the others never paused",
             "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "prod", "replaces": {}, "forced": false,
             "gate": null, "applied": "in_place",
-            "plan": { "changes": [{ "interface": "feed", "what": ["source (MLLP_PORT)"], "in_place": true,
+            "plan": { "changes": [{ "interface": "feed", "what": ["source (MLLP_PORT)"],
               "variables": [{ "name": "MLLP_PORT", "before": "6661", "after": "6666" }] }], "handover_because": [],
               "project": ["environments/prod.yaml: MLLP_PORT \"6661\" → \"6666\""] },
             "steps": [], "deployment": 44, "changes": []

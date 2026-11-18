@@ -78,7 +78,7 @@ pub struct Server {
 impl Route {
     pub(crate) fn interface(&self) -> &str {
         match self {
-            Route::Queue(intake) => &intake.config.name,
+            Route::Queue(intake) => intake.name(),
             Route::Respond { interface, .. } => interface,
         }
     }
@@ -215,7 +215,7 @@ async fn handle(
                 response
             }
             Err(e) => {
-                tracing::error!(interface = %intake.config.name, error = %e, "failed to store message");
+                tracing::error!(interface = %intake.name(), error = %e, "failed to store message");
                 json(
                     StatusCode::SERVICE_UNAVAILABLE,
                     serde_json::json!({ "error": "temporarily unable to store message" }),

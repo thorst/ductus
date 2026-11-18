@@ -17,10 +17,11 @@
 #      the gate run (`release.rollback`, the deployment marked), applied in place;
 #   9. rolled back again: to release 1 (release 3, which a rollback left, is skipped);
 #  10. release 1's file from prod carries where it went: dev, test, prod;
-#  11. release 4 raises the interface's lanes (2 → 8), promoted (by the handover, which the answer
-#      names as what lanes need); a sender keeps sending (10
-#      patients) while the receiver is down, and prod is rolled back to release 1 (8 → 2 lanes):
-#      nothing refused, new messages go to new lanes (numbered after the old), the old ones go first;
+#  11. release 4 raises the interface's lanes (2 → 8), promoted (the interface restarted alone, in
+#      place: 0.7.5.2.4, which the answer names); a sender keeps sending (10
+#      patients) while the receiver is down, and prod is rolled back to release 1 (8 → 2 lanes, in
+#      place too): nothing refused, new messages go to new lanes (numbered after the old), the old
+#      ones go first;
 #  12. the receiver comes up: every message arrives once, each patient's in order, and the old
 #      lanes settle (`interface.lanes_settled`);
 #  13. release 5 adds an archive interface listening where the lab's receiver did (0.7.5.2.1):
@@ -221,7 +222,7 @@ echo "== 10. release 1's file from prod: where it went"
 step where "curl -sS -H \"Authorization: Bearer \$PROD_TOKEN\" \$PROD/api/v1/releases/$S1/file | tar xzO release.json | python3 -c 'import json, sys; print(sorted(p[\"environment\"] for p in json.load(sys.stdin)[\"deployed\"]))'"
 has where "\['dev', 'prod', 'test'\]" || fail+=" where"
 
-echo "== 11. lanes raised (release 4), then rolled back (8 → 2) under traffic, the receiver down"
+echo "== 11. lanes raised (release 4), then rolled back (8 → 2) under traffic, the receiver down: each restarts it alone"
 lanes 8
 g commit -qam "8 lanes"
 step r4 'env -u DUCTUS_DATABASE_URL ductus release -m "8 lanes"'
@@ -229,8 +230,8 @@ REL4=.ductus/releases/$(basename "$(released r4)") S4=$(short_id r4)
 step test4 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL4"' --to $TEST -m "8 lanes"'
 step promote4 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S4"' --from $TEST --to $PROD -m "8 lanes, tested"'
 [ "$(code test4)" = 0 ] && [ "$(code promote4)" = 0 ] || fail+=" promote4"
-# Its lanes changed: only the handover applies that, and the answer says so.
-has promote4 "^· $NAME: .*(needs the handover: " && has promote4 "^✓ handed over" || fail+=" promote4-handover"
+# Its lanes changed: it restarts alone (0.7.5.2.4), and the answer says so.
+has promote4 "^· $NAME: .*(in place, restarting alone: \`ordering\` changed" && has promote4 "^✓ applied in place" || fail+=" promote4-restart"
 # 200 messages for 10 patients over 10 s; the rollback 3 s in.
 "$BIN" gen --to "127.0.0.1:${MLLP[prod]}" --count 200 --patients 10 --rate 20 >"$W/gen.log" 2>&1 &
 SENDER=$!
@@ -239,7 +240,7 @@ waiting() { q prod "SELECT count(*) FROM messages WHERE interface = '$NAME' AND 
 generations() { q prod "SELECT string_agg(first_lane || '+' || lanes, ' ' ORDER BY first_lane) FROM lane_generations WHERE interface = '$NAME'"; }
 echo "waiting on prod: $(waiting); lanes (first+count): $(generations)" | tee -a "$OUT"
 step rollback-lanes 'DUCTUS_API_TOKEN=$OPS_PROD ductus deploy --rollback --to $PROD -m "8 lanes broke the lab feed"'
-[ "$(code rollback-lanes)" = 0 ] && has rollback-lanes "^rollback to release $S1" && has rollback-lanes "^✓ handed over" || fail+=" lanes-rollback"
+[ "$(code rollback-lanes)" = 0 ] && has rollback-lanes "^rollback to release $S1" && has rollback-lanes "^✓ applied in place" || fail+=" lanes-rollback"
 wait "$SENDER"
 grep -q "rejected 0, refused 0," "$W/gen.log" || { cat "$W/gen.log"; fail+=" lanes-sender"; }
 echo "waiting on prod: $(waiting); lanes (first+count): $(generations)" | tee -a "$OUT"
@@ -262,8 +263,7 @@ grep -q "| duplicates 0 | out of order 0 |" "$W/sink.log" && grep -q "unique 200
 
 echo "== 13. an interface added in place (release 5: an archive on the lab's port), then removed (release 6)"
 # The archive listens where the lab's receiver did (stopped after step 12), so promote-demo sends
-# to it unchanged: its lanes changed since prod's engine started (step 11), and while they are,
-# its destinations change only by the handover.
+# to it unchanged.
 ARCHIVE=$NAME-archive
 mkdir -p "$P/interfaces/$ARCHIVE"
 printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: ${RECEIVER_PORT} } }\ndestinations:\n  files: { file: { dir: out/archive } }\n' "$ARCHIVE" >"$P/interfaces/$ARCHIVE/interface.yaml"

@@ -13,7 +13,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader, CardTitle } from "@/components/ui/card";
 import { Table, Td, Th } from "@/components/ui/table";
 import { bytes, count, timestamp } from "@/lib/format";
-import { applyOf, applySummary, changesSummary, reachedOnly } from "@/lib/releases";
+import { applyOf, applySummary, changesSummary, howOf, reachedOnly } from "@/lib/releases";
 
 /**
  * One release: what it is, what deploying it here would change, where it went, every check of
@@ -199,7 +199,7 @@ function Here({ here }: { here: Schemas["Here"] }) {
                   <Td className="font-mono text-xs">
                     {c.from ?? "–"} → {c.to ?? "–"}
                   </Td>
-                  {planned && <Td className={how && !how.inPlace ? "text-warn" : undefined}>{how?.how ?? "–"}</Td>}
+                  {planned && <Td>{how?.how ?? "–"}</Td>}
                 </tr>
               );
             })}
@@ -214,9 +214,7 @@ function Here({ here }: { here: Schemas["Here"] }) {
                   new values<span className="text-muted">: {c.what.join(", ")}</span>
                 </Td>
                 <Td className="text-muted">the same</Td>
-                <Td className={c.in_place ? undefined : "text-warn"}>
-                  {c.in_place ? "in place" : `the handover: ${c.handover_because ?? "it needs one"}`}
-                </Td>
+                <Td>{howOf(c)}</Td>
               </tr>
             ))}
           </tbody>

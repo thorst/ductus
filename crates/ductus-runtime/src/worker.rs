@@ -113,7 +113,16 @@ pub enum Command {
     ///
     /// The code must come from paths not loaded on this thread before (a release's own folder):
     /// V8 keys modules by URL, so a file loaded again from the same path is the old module.
-    Replace { interface: String, jobs: Vec<Job>, answer: tokio::sync::oneshot::Sender<Result<Vec<CodeFile>>> },
+    ///
+    /// `handed`: where a respond-mode interface's requests go when none of `jobs` answers them (it
+    /// stops running here: a restart in place hands them to its new workers, 0.7.5.2.4); without
+    /// it they are dropped with the old responder.
+    Replace {
+        interface: String,
+        jobs: Vec<Job>,
+        answer: tokio::sync::oneshot::Sender<Result<Vec<CodeFile>>>,
+        handed: Option<tokio::sync::oneshot::Sender<Requests>>,
+    },
 }
 
 /// Start a worker thread for `jobs`, with one isolate of `heap_mb`. Each job reports on
@@ -191,8 +200,8 @@ pub fn spawn_thread(
                     tokio::select! {
                         _ = stop.cancelled() => break,
                         command = commands.recv() => match command {
-                            Some(Command::Replace { interface, jobs, answer }) => {
-                                let _ = answer.send(thread.replace(&interface, jobs).await);
+                            Some(Command::Replace { interface, jobs, answer, handed }) => {
+                                let _ = answer.send(thread.replace(&interface, jobs, handed).await);
                             }
                             None if thread.hosted.is_empty() => break,
                             None => {
@@ -300,7 +309,12 @@ impl Thread {
     // The isolate is borrowed across the loads' awaits: the gate is closed meanwhile, so nothing
     // else on the thread borrows it (transforms wait at `Gate::opened`, the driver skips its poll).
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn replace(&mut self, interface: &str, jobs: Vec<Job>) -> Result<Vec<CodeFile>> {
+    async fn replace(
+        &mut self,
+        interface: &str,
+        jobs: Vec<Job>,
+        handed: Option<tokio::sync::oneshot::Sender<Requests>>,
+    ) -> Result<Vec<CodeFile>> {
         let started = std::time::Instant::now();
         self.loading.close();
         let loaded = {
@@ -350,8 +364,17 @@ impl Thread {
                 }
             }
         }
+        let stops = jobs.is_empty();
         for (job, script) in jobs.into_iter().zip(loaded) {
             self.start(job, script, &mut requests);
+        }
+        if let (Some(requests), Some(handed)) = (requests, handed) {
+            let _ = handed.send(requests);
+        }
+        if stops {
+            // Removed, or restarting elsewhere: debug, as a start's per-thread lines are.
+            tracing::debug!(thread = %self.name, %interface, paused = ?started.elapsed(), "it no longer runs on this thread");
+            return Ok(files);
         }
         tracing::info!(
             thread = %self.name,
@@ -1146,7 +1169,7 @@ mod tests {
         let replace = |dir: &Path| {
             let (answer, answered) = tokio::sync::oneshot::channel();
             let jobs = vec![respond_job(dir, None)];
-            commands.send(Command::Replace { interface: "api".into(), jobs, answer }).ok().unwrap();
+            commands.send(Command::Replace { interface: "api".into(), jobs, answer, handed: None }).ok().unwrap();
             answered
         };
 

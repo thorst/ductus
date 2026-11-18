@@ -23,7 +23,8 @@
 #      ports of their own, no traffic to them);
 #   6. (0.7.5.2.2) a port moved: v-0012's MLLP port, then back;
 #   7. (0.7.5.2.3) a variable's new value: V13_PORT (v-0013's port), then SEND_TIMEOUT (every
-#      destination's `timeout_ms`: all COUNT interfaces reached).
+#      destination's `timeout_ms`: all COUNT interfaces reached);
+#   8. (0.7.5.2.4) A restarted alone: an ordering key, 2 dedicated workers, then back.
 # Then CYCLES interfaces added and removed again (two deploys each) and DEPLOYS deploys of A in a
 # row (no traffic), each with the engine's memory before, every 25, and after; and that every
 # message sent arrived once.
@@ -332,6 +333,24 @@ reached=$(python3 -c 'import json, sys
 plan = json.load(open(sys.argv[1]))["plan"]
 print(sum("destinations.receiver (SEND_TIMEOUT)" in c["what"] for c in plan["changes"]))' "$WORK/deploy.json")
 [ "$reached" = "$COUNT" ] || { echo "SEND_TIMEOUT reached $reached of $COUNT"; exit 1; }
+
+# A restarted alone (0.7.5.2.4), under its traffic: an ordering key (its lanes decided again, a
+# generation added), then 2 dedicated workers (new threads, every old worker stopped first), then
+# back as it was (shared, no key). What's measured: A's own send latency (its sending pauses while
+# its workers restart), the others' (within noise), and the time to applied.
+settings() { # $1: what A's interface.yaml gets after its first three lines
+  head -n 3 "$P/interfaces/v-0000/interface.yaml" >"$WORK/a.yaml"
+  printf '%b' "$1" >>"$WORK/a.yaml"
+  mv "$WORK/a.yaml" "$P/interfaces/v-0000/interface.yaml"
+  g commit -qam "A's settings: $1"
+}
+settings 'ordering: { key: PID-3.1 }\n'
+phase "A restarted alone: an ordering key" deploy "$(release "A keyed")" in_place
+grep -q 'restarts' "$WORK/deploy.json" || { echo "A didn't restart:"; cat "$WORK/deploy.json"; exit 1; }
+settings 'ordering: { key: PID-3.1 }\nisolation: dedicated\nworkers: 2\n'
+phase "A restarted alone: 2 dedicated workers" deploy "$(release "A dedicated")" in_place
+settings ''
+phase "A restarted alone: back to shared, no key" deploy "$(release "A as it was")" in_place
 
 echo "== $CYCLES interfaces added and removed again in a row (no traffic)"
 echo "   before: $(memory)"

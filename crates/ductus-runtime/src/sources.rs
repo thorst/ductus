@@ -20,10 +20,12 @@
 //! - **File, SFTP, schedule**: the old one stopped first, as a stop stops it, then the new one
 //!   started: two pickups of one folder must never run at once.
 //!
+//! - **Queue ↔ respond mode** (0.7.5.2.4): its route answered by the interface's new workers, or
+//!   stored by its intake, once they run (`reroute`; the interface restarts alone).
+//!
 //! What only the handover can do (`in_place`): a port moving from one interface to another (or
-//! an HTTP method and path), a listener changing kind or host on its own port, and an interface
-//! changing between queue and respond mode. The handover keeps every socket open, so no sender is
-//! refused there.
+//! an HTTP method and path), and a listener changing kind or host on its own port. The handover
+//! keeps every socket open, so no sender is refused there.
 //!
 //! Stopping one: its listening socket is given back first (`systemd::release`: neither systemd
 //! nor this process keeps it, so the port is free), then the listener closes the way a drain
@@ -274,6 +276,14 @@ impl Sources {
         Ok(())
     }
 
+    /// Route `config`'s HTTP source to `route` from now on (its interface changed between queue
+    /// and respond mode, or restarted in respond mode: its new workers' requests). Requests in
+    /// flight finish where they came.
+    pub(crate) async fn reroute(&self, config: &InterfaceConfig, route: Route) -> Result<()> {
+        self.look_up(config).await;
+        self.route(config, route).await
+    }
+
     /// `config`'s HTTP route, answered by `route`.
     fn endpoint(&self, config: &InterfaceConfig, route: Route) -> Result<Endpoint> {
         let Source::Http { host, port, path, method, tls, allow, .. } = &config.source else {
@@ -452,23 +462,16 @@ impl<'a> Listener<'a> {
 /// Whether a deploy can start, change and stop the sources of the interfaces it adds (`added`)
 /// and changes (`changed`: each one's running config and its next) in place, with `running`
 /// (every interface running now, those it removes too) left as they are; else why only the
-/// handover can: a port moving from one interface to another (or an HTTP method and path), a
-/// listener changing kind or host on its own port, or an interface changing between queue and
-/// respond mode. HTTP routes joining, leaving or changing on a shared server go in place. The set
-/// it leaves is checked as a start checks it before this (`check_together`).
+/// handover can: a port moving from one interface to another (or an HTTP method and path), or a
+/// listener changing kind or host on its own port. HTTP routes joining, leaving or changing on a
+/// shared server go in place, and so does a route changing between queue and respond mode (its
+/// interface restarts alone: `Engine::restart_interface`). The set it leaves is checked as a start
+/// checks it before this (`check_together`).
 pub fn in_place(
     running: &[&InterfaceConfig],
     added: &[&InterfaceConfig],
     changed: &[(&InterfaceConfig, &InterfaceConfig)],
 ) -> std::result::Result<(), NeedsHandover> {
-    for (old, new) in changed {
-        if old.responds() != new.responds() {
-            return Err(NeedsHandover(format!(
-                "`{}` changes between queue and respond mode: its workers are made another way (by the handover)",
-                new.name
-            )));
-        }
-    }
     let now: Vec<Listener> = running.iter().filter_map(|c| Listener::of(c)).collect();
     // What listens somewhere new: every added one; a changed one whose address or route moved.
     let moved = changed.iter().filter_map(|(old, new)| {
@@ -552,8 +555,8 @@ mod tests {
     }
 
     /// Changed sources: a moved MLLP port, TLS or `allow:` on the same port, a route moved on its
-    /// server or to another, a file pickup becoming a listener: in place. A port swapped between
-    /// two interfaces, a listener changing kind on its own port, queue ↔ respond: the handover.
+    /// server or to another, a file pickup becoming a listener, queue ↔ respond: in place. A port
+    /// swapped between two interfaces, a listener changing kind on its own port: the handover.
     #[test]
     fn a_changed_source_goes_in_place_unless_a_port_moves_between_interfaces() {
         let mllp = config("adt", "{ mllp: { port: 6661 } }");
@@ -580,7 +583,7 @@ mod tests {
         assert!(kind.starts_with("`adt` listens on port 6661 another way (MLLP port 6661 now"), "{kind}");
         let takes = why(ok(&api, &config("api", "{ http: { port: 8081, path: /b } }")));
         assert!(takes.contains("which `api2` answers now"), "{takes}");
-        let respond = why(ok(&api, &config("api", "{ http: { port: 8081, path: /a, mode: respond } }")));
-        assert!(respond.starts_with("`api` changes between queue and respond mode"), "{respond}");
+        // Its route answered another way on the same server: in place (its interface restarts).
+        assert!(ok(&api, &config("api", "{ http: { port: 8081, path: /a, mode: respond } }")).is_ok(), "respond");
     }
 }

@@ -63,11 +63,10 @@ describe("changesSummary", () => {
 });
 
 describe("applySummary and applyOf", () => {
-  const planned = (name: string, what: string[], why?: string): Schemas["PlannedChange"] => ({
+  const planned = (name: string, what: string[], restarts?: string): Schemas["PlannedChange"] => ({
     interface: name,
     what,
-    in_place: why === undefined,
-    ...(why === undefined ? {} : { handover_because: why }),
+    ...(restarts === undefined ? {} : { restarts }),
   });
 
   it("says a deploy goes in place, and each interface's line", () => {
@@ -76,7 +75,7 @@ describe("applySummary and applyOf", () => {
     expect(applySummary(h)).toBe(
       "It applies in place: the interface it changes takes its new code between two messages; the others never pause.",
     );
-    expect(applyOf(h, "adt")).toEqual({ what: "code, destination pacs added", how: "in place", inPlace: true });
+    expect(applyOf(h, "adt")).toEqual({ what: "code, destination pacs added", how: "in place" });
     expect(applyOf(h, "lab")).toBeNull();
   });
 
@@ -112,18 +111,26 @@ describe("applySummary and applyOf", () => {
     );
   });
 
-  it("says what needs the handover, and why", () => {
-    const why = "`ordering` changed (how messages are received, stored or laid out in lanes is set at a start)";
-    const plan = {
-      changes: [planned("adt", ["code"]), planned("lab", ["ordering"], why)],
-      handover_because: [`lab: ${why}`],
-      project: [],
-    };
+  it("says an interface whose settings a start sets up restarts alone, and why", () => {
+    const why = "`ordering` changed (what a start sets up for it: how it stores, lays out in lanes or runs its messages)";
+    const plan = { changes: [planned("adt", ["code"]), planned("lab", ["ordering", "source"], why)], handover_because: [], project: [] };
     const h = { ...here, plan };
     expect(applySummary(h)).toBe(
-      `It needs the handover (a new engine takes over; every interface's sending pauses a moment): lab: ${why}.`,
+      "It applies in place: the interface it changes takes its new code between two messages, the interface whose settings change restarts alone; the others never pause.",
     );
-    expect(applyOf(h, "lab")).toEqual({ what: "ordering", how: `the handover: ${why}`, inPlace: false });
+    expect(applyOf(h, "lab")).toEqual({ what: "ordering, source", how: `in place, restarting alone: ${why}` });
+    const two = { ...here, plan: { ...plan, changes: [planned("a", ["format"], why), planned("b", ["workers"], why)] } };
+    expect(applySummary(two)).toBe(
+      "It applies in place: the 2 interfaces whose settings change restart alone; the others never pause.",
+    );
+  });
+
+  it("says what needs the handover, and why", () => {
+    const why = "resources.yaml changed (read at a start)";
+    const plan = { changes: [planned("adt", ["code"])], handover_because: [why], project: [] };
+    expect(applySummary({ ...here, plan })).toBe(
+      `It needs the handover (a new engine takes over; every interface's sending pauses a moment): ${why}.`,
+    );
   });
 
   it("counts the interfaces a variable's new value reaches, a source it moved, and the environment file alone", () => {

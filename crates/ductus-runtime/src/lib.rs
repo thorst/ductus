@@ -531,27 +531,22 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         // Respond mode has no queue: one lane, never read.
         let layout = layouts.remove(&config.name).unwrap_or_else(|| lanes::Layout::single(1, ""));
         let lanes = Arc::new(lanes::Lanes::new(layout, config.slots(), config.destinations().count()));
-        lanes::retire_when_settled(store.clone(), config.name.clone(), lanes.clone(), ended.clone());
+        // Its own, so a restart in place (new lanes) stops the old lanes' watch.
+        let retiring = ended.child_token();
+        lanes::retire_when_settled(store.clone(), config.name.clone(), lanes.clone(), retiring.clone());
         if !config.responds() {
-            let intake = ingest::Intake::new(
-                config.clone(),
-                store.clone(),
-                wake.clone(),
-                gate.clone(),
-                destination_ids.clone(),
-                retention.tier(&config.name),
-                stats.clone(),
-                lanes.clone(),
-            )?;
+            let targets = ingest::Targets { destinations: destination_ids.clone(), wake: wake.clone() };
+            let settings = ingest::Settings::new(config.clone(), lanes.clone(), retention.tier(&config.name), targets)?;
+            let intake = ingest::Intake::new(store.clone(), gate.clone(), stats.clone(), settings);
             intakes.insert(config.name.clone(), Arc::new(intake));
         }
-        parts.push((config, wake, destination_ids, gate, stats, destination_stats, lanes));
+        parts.push((config, wake, destination_ids, gate, stats, destination_stats, lanes, retiring));
     }
     // Last activity and pauses, before any worker starts (a paused destination sends nothing).
     let watched = parts
         .iter()
         .filter(|(config, ..)| !config.responds())
-        .map(|(_, _, ids, _, stats, destinations, _)| activity::Watched {
+        .map(|(_, _, ids, _, stats, destinations, ..)| activity::Watched {
             stats: stats.clone(),
             destinations: ids.iter().copied().zip(destinations.iter().cloned()).collect(),
         })
@@ -574,7 +569,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         stopped: stopped_tx.clone(),
     };
     let mut kept: std::collections::HashMap<String, in_place::Interface> = Default::default();
-    for (config, wake, destination_ids, gate, stats, destination_stats, lanes) in parts {
+    for (config, wake, destination_ids, gate, stats, destination_stats, lanes, retiring) in parts {
         let health = Arc::new(health::Health::reporting(&config.name, stopped_tx.clone()));
         let outlets: Vec<worker::Outlet> = config
             .destinations()
@@ -626,6 +621,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             decided: decided.clone(),
             threads: Vec::new(), // once they're spawned (below)
             removed: false,
+            retiring,
         };
         for slot in 0..config.slots() {
             let job = parts.job(&shared, slot, requests.take(), &shared.waiting);

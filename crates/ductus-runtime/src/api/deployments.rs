@@ -210,8 +210,9 @@ pub struct DeployGate {
 pub struct PlanInfo {
     /// Every interface whose code version changes, is added or is removed.
     changes: Vec<PlannedChange>,
-    /// Why it needs the handover, a line per reason (the project's own files, then each
-    /// interface); empty: it applies in place.
+    /// Why it needs the handover, a line per reason (the project's own files read at a start:
+    /// ductus.yaml, resources.yaml, docs-schema.yaml, a secrets file); empty: it applies in place
+    /// (every change to an interface does, some restarting it alone: `changes[].restarts`).
     handover_because: Vec<String>,
     /// What the project's own files change in place, a line each: the engine's environment file's
     /// variables (`environments/prod.yaml: MLLP_PORT "6661" → "6666"`) and `console:`, another
@@ -230,11 +231,11 @@ pub struct PlannedChange {
     /// absent when none do.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     variables: Vec<crate::changes::VariableChange>,
-    /// It can be applied in place (its workers restarted between messages).
-    in_place: bool,
-    /// Why only the handover applies it; absent when it goes in place.
+    /// Why it restarts alone (what a start sets up for it changes: `format`, `ordering`,
+    /// `workers`...; its workers all stop, then start on the new settings, its senders never
+    /// notice); absent when its workers take the change between two messages.
     #[serde(skip_serializing_if = "Option::is_none")]
-    handover_because: Option<String>,
+    restarts: Option<String>,
 }
 
 impl PlanInfo {
@@ -248,10 +249,9 @@ impl PlanInfo {
                     interface: c.interface.clone(),
                     what: c.what.clone(),
                     variables: c.reached.as_ref().map(|r| r.variables.clone()).unwrap_or_default(),
-                    in_place: c.apply == Apply::InPlace,
-                    handover_because: match &c.apply {
+                    restarts: match &c.apply {
                         Apply::InPlace => None,
-                        Apply::Handover(why) => Some(why.clone()),
+                        Apply::Restart(why) => Some(why.clone()),
                     },
                 })
                 .collect(),
@@ -765,14 +765,21 @@ fn span(d: Duration) -> String {
 
 /// What a deploy applied in place did, by kind: interfaces changed (their new code between two
 /// messages), sources changed (a moved port opens before the old one closes, a pickup restarts:
-/// not "between two messages"), added (started) and removed (stopped).
+/// not "between two messages"), restarted alone (what a start sets up changed: 0.7.5.2.4), added
+/// (started) and removed (stopped).
 fn in_place_outcome(changes: &[crate::changes::Change]) -> String {
+    use crate::changes::Apply;
     let added = changes.iter().filter(|c| c.is_added()).count();
     let removed = changes.iter().filter(|c| c.is_removed()).count();
+    let restarts = |c: &&crate::changes::Change| matches!(c.apply, Apply::Restart(_));
+    let restarted = changes.iter().filter(restarts).count();
     // `source`, or `source (MLLP_PORT)` when a variable moved it.
     let source = |w: &String| w == "source" || w.starts_with("source (");
-    let sources = changes.iter().filter(|c| !c.is_added() && !c.is_removed() && c.what.iter().any(source)).count();
-    let changed = changes.len() - added - removed - sources;
+    let sources = changes
+        .iter()
+        .filter(|c| !c.is_added() && !c.is_removed() && !restarts(c) && c.what.iter().any(source))
+        .count();
+    let changed = changes.len() - added - removed - sources - restarted;
     let mut parts: Vec<String> = Vec::new();
     match changed {
         0 => {}
@@ -793,6 +800,9 @@ fn in_place_outcome(changes: &[crate::changes::Change]) -> String {
         (1, false) => "1 was".to_string(),
         (n, false) => format!("{n} were"),
     };
+    if restarted > 0 {
+        parts.push(format!("{} restarted alone on new settings", noun(restarted, parts.is_empty())));
+    }
     if added > 0 {
         parts.push(format!("{} added and started", noun(added, parts.is_empty())));
     }
@@ -848,6 +858,15 @@ mod tests {
         assert_eq!(
             said(&[change("added"), change("added"), change("removed"), change("removed")]),
             "applied in place: 2 interfaces were added and started, 2 were removed and stopped; the others never paused"
+        );
+        let restart = |what: &str| Change { apply: Apply::Restart("`workers` changed".into()), ..change(what) };
+        assert_eq!(
+            said(&[restart("workers")]),
+            "applied in place: 1 interface was restarted alone on new settings; the others never paused"
+        );
+        assert_eq!(
+            said(&[change("code"), restart("source"), restart("format")]),
+            "applied in place: 1 interface took its new code between two messages, 2 were restarted alone on new settings; the others never paused"
         );
     }
 }

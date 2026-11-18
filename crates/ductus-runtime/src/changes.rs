@@ -10,17 +10,22 @@
 //! written (a release has no environment), so what a variable changed is recorded beside it
 //! (`Change::variables`).
 //!
-//! In place: the code (any file a version counts), `script`, `destinations` (added, removed or
-//! changed), `output`, `retry`, `rate_limit`, `timeout`, what only people and alerts read
-//! (`about`, `custom`, `monitor`, `alert`), and `source` (0.7.5.2.2: a listener moved, its TLS or
-//! `allow:` swapped, an HTTP route changed, a file pickup or schedule restarted: `sources`),
-//! except a change between queue and respond mode. Everything else in interface.yaml shapes how
-//! messages are stored or laid out in lanes (`format`, `ordering`, `isolation`, `workers`,
-//! `dedicated_pools`, `durability`, `dedupe`, `retention`, `quarantined`): those and the
-//! project's own files read at a start (`ductus.yaml`, `resources.yaml` or `alerts:` as filled in,
-//! `docs-schema.yaml`, `secrets/<env>.json`) go by the handover, the answer saying which. The
-//! engine's environment file goes in place (its variables as above, `console:` swapped); another
-//! environment's files change nothing here (`deploy::project_plan`).
+//! Every change to an interface goes in place, one of two ways:
+//! - **Between two messages** (`Apply::InPlace`): the code (any file a version counts), `script`,
+//!   `destinations` (added, removed or changed), `output`, `retry`, `rate_limit`, `timeout`, what
+//!   only people and alerts read (`about`, `custom`, `monitor`, `alert`), and `source` (0.7.5.2.2:
+//!   a listener moved, its TLS or `allow:` swapped, an HTTP route changed, a file pickup or
+//!   schedule restarted: `sources`).
+//! - **Restarted alone** (`Apply::Restart`, 0.7.5.2.4): what a start sets up for it, how messages
+//!   are stored, laid out in lanes or run (`format`, `ordering`, `isolation`, `workers`,
+//!   `dedicated_pools`, `durability`, `dedupe`, `retention`, `quarantined`) and a change between
+//!   queue and respond mode: its workers all stop, then start on the new settings
+//!   (`Engine::restart_interface`); its senders never notice.
+//!
+//! Only the project's own files read at a start (`ductus.yaml`, `resources.yaml` or `alerts:` as
+//! filled in, `docs-schema.yaml`, `secrets/<env>.json`) go by the handover, the answer saying
+//! which. The engine's environment file goes in place (its variables as above, `console:`
+//! swapped); another environment's files change nothing here (`deploy::project_plan`).
 //!
 //! An interface added or removed goes in place whatever its source (0.7.5.2.1): its listener,
 //! file pickup or schedule starts or stops alone (`sources`). What only the settings resolved
@@ -34,7 +39,8 @@ use ductus_core::yaml::Value;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 
-/// interface.yaml's keys a change to which is applied in place.
+/// interface.yaml's keys a change to which is applied between two messages; any other key
+/// restarts the interface alone.
 const IN_PLACE: &[&str] = &[
     "script",
     "destinations",
@@ -55,14 +61,16 @@ fn responds(source: Option<&Value>) -> bool {
     mode == Some("respond")
 }
 
-/// How one interface's change is applied.
+/// How one interface's change is applied (always in place; the project's own files may still
+/// need the handover: `Plan::project`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Apply {
-    /// Its workers restarted between messages on its new code and settings.
+    /// Its workers take its new code and settings between two messages, each where it runs.
     InPlace,
-    /// Only by the full handover; why, in words.
-    Handover(String),
+    /// It restarts alone (its workers all stopped, then started on the new settings, its
+    /// listener, claim and counts kept); why, in words.
+    Restart(String),
 }
 
 /// What changes for one interface.
@@ -128,20 +136,15 @@ pub struct Plan {
 }
 
 impl Plan {
-    /// Every change applies in place (nothing changed counts too).
+    /// Every change applies in place (nothing changed counts too): unless the project's own files
+    /// need the handover.
     pub fn in_place(&self) -> bool {
-        self.project.is_none() && self.changes.iter().all(|c| c.apply == Apply::InPlace)
+        self.project.is_none()
     }
 
     /// Why the deploy needs the handover: one line per reason; empty when it doesn't.
     pub fn handover_because(&self) -> Vec<String> {
-        let mut why: Vec<String> = self.project.iter().cloned().collect();
-        for c in &self.changes {
-            if let Apply::Handover(reason) = &c.apply {
-                why.push(format!("{}: {reason}", c.interface));
-            }
-        }
-        why
+        self.project.iter().cloned().collect()
     }
 
     /// What the new variable values change, by interface (to record with the deployment).
@@ -269,7 +272,7 @@ fn interface(name: &str, before: &str, after: &str, version_changed: bool, vars:
     let changed = vars.changed();
     let keys: BTreeSet<String> = before.keys().chain(after.keys()).cloned().collect();
     let mut what = Vec::new();
-    let mut handover = Vec::new();
+    let mut restart = Vec::new();
     let mut reached: BTreeSet<&str> = BTreeSet::new();
     let mut by_variables = Vec::new(); // `what`'s lines a variable moved
     // The settings as they were, but with what no variable moved as it will be: compared with
@@ -308,7 +311,7 @@ fn interface(name: &str, before: &str, after: &str, version_changed: bool, vars:
         }
         what.extend(lines);
         if !IN_PLACE.contains(&key.as_str()) {
-            handover.push(key);
+            restart.push(format!("`{key}`"));
         }
     }
     let in_code = vars.in_code.get(name).map(|n| n.iter().map(String::as_str).collect::<Vec<_>>()).unwrap_or_default();
@@ -337,15 +340,14 @@ fn interface(name: &str, before: &str, after: &str, version_changed: bool, vars:
             }
         },
     });
-    let mode = responds(before.get("source")) != responds(after.get("source"));
-    let apply = match (handover.len(), mode) {
-        (0, false) => Apply::InPlace,
-        (0, true) => Apply::Handover(
-            "`source` changes between queue and respond mode (its workers are made another way at a start)".into(),
-        ),
-        _ => Apply::Handover(format!(
-            "{} changed (how messages are received, stored or laid out in lanes is set at a start)",
-            handover.iter().map(|k| format!("`{k}`")).collect::<Vec<_>>().join(", ")
+    if responds(before.get("source")) != responds(after.get("source")) {
+        restart.push("its mode (queue ↔ respond)".into());
+    }
+    let apply = match restart.is_empty() {
+        true => Apply::InPlace,
+        false => Apply::Restart(format!(
+            "{} changed (what a start sets up for it: how it stores, lays out in lanes or runs its messages)",
+            restart.join(", ")
         )),
     };
     Ok(Some(Change { interface: name.into(), what, apply, reached }))
@@ -404,25 +406,33 @@ mod tests {
         assert!(plan.in_place());
     }
 
-    /// How messages are stored, lanes, queue ↔ respond, or the project's files: by the handover,
-    /// each saying why (the interfaces added and removed beside them would go in place).
+    /// How messages are stored, lanes, workers, queue ↔ respond: in place, the interface
+    /// restarting alone, each saying why; only the project's files need the handover.
     #[test]
-    fn what_shapes_storing_or_lanes_needs_the_handover() {
+    fn what_a_start_sets_up_restarts_the_interface_alone() {
         let format = format!("{LAB}format: json\n");
-        let lanes = format!("{LAB}ordering: {{ key: PID-3.1 }}\n");
+        let lanes = format!("{LAB}ordering: {{ key: PID-3.1 }}\nisolation: dedicated\nworkers: 4\n");
         let queue = "name: api\nsource: { http: { port: 8081, path: /a } }\ndestinations: {}\n";
         let respond = queue.replace("/a }", "/a, mode: respond }");
-        let running = side(&[("adt", "v1", LAB), ("b", "b1", LAB), ("api", "a1", queue), ("gone", "g", LAB)]);
-        let next = side(&[("adt", "v2", &format), ("b", "b2", &lanes), ("api", "a2", &respond), ("new", "n", LAB)]);
+        let retry = format!("{LAB}retry: {{ max_attempts: 3 }}\n");
+        let running = side(&[("adt", "v1", LAB), ("b", "b1", LAB), ("api", "a1", queue), ("c", "c1", LAB)]);
+        let next = side(&[("adt", "v2", &format), ("b", "b2", &lanes), ("api", "a2", &respond), ("c", "c2", &retry)]);
+        let plan = plan(&running, &next, &Project::default()).unwrap();
+        assert!(plan.in_place(), "{plan:#?}");
+        assert!(plan.handover_because().is_empty());
+        let why = |n: &str| match &plan.changes.iter().find(|c| c.interface == n).unwrap().apply {
+            Apply::Restart(why) => why.clone(),
+            Apply::InPlace => String::new(),
+        };
+        assert!(why("adt").starts_with("`format` changed"), "{plan:#?}");
+        assert!(why("b").starts_with("`isolation`, `ordering`, `workers` changed"), "{plan:#?}");
+        assert!(why("api").starts_with("its mode (queue ↔ respond) changed"), "{plan:#?}");
+        assert_eq!(why("c"), "", "retry: between two messages");
+
         let project = Project { handover: Some("resources.yaml changed: ...".into()), ..Project::default() };
-        let plan = plan(&running, &next, &project).unwrap();
+        let plan = super::plan(&running, &next, &project).unwrap();
         assert!(!plan.in_place());
-        let why = plan.handover_because();
-        assert_eq!(why.len(), 4, "{why:#?}");
-        assert!(why[0].starts_with("resources.yaml changed"), "{why:#?}");
-        assert!(why[1].starts_with("adt: `format` changed"), "{why:#?}");
-        assert!(why[2].starts_with("api: `source` changes between queue and respond mode"), "{why:#?}");
-        assert!(why[3].starts_with("b: `ordering` changed"), "{why:#?}");
+        assert_eq!(plan.handover_because(), ["resources.yaml changed: ..."]);
         assert!(super::plan(&running, &running, &Project::default()).unwrap().changes.is_empty(), "nothing changes");
     }
 
@@ -466,7 +476,7 @@ mod tests {
     }
 
     /// A variable's new value reaches the interfaces whose filled-in settings it moves (in place
-    /// for a source, by the handover for what a start sets), and those whose code names it; an
+    /// for a source, restarting it alone for what a start sets), and those whose code names it; an
     /// interface naming only variables that kept their values, or none, isn't touched.
     #[test]
     fn a_variable_reaches_the_interfaces_it_fills_in_or_their_code_reads() {
@@ -498,7 +508,7 @@ mod tests {
         assert_eq!(reached.touches, Touches { source: true, ..Touches::default() }, "its source only");
         let keep = by_name("keep").unwrap();
         assert_eq!(keep.what, ["retention (DAYS)"]);
-        assert!(matches!(&keep.apply, Apply::Handover(why) if why.starts_with("`retention` changed")), "{keep:#?}");
+        assert!(matches!(&keep.apply, Apply::Restart(why) if why.starts_with("`retention` changed")), "{keep:#?}");
         let code = by_name("code").unwrap();
         assert_eq!((code.what.as_slice(), &code.apply), (&["code reads EMPI".to_string()][..], &Apply::InPlace));
         assert!(by_name("url").is_none() && by_name("other").is_none(), "{plan:#?}");

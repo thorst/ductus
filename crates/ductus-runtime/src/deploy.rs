@@ -663,7 +663,8 @@ pub struct InPlace {
 
 /// Apply release `next` (unpacked in `folder`) in place: the interfaces `plan` adds start
 /// (`Engine::add_interface`), then each interface it changes runs its new code and settings from
-/// its next message (`Engine::replace_interface`; all at once, each on its own threads), then
+/// its next message (`Engine::replace_interface`; all at once, each on its own threads), or, when
+/// what a start sets up for it changes, restarts alone (`Engine::restart_interface`), then
 /// those it removes stop (`Engine::remove_interface`), the others untouched. When the engine's
 /// environment file changes (`Plan::environment_changes`), its new variables and `console:` are
 /// what code reads from before the first of those (`SharedServices::swap_environment`; an
@@ -675,7 +676,8 @@ pub struct InPlace {
 ///
 /// All or nothing: when one interface can't be applied (its new interface.yaml doesn't load, its
 /// code doesn't load on a thread, another engine runs an added one, `in_place::NeedsHandover`),
-/// those already applied are put back on what they ran (the code their threads loaded before),
+/// those already applied are put back on what they ran (the code their threads loaded before;
+/// one restarted, restarted again on its old settings),
 /// those added removed again, and the `Err` says why, so the engine
 /// runs one release, never a mix: the deploy then takes the handover (or, `--in-place-only`,
 /// refuses).
@@ -776,9 +778,20 @@ pub async fn apply_in_place(
         let first = added_results.into_iter().find_map(|(r, _)| r.err());
         return Err(first.expect("one failed"));
     }
-    let applying = changed.iter().map(|(config, ..)| async {
+    // Each the way its change needs: its new code between two messages, or restarted alone.
+    let apply_one = |config: ductus_core::InterfaceConfig, root: &Path, restarts: bool| {
+        let root = root.to_path_buf();
+        async move {
+            match restarts {
+                true => engine.restart_interface(config, &root).await,
+                false => engine.replace_interface(config, &root).await,
+            }
+        }
+    };
+    let restarts = |change: &crate::changes::Change| matches!(change.apply, crate::changes::Apply::Restart(_));
+    let applying = changed.iter().map(|(config, _, change)| async {
         let started = std::time::Instant::now();
-        timed(engine.replace_interface(config.clone(), folder).await, started)
+        timed(apply_one(config.clone(), folder, restarts(change)).await, started)
     });
     let results = futures_util::future::join_all(applying).await;
     if results.iter().any(|(r, _)| r.is_err()) {
@@ -786,14 +799,14 @@ pub async fn apply_in_place(
         // environment they ran with.
         put_back();
         let mut first = None;
-        for ((result, _), (_, before, _)) in results.into_iter().zip(&changed) {
+        for ((result, _), (_, before, change)) in results.into_iter().zip(&changed) {
             match result {
                 Err(e) => {
                     first.get_or_insert(e);
                 }
                 Ok(_) => {
                     let root = before.dir.parent().and_then(Path::parent).unwrap_or(folder);
-                    if let Err(e) = engine.replace_interface((**before).clone(), root).await {
+                    if let Err(e) = apply_one((**before).clone(), root, restarts(change)).await {
                         tracing::error!(interface = %before.name, error = %format!("{e:#}"), "couldn't put an interface back on what it ran after a deploy in place failed: it runs the new release's code");
                     }
                 }
@@ -818,12 +831,8 @@ pub async fn apply_in_place(
     for ((result, took), change) in done.chain(results.into_iter().zip(changed.iter().map(|(.., c)| *c))) {
         let a = result.expect("none failed");
         let version = a.version.as_ref().map_or("its version unknown".to_string(), |v| v.short());
-        steps.push(format!(
-            "{}: {} → {version}, applied in place ({} ms)",
-            a.interface,
-            change.what.join(", "),
-            took.as_millis()
-        ));
+        let how = if restarts(change) { "restarted alone" } else { "applied in place" };
+        steps.push(format!("{}: {} → {version}, {how} ({} ms)", a.interface, change.what.join(", "), took.as_millis()));
         applied.push(a);
     }
     let deployment = match crate::deployment::record_in_place(engine, who, &applied, Some(next.clone()), warnings).await

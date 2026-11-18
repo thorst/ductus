@@ -27,38 +27,46 @@ pub enum Accepted {
 }
 
 /// Stores incoming messages for one interface and wakes the worker that owns each one.
+///
+/// What it stores with (`Settings`: the interface's config, the keys compiled from it, its lanes,
+/// retention tier, destinations and their workers' wake-ups) is one snapshot, read once per store
+/// and swapped whole by a deploy in place (`retarget` for destinations, `reset` for a restart,
+/// 0.7.5.2.4), so its source (an MLLP listener, a file pickup, an HTTP route) and the interfaces
+/// routing to it keep the same intake through any change.
 pub struct Intake {
-    pub config: Arc<InterfaceConfig>,
+    /// The interface's name (never changes).
+    name: String,
     store: Store,
-    /// Its destinations and their workers' wake-ups: read once per store, swapped by a deploy in
-    /// place that adds or removes destinations (`retarget`).
-    targets: RwLock<Arc<Targets>>,
+    settings: RwLock<Arc<Settings>>,
     /// Closed while draining: nothing new is stored.
     pub gate: Arc<Gate>,
-    /// The retention tier new messages go to (changes when a retention change starts).
-    tier: Arc<AtomicI16>,
+    /// What it received (shared with the API and `/metrics`).
+    pub stats: Arc<InterfaceStats>,
+}
+
+/// What an intake stores with (`Intake`): held for the whole of a store, so a swap knows when
+/// nothing stores with the old one any more.
+pub(crate) struct Settings {
+    config: Arc<InterfaceConfig>,
     ordering: Option<KeyPath>,
     dedupe: Vec<KeyPath>,
     control_id: Option<KeyPath>,
-    /// What it received (shared with the API and `/metrics`).
-    pub stats: Arc<InterfaceStats>,
     /// Its lanes: messages go to the newest generation's (`crate::lanes`).
     lanes: Arc<Lanes>,
+    /// The retention tier new messages go to (changes when a retention change starts).
+    tier: Arc<AtomicI16>,
+    targets: Targets,
 }
 
-impl Intake {
-    /// `destinations`: the ids of the interface's destinations (`Store::destination_ids`);
-    /// `tier`: its retention tier (`Retention::tier`).
-    #[allow(clippy::too_many_arguments)]
+impl Settings {
+    /// `destinations`: the ids of the interface's destinations (`Store::destination_ids`), with
+    /// their workers' wake-ups; `tier`: its retention tier (`Retention::tier`). An error when a key
+    /// path doesn't fit its format.
     pub(crate) fn new(
         config: Arc<InterfaceConfig>,
-        store: Store,
-        wake: Arc<Wake>,
-        gate: Arc<Gate>,
-        destinations: Vec<DestinationId>,
-        tier: Arc<AtomicI16>,
-        stats: Arc<InterfaceStats>,
         lanes: Arc<Lanes>,
+        tier: Arc<AtomicI16>,
+        targets: Targets,
     ) -> Result<Self> {
         let compile = |path: &str| {
             keys::compile(&config.format, path).with_context(|| format!("interface `{}`: key `{path}`", config.name))
@@ -66,29 +74,19 @@ impl Intake {
         let ordering = config.ordering.key.as_deref().map(compile).transpose()?;
         let dedupe = config.dedupe.iter().flat_map(|d| d.keys.iter()).map(|k| compile(k)).collect::<Result<_>>()?;
         let control_id = (config.format == Format::Hl7).then(|| compile("MSH-10")).transpose()?;
-        let targets = RwLock::new(Arc::new(Targets { destinations, wake }));
-        Ok(Self { config, store, targets, gate, tier, ordering, dedupe, control_id, stats, lanes })
+        Ok(Self { config, ordering, dedupe, control_id, lanes, tier, targets })
     }
 
-    pub fn store(&self) -> &Store {
-        &self.store
-    }
-
-    /// Its destinations and wake-ups now. Held for the whole of a store, so `retarget` knows when
-    /// nothing stores with the old ones any more.
-    fn targets(&self) -> Arc<Targets> {
-        self.targets.read().unwrap_or_else(|p| p.into_inner()).clone()
-    }
-
-    /// Queue messages for `targets`' destinations and wake their workers from now on (a deploy in
-    /// place that adds or removes destinations). Returns once every store that began with the
-    /// old ones has finished (committed or failed), so matching what's stored to the new
-    /// destinations after this misses nothing (`Store::reconcile`).
-    pub(crate) async fn retarget(&self, targets: Targets) {
-        let old = std::mem::replace(&mut *self.targets.write().unwrap_or_else(|p| p.into_inner()), Arc::new(targets));
-        // A store holds its targets for a database round trip or two: milliseconds.
-        while Arc::strong_count(&old) > 1 {
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+    /// The same, queueing for `targets` instead.
+    fn retargeted(&self, targets: Targets) -> Self {
+        Self {
+            config: self.config.clone(),
+            ordering: self.ordering.clone(),
+            dedupe: self.dedupe.clone(),
+            control_id: self.control_id.clone(),
+            lanes: self.lanes.clone(),
+            tier: self.tier.clone(),
+            targets,
         }
     }
 
@@ -116,10 +114,64 @@ impl Intake {
         self.config.durability == Durability::Relaxed
     }
 
+    fn dedupe_window(&self) -> std::time::Duration {
+        self.config.dedupe.as_ref().map(|d| d.window).unwrap_or_default()
+    }
+}
+
+impl Intake {
+    pub(crate) fn new(store: Store, gate: Arc<Gate>, stats: Arc<InterfaceStats>, settings: Settings) -> Self {
+        let name = settings.config.name.clone();
+        Self { name, store, settings: RwLock::new(Arc::new(settings)), gate, stats }
+    }
+
+    pub fn store(&self) -> &Store {
+        &self.store
+    }
+
+    /// The interface's name.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// What it stores with now. Held for the whole of a store (see `swap`).
+    fn settings(&self) -> Arc<Settings> {
+        self.settings.read().unwrap_or_else(|p| p.into_inner()).clone()
+    }
+
+    /// Store with `settings` from now on. Returns once every store that began with the old ones
+    /// has finished (committed or failed), so what follows (matching what's stored to new
+    /// destinations, new workers reading their lanes) misses nothing. Answers the old ones.
+    async fn swap(&self, settings: Arc<Settings>) -> Arc<Settings> {
+        let old = std::mem::replace(&mut *self.settings.write().unwrap_or_else(|p| p.into_inner()), settings);
+        // A store holds its settings for a database round trip or two: milliseconds.
+        while Arc::strong_count(&old) > 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        old
+    }
+
+    /// Queue messages for `targets`' destinations and wake their workers from now on (a deploy in
+    /// place that adds or removes destinations). Returns once every store that began with the
+    /// old ones has finished, so matching what's stored to the new destinations after this misses
+    /// nothing (`Store::reconcile`).
+    pub(crate) async fn retarget(&self, targets: Targets) {
+        let next = self.settings().retargeted(targets);
+        self.swap(Arc::new(next)).await;
+    }
+
+    /// Store with `settings` from now on (a deploy in place restarted the interface on new
+    /// settings: format, keys, durability, lanes, retention, destinations), once every store with
+    /// the old ones has finished. Answers the old ones, which `reset` takes back if the restart
+    /// fails.
+    pub(crate) async fn reset(&self, settings: Arc<Settings>) -> Arc<Settings> {
+        self.swap(settings).await
+    }
+
     /// Wake only the lane's owners: one worker per destination. (Also after a resend, which puts
     /// a delivery back in the lane's queue.)
     pub(crate) fn wake(&self, partition: i32) {
-        self.targets().wake.lane(partition);
+        self.settings().targets.wake.lane(partition);
     }
 
     /// Queue an operator's corrected copy of message `original` for `destinations` (see
@@ -134,20 +186,21 @@ impl Intake {
         destinations: &[DestinationId],
         by: ductus_store::Actor<'_>,
     ) -> Result<ductus_store::Edited> {
-        let keys = self.keys(payload);
+        let settings = self.settings();
+        let keys = settings.keys(payload);
         let copy = ductus_store::Copy {
             original,
-            interface: &self.config.name,
+            interface: &self.name,
             partition_key: keys.partition,
             ordering_key: keys.ordering_key.as_deref(),
             control_id: keys.control_id.as_deref(),
             payload,
-            tier: self.tier(),
+            tier: settings.tier(),
             destinations,
         };
         let edited = self.store.copy_edited(copy, by).await?;
         if matches!(edited, ductus_store::Edited::Copied { .. }) {
-            self.wake(keys.partition);
+            settings.targets.wake.lane(keys.partition);
         }
         Ok(edited)
     }
@@ -179,23 +232,24 @@ impl Intake {
 
     async fn accept_one(&self, payload: &[u8]) -> Result<Accepted> {
         let _pass = self.gate.enter()?;
-        let keys = self.keys(payload);
-        let targets = self.targets();
+        let settings = self.settings();
+        let keys = settings.keys(payload);
+        let targets = &settings.targets;
         let new = NewMessage {
-            interface: &self.config.name,
+            interface: &self.name,
             partition_key: keys.partition,
             ordering_key: keys.ordering_key.as_deref(),
             control_id: keys.control_id.as_deref(),
             payload,
-            relaxed: self.relaxed(),
+            relaxed: settings.relaxed(),
             destinations: &targets.destinations,
-            tier: self.tier(),
+            tier: settings.tier(),
         };
-        let accepted = match (&self.config.dedupe, &keys.dedupe) {
+        let accepted = match (&settings.config.dedupe, &keys.dedupe) {
             (Some(d), Some(key)) => {
                 let stored = self.store.insert_deduped(new, DedupeKey { key, window: d.window }).await?;
                 if stored.duplicate {
-                    tracing::debug!(interface = %self.config.name, %key, "duplicate");
+                    tracing::debug!(interface = %self.name, %key, "duplicate");
                     Accepted::Duplicate
                 } else {
                     Accepted::Queued(stored.message)
@@ -219,10 +273,11 @@ impl Intake {
 
     async fn accept_many(&self, payloads: &[Vec<u8>], state: Option<(&str, &str)>) -> Result<usize> {
         let _pass = self.gate.enter()?;
-        let keys: Vec<Keys> = payloads.iter().map(|p| self.keys(p)).collect();
-        let targets = self.targets();
+        let settings = self.settings();
+        let keys: Vec<Keys> = payloads.iter().map(|p| settings.keys(p)).collect();
+        let targets = &settings.targets;
         let batch = Batch {
-            interface: &self.config.name,
+            interface: &self.name,
             messages: keys
                 .iter()
                 .zip(payloads)
@@ -235,11 +290,11 @@ impl Intake {
                     origin: None,
                 })
                 .collect(),
-            dedupe_window: self.config.dedupe.as_ref().map(|d| d.window).unwrap_or_default(),
-            relaxed: self.relaxed(),
+            dedupe_window: settings.dedupe_window(),
+            relaxed: settings.relaxed(),
             state,
             destinations: &targets.destinations,
-            tier: self.tier(),
+            tier: settings.tier(),
         };
         let duplicates = self.store.insert_batch(&batch).await?;
         let mut woken = vec![false; targets.wake.slots()];
@@ -264,10 +319,11 @@ impl Intake {
         if routed.is_empty() {
             return self.store.finish(destination, done).await;
         }
-        let keys: Vec<Keys> = routed.iter().map(|r| self.keys(&r.payload)).collect();
-        let targets = self.targets();
+        let settings = self.settings();
+        let keys: Vec<Keys> = routed.iter().map(|r| settings.keys(&r.payload)).collect();
+        let targets = &settings.targets;
         let batch = Batch {
-            interface: &self.config.name,
+            interface: &self.name,
             messages: keys
                 .iter()
                 .zip(routed)
@@ -280,11 +336,11 @@ impl Intake {
                     origin: Some(r.origin),
                 })
                 .collect(),
-            dedupe_window: self.config.dedupe.as_ref().map(|d| d.window).unwrap_or_default(),
+            dedupe_window: settings.dedupe_window(),
             relaxed: true, // see `Store::finish_routed`
             state: None,
             destinations: &targets.destinations,
-            tier: self.tier(),
+            tier: settings.tier(),
         };
         let queued = self.store.finish_routed(destination, done, &batch).await;
         // Not queued here: a duplicate, or already routed by an earlier try of this flush.
@@ -299,17 +355,18 @@ impl Intake {
     /// previous run is still pending; `skipped_state` is saved instead of `state` then.
     pub async fn accept_scheduled(&self, payload: &[u8], key: &str, state: &str, skipped_state: &str) -> Result<bool> {
         let _pass = self.gate.enter()?;
-        let lane = self.lanes.lane_of("");
-        let targets = self.targets();
+        let settings = self.settings();
+        let lane = settings.lanes.lane_of("");
+        let targets = &settings.targets;
         let new = NewMessage {
-            interface: &self.config.name,
+            interface: &self.name,
             partition_key: lane,
             ordering_key: None,
             control_id: None,
             payload,
-            relaxed: self.relaxed(),
+            relaxed: settings.relaxed(),
             destinations: &targets.destinations,
-            tier: self.tier(),
+            tier: settings.tier(),
         };
         let queued = self.store.insert_scheduled(new, key, state, skipped_state).await.map(|q| q.is_some());
         self.count(&queued, |&q| (u64::from(q), 0));
@@ -364,7 +421,7 @@ pub async fn spawn_mllp(
         }
     };
     // The first bind is part of startup: a port in use stops the engine.
-    let mut listener = Some(bind().await.with_context(|| format!("interface `{}`", intake.config.name))?);
+    let mut listener = Some(bind().await.with_context(|| format!("interface `{}`", intake.name()))?);
 
     let handler = {
         let intake = intake.clone();
@@ -379,7 +436,7 @@ pub async fn spawn_mllp(
     };
     // Until `stop`: after the engine's stop its gate stays closed, and this would wait forever.
     Ok(tokio::spawn(async move {
-        let name = &intake.config.name;
+        let name = intake.name();
         loop {
             tokio::select! {
                 _ = intake.gate.opened() => {}
@@ -435,7 +492,7 @@ async fn receive_hl7(intake: &Intake, frame: &[u8]) -> Option<String> {
     let message = match Message::parse(&raw) {
         Ok(m) => m,
         Err(e) => {
-            tracing::warn!(interface = %intake.config.name, error = %e, "rejected unparseable message");
+            tracing::warn!(interface = %intake.name(), error = %e, "rejected unparseable message");
             return Some(ductus_hl7::reject_unparseable(&e.to_string(), &hl7_now()));
         }
     };
@@ -445,7 +502,7 @@ async fn receive_hl7(intake: &Intake, frame: &[u8]) -> Option<String> {
         Err(e) if e.is::<Closed>() => return None,
         Err(e) => {
             // AE tells the sender to retry: nothing was stored, so nothing is lost.
-            tracing::error!(interface = %intake.config.name, error = %e, "failed to store message");
+            tracing::error!(interface = %intake.name(), error = %e, "failed to store message");
             message.ack(AckCode::Error, "temporarily unable to store message", &hl7_now())
         }
     })

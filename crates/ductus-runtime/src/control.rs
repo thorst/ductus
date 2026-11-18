@@ -50,6 +50,21 @@ pub struct Running {
     pub lanes: Arc<crate::lanes::Lanes>,
 }
 
+/// What a restart in place changed before it failed (`Engine::put_back_restart`).
+#[derive(Default)]
+struct Undo {
+    /// Its lanes decided again (maybe a generation written).
+    lanes: bool,
+    /// Its destinations watched as the new config has them.
+    watched: bool,
+    /// Its retention applied from the new config.
+    retention: bool,
+    /// Its intake's settings before the restart reset them.
+    intake: Option<Arc<crate::ingest::Settings>>,
+    /// Its new workers started.
+    added: bool,
+}
+
 /// One of a running interface's destinations: its name, its id in the store and its counts. A
 /// destination added by a deploy in place starts at zero; one that stays keeps its counts.
 #[derive(Clone)]
@@ -338,6 +353,13 @@ impl Engine {
     ) -> Result<crate::deployment::Applied> {
         let name = config.name.clone();
         let running = self.interface(&name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
+        // Destinations added or removed while its lanes change (an `ordering` change not settled
+        // yet): each old lane's drain is followed per destination, so it restarts alone (its lanes
+        // built again for the new destinations).
+        let retargets = running.config.destinations().map(|(n, _)| n).ne(config.destinations().map(|(n, _)| n));
+        if retargets && running.lanes.is_changing() {
+            return self.restart_interface(config, root).await;
+        }
         let (saving, decided) = crate::deployment::Decided::channel();
         // Its source first (`sources::Sources::change`: nothing to do when it's the same), so a
         // failure (its new port in use) leaves everything as it was; what it receives meanwhile
@@ -460,7 +482,8 @@ impl Engine {
             })
             .collect();
         let lanes = Arc::new(crate::lanes::Lanes::new(layout, config.slots(), ids.len()));
-        crate::lanes::retire_when_settled(store.clone(), name.clone(), lanes.clone(), self.ended.clone());
+        let retiring = self.ended.child_token();
+        crate::lanes::retire_when_settled(store.clone(), name.clone(), lanes.clone(), retiring.clone());
         // Respond mode: no queue, so no intake, retention or stored activity (as at a start); its
         // requests come over a channel to its first worker.
         let queued = !config.responds();
@@ -472,16 +495,12 @@ impl Engine {
             }
         };
         let intake = match queued {
-            true => Some(Arc::new(crate::ingest::Intake::new(
-                config.clone(),
-                store.clone(),
-                wake.clone(),
-                gate.clone(),
-                ids.clone(),
-                self.retention.add(self.retention.configured(&config)).await?,
-                stats.clone(),
-                lanes.clone(),
-            )?)),
+            true => {
+                let tier = self.retention.add(self.retention.configured(&config)).await?;
+                let targets = crate::ingest::Targets { destinations: ids.clone(), wake: wake.clone() };
+                let settings = crate::ingest::Settings::new(config.clone(), lanes.clone(), tier, targets)?;
+                Some(Arc::new(crate::ingest::Intake::new(store.clone(), gate.clone(), stats.clone(), settings)))
+            }
             false => None,
         };
         if queued && !names.is_empty() {
@@ -528,6 +547,7 @@ impl Engine {
             decided: decided.clone(),
             threads: Vec::new(),
             removed: false,
+            retiring,
         };
         let files = self.kept.add(interface, requests).await?;
         // Closed before it receives anything while the engine drains (an MLLP listener then
@@ -567,6 +587,264 @@ impl Engine {
         self.remove_running(name);
         self.let_go(name).await;
         Ok(())
+    }
+
+    /// Run `config`'s interface on new settings that only a start sets up (0.7.5.2.4: `format`,
+    /// `ordering`, `isolation`, `workers`, `dedicated_pools`, `durability`, `dedupe`, `retention`,
+    /// `quarantined`, queue ↔ respond mode) by restarting it alone, as a start would start it, with
+    /// its claim, gate, counts and source kept: senders never notice (its intake goes on storing and
+    /// acknowledging; what arrives meanwhile waits for its new workers, a respond-mode request too).
+    ///
+    /// In order: claimed if it becomes queued (refused, nothing done, when another engine runs it);
+    /// its source changed as `replace_interface` changes it; every worker of it stopped between
+    /// messages (`Kept::stop`: no lane ever has two owners, whatever its new slot count); its lanes
+    /// decided as at a start (`lanes::start`: a changed `ordering` adds a generation, old lanes
+    /// read first); its destinations kept, added or removed (`outlets_for`); its retention applied
+    /// as at a start; its intake storing with the new settings (`Intake::reset`, once every store
+    /// with the old ones finished) and what waits matched to its destinations; its new workers
+    /// started where a start would place them (`Kept::add`: pool or dedicated threads, its own
+    /// pools); an HTTP route changing mode answered the new way; shown and its version saved.
+    /// Becoming respond mode, its claim is given back and what its queue holds stays stored (as at
+    /// a remove).
+    ///
+    /// All or nothing: a failure puts everything back as it was (its lanes taken back where
+    /// nothing was stored in them, its intake's old settings, its old workers on the code they
+    /// ran) and errors.
+    pub(crate) async fn restart_interface(
+        self: &Arc<Self>,
+        config: InterfaceConfig,
+        root: &std::path::Path,
+    ) -> Result<crate::deployment::Applied> {
+        let name = config.name.clone();
+        let running = self.interface(&name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
+        let config = Arc::new(config);
+        let (was_queued, queued) = (!running.config.responds(), !config.responds());
+        let claims = queued && !was_queued;
+        if claims {
+            self.owner.add(&self.store, std::slice::from_ref(&name)).await?;
+        }
+        let unclaim = || async {
+            if claims && let Err(e) = self.owner.remove(&self.store, std::slice::from_ref(&name)).await {
+                tracing::warn!(interface = %name, error = %format!("{e:#}"), "couldn't give back the claim a failed restart made");
+            }
+        };
+        // Its source first, as for a replace (an HTTP route changing mode: once its workers run).
+        let mode_changes = was_queued != queued;
+        if !mode_changes && let Err(e) = self.sources.change(&running.config, &config, running.intake.clone()).await {
+            return Err(e.context(format!("`{name}`: changing its source")));
+        }
+        let source_back = || async {
+            if !mode_changes && let Err(e) = self.sources.change(&config, &running.config, running.intake.clone()).await {
+                tracing::error!(interface = %name, error = %format!("{e:#}"), "couldn't put its source back after a failed restart");
+            }
+        };
+        let (old, requests) = match self.kept.stop(&name).await {
+            Ok(stopped) => stopped,
+            Err(e) => {
+                source_back().await;
+                unclaim().await;
+                return Err(e);
+            }
+        };
+        let mut undo = Undo::default();
+        let stopped = std::time::Instant::now();
+        match self.restarted(&running, &old, config.clone(), root, &mut undo).await {
+            Ok((applied, calls)) => {
+                tracing::info!(
+                    interface = %name,
+                    workers = config.slots(),
+                    isolation = ?config.isolation,
+                    lanes = self.interface(&name).map_or(0, |r| r.lanes.layout.newest().lanes),
+                    sending_paused = ?stopped.elapsed(),
+                    "restarted alone on its new settings: its senders never noticed"
+                );
+                old.retiring.cancel(); // its old lanes' watch: the new lanes have their own
+                match (requests, calls) {
+                    // Respond mode still: what waited for the old responder goes to the new one.
+                    (Some(mut waiting), Some(calls)) => {
+                        tokio::spawn(async move {
+                            while let Some(call) = waiting.recv().await {
+                                if calls.send(call).await.is_err() {
+                                    break;
+                                }
+                            }
+                        });
+                    }
+                    (Some(waiting), None) if !waiting.is_empty() => tracing::warn!(interface = %name, count = waiting.len(), "requests waiting when it changed to queue mode weren't answered: their callers get an error and may send again"),
+                    _ => {}
+                }
+                if was_queued && !queued {
+                    self.let_go(&name).await; // what its queue holds stays stored, unclaimed
+                }
+                Ok(applied)
+            }
+            Err(e) => {
+                self.put_back_restart(&running, old, requests, undo).await;
+                source_back().await;
+                unclaim().await;
+                Err(e)
+            }
+        }
+    }
+
+    /// `restart_interface` once its old workers stopped (`old`: its parts as they ran), noting in
+    /// `undo` what to put back. Answers its version and, in respond mode, where its new workers
+    /// take requests.
+    async fn restarted(
+        self: &Arc<Self>,
+        running: &Running,
+        old: &crate::in_place::Interface,
+        config: Arc<InterfaceConfig>,
+        root: &std::path::Path,
+        undo: &mut Undo,
+    ) -> Result<(crate::deployment::Applied, Option<tokio::sync::mpsc::Sender<crate::http::HttpCall>>)> {
+        use anyhow::Context;
+        let (name, store, shared) = (config.name.clone(), &self.store, self.kept.shared());
+        let queued = !config.responds();
+        // Its lanes, as a start decides them (nothing written when `ordering` is the same).
+        let layout = match crate::lanes::Wanted::of(&config).filter(|_| queued) {
+            Some(wanted) => {
+                undo.lanes = true;
+                crate::lanes::start(store, &[wanted]).await?.remove(&name)
+            }
+            None => None,
+        };
+        let layout = layout.unwrap_or_else(|| crate::lanes::Layout::single(1, ""));
+        // Its destinations: those it keeps keep their ids, counts and pauses; watched as they
+        // change (becoming queued: all new, so watched from now on).
+        let outlets = old.outlets_for(shared, &config, &self.activity).await?;
+        undo.watched = true;
+        let destinations: Vec<RunningDestination> = config
+            .destinations()
+            .zip(&outlets)
+            .map(|((d, _), o)| RunningDestination { name: d.to_string(), id: o.id, stats: o.stats.clone() })
+            .collect();
+        let ids: Vec<DestinationId> = outlets.iter().map(|o| o.id).collect();
+        let wake = Arc::new(crate::Wake::new(config.slots(), ids.len()));
+        let lanes = Arc::new(crate::lanes::Lanes::new(layout, config.slots(), ids.len()));
+        // Its intake stores with the new settings; one made when it becomes queued.
+        let intake = match queued {
+            false => None,
+            true => {
+                undo.retention = true;
+                let tier = self.retention.add(self.retention.configured(&config)).await?;
+                let targets = crate::ingest::Targets { destinations: ids.clone(), wake: wake.clone() };
+                let settings = Arc::new(crate::ingest::Settings::new(config.clone(), lanes.clone(), tier, targets)?);
+                match &running.intake {
+                    Some(intake) => {
+                        undo.intake = Some(intake.reset(settings).await);
+                        Some(intake.clone())
+                    }
+                    None => {
+                        let settings = Arc::into_inner(settings).expect("not shared yet");
+                        let made = crate::ingest::Intake::new(
+                            store.clone(),
+                            running.gate.clone(),
+                            running.stats.clone(),
+                            settings,
+                        );
+                        Some(Arc::new(made))
+                    }
+                }
+            }
+        };
+        let names: Vec<(String, String)> = config.destinations().map(|(d, _)| (name.clone(), d.to_string())).collect();
+        if queued && !names.is_empty() {
+            let reconciled =
+                store.reconcile(&names, &ids).await.context("matching what waits for it to its destinations")?;
+            for (_, destination, count) in &reconciled.removed {
+                tracing::warn!(interface = %name, %destination, count, "destination is no longer in interface.yaml: its pending deliveries were marked filtered");
+            }
+        }
+        let (calls, requests) = match queued {
+            true => (None, None),
+            false => {
+                let (calls, requests) = tokio::sync::mpsc::channel(1024);
+                (Some(calls), Some(requests))
+            }
+        };
+        let (saving, decided) = crate::deployment::Decided::channel();
+        let retiring = self.ended.child_token();
+        let interface = crate::in_place::Interface {
+            config: config.clone(),
+            wake,
+            health: old.health.clone(),
+            stats: old.stats.clone(),
+            lanes: lanes.clone(),
+            outlets,
+            intake: intake.clone(),
+            decided: decided.clone(),
+            threads: Vec::new(),
+            removed: false,
+            retiring: retiring.clone(),
+        };
+        let files = self.kept.add(interface, requests).await?;
+        undo.added = true;
+        // An HTTP route answered the new way once its workers run (respond mode: by them, from
+        // now on; the old responder's waiting requests follow, `restart_interface`).
+        let http = matches!(config.source, ductus_core::config::Source::Http { .. });
+        let route = match (&calls, &intake) {
+            (Some(calls), _) => Some(crate::http::Route::Respond { interface: name.clone(), calls: calls.clone() }),
+            (None, Some(intake)) if old.config.responds() => Some(crate::http::Route::Queue(intake.clone())),
+            _ => None,
+        };
+        if let Some(route) = route.filter(|_| http) {
+            self.sources.reroute(&config, route).await.with_context(|| format!("`{name}`: rerouting its HTTP source"))?;
+        }
+        crate::lanes::retire_when_settled(store.clone(), name.clone(), lanes.clone(), retiring);
+        let (version, id) = self.saved_version(&config, files, root, saving, &decided).await;
+        self.swap_interface(Running { config, destinations, intake, lanes, ..running.clone() });
+        Ok((crate::deployment::Applied { interface: name, version, id }, calls))
+    }
+
+    /// Put an interface a restart failed for back as it ran (`undo` says what changed): its
+    /// lanes taken back where nothing was stored in them, its retention and intake settings as
+    /// before, its old destinations watched, its new workers stopped and its old ones started
+    /// again on the code they ran (the same files: nothing loads twice on a thread that had them).
+    async fn put_back_restart(
+        self: &Arc<Self>,
+        running: &Running,
+        old: crate::in_place::Interface,
+        requests: Option<crate::worker::Requests>,
+        undo: Undo,
+    ) {
+        let name = old.config.name.clone();
+        let warn = |what: &str, e: anyhow::Error| {
+            tracing::error!(interface = %name, error = %format!("{e:#}"), "after a failed restart, couldn't {what}");
+        };
+        if undo.added && let Err(e) = self.kept.remove(&name).await {
+            warn("stop its new workers", e);
+        }
+        if let (Some(intake), Some(settings)) = (&running.intake, undo.intake) {
+            intake.reset(settings).await;
+        }
+        if undo.retention {
+            match old.config.responds() {
+                true => self.retention.remove(&name),
+                false => {
+                    if let Err(e) = self.retention.add(self.retention.configured(&old.config)).await {
+                        warn("apply its retention as before", e);
+                    }
+                }
+            }
+        }
+        if undo.lanes
+            && let Some(told) = crate::lanes::take_back(&self.store, &[(name.clone(), &*old.lanes)]).await
+        {
+            tracing::warn!(interface = %name, "{told}");
+        }
+        if undo.watched {
+            let result = match old.config.responds() {
+                true => self.activity.unwatch(&name).await,
+                false => self.activity.watch(old.watched()).await,
+            };
+            if let Err(e) = result {
+                warn("watch its destinations as before", e);
+            }
+        }
+        if let Err(e) = self.kept.add(old, requests).await {
+            warn("start it again as it ran: it runs nothing until the next start", e);
+        }
     }
 
     /// Interface `name` is no longer this engine's: not watched, not managed, its claim given

@@ -668,12 +668,15 @@ recorded in .ductus/releases/integrations-7fc9677466dd.tar.gz: deployed to dev
 
 Before the gate runs, the engine works out what the release changes here, per interface, from the
 two releases' code versions and interface.yaml files, and the answer lists it (a `·` line per
-interface). When every change is to interfaces' code, `script`, `destinations` (added, removed or
-changed), `output`, `retry`, `rate_limit`, `timeout`, `about`, `custom`, `monitor`, `alert` or
-`source`, the release is **applied in place**: each changed interface's workers finish the message
-in hand on the old code and take the next on the new one; a destination added gets a delivery for
-every message waiting, a removed one's waiting deliveries are filtered; the other interfaces never
-pause, and no new engine starts. The deployment is recorded as `how` = `deploy`.
+interface). Every change to an interface is **applied in place**, in the running engine: the
+other interfaces never pause, and no new engine starts. A change to its code, `script`,
+`destinations` (added, removed or changed), `output`, `retry`, `rate_limit`, `timeout`, `about`,
+`custom`, `monitor`, `alert` or `source` goes between two messages: each changed interface's
+workers finish the message in hand on the old code and take the next on the new one; a destination
+added gets a delivery for every message waiting, a removed one's waiting deliveries are filtered. A
+change to what a start sets up for it (`format`, `ordering`, `workers`, `isolation`,
+`dedicated_pools`, `durability`, `dedupe`, `retention`, `quarantined`, or queue ↔ respond mode)
+**restarts that interface alone** (below). The deployment is recorded as `how` = `deploy`.
 
 A changed **source** is applied alone, by kind: a moved MLLP port listens before the old one
 closes (each connection there finishes the message in hand, so its sender loses nothing and
@@ -681,8 +684,9 @@ reconnects where it's pointed); new TLS or `allow:` on the same port is swapped 
 listener (open connections keep their TLS session; those the new `allow:` refuses are closed after
 the message in hand); an HTTP route moves on its port's server beside the others, or to a new one;
 a file or SFTP pickup or a schedule stops between messages and starts again with its new settings.
-A port or HTTP route moving from one interface to another, a listener changing kind or host on its
-own port, and a change between queue and respond mode still take the handover
+A route changing between queue and respond mode restarts its interface alone (below). A port or
+HTTP route moving from one interface to another, and a listener changing kind or host on its own
+port, still take the handover
 ([nuance](../nuances/releases.md#a-source-changed-in-place-moves-swaps-or-restarts-alone-level-2)).
 Here a release moves the lab feed's MLLP port by its variable (`scripts/demo-promote.sh`, step
 14: `port: ${MLLP_PORT}`, the value changed in each environment file); the sender, pointed at the
@@ -749,30 +753,23 @@ changed 2 interfaces:
 Removing it again, in the next release, took 22 ms (`· promote-demo-archive: removed (in
 place)`, then `changed 1 interface: promote-demo-archive removed`).
 
-Anything else needs the **handover**, and the answer says which change did (`needs the handover:
-…`): `format`, `ordering`, `workers`, `isolation`, `dedupe`, `retention` and the other
-settings of how messages are stored or laid out in lanes; the project's own files read at a start
-(`ductus.yaml`, `resources.yaml`, `docs-schema.yaml`, this environment's `secrets/` file, or a
-variable whose new value changes what `resources.yaml` or `alerts:` fill in); the first release on an engine
-([nuance](../nuances/releases.md#a-deploy-goes-in-place-unless-it-changes-how-messages-are-stored-lanes-or-the-projects-files-level-1)).
-Here a release raises an interface's lanes (`scripts/demo-promote.sh`, step 11):
+An interface whose **start-time settings** change (`format`, `ordering`, `workers`, `isolation`,
+`dedicated_pools`, `durability`, `dedupe`, `retention`, `quarantined`, queue ↔ respond mode)
+restarts alone: its claim, listener and counts stay, so its senders never notice (what it receives
+meanwhile is stored and ACKed as always); every worker of it stops between messages, its lanes and
+retention are set up as a start sets them, and its new workers start where a start would place
+them. Its own sending pauses while its code loads; the others never pause
+([nuance](../nuances/releases.md#an-interface-whose-start-time-settings-change-restarts-alone-level-2)).
+Here a release raises an interface's lanes (`scripts/demo-promote.sh`, step 11), a sender sending
+throughout:
 
-```text
-$ DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy 2f235eaa1d28 --from $TEST --to $PROD -m "8 lanes, tested"
-fetched release 2f235eaa1d28 from http://127.0.0.1:17793 (1.4 KB, deployed to: test)
-stored release 2f235eaa1d28 on the engine (1 record of where it went added)
-deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
-release 2f235eaa1d28 (project integrations, branch main) to environment `prod`
-gate: passed in 0.93 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
-· promote-demo: ordering (needs the handover: `ordering` changed (how messages are received, stored or laid out in lanes is set at a start))
-  needs the handover: promote-demo: `ordering` changed (how messages are received, stored or laid out in lanes is set at a start)
-  started a new engine in this process: it reads the project, migrates the database and loads every interface's code while this one runs
-  the new engine (ductus 0.7.0-dev, in this process) is ready after 427 ms and receives beside this one: stopping this one
-  this engine stopped in 1 ms and let go of its interfaces: the new one takes them
-✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 18 ms
-changed 1 interface:
-  promote-demo 0db7a1e1454e → b2d89c0907a5
-```
+<!-- TRANSCRIPT 0.7.5.2.4: demo-promote.sh step 11, promote4, pasted at the step's close -->
+
+Only the project's own files read at a start need the **handover**, and the answer says which
+(`needs the handover: …`): `ductus.yaml`, `resources.yaml`, `docs-schema.yaml`, this
+environment's `secrets/` file, or a variable whose new value changes what `resources.yaml` or
+`alerts:` fill in; and the first release on an engine
+([nuance](../nuances/releases.md#a-deploy-goes-in-place-unless-it-changes-the-projects-own-files-level-1)).
 
 **When to use `--in-place-only`:** where a handover's short pause of every interface's sending
 should happen in a change window. Such a release is refused before the gate runs, with the reason;
@@ -1051,30 +1048,15 @@ for a destination it removed)
 
 A release that changes an interface's lanes (`ordering.partitions` up or down, or `ordering.key`),
 a rollback past one that changed them included, deploys like any other, with messages waiting or
-not: the new engine stores new messages in new lanes at once, the messages waiting in the old
-lanes are sent first, and a patient's new messages wait behind their older ones
+not, in place (the interface restarts alone): from then on new messages go to new lanes, the
+messages waiting in the old lanes are sent first, and a patient's new messages wait behind their
+older ones
 ([nuance](../nuances/ordering.md#after-a-change-of-ordering-new-messages-of-a-key-wait-for-its-older-ones-level-4)).
 Here prod is rolled back from 8 lanes to 2 while a sender sends and the receiver is down
 (`scripts/demo-promote.sh`, step 11):
 
-```text
-waiting on prod: 62; lanes (first+count): 2+8
-$ DUCTUS_API_TOKEN=$OPS_PROD ductus deploy --rollback --to $PROD -m "8 lanes broke the lab feed"
-rolling back: the gate runs, then it's applied (in place when it can be, else by the handover)…
-rollback to release 7fc9677466dd (project integrations, branch main) to environment `prod`
-…
-gate: passed in 1.01 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `prod` since)
-· promote-demo: ordering (needs the handover: `ordering` changed (how messages are received, stored or laid out in lanes is set at a start))
-  needs the handover: promote-demo: `ordering` changed (how messages are received, stored or laid out in lanes is set at a start)
-  …
-  the new engine (ductus 0.7.0-dev, in this process) is ready after 362 ms and receives beside this one: stopping this one
-  this engine stopped in 11 ms and let go of its interfaces: the new one takes them
-✓ handed over to a new engine in this process (ductus 0.7.0-dev): receiving never stopped, sending paused 66 ms
-changed 1 interface:
-  promote-demo b2d89c0907a5 → 0db7a1e1454e
+<!-- TRANSCRIPT 0.7.5.2.4: demo-promote.sh step 11, rollback-lanes with its waiting lines, pasted at the step's close -->
 
-waiting on prod: 200; lanes (first+count): 2+8 10+2
-```
 
 The 8 lanes are numbered 2–9 (the first release's 2 lanes settled when release 4 started with
 nothing waiting), the 2 new ones 10–11. Once the receiver is back:
@@ -1086,8 +1068,10 @@ final: received 200 | unique 200 | duplicates 0 | out of order 0 | patients 10
 
 The gate's `validate` notes the change (`DUC311`), never refuses it. Once the receiver is back,
 every message arrives once and each patient's in order, and the old lanes settle
-(`interface.lanes_settled` in the audit log). Should the handover fail after the new engine
-stored messages in its new lanes, they wait for the next start or handover
+(`interface.lanes_settled` in the audit log). Should the restart fail after its new lanes were
+written (or a handover, when a project file changed in the same release), the new lanes it stored
+nothing in are taken back and it runs as before; messages it did store in them wait for the next
+start, restart or handover
 ([nuance](../nuances/ordering.md#a-handover-that-fails-after-storing-messages-in-new-lanes-leaves-them-for-the-next-start-level-5)).
 
 ## From the web UI: the Releases page

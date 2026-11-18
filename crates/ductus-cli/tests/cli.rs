@@ -5885,6 +5885,230 @@ async fn sources_change_in_place_while_their_senders_send() {
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
+/// What a start sets up for an interface, changed in place by restarting it alone (0.7.5.2.4),
+/// one engine throughout. R and K listen on MLLP, a sender each sending one message at a time
+/// throughout (never refused: every message ACKed AA, each delivered once). Deploy 2 gives R an
+/// ordering key, 4 dedicated workers and dedupe, and turns A (HTTP, queue mode) into respond mode:
+/// both restarted alone (said so), R's sender never noticing, A answering from its code at once
+/// and no longer claimed. Deploy 3 adds a destination to R while its lanes still change (once
+/// only the handover could): in place. Deploy 4 turns A back to queue mode: claimed, 202.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn what_a_start_sets_up_restarts_one_interface_alone_while_its_sender_sends() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (pr, pk, ph, api) = (free_port(), free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let [r, k, a] = ["r", "k", "a"].map(|n| format!("rs{n}-{nanos}"));
+    let work = tempfile::tempdir().unwrap();
+    let out_dir = |name: &str| work.path().join(format!("out-{name}"));
+    let to_file = |name: &str| format!("  {name}: {{ file: {{ dir: '{}' }} }}\n", out_dir(name).display());
+    let mllp = |name: &str, port: u16, more: &str| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\n{more}destinations:\n{}",
+            to_file(name)
+        )
+    };
+    let restarted_r = "ordering: { key: PID-3.1 }\nisolation: dedicated\nworkers: 4\ndedupe: { keys: [MSH-10], window: 1h }\n";
+    let queue = || {
+        format!(
+            "name: {a}\nsource: {{ http: {{ host: 127.0.0.1, port: {ph}, path: /a }} }}\nformat: text\ndestinations:\n{}",
+            to_file(&a)
+        )
+    };
+    let respond = format!(
+        "name: {a}\nsource: {{ http: {{ host: 127.0.0.1, port: {ph}, path: /a, method: GET, mode: respond }} }}\nformat: text\nscript: hello.ts\n"
+    );
+    let hello = "import type { HttpRequest } from \"@ductus/sdk\";\n\nexport function transform(req: HttpRequest) {\n  return `hello ${req.query.name ?? \"world\"}`;\n}\n";
+    let yaml = |name: &str| format!("interfaces/{name}/interface.yaml");
+    let dir = project(&[
+        (".gitignore", "out/\n*.log\n"),
+        ("ductus.yaml", "{}\n"),
+        ("environments/dev.yaml", "variables: {}\n"),
+        ("environments/prod.yaml", "variables: {}\n"),
+        (yaml(&r).as_str(), mllp(&r, pr, "").as_str()),
+        (yaml(&k).as_str(), mllp(&k, pk, "").as_str()),
+        (yaml(&a).as_str(), queue().as_str()),
+    ]);
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let token_name = format!("{r}-deployer");
+    let _tokens = Tokens::new([token_name.clone()]);
+    let args = ["token", "create", &token_name, "--role", "operator", "--permission", "deploy"];
+    let out = Command::new(bin).args(args).current_dir(dir.path()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let to = format!("http://127.0.0.1:{api}");
+    let deploy = |file: &serde_json::Value, why: &str| -> (bool, String) {
+        let out = Command::new(bin)
+            .args(["deploy", file["file"].as_str().unwrap(), "-m", why, "--in-place-only", "--to", &to])
+            .env("DUCTUS_API_TOKEN", &token)
+            .current_dir(dir.path())
+            .output()
+            .unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let release = |why: &str| {
+        git(dir.path(), &["add", "-A"]);
+        git(dir.path(), &["commit", "-qm", why]);
+        release_json(dir.path(), &["-m", why])
+    };
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    // The engine running R, and whether it claims A.
+    let running = async || -> (u32, bool) {
+        for _ in 0..600 {
+            let engines = store.live_engines().await.unwrap();
+            if let Some(e) = engines.iter().find(|e| e.interfaces.contains(&r)) {
+                return (e.pid as u32, e.interfaces.contains(&a));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("no engine runs {r}");
+    };
+    let log = work.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let releases = work.path().join("releases");
+    let mut first = Child(
+        Command::new(bin)
+            .args(["run", "--releases", &releases.to_string_lossy(), "--release-project", &project_name])
+            .args(["--env", "prod", "--threads", "2", "--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", work.path().join("control"))
+            .env_remove("DUCTUS_PROJECT")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "started interfaces=0", 60), "{}", read(&log));
+    let one = release_json(dir.path(), &["-m", "first"]);
+    let out = Command::new(bin)
+        .args(["deploy", one["file"].as_str().unwrap(), "-m", "first", "--to", &to])
+        .env("DUCTUS_API_TOKEN", &token)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}{}", String::from_utf8_lossy(&out.stdout), read(&log));
+    let exited = tokio::task::spawn_blocking(move || first.0.wait()).await.unwrap().unwrap();
+    assert!(exited.success(), "the engine before stops cleanly: {exited}");
+    let (pid, claims_a) = running().await;
+    assert!(claims_a, "A in queue mode is claimed");
+    let engine = Terminate(pid);
+    let delivered = |name: &str| std::fs::read_dir(out_dir(name)).map_or(0, |d| d.count());
+
+    // A sender per MLLP interface: one message at a time (5 patients) until told to stop; any
+    // error or answer but AA fails the test. Answers how many were ACKed.
+    let sending = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let sender = |port: u16, prefix: &'static str| {
+        let sending = sending.clone();
+        tokio::spawn(async move {
+            let mut client = ductus_mllp::Client::new(format!("127.0.0.1:{port}"), std::time::Duration::from_secs(5));
+            let mut acked = 0u64;
+            while sending.load(std::sync::atomic::Ordering::Relaxed) {
+                let seq = acked + 1;
+                let message =
+                    format!("MSH|^~\\&|T|T|R|R|20260101||ADT^A01|{prefix}{seq}|P|2.5\rPID|1||P{}\r", seq % 5);
+                let ack = client.send(message.as_bytes()).await.unwrap_or_else(|e| panic!("{prefix}{seq}: {e}"));
+                assert!(String::from_utf8_lossy(&ack).contains("MSA|AA"), "{prefix}{seq}");
+                acked += 1;
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+            acked
+        })
+    };
+    let (send_r, send_k) = (sender(pr, "RS"), sender(pk, "KS"));
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    let get = async |name: &str| -> (u16, String) {
+        let answer = reqwest::get(format!("http://127.0.0.1:{ph}/a?name={name}")).await.unwrap();
+        (answer.status().as_u16(), answer.text().await.unwrap())
+    };
+    let post = async || -> u16 {
+        let answer = reqwest::Client::new().post(format!("http://127.0.0.1:{ph}/a")).body("x").send();
+        answer.await.unwrap().status().as_u16()
+    };
+    assert_eq!(post().await, 202);
+
+    // Deploy 2: R's lanes, workers and dedupe; A to respond mode.
+    std::fs::write(dir.path().join(yaml(&r)), mllp(&r, pr, restarted_r)).unwrap();
+    std::fs::write(dir.path().join(yaml(&a)), &respond).unwrap();
+    std::fs::write(dir.path().join(format!("interfaces/{a}/hello.ts")), hello).unwrap();
+    let two = release("R and A restarted");
+    let (ok, out) = deploy(&two, "R and A restarted");
+    assert!(ok && out.contains("✓ applied in place"), "{out}\n{}", read(&log));
+    assert!(
+        out.contains(&format!("· {r}: dedupe, isolation, ordering, workers (in place, restarting alone: ")),
+        "{out}"
+    );
+    assert!(out.contains(&format!("· {a}: ")) && out.contains("its mode (queue ↔ respond) changed"), "{out}");
+    assert!(out.contains("2 interfaces were restarted alone on new settings"), "{out}");
+    let (now, claims_a) = running().await;
+    assert_eq!(now, engine.0, "the same engine");
+    assert!(!claims_a, "A in respond mode isn't claimed");
+    assert_eq!(get("ductus").await, (200, "hello ductus".to_string()), "A answers from its code");
+    // Dedupe from now on: a message sent twice is delivered once.
+    let mut again = ductus_mllp::Client::new(format!("127.0.0.1:{pr}"), std::time::Duration::from_secs(5));
+    for _ in 0..2 {
+        let ack = again.send(b"MSH|^~\\&|T|T|R|R|20260101||ADT^A01|RSDUP|P|2.5\rPID|1||P9\r").await.unwrap();
+        assert!(String::from_utf8_lossy(&ack).contains("MSA|AA"), "a duplicate is ACKed too");
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Deploy 3: a destination added to R while its lanes change.
+    let copy = format!("{}{}", mllp(&r, pr, restarted_r), to_file("copy"));
+    std::fs::write(dir.path().join(yaml(&r)), copy).unwrap();
+    let three = release("R copies");
+    let (ok, out) = deploy(&three, "R copies");
+    assert!(ok && out.contains("✓ applied in place"), "{out}\n{}", read(&log));
+    assert!(out.contains(&format!("· {r}: destination copy added (in place)")), "{out}");
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+
+    // Deploy 4: A back to queue mode.
+    std::fs::write(dir.path().join(yaml(&a)), queue()).unwrap();
+    std::fs::remove_file(dir.path().join(format!("interfaces/{a}/hello.ts"))).unwrap();
+    let four = release("A queues again");
+    let (ok, out) = deploy(&four, "A queues again");
+    assert!(ok && out.contains("✓ applied in place"), "{out}\n{}", read(&log));
+    let (now, claims_a) = running().await;
+    assert_eq!(now, engine.0, "the same engine still");
+    assert!(claims_a, "A claimed again");
+    assert_eq!(post().await, 202, "A stores again");
+
+    sending.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (acked_r, acked_k) = (send_r.await.unwrap(), send_k.await.unwrap());
+    assert!(acked_r > 50 && acked_k > 50, "R {acked_r}, K {acked_k}");
+    // Every ACKed message delivered once (R: and the duplicate once); R's copy got some.
+    let want = async |name: &str, n: u64| -> u64 {
+        for _ in 0..300 {
+            if delivered(name) as u64 >= n {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+        delivered(name) as u64
+    };
+    assert_eq!(want(&r, acked_r + 1).await, acked_r + 1, "{}", read(&log));
+    assert_eq!(want(&k, acked_k).await, acked_k, "{}", read(&log));
+    assert!(delivered("copy") > 0, "the destination added reached");
+    assert_eq!(want(&a, 2).await, 2, "A's two stored calls");
+    let restarts = read(&log).matches("restarted alone on its new settings").count();
+    assert_eq!(restarts, 4, "R, A, R (its lanes changing), A again: {}", read(&log));
+    assert_eq!(read(&log).matches("handover: handed over to").count(), 1, "only the first: {}", read(&log));
+
+    drop(engine);
+    let ids: Vec<Vec<u8>> = [&one, &two, &three, &four]
+        .iter()
+        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
+        .collect();
+    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
+}
+
 /// A variable's new value applied in place (0.7.5.2.3), one engine throughout. M listens on
 /// `${M_PORT}` and its code reads `env("STAMP")` once and keeps it; K listens on a port of its
 /// own, its sender sending throughout. A deploy that changes only `environments/prod.yaml` (both

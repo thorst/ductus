@@ -21,9 +21,13 @@
 //!    (`Store::reconcile`: a new destination gets a delivery for each message waiting, a removed
 //!    one's pending deliveries are marked filtered) and every new worker reads again.
 //!
-//! While an interface's lanes are changing (an `ordering` change since this engine started) its
-//! destinations can't change in place: each lane's drain is tracked per destination. That
-//! refuses with `NeedsHandover`, and a deploy takes the handover.
+//! While an interface's lanes are changing (an `ordering` change not settled yet) its destinations
+//! can't change between two messages: each lane's drain is tracked per destination. `replace`
+//! refuses that with `NeedsHandover`; `Engine::replace_interface` restarts the interface alone
+//! instead (its lanes built again for its new destinations, 0.7.5.2.4).
+//!
+//! **A restart** (`Engine::restart_interface`) is `stop` (every worker of it stopped, its parts and
+//! a respond-mode interface's waiting requests answered), then `add` with its new parts.
 
 use crate::Wake;
 use crate::activity::{Activity, Pause, Watched};
@@ -115,6 +119,9 @@ pub(crate) struct Interface {
     pub threads: Vec<Placed>,
     /// Removed by a deploy (`Kept::remove`): a change that waited for its lock finds it gone.
     pub removed: bool,
+    /// Stops its lanes' watch for settling (`lanes::retire_when_settled`): cancelled when a
+    /// restart in place gives it new lanes, or it is removed.
+    pub retiring: tokio_util::sync::CancellationToken,
 }
 
 /// Some of an interface's slots, on one worker thread.
@@ -250,8 +257,25 @@ impl Interface {
         Replaced { config: self.config.clone(), destinations, files }
     }
 
+    /// Its parts as they are, on no thread (`Kept::stop`).
+    fn stopped(&self) -> Interface {
+        Interface {
+            config: self.config.clone(),
+            wake: self.wake.clone(),
+            health: self.health.clone(),
+            stats: self.stats.clone(),
+            lanes: self.lanes.clone(),
+            outlets: self.outlets.clone(),
+            intake: self.intake.clone(),
+            decided: self.decided.clone(),
+            threads: Vec::new(),
+            removed: false,
+            retiring: self.retiring.clone(),
+        }
+    }
+
     /// What the activity saver watches of it.
-    fn watched(&self) -> Watched {
+    pub(crate) fn watched(&self) -> Watched {
         Watched {
             stats: self.stats.clone(),
             destinations: self.outlets.iter().map(|o| (o.id, o.stats.clone())).collect(),
@@ -261,7 +285,12 @@ impl Interface {
     /// The outlets for `config`. A destination it had (by name) keeps its id, counts and pause,
     /// and its allowance if its rate limit is the same; a new one gets its id and what's stored
     /// about it (`Activity::watch`, which from then on watches `config`'s destinations).
-    async fn outlets_for(&self, shared: &Shared, config: &InterfaceConfig, activity: &Activity) -> Result<Vec<Outlet>> {
+    pub(crate) async fn outlets_for(
+        &self,
+        shared: &Shared,
+        config: &InterfaceConfig,
+        activity: &Activity,
+    ) -> Result<Vec<Outlet>> {
         let old: HashMap<&str, (&DestinationConfig, &Outlet)> =
             self.config.destinations().zip(&self.outlets).map(|((name, d), o)| (name, (d, o))).collect();
         let added: Vec<(String, String)> = config
@@ -477,6 +506,17 @@ impl Kept {
     /// found by routes. Close its gate and let what it was storing finish first. A change of it
     /// waiting for its lock finds it gone. Errors only when it isn't running here.
     pub(crate) async fn remove(&self, name: &str) -> Result<()> {
+        let (stopped, _) = self.stop(name).await?;
+        stopped.retiring.cancel();
+        Ok(())
+    }
+
+    /// Stop running `name` as `remove` does, and answer its parts (no threads: ready for `add`
+    /// with other settings, or the same again) and a respond-mode interface's requests waiting
+    /// (handed back by its old responder, to give its next one: none is lost). Every worker of it
+    /// has stopped when this returns, so the next ones never share a lane with them (a restart in
+    /// place, 0.7.5.2.4).
+    pub(crate) async fn stop(&self, name: &str) -> Result<(Interface, Option<Requests>)> {
         let interface = self
             .interfaces
             .write()
@@ -485,14 +525,23 @@ impl Kept {
             .with_context(|| format!("interface `{name}` isn't running here"))?;
         let mut interface = interface.lock().await;
         interface.removed = true;
+        let mut requests = None;
         for placed in &interface.threads {
-            if let Err(e) = send(&placed.commands, name, Vec::new()).await {
-                tracing::warn!(interface = %name, error = %format!("{e:#}"), "couldn't tell a worker thread to stop running a removed interface (it ends with the engine)");
+            let (handed, handing) = oneshot::channel();
+            match send_handing(&placed.commands, name, Vec::new(), Some(handed)).await {
+                Ok(_) => {
+                    if let Ok(r) = handing.await {
+                        requests = Some(r);
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(interface = %name, error = %format!("{e:#}"), "couldn't tell a worker thread to stop running an interface (it ends with the engine)")
+                }
             }
         }
         self.counted_off(&interface.threads);
         self.shared.intakes.write().unwrap_or_else(|e| e.into_inner()).remove(name);
-        Ok(())
+        Ok((interface.stopped(), requests))
     }
 
     /// The pool threads among `placed` run their slots no more. A pool thread that couldn't be
@@ -645,9 +694,19 @@ impl Kept {
 
 /// Ask one thread to run `jobs` as `interface` and wait for its answer.
 async fn send(commands: &UnboundedSender<Command>, interface: &str, jobs: Vec<Job>) -> Result<Vec<CodeFile>> {
+    send_handing(commands, interface, jobs, None).await
+}
+
+/// `send`, a respond-mode interface's requests handed to `handed` when no job takes them.
+async fn send_handing(
+    commands: &UnboundedSender<Command>,
+    interface: &str,
+    jobs: Vec<Job>,
+    handed: Option<oneshot::Sender<Requests>>,
+) -> Result<Vec<CodeFile>> {
     let (answer, answered) = oneshot::channel();
     commands
-        .send(Command::Replace { interface: interface.to_string(), jobs, answer })
+        .send(Command::Replace { interface: interface.to_string(), jobs, answer, handed })
         .map_err(|_| anyhow!("`{interface}`: its worker thread has stopped"))?;
     answered.await.map_err(|_| anyhow!("`{interface}`: its worker thread stopped before answering"))?
 }
@@ -701,7 +760,7 @@ mod tests {
         let (seen, commands) = mpsc::unbounded_channel();
         tokio::spawn(async move {
             let mut n = 0;
-            while let Some(Command::Replace { interface, jobs, answer: reply }) = rx.recv().await {
+            while let Some(Command::Replace { interface, jobs, answer: reply, .. }) = rx.recv().await {
                 let _ = seen.send((interface, jobs.iter().map(|j| j.slot).collect()));
                 let _ = reply.send(answer(n));
                 n += 1;
@@ -791,17 +850,9 @@ mod tests {
         let wake = Arc::new(Wake::new(config.slots(), ids.len()));
         let lanes = Arc::new(Lanes::new(lanes, config.slots(), ids.len()));
         let tier = Arc::new(std::sync::atomic::AtomicI16::new(ductus_core::Retention::DEFAULT.days() as i16));
-        let intake = Intake::new(
-            config.clone(),
-            shared.store.clone(),
-            wake.clone(),
-            Default::default(),
-            ids.clone(),
-            tier,
-            stats.clone(),
-            lanes.clone(),
-        )
-        .unwrap();
+        let targets = Targets { destinations: ids.clone(), wake: wake.clone() };
+        let settings = crate::ingest::Settings::new(config.clone(), lanes.clone(), tier, targets).unwrap();
+        let intake = Intake::new(shared.store.clone(), Default::default(), stats.clone(), settings);
         let outlets = config
             .destinations()
             .zip(&ids)
@@ -825,6 +876,7 @@ mod tests {
             decided: decided(1),
             threads: Vec::new(),
             removed: false,
+            retiring: Default::default(),
             config,
         };
         (interface, activity)

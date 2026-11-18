@@ -31,7 +31,7 @@ struct State {
 
 /// `ownership`: runs wait while this engine doesn't hold its interfaces (`ownership`).
 pub async fn run(intake: Arc<Intake>, timing: Timing, ownership: Arc<crate::ownership::Ownership>) {
-    let name = intake.config.name.clone();
+    let name = intake.name().to_string();
     tracing::debug!(interface = %name, "schedule started");
     loop {
         match next_run(&intake, &timing, &ownership).await {
@@ -48,7 +48,7 @@ pub async fn run(intake: Arc<Intake>, timing: Timing, ownership: Arc<crate::owne
 
 /// Wait for the next run and queue it.
 async fn next_run(intake: &Intake, timing: &Timing, ownership: &crate::ownership::Ownership) -> Result<()> {
-    let name = &intake.config.name;
+    let name = intake.name();
     let state: State = match intake.store().source_state(name, STATE_KEY).await? {
         Some(json) => serde_json::from_str(&json).context("reading schedule state")?,
         None => State::default(),
