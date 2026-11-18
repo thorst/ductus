@@ -16,7 +16,7 @@ const base = process.env.DUCTUS_RELEASES_URL ?? "http://127.0.0.1:7795";
 const deployer = process.env.DUCTUS_DEPLOYER_TOKEN ?? "";
 const viewer = process.env.DUCTUS_VIEWER_TOKEN ?? "";
 const file = process.env.DUCTUS_RELEASE_FILE ?? "";
-const [r1 = "", r2 = "", r3 = "", r4 = "", r5 = "", r6 = ""] = (process.env.DUCTUS_RELEASES ?? "").split(" ");
+const [r1 = "", r2 = "", r3 = "", r4 = "", r5 = "", r6 = "", r7 = ""] = (process.env.DUCTUS_RELEASES ?? "").split(" ");
 
 async function signIn(page: Page, path: string, token = deployer) {
   await page.goto(`${base}${path}`);
@@ -218,6 +218,29 @@ test("a release changing only a variable's value moves the port in place, the ve
   await expect(
     page.getByText('deployed new values: ARCHIVE_PORT "6728" → "6729" in place: the archive on 6729'),
   ).toBeVisible();
+});
+
+test("a release changing what a start sets up restarts the interface alone, in place", async ({ page }) => {
+  const name = process.env.DUCTUS_RELEASE_INTERFACE ?? "";
+  await signIn(page, `/releases/${r7}`);
+  await expect(page.getByTestId("applies")).toHaveText(
+    "It applies in place: the interface whose settings change restarts alone; the others never pause.",
+  );
+  const line = page
+    .getByRole("table", { name: "What it changes in staging" })
+    .getByRole("row", { name: new RegExp(name) });
+  await expect(line).toContainText("changes: dedupe");
+  await expect(line).toContainText("in place, restarting alone: `dedupe` changed");
+  await page.getByRole("button", { name: "Deploy to staging…" }).click();
+  const dialog = page.getByRole("dialog", { name: `Deploy release ${r7} to staging` });
+  await dialog.getByLabel(/Reason/).fill("no repeats");
+  await dialog.getByRole("button", { name: "Deploy", exact: true }).click();
+  await expect(dialog.getByRole("status")).toContainText(
+    "applied in place: 1 interface was restarted alone on new settings; the others never paused",
+    { timeout: 60_000 },
+  );
+  await dialog.getByRole("button", { name: "Done" }).click();
+  await expect(page.getByRole("heading", { level: 1 })).toContainText("Running here");
 });
 
 test("a viewer sees the releases and changes nothing", async ({ page }) => {

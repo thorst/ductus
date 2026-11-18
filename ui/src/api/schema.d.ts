@@ -2868,8 +2868,9 @@ export interface components {
             /** @description Every interface whose code version changes, is added or is removed. */
             changes: components["schemas"]["PlannedChange"][];
             /**
-             * @description Why it needs the handover, a line per reason (the project's own files, then each
-             *     interface); empty: it applies in place.
+             * @description Why it needs the handover, a line per reason (the project's own files read at a start:
+             *     ductus.yaml, resources.yaml, docs-schema.yaml, a secrets file); empty: it applies in place
+             *     (every change to an interface does, some restarting it alone: `changes[].restarts`).
              */
             handover_because: string[];
             /**
@@ -2880,11 +2881,13 @@ export interface components {
             project: string[];
         };
         PlannedChange: {
-            /** @description Why only the handover applies it; absent when it goes in place. */
-            handover_because?: string | null;
-            /** @description It can be applied in place (its workers restarted between messages). */
-            in_place: boolean;
             interface: string;
+            /**
+             * @description Why it restarts alone (what a start sets up for it changes: `format`, `ordering`,
+             *     `workers`...; its workers all stop, then start on the new settings, its senders never
+             *     notice); absent when its workers take the change between two messages.
+             */
+            restarts?: string | null;
             /**
              * @description The environment variables whose new values reach it, with their values before and after;
              *     absent when none do.

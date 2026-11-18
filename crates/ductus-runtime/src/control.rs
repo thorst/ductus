@@ -634,7 +634,8 @@ impl Engine {
             return Err(e.context(format!("`{name}`: changing its source")));
         }
         let source_back = || async {
-            if !mode_changes && let Err(e) = self.sources.change(&config, &running.config, running.intake.clone()).await {
+            if !mode_changes && let Err(e) = self.sources.change(&config, &running.config, running.intake.clone()).await
+            {
                 tracing::error!(interface = %name, error = %format!("{e:#}"), "couldn't put its source back after a failed restart");
             }
         };
@@ -670,7 +671,9 @@ impl Engine {
                             }
                         });
                     }
-                    (Some(waiting), None) if !waiting.is_empty() => tracing::warn!(interface = %name, count = waiting.len(), "requests waiting when it changed to queue mode weren't answered: their callers get an error and may send again"),
+                    (Some(waiting), None) if !waiting.is_empty() => {
+                        tracing::warn!(interface = %name, count = waiting.len(), "requests waiting when it changed to queue mode weren't answered: their callers get an error and may send again")
+                    }
                     _ => {}
                 }
                 if was_queued && !queued {
@@ -789,7 +792,10 @@ impl Engine {
             _ => None,
         };
         if let Some(route) = route.filter(|_| http) {
-            self.sources.reroute(&config, route).await.with_context(|| format!("`{name}`: rerouting its HTTP source"))?;
+            self.sources
+                .reroute(&config, route)
+                .await
+                .with_context(|| format!("`{name}`: rerouting its HTTP source"))?;
         }
         crate::lanes::retire_when_settled(store.clone(), name.clone(), lanes.clone(), retiring);
         let (version, id) = self.saved_version(&config, files, root, saving, &decided).await;
@@ -812,7 +818,9 @@ impl Engine {
         let warn = |what: &str, e: anyhow::Error| {
             tracing::error!(interface = %name, error = %format!("{e:#}"), "after a failed restart, couldn't {what}");
         };
-        if undo.added && let Err(e) = self.kept.remove(&name).await {
+        if undo.added
+            && let Err(e) = self.kept.remove(&name).await
+        {
             warn("stop its new workers", e);
         }
         if let (Some(intake), Some(settings)) = (&running.intake, undo.intake) {

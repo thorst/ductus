@@ -301,16 +301,15 @@ What a release changes here, by kind (`changes::plan`).
 | Field | Type | |
 |---|---|---|
 | `changes` | list of [`PlannedChange`](#plannedchange) | Every interface whose code version changes, is added or is removed. |
-| `handover_because` | list of text | Why it needs the handover, a line per reason (the project's own files, then each interface); empty: it applies in place. |
+| `handover_because` | list of text | Why it needs the handover, a line per reason (the project's own files read at a start: ductus.yaml, resources.yaml, docs-schema.yaml, a secrets file); empty: it applies in place (every change to an interface does, some restarting it alone: `changes[].restarts`). |
 | `project` | list of text | What the project's own files change in place, a line each: the engine's environment file's variables (`environments/prod.yaml: MLLP_PORT "6661" → "6666"`) and `console:`, another environment's file changing nothing here. |
 
 ### `PlannedChange`
 
 | Field | Type | |
 |---|---|---|
-| `handover_because` (optional) | text or null | Why only the handover applies it; absent when it goes in place. |
-| `in_place` | true or false | It can be applied in place (its workers restarted between messages). |
 | `interface` | text |  |
+| `restarts` (optional) | text or null | Why it restarts alone (what a start sets up for it changes: `format`, `ordering`, `workers`...; its workers all stop, then start on the new settings, its senders never notice); absent when its workers take the change between two messages. |
 | `variables` (optional) | list of [`HistoryVariable`](#historyvariable) | The environment variables whose new values reach it, with their values before and after; absent when none do. |
 | `what` | list of text | What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`, `source`, `source (MLLP_PORT)` (a variable's new value moved it), `code reads EMPI_URL` (reloaded for a variable its code names), `added`, `removed`, ... |
 

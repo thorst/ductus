@@ -112,14 +112,22 @@ describe("applySummary and applyOf", () => {
   });
 
   it("says an interface whose settings a start sets up restarts alone, and why", () => {
-    const why = "`ordering` changed (what a start sets up for it: how it stores, lays out in lanes or runs its messages)";
-    const plan = { changes: [planned("adt", ["code"]), planned("lab", ["ordering", "source"], why)], handover_because: [], project: [] };
+    const why =
+      "`ordering` changed (what a start sets up for it: how it stores, lays out in lanes or runs its messages)";
+    const plan = {
+      changes: [planned("adt", ["code"]), planned("lab", ["ordering", "source"], why)],
+      handover_because: [],
+      project: [],
+    };
     const h = { ...here, plan };
     expect(applySummary(h)).toBe(
       "It applies in place: the interface it changes takes its new code between two messages, the interface whose settings change restarts alone; the others never pause.",
     );
     expect(applyOf(h, "lab")).toEqual({ what: "ordering, source", how: `in place, restarting alone: ${why}` });
-    const two = { ...here, plan: { ...plan, changes: [planned("a", ["format"], why), planned("b", ["workers"], why)] } };
+    const two = {
+      ...here,
+      plan: { ...plan, changes: [planned("a", ["format"], why), planned("b", ["workers"], why)] },
+    };
     expect(applySummary(two)).toBe(
       "It applies in place: the 2 interfaces whose settings change restart alone; the others never pause.",
     );

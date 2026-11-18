@@ -7754,7 +7754,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Why it needs the handover, a line per reason (the project's own files, then each\ninterface); empty: it applies in place."
+            "description": "Why it needs the handover, a line per reason (the project's own files read at a start:\nductus.yaml, resources.yaml, docs-schema.yaml, a secrets file); empty: it applies in place\n(every change to an interface does, some restarting it alone: `changes[].restarts`)."
           },
           "project": {
             "type": "array",
@@ -7769,23 +7769,18 @@
         "type": "object",
         "required": [
           "interface",
-          "what",
-          "in_place"
+          "what"
         ],
         "properties": {
-          "handover_because": {
+          "interface": {
+            "type": "string"
+          },
+          "restarts": {
             "type": [
               "string",
               "null"
             ],
-            "description": "Why only the handover applies it; absent when it goes in place."
-          },
-          "in_place": {
-            "type": "boolean",
-            "description": "It can be applied in place (its workers restarted between messages)."
-          },
-          "interface": {
-            "type": "string"
+            "description": "Why it restarts alone (what a start sets up for it changes: `format`, `ordering`,\n`workers`...; its workers all stop, then start on the new settings, its senders never\nnotice); absent when its workers take the change between two messages."
           },
           "variables": {
             "type": "array",

@@ -294,7 +294,7 @@ echo "== releases: an engine in release mode beside this one (the Releases page)
 # for the browser to see refused; then a rollback; release 4 (adds an interface) is stored for the
 # browser to deploy in place, then rolled back (the interface removed in place); release 5 (its
 # port moved) is deployed in place after that, then release 6 (the port moved by its variable's
-# value alone). The interface is named for this run
+# value alone), then release 7 (dedupe added: the interface restarts alone). The interface is named for this run
 # (`ui-release-<pid>`): what earlier runs deployed of it, from commits this run's git doesn't have,
 # would make the "replaces" check refuse. This project's releases are forgotten before and after.
 R=$P/ui-releases
@@ -351,6 +351,10 @@ R5=$(release_of "port 6728")
 printf 'variables: { ARCHIVE_PORT: 6729 }\n' >"$R/environments/staging.yaml"
 rgit commit -qam "the archive on 6729 in staging"
 R6=$(release_of "port 6729")
+# Release 7 (0.7.5.2.4): dedupe added, what a start sets up: the interface restarts alone, in place.
+printf 'dedupe: { keys: [MSH-10], window: 1h }\n' >>"$R/interfaces/$IFACE/interface.yaml"
+rgit commit -qam "no repeats"
+R7=$(release_of "dedupe")
 DEPLOYER=$("$BIN" token create "ui-demo-deployer-$$" --role operator --permission deploy 2>/dev/null)
 PULL=$("$BIN" token create "ui-demo-pull-$$" --role viewer --permission download 2>/dev/null)
 RELEASES_URL=http://127.0.0.1:7795
@@ -369,12 +373,14 @@ curl -sf -o /dev/null -H "Authorization: Bearer $DEPLOYER" -H "Content-Type: app
   "$RELEASES_URL/api/v1/releases" || { echo "FAIL: release 5 wasn't stored"; exit 1; }
 curl -sf -o /dev/null -H "Authorization: Bearer $DEPLOYER" -H "Content-Type: application/gzip" --data-binary "@$R6" \
   "$RELEASES_URL/api/v1/releases" || { echo "FAIL: release 6 wasn't stored"; exit 1; }
-echo "   releases 3 (feature/x), 4 (adds an interface), 5 (moves its port) and 6 (moves it by its variable) stored; release 2 is for the browser to upload"
+curl -sf -o /dev/null -H "Authorization: Bearer $DEPLOYER" -H "Content-Type: application/gzip" --data-binary "@$R7" \
+  "$RELEASES_URL/api/v1/releases" || { echo "FAIL: release 7 wasn't stored"; exit 1; }
+echo "   releases 3 (feature/x), 4 (adds an interface), 5 (moves its port), 6 (moves it by its variable) and 7 (restarts it alone) stored; release 2 is for the browser to upload"
 
 echo "== the browser (Playwright)"
 cd "$UI"
 export DUCTUS_RELEASES_URL=$RELEASES_URL DUCTUS_DEPLOYER_TOKEN=$DEPLOYER DUCTUS_RELEASE_FILE=$R2 \
-  DUCTUS_RELEASES="$(short_of "$R1") $(short_of "$R2") $(short_of "$R3") $(short_of "$R4") $(short_of "$R5") $(short_of "$R6")" DUCTUS_RELEASE_INTERFACE=$IFACE
+  DUCTUS_RELEASES="$(short_of "$R1") $(short_of "$R2") $(short_of "$R3") $(short_of "$R4") $(short_of "$R5") $(short_of "$R6") $(short_of "$R7")" DUCTUS_RELEASE_INTERFACE=$IFACE
 export DUCTUS_URL=$DUCTUS_API_URL DUCTUS_VIEWER_TOKEN=$VIEWER DUCTUS_OPERATOR_TOKEN=$DUCTUS_API_TOKEN \
   DUCTUS_ADMIN_TOKEN=$ADMIN DUCTUS_PEOPLE_PREFIX=$PEOPLE_PREFIX DUCTUS_PERSON_ADMIN="${PEOPLE_PREFIX}admin:$PASSWORD" \
   DUCTUS_PERSON_OPERATOR="${PEOPLE_PREFIX}operator:$PASSWORD" DUCTUS_PERSON_VIEWER="${PEOPLE_PREFIX}viewer:$PASSWORD" \

@@ -5908,7 +5908,8 @@ async fn what_a_start_sets_up_restarts_one_interface_alone_while_its_sender_send
             to_file(name)
         )
     };
-    let restarted_r = "ordering: { key: PID-3.1 }\nisolation: dedicated\nworkers: 4\ndedupe: { keys: [MSH-10], window: 1h }\n";
+    let restarted_r =
+        "ordering: { key: PID-3.1 }\nisolation: dedicated\nworkers: 4\ndedupe: { keys: [MSH-10], window: 1h }\n";
     let queue = || {
         format!(
             "name: {a}\nsource: {{ http: {{ host: 127.0.0.1, port: {ph}, path: /a }} }}\nformat: text\ndestinations:\n{}",
@@ -6012,8 +6013,7 @@ async fn what_a_start_sets_up_restarts_one_interface_alone_while_its_sender_send
             let mut acked = 0u64;
             while sending.load(std::sync::atomic::Ordering::Relaxed) {
                 let seq = acked + 1;
-                let message =
-                    format!("MSH|^~\\&|T|T|R|R|20260101||ADT^A01|{prefix}{seq}|P|2.5\rPID|1||P{}\r", seq % 5);
+                let message = format!("MSH|^~\\&|T|T|R|R|20260101||ADT^A01|{prefix}{seq}|P|2.5\rPID|1||P{}\r", seq % 5);
                 let ack = client.send(message.as_bytes()).await.unwrap_or_else(|e| panic!("{prefix}{seq}: {e}"));
                 assert!(String::from_utf8_lossy(&ack).contains("MSA|AA"), "{prefix}{seq}");
                 acked += 1;
@@ -6889,9 +6889,9 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
     let plan = &page["here"]["plan"];
     assert_eq!(plan["changes"][0]["what"], serde_json::json!(["code"]), "{page:#}");
     assert_eq!(
-        (plan["changes"][0]["in_place"].as_bool(), plan["handover_because"].as_array().map(Vec::len)),
-        (Some(true), Some(0)),
-        "{page:#}"
+        (plan["changes"][0].get("restarts"), plan["handover_because"].as_array().map(Vec::len)),
+        (None, Some(0)),
+        "between two messages: {page:#}"
     );
     // A's page (it runs): nothing to plan.
     let running = get(format!("{prod_url}/api/v1/releases/{a_id}"), &ann).await;
