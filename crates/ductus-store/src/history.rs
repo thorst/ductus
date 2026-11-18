@@ -356,12 +356,11 @@ impl Store {
     /// The texts of the files `hashes` name (`code_files`), by hash: the running interface.yaml and
     /// code a reload compares with, read back from where its version saved them.
     pub async fn file_texts(&self, hashes: &[Vec<u8>]) -> Result<HashMap<Vec<u8>, String>> {
-        let rows: Vec<(Vec<u8>, String)> =
-            sqlx::query_as("SELECT hash, content FROM code_files WHERE hash = ANY($1)")
-                .bind(hashes)
-                .fetch_all(&self.pool)
-                .await
-                .context("reading the running files' texts")?;
+        let rows: Vec<(Vec<u8>, String)> = sqlx::query_as("SELECT hash, content FROM code_files WHERE hash = ANY($1)")
+            .bind(hashes)
+            .fetch_all(&self.pool)
+            .await
+            .context("reading the running files' texts")?;
         Ok(rows.into_iter().collect())
     }
 

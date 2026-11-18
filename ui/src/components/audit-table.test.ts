@@ -26,7 +26,13 @@ describe("summary", () => {
   });
 
   it("says what a reload applied, who asked and why", () => {
-    const inPlace = { applied: "in_place", ok: true, interfaces: ["adt-in", "lab-out"], by: "todd", reason: "new codes" };
+    const inPlace = {
+      applied: "in_place",
+      ok: true,
+      interfaces: ["adt-in", "lab-out"],
+      by: "todd",
+      reason: "new codes",
+    };
     expect(summary(entry("engine.reload", inPlace))).toBe("in place: adt-in, lab-out · asked by todd: new codes");
     const nothing = { applied: "nothing", ok: true, interfaces: [], by: "systemd (systemctl reload)" };
     expect(summary(entry("engine.reload", nothing))).toBe("nothing to apply · asked by systemd (systemctl reload)");

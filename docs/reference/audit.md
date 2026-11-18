@@ -36,7 +36,8 @@ The audit log records who did what, to what, from where, and how it ended: on th
 | `alert.test` | Someone sent a test notification to a channel. |
 | `engine.start` | The engine started, with its version and how the previous run on this host ended (a start without a stop before it is a crash). |
 | `engine.stop` | The engine stopped cleanly (or handed over to a new engine). |
-| `engine.handover` | A new engine took over from the running one (`systemctl reload`: an upgrade or a deploy), with both versions and how long sending paused. |
+| `engine.handover` | A new engine took over from the running one (`ductus handover`, an upgrade, a deploy or reload that needed it), with both versions and how long sending paused. |
+| `engine.reload` | The engine applied its project folder as it is now (`ductus reload`, `systemctl reload`): in place, nothing to apply, or refused, with who asked, the interfaces it changed and the deployment it recorded. |
 | `engine.refused` | A start was refused: another live engine runs some of its interfaces (before 0.7.4.4.4 also: its lanes would strand waiting messages, or a handover would lower lanes). |
 | `interface.stopped` | An interface's code was stopped (it ran away or ran out of memory): its messages wait. |
 | `interface.partitions_raised` | Before 0.7.4.4.4: an interface started with more lanes while messages waited, so a key's new messages could pass its older ones until those were sent. |

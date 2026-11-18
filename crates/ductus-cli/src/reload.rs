@@ -85,8 +85,10 @@ async fn over_socket(r: &Reload, path: &std::path::Path) -> Result<Value> {
 
 async fn over_api(r: &Reload) -> Result<Value> {
     if r.with_environment {
-        bail!("`--with-environment` passes this command's environment over the control socket, and there's none here: \
-               restart the engine to apply its environment");
+        bail!(
+            "`--with-environment` passes this command's environment over the control socket, and there's none here: \
+               restart the engine to apply its environment"
+        );
     }
     let token = r.token.as_deref().filter(|t| !t.trim().is_empty()).context(
         "no control socket here, so `ductus reload` asks the engine's API: set DUCTUS_API_TOKEN to a token with the \

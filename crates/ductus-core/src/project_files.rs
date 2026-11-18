@@ -46,7 +46,13 @@ impl ProjectFiles {
     /// Read `root`'s files for environment `env` (each optional; one that can't be read is an error).
     pub fn read(root: &Path, env: &str) -> Result<Self> {
         let mut texts = BTreeMap::new();
-        for path in [SETTINGS.to_string(), RESOURCES.to_string(), DOCS_SCHEMA.to_string(), environment_file(env), secrets_file(env)] {
+        for path in [
+            SETTINGS.to_string(),
+            RESOURCES.to_string(),
+            DOCS_SCHEMA.to_string(),
+            environment_file(env),
+            secrets_file(env),
+        ] {
             let file = root.join(&path);
             if file.is_file() {
                 let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;

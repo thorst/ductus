@@ -93,10 +93,25 @@ pub struct Options {
     pub new_binary_counts: bool,
 }
 
+/// What of the engine's settings outside the project (`crate::started_with`) differs when they're
+/// read again as an in-process handover reads them (`rebuild`: the env file read again), by name;
+/// None when nothing does. Settings that can't be read again are said as such: the handover then
+/// fails on them, saying why, and the engine goes on.
+pub(crate) fn settings_changed(engine: &Engine, rebuild: &crate::handover::Rebuild) -> Option<String> {
+    let again = match rebuild() {
+        Ok(r) => crate::started_with(&r.root, &r.database_url, &r.options),
+        Err(e) => return Some(format!("they can't be read again: {e:#}")),
+    };
+    let changed: Vec<&str> =
+        engine.started_with.iter().zip(&again).filter(|(a, b)| a.1 != b.1).map(|(a, _)| a.0).collect();
+    (!changed.is_empty()).then(|| changed.join(", "))
+}
+
 /// Apply `engine`'s project folder as it is now, in place where it can, for whoever `asked`
 /// (recorded with the deployment). `environment`: the environment the asker passes along
 /// (`--with-environment`: systemd's, ductus.env read again), which only a handover can apply when
-/// its `DUCTUS_*` values differ from this engine's. Never hands over itself: `How::Handover`
+/// its `DUCTUS_*` values differ from this engine's; `settings_changed`: what of its settings read
+/// again in this process differs (`settings_changed`), the same. Never hands over itself: `How::Handover`
 /// tells the caller to. Release mode always hands over (to the release it runs: a new binary, the
 /// settings read again; releases are deployed with `ductus deploy`).
 pub async fn reload(
@@ -104,6 +119,7 @@ pub async fn reload(
     asked: &Asked,
     environment: Option<&[(String, String)]>,
     options: Options,
+    settings_changed: Option<String>,
 ) -> Reloaded {
     let in_place_only = options.in_place_only;
     let started = std::time::Instant::now();
@@ -137,6 +153,9 @@ pub async fn reload(
     }
     if let Some(changed) = environment.and_then(environment_changed) {
         handover.push(format!("the service's environment changed ({changed}): only a new engine reads it"));
+    }
+    if let Some(changed) = settings_changed {
+        handover.push(format!("the engine's settings changed ({changed}): only a new engine reads them"));
     }
     if !handover.is_empty() {
         return needs_handover(reloaded, handover.join("; "), in_place_only, finish);
@@ -179,19 +198,24 @@ pub async fn reload(
         .changes
         .iter()
         .filter(|c| !c.is_removed())
-        .filter_map(|c| Some((c.interface.clone(), crate::deploy::unhex(&next.manifest.interfaces.get(&c.interface)?.version)?)))
+        .filter_map(|c| {
+            Some((c.interface.clone(), crate::deploy::unhex(&next.manifest.interfaces.get(&c.interface)?.version)?))
+        })
         .collect();
     let pairs: Vec<(&str, &[u8])> = versions.iter().map(|(n, v)| (n.as_str(), v.as_slice())).collect();
     let source = crate::deploy::Source::Folder(engine.root.clone());
     match crate::deploy::replaced(&engine.store, &source, &pairs, &who).await {
         Ok(found) => reloaded.warnings = found.into_iter().collect(),
-        Err(e) => tracing::warn!(error = %format!("{e:#}"), "couldn't read what the interfaces ran before: no warning for changes over someone else's"),
+        Err(e) => {
+            tracing::warn!(error = %format!("{e:#}"), "couldn't read what the interfaces ran before: no warning for changes over someone else's")
+        }
     }
     for (interface, warning) in &reloaded.warnings {
         tracing::warn!(%interface, "reloaded over someone else's change: {warning}");
     }
     let Folder { manifest, files, env } = next;
-    match crate::deploy::apply_in_place(engine, plan, &manifest, None, &engine.root, env, &who, &reloaded.warnings).await
+    match crate::deploy::apply_in_place(engine, plan, &manifest, None, &engine.root, env, &who, &reloaded.warnings)
+        .await
     {
         Ok(done) => {
             engine.now_runs_files(files);
@@ -219,7 +243,9 @@ fn needs_handover(
         true => finish(
             reloaded,
             How::Refused,
-            format!("refused: only the handover applies it ({why}), and only in place was asked: reload without that when a handover suits\nNothing changed: every interface runs what it ran."),
+            format!(
+                "refused: only the handover applies it ({why}), and only in place was asked: reload without that when a handover suits\nNothing changed: every interface runs what it ran."
+            ),
         ),
         false => finish(reloaded, How::Handover, why),
     }
@@ -433,8 +459,7 @@ mod tests {
         // SAFETY: set before any thread of this test reads the environment; the name is this
         // test's own.
         unsafe { std::env::set_var("DUCTUS_RELOAD_TEST_A", "1") };
-        let mut asker: Vec<(String, String)> =
-            std::env::vars().filter(|(k, _)| k.starts_with("DUCTUS_")).collect();
+        let mut asker: Vec<(String, String)> = std::env::vars().filter(|(k, _)| k.starts_with("DUCTUS_")).collect();
         asker.push(("MAINPID".into(), "123".into()));
         assert_eq!(environment_changed(&asker), None, "the same DUCTUS_ values: nothing (MAINPID differs always)");
         for (k, v) in asker.iter_mut() {

@@ -11,10 +11,12 @@
 //! file in the log folder; the next start removes it. An upgrade that finds it leaves the service
 //! stopped: an engine stopped on purpose stays stopped. Windows shutting down leaves none.
 //!
-//! `paramchange` (`sc.exe control Ductus paramchange`, which `ductus handover` sends) is a reload,
-//! as `systemctl reload` is on Linux: a new engine starts beside the running one in this process,
-//! on the project or release as it is now and ductus.env read again, and takes over
-//! (`ductus_runtime::handover`). The service stays Running throughout.
+//! `paramchange` (`sc.exe control Ductus paramchange`) is a reload, as `systemctl reload` is on
+//! Linux: the project as it is now applied in place where it can (`ductus_runtime::reload`), else
+//! a new engine starts beside the running one in this process, on the project or release as it is
+//! now and ductus.env read again, and takes over (`ductus_runtime::handover`). Control 128
+//! (`sc.exe control Ductus 128`, which `ductus handover` sends) is always that handover. The
+//! service stays Running throughout.
 
 use super::eventlog::{self, EventLogLayer};
 use crate::RunArgs;
@@ -91,6 +93,10 @@ fn serve() -> Result<()> {
             }
             ServiceControl::ParamChange => {
                 ductus_runtime::handover::reload("the service manager (paramchange)");
+                ServiceControlHandlerResult::NoError
+            }
+            ServiceControl::UserEvent(code) if code.to_raw() == super::HANDOVER_CONTROL => {
+                ductus_runtime::handover::handover("the service manager (ductus handover)");
                 ServiceControlHandlerResult::NoError
             }
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,

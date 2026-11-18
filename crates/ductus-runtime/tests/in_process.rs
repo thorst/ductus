@@ -52,10 +52,11 @@ fn threads() -> usize {
     std::fs::read_dir("/proc/self/task").map(|d| d.count()).unwrap_or(0)
 }
 
-/// Ask for a reload until one is taken (the new engine takes requests once it runs).
+/// Ask for a handover until one is taken (the new engine takes requests once it runs). The full
+/// handover, whatever changed (since 0.7.5.3 a plain reload applies the project in place).
 async fn reload() {
     for _ in 0..100 {
-        if handover::reload("the in-process test") {
+        if handover::handover("the in-process test") {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;

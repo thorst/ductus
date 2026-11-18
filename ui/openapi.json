@@ -850,6 +850,66 @@
         }
       }
     },
+    "/engine/reload": {
+      "post": {
+        "tags": [
+          "engine"
+        ],
+        "summary": "Apply the project folder as it is now (folder mode): only the interfaces whose files or\nfilled-in settings changed take the change (between two messages, or restarting alone; added\nones start, removed ones stop), the others never pause. What only a start reads (ductus.yaml,\nresources.yaml, docs-schema.yaml, the environment's secrets file; a new binary) goes by the\nhandover, unless `in_place_only`. Recorded as a deployment (`how` = `reload`). In release mode\nit's a handover to the release that runs. 200: it runs the folder (`applied`: `in_place`,\n`nothing`, `handover`). 409: refused, nothing changed (the folder doesn't load, a start would\nrefuse it, `in_place_only` and it needs the handover, another reload or handover under way).\n500: a handover that failed (this engine goes on as it was). Needs the `deploy` permission.",
+        "operationId": "reload_engine",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ReloadRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "It runs the folder as it is now: `applied` says how",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReloadReport"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorBody"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Refused, nothing changed: `outcome` says why",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReloadReport"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "The handover failed: this engine goes on as it was",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ReloadReport"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/events": {
       "get": {
         "tags": [
@@ -4822,7 +4882,7 @@
           },
           "by": {
             "type": "string",
-            "description": "The account that started it, the person who asked for the handover or deploy, or\n`systemd (systemctl reload)`."
+            "description": "The account that started it, the person who asked for the handover, deploy or reload, or\n`systemd (systemctl reload)`."
           },
           "changed": {
             "type": "integer",
@@ -4838,7 +4898,7 @@
           },
           "how": {
             "type": "string",
-            "description": "`start` (someone ran it), `service` (systemd or the Windows service started it), `handover`,\nor `deploy` (a deploy applied in place: the engine kept running, only the changed\ninterfaces took their new code)."
+            "description": "`start` (someone ran it), `service` (systemd or the Windows service started it), `handover`,\n`deploy` (a release applied in place: the engine kept running, only the changed interfaces\ntook their new code) or `reload` (the project folder applied in place, the same way)."
           },
           "id": {
             "type": "integer",
@@ -6076,7 +6136,7 @@
           },
           "how": {
             "type": "string",
-            "description": "`start`, `service`, `handover` or `deploy` (a deploy applied in place, without a handover)."
+            "description": "`start`, `service`, `handover`, `deploy` (a release applied in place, without a handover)\nor `reload` (the project folder applied in place)."
           },
           "id": {
             "type": "integer",
@@ -8349,6 +8409,123 @@
             "description": "The release it runs, in hex; none before the first deploy."
           }
         }
+      },
+      "ReloadChange": {
+        "type": "object",
+        "description": "One interface a reload changed.",
+        "required": [
+          "interface",
+          "to"
+        ],
+        "properties": {
+          "from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Its version before; null: new here."
+          },
+          "interface": {
+            "type": "string"
+          },
+          "to": {
+            "type": "string"
+          }
+        }
+      },
+      "ReloadReport": {
+        "type": "object",
+        "description": "How a reload went: what `ductus reload --json` prints and `POST /engine/reload` answers.",
+        "required": [
+          "ok",
+          "applied",
+          "outcome",
+          "steps",
+          "changes",
+          "warnings",
+          "took_ms"
+        ],
+        "properties": {
+          "applied": {
+            "type": "string",
+            "description": "`in_place`, `nothing` (the folder is what runs), `handover` (a new engine runs it) or\n`refused` (nothing changed: `outcome` says why)."
+          },
+          "changes": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReloadChange"
+            },
+            "description": "Each interface it changed: its code version before and after (12 hex characters)."
+          },
+          "deployment": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int32",
+            "description": "The deployment it recorded (in place: `how` = `reload`)."
+          },
+          "ok": {
+            "type": "boolean",
+            "description": "It runs the folder as it is now (applied, or nothing to apply)."
+          },
+          "outcome": {
+            "type": "string",
+            "description": "What it did, or why it didn't, in words."
+          },
+          "plan": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/PlanInfo",
+                "description": "What the folder changes here, by kind; absent when the folder didn't load."
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "What it did, a line per interface (in place)."
+          },
+          "took_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long it took, in milliseconds (the handover's: until the new engine sent).",
+            "minimum": 0
+          },
+          "warnings": {
+            "type": "object",
+            "description": "Interfaces changed over someone else's work (the \"replaces\" check: folder mode warns), by\ninterface, with why.",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "ReloadRequest": {
+        "type": "object",
+        "description": "What to reload with.",
+        "properties": {
+          "in_place_only": {
+            "type": "boolean",
+            "description": "Refuse what only the handover applies (ductus.yaml, resources.yaml, docs-schema.yaml, the\nenvironment's secrets file changed) instead of taking it. Default: false."
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Why: recorded with the deployment, beside who asked. Optional (a reload records what\nchanged whoever asks; `systemctl reload` gives none)."
+          }
+        },
+        "additionalProperties": false
       },
       "Report": {
         "type": "object",

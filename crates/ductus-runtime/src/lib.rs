@@ -161,6 +161,24 @@ pub struct EngineOptions {
     pub releases: Option<deploy::Mode>,
 }
 
+/// What an engine was started with that its settings outside the project can change (ductus.env,
+/// `--env-file`, the command line), by what each is: compared by a reload in this process, which
+/// hands over when one differs (0.7.5.3). The database's address is kept as a hash (it may hold a
+/// password); only the names of what changed are ever said.
+pub(crate) fn started_with(root: &Path, database_url: &str, options: &EngineOptions) -> Vec<(&'static str, String)> {
+    use sha2::Digest;
+    vec![
+        ("the project folder", root.display().to_string()),
+        ("the database", code::hex(&sha2::Sha256::digest(database_url.as_bytes()))),
+        ("the environment", options.env.clone()),
+        ("the API's address", format!("{:?}", options.api_listen)),
+        ("the worker pool's size", options.pool_threads.to_string()),
+        ("the database connections", options.db_connections.to_string()),
+        ("the stop's time limit", format!("{:?}", options.stop_timeout)),
+        ("release mode", format!("{:?}", options.releases.as_ref().map(|m| &m.dir))),
+    ]
+}
+
 /// Interfaces a debugger may attach to, served by `inspector`. Each gets a thread and isolate of
 /// its own for the run (all its workers on it, if it's dedicated), so a pause or an endless loop
 /// under the debugger holds only that interface: receiving, ACKs and every other interface go on.
@@ -320,6 +338,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let ended = tokio_util::sync::CancellationToken::new();
     let _end = ended.clone().drop_guard();
     let mut phases = Phases::new();
+    let settings_at_start = started_with(root, database_url, &options);
     // Release mode: the release to run comes from the database (a deploy's handover names it),
     // unpacked into its folder the first time; that folder is the project from here on. The
     // database is connected (and migrated) first for it, once.
@@ -885,6 +904,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         ended: ended.clone(),
         sources,
         project_files,
+        started_with: settings_at_start,
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse

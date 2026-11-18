@@ -5994,7 +5994,8 @@ async fn a_reload_applies_the_folder_in_place_while_another_interface_sends() {
     let answered = chrono::Utc::now();
     assert!(ok, "{said}\n{}", read(&log));
     assert_eq!(report["applied"], "in_place", "{said}");
-    let changed: Vec<&str> = report["changes"].as_array().unwrap().iter().map(|c| c["interface"].as_str().unwrap()).collect();
+    let changed: Vec<&str> =
+        report["changes"].as_array().unwrap().iter().map(|c| c["interface"].as_str().unwrap()).collect();
     assert_eq!(changed, [a.as_str()], "A alone: {said}");
     assert!(report["deployment"].is_i64(), "recorded: {said}");
     assert_eq!(running(&b).await, Some(pid), "the same engine runs both");
@@ -7179,7 +7180,24 @@ async fn sighup_reloads_the_engine_in_its_own_process() {
     );
     let file = format!("interfaces/{name}/interface.yaml");
     let dir = project(&[(file.as_str(), config.as_str())]);
-    let (mut engine, log) = start_engine(dir.path(), &db, None, "engine.log");
+    // Its settings in an env file, as the Windows service's are: read again by a reload.
+    let env_file = dir.path().join("ductus.env");
+    std::fs::write(&env_file, "DUCTUS_DB_CONNECTIONS=8\n").unwrap();
+    let log = dir.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let mut engine = Child(
+        Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["run", "--root", &dir.path().to_string_lossy(), "--threads", "1", "--api-listen", "off"])
+            .arg("--env-file")
+            .arg(&env_file)
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env_remove("DUCTUS_DB_CONNECTIONS")
+            .env_remove("DUCTUS_CONTROL")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
     let read = || std::fs::read_to_string(&log).unwrap_or_default();
     assert!(wait_for_log(&log, "started interfaces=1", 60), "{}", read());
     let pid = engine.0.id().to_string();
@@ -7207,6 +7225,19 @@ async fn sighup_reloads_the_engine_in_its_own_process() {
     assert!(wait_for_log(&log, "handed over to a new engine in this process", 60), "{}", read());
     assert!(read().contains("ductus.yaml changed"), "{}", read());
     assert!(engine.0.try_wait().unwrap().is_none(), "the same process goes on");
+
+    // The env file changed: only a new engine reads it, so the reload hands over, naming it.
+    let handed = read().matches("handed over to a new engine in this process").count();
+    std::fs::write(&env_file, "DUCTUS_DB_CONNECTIONS=9\n").unwrap();
+    signal("HUP");
+    for _ in 0..600 {
+        if read().matches("handed over to a new engine in this process").count() > handed {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(read().contains("the engine's settings changed (the database connections)"), "{}", read());
+    assert_eq!(read().matches("handed over to a new engine in this process").count(), handed + 1, "{}", read());
 
     signal("TERM");
     let exited = tokio::task::spawn_blocking(move || engine.0.wait()).await.unwrap().unwrap();

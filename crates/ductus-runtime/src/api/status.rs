@@ -246,10 +246,10 @@ pub struct DeploymentInfo {
     id: i32,
     at: DateTime<Utc>,
     /// `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`,
-    /// or `deploy` (a deploy applied in place: the engine kept running, only the changed
-    /// interfaces took their new code).
+    /// `deploy` (a release applied in place: the engine kept running, only the changed interfaces
+    /// took their new code) or `reload` (the project folder applied in place, the same way).
     how: &'static str,
-    /// The account that started it, the person who asked for the handover or deploy, or
+    /// The account that started it, the person who asked for the handover, deploy or reload, or
     /// `systemd (systemctl reload)`.
     by: String,
     /// Why (`ductus handover -m`); none when nobody said.

@@ -1600,7 +1600,7 @@ async fn run(cli: Cli) -> Result<()> {
             exit_on_failure(replay::run(options).await)
         }
         #[cfg(windows)]
-        Command::Handover { reason, .. } => service::reload(reason.as_deref()),
+        Command::Handover { reason, .. } => service::handover(reason.as_deref()),
         #[cfg(not(windows))]
         Command::Handover { control, timeout, with_environment, reason } => {
             use ductus_runtime::handover;
@@ -1609,7 +1609,8 @@ async fn run(cli: Cli) -> Result<()> {
                 std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect()
             });
             let asked = handover::Asked::here(reason);
-            let request = handover::Request { timeout_secs: timeout.as_secs(), environment, asked, ..Default::default() };
+            let request =
+                handover::Request { timeout_secs: timeout.as_secs(), environment, asked, ..Default::default() };
             let done = handover::ask(&path, &request, |line| println!("{line}")).await?;
             if !done.ok {
                 eprintln!("error: {}", done.text);

@@ -308,6 +308,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/engine/reload": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Apply the project folder as it is now (folder mode): only the interfaces whose files or
+         *     filled-in settings changed take the change (between two messages, or restarting alone; added
+         *     ones start, removed ones stop), the others never pause. What only a start reads (ductus.yaml,
+         *     resources.yaml, docs-schema.yaml, the environment's secrets file; a new binary) goes by the
+         *     handover, unless `in_place_only`. Recorded as a deployment (`how` = `reload`). In release mode
+         *     it's a handover to the release that runs. 200: it runs the folder (`applied`: `in_place`,
+         *     `nothing`, `handover`). 409: refused, nothing changed (the folder doesn't load, a start would
+         *     refuse it, `in_place_only` and it needs the handover, another reload or handover under way).
+         *     500: a handover that failed (this engine goes on as it was). Needs the `deploy` permission.
+         */
+        post: operations["reload_engine"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/events": {
         parameters: {
             query?: never;
@@ -1753,7 +1780,7 @@ export interface components {
             /** Format: date-time */
             at: string;
             /**
-             * @description The account that started it, the person who asked for the handover or deploy, or
+             * @description The account that started it, the person who asked for the handover, deploy or reload, or
              *     `systemd (systemctl reload)`.
              */
             by: string;
@@ -1763,8 +1790,8 @@ export interface components {
             git_commit?: string | null;
             /**
              * @description `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`,
-             *     or `deploy` (a deploy applied in place: the engine kept running, only the changed
-             *     interfaces took their new code).
+             *     `deploy` (a release applied in place: the engine kept running, only the changed interfaces
+             *     took their new code) or `reload` (the project folder applied in place, the same way).
              */
             how: string;
             /**
@@ -2250,7 +2277,10 @@ export interface components {
             /** @description The project's commit then (hex); none without git. */
             git_commit?: string | null;
             host: string;
-            /** @description `start`, `service`, `handover` or `deploy` (a deploy applied in place, without a handover). */
+            /**
+             * @description `start`, `service`, `handover`, `deploy` (a release applied in place, without a handover)
+             *     or `reload` (the project folder applied in place).
+             */
             how: string;
             /** Format: int32 */
             id: number;
@@ -3115,6 +3145,60 @@ export interface components {
             reuse_check_seconds: number;
             /** @description The release it runs, in hex; none before the first deploy. */
             running?: string | null;
+        };
+        /** @description One interface a reload changed. */
+        ReloadChange: {
+            /** @description Its version before; null: new here. */
+            from?: string | null;
+            interface: string;
+            to: string;
+        };
+        /** @description How a reload went: what `ductus reload --json` prints and `POST /engine/reload` answers. */
+        ReloadReport: {
+            /**
+             * @description `in_place`, `nothing` (the folder is what runs), `handover` (a new engine runs it) or
+             *     `refused` (nothing changed: `outcome` says why).
+             */
+            applied: string;
+            /** @description Each interface it changed: its code version before and after (12 hex characters). */
+            changes: components["schemas"]["ReloadChange"][];
+            /**
+             * Format: int32
+             * @description The deployment it recorded (in place: `how` = `reload`).
+             */
+            deployment?: number | null;
+            /** @description It runs the folder as it is now (applied, or nothing to apply). */
+            ok: boolean;
+            /** @description What it did, or why it didn't, in words. */
+            outcome: string;
+            plan?: components["schemas"]["PlanInfo"] | null;
+            /** @description What it did, a line per interface (in place). */
+            steps: string[];
+            /**
+             * Format: int64
+             * @description How long it took, in milliseconds (the handover's: until the new engine sent).
+             */
+            took_ms: number;
+            /**
+             * @description Interfaces changed over someone else's work (the "replaces" check: folder mode warns), by
+             *     interface, with why.
+             */
+            warnings: {
+                [key: string]: string;
+            };
+        };
+        /** @description What to reload with. */
+        ReloadRequest: {
+            /**
+             * @description Refuse what only the handover applies (ductus.yaml, resources.yaml, docs-schema.yaml, the
+             *     environment's secrets file changed) instead of taking it. Default: false.
+             */
+            in_place_only?: boolean;
+            /**
+             * @description Why: recorded with the deployment, beside who asked. Optional (a reload records what
+             *     changed whoever asks; `systemctl reload` gives none).
+             */
+            reason?: string | null;
         };
         /** @description The whole report: what `ductus doctor` prints and `--report` saves. */
         Report: {
@@ -4123,6 +4207,56 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["EngineInfo"];
+                };
+            };
+        };
+    };
+    reload_engine: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ReloadRequest"];
+            };
+        };
+        responses: {
+            /** @description It runs the folder as it is now: `applied` says how */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReloadReport"];
+                };
+            };
+            403: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ErrorBody"];
+                };
+            };
+            /** @description Refused, nothing changed: `outcome` says why */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReloadReport"];
+                };
+            };
+            /** @description The handover failed: this engine goes on as it was */
+            500: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ReloadReport"];
                 };
             };
         };

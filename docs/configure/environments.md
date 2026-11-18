@@ -123,8 +123,8 @@ databases:
   read the values, so the key is what to protect.
 - **Without the key**, a project that uses a secret can't be read for that environment: the
   engine's start and `ductus validate` stop and say which secret is missing.
-- **Rotating a secret:** `ductus secret set` the new value, commit, deploy (`systemctl reload
-  ductus` on Linux). Rotating the *key* means setting every secret again with the new key.
+- **Rotating a secret:** `ductus secret set` the new value, commit, deploy (`ductus reload`:
+  a changed secrets file is applied by the handover, a new engine beside the running one). Rotating the *key* means setting every secret again with the new key.
 
 ## Console lines from your code
 

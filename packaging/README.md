@@ -135,7 +135,9 @@ becomes `0.5.0~dev.20261009`, which sorts before `0.5.0`.
   which waits `RestartSec`). A stop, a failed start and a drain close the ports for real. No start
   timeout (`TimeoutStartSec=infinity`): a start migrates first, which can take long.
 - **Upgrade:** a running service is handed over to the new version (`systemctl reload`:
-  `ExecReload=ductus handover --with-environment`, asking the engine over `/run/ductus/control`;
+  `ExecReload=ductus reload --with-environment`, asking the engine over `/run/ductus/control`; a
+  new program on disk is one of the changes it hands over for, a project change alone goes in
+  place;
   no connection refused, longest ACK wait 0.06–0.07 s for a reload and 0.17–0.22 s for an upgrade under real systemd 255 and 252); one that can't take over leaves the old version
   running and the install says so. A running version without the handover (before 0.6.6.3) is
   restarted instead; a stopped one stays stopped.

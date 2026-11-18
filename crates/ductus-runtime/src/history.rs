@@ -128,7 +128,8 @@ pub struct FileChange {
 #[schema(as = HistoryDeployment)]
 pub struct DeploymentDetail {
     pub id: i32,
-    /// `start`, `service`, `handover` or `deploy` (a deploy applied in place, without a handover).
+    /// `start`, `service`, `handover`, `deploy` (a release applied in place, without a handover)
+    /// or `reload` (the project folder applied in place).
     pub how: String,
     pub reason: Option<String>,
     pub host: String,

@@ -25,7 +25,8 @@ pub struct NewDeployment<'a> {
     pub host: &'a str,
     /// The binary's version.
     pub version: &'a str,
-    /// `start`, `service`, `handover` or `deploy` (applied in place, 0.7.5).
+    /// `start`, `service`, `handover`, `deploy` (a release applied in place, 0.7.5) or `reload`
+    /// (the project folder applied in place, 0.7.5.3).
     pub how: &'a str,
     pub by: &'a str,
     pub reason: Option<&'a str>,
@@ -75,7 +76,7 @@ pub struct Current {
     pub files: Vec<String>,
     pub deployment: i32,
     pub at: DateTime<Utc>,
-    /// `start`, `service`, `handover` or `deploy`.
+    /// `start`, `service`, `handover`, `deploy` or `reload`.
     pub how: String,
     pub by: String,
     pub host: String,

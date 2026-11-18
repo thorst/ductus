@@ -11,7 +11,8 @@ does today is **one engine per interface, a standby you start**, and no automati
 |---|---|---|
 | A restart (Linux) | systemd keeps the listening sockets across it | nothing refused; ~0.2–0.3 s wait for an ACK ([measured](../nuances/upgrades.md#on-linux-a-restart-refuses-no-connection-senders-wait-for-it-level-2)) |
 | A crash (Linux) | systemd restarts it after 5 s, with the same sockets | nothing refused; ~5 s wait |
-| A project deploy or an upgrade (Linux) | `systemctl reload`: the new engine starts beside the old one and takes over | nothing refused; sending paused ~35 ms (1 interface) to ~0.6 s (1,001) ([measured](../nuances/upgrades.md#systemctl-reload-hands-over-receiving-never-stops-sending-pauses-briefly-level-2)) |
+| A project deploy (any system) | `ductus reload` / `systemctl reload`: in place, only the changed interfaces take the change ([applying the folder](deployments.md#applying-the-folder-ductus-reload)) | nothing refused; the changed interfaces' sending pauses for milliseconds, the others' not at all |
+| An upgrade, or a change only a start reads (Linux) | `systemctl reload`: the new engine starts beside the old one and takes over | nothing refused; sending paused ~35 ms (1 interface) to ~0.6 s (1,001) ([measured](../nuances/upgrades.md#systemctl-reload-hands-over-receiving-never-stops-sending-pauses-briefly-level-2)) |
 | A restart (Windows) | the service stops and starts | a short gap: measured 0 refused, a few resets, ~1.1 s longest wait |
 | An upgrade (Windows) | the MSI stops, replaces and starts the service | down 3.1–3.5 s: a few refused, nothing lost ([nuance](../nuances/upgrades.md#windows-and-containers-a-restart-is-a-short-gap-level-2)) |
 | The database restarts or fails over | sending, file pickup and schedules pause; receiving goes on; the engine reconnects and catches up | nothing, as long as the database takes writes ([nuance](../nuances/engines.md#losing-the-database-connection-pauses-sending-not-receiving-level-3)) |
@@ -78,20 +79,26 @@ Everything the engine knows is in Postgres: the messages, the queues, the audit 
 
 ## Deploying and upgrading without a gap
 
-- **Linux**: `systemctl reload ductus` for a project change, and the package's upgrade for a new
-  version, both hand over: the new engine starts on the same listening sockets, takes over once
-  it's ready, and the old one stops. Receiving never stops. A new version or project that can't
-  start leaves the running one serving, and the reload says why
+- **A project change, everywhere**: `ductus reload` (`systemctl reload ductus`, `SIGHUP`, the
+  Windows service's reload) applies it in place: only the changed interfaces take the change,
+  between two messages or restarting alone, and every other interface goes on
+  ([applying the folder](deployments.md#applying-the-folder-ductus-reload)). A project that
+  doesn't load is refused, nothing changed.
+- **Linux**: what only a start reads (an upgrade's new version, ductus.yaml, resources.yaml,
+  ductus.env) and `ductus handover` hand over: the new engine starts on the same listening
+  sockets, takes over once it's ready, and the old one stops. Receiving never stops. A new version
+  or project that can't start leaves the running one serving, and the reload says why
   ([nuance](../nuances/upgrades.md#a-new-version-or-project-that-cant-start-leaves-the-running-one-serving-level-2)).
-  No drain, no maintenance window for the senders. Every start and handover records what each
-  interface runs, by whom and why: `sudo ductus handover -m "why"` instead of `systemctl reload`
-  puts your name and reason on it ([what runs, recorded](deployments.md#who-and-why)).
-- **Windows, containers, a plain `ductus run`**: a project change or a deploy hands over too,
-  inside the engine's own process: the new engine starts beside the running one on copies of the
-  same listening sockets and takes over the same way, so receiving never stops and a project that
-  can't start leaves the running one serving. Ask for it with `ductus handover` (Windows: from an
-  elevated shell, it asks the service), `SIGHUP` (`docker kill --signal HUP <container>`), or a
-  deploy ([releases](releases.md#deploy-a-release)). The same binary runs on: a new version still
+  No drain, no maintenance window for the senders. Every start, reload and handover records what
+  each interface runs, by whom and why: `sudo ductus reload -m "why"` instead of `systemctl
+  reload` puts your name and reason on it ([what runs, recorded](deployments.md#who-and-why)).
+- **Windows, containers, a plain `ductus run`**: a handover runs inside the engine's own
+  process: the new engine starts beside the running one on copies of the same listening sockets
+  and takes over the same way, so receiving never stops and a project that can't start leaves the
+  running one serving. Ask for a reload with `ductus reload` (through the API), `SIGHUP`
+  (`docker kill --signal HUP <container>`) or the service's reload, for a handover with `ductus
+  handover` (Windows: from an elevated shell, it asks the service), or deploy
+  ([releases](releases.md#deploy-a-release)). The same binary runs on: a new version still
   needs a restart or the MSI, a short gap (above), so pick a quiet moment for those; zero-downtime
   Windows upgrades are planned for v1.0
   ([nuance](../nuances/upgrades.md#without-a-control-socket-the-handover-runs-in-the-engines-own-process-level-2)).

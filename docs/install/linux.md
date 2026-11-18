@@ -134,15 +134,18 @@ journalctl -u ductus -f                # the log; "started interfaces=12 …" wh
 
 ## Deploy a change, upgrade
 
-**Project changes** (new code, a new interface): pull the project, then reload. The new project
-starts beside the running engine and takes over once it's ready; nothing is refused, and a
-project that can't start leaves the running one serving
-([deploying](../nuances/upgrades.md#deploying-project-changes-systemctl-reload-level-1)):
+**Project changes** (new code, a new interface): pull the project, then reload. The running
+engine applies it in place: only the interfaces that changed take the change, the others never
+pause; a change only a start reads (ductus.yaml, resources.yaml, ductus.env) starts a new engine
+beside the running one, which takes over once it's ready. Nothing is refused either way, and a
+project that doesn't load leaves the running one serving as it was
+([deploying](../nuances/upgrades.md#deploying-project-changes-systemctl-reload-level-1),
+[applying the folder](../operate/deployments.md#applying-the-folder-ductus-reload)):
 
 ```sh
 sudo -u ductus git -C /var/lib/ductus/project pull
 sudo -u ductus ductus validate --env-file /etc/ductus/ductus.env --root /var/lib/ductus/project
-sudo systemctl reload ductus
+sudo ductus reload -m "why"          # or: sudo systemctl reload ductus (recorded as systemd's)
 ```
 
 **Upgrades**: run the new version's `ductus upgrade --check` from its

@@ -54,8 +54,9 @@ What each state means exactly, and when it shows:
 - **Upgrades**: `ductus upgrade --check` with the new version first, then `ductus replay` for the
   evidence a change board asks for ([resend and replay](resend.md#replay-a-period-before-a-change)).
 - **A project change** (new code, a new destination): `ductus test` and `ductus validate --env
-  prod` in CI, then deploy. On Linux, `systemctl reload ductus` deploys without refusing a single
-  connection ([high availability](high-availability.md#deploying-and-upgrading-without-a-gap)).
+  prod` in CI, then deploy. `ductus reload` (`systemctl reload ductus` on Linux) deploys in place,
+  pausing only what changed and refusing not a single connection
+  ([high availability](high-availability.md#deploying-and-upgrading-without-a-gap)).
   Each start and handover records what every interface runs, from which commit, by whom and why
   ([what runs, recorded](deployments.md)). A release (`ductus release`) is the commit as one
   checksummed file, and `ductus release check --env prod` checks it against prod's settings and

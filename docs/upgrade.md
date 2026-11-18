@@ -238,9 +238,9 @@ and sends. **Receiving never stops** and sending pauses for a moment (measured u
 systemd, 4 senders at 200 messages/s: 0 refused, longest wait for an ACK 0.17–0.22 s, nothing
 lost: [nuance](nuances/upgrades.md#systemctl-reload-hands-over-receiving-never-stops-sending-pauses-briefly-level-2)).
 
-The handover's own lines, from an engine handing over to the program now on disk (`ductus
-handover` is what `systemctl reload` runs, with the service's control socket; these are the lines
-`journalctl -u ductus` shows):
+The handover's own lines, from an engine handing over to the program now on disk (`systemctl
+reload` runs `ductus reload`, which hands over when the program on disk is a new one, as `ductus
+handover` always does; these are the lines `journalctl -u ductus` shows):
 
 ```text
 $ ductus handover --control …/control
@@ -273,9 +273,9 @@ again; `C:\ProgramData\Ductus` (settings, project, logs) is never touched. The e
 a few seconds (an MSI upgrade measured **3.1–3.5 s**: a few connections refused or reset,
 nothing lost), so choose a quiet moment
 ([nuance](nuances/upgrades.md#windows-and-containers-a-restart-is-a-short-gap-level-2)). A
-project change or a deploy hands over without a gap (`ductus handover`, in the service's own
-process), but a new version needs the new program, so the MSI restarts the service: a handover
-to a new version on Windows is planned for v1.0. Details (a service stopped on purpose, a
+project change or a deploy goes without a gap (`ductus reload` applies a project change in place,
+a handover runs in the service's own process), but a new version needs the new program, so the
+MSI restarts the service: a handover to a new version on Windows is planned for v1.0. Details (a service stopped on purpose, a
 password account, Restart Manager): [Windows installer](install/windows.md#upgrade).
 
 ### The portable archive

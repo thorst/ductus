@@ -199,8 +199,8 @@ pub const ACCESS: &[(&str, &str, &str)] = &[
     ("POST", "/upstream/releases/{id}", "deploy"),
 ];
 
-pub use metrics::{METRICS, Metric};
 pub(crate) use deployments::in_place_outcome;
+pub use metrics::{METRICS, Metric};
 pub(crate) use reload::report as reload_report;
 
 /// The OpenAPI document, without an engine (`ductus api-spec`: the web UI's types are made

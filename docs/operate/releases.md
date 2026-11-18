@@ -11,7 +11,8 @@ You make releases, check them from a shell or CI,
 environment, [deploy them](#deploy-a-release) to an engine in release mode (Linux, Windows,
 containers), [promote them and roll back](#promote-and-roll-back), from a shell or from
 [the web UI's Releases page](#from-the-web-ui-the-releases-page). An engine in folder mode deploys
-as before (`git pull` and `systemctl reload ductus`, [what runs, recorded](deployments.md)).
+as before (`git pull` and `ductus reload`, in place by the same rules as a release:
+[applying the folder](deployments.md#applying-the-folder-ductus-reload)).
 
 **When not to bother:** a project you deploy only to your own machine with `ductus dev`. A
 release earns its place once code goes through review, or to more than one environment.
@@ -1299,7 +1300,7 @@ interface in a row: 26 MB over the first 25, then about 130 KB a deploy (code an
 longer runs stays loaded until the next handover or restart:
 [nuance](../nuances/releases.md#a-deploy-in-place-pauses-the-changed-interface-while-its-code-loads-level-3)).
 A handover or restart gives it back. An engine deployed in place hundreds of times a day can
-reload (`systemctl reload ductus`) in a quiet hour now and then; a later step replaces an
+hand over (`sudo ductus handover`) in a quiet hour now and then; a later step replaces an
 isolate on its own past a budget.
 
 What the Releases page reads, the same project (0.7.4.5, `scripts/bench-release.sh`, three

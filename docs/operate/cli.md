@@ -135,8 +135,9 @@ accepting: taking new messages
 - `--stop` exits the engine once drained (the service manager then sees a clean stop).
 - **Senders are refused while it drains**, on purpose: they hold their messages and resend once
   the engine takes them again ([nuance](../nuances/upgrades.md#a-stopped-service-a-failed-start-and-a-drain-refuse-connections-on-purpose-level-2)).
-- **A drain isn't needed for an upgrade or a project deploy** on Linux: `systemctl reload ductus`
-  hands over without refusing anything ([high availability](high-availability.md#deploying-and-upgrading-without-a-gap)).
+- **A drain isn't needed for a project deploy or an upgrade**: `ductus reload` applies a project
+  change in place, and an upgrade's `systemctl reload ductus` hands over, neither refusing anything
+  ([high availability](high-availability.md#deploying-and-upgrading-without-a-gap)).
 - A drain finishes only when every destination has caught up, so a receiver that's down keeps it
   draining ([nuance](../nuances/drain-and-api.md#a-drain-finishes-only-when-every-destination-has-caught-up-level-4)).
   Drain mode isn't remembered across a restart.
@@ -240,7 +241,7 @@ held messages someone still needs ([retention and storage](retention.md)).
 | | Linux | Windows |
 |---|---|---|
 | Start, stop | `systemctl start\|stop ductus` | `Start-Service Ductus`, `Stop-Service Ductus` |
-| Deploy a project change | `systemctl reload ductus` (no gap) | `Restart-Service Ductus` |
+| Deploy a project change | `sudo ductus reload -m "why"` or `systemctl reload ductus` (in place, no gap) | `ductus reload -m "why"` (through the API) or `sc.exe control Ductus paramchange` (in place, no gap) |
 | Is it running | `systemctl status ductus` | `Get-Service Ductus` |
 | Its logs | `journalctl -u ductus` | `C:\ProgramData\Ductus\logs`, the Event Log |
 

@@ -155,7 +155,8 @@ pub async fn check(
 /// Who started this engine and why.
 #[derive(Debug, Clone)]
 pub struct Who {
-    /// `start`, `service`, `handover` or `deploy` (applied in place: `record_in_place`).
+    /// `start`, `service`, `handover`, `deploy` or `reload` (the last two applied in place:
+    /// `record_in_place`).
     pub how: &'static str,
     pub by: String,
     pub reason: Option<String>,

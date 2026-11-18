@@ -257,7 +257,16 @@ impl Isolate {
         let context = runtime.main_context();
         let guard = Guard::new(runtime.v8_isolate(), context, heap_mb);
         runtime.add_near_heap_limit_callback(guard.heap_callback());
-        Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard, clock: None, inspector, loaded, generation: 0 }
+        Self {
+            runtime,
+            entries: Vec::new(),
+            interfaces: Vec::new(),
+            guard,
+            clock: None,
+            inspector,
+            loaded,
+            generation: 0,
+        }
     }
 
     /// The generation the next loads (`add_functions`, `code_files`) name project files by
@@ -275,8 +284,7 @@ impl Isolate {
     /// as the loader read it. An `import("...")` that hasn't run yet is read from disk now. Call
     /// it after loading them (`add_functions`) and before `forget_code_files`.
     pub fn code_files(&self, modules: &[PathBuf]) -> Result<Vec<CodeFile>> {
-        let mut todo =
-            modules.iter().map(|m| Ok(self.module_specifier(m)?.to_string())).collect::<Result<Vec<_>>>()?;
+        let mut todo = modules.iter().map(|m| Ok(self.module_specifier(m)?.to_string())).collect::<Result<Vec<_>>>()?;
         let mut seen = std::collections::BTreeSet::new();
         let mut files = Vec::new();
         while let Some(url) = todo.pop() {

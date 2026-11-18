@@ -200,6 +200,9 @@ pub struct Engine {
     /// The project's own files as this engine runs them (`ProjectFiles`): the start's, then each
     /// reload's in folder mode, which compares the folder with them. Read with `project_files()`.
     project_files: std::sync::RwLock<Arc<ductus_core::project_files::ProjectFiles>>,
+    /// What it was started with outside the project (`crate::started_with`): a reload in this
+    /// process hands over when its settings read again differ.
+    pub(crate) started_with: Vec<(&'static str, String)>,
 }
 
 /// Where the engine's REST API (and web UI) listens, and its `tls` (none: plain HTTP).
@@ -241,6 +244,7 @@ pub struct Parts {
     pub ended: CancellationToken,
     pub sources: crate::sources::Sources,
     pub project_files: ductus_core::project_files::ProjectFiles,
+    pub started_with: Vec<(&'static str, String)>,
 }
 
 impl Engine {
@@ -273,6 +277,7 @@ impl Engine {
             ended,
             sources,
             project_files,
+            started_with,
         } = parts;
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
@@ -318,6 +323,7 @@ impl Engine {
             ended,
             sources,
             project_files: std::sync::RwLock::new(Arc::new(project_files)),
+            started_with,
         });
         tokio::spawn(engine.ended.clone().run_until_cancelled_owned(monitor(Arc::downgrade(&engine))));
         engine

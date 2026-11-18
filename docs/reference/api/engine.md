@@ -12,6 +12,21 @@ The engine: version, environment, uptime, drain state.
 
 - `200` (application/json): [`EngineInfo`](#engineinfo)
 
+## `POST /api/v1/engine/reload`
+
+Apply the project folder as it is now (folder mode): only the interfaces whose files or filled-in settings changed take the change (between two messages, or restarting alone; added ones start, removed ones stop), the others never pause. What only a start reads (ductus.yaml, resources.yaml, docs-schema.yaml, the environment's secrets file; a new binary) goes by the handover, unless `in_place_only`. Recorded as a deployment (`how` = `reload`). In release mode it's a handover to the release that runs. 200: it runs the folder (`applied`: `in_place`, `nothing`, `handover`). 409: refused, nothing changed (the folder doesn't load, a start would refuse it, `in_place_only` and it needs the handover, another reload or handover under way). 500: a handover that failed (this engine goes on as it was). Needs the `deploy` permission.
+
+**Who may call it:** an operator or admin with the `deploy` permission (admins have it).
+
+**Body** (application/json): [`ReloadRequest`](#reloadrequest)
+
+**Answers**
+
+- `200` It runs the folder as it is now: `applied` says how (application/json): [`ReloadReport`](#reloadreport)
+- `403` (application/json): [`ErrorBody`](#errorbody)
+- `409` Refused, nothing changed: `outcome` says why (application/json): [`ReloadReport`](#reloadreport)
+- `500` The handover failed: this engine goes on as it was (application/json): [`ReloadReport`](#reloadreport)
+
 ## `GET /api/v1/events`
 
 Live updates (Server-Sent Events): an `update` event with every interface's queues, health and the drain state, sent at once and then whenever a count or a health state changes or a delivery finishes (checked every 2 s).
@@ -178,10 +193,10 @@ What an interface runs, and the deployment it came with.
 | Field | Type | |
 |---|---|---|
 | `at` | time (RFC 3339) |  |
-| `by` | text | The account that started it, the person who asked for the handover or deploy, or `systemd (systemctl reload)`. |
+| `by` | text | The account that started it, the person who asked for the handover, deploy or reload, or `systemd (systemctl reload)`. |
 | `changed` | number | Interfaces whose code version is new for them with this deployment. |
 | `git_commit` (optional) | text or null | The project's git commit (HEAD); none without a git repository. |
-| `how` | text | `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`, or `deploy` (a deploy applied in place: the engine kept running, only the changed interfaces took their new code). |
+| `how` | text | `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`, `deploy` (a release applied in place: the engine kept running, only the changed interfaces took their new code) or `reload` (the project folder applied in place, the same way). |
 | `id` | number | The deployment's id (`deployments.id`). |
 | `reason` (optional) | text or null | Why (`ductus handover -m`); none when nobody said. |
 | `release` (optional) | text or null | Release mode (`ductus run --releases`): the release it runs, in hex; none in folder mode. Its commit and files not committed are then the release's. |
@@ -359,7 +374,7 @@ The first message waiting in a lane: the next one its worker handles.
 | `from` (optional) | text or null | The code version before (12 hex characters); none when new here, or unchanged. |
 | `git_commit` (optional) | text or null | The project's commit then (hex); none without git. |
 | `host` | text |  |
-| `how` | text | `start`, `service`, `handover` or `deploy` (a deploy applied in place, without a handover). |
+| `how` | text | `start`, `service`, `handover`, `deploy` (a release applied in place, without a handover) or `reload` (the project folder applied in place). |
 | `id` | number |  |
 | `reason` (optional) | text or null |  |
 | `to` (optional) | text or null | The code version from then; none when unchanged (also when only `variables` changed). |
@@ -597,6 +612,25 @@ An interface's lanes (`ordering`): how many, and while a change is under way, th
 | `paused` (optional) | [`PauseInfo`](#pauseinfo) or null |  |
 | `pending` | number | Messages waiting for it. |
 
+### `PlanInfo`
+
+What a release changes here, by kind (`changes::plan`).
+
+| Field | Type | |
+|---|---|---|
+| `changes` | list of [`PlannedChange`](#plannedchange) | Every interface whose code version changes, is added or is removed. |
+| `handover_because` | list of text | Why it needs the handover, a line per reason (the project's own files read at a start: ductus.yaml, resources.yaml, docs-schema.yaml, a secrets file); empty: it applies in place (every change to an interface does, some restarting it alone: `changes[].restarts`). |
+| `project` | list of text | What the project's own files change in place, a line each: the engine's environment file's variables (`environments/prod.yaml: MLLP_PORT "6661" → "6666"`) and `console:`, another environment's file changing nothing here. |
+
+### `PlannedChange`
+
+| Field | Type | |
+|---|---|---|
+| `interface` | text |  |
+| `restarts` (optional) | text or null | Why it restarts alone (what a start sets up for it changes: `format`, `ordering`, `workers`...; its workers all stop, then start on the new settings, its senders never notice); absent when its workers take the change between two messages. |
+| `variables` (optional) | list of [`HistoryVariable`](#historyvariable) | The environment variables whose new values reach it, with their values before and after; absent when none do. |
+| `what` | list of text | What changed, in words: `code`, `destinations.lab`, `destination lab added`, `retry`, `source`, `source (MLLP_PORT)` (a variable's new value moved it), `code reads EMPI_URL` (reloaded for a variable its code names), `added`, `removed`, ... |
+
 ### `Rates`
 
 | Field | Type | |
@@ -617,6 +651,41 @@ An engine in release mode, and what this environment takes.
 | `requires` | list of text | Environments a release must have been deployed to first (`DUCTUS_DEPLOY_REQUIRES`); empty: none. |
 | `reuse_check_seconds` | number | How long a deploy may reuse a passing check instead of running the gate again (`DUCTUS_DEPLOY_REUSE_CHECK`); 0: the gate runs at every deploy. |
 | `running` (optional) | text or null | The release it runs, in hex; none before the first deploy. |
+
+### `ReloadChange`
+
+One interface a reload changed.
+
+| Field | Type | |
+|---|---|---|
+| `from` (optional) | text or null | Its version before; null: new here. |
+| `interface` | text |  |
+| `to` | text |  |
+
+### `ReloadReport`
+
+How a reload went: what `ductus reload --json` prints and `POST /engine/reload` answers.
+
+| Field | Type | |
+|---|---|---|
+| `applied` | text | `in_place`, `nothing` (the folder is what runs), `handover` (a new engine runs it) or `refused` (nothing changed: `outcome` says why). |
+| `changes` | list of [`ReloadChange`](#reloadchange) | Each interface it changed: its code version before and after (12 hex characters). |
+| `deployment` (optional) | number or null | The deployment it recorded (in place: `how` = `reload`). |
+| `ok` | true or false | It runs the folder as it is now (applied, or nothing to apply). |
+| `outcome` | text | What it did, or why it didn't, in words. |
+| `plan` (optional) | [`PlanInfo`](#planinfo) or null |  |
+| `steps` | list of text | What it did, a line per interface (in place). |
+| `took_ms` | number | How long it took, in milliseconds (the handover's: until the new engine sent). |
+| `warnings` | map of name to text | Interfaces changed over someone else's work (the "replaces" check: folder mode warns), by interface, with why. |
+
+### `ReloadRequest`
+
+What to reload with.
+
+| Field | Type | |
+|---|---|---|
+| `in_place_only` (optional) | true or false | Refuse what only the handover applies (ductus.yaml, resources.yaml, docs-schema.yaml, the environment's secrets file changed) instead of taking it. Default: false. |
+| `reason` (optional) | text or null | Why: recorded with the deployment, beside who asked. Optional (a reload records what changed whoever asks; `systemctl reload` gives none). |
 
 ### `ResourceCalls`
 

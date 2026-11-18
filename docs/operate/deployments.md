@@ -1,13 +1,14 @@
 # What runs, recorded
 
-Every time an engine starts or hands over (`systemctl reload`), it records what each interface
-runs, from which git commit, who started it and why. This page is for whoever deploys and
-whoever has to answer "what changed, and when?": which code a feed ran last Tuesday, who
-deployed the change that broke it, whether what's running is what's in git.
+Every time an engine starts, reloads its project (`ductus reload`, `systemctl reload`) or hands
+over, it records what each interface runs, from which git commit, who started it and why. This
+page is for whoever deploys and whoever has to answer "what changed, and when?": which code a
+feed ran last Tuesday, who deployed the change that broke it, whether what's running is what's in
+git.
 
 Nothing to set up: a start records it on its own, from 0.7.3. It works with the way most sites
-deploy today (`git pull` on the server, then `systemctl reload ductus`) and needs no release
-process. What's recorded is in the database (the `deployments` table and its neighbours,
+deploy today (`git pull` on the server, then `ductus reload` or `systemctl reload ductus`:
+[applying the folder](#applying-the-folder-ductus-reload)) and needs no release process. What's recorded is in the database (the `deployments` table and its neighbours,
 [schema](../schema.md#deployments)), on the Overview, on each interface's page and in the API.
 
 ## What's recorded
@@ -20,7 +21,7 @@ At every start and every handover, once the engine holds its interfaces:
 | **What changed** | The interfaces whose version is new for them, with what they ran before | `adt-in 36792608ed03 → ab2dae752eb7` |
 | **Who** | The account that started it, or the person who asked for the handover ([below](#who-and-why)) | `todd` |
 | **Why** | What the person said (`-m`), when they said | `lab wants MSH-5 set` |
-| **How** | `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`, `deploy` (a release deployed in place: the engine went on, only the changed interfaces took their new code; [releases](releases.md#in-place-or-by-the-handover)) | `handover` |
+| **How** | `start` (someone ran it), `service` (systemd or the Windows service started it), `handover`, `reload` (the project folder applied in place: the engine went on, only the changed interfaces took their new code; [below](#applying-the-folder-ductus-reload)), `deploy` (a release deployed in place, the same way; [releases](releases.md#in-place-or-by-the-handover)) | `reload` |
 | **The git commit** | The project's HEAD, and the files the interfaces run that aren't that commit's | `commit 71be1444e8bc, 1 file not committed` |
 | **The engine** | Its version, environment, host and run (as the audit log names it) | `0.7.0`, `prod`, `ductus-01` |
 
@@ -91,32 +92,65 @@ a62ffecddebf490aec72a1e6d737d9daa4f9977e4c211a90df77c384d32c6524  interfaces/adt
 |---|---|---|
 | `ductus run` in a terminal, or `ductus dev` | the account running it, `how` = `start` | none |
 | systemd, or the Windows service (a start, a restart, a crash's restart) | the service's account (`ductus`), `how` = `service` | none |
-| `systemctl reload ductus` | `systemd (systemctl reload)`, `how` = `handover` | none: systemd passes nothing on |
-| **`sudo ductus handover -m "why"`** | **the person behind `sudo`**, `how` = `handover` | **what `-m` says** |
+| `systemctl reload ductus` | `systemd (systemctl reload)`, `how` = `reload` (or `handover` when it needed one) | none: systemd passes nothing on |
+| **`sudo ductus reload -m "why"`** | **the person behind `sudo`**, `how` = `reload` | **what `-m` says** |
+| `ductus reload -m "why"` through the API (Windows, no control socket) | the token's owner, `how` = `reload` | what `-m` says |
+| `sudo ductus handover -m "why"` | the person behind `sudo`, `how` = `handover` | what `-m` says |
 
-So on Linux, **deploy with `ductus handover` when you want the record to say who and why**
-([nuance](../nuances/deployments.md#systemctl-reload-cant-say-who-deployed-level-1)). It's
-the same handover `systemctl reload` runs (the new engine starts beside the old one on the same
-sockets; nothing is refused, [high availability](high-availability.md#deploying-and-upgrading-without-a-gap)):
+So on Linux, **deploy with `sudo ductus reload -m "why"` when you want the record to say who and
+why** ([nuance](../nuances/deployments.md#systemctl-reload-cant-say-who-deployed-level-1)): it's
+the same reload `systemctl reload` runs. `sudo` is needed because only the engine's account and
+root may ask it over its control socket; the record names the person `sudo` ran for. `-m` is
+optional; nothing refuses a reload without one.
 
-After a `git pull` on the server, `sudo ductus handover -m "lab wants MSH-5 set"`. From a lab
-engine (a development build, hence its path; run as the engine's own account, so without `sudo`):
+## Applying the folder: `ductus reload`
+
+After a `git pull` on the server, `ductus reload` (0.7.5.3) applies the project folder as it is
+now **in place**: the engine compares the folder with what it runs, and only the interfaces whose
+files or settings changed take the change; every other interface goes on untouched, and no new
+engine starts ([nuance](../nuances/deployments.md#a-reload-applies-the-folder-in-place-only-what-a-start-reads-hands-over-level-1)).
+
+| In the folder | Applied |
+|---|---|
+| An interface's code, or a file it imports (`lib/codes.ts`: every interface that imports it) | between two messages: the message in hand finishes on the old code, the next runs the new |
+| Its `interface.yaml`: destinations, `retry`, `source`, ... | the same; a moved port opens before the old one closes ([how sources change](../nuances/releases.md#a-source-changed-in-place-moves-swaps-or-restarts-alone-level-2)) |
+| What a start sets up for it: `format`, `ordering`, `workers`, `dedupe`, `retention`, ... | that interface restarts alone, its senders never notice ([nuance](../nuances/releases.md#an-interface-whose-start-time-settings-change-restarts-alone-level-2)) |
+| An interface folder added, or removed | started, or stopped (its waiting messages kept) |
+| A value in this environment's `environments/<env>.yaml` | each interface it reaches, as above ([nuance](../nuances/releases.md#a-variables-new-value-reaches-what-it-fills-in-and-the-code-that-names-it-level-2)) |
+| ductus.yaml, resources.yaml, docs-schema.yaml, this environment's secrets file; a new program on disk; the engine's own settings (`--with-environment`, an env file) | **the handover**: a new engine beside the running one, as `ductus handover` ([high availability](high-availability.md#deploying-and-upgrading-without-a-gap)) |
+| Nothing | nothing: "the folder is what runs" |
+
+**Why in place:** a handover starts every interface again, so every interface's sending pauses
+while the engines swap (0.4–0.6 s at 1,001 interfaces); a reload pauses only what changed.
+**What it compares with:** what the engine runs (each version's files, as the database keeps
+them, and the project's own files as the start read them), never git or the disk: by the time
+you reload, the folder already holds the new files. **When it refuses:** a folder that doesn't
+load (a broken interface.yaml) or that a start would refuse (two interfaces on one port) changes
+nothing, and says why; so does `--in-place-only` when the change needs the handover (to keep
+those to a quiet hour). A reload is recorded as a deployment (`how` = `reload`; [history](#history-who-changed-what-and-why)
+says "in place by a reload") and in the audit log (`engine.reload`). Code an interface imports
+only later (`import()`) reads the file when that runs
+([nuance](../nuances/deployments.md#after-a-reload-code-imported-later-reads-the-file-as-it-is-then-level-4)).
+
+How it reaches the engine: over its control socket where there is one (Linux under the package's
+service, as root or the engine's account; containers), else the engine's API (Windows, a plain
+`ductus run`, another machine) with a token that has the `deploy` permission (`ductus token
+create reload --role operator --permission deploy`, then `DUCTUS_API_TOKEN`).
+`systemctl reload ductus`, `SIGHUP` and the Windows service's reload (`sc.exe control Ductus
+paramchange`) ask for the same reload, answered only in the log. [`ductus
+reload`](../reference/cli/reload.md) has the options; `--json` prints the report
+`POST /engine/reload` answers.
+
+A change to one interface's code, from a lab engine (run as the engine's own account, so without
+`sudo`):
 
 ```text
-$ ductus handover -m "lab wants MSH-5 set"
-started /home/todd/target/release/ductus (pid 5470): it reads the project, migrates the database and loads every interface's code while this one runs
-ductus 0.7.0-dev (pid 5470) is ready after 372 ms and receives beside this one: stopping this one
-this engine stopped in 1 ms and let go of its interfaces: the new one takes them
-handed over to ductus 0.7.0-dev (pid 5470): receiving never stopped, sending paused 31 ms
+TRANSCRIPT 0.7.5.3.1
 ```
 
-`sudo` is needed because only the engine's account and root may ask it for a handover; the
-record names the person `sudo` ran for. [`ductus handover`](../reference/cli/handover.md) has the
-options.
-
-`-m` is optional; nothing refuses a deploy without one. Releases (0.7.4) will require a reason
-outside dev. On Windows there's no handover: a restart is recorded as the service's start, with
-no reason, until deploys through the API (0.7.4).
+`ductus handover` is the full handover whatever changed: a new engine, every interface started
+again. Use it to give back the memory of code replaced in place many times
+([nuance](../nuances/releases.md#a-deploy-in-place-pauses-the-changed-interface-while-its-code-loads-level-3)).
 
 ## Git
 

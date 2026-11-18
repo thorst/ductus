@@ -53,9 +53,10 @@ At start, the engine reads `ductus.yaml`, then the environment it was started wi
 (`DUCTUS_ENV`, or `--env`), fills every `${NAME}` and `${secret:NAME}` in from it, reads
 `resources.yaml`, then every `interfaces/*/interface.yaml`, and loads each interface's code. Any
 mistake stops the start with the file and what's wrong: a typo in a setting's name too, since
-every file refuses keys it doesn't know. The engine doesn't read its configuration again while it
-runs (only certificate files, every minute, so a renewal needs no restart); a change takes effect
-at the next start, or with `systemctl reload ductus` on Linux
+every file refuses keys it doesn't know. The engine doesn't read its configuration again by itself while
+it runs (only certificate files, every minute, so a renewal needs no restart); a change takes
+effect at the next start, or with `ductus reload` (`systemctl reload ductus` on Linux), which
+applies it in place where it can
 ([deploying](../nuances/upgrades.md#deploying-project-changes-systemctl-reload-level-1)).
 
 `ductus validate` reads it the same way without starting anything, for an environment

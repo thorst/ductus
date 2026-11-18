@@ -343,7 +343,11 @@ fn a_new_generation_loads_changed_files_again_and_an_old_one_gets_its_modules_ba
     assert_eq!(call(&mut host, start), "ZGN|one|1");
     assert_eq!(call(&mut host, start), "ZGN|one|2");
 
-    std::fs::write(dir.path().join("lib/shared.ts"), "let n = 100;\nexport const count = () => ++n;\nexport const label = \"two\";\n").unwrap();
+    std::fs::write(
+        dir.path().join("lib/shared.ts"),
+        "let n = 100;\nexport const count = () => ++n;\nexport const label = \"two\";\n",
+    )
+    .unwrap();
     let reloaded = load(&mut host, 1);
     assert_eq!(call(&mut host, reloaded), "ZGN|two|101", "the shared file read again: its new text, fresh state");
     let files = host.code_files(std::slice::from_ref(&module)).unwrap();

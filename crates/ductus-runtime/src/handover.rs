@@ -324,13 +324,14 @@ impl Requested {
     /// A reload (`Request::in_place`): applied in place where it can, answered, and None; or,
     /// when only the handover applies it, said, and the request given back for the handover.
     /// `new_process`: a handover here starts a new process (which runs a new binary).
-    async fn reload(mut self, engine: &Arc<Engine>, new_process: bool) -> Option<Self> {
+    async fn reload(mut self, engine: &Arc<Engine>, new_process: bool, settings: Option<String>) -> Option<Self> {
         let request = &self.request;
         let reloaded = crate::reload::reload(
             engine,
             &request.asked,
             request.environment.as_deref(),
             crate::reload::Options { in_place_only: request.in_place_only, new_binary_counts: new_process },
+            settings,
         )
         .await;
         let report = crate::api::reload_report(&reloaded);
@@ -377,6 +378,17 @@ static RELOADS: std::sync::Mutex<Option<(mpsc::Sender<Requested>, Arc<AtomicBool
 /// False when it can't be asked now (no engine takes handovers, or one is under way), said in the
 /// log too.
 pub fn reload(by: &str) -> bool {
+    ask_system(by, true)
+}
+
+/// The system asks for the full handover (the Windows service's control 128, which `ductus
+/// handover` sends there): a new engine on the project or release as it is now, whatever changed,
+/// with the settings read again. Answered like `reload`: in the log.
+pub fn handover(by: &str) -> bool {
+    ask_system(by, false)
+}
+
+fn ask_system(by: &str, in_place: bool) -> bool {
     let current = RELOADS.lock().unwrap().clone();
     let Some((tx, busy)) = current else {
         tracing::warn!(%by, "a reload was asked, but this engine takes no handovers: restart it instead");
@@ -385,14 +397,19 @@ pub fn reload(by: &str) -> bool {
     let request = Request {
         timeout_secs: RELOAD_TIMEOUT.as_secs(),
         asked: Asked { by: Some(by.to_string()), ..Asked::default() },
-        in_place: true,
+        in_place,
         ..Request::default()
     };
     if busy.load(Ordering::SeqCst) || tx.try_send(Requested { request, asker: None }).is_err() {
         tracing::warn!(%by, "a reload was asked while another handover is under way: ignored (ask again once it's done)");
         return false;
     }
-    tracing::info!(%by, "reload asked: the project as it is now, applied in place where it can");
+    match in_place {
+        true => tracing::info!(%by, "reload asked: the project as it is now, applied in place where it can"),
+        false => {
+            tracing::info!(%by, "handover asked: a new engine starts beside this one on the project or release as it is now")
+        }
+    }
     true
 }
 
@@ -505,7 +522,14 @@ impl Control {
                     let new_process = matches!(how, How::Process);
                     #[cfg(not(target_os = "linux"))]
                     let new_process = false;
-                    match requested.reload(engine, new_process).await {
+                    // In this process, the settings are the env file's as it is now: what a
+                    // handover here would read (a new process gets `--with-environment`'s).
+                    let settings = match how {
+                        How::InProcess { rebuild, .. } => crate::reload::settings_changed(engine, rebuild),
+                        #[cfg(target_os = "linux")]
+                        How::Process => None,
+                    };
+                    match requested.reload(engine, new_process, settings).await {
                         Some(back) => requested = back,
                         None => {
                             self.busy.store(false, Ordering::SeqCst);

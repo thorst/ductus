@@ -120,6 +120,7 @@
     - [ductus deploy](reference/cli/deploy.md)
     - [ductus replay](reference/cli/replay.md)
     - [ductus handover](reference/cli/handover.md)
+    - [ductus reload](reference/cli/reload.md)
     - [ductus new](reference/cli/new.md)
     - [ductus ports](reference/cli/ports.md)
     - [ductus impact](reference/cli/impact.md)

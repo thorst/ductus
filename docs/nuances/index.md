@@ -47,11 +47,11 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [People and access](people.md) (19)
 - [Local development](dev.md) (2)
 - [Upgrades](upgrades.md) (17)
-- [What runs, recorded](deployments.md) (17)
+- [What runs, recorded](deployments.md) (19)
 - [Releases](releases.md) (35)
 - [Windows](windows.md) (9)
 
-## Level 1: Foundations (39)
+## Level 1: Foundations (40)
 
 - [Retention is 1, 3 or 7 weeks, not any number of days](retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1) (Retention)
 - [Missing fields read as "" and never throw](transforms.md#missing-fields-read-as--and-never-throw-level-1) (Writing transforms)
@@ -84,6 +84,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Deploying project changes: `systemctl reload`](upgrades.md#deploying-project-changes-systemctl-reload-level-1) (Upgrades)
 - [`ductus replay` shows what a change would do to real traffic, before you make it](upgrades.md#ductus-replay-shows-what-a-change-would-do-to-real-traffic-before-you-make-it-level-1) (Upgrades)
 - [`systemctl reload` can't say who deployed](deployments.md#systemctl-reload-cant-say-who-deployed-level-1) (What runs, recorded)
+- [A reload applies the folder in place; only what a start reads hands over](deployments.md#a-reload-applies-the-folder-in-place-only-what-a-start-reads-hands-over-level-1) (What runs, recorded)
 - [A release is the commit, not the folder](releases.md#a-release-is-the-commit-not-the-folder-level-1) (Releases)
 - [A committed private key refuses the release](releases.md#a-committed-private-key-refuses-the-release-level-1) (Releases)
 - [An engine in release mode runs nothing until a release is deployed, and its API starts on its defaults](releases.md#an-engine-in-release-mode-runs-nothing-until-a-release-is-deployed-and-its-api-starts-on-its-defaults-level-1) (Releases)
@@ -309,7 +310,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - ["Log on as a service": the installer grants it, Group Policy can take it away](windows.md#log-on-as-a-service-the-installer-grants-it-group-policy-can-take-it-away-level-3) (Windows)
 - [A refused connection takes about a second on Windows, and `localhost` may be `::1` first](windows.md#a-refused-connection-takes-about-a-second-on-windows-and-localhost-may-be-1-first-level-3) (Windows)
 
-## Level 4: Advanced (32)
+## Level 4: Advanced (33)
 
 - [A query that holds the message tables for days can pause intake](store.md#a-query-that-holds-the-message-tables-for-days-can-pause-intake-level-4) (The store (Postgres))
 - [Shortening frees disk when partitions go, not at once](retention.md#shortening-frees-disk-when-partitions-go-not-at-once-level-4) (Retention)
@@ -340,6 +341,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A refused certificate is said once, not logged as an error each time](certificates.md#a-refused-certificate-is-said-once-not-logged-as-an-error-each-time-level-4) (Certificates)
 - [Reading payloads is a permission, not part of a role](people.md#reading-payloads-is-a-permission-not-part-of-a-role-level-4) (People and access)
 - [Nested groups: Active Directory answers, other directories are walked](people.md#nested-groups-active-directory-answers-other-directories-are-walked-level-4) (People and access)
+- [After a reload, code imported later reads the file as it is then](deployments.md#after-a-reload-code-imported-later-reads-the-file-as-it-is-then-level-4) (What runs, recorded)
 - [The first decisions after a start wait for the code versions to be saved](deployments.md#the-first-decisions-after-a-start-wait-for-the-code-versions-to-be-saved-level-4) (What runs, recorded)
 - [The first history read after a deploy walks git; later ones don't](deployments.md#the-first-history-read-after-a-deploy-walks-git-later-ones-dont-level-4) (What runs, recorded)
 - [`import()` with a computed name isn't counted](deployments.md#import-with-a-computed-name-isnt-counted-level-4) (What runs, recorded)
