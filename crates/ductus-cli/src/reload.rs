@@ -117,7 +117,12 @@ fn print(report: &Value) {
     let text = |v: &Value| v.as_str().unwrap_or_default().to_string();
     let applied = text(&report["applied"]);
     if applied == "handover" {
-        println!("by the handover: {}", text(&report["outcome"]));
+        // As `ductus handover` ends ("handed over to ductus 0.7.0 (pid 4598): …"): why it took
+        // the handover was said before, as the engine went.
+        match report["ok"].as_bool() {
+            Some(true) => println!("{}", text(&report["outcome"])),
+            _ => eprintln!("error: {}", text(&report["outcome"])),
+        }
         return;
     }
     let plan = &report["plan"];

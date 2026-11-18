@@ -130,7 +130,7 @@ GB=$!
 sleep 1
 reload -m "smaller heap" >"$WORK/reload6.out"
 wait $GB
-check handed-over 'grep -q "by the handover" "$WORK/reload6.out"'
+check handed-over 'grep -q "^reload: by the handover: ductus.yaml changed" "$WORK/reload6.out" && grep -q "^handed over to ductus" "$WORK/reload6.out"'
 for _ in $(seq 1 50); do [ -n "$(pid "$A")" ] && [ "$(pid "$A")" != "$first" ] && break; sleep 0.2; done
 check new-engine '[ -n "$(pid "$A")" ] && [ "$(pid "$A")" != "$first" ]'
 # A handover closes each connection after its last ACK: a frame the sender had already written
