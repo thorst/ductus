@@ -23,6 +23,7 @@ mod me;
 mod messages;
 mod metrics;
 mod releases;
+mod reload;
 mod reports;
 mod retention;
 mod session;
@@ -105,6 +106,7 @@ fn parts() -> (axum::Router<Shared>, utoipa::openapi::OpenApi) {
         .merge(metrics::routes())
         .merge(releases::routes())
         .merge(deployments::routes())
+        .merge(reload::routes())
         .merge(upstream::routes())
         .merge(reports::routes())
         .merge(retention::routes())
@@ -192,11 +194,14 @@ pub const ACCESS: &[(&str, &str, &str)] = &[
     ("POST", "/releases/{id}/check", "deploy"),
     ("POST", "/deployments", "deploy"),
     ("GET", "/deployments", "signed"),
+    ("POST", "/engine/reload", "deploy"),
     ("GET", "/upstream", "signed"),
     ("POST", "/upstream/releases/{id}", "deploy"),
 ];
 
 pub use metrics::{METRICS, Metric};
+pub(crate) use deployments::in_place_outcome;
+pub(crate) use reload::report as reload_report;
 
 /// The OpenAPI document, without an engine (`ductus api-spec`: the web UI's types are made
 /// from it).

@@ -681,18 +681,24 @@ pub struct InPlace {
 /// those added removed again, and the `Err` says why, so the engine
 /// runs one release, never a mix: the deploy then takes the handover (or, `--in-place-only`,
 /// refuses).
+///
+/// The same for a reload in folder mode (`reload`): `next` is then the folder as it is now (a
+/// manifest made in memory, `release` None), `folder` the project and `env` its environment as the
+/// reload read it.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_in_place(
     engine: &Arc<crate::control::Engine>,
     plan: &crate::changes::Plan,
-    next: Arc<Running>,
+    next: &Manifest,
+    release: Option<Arc<Running>>,
     folder: &Path,
+    env: Arc<ductus_core::Environment>,
     who: &Who,
     warnings: &HashMap<String, String>,
 ) -> Result<InPlace> {
     let started = std::time::Instant::now();
-    let env = Arc::new(ductus_core::Environment::load(folder, &engine.environment)?);
     let load = |name: &str| -> Result<ductus_core::InterfaceConfig> {
-        let yaml = next.manifest.interfaces.get(name).and_then(interface_yaml);
+        let yaml = next.interfaces.get(name).and_then(interface_yaml);
         let dir = yaml
             .and_then(|y| Path::new(y).parent())
             .with_context(|| format!("`{name}`: the release has no interface.yaml for it"))?;
@@ -751,10 +757,17 @@ pub async fn apply_in_place(
         }
     };
     let timed = |result, started: std::time::Instant| (result, started.elapsed());
+    // The code this deploy loads, under a generation of its own; each changed interface's old one
+    // kept, to put it back on the modules it ran (folder mode: the disk no longer has their text).
+    let generation = engine.kept.next_generation();
+    let mut generations = HashMap::with_capacity(changed.len());
+    for (config, ..) in &changed {
+        generations.insert(config.name.clone(), engine.kept.generation_of(&config.name).await.unwrap_or_default());
+    }
     // Added first: a changed interface may route to one.
     let adding = added.iter().map(|(config, _)| async {
         let started = std::time::Instant::now();
-        timed(engine.add_interface(config.clone(), folder).await, started)
+        timed(engine.add_interface(config.clone(), folder, generation).await, started)
     });
     let added_results = futures_util::future::join_all(adding).await;
     let names: Vec<String> =
@@ -779,19 +792,19 @@ pub async fn apply_in_place(
         return Err(first.expect("one failed"));
     }
     // Each the way its change needs: its new code between two messages, or restarted alone.
-    let apply_one = |config: ductus_core::InterfaceConfig, root: &Path, restarts: bool| {
+    let apply_one = |config: ductus_core::InterfaceConfig, root: &Path, restarts: bool, generation: u64| {
         let root = root.to_path_buf();
         async move {
             match restarts {
-                true => engine.restart_interface(config, &root).await,
-                false => engine.replace_interface(config, &root).await,
+                true => engine.restart_interface(config, &root, generation).await,
+                false => engine.replace_interface(config, &root, generation).await,
             }
         }
     };
     let restarts = |change: &crate::changes::Change| matches!(change.apply, crate::changes::Apply::Restart(_));
     let applying = changed.iter().map(|(config, _, change)| async {
         let started = std::time::Instant::now();
-        timed(apply_one(config.clone(), folder, restarts(change)).await, started)
+        timed(apply_one(config.clone(), folder, restarts(change), generation).await, started)
     });
     let results = futures_util::future::join_all(applying).await;
     if results.iter().any(|(r, _)| r.is_err()) {
@@ -806,7 +819,8 @@ pub async fn apply_in_place(
                 }
                 Ok(_) => {
                     let root = before.dir.parent().and_then(Path::parent).unwrap_or(folder);
-                    if let Err(e) = apply_one((**before).clone(), root, restarts(change)).await {
+                    let was = generations.get(&before.name).copied().unwrap_or_default();
+                    if let Err(e) = apply_one((**before).clone(), root, restarts(change), was).await {
                         tracing::error!(interface = %before.name, error = %format!("{e:#}"), "couldn't put an interface back on what it ran after a deploy in place failed: it runs the new release's code");
                     }
                 }
@@ -835,24 +849,24 @@ pub async fn apply_in_place(
         steps.push(format!("{}: {} → {version}, {how} ({} ms)", a.interface, change.what.join(", "), took.as_millis()));
         applied.push(a);
     }
-    let deployment = match crate::deployment::record_in_place(engine, who, &applied, Some(next.clone()), warnings).await
-    {
+    let deployment = match crate::deployment::record_in_place(engine, who, &applied, release.clone(), warnings).await {
         Ok(d) => Some(d),
         Err(e) => {
-            tracing::error!(error = %format!("{e:#}"), "a deploy applied in place wasn't recorded");
+            tracing::error!(error = %format!("{e:#}"), how = who.how, "applied in place but not recorded");
             steps.push(format!("⚠ not recorded: {e:#}"));
-            if let Some(releases) = &engine.releases {
-                releases.now_runs(next.clone()); // what runs all the same
+            if let (Some(releases), Some(release)) = (&engine.releases, &release) {
+                releases.now_runs(release.clone()); // what runs all the same
             }
             None
         }
     };
     engine.tidy_releases();
     tracing::info!(
-        release = release::short(&next.hex()),
+        release = release.as_ref().map(|r| release::short(&r.hex()).to_string()),
+        how = who.how,
         interfaces = applied.len(),
         took = ?started.elapsed(),
-        "deploy applied in place: the other interfaces never paused"
+        "applied in place: the other interfaces never paused"
     );
     Ok(InPlace { steps, deployment })
 }

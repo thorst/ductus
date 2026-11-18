@@ -188,6 +188,8 @@ pub struct Isolate {
     inspector: bool,
     /// What the module loader read (`code_files`).
     loaded: Rc<loader::Loaded>,
+    /// The generation project files load as from now on (`set_generation`).
+    generation: u64,
 }
 
 /// Replaces `Date` and `Math.random` so that a replay computes what the engine computed then, and
@@ -255,7 +257,17 @@ impl Isolate {
         let context = runtime.main_context();
         let guard = Guard::new(runtime.v8_isolate(), context, heap_mb);
         runtime.add_near_heap_limit_callback(guard.heap_callback());
-        Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard, clock: None, inspector, loaded }
+        Self { runtime, entries: Vec::new(), interfaces: Vec::new(), guard, clock: None, inspector, loaded, generation: 0 }
+    }
+
+    /// The generation the next loads (`add_functions`, `code_files`) name project files by
+    /// (`loader::generation_query`). V8 knows a module by its URL, so a file loaded again under the
+    /// same one is the module it already has: in a project folder whose files changed on disk (a
+    /// reload in folder mode) the changed code loads under a new generation and is read again,
+    /// while code put back after a failed reload loads under its old one and gets its old modules,
+    /// whatever the disk holds now. 0, a start's, adds nothing to the URLs.
+    pub fn set_generation(&mut self, generation: u64) {
+        self.generation = generation;
     }
 
     /// The project files the code of `modules` runs: each of them and everything they import,
@@ -263,7 +275,8 @@ impl Isolate {
     /// as the loader read it. An `import("...")` that hasn't run yet is read from disk now. Call
     /// it after loading them (`add_functions`) and before `forget_code_files`.
     pub fn code_files(&self, modules: &[PathBuf]) -> Result<Vec<CodeFile>> {
-        let mut todo = modules.iter().map(|m| Ok(file_url(m)?.to_string())).collect::<Result<Vec<_>>>()?;
+        let mut todo =
+            modules.iter().map(|m| Ok(self.module_specifier(m)?.to_string())).collect::<Result<Vec<_>>>()?;
         let mut seen = std::collections::BTreeSet::new();
         let mut files = Vec::new();
         while let Some(url) = todo.pop() {
@@ -285,6 +298,13 @@ impl Isolate {
     /// what's loaded later is recorded from then on.
     pub fn forget_code_files(&self) {
         self.loaded.clear();
+    }
+
+    /// A project module's URL at this isolate's generation (`set_generation`).
+    fn module_specifier(&self, path: &Path) -> Result<ModuleSpecifier> {
+        let mut url = file_url(path)?;
+        url.set_query(loader::generation_query(self.generation).as_deref());
+        Ok(url)
     }
 
     /// Where debuggers open sessions on this isolate; None without the inspector.
@@ -400,7 +420,7 @@ impl Isolate {
         let mut urls = Vec::with_capacity(modules.len());
         let mut glue = String::new();
         for (i, module) in modules.iter().enumerate() {
-            let url = file_url(module)?;
+            let url = self.module_specifier(module)?;
             glue.push_str(&format!("import * as entry{i} from \"{url}\";\n"));
             urls.push(url.to_string());
         }

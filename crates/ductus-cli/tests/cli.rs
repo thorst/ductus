@@ -5885,6 +5885,214 @@ async fn sources_change_in_place_while_their_senders_send() {
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
+/// `ductus reload` (0.7.5.3.1): an engine in folder mode applies the folder in place while A and B
+/// receive. A's code imports a shared file (`lib/stamp.ts`); changing it reloads A alone (its
+/// version and its output change, the same engine runs both, neither sender refused or retried,
+/// every message delivered once, B decided by one version throughout). Over the API (no control
+/// socket asked), an interface added in the folder starts and takes messages; removed, it stops.
+/// A folder that doesn't load is refused with nothing changed; a changed ductus.yaml is refused
+/// with `--in-place-only`, then applied by the handover (a new engine). `ductus history` says
+/// "in place by a reload".
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reload_applies_the_folder_in_place_while_another_interface_sends() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (port_a, port_b, port_c, api) = (free_port(), free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let (a, b, c) = (format!("rla-{nanos}"), format!("rlb-{nanos}"), format!("rlc-{nanos}"));
+    let work = tempfile::tempdir().unwrap();
+    let out_dir = |name: &str| work.path().join(format!("out-{name}"));
+    let interface = |name: &str, port: u16| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\ndestinations:\n  out: {{ file: {{ dir: '{}' }}, script: tag.ts }}\n",
+            out_dir(name).display()
+        )
+    };
+    let shared = "import type { Message } from \"@ductus/sdk\";\nimport { TAG } from \"../../lib/stamp.ts\";\n\nexport function transform(m: Message) {\n  m.set(\"MSH-5\", TAG);\n  return m;\n}\n";
+    let own = "import type { Message } from \"@ductus/sdk\";\n\nexport function transform(m: Message) {\n  m.set(\"MSH-5\", \"B1\");\n  return m;\n}\n";
+    let files = |name: &str, file: &str| format!("interfaces/{name}/{file}");
+    let (a_yaml, b_yaml) = (interface(&a, port_a), interface(&b, port_b));
+    let dir = project(&[
+        (".gitignore", "*.log\n"),
+        ("ductus.yaml", "{}\n"),
+        ("environments/prod.yaml", "variables: {}\n"),
+        ("lib/stamp.ts", "export const TAG = \"A1\";\n"),
+        (files(&a, "interface.yaml").as_str(), a_yaml.as_str()),
+        (files(&a, "tag.ts").as_str(), shared),
+        (files(&b, "interface.yaml").as_str(), b_yaml.as_str()),
+        (files(&b, "tag.ts").as_str(), own),
+    ]);
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    let control = work.path().join("control");
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let token_name = format!("{a}-reloader");
+    let _tokens = Tokens::new([token_name.clone()]);
+    let args = ["token", "create", &token_name, "--role", "operator", "--permission", "deploy"];
+    let out = Command::new(bin).args(args).current_dir(dir.path()).output().unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let token = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    // Over the control socket, or (`api`) the engine's API with the token.
+    let reload = |args: &[&str], api_only: bool| -> (bool, serde_json::Value, String) {
+        let mut command = Command::new(bin);
+        command.arg("reload").args(args).arg("--json").env("SUDO_USER", "ann-test").env_remove("RUNTIME_DIRECTORY");
+        match api_only {
+            true => command
+                .env_remove("DUCTUS_CONTROL")
+                .args(["--api", &format!("http://127.0.0.1:{api}")])
+                .env("DUCTUS_API_TOKEN", &token),
+            false => command.arg("--control").arg(&control),
+        };
+        let out = command.output().unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let report = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
+        (out.status.success(), report, said)
+    };
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let running = async |name: &str| -> Option<u32> {
+        let engines = store.live_engines().await.unwrap();
+        engines.iter().find(|e| e.interfaces.iter().any(|i| i == name)).map(|e| e.pid as u32)
+    };
+
+    let log = work.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let mut first = Child(
+        Command::new(bin)
+            .args(["run", "--root", &dir.path().to_string_lossy(), "--env", "prod", "--threads", "2"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", &control)
+            .env_remove("DUCTUS_PROJECT")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "deployed:", 60), "{}", read(&log));
+    let pid = first.0.id();
+
+    // Nothing changed yet: nothing to apply.
+    let (ok, report, said) = reload(&[], false);
+    assert!(ok && report["applied"] == "nothing", "{said}\n{}", read(&log));
+
+    // Both under traffic; the shared file A imports changes: A alone, in place.
+    let send = |port: u16, count: &str, offset: &str| {
+        Command::new(bin)
+            .args(["gen", "--to", &format!("127.0.0.1:{port}"), "--count", count, "--rate", "50"])
+            .args(["--patients", "20", "--offset", offset])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let (send_a, send_b) = (send(port_a, "300", "0"), send(port_b, "300", "100000"));
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    std::fs::write(dir.path().join("lib/stamp.ts"), "export const TAG = \"A2\";\n").unwrap();
+    let (ok, report, said) = reload(&["-m", "A tags A2"], false);
+    let answered = chrono::Utc::now();
+    assert!(ok, "{said}\n{}", read(&log));
+    assert_eq!(report["applied"], "in_place", "{said}");
+    let changed: Vec<&str> = report["changes"].as_array().unwrap().iter().map(|c| c["interface"].as_str().unwrap()).collect();
+    assert_eq!(changed, [a.as_str()], "A alone: {said}");
+    assert!(report["deployment"].is_i64(), "recorded: {said}");
+    assert_eq!(running(&b).await, Some(pid), "the same engine runs both");
+
+    let sent = |child: std::process::Child| {
+        let out = child.wait_with_output().unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "{said}");
+        said
+    };
+    let (said_a, said_b) = tokio::task::spawn_blocking(move || (sent(send_a), sent(send_b))).await.unwrap();
+    for said in [&said_a, &said_b] {
+        assert!(said.contains("sent 300 messages"), "{said}");
+        assert!(said.contains("retries 0, rejected 0, refused 0, dropped 0"), "{said}");
+    }
+    let outputs = |name: &str| -> Vec<String> {
+        std::fs::read_dir(out_dir(name))
+            .map(|d| d.flatten().map(|e| std::fs::read_to_string(e.path()).unwrap_or_default()).collect())
+            .unwrap_or_default()
+    };
+    for _ in 0..600 {
+        if outputs(&a).len() >= 300 && outputs(&b).len() >= 300 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (out_a, out_b) = (outputs(&a), outputs(&b));
+    assert_eq!((out_a.len(), out_b.len()), (300, 300), "each message delivered once");
+    assert!(out_b.iter().all(|m| m.contains("|B1|")), "B ran its code throughout");
+    let a2 = out_a.iter().filter(|m| m.contains("|A2|")).count();
+    assert!(a2 > 0 && a2 < 300, "A ran the old code, then the shared file's new text: {a2} of 300");
+    // Every A message received after the reload answered: decided by the new version.
+    let page = ductus_store::Browse { interface: &a, status: None, before: None, limit: 500 };
+    let mut late = 0;
+    for m in store.browse(&page).await.unwrap().iter().filter(|m| m.received_at > answered) {
+        let at = ductus_store::MessageRef { id: m.id, received_at: m.received_at };
+        let d = store.deliveries(at).await.unwrap().remove(0);
+        assert_eq!(d.deployed_reason.as_deref(), Some("A tags A2"), "message {}", m.id);
+        late += 1;
+    }
+    assert!(late > 0, "A received messages after the reload");
+
+    // Over the API: C added in the folder starts; removed, it stops (its claim given back).
+    let c_yaml = interface(&c, port_c);
+    std::fs::create_dir_all(dir.path().join(format!("interfaces/{c}"))).unwrap();
+    std::fs::write(dir.path().join(files(&c, "tag.ts")), own).unwrap();
+    std::fs::write(dir.path().join(files(&c, "interface.yaml")), &c_yaml).unwrap();
+    let (ok, report, said) = reload(&["-m", "C added"], true);
+    assert!(ok && report["applied"] == "in_place", "{said}\n{}", read(&log));
+    assert_eq!(running(&c).await, Some(pid), "C runs on the same engine");
+    let send_c = send(port_c, "5", "200000");
+    let said_c = tokio::task::spawn_blocking(move || sent(send_c)).await.unwrap();
+    assert!(said_c.contains("sent 5 messages"), "{said_c}");
+    std::fs::remove_dir_all(dir.path().join(format!("interfaces/{c}"))).unwrap();
+    let (ok, report, said) = reload(&["-m", "C removed"], false);
+    assert!(ok && report["applied"] == "in_place", "{said}");
+    assert_eq!(running(&c).await, None, "C let go");
+
+    // A folder that doesn't load: refused, nothing changed.
+    std::fs::write(dir.path().join(files(&a, "interface.yaml")), "name: [broken\n").unwrap();
+    let (ok, report, said) = reload(&[], false);
+    assert!(!ok && report["applied"] == "refused", "{said}");
+    assert!(report["outcome"].as_str().unwrap().contains("the folder doesn't load"), "{said}");
+    std::fs::write(dir.path().join(files(&a, "interface.yaml")), &a_yaml).unwrap();
+
+    // ductus.yaml: only a start reads it. Refused with --in-place-only; then by the handover.
+    std::fs::write(dir.path().join("ductus.yaml"), "isolates: { heap_mb: 256 }\n").unwrap();
+    let (ok, report, said) = reload(&["--in-place-only"], false);
+    assert!(!ok && report["applied"] == "refused", "{said}");
+    assert!(report["outcome"].as_str().unwrap().contains("ductus.yaml changed"), "{said}");
+    assert_eq!(running(&a).await, Some(pid), "nothing changed");
+    let (ok, report, said) = reload(&["-m", "a smaller heap"], false);
+    assert!(ok && report["applied"] == "handover", "{said}\n{}", read(&log));
+    let exited = tokio::task::spawn_blocking(move || first.0.wait()).await.unwrap().unwrap();
+    assert!(exited.success(), "the engine before stops cleanly: {exited}");
+    let mut new = None;
+    for _ in 0..100 {
+        new = running(&a).await.filter(|p| *p != pid);
+        if new.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let engine = Terminate(new.expect("a new engine runs A"));
+
+    let out = Command::new(bin)
+        .args(["history", &a, "--root"])
+        .arg(dir.path())
+        .args(["--database-url", &db, "--env", "prod"])
+        .env_remove("DUCTUS_PROJECT")
+        .env_remove("DUCTUS_ENV")
+        .output()
+        .unwrap();
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(said.contains("in place by a reload: A tags A2"), "{said}");
+    drop(engine);
+}
+
 /// What a start sets up for an interface, changed in place by restarting it alone (0.7.5.2.4),
 /// one engine throughout. R and K listen on MLLP, a sender each sending one message at a time
 /// throughout (never refused: every message ACKed AA, each delivered once). Deploy 2 gives R an
@@ -6954,9 +7162,11 @@ fn uat_place(m: &ductus_runtime::release::Manifest) -> ductus_runtime::release::
     ductus_runtime::release::Place { environment: "uat".into(), ..m.deployed[0].clone() }
 }
 
-/// A reload where there's no `systemctl reload` (0.7.4.4.2): `SIGHUP` hands the engine over in its
-/// own process to one on the project as it is now (before, it ended the engine); a project that
-/// can't start leaves the engine running; SIGTERM still stops it cleanly.
+/// A reload where there's no `systemctl reload` (0.7.4.4.2): `SIGHUP` applies the project as it is
+/// now (before 0.7.4.4.2 it ended the engine). Since 0.7.5.3 in place where it can: nothing
+/// changed, nothing to apply; a destination's folder changed, in place; a project that doesn't
+/// load leaves the engine running as it was; ductus.yaml changed, a handover in its own process.
+/// SIGTERM still stops it cleanly.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread")]
 async fn sighup_reloads_the_engine_in_its_own_process() {
@@ -6975,16 +7185,28 @@ async fn sighup_reloads_the_engine_in_its_own_process() {
     let pid = engine.0.id().to_string();
     let signal = |name: &str| assert!(Command::new("kill").args(["-s", name, &pid]).status().unwrap().success());
 
+    // Right after the start: it waits for the start's record, then finds nothing to apply.
     signal("HUP");
-    assert!(wait_for_log(&log, "handed over to a new engine in this process", 60), "{}", read());
-    assert!(read().contains("asked by a signal (SIGHUP)") || read().contains("a signal (SIGHUP)"), "{}", read());
-    assert!(engine.0.try_wait().unwrap().is_none(), "the same process goes on");
+    assert!(wait_for_log(&log, "reload: nothing changed: the folder is what runs", 60), "{}", read());
+    assert!(read().contains("a signal (SIGHUP)"), "{}", read());
+
+    std::fs::write(dir.path().join(&file), config.replace("dir: out", "dir: out2")).unwrap();
+    signal("HUP");
+    assert!(wait_for_log(&log, "took its new code between two messages", 60), "in place: {}", read());
+    assert!(!read().contains("handed over"), "{}", read());
 
     std::fs::write(dir.path().join(&file), format!("{config}bogus: true\n")).unwrap();
     signal("HUP");
-    assert!(wait_for_log(&log, "the new engine can't take over", 60), "{}", read());
+    assert!(wait_for_log(&log, "the folder doesn't load", 60), "{}", read());
     assert!(read().contains("unknown field `bogus`"), "{}", read());
     assert!(engine.0.try_wait().unwrap().is_none(), "the engine goes on");
+
+    std::fs::write(dir.path().join(&file), &config).unwrap();
+    std::fs::write(dir.path().join("ductus.yaml"), "isolates: { heap_mb: 256 }\n").unwrap();
+    signal("HUP");
+    assert!(wait_for_log(&log, "handed over to a new engine in this process", 60), "{}", read());
+    assert!(read().contains("ductus.yaml changed"), "{}", read());
+    assert!(engine.0.try_wait().unwrap().is_none(), "the same process goes on");
 
     signal("TERM");
     let exited = tokio::task::spawn_blocking(move || engine.0.wait()).await.unwrap().unwrap();

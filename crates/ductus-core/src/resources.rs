@@ -986,7 +986,14 @@ impl Resources {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-        let mut value = crate::yaml::parse(&text).with_context(|| format!("parsing {}", file.display()))?;
+        Self::from_text(root, Some(&text), env)
+    }
+
+    /// `load`, from the file's text read already (`ProjectFiles`; None: the project has none).
+    pub fn from_text(root: &Path, text: Option<&str>, env: &Environment) -> Result<Self> {
+        let file = root.join("resources.yaml");
+        let Some(text) = text else { return Ok(Self::default()) };
+        let mut value = crate::yaml::parse(text).with_context(|| format!("parsing {}", file.display()))?;
         if value.is_null() {
             return Ok(Self::default()); // only comments (as `ductus init` writes it)
         }

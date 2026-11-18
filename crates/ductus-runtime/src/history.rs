@@ -495,6 +495,7 @@ fn deployment(d: DeploymentEntry, touches: Touches) -> Entry {
     match d.how.as_str() {
         "handover" if d.changed => what.push_str(" by a handover"),
         "deploy" if d.changed => what.push_str(" in place"),
+        "reload" if d.changed => what.push_str(" in place by a reload"),
         _ => {}
     }
     if let Some(reason) = &d.reason {

@@ -310,6 +310,52 @@ export function toBilling(m: Message) { return { mine: ++mine, shared: count() }
     assert_eq!(files, ["billing.ts", "lab.ts", "shared.ts"]);
 }
 
+/// A project folder whose files changed on disk (a reload in folder mode, 0.7.5.3): loaded again
+/// under a new generation, the interface's file and the shared file it imports are new modules,
+/// read again (the new text, fresh module state); loaded again under the old generation (code put
+/// back after a failed reload), they are the old modules, whatever the disk holds now. The files a
+/// version counts name the plain paths (errors too: `errors` tests).
+#[test]
+fn a_new_generation_loads_changed_files_again_and_an_old_one_gets_its_modules_back() {
+    let dir = project(&[
+        ("lib/shared.ts", "let n = 0;\nexport const count = () => ++n;\nexport const label = \"one\";\n"),
+        (
+            "adt/t.ts",
+            "import type { Message } from \"@ductus/sdk\";\nimport { count, label } from \"../lib/shared.ts\";\n\
+             export function transform(m: Message) { m.add(\"ZGN\", [label, String(count())]); return m; }\n",
+        ),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let module = dir.path().join("adt/t.ts");
+    let transform = || Some(Function { module: &module, name: "transform", formats: DEFAULT_FORMATS });
+    let zgn = |out: String| out.split('\r').find(|s| s.starts_with("ZGN")).unwrap().to_string();
+    let load = |host: &mut Isolate, generation| {
+        host.set_generation(generation);
+        rt.block_on(host.add_functions(&[transform()], SECOND)).unwrap().1[0].unwrap()
+    };
+    let start = load(&mut host, 0);
+    let call = |host: &mut Isolate, f| match host.begin_function(f, ADT, None).unwrap() {
+        ductus_script::Call::Done(out) => zgn(out.unwrap()),
+        ductus_script::Call::Pending(_) => panic!("sync"),
+    };
+    assert_eq!(call(&mut host, start), "ZGN|one|1");
+    assert_eq!(call(&mut host, start), "ZGN|one|2");
+
+    std::fs::write(dir.path().join("lib/shared.ts"), "let n = 100;\nexport const count = () => ++n;\nexport const label = \"two\";\n").unwrap();
+    let reloaded = load(&mut host, 1);
+    assert_eq!(call(&mut host, reloaded), "ZGN|two|101", "the shared file read again: its new text, fresh state");
+    let files = host.code_files(std::slice::from_ref(&module)).unwrap();
+    let names: Vec<String> = files.iter().map(|f| f.path.to_string_lossy().replace('\\', "/")).collect();
+    assert!(names.iter().all(|n| !n.contains('?')), "plain paths: {names:?}");
+    assert!(files.iter().any(|f| f.text.contains("\"two\"")), "the version counts the new text");
+
+    let put_back = load(&mut host, 0);
+    assert_eq!(call(&mut host, put_back), "ZGN|one|3", "the old modules, their state kept, not the disk's text");
+    assert_eq!(call(&mut host, start), "ZGN|one|4", "the same module the start loaded");
+}
+
 const SECOND: Duration = Duration::from_secs(1);
 
 /// A replay's isolate (`pin_clock`): `new Date()` and `Date.now()` give the time it's set to, also

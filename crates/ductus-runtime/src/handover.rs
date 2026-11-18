@@ -66,7 +66,7 @@ pub fn control_path() -> Option<PathBuf> {
 }
 
 /// `ductus handover` → the running engine (one JSON line).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Request {
     /// How long the new engine may take to be ready (it migrates the database first).
     pub timeout_secs: u64,
@@ -76,6 +76,14 @@ pub struct Request {
     /// Who asks and why, for the new engine's deployment record (0.7.3; engines before ignore it).
     #[serde(default)]
     pub asked: Asked,
+    /// A reload (`ductus reload`, the system's reload, 0.7.5.3): the engine applies its folder in
+    /// place where it can (`reload`), and hands over only for what needs it. Engines before
+    /// ignore it and hand over.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_place: bool,
+    /// With `in_place`: refuse what needs the handover instead (`ductus reload --in-place-only`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub in_place_only: bool,
 }
 
 /// Who asked for a handover and why (`ductus handover -m`): the old engine passes it to the new
@@ -119,7 +127,22 @@ impl Asked {
 #[serde(rename_all = "snake_case")]
 pub enum Answer {
     Progress(String),
-    Done { ok: bool, text: String },
+    Done {
+        ok: bool,
+        text: String,
+        /// A reload's report (`api::ReloadReport`, as JSON), for `--json` and the API; absent
+        /// from a handover's answer and from engines before 0.7.5.3.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        report: Option<serde_json::Value>,
+    },
+}
+
+/// How a request ended: what `Answer::Done` says.
+#[derive(Debug)]
+pub struct Done {
+    pub ok: bool,
+    pub text: String,
+    pub report: Option<serde_json::Value>,
 }
 
 /// The engine a takeover takes over from.
@@ -210,7 +233,8 @@ fn took(d: Duration) -> String {
 /// a symbolic link (`/opt/ductus/current/ductus`) it names the version the link pointed to then.
 static EXECUTABLE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
 
-/// Remember where this binary was started from (call once, at start).
+/// Remember where this binary was started from, and which file it was (`binary_changed`): call
+/// once, at start (a path and one `stat`).
 pub fn remember_executable() {
     EXECUTABLE.get_or_init(|| {
         let argv0 = PathBuf::from(std::env::args_os().next()?);
@@ -222,6 +246,7 @@ pub fn remember_executable() {
         };
         Some(path)
     });
+    BINARY.get_or_init(|| executable().ok().and_then(|p| identity(&p)));
 }
 
 /// This binary's path, as it was started (after an upgrade replaced the file: the new binary,
@@ -279,15 +304,50 @@ impl Requested {
         }
     }
 
-    async fn done(mut self, ok: bool, text: String) {
+    async fn done(self, ok: bool, text: String) {
+        self.answer("handover", ok, text, None).await;
+    }
+
+    /// Answer the asker how it ended (`what`: the log's word, `handover` or `reload`), with a
+    /// reload's report.
+    async fn answer(mut self, what: &str, ok: bool, text: String, report: Option<serde_json::Value>) {
         if ok {
-            tracing::info!("handover: {text}");
+            tracing::info!("{what}: {text}");
         } else {
-            tracing::error!("handover: {text}");
+            tracing::error!("{what}: {text}");
         }
         if let Some(mut asker) = self.asker.take() {
-            asker.send(Answer::Done { ok, text }).await;
+            asker.send(Answer::Done { ok, text, report }).await;
         }
+    }
+
+    /// A reload (`Request::in_place`): applied in place where it can, answered, and None; or,
+    /// when only the handover applies it, said, and the request given back for the handover.
+    /// `new_process`: a handover here starts a new process (which runs a new binary).
+    async fn reload(mut self, engine: &Arc<Engine>, new_process: bool) -> Option<Self> {
+        let request = &self.request;
+        let reloaded = crate::reload::reload(
+            engine,
+            &request.asked,
+            request.environment.as_deref(),
+            crate::reload::Options { in_place_only: request.in_place_only, new_binary_counts: new_process },
+        )
+        .await;
+        let report = crate::api::reload_report(&reloaded);
+        if reloaded.how == crate::reload::How::Handover {
+            self.say(format!("reload: by the handover: {}", reloaded.outcome)).await;
+            return Some(self);
+        }
+        crate::audit::reloaded(engine, &self.request.asked, &reloaded).await;
+        let mut text = reloaded.outcome.clone();
+        for step in &reloaded.steps {
+            text.push_str(&format!("\n  {step}"));
+        }
+        for (interface, warning) in &reloaded.warnings {
+            text.push_str(&format!("\n  ⚠ {interface}: over someone else's change: {warning}"));
+        }
+        self.answer("reload", reloaded.ok, text, Some(report)).await;
+        None
     }
 }
 
@@ -296,7 +356,7 @@ impl Drop for Requested {
     /// stops), and the new one was stopped with it (`Unready`).
     fn drop(&mut self) {
         let text = "this engine stopped before the handover finished (it was asked to stop): a new engine it had started was stopped too";
-        let done = Answer::Done { ok: false, text: text.into() };
+        let done = Answer::Done { ok: false, text: text.into(), report: None };
         match self.asker.take() {
             #[cfg(target_os = "linux")]
             Some(Reply::Socket(asker)) => asker.try_send(&done),
@@ -309,10 +369,13 @@ impl Drop for Requested {
 /// Where this process's current engine takes requests the system asks for (`reload`).
 static RELOADS: std::sync::Mutex<Option<(mpsc::Sender<Requested>, Arc<AtomicBool>)>> = std::sync::Mutex::new(None);
 
-/// The system asks for a reload (`SIGHUP`; the Windows service's `paramchange`): a handover to
-/// the project or release as it is now, with the settings read again. Nobody waits for the
-/// answer: the log (and the Event Log) says how it went. False when it can't be asked now (no
-/// engine takes handovers, or one is under way), said in the log too.
+/// The system asks for a reload (`SIGHUP`; the Windows service's `paramchange`): the project
+/// folder as it is now applied in place where it can, else a handover to it (a new binary, a
+/// change only a start reads; release mode: a handover to the release that runs), with the
+/// settings read again (0.7.5.3: a reload in place is faster for every interface it doesn't
+/// change, measured). Nobody waits for the answer: the log (and the Event Log) says how it went.
+/// False when it can't be asked now (no engine takes handovers, or one is under way), said in the
+/// log too.
 pub fn reload(by: &str) -> bool {
     let current = RELOADS.lock().unwrap().clone();
     let Some((tx, busy)) = current else {
@@ -321,15 +384,39 @@ pub fn reload(by: &str) -> bool {
     };
     let request = Request {
         timeout_secs: RELOAD_TIMEOUT.as_secs(),
-        environment: None,
         asked: Asked { by: Some(by.to_string()), ..Asked::default() },
+        in_place: true,
+        ..Request::default()
     };
     if busy.load(Ordering::SeqCst) || tx.try_send(Requested { request, asker: None }).is_err() {
         tracing::warn!(%by, "a reload was asked while another handover is under way: ignored (ask again once it's done)");
         return false;
     }
-    tracing::info!(%by, "reload asked: a new engine starts beside this one on the project or release as it is now");
+    tracing::info!(%by, "reload asked: the project as it is now, applied in place where it can");
     true
+}
+
+/// What this binary's file was at the start (`remember_executable`): its size, change time and
+/// (Unix) inode. None when it couldn't be read.
+static BINARY: std::sync::OnceLock<Option<(u64, Option<std::time::SystemTime>, u64)>> = std::sync::OnceLock::new();
+
+/// The file at `path`: size, modification time, inode (0 where there's none).
+fn identity(path: &Path) -> Option<(u64, Option<std::time::SystemTime>, u64)> {
+    let meta = std::fs::metadata(path).ok()?;
+    #[cfg(unix)]
+    let inode = std::os::unix::fs::MetadataExt::ino(&meta);
+    #[cfg(not(unix))]
+    let inode = 0;
+    Some((meta.len(), meta.modified().ok(), inode))
+}
+
+/// The binary on disk at the path this engine was started from is another file than the one it
+/// started (a package upgrade replaced it): only a new engine runs it, so a reload hands over.
+/// False when it can't tell (said nowhere: the reload goes in place, as before an upgrade).
+pub fn binary_changed() -> bool {
+    let Some(Some(then)) = BINARY.get() else { return false };
+    let Ok(path) = executable() else { return false };
+    identity(&path).is_some_and(|now| now != *then)
 }
 
 /// How a handover starts the new engine (see the module).
@@ -404,11 +491,28 @@ impl Control {
 
     /// Resolves when a new engine is ready to take over: this one must then stop, let go of its
     /// interfaces and call `Successor::released`. Requests that fail are answered here (the
-    /// engine goes on), and the next one is waited for.
-    pub async fn next(&mut self, engine: &Engine) -> Successor {
+    /// engine goes on), and the next one is waited for. A reload (`Request::in_place`) is applied
+    /// here in place when it can be (`reload`), and answered; only what needs the handover goes on
+    /// to it. One request at a time, whichever kind.
+    pub async fn next(&mut self, engine: &Arc<Engine>) -> Successor {
         if let (Some(requests), Some(how)) = (self.requests.as_mut(), self.how.as_ref()) {
-            while let Some(requested) = requests.recv().await {
+            while let Some(mut requested) = requests.recv().await {
                 self.busy.store(true, Ordering::SeqCst);
+                if requested.request.in_place {
+                    // A new binary is picked up only by a new process: in this one, a handover
+                    // would run the same binary again, so it isn't a reason for one.
+                    #[cfg(target_os = "linux")]
+                    let new_process = matches!(how, How::Process);
+                    #[cfg(not(target_os = "linux"))]
+                    let new_process = false;
+                    match requested.reload(engine, new_process).await {
+                        Some(back) => requested = back,
+                        None => {
+                            self.busy.store(false, Ordering::SeqCst);
+                            continue;
+                        }
+                    }
+                }
                 if let Some(successor) = start(requested, engine, how).await {
                     return successor; // busy for good: this engine stops
                 }
@@ -449,19 +553,24 @@ impl Asker {
     /// Ask, passing each line said as it goes to `say`: Ok((true, text)) once the new engine runs,
     /// (false, why) when it couldn't take over (this engine goes on), as `ask` over the socket.
     /// The answer comes once this engine stopped and let go (it answers before it ends).
-    pub async fn ask(&self, request: Request, mut say: impl FnMut(&str)) -> Result<(bool, String)> {
+    pub async fn ask(&self, request: Request, say: impl FnMut(&str)) -> Result<(bool, String)> {
+        Ok(self.ask_for(request, say).await?.map_or_else(|why| (false, why), |done| (done.ok, done.text)))
+    }
+
+    /// `ask`, with a reload's report: Err(why) when it couldn't be asked (another under way).
+    pub async fn ask_for(&self, request: Request, mut say: impl FnMut(&str)) -> Result<Result<Done, String>> {
         if self.busy.load(Ordering::SeqCst) {
-            return Ok((false, "another handover is under way".into()));
+            return Ok(Err("another handover or reload is under way".into()));
         }
         let (answers, mut rx) = mpsc::unbounded_channel();
         let requested = Requested { request, asker: Some(Reply::InProcess(answers)) };
         if self.tx.try_send(requested).is_err() {
-            return Ok((false, "another handover is under way".into()));
+            return Ok(Err("another handover or reload is under way".into()));
         }
         while let Some(answer) = rx.recv().await {
             match answer {
                 Answer::Progress(text) => say(&text),
-                Answer::Done { ok, text } => return Ok((ok, text)),
+                Answer::Done { ok, text, report } => return Ok(Ok(Done { ok, text, report })),
             }
         }
         bail!("the handover ended without an answer: see the engine's log")
@@ -816,10 +925,10 @@ impl Takeover {
     }
 }
 
-/// `ductus handover`: ask the engine listening at `path`, passing each line it says as it goes to
-/// `say`. Ok((true, text)) once the new engine runs; (false, why) when it couldn't take over (the
-/// running engine goes on).
-pub async fn ask(path: &Path, request: &Request, say: impl FnMut(&str)) -> Result<(bool, String)> {
+/// `ductus handover` and `ductus reload`: ask the engine listening at `path`, passing each line it
+/// says as it goes to `say`. `ok` once the new engine runs (a reload: once applied, or nothing to
+/// apply); not, with why, when it couldn't (the running engine goes on).
+pub async fn ask(path: &Path, request: &Request, say: impl FnMut(&str)) -> Result<Done> {
     #[cfg(target_os = "linux")]
     return linux::ask(path, request, say).await;
     #[cfg(not(target_os = "linux"))]
@@ -1018,7 +1127,7 @@ mod linux {
         Ok(Lined::new(UnixStream::from_std(stream)?))
     }
 
-    pub(super) async fn ask(path: &Path, request: &Request, mut say: impl FnMut(&str)) -> Result<(bool, String)> {
+    pub(super) async fn ask(path: &Path, request: &Request, mut say: impl FnMut(&str)) -> Result<super::Done> {
         let stream = UnixStream::connect(path).await.map_err(|e| match e.kind() {
             io::ErrorKind::NotFound | io::ErrorKind::ConnectionRefused => anyhow::anyhow!(
                 "no engine answers at {} ({e}): is it running? (Engines before 0.6.6.3 have no control socket: restart those.)",
@@ -1034,7 +1143,7 @@ mod linux {
         loop {
             match engine.receive::<Answer>().await.context("reading the engine's answer")? {
                 Some(Answer::Progress(text)) => say(&text),
-                Some(Answer::Done { ok, text }) => return Ok((ok, text)),
+                Some(Answer::Done { ok, text, report }) => return Ok(super::Done { ok, text, report }),
                 None => {
                     bail!("the engine closed the connection without an answer: see its log (`journalctl -u ductus`)")
                 }

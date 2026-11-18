@@ -197,6 +197,9 @@ pub struct Engine {
     /// Every interface's source: a deploy in place starts an added one's and stops a removed
     /// one's, alone.
     pub sources: crate::sources::Sources,
+    /// The project's own files as this engine runs them (`ProjectFiles`): the start's, then each
+    /// reload's in folder mode, which compares the folder with them. Read with `project_files()`.
+    project_files: std::sync::RwLock<Arc<ductus_core::project_files::ProjectFiles>>,
 }
 
 /// Where the engine's REST API (and web UI) listens, and its `tls` (none: plain HTTP).
@@ -237,6 +240,7 @@ pub struct Parts {
     pub releases: Option<crate::deploy::Releases>,
     pub ended: CancellationToken,
     pub sources: crate::sources::Sources,
+    pub project_files: ductus_core::project_files::ProjectFiles,
 }
 
 impl Engine {
@@ -268,6 +272,7 @@ impl Engine {
             releases,
             ended,
             sources,
+            project_files,
         } = parts;
         let certificates = {
             let configs: Vec<&InterfaceConfig> = interfaces.iter().map(|i| &*i.config).collect();
@@ -312,6 +317,7 @@ impl Engine {
             asker: std::sync::OnceLock::new(),
             ended,
             sources,
+            project_files: std::sync::RwLock::new(Arc::new(project_files)),
         });
         tokio::spawn(engine.ended.clone().run_until_cancelled_owned(monitor(Arc::downgrade(&engine))));
         engine
@@ -321,6 +327,17 @@ impl Engine {
     /// meanwhile doesn't change it, so a reader sees each interface whole.
     pub fn interfaces(&self) -> Interfaces {
         self.interfaces.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The project's own files as this engine runs them (folder mode: the start's, then the last
+    /// reload's).
+    pub fn project_files(&self) -> Arc<ductus_core::project_files::ProjectFiles> {
+        self.project_files.read().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// The project's own files a reload applied: what the next one compares with.
+    pub(crate) fn now_runs_files(&self, files: ductus_core::project_files::ProjectFiles) {
+        *self.project_files.write().unwrap_or_else(|e| e.into_inner()) = Arc::new(files);
     }
 
     /// What this engine runs, as last recorded.
@@ -345,11 +362,13 @@ impl Engine {
     /// the new release's folder) is saved once applied, and its new workers save their decisions
     /// with it (they wait for it). Answers the version, for the deploy's record
     /// (`deployment::record_in_place`). `in_place::NeedsHandover` when only the handover can
-    /// apply it; any other `Err` leaves it running as it was.
+    /// apply it; any other `Err` leaves it running as it was. Its code loads under `generation`
+    /// (`in_place::Interface::generation`: a deploy's new one, or its own to put it back).
     pub(crate) async fn replace_interface(
         self: &Arc<Self>,
         config: InterfaceConfig,
         root: &std::path::Path,
+        generation: u64,
     ) -> Result<crate::deployment::Applied> {
         let name = config.name.clone();
         let running = self.interface(&name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
@@ -358,7 +377,7 @@ impl Engine {
         // built again for the new destinations).
         let retargets = running.config.destinations().map(|(n, _)| n).ne(config.destinations().map(|(n, _)| n));
         if retargets && running.lanes.is_changing() {
-            return self.restart_interface(config, root).await;
+            return self.restart_interface(config, root, generation).await;
         }
         let (saving, decided) = crate::deployment::Decided::channel();
         // Its source first (`sources::Sources::change`: nothing to do when it's the same), so a
@@ -367,7 +386,7 @@ impl Engine {
         let intake = || running.intake.clone();
         let changing = self.sources.change(&running.config, &config, intake());
         changing.await.with_context(|| format!("`{name}`: changing its source"))?;
-        let replaced = match self.kept.replace(config.clone(), &self.activity, decided.clone()).await {
+        let replaced = match self.kept.replace(config.clone(), &self.activity, decided.clone(), generation).await {
             Ok(replaced) => replaced,
             Err(e) => {
                 if let Err(again) = self.sources.change(&config, &running.config, intake()).await {
@@ -429,11 +448,13 @@ impl Engine {
     /// managed (as at a start).
     ///
     /// All or nothing: an error leaves it unclaimed, unwatched and with no workers or source (its
-    /// lanes and destinations stay registered: a start would register them the same way).
+    /// lanes and destinations stay registered: a start would register them the same way). Its
+    /// code loads under `generation` (`in_place::Interface::generation`).
     pub(crate) async fn add_interface(
         self: &Arc<Self>,
         config: InterfaceConfig,
         root: &std::path::Path,
+        generation: u64,
     ) -> Result<crate::deployment::Applied> {
         let name = config.name.clone();
         if self.interface(&name).is_some() || self.kept.contains(&name) {
@@ -442,7 +463,7 @@ impl Engine {
         if !config.responds() {
             self.owner.add(&self.store, std::slice::from_ref(&name)).await?;
         }
-        match self.add_claimed(Arc::new(config), root).await {
+        match self.add_claimed(Arc::new(config), root, generation).await {
             Ok(applied) => Ok(applied),
             Err(e) => {
                 self.let_go(&name).await;
@@ -456,6 +477,7 @@ impl Engine {
         self: &Arc<Self>,
         config: Arc<InterfaceConfig>,
         root: &std::path::Path,
+        generation: u64,
     ) -> Result<crate::deployment::Applied> {
         use anyhow::Context;
         let (name, store, shared) = (config.name.clone(), &self.store, self.kept.shared());
@@ -548,6 +570,7 @@ impl Engine {
             threads: Vec::new(),
             removed: false,
             retiring,
+            generation,
         };
         let files = self.kept.add(interface, requests).await?;
         // Closed before it receives anything while the engine drains (an MLLP listener then
@@ -609,11 +632,12 @@ impl Engine {
     ///
     /// All or nothing: a failure puts everything back as it was (its lanes taken back where
     /// nothing was stored in them, its intake's old settings, its old workers on the code they
-    /// ran) and errors.
+    /// ran, under their old generation) and errors. Its new code loads under `generation`.
     pub(crate) async fn restart_interface(
         self: &Arc<Self>,
         config: InterfaceConfig,
         root: &std::path::Path,
+        generation: u64,
     ) -> Result<crate::deployment::Applied> {
         let name = config.name.clone();
         let running = self.interface(&name).ok_or_else(|| anyhow::anyhow!("interface `{name}` isn't running here"))?;
@@ -649,7 +673,7 @@ impl Engine {
         };
         let mut undo = Undo::default();
         let stopped = std::time::Instant::now();
-        match self.restarted(&running, &old, config.clone(), root, &mut undo).await {
+        match self.restarted(&running, &old, config.clone(), root, generation, &mut undo).await {
             Ok((applied, calls)) => {
                 tracing::info!(
                     interface = %name,
@@ -699,6 +723,7 @@ impl Engine {
         old: &crate::in_place::Interface,
         config: Arc<InterfaceConfig>,
         root: &std::path::Path,
+        generation: u64,
         undo: &mut Undo,
     ) -> Result<(crate::deployment::Applied, Option<tokio::sync::mpsc::Sender<crate::http::HttpCall>>)> {
         use anyhow::Context;
@@ -780,6 +805,7 @@ impl Engine {
             threads: Vec::new(),
             removed: false,
             retiring: retiring.clone(),
+            generation,
         };
         let files = self.kept.add(interface, requests).await?;
         undo.added = true;

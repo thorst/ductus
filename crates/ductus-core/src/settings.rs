@@ -559,8 +559,15 @@ impl Settings {
             return Ok(Self::default());
         }
         let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
+        Self::from_text(root, Some(&text))
+    }
+
+    /// `load`, from the file's text read already (`ProjectFiles`; None: the project has none).
+    pub fn from_text(root: &Path, text: Option<&str>) -> Result<Self> {
+        let file = root.join(FILE);
+        let Some(text) = text else { return Ok(Self::default()) };
         // `${...}` references (alerts only) must not break the YAML: parsed protected.
-        let value = crate::yaml::parse(&text).with_context(|| format!("parsing {}", file.display()))?;
+        let value = crate::yaml::parse(text).with_context(|| format!("parsing {}", file.display()))?;
         if value.is_null() {
             return Ok(Self::default());
         }

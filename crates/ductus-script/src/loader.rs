@@ -120,7 +120,7 @@ impl ModuleLoader for Loader {
         if specifier == SDK_SPECIFIER {
             return ModuleSpecifier::parse(SDK_URL).map_err(JsErrorBox::from_err);
         }
-        resolve_import(specifier, referrer).map_err(JsErrorBox::from_err)
+        resolve(specifier, referrer).map_err(JsErrorBox::from_err)
     }
 
     fn load(
@@ -187,6 +187,29 @@ fn sdk_javascript(index: usize, specifier: &ModuleSpecifier) -> anyhow::Result<S
     Ok(JAVASCRIPT[index].get_or_init(|| js).clone())
 }
 
+/// The query a generation puts on a project file's URL (`?g=3`): a project folder's files loaded
+/// again after they changed on disk (a reload, 0.7.5.3) are new modules to V8, which knows a module
+/// by its URL. Generation 0 (a start) has none, so a start's URLs are the plain paths.
+pub fn generation_query(generation: u64) -> Option<String> {
+    (generation > 0).then(|| format!("g={generation}"))
+}
+
+/// `resolve_import`, keeping the referrer's generation on the project file it resolves to: what a
+/// module of generation 3 imports is generation 3 too, so the whole graph loads again from disk.
+/// The SDK (`ductus:`) has none: it never changes while the engine runs.
+pub(crate) fn resolve(specifier: &str, referrer: &str) -> Result<ModuleSpecifier, deno_core::ModuleResolutionError> {
+    let mut url = resolve_import(specifier, referrer)?;
+    if url.scheme() == "file"
+        && url.query().is_none()
+        && let Ok(from) = ModuleSpecifier::parse(referrer)
+        && from.scheme() == "file"
+        && let Some(query) = from.query()
+    {
+        url.set_query(Some(query));
+    }
+    Ok(url)
+}
+
 /// A project file the loader hasn't read (yet): an `import("...")` that hasn't run. None when it
 /// can't be read (that import fails when it runs).
 pub(crate) fn read(url: &str) -> Option<LoadedModule> {
@@ -210,7 +233,7 @@ pub(crate) fn imports(parsed: &deno_ast::ParsedSource, referrer: &ModuleSpecifie
     let mut urls: Vec<String> = found
         .0
         .iter()
-        .filter_map(|s| resolve_import(s, referrer.as_str()).ok())
+        .filter_map(|s| resolve(s, referrer.as_str()).ok())
         .filter(|url| url.scheme() == "file")
         .map(|url| url.to_string())
         .collect();

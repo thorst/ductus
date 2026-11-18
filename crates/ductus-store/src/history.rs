@@ -1,13 +1,14 @@
 //! What `ductus history` reads from the database for one interface (0.7.3.3): the deployments that
 //! changed it (or, with `all`, every one that ran it), the audit log's entries naming it, its
 //! documentation's changes, and the files its versions named (for its git history). Each read is
-//! a page, newest first, up to a time: the caller merges them into one timeline.
+//! a page, newest first, up to a time: the caller merges them into one timeline. Also the running
+//! versions' files and texts by hash, which a reload in folder mode (0.7.5.3) compares with.
 
 use crate::Store;
 use crate::audit::AuditRow;
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 
 /// One page of one source: rows at or before `until`, newest first, at most `limit`.
 #[derive(Debug, Clone, Copy)]
@@ -337,6 +338,31 @@ impl Store {
                 .await
                 .context("reading the interface's code versions")?;
         Ok(rows.into_iter().map(|(files, parts)| VersionFiles::of(&files, parts)).collect())
+    }
+
+    /// The code versions `hashes` name, with their files and parts, by hash: what a reload in folder
+    /// mode compares the folder with (each running interface's files, hashed again from disk). One
+    /// read; a hash not saved is missing from the answer.
+    pub async fn versions_by_hash(&self, hashes: &[Vec<u8>]) -> Result<HashMap<Vec<u8>, VersionFiles>> {
+        let rows: Vec<(Vec<u8>, String, Option<String>)> =
+            sqlx::query_as("SELECT hash, files::text, parts::text FROM code_versions WHERE hash = ANY($1)")
+                .bind(hashes)
+                .fetch_all(&self.pool)
+                .await
+                .context("reading the running code versions")?;
+        Ok(rows.into_iter().map(|(hash, files, parts)| (hash, VersionFiles::of(&files, parts))).collect())
+    }
+
+    /// The texts of the files `hashes` name (`code_files`), by hash: the running interface.yaml and
+    /// code a reload compares with, read back from where its version saved them.
+    pub async fn file_texts(&self, hashes: &[Vec<u8>]) -> Result<HashMap<Vec<u8>, String>> {
+        let rows: Vec<(Vec<u8>, String)> =
+            sqlx::query_as("SELECT hash, content FROM code_files WHERE hash = ANY($1)")
+                .bind(hashes)
+                .fetch_all(&self.pool)
+                .await
+                .context("reading the running files' texts")?;
+        Ok(rows.into_iter().collect())
     }
 
     /// Every destination `interface` has had on this database (`destinations`: each one an engine

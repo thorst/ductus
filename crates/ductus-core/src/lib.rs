@@ -16,6 +16,7 @@ pub mod owners;
 pub mod password;
 pub mod pgtls;
 pub mod ports;
+pub mod project_files;
 pub mod resources;
 pub mod retention;
 pub mod schedule;

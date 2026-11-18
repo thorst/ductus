@@ -70,6 +70,8 @@ pub struct Job {
     pub decided: crate::deployment::Decided,
     /// The interface's lanes: which this slot reads (`crate::lanes`).
     pub lanes: Arc<Lanes>,
+    /// The generation its code loads under (`in_place::Interface::generation`).
+    pub generation: u64,
 }
 
 /// Set once, before the engine holds its interfaces (see `Job::waiting`).
@@ -111,8 +113,10 @@ pub enum Command {
     /// (its code version's). Other interfaces on the thread aren't stopped; their calls wait while
     /// the code loads (`Gate`).
     ///
-    /// The code must come from paths not loaded on this thread before (a release's own folder):
-    /// V8 keys modules by URL, so a file loaded again from the same path is the old module.
+    /// V8 keys modules by URL, so a file loaded again from the same path is the old module: new
+    /// code comes from a path not loaded here before (a release's own folder) or under a new
+    /// generation (`Job::generation`: a project folder reloaded); code put back loads under its old
+    /// generation and gets its old modules.
     ///
     /// `handed`: where a respond-mode interface's requests go when none of `jobs` answers them (it
     /// stops running here: a restart in place hands them to its new workers, 0.7.5.2.4); without
@@ -160,7 +164,7 @@ pub fn spawn_thread(
                 }
                 let mut loaded = Vec::with_capacity(jobs.len());
                 for job in jobs {
-                    match load(&mut host, &job.config).await {
+                    match load(&mut host, &job.config, job.generation).await {
                         Ok((script, files)) => {
                             let _ = ready.send((job.config.name.clone(), Ok(files)));
                             loaded.push((job, script));
@@ -225,12 +229,14 @@ pub fn spawn_thread(
 /// `config.functions()` order (None for a destination without code). None without `script:`.
 type Loaded = Option<(InterfaceId, Vec<Option<FunctionId>>)>;
 
-/// Load `config`'s code into `host`, with the files it loaded (its code version's).
-async fn load(host: &mut Isolate, config: &InterfaceConfig) -> Result<(Loaded, Vec<CodeFile>)> {
+/// Load `config`'s code into `host` under `generation`, with the files it loaded (its code
+/// version's).
+async fn load(host: &mut Isolate, config: &InterfaceConfig, generation: u64) -> Result<(Loaded, Vec<CodeFile>)> {
     let functions = config.functions();
     if !functions.iter().any(Option::is_some) {
         return Ok((None, Vec::new()));
     }
+    host.set_generation(generation);
     let loaded = host.add_functions(&Function::all(&functions), config.timeout).await?;
     let files = host.code_files(&config.modules()).unwrap_or_else(|e| {
         tracing::warn!(interface = %config.name, error = %format!("{e:#}"), "couldn't tell which files its code loaded: its code version counts its interface.yaml only");
@@ -323,7 +329,7 @@ impl Thread {
             let mut files = None;
             let mut failed = None;
             for job in &jobs {
-                match load(&mut host, &job.config).await {
+                match load(&mut host, &job.config, job.generation).await {
                     Ok((script, f)) => {
                         files.get_or_insert(f);
                         loaded.push(script);
@@ -1087,6 +1093,7 @@ mod tests {
             waiting: Default::default(),
             decided: crate::deployment::Decided::channel().1,
             lanes: Arc::new(Lanes::new(crate::lanes::Layout::single(1, "x"), 1, 1)),
+            generation: 0,
             config,
         }
     }

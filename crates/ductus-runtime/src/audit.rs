@@ -99,6 +99,24 @@ pub async fn handed_over(engine: &Engine, handover: &crate::handover::HandedOver
     record(engine, Audit::new(By::engine(), "engine.handover").detail(detail)).await;
 }
 
+/// Record a reload this engine applied, found nothing to apply for, or refused (`ductus reload`,
+/// `systemctl reload`, 0.7.5.3): who asked, how it went, the interfaces it changed and the
+/// deployment it recorded. One that took the handover is the new engine's `engine.handover`.
+pub async fn reloaded(engine: &Engine, asked: &crate::handover::Asked, r: &crate::reload::Reloaded) {
+    let changed: Vec<&str> = r.plan.iter().flat_map(|p| &p.changes).map(|c| c.interface.as_str()).collect();
+    let detail = json!({
+        "by": asked.by,
+        "reason": asked.reason,
+        "ok": r.ok,
+        "applied": r.how.as_str(),
+        "interfaces": changed,
+        "deployment": r.deployment.as_ref().map(|d| d.id),
+        "outcome": r.outcome,
+        "took_ms": r.took.as_millis() as u64,
+    });
+    record(engine, Audit::new(By::engine(), "engine.reload").detail(detail)).await;
+}
+
 async fn record(engine: &Engine, audit: Audit<'_>) {
     if let Err(e) = engine.store.record(&audit).await {
         tracing::error!(action = audit.action, error = %format!("{e:#}"), "could not write the audit log");

@@ -70,7 +70,11 @@ pub const ACTIONS: &[(&str, &str)] = &[
     ("engine.stop", "The engine stopped cleanly (or handed over to a new engine)."),
     (
         "engine.handover",
-        "A new engine took over from the running one (`systemctl reload`: an upgrade or a deploy), with both versions and how long sending paused.",
+        "A new engine took over from the running one (`ductus handover`, an upgrade, a deploy or reload that needed it), with both versions and how long sending paused.",
+    ),
+    (
+        "engine.reload",
+        "The engine applied its project folder as it is now (`ductus reload`, `systemctl reload`): in place, nothing to apply, or refused, with who asked, the interfaces it changed and the deployment it recorded.",
     ),
     (
         "engine.refused",

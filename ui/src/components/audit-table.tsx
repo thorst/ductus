@@ -40,6 +40,7 @@ export const ACTIONS: Record<string, string> = {
   "engine.start": "Engine started",
   "engine.stop": "Engine stopped",
   "engine.handover": "Engine handed over",
+  "engine.reload": "Engine reloaded its project",
   "engine.refused": "Engine start refused",
   "interface.stopped": "Interface stopped",
   "interface.partitions_raised": "Interface lanes raised with messages waiting",
@@ -85,6 +86,23 @@ function handover(d: Record<string, unknown>): string {
   return `${side(d.from)} → ${side(d.to)}${paused}`;
 }
 
+/**
+ * "in place: adt-in, lab-out · asked by todd: new lab codes", "nothing to apply · asked by systemd
+ * (systemctl reload)", "refused: <why>", from an `engine.reload` detail.
+ */
+function reload(d: Record<string, unknown>): string {
+  const names = Array.isArray(d.interfaces) ? (d.interfaces as string[]) : [];
+  const first =
+    d.applied === "in_place"
+      ? `in place: ${names.length > 0 ? names.join(", ") : "the environment's values"}`
+      : d.applied === "nothing"
+        ? "nothing to apply"
+        : `refused: ${String(d.outcome ?? "").split("\n")[0]}`;
+  const by = typeof d.by === "string" && d.by ? ` · asked by ${d.by}` : "";
+  const why = typeof d.reason === "string" && d.reason ? `: ${d.reason}` : "";
+  return `${first}${by}${why}`;
+}
+
 const VIA: Record<string, string> = { session: "web UI", token: "API token", cli: "command line", engine: "engine" };
 
 /** The most useful line about an entry: the reason if there is one, else what the detail says. */
@@ -92,6 +110,7 @@ export function summary(e: Entry): string {
   const d = (e.detail ?? {}) as Record<string, unknown>;
   if (e.action === "engine.refused") return refusal(d);
   if (e.action === "engine.handover") return handover(d);
+  if (e.action === "engine.reload") return reload(d);
   if (e.action === "interface.partitions_raised") {
     return `${String(d.before)} → ${String(d.now)} lanes with ${String(d.waiting)} waiting`;
   }

@@ -108,15 +108,38 @@ impl Environment {
     /// Load `<root>/environments/<name>.yaml` and `<root>/secrets/<name>.json` (both optional).
     pub fn load(root: &Path, name: &str) -> Result<Self> {
         let file = root.join("environments").join(format!("{name}.yaml"));
-        let (variables, console) = if file.is_file() {
-            let text = std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?;
-            read_file(&text).with_context(|| format!("parsing {}", file.display()))?
-        } else if root.join("environments").is_dir() {
-            bail!("unknown environment `{name}`: {} doesn't exist", file.display());
-        } else {
-            (BTreeMap::new(), None)
+        let text = match file.is_file() {
+            true => Some(std::fs::read_to_string(&file).with_context(|| format!("reading {}", file.display()))?),
+            false => None,
         };
         let secrets = SecretStore::open(root, name)?;
+        Self::from_texts(root, name, text.as_deref(), root.join("environments").is_dir(), secrets)
+    }
+
+    /// The environment `files` were read for (`ProjectFiles::read`), as `load` would load it.
+    pub fn from_files(root: &Path, files: &crate::project_files::ProjectFiles) -> Result<Self> {
+        let name = &files.environment;
+        let secrets = match files.text(&crate::project_files::secrets_file(name)) {
+            Some(text) => Some(SecretStore::from_text(root, name, text)?),
+            None => None,
+        };
+        let text = files.text(&crate::project_files::environment_file(name));
+        Self::from_texts(root, name, text, files.has_environments, secrets)
+    }
+
+    fn from_texts(
+        root: &Path,
+        name: &str,
+        text: Option<&str>,
+        has_environments: bool,
+        secrets: Option<SecretStore>,
+    ) -> Result<Self> {
+        let file = root.join("environments").join(format!("{name}.yaml"));
+        let (variables, console) = match text {
+            Some(text) => read_file(text).with_context(|| format!("parsing {}", file.display()))?,
+            None if has_environments => bail!("unknown environment `{name}`: {} doesn't exist", file.display()),
+            None => (BTreeMap::new(), None),
+        };
         Ok(Self { name: name.to_string(), variables, secrets, console })
     }
 

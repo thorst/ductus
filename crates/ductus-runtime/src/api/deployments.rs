@@ -615,7 +615,8 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
         report.replaces.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
     if let Some(plan) = plan.as_ref().filter(|_| handover_because.is_empty()) {
         let next = std::sync::Arc::new(deploy::Running { id: id.clone(), manifest: manifest.clone(), ancestry });
-        match deploy::apply_in_place(&engine, plan, next, &folder, &deployer, &warnings).await {
+        let env = std::sync::Arc::new(ductus_core::Environment::load(&folder, &engine.environment)?);
+        match deploy::apply_in_place(&engine, plan, &manifest, Some(next), &folder, env, &deployer, &warnings).await {
             Ok(done) => {
                 report.ok = true;
                 report.applied = Some("in_place");
@@ -696,6 +697,7 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
             rollback: asked.rollback,
             variables: reached,
         },
+        ..Default::default()
     };
     let started = Utc::now();
     let mut steps = std::mem::take(&mut report.steps);
@@ -767,7 +769,7 @@ fn span(d: Duration) -> String {
 /// messages), sources changed (a moved port opens before the old one closes, a pickup restarts:
 /// not "between two messages"), restarted alone (what a start sets up changed: 0.7.5.2.4), added
 /// (started) and removed (stopped).
-fn in_place_outcome(changes: &[crate::changes::Change]) -> String {
+pub(crate) fn in_place_outcome(changes: &[crate::changes::Change]) -> String {
     use crate::changes::Apply;
     let added = changes.iter().filter(|c| c.is_added()).count();
     let removed = changes.iter().filter(|c| c.is_removed()).count();

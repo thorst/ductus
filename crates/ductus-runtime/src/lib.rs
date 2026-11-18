@@ -34,6 +34,7 @@ pub mod mssql;
 pub mod ownership;
 pub mod project;
 pub mod release;
+pub mod reload;
 pub mod replay;
 pub mod retention;
 mod schedule;
@@ -337,14 +338,18 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     };
     let root = root.as_path();
     let running_release = releases.as_ref().and_then(|r| r.running());
-    let env = Environment::load(root, &options.env)?;
+    // The project's own files, read once: the engine is built from these texts, and keeps them (a
+    // reload in folder mode compares the folder with them).
+    let project_files = ductus_core::project_files::ProjectFiles::read(root, &options.env)?;
+    let env = Environment::from_files(root, &project_files)?;
     // Said in the start's line: which of the code's `console` lines this environment logs.
     let console = env.console().as_str();
     let configs = load_interfaces(root, &env)?;
     phases.mark("interface.yaml files read");
     // Loaded now so a missing variable or secret stops startup; used by interface code (v0.4).
-    let resources = ductus_core::Resources::load(root, &env)?;
-    let settings = ductus_core::settings::Settings::load(root)?;
+    use ductus_core::project_files::{DOCS_SCHEMA, RESOURCES, SETTINGS};
+    let resources = ductus_core::Resources::from_text(root, project_files.text(RESOURCES), &env)?;
+    let settings = ductus_core::settings::Settings::from_text(root, project_files.text(SETTINGS))?;
     let alert_settings = settings.alerts(&env)?;
     let heap_mb = settings.isolates.heap_mb;
     let api_address = settings.api.address(options.api_listen.as_deref())?;
@@ -464,7 +469,10 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     phases.mark("lanes decided");
     // The company's documentation fields: a broken docs-schema.yaml is for `ductus validate` to report,
     // not a reason to stop the engine. The snapshot is for SQL reports, so it never blocks startup either.
-    let docs = ductus_core::docs::Schema::load(root).unwrap_or_else(|e| {
+    let docs = project_files.text(DOCS_SCHEMA).map_or(Ok(Default::default()), |text| {
+        ductus_core::docs::Schema::parse(text).with_context(|| format!("in {}", root.join(DOCS_SCHEMA).display()))
+    });
+    let docs = docs.unwrap_or_else(|e| {
         tracing::warn!(error = format!("{e:#}"), "ignoring the documentation fields: run `ductus validate`");
         Default::default()
     });
@@ -622,6 +630,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             threads: Vec::new(), // once they're spawned (below)
             removed: false,
             retiring,
+            generation: 0, // the start's
         };
         for slot in 0..config.slots() {
             let job = parts.job(&shared, slot, requests.take(), &shared.waiting);
@@ -875,6 +884,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         releases: releases.clone(),
         ended: ended.clone(),
         sources,
+        project_files,
     });
     // The audit log: this start (and how the last run on this host ended), interfaces the runaway
     // guard stops, and the hourly trimming. A log that can't be written is not a reason to refuse

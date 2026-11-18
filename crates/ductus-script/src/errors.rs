@@ -130,6 +130,12 @@ mod tests {
             "Error: no PID (interfaces/adt/t.ts:6:11)\n    at transform (interfaces/adt/t.ts:6:11)"
         );
         assert_eq!(readable("Uncaught boom", root.path()), "Uncaught boom", "nothing to point at");
+        // A module loaded again after a reload (its generation on the URL, 0.7.5.3): the same place.
+        let error = format!("Error: no PID\n    at transform ({url}?g=3:6:11)");
+        assert_eq!(
+            readable(&error, root.path()),
+            "Error: no PID (interfaces/adt/t.ts:6:11)\n    at transform (interfaces/adt/t.ts:6:11)"
+        );
         // Outside the project: the whole path.
         #[cfg(unix)]
         assert_eq!(

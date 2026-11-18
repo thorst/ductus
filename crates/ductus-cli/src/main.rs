@@ -12,6 +12,7 @@ mod owners;
 mod project;
 mod reference;
 mod release;
+mod reload;
 mod replay;
 mod service;
 mod sinks;
@@ -570,6 +571,47 @@ enum Command {
         /// Example: `sudo ductus handover -m "lab wants PV1-3 mapped"`.
         #[arg(short = 'm', long = "message")]
         reason: Option<String>,
+    },
+    /// Apply the project folder as it is now to the running engine (folder mode), in place: only
+    /// the interfaces whose files or settings changed take the change (between two messages, or
+    /// restarting alone; added ones start, removed ones stop), every other interface goes on
+    /// untouched. What only a start reads (ductus.yaml, resources.yaml, docs-schema.yaml, the
+    /// environment's secrets file, a new binary, ductus.env with `--with-environment`) is applied
+    /// by the handover instead, said in the answer. Recorded as a deployment (`ductus history`).
+    /// Asks over the control socket where there is one (Linux under the package, containers),
+    /// else the engine's API with a `deploy` token (Windows, a plain `ductus run`). `systemctl
+    /// reload ductus` runs it. Exit 0 once the engine runs the folder, 1 when it was refused
+    /// (nothing changed: the reason is printed). Example: `git pull && sudo ductus reload -m
+    /// "lab codes from LAB-142"`.
+    Reload {
+        /// The running engine's control socket (default: `$RUNTIME_DIRECTORY/control`, else
+        /// /run/ductus/control when it's there; without one, the API is asked).
+        #[arg(long, env = "DUCTUS_CONTROL")]
+        control: Option<PathBuf>,
+        /// The engine's API, asked when there's no control socket.
+        #[arg(long, env = "DUCTUS_API_URL", default_value = "http://127.0.0.1:7700")]
+        api: String,
+        /// A token with the `deploy` permission, for the API (`ductus token create reload --role
+        /// operator --permission deploy`).
+        #[arg(long, env = "DUCTUS_API_TOKEN", hide_env_values = true)]
+        token: Option<String>,
+        /// Why: recorded with the deployment, beside who asked.
+        #[arg(short = 'm', long = "message")]
+        reason: Option<String>,
+        /// Refuse what only the handover applies, instead of handing over (nothing changes then).
+        #[arg(long)]
+        in_place_only: bool,
+        /// Pass this command's environment along (the unit's reload: ductus.env read again): a
+        /// `DUCTUS_*` value that differs from the running engine's is applied by the handover.
+        /// Control socket only.
+        #[arg(long)]
+        with_environment: bool,
+        /// How long a handover's new engine may take to be ready.
+        #[arg(long, default_value = "5m", value_parser = parse_duration)]
+        timeout: std::time::Duration,
+        /// Print the report as JSON (what `POST /engine/reload` answers).
+        #[arg(long)]
+        json: bool,
     },
     /// Create something new in a project.
     New {
@@ -1567,13 +1609,20 @@ async fn run(cli: Cli) -> Result<()> {
                 std::env::vars_os().filter_map(|(k, v)| Some((k.into_string().ok()?, v.into_string().ok()?))).collect()
             });
             let asked = handover::Asked::here(reason);
-            let request = handover::Request { timeout_secs: timeout.as_secs(), environment, asked };
-            let (ok, text) = handover::ask(&path, &request, |line| println!("{line}")).await?;
-            if !ok {
-                eprintln!("error: {text}");
+            let request = handover::Request { timeout_secs: timeout.as_secs(), environment, asked, ..Default::default() };
+            let done = handover::ask(&path, &request, |line| println!("{line}")).await?;
+            if !done.ok {
+                eprintln!("error: {}", done.text);
                 std::process::exit(1);
             }
-            println!("{text}");
+            println!("{}", done.text);
+            Ok(())
+        }
+        Command::Reload { control, api, token, reason, in_place_only, with_environment, timeout, json } => {
+            let r = reload::Reload { control, api, token, reason, in_place_only, with_environment, json, timeout };
+            if !reload::run(r).await? {
+                std::process::exit(1);
+            }
             Ok(())
         }
         Command::Init { dir } => init::project(&dir).await,

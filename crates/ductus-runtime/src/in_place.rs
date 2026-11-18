@@ -56,6 +56,8 @@ pub struct Kept {
     interfaces: std::sync::RwLock<HashMap<String, Arc<Mutex<Interface>>>>,
     shared: Shared,
     threads: Threads,
+    /// The generation code applied now loads under (`next_generation`; 0: the start's).
+    generation: std::sync::atomic::AtomicU64,
 }
 
 /// What every interface's jobs and outlets are built with.
@@ -122,6 +124,10 @@ pub(crate) struct Interface {
     /// Stops its lanes' watch for settling (`lanes::retire_when_settled`): cancelled when a
     /// restart in place gives it new lanes, or it is removed.
     pub retiring: tokio_util::sync::CancellationToken,
+    /// The generation its code loaded under (`ductus_script::Isolate::set_generation`): the
+    /// start's 0, then the deploy's or reload's that changed it last. Code put back after a failed
+    /// change loads under its old one, and so gets its old modules back.
+    pub generation: u64,
 }
 
 /// Some of an interface's slots, on one worker thread.
@@ -236,6 +242,7 @@ impl Interface {
             waiting: waiting.clone(),
             decided: self.decided.clone(),
             lanes: self.lanes.clone(),
+            generation: self.generation,
         }
     }
 
@@ -271,6 +278,7 @@ impl Interface {
             threads: Vec::new(),
             removed: false,
             retiring: self.retiring.clone(),
+            generation: self.generation,
         }
     }
 
@@ -340,7 +348,20 @@ impl Kept {
     /// What a start built: `interfaces` with the threads their slots run on.
     pub(crate) fn new(shared: Shared, interfaces: impl IntoIterator<Item = Interface>, threads: Threads) -> Self {
         let interfaces = interfaces.into_iter().map(|i| (i.config.name.clone(), Arc::new(Mutex::new(i)))).collect();
-        Self { interfaces: std::sync::RwLock::new(interfaces), shared, threads }
+        Self { interfaces: std::sync::RwLock::new(interfaces), shared, threads, generation: Default::default() }
+    }
+
+    /// A new generation for the code a deploy or reload is about to load (`Interface::generation`):
+    /// one per deploy, never used before. In folder mode it's what makes a changed file a new
+    /// module (its path is the same: `ductus_script::Isolate::set_generation`); a release's files
+    /// have paths of their own, where it changes nothing but the URLs.
+    pub(crate) fn next_generation(&self) -> u64 {
+        self.generation.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1
+    }
+
+    /// The generation `name`'s code loaded under, if it runs here (what putting it back loads under).
+    pub(crate) async fn generation_of(&self, name: &str) -> Option<u64> {
+        Some(self.get(name)?.lock().await.generation)
     }
 
     /// What every interface's jobs and outlets are built with (an added interface's too).
@@ -565,12 +586,14 @@ impl Kept {
     /// A thread that can't load the new code leaves the interface as it was: threads that already
     /// switched are given the old code back (the same files: V8's own modules, so nothing loads
     /// twice) before the error is returned. A destination change while its lanes are changing is
-    /// refused with `NeedsHandover`, nothing changed.
+    /// refused with `NeedsHandover`, nothing changed. Its code loads under `generation`
+    /// (`Interface::generation`).
     pub async fn replace(
         &self,
         config: InterfaceConfig,
         activity: &Activity,
         decided: crate::deployment::Decided,
+        generation: u64,
     ) -> Result<Replaced> {
         let name = config.name.clone();
         let interface = self.get(&name).with_context(|| format!("interface `{name}` isn't running here"))?;
@@ -608,6 +631,7 @@ impl Kept {
             std::mem::replace(&mut interface.outlets, outlets),
             std::mem::replace(&mut interface.wake, wake),
             std::mem::replace(&mut interface.decided, decided),
+            std::mem::replace(&mut interface.generation, generation),
         );
         let mut switched = Vec::new();
         let mut files = Vec::new();
@@ -625,7 +649,7 @@ impl Kept {
             }
         }
         if let Some(error) = failed {
-            (interface.config, interface.outlets, interface.wake, interface.decided) = old;
+            (interface.config, interface.outlets, interface.wake, interface.decided, interface.generation) = old;
             self.put_back(&interface, &switched).await;
             if retarget && let Err(e) = activity.watch(interface.watched()).await {
                 tracing::warn!(interface = %name, error = %format!("{e:#}"), "couldn't watch its old destinations again: their last activity isn't saved until the next start");
@@ -802,7 +826,7 @@ mod tests {
         assert_eq!(seen_b.recv().await.unwrap(), ("two".to_string(), vec![]), "told to stop running it");
         assert_eq!(pool_slots(&kept), [2, 0]);
         assert!(!kept.contains("two") && kept.shared().intake("two").is_none());
-        let error = kept.replace(config(TWO), &activity, decided(2)).await.map(drop).unwrap_err();
+        let error = kept.replace(config(TWO), &activity, decided(2), 1).await.map(drop).unwrap_err();
         assert!(format!("{error:#}").contains("`two` isn't running here"), "{error:#}");
         assert!(kept.remove("two").await.is_err());
         assert!(kept.contains("adt") && kept.contains("three"), "the others run on");
@@ -877,6 +901,7 @@ mod tests {
             threads: Vec::new(),
             removed: false,
             retiring: Default::default(),
+            generation: 0,
             config,
         };
         (interface, activity)
@@ -927,7 +952,7 @@ mod tests {
             "ris: { file: { dir: ris }, rate_limit: { per_minute: 60 } }",
             "ris: { file: { dir: ris2 }, rate_limit: { per_minute: 30 } }",
         );
-        let replaced = kept.replace(config(&two), &activity, decided(2)).await.unwrap();
+        let replaced = kept.replace(config(&two), &activity, decided(2), 1).await.unwrap();
         for seen in [&mut seen_a, &mut seen_b] {
             let job = seen.recv().await.unwrap();
             assert!(job.config.destinations().any(|(_, d)| d.rate_limit.as_ref().unwrap().per_minute == 30));
@@ -957,7 +982,7 @@ mod tests {
         let (kept, activity) = kept([a, b]);
         let (old, _, _) = running(&kept, "adt").await;
         let two = ONE.replace("dir: lab", "dir: lab2");
-        let error = kept.replace(config(&two), &activity, decided(2)).await.map(drop).unwrap_err();
+        let error = kept.replace(config(&two), &activity, decided(2), 1).await.map(drop).unwrap_err();
         assert!(format!("{error:#}").contains("SyntaxError"));
         assert!(!Arc::ptr_eq(&seen_a.recv().await.unwrap().config, &old), "the first thread switched");
         let back = seen_a.recv().await.unwrap();
@@ -977,14 +1002,14 @@ mod tests {
         let changing = Layout { generations: vec![generation(0, 2), generation(2, 1)] };
         let (kept, activity) = kept_with(ONE, vec![a, b], store, 1, changing);
         let error =
-            kept.replace(config(&ONE.replace("ris:", "pacs:")), &activity, decided(2)).await.map(drop).unwrap_err();
+            kept.replace(config(&ONE.replace("ris:", "pacs:")), &activity, decided(2), 1).await.map(drop).unwrap_err();
         assert!(error.is::<NeedsHandover>(), "{error:#}");
         assert!(format!("{error:#}").contains("while its lanes are changing"), "{error:#}");
         assert!(seen_a.try_recv().is_err());
         // A change to a destination's settings still goes in place.
-        kept.replace(config(&ONE.replace("dir: lab", "dir: lab2")), &activity, decided(2)).await.unwrap();
+        kept.replace(config(&ONE.replace("dir: lab", "dir: lab2")), &activity, decided(2), 1).await.unwrap();
         let error =
-            kept.replace(config(&ONE.replace("adt", "nope")), &activity, decided(2)).await.map(drop).unwrap_err();
+            kept.replace(config(&ONE.replace("adt", "nope")), &activity, decided(2), 1).await.map(drop).unwrap_err();
         assert!(format!("{error:#}").contains("interface `nope` isn't running here"), "{error:#}");
     }
 
@@ -1017,7 +1042,7 @@ mod tests {
         assert_eq!(pending(&ids).await, [2, 2]);
 
         let swapped = yaml.replace("ris: { file: { dir: ris }", "pacs: { file: { dir: pacs }");
-        let replaced = kept.replace(config(&swapped), &activity, decided(2)).await.unwrap();
+        let replaced = kept.replace(config(&swapped), &activity, decided(2), 1).await.unwrap();
         let shown: Vec<&str> = replaced.destinations.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(shown, ["lab", "pacs"]);
         let (lab, pacs) = (&replaced.destinations[0], &replaced.destinations[1]);

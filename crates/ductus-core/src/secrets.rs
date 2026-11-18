@@ -57,8 +57,14 @@ impl SecretStore {
             return Ok(None);
         }
         let text = std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
-        let values = serde_json::from_str(&text).with_context(|| format!("parsing {}", path.display()))?;
-        Ok(Some(Self { env: env.to_string(), path, values }))
+        Self::from_text(root, env, &text).map(Some)
+    }
+
+    /// The store for `env` from its file's text, read already (`ProjectFiles`).
+    pub fn from_text(root: &Path, env: &str, text: &str) -> Result<Self> {
+        let path = file(root, env);
+        let values = serde_json::from_str(text).with_context(|| format!("parsing {}", path.display()))?;
+        Ok(Self { env: env.to_string(), path, values })
     }
 
     pub fn names(&self) -> impl Iterator<Item = &str> {
