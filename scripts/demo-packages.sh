@@ -147,19 +147,28 @@ lifecycle() {
   check "$ext-crash-none-refused" '[ "$(refused "$sent")" = 0 ]'
   check "$ext-crash-nothing-lost" 'grep "unique 1000 |" <<<"$received" >/dev/null'
 
-  # A reload: the handover (here the same binary and project, as a deploy would be). The new
-  # engine starts on the same sockets; the old one stops once it's ready. systemd follows.
   mainpid() { on "systemctl show -p MainPID --value ductus"; }
   handovers() { on "journalctl -u ductus --no-pager -o cat | grep -c 'took over: receiving never stopped'" || true; }
   local before
+  # A reload (0.7.5.3: `ductus reload --with-environment`): the project in place, here unchanged,
+  # so nothing to apply; the same process runs on.
   before=$(mainpid)
   gap "reload" 400000 "systemctl reload ductus"
   check "$ext-reload-none-refused" '[ "$(refused "$sent")" = 0 ]'
   check "$ext-reload-nothing-lost" 'grep "unique 1000 |" <<<"$received" >/dev/null'
-  check "$ext-reload-nothing-twice" 'grep "duplicates 0 |" <<<"$received" >/dev/null'
-  check "$ext-reload-in-order" 'grep "out of order 0 |" <<<"$received" >/dev/null'
-  check "$ext-reload-followed" '[ "$(mainpid)" != "$before" ] && [ "$(on "systemctl is-active ductus")" = active ]'
-  echo "   reload: $(on "journalctl -u ductus --no-pager -o cat | grep -o 'handed over to .*' | tail -1")"
+  check "$ext-reload-in-place" '[ "$(mainpid)" = "$before" ] && [ "$(on "systemctl is-active ductus")" = active ]'
+  check "$ext-reload-said" 'on "journalctl -u ductus --no-pager -o cat | grep \"reload: nothing changed\" >/dev/null"'
+  # The handover (`ductus handover`: the same binary and project, as a change only a start reads
+  # would be). The new engine starts on the same sockets; the old one stops once it's ready.
+  # systemd follows.
+  before=$(mainpid)
+  gap "handover" 450000 "ductus handover -m 'package test'"
+  check "$ext-handover-none-refused" '[ "$(refused "$sent")" = 0 ]'
+  check "$ext-handover-nothing-lost" 'grep "unique 1000 |" <<<"$received" >/dev/null'
+  check "$ext-handover-nothing-twice" 'grep "duplicates 0 |" <<<"$received" >/dev/null'
+  check "$ext-handover-in-order" 'grep "out of order 0 |" <<<"$received" >/dev/null'
+  check "$ext-handover-followed" '[ "$(mainpid)" != "$before" ] && [ "$(on "systemctl is-active ductus")" = active ]'
+  echo "   handover: $(on "journalctl -u ductus --no-pager -o cat | grep -o 'handed over to .*' | tail -1")"
 
   # A project change that can't start: the reload fails and says why; the running engine goes on.
   local yaml=/var/lib/ductus/project/interfaces/adt-in/interface.yaml
