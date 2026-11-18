@@ -121,7 +121,8 @@ engine starts ([nuance](../nuances/deployments.md#a-reload-applies-the-folder-in
 | Nothing | nothing: "the folder is what runs" |
 
 **Why in place:** a handover starts every interface again, so every interface's sending pauses
-while the engines swap (0.4–0.6 s at 1,001 interfaces); a reload pauses only what changed.
+while the engines swap (86–178 ms at 1,001 interfaces, measured below); a reload pauses only
+what changed.
 **What it compares with:** what the engine runs (each version's files, as the database keeps
 them, and the project's own files as the start read them), never git or the disk: by the time
 you reload, the folder already holds the new files. **When it refuses:** a folder that doesn't
@@ -141,12 +142,28 @@ paramchange`) ask for the same reload, answered only in the log. [`ductus
 reload`](../reference/cli/reload.md) has the options; `--json` prints the report
 `POST /engine/reload` answers.
 
-A change to one interface's code, from a lab engine (run as the engine's own account, so without
+A change to a shared file one interface imports (`lib/tag.ts`), while senders send to it and to
+another, from a lab engine (`scripts/demo-reload.sh`; run as the engine's own account, so without
 `sudo`):
 
 ```text
-TRANSCRIPT 0.7.5.3.1
+$ ductus reload -m "lab wants MSH-5 = LAB2"
+  reload-a-832: code
+  reload-a-832: code → 3a0f58f6ace3, applied in place (24 ms)
+applied in place: 1 interface took its new code between two messages; the others never paused (46 ms)
 ```
+
+The first line is what the folder changes (`code`: a file its version counts), the second what
+was done and how long that interface took, the last how long the whole reload took. Neither
+sender was refused or retried, and every message arrived once.
+
+**What it costs**, measured at 1,001 interfaces (`scripts/bench-reload.sh`: 4 pool threads, 100
+messages a second to the changed interface and to one that isn't, 6 rounds each): a reload of
+one interface's code answers in 0.25–0.29 s and the interface that didn't change waits at most
+15–74 ms for an ACK (the baseline without a reload: 73 ms); 50 interfaces' code, 0.29–0.40 s
+and 13–22 ms; nothing changed, 0.17–0.19 s (reading the folder again, 124–209 ms, beside the
+messages). `ductus handover` for the same change: 0.80–1.02 s, every interface's sending paused
+86–178 ms, the unchanged interface waiting 117–130 ms for an ACK every time.
 
 `ductus handover` is the full handover whatever changed: a new engine, every interface started
 again. Use it to give back the memory of code replaced in place many times

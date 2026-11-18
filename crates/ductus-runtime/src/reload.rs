@@ -169,8 +169,12 @@ pub async fn reload(
             .to_string();
         return needs_handover(reloaded, why, in_place_only, finish);
     }
+    let planning = std::time::Instant::now();
     let (next, plan) = match plan(engine).await {
-        Ok(planned) => planned,
+        Ok(planned) => {
+            tracing::debug!(changes = planned.1.changes.len(), took = ?planning.elapsed(), "reload: what the folder changes worked out");
+            planned
+        }
         Err(e) => {
             let outcome = format!("the folder doesn't load: {e:#}\nNothing changed: every interface runs what it ran.");
             return finish(reloaded, How::Refused, outcome);

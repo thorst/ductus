@@ -101,6 +101,9 @@ start_engine 2
 GEN=$!
 sleep 6 # the first drop of expired partitions runs 5 s after startup
 wait_for 30 '! exists "$lab28"'
+# Logged beside the start: on a busy machine after the drop above. Waited for, since a grep that
+# finds nothing ends this script silently (`set -e` with `pipefail`).
+wait_for 30 'grep -q "shorter retention not applied" run.log'
 grep -o 'shorter retention not applied.*' run.log | sed 's/^/   log: /'
 echo "   \$ ductus retention"
 "$BIN" retention | sed 's/^/     /'
@@ -118,6 +121,7 @@ elapsed=$(( ($(date +%s%N) - start) / 1000000 ))
 wait $GEN
 tail -1 "$P/gen.log" | sed 's/^/   gen: /'
 wait_for 60 '[ "$(q "SELECT count(*) FROM messages WHERE interface = '"'adt'"' AND tier = 21 AND status = 1 AND received_at >= current_date")" = $LIVE ]'
+wait_for 30 'grep -q "retention change done" run.log'
 grep -o 'retention change done.*' run.log | sed 's/^/   log: /'
 echo "   adt after ${elapsed} ms: $(tier_counts adt)"
 
