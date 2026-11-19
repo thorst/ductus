@@ -28,7 +28,7 @@ The range a new HTTP interface's port is picked from, as `first-last` (HTTP inte
 
 **Type:** settings, below
 
-Limits of the JavaScript engine that runs interface code (`heap_mb`). Default: `heap_mb: 512`.
+Limits of the JavaScript engine that runs interface code (`heap_mb`, `superseded_mb`). Default: `heap_mb: 512`, `superseded_mb: 64`.
 
 ### `isolates.heap_mb`
 
@@ -39,6 +39,14 @@ The memory limit, in MB, of each isolate: one copy of the JavaScript engine (V8)
 Every thread of the shared pool has an isolate (one thread per CPU core, or `--threads`), and so does every worker of an `isolation: dedicated` interface, so the code can use up to about `heap_mb` × (threads + dedicated workers) in all: size the server with that. Code that fills its isolate is stopped, its message quarantined and its interface stopped until a restart; the engine and every other interface keep running. In the shared pool the limit is shared by every interface on the thread, so the one that runs out isn't always the one that filled it (a cache in another interface that only grows).
 
 Raise it for code that holds a lot on purpose (a large lookup table loaded once), or give that interface `isolation: dedicated`; lower it on a small server with many cores. Default: `512`. Example: `isolates: { heap_mb: 1024 }`.
+
+### `isolates.superseded_mb`
+
+**Type:** number
+
+How much replaced code, in MB, an isolate may hold before the engine gives its thread a fresh one. A deploy or reload in place loads an interface's new code beside the old, and the JavaScript engine keeps every version it loaded until its isolate ends: about 14 KB plus 16 times the size of the files, per version (measured). The engine counts what each deploy replaces, and once a thread's count passes this, it makes a new thread beside it, loads every interface of the old one there, and moves them over one at a time, between messages; the old thread and its memory are then gone. So an engine deployed to many times a day stays the same size without a restart.
+
+A move resets the module-level state of every interface on that thread (a cache, a counter), as a restart does; each interface pauses only while it moves (the message in hand finishes first). It happens only after a deploy, never on a timer. Raise it to move less often on a server with memory to spare; lower it on a small one. A fraction is allowed. Default: `64`. Example: `isolates: { superseded_mb: 128 }`.
 
 ### `require_about`
 

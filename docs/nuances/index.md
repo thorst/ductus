@@ -48,7 +48,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Local development](dev.md) (2)
 - [Upgrades](upgrades.md) (17)
 - [What runs, recorded](deployments.md) (19)
-- [Releases](releases.md) (37)
+- [Releases](releases.md) (38)
 - [Windows](windows.md) (9)
 
 ## Level 1: Foundations (40)
@@ -222,7 +222,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (87)
+## Level 3: Professional (88)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
@@ -308,6 +308,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Stored releases are kept](releases.md#stored-releases-are-kept-level-3) (Releases)
 - [A rewritten history is accepted once a deploy brings the same files from it](releases.md#a-rewritten-history-is-accepted-once-a-deploy-brings-the-same-files-from-it-level-3) (Releases)
 - [A deploy in place pauses the changed interface while its code loads](releases.md#a-deploy-in-place-pauses-the-changed-interface-while-its-code-loads-level-3) (Releases)
+- [A thread that holds too much replaced code gets a fresh isolate, and its interfaces start over](releases.md#a-thread-that-holds-too-much-replaced-code-gets-a-fresh-isolate-and-its-interfaces-start-over-level-3) (Releases)
 - [A destination a rollback brings back doesn't get what waited while it was gone](releases.md#a-destination-a-rollback-brings-back-doesnt-get-what-waited-while-it-was-gone-level-3) (Releases)
 - ["Log on as a service": the installer grants it, Group Policy can take it away](windows.md#log-on-as-a-service-the-installer-grants-it-group-policy-can-take-it-away-level-3) (Windows)
 - [A refused connection takes about a second on Windows, and `localhost` may be `::1` first](windows.md#a-refused-connection-takes-about-a-second-on-windows-and-localhost-may-be-1-first-level-3) (Windows)

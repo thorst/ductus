@@ -14,13 +14,13 @@
       "markdownDescription": "The port ranges `ductus new interface` picks a free port from for a new interface's listener (each interface's own port is in its interface.yaml). Set them to the ranges your firewall team opened, so new interfaces land inside. Default: MLLP `6661-6699`, HTTP `8080-8099`. Example: `ports: { mllp: 7000-7099 }`."
     },
     "isolates": {
-      "description": "Limits of the JavaScript engine that runs interface code (`heap_mb`). Default: `heap_mb: 512`.",
+      "description": "Limits of the JavaScript engine that runs interface code (`heap_mb`, `superseded_mb`). Default: `heap_mb: 512`, `superseded_mb: 64`.",
       "allOf": [
         {
           "$ref": "#/definitions/Isolates"
         }
       ],
-      "markdownDescription": "Limits of the JavaScript engine that runs interface code (`heap_mb`). Default: `heap_mb: 512`."
+      "markdownDescription": "Limits of the JavaScript engine that runs interface code (`heap_mb`, `superseded_mb`). Default: `heap_mb: 512`, `superseded_mb: 64`."
     },
     "require_about": {
       "description": "Make `ductus validate` fail (not only warn) when an interface doesn't name the application or vendor on each side in `about:`, so `ductus impact` never misses one. Turn it on once the existing interfaces are documented, and every new one must be. Default: `false`. Example: `require_about: true`.",
@@ -144,6 +144,13 @@
           "minimum": 0,
           "default": 512,
           "markdownDescription": "The memory limit, in MB, of each isolate: one copy of the JavaScript engine (V8) that runs interface code. At least `64`.\n\nEvery thread of the shared pool has an isolate (one thread per CPU core, or `--threads`), and so does every worker of an `isolation: dedicated` interface, so the code can use up to about `heap_mb` × (threads + dedicated workers) in all: size the server with that. Code that fills its isolate is stopped, its message quarantined and its interface stopped until a restart; the engine and every other interface keep running. In the shared pool the limit is shared by every interface on the thread, so the one that runs out isn't always the one that filled it (a cache in another interface that only grows).\n\nRaise it for code that holds a lot on purpose (a large lookup table loaded once), or give that interface `isolation: dedicated`; lower it on a small server with many cores. Default: `512`. Example: `isolates: { heap_mb: 1024 }`."
+        },
+        "superseded_mb": {
+          "description": "How much replaced code, in MB, an isolate may hold before the engine gives its thread a fresh one. A deploy or reload in place loads an interface's new code beside the old, and the JavaScript engine keeps every version it loaded until its isolate ends: about 14 KB plus 16 times the size of the files, per version (measured). The engine counts what each deploy replaces, and once a thread's count passes this, it makes a new thread beside it, loads every interface of the old one there, and moves them over one at a time, between messages; the old thread and its memory are then gone. So an engine deployed to many times a day stays the same size without a restart.\n\nA move resets the module-level state of every interface on that thread (a cache, a counter), as a restart does; each interface pauses only while it moves (the message in hand finishes first). It happens only after a deploy, never on a timer. Raise it to move less often on a server with memory to spare; lower it on a small one. A fraction is allowed. Default: `64`. Example: `isolates: { superseded_mb: 128 }`.",
+          "type": "number",
+          "format": "double",
+          "default": 64.0,
+          "markdownDescription": "How much replaced code, in MB, an isolate may hold before the engine gives its thread a fresh one. A deploy or reload in place loads an interface's new code beside the old, and the JavaScript engine keeps every version it loaded until its isolate ends: about 14 KB plus 16 times the size of the files, per version (measured). The engine counts what each deploy replaces, and once a thread's count passes this, it makes a new thread beside it, loads every interface of the old one there, and moves them over one at a time, between messages; the old thread and its memory are then gone. So an engine deployed to many times a day stays the same size without a restart.\n\nA move resets the module-level state of every interface on that thread (a cache, a counter), as a restart does; each interface pauses only while it moves (the message in hand finishes first). It happens only after a deploy, never on a timer. Raise it to move less often on a server with memory to spare; lower it on a small one. A fraction is allowed. Default: `64`. Example: `isolates: { superseded_mb: 128 }`."
         }
       },
       "additionalProperties": false
