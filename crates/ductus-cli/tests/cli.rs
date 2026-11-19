@@ -3632,6 +3632,18 @@ fn wait_for_log(path: &Path, text: &str, seconds: u64) -> bool {
     false
 }
 
+/// Wait up to `seconds` for `path` to exist (a control socket).
+fn wait_for_path(path: &Path, seconds: u64) -> bool {
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(seconds);
+    while std::time::Instant::now() < until {
+        if path.exists() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    false
+}
+
 /// `ductus run` to its end; returns its exit code and output.
 fn run_to_end(dir: &Path, db: &str) -> (Option<i32>, String) {
     let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
@@ -5974,6 +5986,8 @@ async fn a_thread_past_its_budget_of_replaced_code_is_renewed_under_traffic() {
             .unwrap(),
     );
     assert!(wait_for_log(&log, "deployed:", 60), "{}", read(&log));
+    // The control socket opens at the end of the start; `deployed:` is logged beside it, maybe first.
+    assert!(wait_for_path(&control, 30), "no control socket:\n{}", read(&log));
     let pid = engine.0.id();
     let renewed = || read(&log).matches("renewed: its interfaces run in a fresh isolate").count();
 
@@ -6172,6 +6186,8 @@ async fn a_reload_applies_the_folder_in_place_while_another_interface_sends() {
             .unwrap(),
     );
     assert!(wait_for_log(&log, "deployed:", 60), "{}", read(&log));
+    // The control socket opens at the end of the start; `deployed:` is logged beside it, maybe first.
+    assert!(wait_for_path(&control, 30), "no control socket:\n{}", read(&log));
     let pid = first.0.id();
 
     // Nothing changed yet: nothing to apply.
