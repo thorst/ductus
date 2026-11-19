@@ -389,6 +389,24 @@ pub struct Manifest {
     /// **Unsigned**: anyone holding the file can edit it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deployed: Vec<Place>,
+    /// Made by an engine from two releases (`ductus deploy R --interface A`, 0.7.5.3.2): what
+    /// ran there with some interfaces taken from another release (`compose`). None: made by
+    /// `ductus release`. Its `git` is the other release's: the commit the interfaces taken came
+    /// from (what the "replaces" check and `DUCTUS_DEPLOY_BRANCHES` read), not every file's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub composed: Option<Composed>,
+}
+
+/// What a composed release was made of (`Manifest::composed`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Composed {
+    /// The release that ran (in hex): every interface not named, and the project's own files
+    /// (ductus.yaml, resources.yaml, `environments/`, ...), are as they were in it.
+    pub over: String,
+    /// The release the named interfaces came from (in hex).
+    pub from: String,
+    /// The interfaces taken from `from` (changed, added, or removed when `from` has none), sorted.
+    pub interfaces: Vec<String>,
 }
 
 /// One deployment of a release, as its file carries it (`Manifest::deployed`).
@@ -403,6 +421,12 @@ pub struct Place {
     pub by: String,
     /// The Ductus version that ran it.
     pub ductus: String,
+    /// Only these interfaces of it went there (0.7.5.3.2: a release composed from it,
+    /// `ductus deploy R --interface A`); empty: the whole release. An environment requiring this
+    /// one first takes the release whole only after a whole deployment, and some of its
+    /// interfaces once those went.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 impl Place {
@@ -414,6 +438,7 @@ impl Place {
             at: p.at,
             by: p.by.clone(),
             ductus: p.ductus_version.clone(),
+            interfaces: p.interfaces.clone(),
         }
     }
 
@@ -426,6 +451,7 @@ impl Place {
             by: self.by.clone(),
             ductus_version: self.ductus.clone(),
             here: false,
+            interfaces: self.interfaces.clone(),
         }
     }
 
@@ -724,6 +750,7 @@ mod tests {
             bytes: files.iter().map(|f| f.bytes.len() as u64).sum(),
             binary: Vec::new(),
             deployed: Vec::new(),
+            composed: None,
         }
     }
 
@@ -744,6 +771,7 @@ mod tests {
             at: at(h),
             by: "ci".into(),
             ductus: "0.7.0".into(),
+            interfaces: Vec::new(),
         };
         assert!(m.add_place(place("test", 7, 10)));
         assert!(m.add_place(place("dev", 3, 9)));

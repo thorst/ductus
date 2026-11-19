@@ -165,6 +165,7 @@ pub async fn make(args: Make) -> Result<()> {
         bytes: picked.files.iter().map(|f| f.bytes.len() as u64).sum(),
         binary: picked.files.iter().filter(|f| f.binary).map(|f| f.path.clone()).collect(),
         deployed: Vec::new(),
+        composed: None,
     };
     let file_name = format!("{name}-{}.tar.gz", release::short(&id));
     let path = match &args.out {

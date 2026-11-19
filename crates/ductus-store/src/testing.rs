@@ -242,14 +242,22 @@ pub async fn forget_version_parts(store: &Store, interface: &str) -> Result<u64>
 }
 
 /// Delete releases a test stored, with their checks (the same files give the same id at the next
-/// run, which would find them "stored before"). Deployments naming them stay, as deployments do.
+/// run, which would find them "stored before"), and the releases engines composed from them
+/// (0.7.5.3.2). Deployments naming them stay, as deployments do.
 pub async fn forget_releases(store: &Store, ids: &[Vec<u8>]) -> Result<()> {
+    let mut ids = ids.to_vec();
+    let composed: Vec<Vec<u8>> = sqlx::query_scalar("SELECT id FROM releases WHERE composed_from = ANY($1)")
+        .bind(&ids)
+        .fetch_all(&store.pool)
+        .await
+        .context("finding the releases composed from the test's")?;
+    ids.extend(composed);
     for statement in [
         "DELETE FROM release_checks WHERE release_id = ANY($1)",
         "DELETE FROM release_places WHERE release_id = ANY($1)",
         "DELETE FROM releases WHERE id = ANY($1)",
     ] {
-        sqlx::query(statement).bind(ids).execute(&store.pool).await.context("forgetting the test's releases")?;
+        sqlx::query(statement).bind(&ids).execute(&store.pool).await.context("forgetting the test's releases")?;
     }
     Ok(())
 }

@@ -32,8 +32,56 @@ const CHECK_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 const MAX_PAGE: i64 = 500;
 
 /// One check at a time per engine: each one spreads `validate` and the tests over every CPU. A
-/// deploy holds it too, from its gate to its end (`api::deployments`).
-pub(super) static CHECKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// deploy holds it too, from before it reads what runs to its end (`api::deployments`). Taken in
+/// turn (`turn`): tokio's mutex is fair, so deploys and checks sent at once run in the order
+/// they asked.
+static CHECKING: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+/// What holds `CHECKING` now, in words, and since when: what a deploy waiting its turn is told.
+static HOLDER: std::sync::Mutex<Option<(String, Instant)>> = std::sync::Mutex::new(None);
+/// How long a deploy or check waits for its turn (0.7.5.3.2, Q4), as a handover waits for its new
+/// engine: a gate at 1,001 interfaces takes seconds, so this is several deploys queued, or one
+/// stuck.
+pub(super) const TURN_WITHIN: Duration = Duration::from_secs(5 * 60);
+
+/// This engine's one deploy or check at a time (`turn`), held until dropped.
+pub(super) struct Turn {
+    _held: tokio::sync::MutexGuard<'static, ()>,
+    /// How long it waited for the one before.
+    pub waited: Duration,
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        *HOLDER.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+}
+
+/// Wait up to `within` for this engine's deploys and checks before it to end, then hold the turn
+/// as `what` ("a deploy of 0a1b2c3d4e5f by ann"). Err: what still held it when the wait ran out,
+/// as a refusal to send.
+pub(super) async fn turn(what: String, within: Duration) -> Result<Turn, String> {
+    let asked = Instant::now();
+    let held = match CHECKING.try_lock() {
+        Ok(held) => held,
+        Err(_) => match tokio::time::timeout(within, CHECKING.lock()).await {
+            Ok(held) => held,
+            Err(_) => {
+                let holder = HOLDER.lock().unwrap_or_else(|e| e.into_inner()).clone();
+                let running = match holder {
+                    Some((what, since)) => format!("{what}, running for {} s", since.elapsed().as_secs()),
+                    None => "another deploy or check".to_string(),
+                };
+                return Err(format!(
+                    "waited {} s for the deploys and checks before it on this engine ({running}): try again when \
+                     they end (the engine's log and the audit log say how they went)",
+                    within.as_secs()
+                ));
+            }
+        },
+    };
+    *HOLDER.lock().unwrap_or_else(|e| e.into_inner()) = Some((what, Instant::now()));
+    Ok(Turn { _held: held, waited: asked.elapsed() })
+}
 
 pub fn routes() -> OpenApiRouter<Shared> {
     OpenApiRouter::new()
@@ -289,30 +337,8 @@ pub(super) async fn store_bytes(
     }
     let m = &bundle.manifest;
     let id = unhex(&m.id).ok_or_else(|| ApiError::bad_request("the release's id isn't hex"))?;
-    let hashes: Vec<[u8; 32]> = bundle.files.iter().map(release::File::hash).collect();
-    let files: Vec<ductus_store::ReleaseFile> = bundle
-        .files
-        .iter()
-        .zip(&hashes)
-        .map(|(f, hash)| ductus_store::ReleaseFile { path: &f.path, hash, bytes: &f.bytes, binary: f.binary })
-        .collect();
-    let manifest = serde_json::to_value(m).map_err(anyhow::Error::from)?;
     let by = caller.name().to_string();
-    let new = ductus_store::NewRelease {
-        id: &id,
-        project: &m.project,
-        manifest: &manifest,
-        made_at: DateTime::parse_from_rfc3339(&m.made.at).ok().map(|t| t.with_timezone(&Utc)),
-        made_by: &m.made.by,
-        reason: m.made.reason.as_deref(),
-        git_commit: m.git.as_ref().map(|g| g.commit.as_str()),
-        branch: m.branch(),
-        interfaces: m.interfaces.len(),
-        ancestry: &bundle.ancestry,
-        files: &files,
-        by: &by,
-    };
-    let stored = engine.store.store_release(&new, &audit).await?;
+    let stored = keep(engine, &by, m, &bundle.ancestry, &bundle.files, &audit).await?;
     // Where it went, as the file says: merged whether or not the release was here (a release
     // stored before keeps its first manifest, so the record can't live only there).
     let places: Vec<ductus_store::Place> = m.deployed.iter().map(release::Place::to_store).collect();
@@ -325,6 +351,43 @@ pub(super) async fn store_bytes(
         new_files: stored.new_files,
         new_places,
     })
+}
+
+/// Store release `m` with `files` (read and checked, or composed here) by `by`, with `audit` as
+/// its audit row when it's new: a file sent, a pull, and a composed deploy's own release.
+pub(super) async fn keep(
+    engine: &Shared,
+    by: &str,
+    m: &release::Manifest,
+    ancestry: &[u8],
+    files: &[release::File],
+    audit: &ductus_store::Audit<'_>,
+) -> Result<ductus_store::ReleaseStored, ApiError> {
+    let id = unhex(&m.id).ok_or_else(|| ApiError::bad_request("the release's id isn't hex"))?;
+    let hashes: Vec<[u8; 32]> = files.iter().map(release::File::hash).collect();
+    let files: Vec<ductus_store::ReleaseFile> = files
+        .iter()
+        .zip(&hashes)
+        .map(|(f, hash)| ductus_store::ReleaseFile { path: &f.path, hash, bytes: &f.bytes, binary: f.binary })
+        .collect();
+    let manifest = serde_json::to_value(m).map_err(anyhow::Error::from)?;
+    let from = m.composed.as_ref().and_then(|c| unhex(&c.from));
+    let new = ductus_store::NewRelease {
+        id: &id,
+        project: &m.project,
+        manifest: &manifest,
+        made_at: DateTime::parse_from_rfc3339(&m.made.at).ok().map(|t| t.with_timezone(&Utc)),
+        made_by: &m.made.by,
+        reason: m.made.reason.as_deref(),
+        git_commit: m.git.as_ref().map(|g| g.commit.as_str()),
+        branch: m.branch(),
+        interfaces: m.interfaces.len(),
+        ancestry,
+        files: &files,
+        by,
+        composed: from.as_deref().zip(m.composed.as_ref().map(|c| c.interfaces.as_slice())),
+    };
+    Ok(engine.store.store_release(&new, audit).await?)
 }
 
 #[derive(Deserialize, IntoParams)]
@@ -565,16 +628,17 @@ pub struct CheckQuery {
 /// Check a stored release against this engine's environment: `ductus release check` runs here,
 /// with this engine's settings, secrets and database (read-only), as a child process at a lower
 /// CPU priority. `validate`, then the tests of the interfaces the release changes here. Nothing
-/// is changed but the check's record (and an audit row). One check at a time per engine (409
-/// while one runs). Answers when it ends (seconds at a thousand interfaces); `ok` says whether it
-/// passed. Needs the `deploy` permission: the release's code runs with this environment's secrets.
+/// is changed but the check's record (and an audit row). One check or deploy at a time per
+/// engine: one sent while another runs waits its turn (up to 5 minutes, then 409). Answers when it
+/// ends (seconds at a thousand interfaces); `ok` says whether it passed. Needs the `deploy`
+/// permission: the release's code runs with this environment's secrets.
 #[utoipa::path(
     post, path = "/releases/{id}/check", operation_id = "check_release", tag = "releases",
     params(("id" = String, Path, description = "The release id, or its first 12 characters"), CheckQuery),
     responses(
         (status = 200, body = CheckInfo, description = "The check ran: `ok` says whether it passed"),
         (status = 404, body = super::ErrorBody),
-        (status = 409, body = super::ErrorBody, description = "Another check is running on this engine"),
+        (status = 409, body = super::ErrorBody, description = "Waited 5 minutes for the checks and deploys before it on this engine"),
         (status = 403, body = super::ErrorBody)
     )
 )]
@@ -586,17 +650,13 @@ async fn check(
 ) -> ApiResult<CheckInfo> {
     caller.require_permission("deploy")?;
     let id = find(&engine, &id).await?;
-    let Ok(_one_at_a_time) = CHECKING.try_lock() else {
-        return Err(ApiError::new(
-            StatusCode::CONFLICT,
-            "another release check or deploy is running on this engine: try again when it ends",
-        ));
-    };
+    let what = format!("a check of release {} by {}", release::short(&crate::code::hex(&id)), caller.name());
+    let _one_at_a_time = turn(what, TURN_WITHIN).await.map_err(|why| ApiError::new(StatusCode::CONFLICT, why))?;
     Ok(Json(run_check(&engine, &caller, &id, q.all_tests).await?))
 }
 
 /// Run the gate on stored release `id` against this engine's environment and record the check
-/// (with its `release.check` audit row). The caller holds `CHECKING`.
+/// (with its `release.check` audit row). The caller holds the turn (`turn`).
 pub(super) async fn run_check(
     engine: &Shared,
     caller: &Caller,

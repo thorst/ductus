@@ -488,10 +488,20 @@ enum Command {
         /// For sites that schedule handovers.
         #[arg(long)]
         in_place_only: bool,
+        /// Deploy only this interface's work from the release (repeat for several): the engine
+        /// makes a release of its own from what runs there with this interface's folder and the
+        /// shared code it loads taken from the release named, and deploys that (an interface the
+        /// release lacks is removed, one only it has is added). Every other interface, and the
+        /// project's own files, stay as they run. Refused when a shared file it needs differs and
+        /// other interfaces run it (named: take them too). Example: `ductus deploy 0a1b2c3d4e5f
+        /// --interface adt-to-lab -m "lab's fix, without billing's change"`.
+        #[arg(long = "interface", value_name = "NAME", conflicts_with = "rollback")]
+        interfaces: Vec<String>,
         /// The engine's report as JSON.
         #[arg(long)]
         json: bool,
-        /// How long to wait for the engine's answer (the gate, up to 30 minutes, then applying it).
+        /// How long to wait for the engine's answer (its turn behind other deploys, up to 5
+        /// minutes; the gate, up to 30; then applying it).
         #[arg(long, default_value = "40m", value_parser = parse_duration)]
         timeout: std::time::Duration,
     },
@@ -1533,6 +1543,7 @@ async fn run(cli: Cli) -> Result<()> {
             force,
             all_tests,
             in_place_only,
+            interfaces,
             json,
             timeout,
         } => {
@@ -1547,6 +1558,7 @@ async fn run(cli: Cli) -> Result<()> {
                 force,
                 all_tests,
                 in_place_only,
+                interfaces,
                 json,
                 timeout,
             };

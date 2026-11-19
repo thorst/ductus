@@ -46,6 +46,11 @@ pub struct NewRelease<'a> {
     pub files: &'a [ReleaseFile<'a>],
     /// Who stores it (as the audit log names them).
     pub by: &'a str,
+    /// Composed by an engine (0.7.5.3.2): the release its named interfaces came from, and those
+    /// interfaces. None: made by `ductus release`. A release stored composed and then received
+    /// from `ductus release` with the same files (the same id) takes the made one's manifest:
+    /// the commit it names is every file's.
+    pub composed: Option<(&'a [u8], &'a [String])>,
 }
 
 /// What storing a release did.
@@ -157,6 +162,9 @@ pub struct Place {
     pub ductus_version: String,
     /// Recorded on this database (`deployments`), not carried in by a file.
     pub here: bool,
+    /// Only these interfaces of it went there (a release composed from it, 0.7.5.3.2); empty:
+    /// the whole release.
+    pub interfaces: Vec<String>,
 }
 
 /// A run of one release in an environment (consecutive deployments of it: a deploy, then the
@@ -265,6 +273,7 @@ impl Store {
         let mut tx = self.pool.begin().await.context("starting to store the release")?;
         if let Some((at, by)) = stored_before(&mut tx, r.id).await? {
             add_branch(&mut tx, r.id, r.branch).await?;
+            made_wins(&mut tx, r).await?;
             tx.commit().await.context("committing the release's branch")?;
             return Ok(ReleaseStored { new: false, at, by, new_folders: 0, new_files: 0 });
         }
@@ -369,9 +378,9 @@ impl Store {
         let bytes: i64 = r.files.iter().map(|f| f.bytes.len() as i64).sum();
         let stored: Option<DateTime<Utc>> = sqlx::query_scalar(
             "INSERT INTO releases (id, project, manifest, made_at, made_by, reason, git_commit, interfaces, files,
-                                   bytes, ancestry, folders, stored_by, branches)
+                                   bytes, ancestry, folders, stored_by, branches, composed_from, composed_interfaces)
              VALUES ($1, $2, $3::jsonb, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
-                     CASE WHEN $14::text IS NULL THEN NULL ELSE ARRAY[$14::text] END)
+                     CASE WHEN $14::text IS NULL THEN NULL ELSE ARRAY[$14::text] END, $15, $16)
              ON CONFLICT (id) DO NOTHING RETURNING stored_at",
         )
         .bind(r.id)
@@ -388,6 +397,8 @@ impl Store {
         .bind(&order)
         .bind(r.by)
         .bind(r.branch)
+        .bind(r.composed.map(|(from, _)| from))
+        .bind(r.composed.map(|(_, interfaces)| interfaces))
         .fetch_optional(&mut *tx)
         .await
         .context("saving the release")?;
@@ -395,6 +406,7 @@ impl Store {
             // Stored by someone else since the read above.
             let (at, by) = stored_before(&mut tx, r.id).await?.context("the release was stored and is gone")?;
             add_branch(&mut tx, r.id, r.branch).await?;
+            made_wins(&mut tx, r).await?;
             tx.commit().await.context("committing the release's branch")?;
             return Ok(ReleaseStored { new: false, at, by, new_folders: 0, new_files: 0 });
         };
@@ -407,6 +419,9 @@ impl Store {
             "interfaces": r.interfaces,
             "files": r.files.len(),
         });
+        if let Some((from, interfaces)) = r.composed {
+            detail["composed"] = serde_json::json!({ "from": &hex(from)[..12], "interfaces": interfaces });
+        }
         // The caller's own (a pull's `from`) kept beside.
         if let (Some(serde_json::Value::Object(own)), Some(all)) = (&audit.detail, detail.as_object_mut()) {
             all.extend(own.clone());
@@ -778,18 +793,29 @@ impl Store {
     /// Where release `id` was deployed: each environment's first deployment of it on this database,
     /// then what files carrying it said about other databases (`release_places`), oldest first.
     /// A record that came back to the database it was made on is listed once (as `here`).
+    ///
+    /// Releases composed from it (0.7.5.3.2) count too, with the interfaces they took
+    /// (`Place::interfaces`): each environment's first deployment of each such release.
     pub async fn release_places(&self, id: &[u8]) -> Result<Vec<Place>> {
-        type Row = (String, String, i32, DateTime<Utc>, String, String, bool);
+        type Row = (String, String, i32, DateTime<Utc>, String, String, bool, Option<Vec<String>>);
         let rows: Vec<Row> = sqlx::query_as(
-            "SELECT environment, host, id, at, by_name, version, true FROM (
+            "WITH composed AS (SELECT id, composed_interfaces FROM releases WHERE composed_from = $1)
+             SELECT environment, host, id, at, by_name, version, true, NULL::text[] FROM (
                  SELECT DISTINCT ON (environment) environment, host, id, at, by_name, version
                  FROM deployments WHERE release_id = $1 ORDER BY environment, id) AS here
              UNION ALL
-             SELECT p.environment, p.host, p.deployment, p.at, p.by_name, p.ductus_version, false
+             SELECT environment, host, id, at, by_name, version, true, composed_interfaces FROM (
+                 SELECT DISTINCT ON (d.environment, c.id) d.environment, d.host, d.id, d.at, d.by_name, d.version,
+                        c.composed_interfaces
+                 FROM composed c JOIN deployments d ON d.release_id = c.id
+                 ORDER BY d.environment, c.id, d.id) AS some_of_it
+             UNION ALL
+             SELECT p.environment, p.host, p.deployment, p.at, p.by_name, p.ductus_version, false, p.interfaces
              FROM release_places p
              WHERE p.release_id = $1
-               AND NOT EXISTS (SELECT 1 FROM deployments d WHERE d.id = p.deployment AND d.release_id = $1
-                                                             AND d.environment = p.environment AND d.host = p.host)
+               AND NOT EXISTS (SELECT 1 FROM deployments d
+                               WHERE d.id = p.deployment AND d.environment = p.environment AND d.host = p.host
+                                 AND (d.release_id = $1 OR d.release_id IN (SELECT id FROM composed)))
              ORDER BY 4, 1",
         )
         .bind(id)
@@ -798,7 +824,7 @@ impl Store {
         .context("reading where the release was deployed")?;
         Ok(rows
             .into_iter()
-            .map(|(environment, host, deployment, at, by, ductus_version, here)| Place {
+            .map(|(environment, host, deployment, at, by, ductus_version, here, interfaces)| Place {
                 environment,
                 host,
                 deployment,
@@ -806,6 +832,7 @@ impl Store {
                 by,
                 ductus_version,
                 here,
+                interfaces: interfaces.unwrap_or_default(),
             })
             .collect())
     }
@@ -834,9 +861,20 @@ impl Store {
         let at: Vec<DateTime<Utc>> = places.iter().map(|p| p.at).collect();
         let names: Vec<&str> = places.iter().map(|p| p.by.as_str()).collect();
         let versions: Vec<&str> = places.iter().map(|p| p.ductus_version.as_str()).collect();
+        // Each place's interfaces as a JSON array (Postgres has no array of arrays of differing
+        // lengths); null for the whole release.
+        let interfaces: Vec<Option<String>> = places
+            .iter()
+            .map(|p| (!p.interfaces.is_empty()).then(|| serde_json::to_string(&p.interfaces).unwrap_or_default()))
+            .collect();
         let added = sqlx::query(
-            "INSERT INTO release_places (release_id, environment, host, deployment, at, by_name, ductus_version, received_by)
-             SELECT $1, * , $8 FROM unnest($2::text[], $3::text[], $4::int[], $5::timestamptz[], $6::text[], $7::text[])
+            "INSERT INTO release_places (release_id, environment, host, deployment, at, by_name, ductus_version, received_by,
+                                         interfaces)
+             SELECT $1, u.environment, u.host, u.deployment, u.at, u.by_name, u.ductus_version, $8,
+                    CASE WHEN u.interfaces IS NULL THEN NULL
+                         ELSE ARRAY(SELECT jsonb_array_elements_text(u.interfaces::jsonb)) END
+             FROM unnest($2::text[], $3::text[], $4::int[], $5::timestamptz[], $6::text[], $7::text[], $9::text[])
+                  AS u(environment, host, deployment, at, by_name, ductus_version, interfaces)
              ORDER BY 1, 2, 3
              ON CONFLICT DO NOTHING",
         )
@@ -848,6 +886,7 @@ impl Store {
         .bind(&names)
         .bind(&versions)
         .bind(by)
+        .bind(&interfaces)
         .execute(&self.pool)
         .await
         .context("keeping where the release was deployed")?;
@@ -898,6 +937,30 @@ async fn add_branch(tx: &mut sqlx::PgConnection, id: &[u8], branch: Option<&str>
     .execute(tx)
     .await
     .context("adding the branch the release was made on")?;
+    Ok(())
+}
+
+/// A release stored composed, received again made by `ductus release` (the same files): the made
+/// one's manifest, commit and history replace the composition's, since they speak for every file.
+async fn made_wins(tx: &mut sqlx::PgConnection, r: &NewRelease<'_>) -> Result<()> {
+    if r.composed.is_some() {
+        return Ok(());
+    }
+    sqlx::query(
+        "UPDATE releases SET manifest = $2::jsonb, made_at = $3, made_by = $4, reason = $5, git_commit = $6,
+                             ancestry = $7, composed_from = NULL, composed_interfaces = NULL
+         WHERE id = $1 AND composed_from IS NOT NULL",
+    )
+    .bind(r.id)
+    .bind(r.manifest.to_string())
+    .bind(r.made_at)
+    .bind(r.made_by)
+    .bind(r.reason)
+    .bind(r.git_commit)
+    .bind(r.ancestry)
+    .execute(tx)
+    .await
+    .context("replacing a composed release's manifest with the one `ductus release` made")?;
     Ok(())
 }
 

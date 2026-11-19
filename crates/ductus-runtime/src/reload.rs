@@ -451,6 +451,7 @@ fn manifest(root: &Path, files: &ProjectFiles, interfaces: BTreeMap<String, rele
         bytes: 0,
         binary: Vec::new(),
         deployed: Vec::new(),
+        composed: None,
     }
 }
 

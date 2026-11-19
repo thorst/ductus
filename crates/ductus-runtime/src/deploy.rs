@@ -87,20 +87,54 @@ impl std::fmt::Debug for Upstream {
 /// same files made on a feature branch and on main after a fast-forward merge are one release:
 /// any of them may match). A rollback is never held to them (the caller skips this): the release
 /// ran here before.
-pub fn rules(mode: &Mode, manifest: &Manifest, branches: &[String], places: &[ductus_store::Place]) -> Vec<String> {
+///
+/// `only`: the interfaces a composed deploy takes from it (`ductus deploy R --interface A`,
+/// 0.7.5.3.2), empty for the whole release. A required environment counts when the release went
+/// there whole, or (`only`) when a release composed from it took at least those interfaces there:
+/// what's held to the rule is the code that comes here.
+pub fn rules(
+    mode: &Mode,
+    manifest: &Manifest,
+    branches: &[String],
+    places: &[ductus_store::Place],
+    only: &[String],
+) -> Vec<String> {
     let mut refused = Vec::new();
-    let missing: Vec<&str> =
-        mode.requires.iter().filter(|e| !places.iter().any(|p| &p.environment == *e)).map(String::as_str).collect();
+    let covers = |p: &ductus_store::Place| {
+        p.interfaces.is_empty() || (!only.is_empty() && only.iter().all(|i| p.interfaces.contains(i)))
+    };
+    let missing: Vec<&str> = mode
+        .requires
+        .iter()
+        .filter(|e| !places.iter().any(|p| &p.environment == *e && covers(p)))
+        .map(String::as_str)
+        .collect();
     if !missing.is_empty() {
-        let went: BTreeSet<&str> = places.iter().map(|p| p.environment.as_str()).collect();
-        let went = if went.is_empty() {
+        let mut went: BTreeMap<&str, BTreeSet<&str>> = BTreeMap::new();
+        let mut whole: BTreeSet<&str> = BTreeSet::new();
+        for p in places {
+            if p.interfaces.is_empty() {
+                whole.insert(p.environment.as_str());
+            } else {
+                went.entry(p.environment.as_str()).or_default().extend(p.interfaces.iter().map(String::as_str));
+            }
+        }
+        let mut said: Vec<String> = whole.iter().map(|e| e.to_string()).collect();
+        said.extend(went.iter().filter(|(e, _)| !whole.contains(*e)).map(|(e, interfaces)| {
+            format!("{e} (only {})", interfaces.iter().copied().collect::<Vec<_>>().join(", "))
+        }));
+        let went = if said.is_empty() {
             "it hasn't been deployed anywhere that this engine knows of".to_string()
         } else {
-            format!("it was deployed to {} only", went.into_iter().collect::<Vec<_>>().join(", "))
+            format!("it was deployed to {} only", said.join(", "))
+        };
+        let (what, flags) = match only {
+            [] => ("releases", String::new()),
+            _ => ("interfaces", only.iter().map(|i| format!(" --interface {i}")).collect::<String>()),
         };
         refused.push(format!(
-            "this environment takes only releases deployed to {} first (DUCTUS_DEPLOY_REQUIRES), and {went}: deploy it \
-             there, then bring it here with its record (`ductus deploy {} --from <{}'s engine> --to <this engine>`)",
+            "this environment takes only {what} deployed to {} first (DUCTUS_DEPLOY_REQUIRES), and {went}: deploy it \
+             there, then bring it here with its record (`ductus deploy {}{flags} --from <{}'s engine> --to <this engine>`)",
             missing.join(", "),
             short(&manifest.id),
             missing[0]
@@ -1243,6 +1277,7 @@ mod tests {
             bytes: 0,
             binary: Vec::new(),
             deployed: Vec::new(),
+            composed: None,
         }
     }
 
@@ -1255,6 +1290,7 @@ mod tests {
             by: "ci".into(),
             ductus_version: "0.7.0".into(),
             here: false,
+            interfaces: Vec::new(),
         }
     }
 
@@ -1272,27 +1308,40 @@ mod tests {
         };
         let git = manifest(Some(("1".repeat(40).as_str(), None)));
         let on = |names: &[&str]| -> Vec<String> { names.iter().map(|s| s.to_string()).collect() };
-        assert!(rules(&mode(&[], &[]), &manifest(None), &[], &[]).is_empty(), "no rules");
-        assert!(rules(&mode(&["test"], &["main"]), &git, &on(&["main"]), &[place("test")]).is_empty());
+        assert!(rules(&mode(&[], &[]), &manifest(None), &[], &[], &[]).is_empty(), "no rules");
+        assert!(rules(&mode(&["test"], &["main"]), &git, &on(&["main"]), &[place("test")], &[]).is_empty());
 
-        let missing = rules(&mode(&["test", "uat"], &[]), &git, &[], &[place("dev"), place("test")]);
+        let missing = rules(&mode(&["test", "uat"], &[]), &git, &[], &[place("dev"), place("test")], &[]);
         assert_eq!(missing.len(), 1);
         assert!(
             missing[0].contains("deployed to uat first") && missing[0].contains("it was deployed to dev, test only")
         );
         assert!(missing[0].contains("ductus deploy abababababab --from <uat's engine>"), "{}", missing[0]);
-        let nowhere = rules(&mode(&["test"], &[]), &git, &[], &[]);
+        let nowhere = rules(&mode(&["test"], &[]), &git, &[], &[], &[]);
         assert!(nowhere[0].contains("it hasn't been deployed anywhere that this engine knows of"), "{}", nowhere[0]);
 
+        // Composed (0.7.5.3.2): some interfaces of it went to test. They may follow; the whole
+        // release, or another interface of it, may not.
+        let some = |names: &[&str]| ductus_store::Place { interfaces: on(names), ..place("test") };
+        let test = mode(&["test"], &[]);
+        assert!(rules(&test, &git, &[], &[some(&["adt", "lab"])], &on(&["adt"])).is_empty());
+        assert!(rules(&test, &git, &[], &[some(&["adt"]), some(&["lab"])], &on(&["lab"])).is_empty());
+        assert!(rules(&test, &git, &[], &[place("test")], &on(&["lab"])).is_empty(), "went there whole");
+        let whole = rules(&test, &git, &[], &[some(&["adt"])], &[]);
+        assert!(whole[0].contains("takes only releases") && whole[0].contains("deployed to test (only adt) only"));
+        let other = rules(&test, &git, &[], &[some(&["adt"])], &on(&["lab", "adt"]));
+        assert!(other[0].contains("takes only interfaces deployed to test first"), "{}", other[0]);
+        assert!(other[0].contains("ductus deploy abababababab --interface lab --interface adt --from"), "{}", other[0]);
+
         let branches = mode(&[], &["main", "release/*"]);
-        let feature = rules(&branches, &git, &on(&["feature/x"]), &[]);
+        let feature = rules(&branches, &git, &on(&["feature/x"]), &[], &[]);
         assert!(feature[0].contains("made on main, release/*") && feature[0].contains("made on `feature/x`"));
-        assert!(rules(&branches, &git, &on(&["release/2026-11"]), &[]).is_empty(), "a prefix");
+        assert!(rules(&branches, &git, &on(&["release/2026-11"]), &[], &[]).is_empty(), "a prefix");
         // The same files made on a feature branch, then on main after a fast-forward merge.
-        assert!(rules(&branches, &git, &on(&["feature/x", "main"]), &[]).is_empty(), "any of its branches");
-        let detached = rules(&mode(&[], &["main"]), &git, &[], &[]);
+        assert!(rules(&branches, &git, &on(&["feature/x", "main"]), &[], &[]).is_empty(), "any of its branches");
+        let detached = rules(&mode(&[], &["main"]), &git, &[], &[], &[]);
         assert!(detached[0].contains("records no branch") && detached[0].contains("--branch NAME"), "{}", detached[0]);
-        let no_git = rules(&mode(&[], &["main"]), &manifest(None), &[], &[]);
+        let no_git = rules(&mode(&[], &["main"]), &manifest(None), &[], &[], &[]);
         assert!(no_git[0].contains("made without git"), "{}", no_git[0]);
         assert!(!branch_matches("main", "main-old") && branch_matches("*", "anything"));
     }

@@ -10,6 +10,7 @@ pub mod cert_show;
 pub mod certificates;
 pub mod changes;
 pub mod code;
+pub mod compose;
 pub mod control;
 pub mod deploy;
 pub mod deployment;

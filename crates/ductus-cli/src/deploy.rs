@@ -29,6 +29,8 @@ pub struct Deploy {
     pub all_tests: bool,
     /// Refuse what only a handover applies (`--in-place-only`).
     pub in_place_only: bool,
+    /// Only these interfaces of the release (`--interface`): the engine composes a release of its own.
+    pub interfaces: Vec<String>,
     pub json: bool,
     pub timeout: Duration,
 }
@@ -92,13 +94,20 @@ pub async fn run(d: Deploy) -> Result<bool> {
     };
     let mut request = json!({
         "reason": d.reason, "force": d.force, "all_tests": d.all_tests, "rollback": d.rollback,
-        "in_place_only": d.in_place_only,
+        "in_place_only": d.in_place_only, "interfaces": d.interfaces,
     });
     if !id.is_empty() {
         request["release"] = id.clone().into();
     }
     say(if d.rollback {
         "rolling back: the gate runs, then it's applied (in place when it can be, else by the handover)…".to_string()
+    } else if !d.interfaces.is_empty() {
+        format!(
+            "deploying {} only: the engine composes a release of what runs there with {} from this one, the gate runs \
+             on it, then it's applied (in place when it can be, else by the handover)…",
+            d.interfaces.join(", "),
+            if d.interfaces.len() == 1 { "it" } else { "them" }
+        )
     } else {
         "deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can \
          be, else by the handover)…"
@@ -208,6 +217,37 @@ fn text(r: &Value) -> String {
         s(&r["project"]),
         s(&r["environment"])
     );
+    // Some interfaces only (`--interface`): what was taken, from which release, over what.
+    let composed = &r["composed"];
+    if let Some(taken) = composed["interfaces"].as_object() {
+        let names: Vec<String> = taken.iter().map(|(n, what)| format!("{n} ({})", s(what))).collect();
+        let made = match (composed["is_from"] == true, composed["stored"] == true) {
+            (true, _) => {
+                format!("it differs from what runs only there, so it's release {} itself", s(&composed["from_short"]))
+            }
+            (false, true) => "composed and stored now".to_string(),
+            (false, false) => "composed before, the same files".to_string(),
+        };
+        out += &format!(
+            "· {} from release {}, over {} as it runs here ({made})\n",
+            names.join(", "),
+            s(&composed["from_short"]),
+            s(&composed["over_short"])
+        );
+        let differ: Vec<&str> =
+            composed["project_differs"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+        if !differ.is_empty() {
+            out += &format!(
+                "· the project's own files stay as they run ({} differ in {}: deploy it whole to bring them)\n",
+                differ.join(", "),
+                s(&composed["from_short"])
+            );
+        }
+    }
+    if r["waited_ms"].as_u64().unwrap_or(0) >= 100 {
+        let secs = r["waited_ms"].as_u64().unwrap_or(0) as f64 / 1000.0;
+        out += &format!("· waited {secs:.1} s for its turn (deploys and checks sent before it run one at a time)\n");
+    }
     for rule in r["rules"].as_array().into_iter().flatten() {
         let mark = if r["rollback"] == true { "·" } else { "✗" };
         out += &format!("{mark} {}\n", s(rule));
@@ -420,6 +460,47 @@ mod tests {
         assert!(v.contains("· feed: source (MLLP_PORT) (in place)\n· environments/prod.yaml: MLLP_PORT"), "{v}");
         assert!(v.contains("changed 1 interface:\n  feed new values: MLLP_PORT \"6661\" → \"6666\"\n"), "{v}");
         assert!(t.contains("✗ refused: only the handover applies it"), "{t}");
+    }
+
+    /// Some interfaces only (0.7.5.3.2): what was taken from which release, the project's files
+    /// kept, and how long it waited for its turn.
+    #[test]
+    fn a_composed_deploy_says_what_it_took_and_what_it_kept() {
+        let r = json!({
+            "ok": true, "outcome": "applied in place: 1 interface took its new code between two messages; the others never paused",
+            "short": "c0c0c0c0c0c0", "project": "integrations", "environment": "test", "replaces": {}, "forced": false,
+            "waited_ms": 2300, "applied": "in_place",
+            "composed": { "from": "0a1b", "from_short": "0a1b2c3d4e5f", "over_short": "9f8e7d6c5b4a",
+                          "interfaces": { "lab": "changed" }, "project_differs": ["environments/test.yaml"],
+                          "is_from": false, "stored": true },
+            "gate": null, "steps": [], "deployment": 50,
+            "changes": [{ "interface": "lab", "from": "aaaaaaaaaaaa", "to": "bbbbbbbbbbbb" }]
+        });
+        let t = text(&r);
+        assert!(t.starts_with("release c0c0c0c0c0c0 (project integrations) to environment `test`\n"), "{t}");
+        assert!(
+            t.contains(
+                "· lab (changed) from release 0a1b2c3d4e5f, over 9f8e7d6c5b4a as it runs here (composed and stored now)"
+            ),
+            "{t}"
+        );
+        assert!(
+            t.contains("· the project's own files stay as they run (environments/test.yaml differ in 0a1b2c3d4e5f"),
+            "{t}"
+        );
+        assert!(t.contains("· waited 2.3 s for its turn"), "{t}");
+        let itself = json!({
+            "ok": true, "outcome": "…", "short": "0a1b2c3d4e5f", "project": "integrations", "environment": "test",
+            "composed": { "from_short": "0a1b2c3d4e5f", "over_short": "9f8e7d6c5b4a", "interfaces": { "lab": "added" },
+                          "project_differs": [], "is_from": true, "stored": false },
+            "waited_ms": 0, "steps": [], "changes": []
+        });
+        let t = text(&itself);
+        assert!(
+            t.contains("lab (added) from release 0a1b2c3d4e5f") && t.contains("so it's release 0a1b2c3d4e5f itself"),
+            "{t}"
+        );
+        assert!(!t.contains("waited") && !t.contains("project's own files stay"), "{t}");
     }
 
     /// The environment's rules refuse with what to do; a rollback names what it undoes and that

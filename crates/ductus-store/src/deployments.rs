@@ -442,7 +442,8 @@ impl Store {
     /// since a change would have moved it there), with the files they hadn't committed. A version
     /// first brought from a commit a release's history lacks (a rewritten history: a fresh
     /// repository, a squash) may have come again from one it has. Read only for the "replaces"
-    /// check's suspects; deployments without git are left out.
+    /// check's suspects; deployments without git are left out, and so are a composed release's
+    /// (0.7.5.3.2) for the interfaces it didn't take: its commit is where those it took came from.
     pub async fn later_sources(&self, after: &[(&str, i32)]) -> Result<HashMap<String, Vec<Brought>>> {
         if after.is_empty() {
             return Ok(HashMap::new());
@@ -453,7 +454,9 @@ impl Store {
              FROM unnest($1::text[], $2::int[]) AS u(interface, after)
              JOIN interface_sets s ON u.interface = ANY(s.interfaces)
              JOIN deployments d ON d.interface_set = s.id AND d.id > u.after
-             WHERE d.git_commit IS NOT NULL",
+             LEFT JOIN releases r ON r.id = d.release_id
+             WHERE d.git_commit IS NOT NULL
+               AND (r.composed_from IS NULL OR u.interface = ANY(r.composed_interfaces))",
         )
         .bind(&names)
         .bind(&ids)
@@ -468,7 +471,8 @@ impl Store {
     }
 
     /// The same for a project version (release mode): later deployments in `environment` that ran
-    /// `version`, after `deployment`, with their commits.
+    /// `version`, after `deployment`, with their commits. A composed release's are left out: the
+    /// project's files are what ran before it, not its commit's.
     pub async fn later_project_sources(
         &self,
         environment: &str,
@@ -476,8 +480,10 @@ impl Store {
         deployment: i32,
     ) -> Result<Vec<Brought>> {
         let rows: Vec<(String, Option<Vec<String>>)> = sqlx::query_as(
-            "SELECT DISTINCT git_commit, uncommitted FROM deployments
-             WHERE environment = $1 AND project_version = $2 AND id > $3 AND git_commit IS NOT NULL",
+            "SELECT DISTINCT d.git_commit, d.uncommitted FROM deployments d
+             LEFT JOIN releases r ON r.id = d.release_id
+             WHERE d.environment = $1 AND d.project_version = $2 AND d.id > $3 AND d.git_commit IS NOT NULL
+               AND r.composed_from IS NULL",
         )
         .bind(environment)
         .bind(version)

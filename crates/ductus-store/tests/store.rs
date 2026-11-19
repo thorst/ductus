@@ -4116,7 +4116,7 @@ async fn later_deployments_say_where_else_a_version_came_from() {
     let versions = [a1.borrow()];
     let ids = store.save_versions(&versions).await.unwrap();
     let project = vec![7u8; 32];
-    let record = |commit: Option<&'static str>, uncommitted: Option<Vec<String>>| {
+    let in_release = |commit: Option<&'static str>, uncommitted: Option<Vec<String>>, release: Option<Vec<u8>>| {
         let (store, env, versions, ids, project) = (&store, &env, &versions, &ids, &project);
         async move {
             let d = ductus_store::NewDeployment {
@@ -4132,7 +4132,7 @@ async fn later_deployments_say_where_else_a_version_came_from() {
                 versions,
                 warnings: &Default::default(),
                 docs: None,
-                release: None,
+                release: release.as_deref(),
                 project_version: Some(project),
                 rollback: false,
                 variables: &[],
@@ -4140,19 +4140,29 @@ async fn later_deployments_say_where_else_a_version_came_from() {
             store.record_deployment(&d, ids).await.unwrap()
         }
     };
+    let record = |commit, uncommitted| in_release(commit, uncommitted, None);
     let first = record(Some("1111"), Some(Vec::new())).await;
     assert!(store.later_sources(&[(a.as_str(), first.id)]).await.unwrap().is_empty(), "nothing later yet");
     record(Some("2222"), Some(Vec::new())).await;
     record(None, None).await; // without git: says nothing
     record(Some("3333"), Some(vec!["interfaces/a/interface.yaml".into()])).await;
     record(Some("2222"), Some(Vec::new())).await; // the same again: once
+    // Composed releases (0.7.5.3.2) record the commit the interfaces they took came from: one
+    // that took another interface says nothing about `a`, nor about the project's files; one that
+    // took `a` speaks for it alone.
+    let (other, took_a) = ([3u8; 32].map(|x| x ^ (nanos as u8)), [4u8; 32].map(|x| x ^ (nanos as u8)));
+    let files = release_files(&env, "later");
+    store_composed_release(&store, &other, &files, "x", Some((&[1u8; 32], &["someone-else".to_string()]))).await;
+    store_composed_release(&store, &took_a, &files, "y", Some((&[1u8; 32], std::slice::from_ref(&a)))).await;
+    in_release(Some("4444"), Some(Vec::new()), Some(other.to_vec())).await;
+    in_release(Some("5555"), Some(Vec::new()), Some(took_a.to_vec())).await;
 
     let later = store.later_sources(&[(a.as_str(), first.id), ("nobody-ran-this", 0)]).await.unwrap();
     assert_eq!(later.len(), 1, "{later:?}");
     let mut seen: Vec<(&str, usize)> =
         later[&a].iter().map(|b| (b.git_commit.as_str(), b.uncommitted.as_ref().map_or(0, Vec::len))).collect();
     seen.sort();
-    assert_eq!(seen, [("2222", 0), ("3333", 1)]);
+    assert_eq!(seen, [("2222", 0), ("3333", 1), ("5555", 0)]);
 
     let mut project_later: Vec<String> = store
         .later_project_sources(&env, &project, first.id)
@@ -4166,6 +4176,8 @@ async fn later_deployments_say_where_else_a_version_came_from() {
     assert!(store.later_project_sources("another-env", &project, first.id).await.unwrap().is_empty());
     assert!(store.later_project_sources(&env, &[8u8; 32], first.id).await.unwrap().is_empty());
     forget_deployments(&pool, &env).await;
+    forget_release(&pool, &other).await;
+    forget_release(&pool, &took_a).await;
 }
 
 /// History by part (0.7.4.2): each version keeps which files each part runs (a version saved
@@ -4434,6 +4446,16 @@ async fn store_test_release(
     files: &[(String, Vec<u8>, bool)],
     reason: &str,
 ) -> ductus_store::ReleaseStored {
+    store_composed_release(store, id, files, reason, None).await
+}
+
+async fn store_composed_release(
+    store: &Store,
+    id: &[u8],
+    files: &[(String, Vec<u8>, bool)],
+    reason: &str,
+    composed: Option<(&[u8], &[String])>,
+) -> ductus_store::ReleaseStored {
     use sha2::Digest;
     let hashes: Vec<Vec<u8>> = files.iter().map(|(_, b, _)| sha2::Sha256::digest(b).to_vec()).collect();
     let files: Vec<ductus_store::ReleaseFile> = files
@@ -4455,6 +4477,7 @@ async fn store_test_release(
         ancestry: &[7u8; 40],
         files: &files,
         by: "test-ci",
+        composed,
     };
     store.store_release(&new, &quiet()).await.unwrap()
 }
@@ -4690,6 +4713,7 @@ async fn where_a_release_went_and_the_runs_a_rollback_chooses_from() {
         by: "ci".into(),
         ductus_version: "0.7.0-test".into(),
         here: false,
+        interfaces: Vec::new(),
     };
     // A record that came home (the file went back to the database it was made on): listed once.
     let home = ductus_store::Place { here: false, ..mine[0].clone() };
@@ -4709,9 +4733,78 @@ async fn where_a_release_went_and_the_runs_a_rollback_chooses_from() {
     );
     assert!(places[1].here);
 
+    // Composed from b (0.7.5.3.2): a release of its own taking `lab` from b, deployed in another
+    // environment here, and one a file says went to a third: both count as places of b, with the
+    // interfaces they took. A release made from git with the composition's files takes its place.
+    let c = [8u8; 32].map(|x| x ^ (nanos as u8));
+    let lab = vec!["lab".to_string()];
+    store_composed_release(&store, &c, &release_files(&tag, "c"), "composed", Some((&b, &lab))).await;
+    let uat = format!("{env}-uat");
+    forget_deployments(&pool, &uat).await;
+    let versions = [v.borrow()];
+    let d = ductus_store::NewDeployment {
+        environment: &uat,
+        instance: &uat,
+        host: "test-host",
+        version: "0.7.0-test",
+        how: "deploy",
+        by: "ann",
+        reason: Some("lab alone"),
+        git_commit: None,
+        uncommitted: None,
+        versions: &versions,
+        warnings: &Default::default(),
+        docs: None,
+        release: Some(c.as_slice()),
+        project_version: None,
+        rollback: false,
+        variables: &[],
+    };
+    let saved = store.save_versions(&versions).await.unwrap();
+    let composed = store.record_deployment(&d, &saved).await.unwrap().id;
+    let from_file = ductus_store::Place {
+        environment: format!("{env}-prod"),
+        deployment: 77,
+        interfaces: vec!["adt".into(), "lab".into()],
+        ..elsewhere.clone()
+    };
+    assert_eq!(store.add_release_places(&b, std::slice::from_ref(&from_file), "test-ci").await.unwrap(), 1);
+    let of_b: Vec<_> =
+        store.release_places(&b).await.unwrap().into_iter().filter(|p| p.environment.starts_with(&env)).collect();
+    let seen: Vec<(&str, bool, &[String])> =
+        of_b.iter().map(|p| (p.environment.as_str(), p.here, p.interfaces.as_slice())).collect();
+    assert_eq!(
+        seen,
+        [
+            (from_file.environment.as_str(), false, &from_file.interfaces[..]),
+            (env.as_str(), true, &[][..]),
+            (uat.as_str(), true, &lab[..])
+        ],
+        "oldest first: {of_b:?}"
+    );
+    assert_eq!(of_b[2].deployment, composed);
+    let made = |id: &[u8]| {
+        let pool = pool.clone();
+        let id = id.to_vec();
+        async move {
+            sqlx::query_as::<_, (Option<Vec<u8>>, String)>(
+                "SELECT composed_from, manifest->'made'->>'reason' FROM releases WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        }
+    };
+    assert_eq!(made(&c).await, (Some(b.to_vec()), "composed".to_string()));
+    store_test_release(&store, &c, &release_files(&tag, "c"), "made by ductus release").await;
+    assert_eq!(made(&c).await, (None, "made by ductus release".to_string()), "the made one's manifest wins");
+
     forget_deployments(&pool, &env).await;
+    forget_deployments(&pool, &uat).await;
     forget_release(&pool, &a).await;
     forget_release(&pool, &b).await;
+    forget_release(&pool, &c).await;
 }
 
 fn ductus_store_hex(bytes: &[u8]) -> String {

@@ -31,7 +31,7 @@
 //! environment's rules don't hold it (it ran here), the "replaces" check names whose newer work it
 //! undoes without refusing (undoing is the point), and the gate always runs.
 
-use super::releases::{CHECKING, CheckInfo, check_info, find, run_check};
+use super::releases::{CheckInfo, TURN_WITHIN, check_info, find, keep, run_check, turn};
 use super::{ApiError, Caller, Eng};
 use crate::deploy;
 use crate::deployment::Who;
@@ -146,6 +146,14 @@ pub struct DeployRequest {
     /// fails, instead of taking the handover. For sites that schedule handovers.
     #[serde(default)]
     in_place_only: bool,
+    /// Only these interfaces of the release (0.7.5.3.2, `ductus deploy R --interface A`): the
+    /// engine composes a release of its own from what runs with their folders and the code they
+    /// load taken from `release` (an interface it lacks is removed, one only it has is added),
+    /// stores it, and deploys that; everything else stays as it runs, the project's own files
+    /// too. Refused (409) when that would change another interface (a shared file it needs
+    /// differs, and others run it), naming them. Not with `rollback`.
+    #[serde(default)]
+    interfaces: Vec<String>,
 }
 
 /// What a deploy did, or why it didn't.
@@ -155,9 +163,16 @@ pub struct DeployReport {
     ok: bool,
     /// What happened, in a sentence.
     outcome: String,
-    /// The release, in hex, and its first 12 characters.
+    /// How long it waited for the deploys and checks sent before it to this engine (one at a
+    /// time, in turn); 0 when none ran.
+    waited_ms: u64,
+    /// The release, in hex, and its first 12 characters: the one composed when `interfaces` was
+    /// asked (`composed` says what of).
     release: String,
     short: String,
+    /// A deploy of some interfaces only (`interfaces`): what was taken from which release.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    composed: Option<ComposedInfo>,
     project: String,
     environment: String,
     /// The branches it was made on, as its files said (the same files made on two branches are
@@ -193,6 +208,28 @@ pub struct DeployReport {
     /// the file it deployed; `GET /releases/{id}/file` includes it): what an environment that
     /// requires this one first reads.
     place: Option<PlaceInfo>,
+}
+
+/// A release composed for a deploy of some interfaces (`DeployRequest::interfaces`).
+#[derive(Serialize, ToSchema)]
+pub struct ComposedInfo {
+    /// The release they were taken from, in hex, and its first 12 characters.
+    from: String,
+    from_short: String,
+    /// The release that ran when it was composed (every other interface, and the project's own
+    /// files, are its), first 12 characters.
+    over_short: String,
+    /// Each interface taken, and what it does: `changed`, `added`, `removed` or `unchanged` (its
+    /// version there is the one running).
+    interfaces: BTreeMap<String, String>,
+    /// The project's own files the release has that differ from what runs: kept as they run
+    /// (deploy the release whole to bring them).
+    project_differs: Vec<String>,
+    /// The composition is that release itself (it differs from what runs only in those
+    /// interfaces), so no release of its own was made.
+    is_from: bool,
+    /// Stored now (false: composed and stored before, the same files).
+    stored: bool,
 }
 
 #[derive(Serialize, ToSchema)]
@@ -286,6 +323,10 @@ pub struct PlaceInfo {
     /// Recorded on this engine's database; false: a release file said so when it was stored here.
     #[serde(default)]
     pub here: bool,
+    /// Only these interfaces of it went there (a release composed from it: `ductus deploy R
+    /// --interface A`); absent: the whole release.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interfaces: Vec<String>,
 }
 
 impl PlaceInfo {
@@ -298,6 +339,7 @@ impl PlaceInfo {
             by: p.by.clone(),
             ductus: p.ductus_version.clone(),
             here: p.here,
+            interfaces: p.interfaces.clone(),
         }
     }
 }
@@ -358,6 +400,27 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
             "a rollback isn't refused over someone's work (it names it), so `force` means nothing there: leave it out",
         ));
     }
+    let mut only: Vec<String> =
+        asked.interfaces.iter().map(|i| i.trim().to_string()).filter(|i| !i.is_empty()).collect();
+    only.sort();
+    only.dedup();
+    if !only.is_empty() && asked.rollback {
+        return Err(ApiError::bad_request(
+            "a rollback goes back to a whole release that ran here: leave `interfaces` out (to bring back some \
+             interfaces only, deploy the old release by its id with `interfaces`)",
+        ));
+    }
+
+    // One deploy or check at a time on this engine, in the order they were sent (Q4): one sent
+    // while another runs waits here, then reads what runs once its turn comes (so a composed deploy
+    // composes over the one before it).
+    let holder = match &asked.release {
+        Some(r) if asked.rollback => format!("a rollback to {r} by {}", caller.name()),
+        Some(r) => format!("a deploy of {r} by {}", caller.name()),
+        None => format!("a rollback by {}", caller.name()),
+    };
+    let one_at_a_time = turn(holder, TURN_WITHIN).await.map_err(|why| ApiError::new(StatusCode::CONFLICT, why))?;
+    let waited = one_at_a_time.waited;
 
     // Which release: the one named, or (a rollback) the last one run here before the current run.
     let runs = match (asked.rollback, releases.project()) {
@@ -399,8 +462,10 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
     let mut report = DeployReport {
         ok: false,
         outcome: String::new(),
+        waited_ms: waited.as_millis() as u64,
         short: release::short(&hex).to_string(),
         release: hex.clone(),
+        composed: None,
         project: manifest.project.clone(),
         environment: engine.environment.clone(),
         branches: branches.clone(),
@@ -429,6 +494,25 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
         );
         return refuse(report, StatusCode::CONFLICT, outcome);
     }
+    // Some interfaces only: a release of its own, composed from what runs with theirs from the
+    // release named (held to this environment's rules as that release's, below).
+    let named = id.clone();
+    let named_manifest = manifest.clone();
+    let (id, manifest, ancestry) = if only.is_empty() {
+        (id, manifest, ancestry)
+    } else {
+        match composed(&engine, releases, &caller, (&named, &manifest, &ancestry), &only, reason.clone()).await? {
+            Ok((id, manifest, ancestry, info)) => {
+                let hex = crate::code::hex(&id);
+                report.short = release::short(&hex).to_string();
+                report.release = hex;
+                report.composed = Some(info);
+                (id, manifest, ancestry)
+            }
+            Err((status, outcome)) => return refuse(report, status, outcome),
+        }
+    };
+    let hex = report.release.clone();
     if current.as_deref() == Some(id.as_slice()) {
         let outcome = format!("release {} already runs here: nothing to do", report.short);
         return refuse(report, StatusCode::CONFLICT, outcome);
@@ -447,18 +531,19 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
             .to_string();
         return refuse(report, StatusCode::CONFLICT, outcome);
     };
-    let Ok(_one_at_a_time) = CHECKING.try_lock() else {
-        let outcome = "another deploy or release check is running on this engine: try again when it ends".to_string();
-        return refuse(report, StatusCode::CONFLICT, outcome);
-    };
     let action = if asked.rollback { "release.rollback" } else { "release.deploy" };
     let from = current.as_ref().map(|c| release::short(&crate::code::hex(c)).to_string());
     let short = report.short.clone();
+    let composed_detail =
+        report.composed.as_ref().map(|c| serde_json::json!({ "from": c.from_short, "interfaces": c.interfaces }));
     let audit = |action: &'static str, mut detail: serde_json::Value| {
         let (engine, by) = (engine.clone(), caller.audit(action));
         let short = short.clone();
         if action == "release.rollback" {
             detail["from"] = from.clone().into();
+        }
+        if let Some(composed) = &composed_detail {
+            detail["composed"] = composed.clone();
         }
         async move {
             let row = by.subject(&short).detail(detail);
@@ -479,8 +564,9 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
             ));
         }
     } else if has_rules {
-        let places = engine.store.release_places(&id).await?;
-        report.rules = deploy::rules(&releases.mode, &manifest, &branches, &places);
+        // A composed deploy is held to them as the release its interfaces come from.
+        let places = engine.store.release_places(&named).await?;
+        report.rules = deploy::rules(&releases.mode, &named_manifest, &branches, &places, &only);
         if !report.rules.is_empty() {
             let outcome = "refused by this environment's rules (`rules` says why)".to_string();
             let detail = serde_json::json!({
@@ -635,13 +721,7 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
                             warning: warnings.get(&i.interface).cloned(),
                         })
                         .collect();
-                    report.place = engine
-                        .store
-                        .release_places(&id)
-                        .await?
-                        .iter()
-                        .find(|p| p.here && p.environment == engine.environment)
-                        .map(PlaceInfo::of);
+                    report.place = place_here(&engine, &named, &only, d.id).await?;
                 }
                 let mut detail = serde_json::json!({
                     "environment": engine.environment,
@@ -737,14 +817,7 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
                     warning: c.warning,
                 })
                 .collect();
-            // The record a release file carries: this environment's first deployment of it here.
-            report.place = engine
-                .store
-                .release_places(&id)
-                .await?
-                .iter()
-                .find(|p| p.here && p.environment == engine.environment)
-                .map(PlaceInfo::of);
+            report.place = place_here(&engine, &named, &only, deployment).await?;
             break;
         }
         if tokio::time::Instant::now() >= until {
@@ -754,6 +827,113 @@ async fn deploy(engine: Eng, caller: Caller, Json(asked): Json<DeployRequest>) -
     }
     report.outcome = text;
     Ok((StatusCode::OK, Json(report)).into_response())
+}
+
+/// The record a release file carries of this deploy: this environment's first deployment of the
+/// release here, or (a composed deploy, `only`) of a release composed from it with at least those
+/// interfaces, this deployment's when it's one of them. What `ductus deploy` writes into the file
+/// it deployed, so the next environment that requires this one reads it.
+async fn place_here(
+    engine: &Eng,
+    release: &[u8],
+    only: &[String],
+    deployment: i32,
+) -> Result<Option<PlaceInfo>, ApiError> {
+    let places = engine.store.release_places(release).await?;
+    let here = places.iter().filter(|p| p.here && p.environment == engine.environment);
+    let found = match only {
+        [] => here.filter(|p| p.interfaces.is_empty()).min_by_key(|p| p.deployment),
+        _ => {
+            let covers: Vec<_> = here.filter(|p| only.iter().all(|i| p.interfaces.contains(i))).collect();
+            covers.iter().find(|p| p.deployment == deployment).or(covers.first()).copied()
+        }
+    };
+    Ok(found.map(PlaceInfo::of))
+}
+
+/// The release a deploy of some interfaces runs (`DeployRequest::interfaces`): what runs here
+/// with those interfaces taken from `named` (`compose`), stored as a release of its own, or
+/// `named` itself when it differs from what runs only in them. Its id, manifest and ancestry (the
+/// named release's: where the interfaces taken came from), and what it took. Err: the refusal
+/// (status and outcome).
+async fn composed(
+    engine: &Eng,
+    releases: &deploy::Releases,
+    caller: &Caller,
+    (named, named_manifest, named_ancestry): (&[u8], &Manifest, &[u8]),
+    only: &[String],
+    reason: Option<String>,
+) -> Result<Result<(Vec<u8>, Manifest, Vec<u8>, ComposedInfo), (StatusCode, String)>, ApiError> {
+    let short = release::short(&named_manifest.id).to_string();
+    let Some(running) = releases.running() else {
+        return Ok(Err((
+            StatusCode::CONFLICT,
+            format!(
+                "nothing runs here yet, so there's nothing to take interfaces over: deploy release {short} whole first \
+                 (`ductus deploy {short}`)"
+            ),
+        )));
+    };
+    let files = |id: Vec<u8>| async move {
+        let contents =
+            engine.store.release_contents(&id).await?.ok_or_else(|| {
+                ApiError::not_found(format!("release {} is no longer stored", crate::code::short(&id)))
+            })?;
+        Ok::<_, ApiError>(
+            contents.files.into_iter().map(|(path, bytes, _)| release::File::new(path, bytes)).collect::<Vec<_>>(),
+        )
+    };
+    let (over_files, from_files) = (files(running.id.clone()).await?, files(named.to_vec()).await?);
+    let made = release::Made {
+        at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
+        by: caller.name().to_string(),
+        host: engine.host.clone(),
+        reason,
+        binary: env!("CARGO_PKG_VERSION").to_string(),
+        platform: format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH),
+    };
+    let (over_manifest, from_manifest, asked) = (running.manifest.clone(), named_manifest.clone(), only.to_vec());
+    let composition = tokio::task::spawn_blocking(move || {
+        let over = crate::compose::Side { manifest: &over_manifest, files: &over_files };
+        let from = crate::compose::Side { manifest: &from_manifest, files: &from_files };
+        crate::compose::compose(over, from, &asked, made)
+    })
+    .await
+    .map_err(anyhow::Error::from)?;
+    let c = match composition {
+        Ok(c) => c,
+        Err(why) => return Ok(Err((StatusCode::CONFLICT, format!("refused: {why}")))),
+    };
+    let mut info = ComposedInfo {
+        from: named_manifest.id.clone(),
+        from_short: short.clone(),
+        over_short: release::short(&running.manifest.id).to_string(),
+        interfaces: c.taken.iter().map(|(n, what)| (n.clone(), what.to_string())).collect(),
+        project_differs: c.project_differs.clone(),
+        is_from: c.manifest.id == named_manifest.id,
+        stored: false,
+    };
+    if c.manifest.id == running.manifest.id {
+        let names = only.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ");
+        return Ok(Err((
+            StatusCode::CONFLICT,
+            format!("{names} in release {short} is what runs here already: nothing to do"),
+        )));
+    }
+    if info.is_from {
+        return Ok(Ok((named.to_vec(), named_manifest.clone(), named_ancestry.to_vec(), info)));
+    }
+    let audit = caller.audit("release.store");
+    let stored = keep(engine, caller.name(), &c.manifest, named_ancestry, &c.files, &audit).await?;
+    info.stored = stored.new;
+    let id = deploy::unhex(&c.manifest.id).ok_or_else(|| anyhow::anyhow!("a composed release's id isn't hex"))?;
+    // As stored: composed before (the same files), or made by `ductus release` with them, its
+    // manifest is the one kept.
+    let (manifest, ancestry) =
+        engine.store.release_manifest(&id).await?.ok_or_else(|| anyhow::anyhow!("the release composed is gone"))?;
+    let manifest: Manifest = serde_json::from_value(manifest)
+        .map_err(|e| anyhow::anyhow!("reading the composed release's manifest: {e}"))?;
+    Ok(Ok((id, manifest, ancestry, info)))
 }
 
 /// "1 h", "15 min", "90 s".

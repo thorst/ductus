@@ -7158,6 +7158,234 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
+/// Composed releases and deploys in turn (0.7.5.3.2). A and B share `lib/shared.ts`. Release 2
+/// changes both; Ann deploys only A from it: the engine composes release 1 with A from 2 (B as
+/// it ran, in place, recorded with 2's commit for A). Release 3 changes the shared file: taking A
+/// alone is refused, naming B. Release 4 changes A and B again; Ann deploys A from it and Bob B,
+/// both at once: one waits its turn, the second composes over the first, and what runs at the end
+/// is release 4 itself.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_deploy_takes_one_interface_out_of_a_release_and_deploys_sent_at_once_wait_their_turn() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (port_a, port_b, api) = (free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let (a, b) = (format!("cpa-{nanos}"), format!("cpb-{nanos}"));
+    let work = tempfile::tempdir().unwrap();
+    let interface = |name: &str, port: u16| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\ndestinations:\n  out: {{ file: {{ dir: '{}' }}, script: tag.ts }}\n",
+            work.path().join(format!("out-{name}")).display()
+        )
+    };
+    let tag = "import type { Message } from \"@ductus/sdk\";\nimport { TAG } from \"./value.ts\";\nimport { PREFIX } from \"../../lib/shared.ts\";\n\nexport function transform(m: Message) {\n  m.set(\"MSH-5\", PREFIX + TAG);\n  return m;\n}\n";
+    let files = |name: &str, file: &str| format!("interfaces/{name}/{file}");
+    let (a_yaml, b_yaml) = (interface(&a, port_a), interface(&b, port_b));
+    let dir = project(&[
+        (".gitignore", "*.log\n"),
+        ("ductus.yaml", "{}\n"),
+        ("environments/dev.yaml", "variables: {}\n"),
+        ("environments/prod.yaml", "variables: {}\n"),
+        ("lib/shared.ts", "export const PREFIX = \"1-\";\n"),
+        (files(&a, "interface.yaml").as_str(), a_yaml.as_str()),
+        (files(&a, "tag.ts").as_str(), tag),
+        (files(&a, "value.ts").as_str(), "export const TAG = \"A1\";\n"),
+        (files(&b, "interface.yaml").as_str(), b_yaml.as_str()),
+        (files(&b, "tag.ts").as_str(), tag),
+        (files(&b, "value.ts").as_str(), "export const TAG = \"B1\";\n"),
+    ]);
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let (control, releases) = (work.path().join("control"), work.path().join("releases"));
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let (ann_name, bob_name) = (format!("{a}-ann"), format!("{a}-bob"));
+    let _tokens = Tokens::new([ann_name.clone(), bob_name.clone()]);
+    let token = |name: &str| {
+        let args = ["token", "create", name, "--role", "operator", "--permission", "deploy"];
+        let out = Command::new(bin).args(args).current_dir(dir.path()).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let (ann, bob) = (token(&ann_name), token(&bob_name));
+    let to = format!("http://127.0.0.1:{api}");
+    let deploying = |token: &str, args: &[&str]| {
+        Command::new(bin)
+            .arg("deploy")
+            .args(args)
+            .args(["--to", &to])
+            .env("DUCTUS_API_TOKEN", token)
+            .current_dir(dir.path())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let answer = |child: std::process::Child| {
+        let out = child.wait_with_output().unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        (out.status.success(), said)
+    };
+    let deploy = |token: &str, args: &[&str]| answer(deploying(token, args));
+    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
+    let running = async || -> u32 {
+        for _ in 0..600 {
+            let engines = store.live_engines().await.unwrap();
+            if let Some(e) = engines.iter().find(|e| e.interfaces.contains(&a) && e.interfaces.contains(&b)) {
+                return e.pid as u32;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        panic!("no engine runs {a} and {b}");
+    };
+    // What A and B run, as recorded, in hex.
+    let runs = async || -> (String, String) {
+        let now = store.current_versions(&[a.as_str(), b.as_str()]).await.unwrap();
+        let of = |name: &str| ductus_runtime::code::hex(&now.iter().find(|c| c.interface == name).unwrap().version);
+        (of(&a), of(&b))
+    };
+    let version = |r: &serde_json::Value, name: &str| r["interfaces"][name]["version"].as_str().unwrap().to_string();
+
+    let log = work.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let mut first = Child(
+        Command::new(bin)
+            .args(["run", "--releases", &releases.to_string_lossy(), "--release-project", &project_name])
+            .args(["--env", "prod", "--threads", "2", "--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", &control)
+            .env_remove("DUCTUS_PROJECT")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "started interfaces=0", 60), "{}", read(&log));
+    let one = release_json(dir.path(), &["-m", "first"]);
+    let one_id = one["id"].as_str().unwrap().to_string();
+
+    // Some interfaces before anything runs: nothing to take them over.
+    let (ok, out) = deploy(&ann, &[one["file"].as_str().unwrap(), "--interface", &a, "-m", "too soon"]);
+    assert!(!ok && out.contains("nothing runs here yet") && out.contains("whole first"), "{out}");
+    let (ok, out) = deploy(&ann, &[&one_id[..12], "-m", "both interfaces"]);
+    assert!(ok && out.contains("✓ handed over"), "{out}\n{}", read(&log));
+    let exited = tokio::task::spawn_blocking(move || first.0.wait()).await.unwrap().unwrap();
+    assert!(exited.success(), "the engine before stops cleanly: {exited}");
+    let engine = Terminate(running().await);
+
+    // Release 2 changes A and B; Ann takes A alone.
+    for (name, value) in [(&a, "A2"), (&b, "B2")] {
+        std::fs::write(dir.path().join(files(name, "value.ts")), format!("export const TAG = \"{value}\";\n")).unwrap();
+    }
+    git(dir.path(), &["commit", "-qam", "A2 and B2"]);
+    let two = release_json(dir.path(), &["-m", "A2 and B2"]);
+    let two_short = &two["id"].as_str().unwrap()[..12];
+    let (ok, out) = deploy(&ann, &[two["file"].as_str().unwrap(), "--interface", &a, "-m", "A2 only", "--json"]);
+    assert!(ok, "{out}\n{}", read(&log));
+    let report: serde_json::Value = serde_json::from_str(&out[out.find("{\n").unwrap()..]).unwrap();
+    let composed = &report["composed"];
+    assert_eq!(composed["interfaces"], serde_json::json!({ a.as_str(): "changed" }), "{report:#}");
+    assert_eq!(
+        (composed["from_short"].as_str(), composed["over_short"].as_str()),
+        (Some(two_short), Some(&one_id[..12]))
+    );
+    assert_eq!((composed["is_from"].as_bool(), composed["stored"].as_bool()), (Some(false), Some(true)), "{report:#}");
+    assert_eq!(report["applied"], "in_place", "{report:#}");
+    let changed: Vec<&str> =
+        report["plan"]["changes"].as_array().unwrap().iter().filter_map(|c| c["interface"].as_str()).collect();
+    assert_eq!(changed, [a.as_str()], "only A changes: {report:#}");
+    assert_eq!(running().await, engine.0, "in place, the same engine");
+    assert_eq!(runs().await, (version(&two, &a), version(&one, &b)), "A from 2, B as it ran");
+    let c1 = report["release"].as_str().unwrap().to_string();
+    let stored = store.release_manifest(&ductus_runtime::deploy::unhex(&c1).unwrap()).await.unwrap().unwrap().0;
+    assert_eq!(stored["composed"]["from"], two["id"], "{stored:#}");
+    assert_eq!(stored["git"]["commit"], two["git"]["commit"], "the commit A came from");
+    let now = store.current_versions(&[a.as_str()]).await.unwrap();
+    assert_eq!(now[0].git_commit.as_deref(), two["git"]["commit"].as_str(), "recorded with that commit");
+
+    // The same again: A from 2 is what runs.
+    let (ok, out) = deploy(&ann, &[two_short, "--interface", &a, "-m", "again"]);
+    assert!(!ok && out.contains("is what runs here already: nothing to do"), "{out}");
+
+    // Release 3 changes the shared file: A alone would change B too.
+    std::fs::write(dir.path().join("lib/shared.ts"), "export const PREFIX = \"3-\";\n").unwrap();
+    git(dir.path(), &["commit", "-qam", "a new prefix"]);
+    let three = release_json(dir.path(), &["-m", "prefix 3"]);
+    let (ok, out) = deploy(&ann, &[three["file"].as_str().unwrap(), "--interface", &a, "-m", "A3"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains(&format!("taking `{a}` alone would change other interfaces")), "{out}");
+    assert!(
+        out.contains("`lib/shared.ts` is different in release") && out.contains(&format!("`{b}` runs it too")),
+        "{out}"
+    );
+    assert!(out.contains(&format!("--interface {a} --interface {b}`")), "{out}");
+    assert_eq!(runs().await, (version(&two, &a), version(&one, &b)), "nothing changed");
+
+    // Release 4 (the prefix back, A4 and B4): Ann's A and Bob's B sent at once.
+    std::fs::write(dir.path().join("lib/shared.ts"), "export const PREFIX = \"1-\";\n").unwrap();
+    for (name, value) in [(&a, "A4"), (&b, "B4")] {
+        std::fs::write(dir.path().join(files(name, "value.ts")), format!("export const TAG = \"{value}\";\n")).unwrap();
+    }
+    git(dir.path(), &["commit", "-qam", "A4 and B4"]);
+    let four = release_json(dir.path(), &["-m", "A4 and B4"]);
+    let four_short = four["id"].as_str().unwrap()[..12].to_string();
+    // Stored first, so both ask by id at once.
+    let stored = reqwest::Client::new()
+        .post(format!("{to}/api/v1/releases"))
+        .bearer_auth(&ann)
+        .header("Content-Type", "application/gzip")
+        .body(std::fs::read(four["file"].as_str().unwrap()).unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert!(stored.status().is_success(), "{}", stored.text().await.unwrap());
+    let (ann_deploy, bob_deploy) = (
+        deploying(&ann, &[&four_short, "--interface", &a, "-m", "Ann's A4", "--json"]),
+        deploying(&bob, &[&four_short, "--interface", &b, "-m", "Bob's B4", "--json"]),
+    );
+    let ((ann_ok, ann_out), (bob_ok, bob_out)) =
+        tokio::task::spawn_blocking(move || (answer(ann_deploy), answer(bob_deploy))).await.unwrap();
+    assert!(ann_ok && bob_ok, "both deployed:\n{ann_out}\n{bob_out}\n{}", read(&log));
+    let parse = |out: &str| -> serde_json::Value { serde_json::from_str(&out[out.find("{\n").unwrap()..]).unwrap() };
+    let (ann_report, bob_report) = (parse(&ann_out), parse(&bob_out));
+    let waited = |r: &serde_json::Value| r["waited_ms"].as_u64().unwrap();
+    assert!(waited(&ann_report).max(waited(&bob_report)) >= 100, "one waited its turn: {ann_report:#}\n{bob_report:#}");
+    // The second composed over the first: its `over` is the first's release, and it's 4 itself.
+    let (first_report, second_report) = if waited(&ann_report) <= waited(&bob_report) {
+        (&ann_report, &bob_report)
+    } else {
+        (&bob_report, &ann_report)
+    };
+    assert_eq!(second_report["composed"]["over_short"].as_str(), Some(&first_report["short"].as_str().unwrap()[..12]));
+    assert_eq!(second_report["composed"]["is_from"], true, "{second_report:#}");
+    assert_eq!(second_report["release"], four["id"], "{second_report:#}");
+    assert_eq!(runs().await, (version(&four, &a), version(&four, &b)), "both took");
+    assert_eq!(running().await, engine.0, "in place throughout");
+    let got: serde_json::Value = reqwest::Client::new()
+        .get(format!("{to}/api/v1/engine"))
+        .bearer_auth(&ann)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(got["deployment"]["release"], four["id"], "{got}");
+    // Each deployment recorded by whom: A's by Ann, B's by Bob.
+    let now = store.current_versions(&[a.as_str(), b.as_str()]).await.unwrap();
+    let by = |name: &str| now.iter().find(|c| c.interface == name).unwrap().by.clone();
+    assert_eq!((by(&a), by(&b)), (ann_name.clone(), bob_name.clone()));
+
+    drop(engine);
+    let ids: Vec<Vec<u8>> = [&one, &two, &three, &four]
+        .iter()
+        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
+        .collect();
+    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
+}
+
 /// A record like `m`'s first, for hand-made records in tests.
 fn uat_place(m: &ductus_runtime::release::Manifest) -> ductus_runtime::release::Place {
     ductus_runtime::release::Place { environment: "uat".into(), ..m.deployed[0].clone() }
