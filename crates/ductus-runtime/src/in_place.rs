@@ -874,7 +874,10 @@ pub(crate) fn renew_beside(engine: &Arc<crate::control::Engine>) {
             let Some(engine) = engine.upgrade() else { return };
             let (thread, superseded) = (renewal.thread.clone(), renewal.superseded);
             match engine.kept.renew(renewal).await {
-                Ok(Some(r)) => tracing::info!(
+                Ok(Some(r)) => {
+                    // The old thread ends once let go: glibc keeps what its arena freed until asked.
+                    crate::give_back_freed_memory();
+                    tracing::info!(
                     %thread,
                     superseded_mb = format!("{:.1}", superseded as f64 / (1 << 20) as f64),
                     interfaces = r.interfaces,
@@ -882,7 +885,8 @@ pub(crate) fn renew_beside(engine: &Arc<crate::control::Engine>) {
                     took = ?r.took,
                     longest_pause = ?r.longest_pause,
                     "renewed: its interfaces run in a fresh isolate on a new thread, and the old one's memory is freed (isolates.superseded_mb)"
-                ),
+                    )
+                }
                 Ok(None) => {}
                 Err(e) => tracing::warn!(
                     %thread,

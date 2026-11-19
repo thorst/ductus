@@ -1427,27 +1427,27 @@ their module-level state starts over, as at a restart. Nothing to do; the log sa
 `renewed: …` each time.
 
 What a renewal costs, the same engine (0.7.5.3.3, `scripts/bench-deploy.sh` phase 10, with
-`superseded_mb: 0.05` so that deploys of A renew A's thread, which runs 251 interfaces; one
-renewal under traffic, 51 without):
+`superseded_mb: 0.05` so that deploys of A renew A's thread, which runs 251 interfaces; two runs,
+each with one renewal under traffic and 51 without):
 
-| | Under traffic (A, S, T at 100 msg/s on that thread, O on another) | Without traffic, 51 renewals |
+| | Under traffic (A, S, T at 100 msg/s on that thread, O on another) | Without traffic, 102 renewals |
 |---|---|---|
-| Loading the 251 interfaces on the new thread (nothing paused) | 363 ms | |
-| The whole renewal, the moves included | 541 ms | 290–320 ms |
-| The longest one interface paused while it moved | 88 ms (it finishes the message in hand first) | 0.9–1.6 ms |
-| The interfaces' send latency, max | 84 ms (A, T), 162 ms (O) | |
-| The senders' longest ACK wait | 146 ms, on every sender alike (other rounds 24–105 ms, the baseline 86 ms) | |
+| Loading the 251 interfaces on the new thread (nothing paused) | 337–363 ms | |
+| The whole renewal, the moves included | 444–541 ms | 275–320 ms |
+| The longest one interface paused while it moved | 16–88 ms (it finishes the message in hand first) | 0.6–1.6 ms |
+| The interfaces' send latency, max | 45–95 ms; once 162 ms (O, on another thread) | |
+| The senders' longest ACK wait | 61–76 ms (that run's baseline 43–67); in the other run 146 ms on every sender alike (its baseline 86) | |
 
 Memory over 100 deploys of A in a row on that engine, each second one renewing (after a
 renewal, the next version of A costs less than 0.05 MB: the shared table it imports was counted
-for whichever interface loaded it first): 278, 289, 295, 297 MB every 25 deploys, levelling off;
-the engine before, without renewals, rose by 25 MB over its 100 (336 to 361 MB). Four pool
-threads were left at the end: each renewed thread had ended. At the default 64 MB, a thread like
-A's is renewed after 1,200 to 2,700 deploys of interfaces like A on it (a version of A costs
-24–54 KB). **When to act:** never for the
-renewal itself. An ACK wait of 146 ms on every sender in the round it happened is within what
-this machine shows without a deploy now and then, but if your senders' timeouts are that tight,
-raise `superseded_mb` so it comes less often.
+for whichever interface loaded it first): 229, 225, 234, 226 MB every 25 deploys, flat. The same
+engine before, without renewals, rose by 30 MB over its 100 (314 to 344 MB). Four pool threads
+were left at the end: each renewed thread had ended. (Before the engine gave the ended threads'
+freed memory back to the system, as it does after a handover, the same run still rose 278 → 297
+MB: glibc keeps what a thread's arena freed.) At the default 64 MB, a thread like A's is renewed
+after 1,200 to 2,700 deploys of interfaces like A on it (a version of A costs 24–54 KB).
+**When to act:** never for the renewal itself. If your senders' timeouts are within a couple of
+hundred milliseconds of their usual ACK times, raise `superseded_mb` so it comes less often.
 
 What the Releases page reads, the same project (0.7.4.5, `scripts/bench-release.sh`, three
 rounds; 2 releases stored, 13 deployments of them, the release read checked several times):

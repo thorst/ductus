@@ -283,13 +283,14 @@ pub async fn run(root: &Path, database_url: &str, options: EngineOptions) -> Res
     }
 }
 
-/// After an in-process handover, once the engine taken over from has ended: give the memory it
+/// After an in-process handover, once the engine taken over from has ended, and after a worker
+/// thread's renewal (`in_place::renew_beside`), once the old thread has ended: give the memory it
 /// freed back to the system. glibc keeps what a thread's arena freed for that arena, and the
-/// ended engine's threads are gone, so without this the process grew a few MB at every handover
+/// ended threads are gone, so without this the process grew a few MB at every handover
 /// (measured at 1,001 interfaces: 94 → 221 MB over ten; with it: see `bench-handover.sh`
-/// IN_PROCESS=1). Once, beside the engine, off the async threads; nothing elsewhere (other
+/// IN_PROCESS=1). Beside the engine, 3 s later, off the async threads; nothing elsewhere (other
 /// allocators return memory themselves).
-fn give_back_freed_memory() {
+pub(crate) fn give_back_freed_memory() {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     tokio::spawn(async {
         tokio::time::sleep(Duration::from_secs(3)).await;
