@@ -262,6 +262,18 @@ pub async fn forget_releases(store: &Store, ids: &[Vec<u8>]) -> Result<()> {
     Ok(())
 }
 
+/// Delete every release of `project` (a test's temporary folder name, so no one else's), with
+/// what `forget_releases` deletes: what a test's drop guard calls, so a test that fails half-way
+/// leaves none (they made a later demo's "nothing deployed yet" step fail).
+pub async fn forget_project_releases(store: &Store, project: &str) -> Result<()> {
+    let ids: Vec<Vec<u8>> = sqlx::query_scalar("SELECT id FROM releases WHERE project = $1")
+        .bind(project)
+        .fetch_all(&store.pool)
+        .await
+        .context("finding the test's releases")?;
+    forget_releases(store, &ids).await
+}
+
 /// While it lives, the database refuses `interface`'s retention row (a trigger on `retention` for
 /// that name only, so other tests' engines on the same database aren't touched): what a start
 /// does when it can't apply the configured retention. Drop it with `allow`.

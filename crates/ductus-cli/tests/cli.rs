@@ -1958,6 +1958,30 @@ impl Drop for Tokens {
     }
 }
 
+/// The releases of a test's project (its temporary folder's name), forgotten when the test ends,
+/// also when it fails half-way: left behind, they're "deployed to prod" on the shared database and
+/// a later demo's engine finds them (demo-release's "nothing deployed yet" failed so, twice).
+struct Releases(String);
+
+impl Drop for Releases {
+    fn drop(&mut self) {
+        let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+        let project = self.0.clone();
+        // Its own runtime on its own thread: the test's may be gone, or this one may be inside it.
+        let done = std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().ok()?;
+            runtime.block_on(async {
+                let store = ductus_store::Store::connect(&db, 1).await.ok()?;
+                ductus_store::testing::forget_project_releases(&store, &project).await.ok()
+            })
+        })
+        .join();
+        if !matches!(done, Ok(Some(()))) {
+            eprintln!("couldn't forget the releases of {}", self.0);
+        }
+    }
+}
+
 /// Wait up to 2.5 s for `check` to hold.
 async fn eventually(check: impl AsyncFnMut() -> bool) -> bool {
     within(2.5, check).await
@@ -7198,6 +7222,7 @@ async fn a_deploy_takes_one_interface_out_of_a_release_and_deploys_sent_at_once_
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-qm", "first"]);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let _releases = Releases(project_name.clone());
     let (control, releases) = (work.path().join("control"), work.path().join("releases"));
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
@@ -7377,13 +7402,7 @@ async fn a_deploy_takes_one_interface_out_of_a_release_and_deploys_sent_at_once_
     let now = store.current_versions(&[a.as_str(), b.as_str()]).await.unwrap();
     let by = |name: &str| now.iter().find(|c| c.interface == name).unwrap().by.clone();
     assert_eq!((by(&a), by(&b)), (ann_name.clone(), bob_name.clone()));
-
     drop(engine);
-    let ids: Vec<Vec<u8>> = [&one, &two, &three, &four]
-        .iter()
-        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
-        .collect();
-    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
 /// A record like `m`'s first, for hand-made records in tests.
