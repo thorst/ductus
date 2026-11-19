@@ -470,7 +470,7 @@ Since 0.7.4.3.3 the text files of stored releases are kept here too (the same te
 
 ## `releases`
 
-Each release stored on this database with `POST /releases` (migration 0030, 0.7.4.3.3): made by `ductus release`, its id recomputed from its files when it was stored. Kept (a release is what a deploy and a rollback choose from); a release's files are kept by folder, each folder's list once (`release_folders`), so a release that changed ten interfaces adds about ten folders and their changed files.
+Each release stored on this database with `POST /releases` (migration 0030, 0.7.4.3.3): made by `ductus release`, its id recomputed from its files when it was stored, or composed by an engine for a deploy of some interfaces (`ductus deploy R --interface A`, migration 0035, 0.7.5.3.2: what ran there with A's files from R). Kept (a release is what a deploy and a rollback choose from); a release's files are kept by folder, each folder's list once (`release_folders`), so a release that changed ten interfaces adds about ten folders and their changed files.
 
 | column | type | |
 |---|---|---|
@@ -480,7 +480,7 @@ Each release stored on this database with `POST /releases` (migration 0030, 0.7.
 | `made_at` | timestamptz | When `ductus release` made it (null when the manifest's time doesn't read as one). |
 | `made_by` | text | Who made it (the account that ran `ductus release`). |
 | `reason` | text | Why (`ductus release -m`); null when nobody said. |
-| `git_commit` | text | The commit it was made from (hex); null when made without git. |
+| `git_commit` | text | The commit it was made from (hex); null when made without git. A composed release's: the commit of the release its interfaces came from (`composed_from`), not every file's. |
 | `interfaces` | integer | How many interfaces it carries. |
 | `files` | integer | How many files it carries. |
 | `bytes` | bigint | Their bytes, unpacked. |
@@ -489,6 +489,8 @@ Each release stored on this database with `POST /releases` (migration 0030, 0.7.
 | `stored_at` | timestamptz | When it was stored here. |
 | `stored_by` | text | Who stored it (a person's or a token's name, as the audit log names them). |
 | `branches` | text[] | Every branch it was made on, as its files said (`git.branch`), added at each upload (migration 0032, 0.7.4.4.3): the same files made on a feature branch and again on `main` after a fast-forward merge are one release, made on both. What `DUCTUS_DEPLOY_BRANCHES` reads (any may match). Null: none said (a detached HEAD without `ductus release --branch`, made without git, or stored before 0.7.4.4.3). Labels, unsigned. |
+| `composed_from` | bytea | A composed release (migration 0035, 0.7.5.3.2): the release its named interfaces came from. Its deployments count as places of that release for those interfaces (`DUCTUS_DEPLOY_REQUIRES`), and the "replaces" check reads their commit as vouching only for those interfaces. Null: made by `ductus release` (also once the same files arrive made by `ductus release`: that manifest replaces the composition's). |
+| `composed_interfaces` | text[] | The interfaces it took from `composed_from`, sorted; null when not composed. |
 
 Indexes: primary key `id`; `releases_stored_at (stored_at)`.
 
@@ -550,6 +552,7 @@ Where a release was deployed on **other** databases, as the file carrying it sai
 | `ductus_version` | text | The Ductus version that ran it there. |
 | `received_at` | timestamptz | When the file carrying the record was stored here. |
 | `received_by` | text | Who stored it. |
+| `interfaces` | text[] | Only these interfaces of it went there: a release composed from it took them (migration 0035, 0.7.5.3.2). Null: the whole release. |
 
 Index: primary key `(release_id, environment, host, deployment)`.
 

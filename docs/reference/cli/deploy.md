@@ -25,6 +25,7 @@ ductus deploy [OPTIONS] [RELEASE]
 | `--force` | Deploy over someone else's work the "replaces" check names: their change is undone (recorded in the audit log as `release.force`, and in the history). Needs `-m`. Doesn't skip the environment's DUCTUS_DEPLOY_REQUIRES or DUCTUS_DEPLOY_BRANCHES. |  |  |
 | `--all-tests` | Run every interface's tests in the gate, not only those of what the release changes there (never reuses a check). |  |  |
 | `--in-place-only` | Only in place: refuse (before the gate runs) when the release changes something only a handover applies (how messages are stored, lanes, the project's own files, a port moving from one interface to another), and when applying in place fails, instead of handing over. For sites that schedule handovers. |  |  |
+| `--interface <NAME>` | Deploy only this interface's work from the release (repeat for several): the engine makes a release of its own from what runs there with this interface's folder and the shared code it loads taken from the release named, and deploys that (an interface the release lacks is removed, one only it has is added). Every other interface, and the project's own files, stay as they run. Refused when a shared file it needs differs and other interfaces run it (named: take them too). Example: `ductus deploy 0a1b2c3d4e5f --interface adt-to-lab -m "lab's fix, without billing's change"`. |  |  |
 | `--json` | The engine's report as JSON. |  |  |
-| `--timeout <TIMEOUT>` | How long to wait for the engine's answer (the gate, up to 30 minutes, then applying it). | `40m` |  |
+| `--timeout <TIMEOUT>` | How long to wait for the engine's answer (its turn behind other deploys, up to 5 minutes; the gate, up to 30; then applying it). | `40m` |  |
 

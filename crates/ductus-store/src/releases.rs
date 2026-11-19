@@ -81,6 +81,9 @@ pub struct ReleaseRow {
     pub stored_by: String,
     /// Every branch it was made on, as its files said when they were stored (empty: none said).
     pub branches: Vec<String>,
+    /// Composed by an engine (0.7.5.3.2): the release its interfaces came from, and which.
+    pub composed_from: Option<Vec<u8>>,
+    pub composed_interfaces: Vec<String>,
     /// The environments it went to, by name: deployed there on this database, or a file carrying
     /// it said so (`release_places`). Filled in lists and summaries.
     pub environments: Vec<String>,
@@ -219,7 +222,7 @@ fn folder_list(files: &[&ReleaseFile<'_>]) -> (Vec<u8>, String) {
 }
 
 const RELEASE_COLUMNS: &str = "id, project, made_at, made_by, reason, git_commit, interfaces, files, bytes, stored_at, stored_by, \
-     coalesce(branches, '{}')";
+     coalesce(branches, '{}'), composed_from, coalesce(composed_interfaces, '{}')";
 
 type Row = (
     Vec<u8>,
@@ -234,12 +237,30 @@ type Row = (
     DateTime<Utc>,
     String,
     Vec<String>,
+    Option<Vec<u8>>,
+    Vec<String>,
 );
 
 fn release_row(r: Row) -> ReleaseRow {
-    let (id, project, made_at, made_by, reason, git_commit, interfaces, files, bytes, stored_at, stored_by, branches) =
-        r;
+    let (
+        id,
+        project,
+        made_at,
+        made_by,
+        reason,
+        git_commit,
+        interfaces,
+        files,
+        bytes,
+        stored_at,
+        stored_by,
+        branches,
+        composed_from,
+        composed_interfaces,
+    ) = r;
     ReleaseRow {
+        composed_from,
+        composed_interfaces,
         id,
         project,
         made_at,

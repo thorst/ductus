@@ -6,6 +6,7 @@ import { pullRelease, uploadRelease, useCanDeploy, useRefresh } from "@/api/acti
 import { ApiError, type Schemas } from "@/api/client";
 import { engine, releases, runs, upstream } from "@/api/queries";
 import { Badge, Environments } from "@/components/badge";
+import { Composed } from "@/components/composed";
 import { DeployDialog } from "@/components/deploy-dialog";
 import { Loaded, PageHeader } from "@/components/page";
 import { Button } from "@/components/ui/button";
@@ -166,6 +167,7 @@ function Stored() {
                         {r.made_by}, {ago(r.made_at)}
                       </div>
                       {r.reason && <div className="text-xs text-muted">{r.reason}</div>}
+                      {r.composed_from && <Composed from={r.composed_from} interfaces={r.composed_interfaces} />}
                     </Td>
                     <Td>
                       <Environments names={r.environments} />

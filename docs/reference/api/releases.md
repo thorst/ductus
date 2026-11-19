@@ -14,7 +14,7 @@ The releases this engine's project ran in its environment, newest first, one ent
 
 ## `POST /api/v1/deployments`
 
-Deploy a stored release to this engine (release mode): this environment's rules, the "replaces" check, what it changes here (`plan`), the gate (or a recent passing check reused), then **in place** when only interfaces' code, destinations, destination settings and sources change, or interfaces are added or removed (those interfaces' workers and sources restart, move, start or stop between two messages; the others never pause), else the handover to an engine running it (`plan.handover_because` says why); or roll back (`rollback`) to a release that ran here before, the same way. Answers once it runs (in place: milliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as it was), plus the gate's time when it runs. 200: deployed (`applied` says how). 409: refused before anything ran (folder mode, another deploy or check running, the release already runs, this environment's rules, its "replaces" check names someone's work, a rollback to a release that never ran here, `in_place_only` and it needs the handover), the report says why. 422: the gate found problems. 500: it couldn't be applied (this engine goes on as it was). Needs the `deploy` permission. One deploy or check at a time per engine.
+Deploy a stored release to this engine (release mode): this environment's rules, the "replaces" check, what it changes here (`plan`), the gate (or a recent passing check reused), then **in place** when only interfaces' code, destinations, destination settings and sources change, or interfaces are added or removed (those interfaces' workers and sources restart, move, start or stop between two messages; the others never pause), else the handover to an engine running it (`plan.handover_because` says why); or roll back (`rollback`) to a release that ran here before, the same way. With `interfaces`, only those interfaces' work from the release: a release composed from what runs with theirs is stored and deployed (`composed` says what it took). Answers once it runs (in place: milliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as it was), plus the gate's time when it runs. **One deploy or check at a time per engine, in turn**: one sent while another runs waits (`waited_ms`), up to 5 minutes, then reads what runs. 200: deployed (`applied` says how). 409: refused before anything ran (folder mode, 5 minutes waited for the deploys before it, the release already runs, this environment's rules, its "replaces" check names someone's work, a rollback to a release that never ran here, `in_place_only` and it needs the handover, `interfaces` that would change another interface or that nothing runs under yet), the report says why. 422: the gate found problems. 500: it couldn't be applied (this engine goes on as it was). Needs the `deploy` permission.
 
 **Who may call it:** an operator or admin with the `deploy` permission (admins have it).
 
@@ -82,7 +82,7 @@ One release: what it is, where it went, what it would change here, and every che
 
 ## `POST /api/v1/releases/{id}/check`
 
-Check a stored release against this engine's environment: `ductus release check` runs here, with this engine's settings, secrets and database (read-only), as a child process at a lower CPU priority. `validate`, then the tests of the interfaces the release changes here. Nothing is changed but the check's record (and an audit row). One check at a time per engine (409 while one runs). Answers when it ends (seconds at a thousand interfaces); `ok` says whether it passed. Needs the `deploy` permission: the release's code runs with this environment's secrets.
+Check a stored release against this engine's environment: `ductus release check` runs here, with this engine's settings, secrets and database (read-only), as a child process at a lower CPU priority. `validate`, then the tests of the interfaces the release changes here. Nothing is changed but the check's record (and an audit row). One check or deploy at a time per engine: one sent while another runs waits its turn (up to 5 minutes, then 409). Answers when it ends (seconds at a thousand interfaces); `ok` says whether it passed. Needs the `deploy` permission: the release's code runs with this environment's secrets.
 
 **Who may call it:** an operator or admin with the `deploy` permission (admins have it).
 
@@ -98,7 +98,7 @@ Check a stored release against this engine's environment: `ductus release check`
 - `200` The check ran: `ok` says whether it passed (application/json): [`CheckInfo`](#checkinfo)
 - `403` (application/json): [`ErrorBody`](#errorbody)
 - `404` (application/json): [`ErrorBody`](#errorbody)
-- `409` Another check is running on this engine (application/json): [`ErrorBody`](#errorbody)
+- `409` Waited 5 minutes for the checks and deploys before it on this engine (application/json): [`ErrorBody`](#errorbody)
 
 ## `GET /api/v1/releases/{id}/checks/{check}`
 
@@ -188,6 +188,20 @@ The JSON bodies the operations above take and return.
 | `report` | object | `ductus release check --json`'s document (without the manifest: it's the release's); null in lists, and for a release's older checks of an environment. |
 | `seconds` | number |  |
 
+### `ComposedInfo`
+
+A release composed for a deploy of some interfaces (`DeployRequest::interfaces`).
+
+| Field | Type | |
+|---|---|---|
+| `from` | text | The release they were taken from, in hex, and its first 12 characters. |
+| `from_short` | text |  |
+| `interfaces` | map of name to text | Each interface taken, and what it does: `changed`, `added`, `removed` or `unchanged` (its version there is the one running). |
+| `is_from` | true or false | The composition is that release itself (it differs from what runs only in those interfaces), so no release of its own was made. |
+| `over_short` | text | The release that ran when it was composed (every other interface, and the project's own files, are its), first 12 characters. |
+| `project_differs` | list of text | The project's own files the release has that differ from what runs: kept as they run (deploy the release whole to bring them). |
+| `stored` | true or false | Stored now (false: composed and stored before, the same files). |
+
 ### `DeployChange`
 
 | Field | Type | |
@@ -214,6 +228,7 @@ What a deploy did, or why it didn't.
 | `applied` (optional) | text or null | How it was applied: `in_place` (only the changed interfaces restarted their workers, between two messages; the others never paused) or `handover` (a new engine took over: every interface's sending paused for a moment); absent when refused. |
 | `branches` | list of text | The branches it was made on, as its files said (the same files made on two branches are one release); empty: a detached HEAD without `--branch`, or made without git. |
 | `changes` | list of [`DeployChange`](#deploychange) |  |
+| `composed` (optional) | [`ComposedInfo`](#composedinfo) or null |  |
 | `deployment` (optional) | number or null | The deployment recorded and what it changed (absent if the new engine's wasn't recorded within seconds: `GET /engine` shows it then). |
 | `environment` | text |  |
 | `forced` | true or false | Deployed over the work `replaces` names. |
@@ -223,12 +238,13 @@ What a deploy did, or why it didn't.
 | `place` (optional) | [`PlaceInfo`](#placeinfo) or null |  |
 | `plan` (optional) | [`PlanInfo`](#planinfo) or null |  |
 | `project` | text |  |
-| `release` | text | The release, in hex, and its first 12 characters. |
+| `release` | text | The release, in hex, and its first 12 characters: the one composed when `interfaces` was asked (`composed` says what of). |
 | `replaces` | map of name to text | Each interface (and "the project's own files") whose running version is someone else's work this release would undo, with why. A deploy is refused when any is named, unless forced; a rollback names them and goes on. |
 | `rollback` | true or false | A rollback: to a release that ran here before. |
 | `rules` | list of text | What this environment's rules said (`DUCTUS_DEPLOY_REQUIRES`, `DUCTUS_DEPLOY_BRANCHES`): each reason a deploy is refused, or (a rollback) that they don't hold it. |
 | `short` | text |  |
 | `steps` | list of text | What applying it said as it went: each interface applied in place, or the handover's steps. |
+| `waited_ms` | number | How long it waited for the deploys and checks sent before it to this engine (one at a time, in turn); 0 when none ran. |
 
 ### `DeployRequest`
 
@@ -237,6 +253,7 @@ What a deploy did, or why it didn't.
 | `all_tests` (optional) | true or false | Run every interface's tests in the gate, not only those of what the release changes here (a passing check is reused only when it ran them all too: never, then). |
 | `force` (optional) | true or false | Deploy over someone else's work the "replaces" check names: their change is undone. The interfaces and whose work go into the audit log (`release.force`) and the deployment's history. Doesn't skip this environment's rules (`DUCTUS_DEPLOY_REQUIRES`, `DUCTUS_DEPLOY_BRANCHES`). |
 | `in_place_only` (optional) | true or false | Only in place: refuse (409, before the gate runs) when the release changes something only the handover applies (`plan.handover_because` says what), and (500) when applying in place fails, instead of taking the handover. For sites that schedule handovers. |
+| `interfaces` (optional) | list of text | Only these interfaces of the release (0.7.5.3.2, `ductus deploy R --interface A`): the engine composes a release of its own from what runs with their folders and the code they load taken from `release` (an interface it lacks is removed, one only it has is added), stores it, and deploys that; everything else stays as it runs, the project's own files too. Refused (409) when that would change another interface (a shared file it needs differs, and others run it), naming them. Not with `rollback`. |
 | `reason` (optional) | text or null | Why: required, except in an environment named `dev`. Recorded with the deployment, in its history and in the audit log. |
 | `release` (optional) | text or null | The release: its id, or its first 12 characters. Store it first (`POST /releases`). Required, except for a rollback (default: the last release run here before the current one, skipping any a rollback left). |
 | `rollback` (optional) | true or false | Roll back: go back to a release that ran in this environment before. Not held to this environment's rules; the "replaces" check names whose work it undoes without refusing; the gate runs. Audited as `release.rollback`. |
@@ -293,6 +310,7 @@ Where a release was deployed: one entry of a release file's record (`deployed`).
 | `environment` | text |  |
 | `here` (optional) | true or false | Recorded on this engine's database; false: a release file said so when it was stored here. |
 | `host` | text | The engine's server. |
+| `interfaces` (optional) | list of text | Only these interfaces of it went there (a release composed from it: `ductus deploy R --interface A`); absent: the whole release. |
 
 ### `PlanInfo`
 
@@ -337,6 +355,8 @@ bytes
 | `bytes` | number | Its files' bytes, unpacked. |
 | `checks` | list of [`CheckInfo`](#checkinfo) | In a list: the last check against each environment (without its report). In a release's own page: every check, newest first, each environment's newest with its report (the others' `GET /releases/{id}/checks/{check}` gives). |
 | `commit` (optional) | text or null | The git commit it was made from (none: made without git). |
+| `composed_from` (optional) | text or null | Composed by an engine for a deploy of some interfaces (`ductus deploy R --interface A`, 0.7.5.3.2): the release (in hex) they came from (`made_by` is who deployed, `commit` that release's); absent for a release made by `ductus release`. |
+| `composed_interfaces` (optional) | list of text | The interfaces it took from `composed_from`; empty when not composed. |
 | `environments` | list of text | The environments it went to, by name: deployed there on this database, or a file carrying it said so (unsigned). Where and when: `GET /releases/{id}`'s `deployed`. |
 | `files` | number |  |
 | `id` | text | The release id (SHA-256 over its files), in hex. |

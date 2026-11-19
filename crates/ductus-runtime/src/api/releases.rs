@@ -124,6 +124,14 @@ pub struct ReleaseInfo {
     /// made on two branches are one release); empty: a detached HEAD without `--branch`, or made
     /// without git. Labels, unsigned.
     branches: Vec<String>,
+    /// Composed by an engine for a deploy of some interfaces (`ductus deploy R --interface A`,
+    /// 0.7.5.3.2): the release (in hex) they came from (`made_by` is who deployed, `commit` that
+    /// release's); absent for a release made by `ductus release`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    composed_from: Option<String>,
+    /// The interfaces it took from `composed_from`; empty when not composed.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    composed_interfaces: Vec<String>,
     /// The environments it went to, by name: deployed there on this database, or a file carrying
     /// it said so (unsigned). Where and when: `GET /releases/{id}`'s `deployed`.
     environments: Vec<String>,
@@ -261,6 +269,8 @@ fn info(r: ductus_store::ReleaseRow, running: Option<&[u8]>) -> ReleaseInfo {
     ReleaseInfo {
         running: running == Some(r.id.as_slice()),
         branches: r.branches,
+        composed_from: r.composed_from.as_deref().map(crate::code::hex),
+        composed_interfaces: r.composed_interfaces,
         environments: r.environments,
         short: release::short(&id).to_string(),
         id,

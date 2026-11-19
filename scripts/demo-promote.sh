@@ -30,7 +30,13 @@
 #  14. release 7 moves the interface's MLLP port by its variable (MLLP_PORT's value in every
 #      environment file; interface.yaml unchanged): applied in place on test and prod (0.7.5.2.3:
 #      the filled-in source compared; 0.7.5.2.2: the new port open before the old closed), the
-#      values recorded in the interface's history; the sender repointed is taken there.
+#      values recorded in the interface's history; the sender repointed is taken there;
+#  15. release 8 adds billing and claims (both load lib/payers.ts); release 9 has the feed's fix and
+#      billing's unfinished change to the shared file: the feed alone (`--interface`, 0.7.5.3.2)
+#      goes to test and then prod (composed over what runs there, in place); release 9 whole is
+#      refused by prod (only the feed went to test); billing alone is refused (claims loads it);
+#  16. release 10: Ann deploys billing and Bob claims to test at once: Bob's waits its turn and
+#      composes over Ann's, which is release 10 itself.
 # `TRANSCRIPT=file` keeps what each step printed (docs/operate/releases.md shows it).
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
@@ -86,7 +92,8 @@ cd "$P"
 echo "{}" >ductus.yaml
 printf 'out/\n*.key\n' >.gitignore
 variables() { # variables <environment> <its feed's MLLP port>
-  printf 'variables:\n  MLLP_PORT: %s\n  RECEIVER_PORT: %s\n' "$2" "${SINK[$1]}" >"$P/environments/$1.yaml"
+  printf 'variables:\n  MLLP_PORT: %s\n  RECEIVER_PORT: %s\n  BILLING_PORT: %s\n  CLAIMS_PORT: %s\n' \
+    "$2" "${SINK[$1]}" $((MLLP[$1] + 6)) $((MLLP[$1] + 7)) >"$P/environments/$1.yaml"
 }
 for e in "${ENVS[@]}"; do variables "$e" "${MLLP[$e]}"; done
 lanes() { # lanes <partitions> [another destination's line]
@@ -320,5 +327,60 @@ if (exec 3<>"/dev/tcp/127.0.0.1/${MLLP[prod]}") 2>/dev/null; then fail+=" old-po
 grep -q "rejected 0, refused 0," "$W/gen3.log" || { cat "$W/gen3.log"; fail+=" moved-sender"; }
 echo "received on prod's new port: $(($(received) - BEFORE))" | tee -a "$OUT"
 [ "$(($(received) - BEFORE))" = 20 ] || fail+=" moved-receives"
+
+echo "== 15. one interface out of a release (0.7.5.3.2): the lab feed's fix without billing's unfinished change"
+# Release 8 adds billing and claims, both loading lib/payers.ts; release 9 has the lab feed's fix
+# (LAB9) and billing's half-done change to the shared file. The feed alone goes to test, then to
+# prod (prod requires test: the feed went there alone, which counts for the feed alone); release 9
+# whole is refused there. Billing alone is refused: claims loads the shared file too.
+BILLING=$NAME-billing CLAIMS=$NAME-claims
+side() { # side <interface> <port variable> <tag>
+  mkdir -p "$P/interfaces/$1"
+  printf 'name: %s\nsource: { mllp: { host: 127.0.0.1, port: ${%s} } }\ndestinations:\n  files: { file: { dir: out/%s }, script: payer.ts }\n' "$1" "$2" "$1" >"$P/interfaces/$1/interface.yaml"
+  printf 'import type { Message } from "@ductus/sdk";\nimport { PAYER } from "../../lib/payers.ts";\n\nexport function transform(m: Message) {\n  m.set("MSH-6", PAYER + "-%s");\n  return m;\n}\n' "$3" >"$P/interfaces/$1/payer.ts"
+}
+mkdir -p "$P/lib"
+echo 'export const PAYER = "P1";' >"$P/lib/payers.ts"
+side "$BILLING" BILLING_PORT B1
+side "$CLAIMS" CLAIMS_PORT C1
+g add . && g commit -qm "billing and claims"
+step r8 'env -u DUCTUS_DATABASE_URL ductus release -m "billing and claims"'
+S8=$(short_id r8) REL8=.ductus/releases/$(basename "$(released r8)")
+step test8 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL8"' --to $TEST -m "billing and claims"'
+step promote8 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S8"' --from $TEST --to $PROD -m "billing and claims, tested"'
+[ "$(code test8)" = 0 ] && [ "$(code promote8)" = 0 ] || fail+=" promote8"
+lab LAB9
+echo 'export const PAYER = "P2"; // billing: not finished' >"$P/lib/payers.ts"
+side "$BILLING" BILLING_PORT B2
+g commit -qam "the lab's fix; billing half done"
+step r9 'env -u DUCTUS_DATABASE_URL ductus release -m "LAB9, and billing in progress"'
+S9=$(short_id r9) REL9=.ductus/releases/$(basename "$(released r9)")
+step test9 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$REL9"' --interface '"$NAME"' --to $TEST -m "the lab fix alone"'
+[ "$(code test9)" = 0 ] || fail+=" test9"
+has test9 "^· $NAME (changed) from release $S9, over $S8 as it runs here (composed and stored now)" || fail+=" test9-composed"
+has test9 "^· $NAME: code (in place)" && ! has test9 "^· $BILLING" || fail+=" test9-only-the-feed"
+step promote9 'DUCTUS_FROM_TOKEN=$TEST_TOKEN DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S9"' --interface '"$NAME"' --from $TEST --to $PROD -m "the lab fix alone, tested"'
+[ "$(code promote9)" = 0 ] && has promote9 "^✓ applied in place" || fail+=" promote9"
+step whole9 'DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy '"$S9"' --to $PROD -m "everything in 9"'
+[ "$(code whole9)" != 0 ] && has whole9 "takes only releases deployed to test first .*test (only $NAME)" || fail+=" whole9-refused"
+step billing9 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$S9"' --interface '"$BILLING"' --to $TEST -m "billing, early"'
+[ "$(code billing9)" != 0 ] && has billing9 "\`$CLAIMS\` runs it too" || fail+=" billing9-refused"
+# Prod runs the feed's fix, billing and claims as they were.
+fix() { q prod "SELECT count(*) FROM deployments WHERE how = 'deploy' AND reason = 'the lab fix alone, tested'"; }
+[ "$(fix)" = 1 ] || fail+=" prod-recorded"
+
+echo "== 16. two deploys at once on test: Ann's billing and Bob's claims (release 10), in turn"
+echo 'export const PAYER = "P1";' >"$P/lib/payers.ts"
+side "$BILLING" BILLING_PORT B3
+side "$CLAIMS" CLAIMS_PORT C3
+g commit -qam "billing and claims, each their own change"
+step r10 'env -u DUCTUS_DATABASE_URL ductus release -m "billing B3, claims C3"'
+S10=$(short_id r10) REL10=.ductus/releases/$(basename "$(released r10)")
+export BOB_TEST=$(token test bob)
+step store10 'curl -sS -o /dev/null -w "stored: %{http_code}\n" -H "Authorization: Bearer $TEST_TOKEN" -H "Content-Type: application/gzip" --data-binary @'"$REL10"' $TEST/api/v1/releases'
+step at-once 'DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy '"$S10"' --interface '"$BILLING"' --to $TEST -m "billing B3" >ann.txt 2>&1 & sleep 0.2; DUCTUS_API_TOKEN=$BOB_TEST ductus deploy '"$S10"' --interface '"$CLAIMS"' --to $TEST -m "claims C3" >bob.txt 2>&1; wait $!; cat ann.txt; echo; cat bob.txt'
+has at-once "waited [0-9.]* s for its turn" || fail+=" at-once-waited"
+[ "$(grep -c '^✓ applied in place' "$W/at-once.txt")" = 2 ] || fail+=" at-once-both"
+has at-once "it's release $S10 itself" || fail+=" at-once-second-over-first"
 
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

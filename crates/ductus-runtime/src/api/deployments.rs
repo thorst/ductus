@@ -350,14 +350,18 @@ impl PlaceInfo {
 /// interfaces are added or removed (those interfaces' workers and sources restart, move, start or
 /// stop between two messages; the others never pause), else
 /// the handover to an engine running it (`plan.handover_because` says why); or roll back
-/// (`rollback`) to a release that ran here before, the same way. Answers once it runs (in place:
-/// milliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as
-/// it was), plus the gate's time when it runs. 200: deployed (`applied` says how). 409: refused
-/// before anything ran (folder mode, another deploy or check running, the release already runs,
-/// this environment's rules, its "replaces" check names someone's work, a rollback to a release
-/// that never ran here, `in_place_only` and it needs the handover), the report says why. 422: the
-/// gate found problems. 500: it couldn't be applied (this engine goes on as it was). Needs the
-/// `deploy` permission. One deploy or check at a time per engine.
+/// (`rollback`) to a release that ran here before, the same way. With `interfaces`, only those
+/// interfaces' work from the release: a release composed from what runs with theirs is stored and
+/// deployed (`composed` says what it took). Answers once it runs (in place: milliseconds; a
+/// handover: when the new engine sends), or when it couldn't (this one goes on as it was), plus
+/// the gate's time when it runs. **One deploy or check at a time per engine, in turn**: one sent
+/// while another runs waits (`waited_ms`), up to 5 minutes, then reads what runs. 200: deployed
+/// (`applied` says how). 409: refused before anything ran (folder mode, 5 minutes waited for the
+/// deploys before it, the release already runs, this environment's rules, its "replaces" check
+/// names someone's work, a rollback to a release that never ran here, `in_place_only` and it needs
+/// the handover, `interfaces` that would change another interface or that nothing runs under yet),
+/// the report says why. 422: the gate found problems. 500: it couldn't be applied (this engine
+/// goes on as it was). Needs the `deploy` permission.
 #[utoipa::path(
     post, path = "/deployments", operation_id = "deploy_release", tag = "releases",
     request_body = DeployRequest,

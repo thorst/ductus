@@ -521,7 +521,7 @@
         "tags": [
           "releases"
         ],
-        "summary": "Deploy a stored release to this engine (release mode): this environment's rules, the \"replaces\"\ncheck, what it changes here (`plan`), the gate (or a recent passing check reused), then **in\nplace** when only interfaces' code, destinations, destination settings and sources change, or\ninterfaces are added or removed (those interfaces' workers and sources restart, move, start or\nstop between two messages; the others never pause), else\nthe handover to an engine running it (`plan.handover_because` says why); or roll back\n(`rollback`) to a release that ran here before, the same way. Answers once it runs (in place:\nmilliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as\nit was), plus the gate's time when it runs. 200: deployed (`applied` says how). 409: refused\nbefore anything ran (folder mode, another deploy or check running, the release already runs,\nthis environment's rules, its \"replaces\" check names someone's work, a rollback to a release\nthat never ran here, `in_place_only` and it needs the handover), the report says why. 422: the\ngate found problems. 500: it couldn't be applied (this engine goes on as it was). Needs the\n`deploy` permission. One deploy or check at a time per engine.",
+        "summary": "Deploy a stored release to this engine (release mode): this environment's rules, the \"replaces\"\ncheck, what it changes here (`plan`), the gate (or a recent passing check reused), then **in\nplace** when only interfaces' code, destinations, destination settings and sources change, or\ninterfaces are added or removed (those interfaces' workers and sources restart, move, start or\nstop between two messages; the others never pause), else\nthe handover to an engine running it (`plan.handover_because` says why); or roll back\n(`rollback`) to a release that ran here before, the same way. With `interfaces`, only those\ninterfaces' work from the release: a release composed from what runs with theirs is stored and\ndeployed (`composed` says what it took). Answers once it runs (in place: milliseconds; a\nhandover: when the new engine sends), or when it couldn't (this one goes on as it was), plus\nthe gate's time when it runs. **One deploy or check at a time per engine, in turn**: one sent\nwhile another runs waits (`waited_ms`), up to 5 minutes, then reads what runs. 200: deployed\n(`applied` says how). 409: refused before anything ran (folder mode, 5 minutes waited for the\ndeploys before it, the release already runs, this environment's rules, its \"replaces\" check\nnames someone's work, a rollback to a release that never ran here, `in_place_only` and it needs\nthe handover, `interfaces` that would change another interface or that nothing runs under yet),\nthe report says why. 422: the gate found problems. 500: it couldn't be applied (this engine\ngoes on as it was). Needs the `deploy` permission.",
         "operationId": "deploy_release",
         "requestBody": {
           "content": {
@@ -2622,7 +2622,7 @@
         "tags": [
           "releases"
         ],
-        "summary": "Check a stored release against this engine's environment: `ductus release check` runs here,\nwith this engine's settings, secrets and database (read-only), as a child process at a lower\nCPU priority. `validate`, then the tests of the interfaces the release changes here. Nothing\nis changed but the check's record (and an audit row). One check at a time per engine (409\nwhile one runs). Answers when it ends (seconds at a thousand interfaces); `ok` says whether it\npassed. Needs the `deploy` permission: the release's code runs with this environment's secrets.",
+        "summary": "Check a stored release against this engine's environment: `ductus release check` runs here,\nwith this engine's settings, secrets and database (read-only), as a child process at a lower\nCPU priority. `validate`, then the tests of the interfaces the release changes here. Nothing\nis changed but the check's record (and an audit row). One check or deploy at a time per\nengine: one sent while another runs waits its turn (up to 5 minutes, then 409). Answers when it\nends (seconds at a thousand interfaces); `ok` says whether it passed. Needs the `deploy`\npermission: the release's code runs with this environment's secrets.",
         "operationId": "check_release",
         "parameters": [
           {
@@ -2674,7 +2674,7 @@
             }
           },
           "409": {
-            "description": "Another check is running on this engine",
+            "description": "Waited 5 minutes for the checks and deploys before it on this engine",
             "content": {
               "application/json": {
                 "schema": {
@@ -4531,6 +4531,57 @@
           }
         }
       },
+      "ComposedInfo": {
+        "type": "object",
+        "description": "A release composed for a deploy of some interfaces (`DeployRequest::interfaces`).",
+        "required": [
+          "from",
+          "from_short",
+          "over_short",
+          "interfaces",
+          "project_differs",
+          "is_from",
+          "stored"
+        ],
+        "properties": {
+          "from": {
+            "type": "string",
+            "description": "The release they were taken from, in hex, and its first 12 characters."
+          },
+          "from_short": {
+            "type": "string"
+          },
+          "interfaces": {
+            "type": "object",
+            "description": "Each interface taken, and what it does: `changed`, `added`, `removed` or `unchanged` (its\nversion there is the one running).",
+            "additionalProperties": {
+              "type": "string"
+            },
+            "propertyNames": {
+              "type": "string"
+            }
+          },
+          "is_from": {
+            "type": "boolean",
+            "description": "The composition is that release itself (it differs from what runs only in those\ninterfaces), so no release of its own was made."
+          },
+          "over_short": {
+            "type": "string",
+            "description": "The release that ran when it was composed (every other interface, and the project's own\nfiles, are its), first 12 characters."
+          },
+          "project_differs": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The project's own files the release has that differ from what runs: kept as they run\n(deploy the release whole to bring them)."
+          },
+          "stored": {
+            "type": "boolean",
+            "description": "Stored now (false: composed and stored before, the same files)."
+          }
+        }
+      },
       "CreatedToken": {
         "type": "object",
         "required": [
@@ -4679,6 +4730,7 @@
         "required": [
           "ok",
           "outcome",
+          "waited_ms",
           "release",
           "short",
           "project",
@@ -4711,6 +4763,17 @@
             "items": {
               "$ref": "#/components/schemas/DeployChange"
             }
+          },
+          "composed": {
+            "oneOf": [
+              {
+                "$ref": "#/components/schemas/ComposedInfo",
+                "description": "A deploy of some interfaces only (`interfaces`): what was taken from which release."
+              },
+              {
+                "type": "null"
+              }
+            ]
           },
           "deployment": {
             "type": [
@@ -4773,7 +4836,7 @@
           },
           "release": {
             "type": "string",
-            "description": "The release, in hex, and its first 12 characters."
+            "description": "The release, in hex, and its first 12 characters: the one composed when `interfaces` was\nasked (`composed` says what of)."
           },
           "replaces": {
             "type": "object",
@@ -4805,6 +4868,12 @@
               "type": "string"
             },
             "description": "What applying it said as it went: each interface applied in place, or the handover's steps."
+          },
+          "waited_ms": {
+            "type": "integer",
+            "format": "int64",
+            "description": "How long it waited for the deploys and checks sent before it to this engine (one at a\ntime, in turn); 0 when none ran.",
+            "minimum": 0
           }
         }
       },
@@ -4822,6 +4891,13 @@
           "in_place_only": {
             "type": "boolean",
             "description": "Only in place: refuse (409, before the gate runs) when the release changes something only\nthe handover applies (`plan.handover_because` says what), and (500) when applying in place\nfails, instead of taking the handover. For sites that schedule handovers."
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only these interfaces of the release (0.7.5.3.2, `ductus deploy R --interface A`): the\nengine composes a release of its own from what runs with their folders and the code they\nload taken from `release` (an interface it lacks is removed, one only it has is added),\nstores it, and deploys that; everything else stays as it runs, the project's own files\ntoo. Refused (409) when that would change another interface (a shared file it needs\ndiffers, and others run it), naming them. Not with `rollback`."
           },
           "reason": {
             "type": [
@@ -7790,6 +7866,13 @@
           "host": {
             "type": "string",
             "description": "The engine's server."
+          },
+          "interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Only these interfaces of it went there (a release composed from it: `ductus deploy R\n--interface A`); absent: the whole release."
           }
         }
       },
@@ -8299,6 +8382,20 @@
               "null"
             ],
             "description": "The git commit it was made from (none: made without git)."
+          },
+          "composed_from": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Composed by an engine for a deploy of some interfaces (`ductus deploy R --interface A`,\n0.7.5.3.2): the release (in hex) they came from (`made_by` is who deployed, `commit` that\nrelease's); absent for a release made by `ductus release`."
+          },
+          "composed_interfaces": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "The interfaces it took from `composed_from`; empty when not composed."
           },
           "environments": {
             "type": "array",

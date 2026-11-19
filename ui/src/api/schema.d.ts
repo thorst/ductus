@@ -176,14 +176,18 @@ export interface paths {
          *     interfaces are added or removed (those interfaces' workers and sources restart, move, start or
          *     stop between two messages; the others never pause), else
          *     the handover to an engine running it (`plan.handover_because` says why); or roll back
-         *     (`rollback`) to a release that ran here before, the same way. Answers once it runs (in place:
-         *     milliseconds; a handover: when the new engine sends), or when it couldn't (this one goes on as
-         *     it was), plus the gate's time when it runs. 200: deployed (`applied` says how). 409: refused
-         *     before anything ran (folder mode, another deploy or check running, the release already runs,
-         *     this environment's rules, its "replaces" check names someone's work, a rollback to a release
-         *     that never ran here, `in_place_only` and it needs the handover), the report says why. 422: the
-         *     gate found problems. 500: it couldn't be applied (this engine goes on as it was). Needs the
-         *     `deploy` permission. One deploy or check at a time per engine.
+         *     (`rollback`) to a release that ran here before, the same way. With `interfaces`, only those
+         *     interfaces' work from the release: a release composed from what runs with theirs is stored and
+         *     deployed (`composed` says what it took). Answers once it runs (in place: milliseconds; a
+         *     handover: when the new engine sends), or when it couldn't (this one goes on as it was), plus
+         *     the gate's time when it runs. **One deploy or check at a time per engine, in turn**: one sent
+         *     while another runs waits (`waited_ms`), up to 5 minutes, then reads what runs. 200: deployed
+         *     (`applied` says how). 409: refused before anything ran (folder mode, 5 minutes waited for the
+         *     deploys before it, the release already runs, this environment's rules, its "replaces" check
+         *     names someone's work, a rollback to a release that never ran here, `in_place_only` and it needs
+         *     the handover, `interfaces` that would change another interface or that nothing runs under yet),
+         *     the report says why. 422: the gate found problems. 500: it couldn't be applied (this engine
+         *     goes on as it was). Needs the `deploy` permission.
          */
         post: operations["deploy_release"];
         delete?: never;
@@ -955,9 +959,10 @@ export interface paths {
          * Check a stored release against this engine's environment: `ductus release check` runs here,
          *     with this engine's settings, secrets and database (read-only), as a child process at a lower
          *     CPU priority. `validate`, then the tests of the interfaces the release changes here. Nothing
-         *     is changed but the check's record (and an audit row). One check at a time per engine (409
-         *     while one runs). Answers when it ends (seconds at a thousand interfaces); `ok` says whether it
-         *     passed. Needs the `deploy` permission: the release's code runs with this environment's secrets.
+         *     is changed but the check's record (and an audit row). One check or deploy at a time per
+         *     engine: one sent while another runs waits its turn (up to 5 minutes, then 409). Answers when it
+         *     ends (seconds at a thousand interfaces); `ok` says whether it passed. Needs the `deploy`
+         *     permission: the release's code runs with this environment's secrets.
          */
         post: operations["check_release"];
         delete?: never;
@@ -1641,6 +1646,36 @@ export interface components {
              */
             version: string;
         };
+        /** @description A release composed for a deploy of some interfaces (`DeployRequest::interfaces`). */
+        ComposedInfo: {
+            /** @description The release they were taken from, in hex, and its first 12 characters. */
+            from: string;
+            from_short: string;
+            /**
+             * @description Each interface taken, and what it does: `changed`, `added`, `removed` or `unchanged` (its
+             *     version there is the one running).
+             */
+            interfaces: {
+                [key: string]: string;
+            };
+            /**
+             * @description The composition is that release itself (it differs from what runs only in those
+             *     interfaces), so no release of its own was made.
+             */
+            is_from: boolean;
+            /**
+             * @description The release that ran when it was composed (every other interface, and the project's own
+             *     files, are its), first 12 characters.
+             */
+            over_short: string;
+            /**
+             * @description The project's own files the release has that differ from what runs: kept as they run
+             *     (deploy the release whole to bring them).
+             */
+            project_differs: string[];
+            /** @description Stored now (false: composed and stored before, the same files). */
+            stored: boolean;
+        };
         CreatedToken: {
             /** @description The token itself: shown this once, never stored (only its hash is). */
             secret: string;
@@ -1694,6 +1729,7 @@ export interface components {
              */
             branches: string[];
             changes: components["schemas"]["DeployChange"][];
+            composed?: components["schemas"]["ComposedInfo"] | null;
             /**
              * Format: int32
              * @description The deployment recorded and what it changed (absent if the new engine's wasn't recorded
@@ -1711,7 +1747,10 @@ export interface components {
             place?: components["schemas"]["PlaceInfo"] | null;
             plan?: components["schemas"]["PlanInfo"] | null;
             project: string;
-            /** @description The release, in hex, and its first 12 characters. */
+            /**
+             * @description The release, in hex, and its first 12 characters: the one composed when `interfaces` was
+             *     asked (`composed` says what of).
+             */
             release: string;
             /**
              * @description Each interface (and "the project's own files") whose running version is someone else's work
@@ -1731,6 +1770,12 @@ export interface components {
             short: string;
             /** @description What applying it said as it went: each interface applied in place, or the handover's steps. */
             steps: string[];
+            /**
+             * Format: int64
+             * @description How long it waited for the deploys and checks sent before it to this engine (one at a
+             *     time, in turn); 0 when none ran.
+             */
+            waited_ms: number;
         };
         DeployRequest: {
             /**
@@ -1751,6 +1796,15 @@ export interface components {
              *     fails, instead of taking the handover. For sites that schedule handovers.
              */
             in_place_only?: boolean;
+            /**
+             * @description Only these interfaces of the release (0.7.5.3.2, `ductus deploy R --interface A`): the
+             *     engine composes a release of its own from what runs with their folders and the code they
+             *     load taken from `release` (an interface it lacks is removed, one only it has is added),
+             *     stores it, and deploys that; everything else stays as it runs, the project's own files
+             *     too. Refused (409) when that would change another interface (a shared file it needs
+             *     differs, and others run it), naming them. Not with `rollback`.
+             */
+            interfaces?: string[];
             /**
              * @description Why: required, except in an environment named `dev`. Recorded with the deployment, in its
              *     history and in the audit log.
@@ -2892,6 +2946,11 @@ export interface components {
             here?: boolean;
             /** @description The engine's server. */
             host: string;
+            /**
+             * @description Only these interfaces of it went there (a release composed from it: `ductus deploy R
+             *     --interface A`); absent: the whole release.
+             */
+            interfaces?: string[];
         };
         /** @description What a release changes here, by kind (`changes::plan`). */
         PlanInfo: {
@@ -3087,6 +3146,14 @@ export interface components {
             checks: components["schemas"]["CheckInfo"][];
             /** @description The git commit it was made from (none: made without git). */
             commit?: string | null;
+            /**
+             * @description Composed by an engine for a deploy of some interfaces (`ductus deploy R --interface A`,
+             *     0.7.5.3.2): the release (in hex) they came from (`made_by` is who deployed, `commit` that
+             *     release's); absent for a release made by `ductus release`.
+             */
+            composed_from?: string | null;
+            /** @description The interfaces it took from `composed_from`; empty when not composed. */
+            composed_interfaces?: string[];
             /**
              * @description The environments it went to, by name: deployed there on this database, or a file carrying
              *     it said so (unsigned). Where and when: `GET /releases/{id}`'s `deployed`.
@@ -5591,7 +5658,7 @@ export interface operations {
                     "application/json": components["schemas"]["ErrorBody"];
                 };
             };
-            /** @description Another check is running on this engine */
+            /** @description Waited 5 minutes for the checks and deploys before it on this engine */
             409: {
                 headers: {
                     [name: string]: unknown;

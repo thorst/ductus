@@ -171,7 +171,9 @@ pub fn compose(over: Side, from: Side, names: &[String], made: release::Made) ->
         over: None,
         project_version: release::ProjectVersion { version: code::hex(&project_version), files: project_files },
         interfaces,
-        tests: release::Tests::default(),
+        // The tests the interfaces taken passed with, when their release was made (the gate runs
+        // the composed release's own).
+        tests: from.manifest.tests.clone(),
         files: files.len(),
         bytes: files.iter().map(|f| f.bytes.len() as u64).sum(),
         binary: files.iter().filter(|f| f.binary).map(|f| f.path.clone()).collect(),

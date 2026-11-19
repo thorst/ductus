@@ -6,6 +6,7 @@ import { checkRelease, useCanDeploy, useRefresh } from "@/api/actions";
 import { ApiError, type Schemas } from "@/api/client";
 import { engine, release, releaseCheck, releaseManifest } from "@/api/queries";
 import { Badge, Environments } from "@/components/badge";
+import { Composed } from "@/components/composed";
 import { DeployDialog } from "@/components/deploy-dialog";
 import { CheckVerdict, GateReport } from "@/components/gate-report";
 import { Field, Loaded, PageHeader } from "@/components/page";
@@ -102,6 +103,7 @@ function Release({ release: r }: { release: Schemas["ReleaseDetail"] }) {
             <Field label="Made">
               {r.made_by}, {timestamp(r.made_at)}
               {r.reason && <div className="text-muted">{r.reason}</div>}
+              {r.composed_from && <Composed from={r.composed_from} interfaces={r.composed_interfaces} />}
             </Field>
             <Field label="Stored here">
               {r.stored_by}, {timestamp(r.stored_at)}

@@ -506,7 +506,7 @@ per environment, `GET /releases/{id}` every one with its report) and is in the a
 > over a run overlapping one check, and to about half while checks ran back to back; ACKs waited
 > up to ~0.1 s instead of ~0.03 s; nothing was refused or lost. Speed is back the moment the check
 > ends. The check runs at a lower CPU priority, which made no measurable difference there
-> ([nuance](../nuances/releases.md#a-check-on-the-engine-slows-its-intake-while-it-runs-and-runs-one-at-a-time-level-3)).
+> ([nuance](../nuances/releases.md#a-check-on-the-engine-slows-its-intake-while-it-runs-and-runs-one-at-a-time-in-turn-level-3)).
 >
 > **This is true of anything you add to a running engine**, not only checks: reports, exports,
 > replays, connection checks, frequent API polling by a monitoring tool. Each one is a trade: what
@@ -617,8 +617,14 @@ there. It exits 1 when nothing was deployed; `--json` prints the engine's report
 | `--rollback [ID]` | Go back to a release that ran there before ([roll back](#roll-back)) |
 | `--all-tests` | The gate runs every interface's tests, not only those of what changes there (never reuses a check) |
 | `--in-place-only` | Refuse a release that only the handover applies (before the gate runs), and don't fall back to the handover when applying in place fails ([below](#in-place-or-by-the-handover)) |
+| `--interface NAME` | Only this interface's work from the release (repeat for several): every other interface and the project's own files stay as they run ([below](#one-interface-out-of-a-release---interface)) |
 | `--json` | The engine's report, as JSON |
-| `--timeout` | How long to wait for the answer (default 40 min: the gate, then applying it) |
+| `--timeout` | How long to wait for the answer (default 40 min: its turn behind other deploys, the gate, then applying it) |
+
+**One at a time, in turn.** An engine runs one deploy or check at a time. One sent while another
+runs waits its turn (in the order they were sent, up to 5 minutes) and then works from what runs
+by then; the answer says how long it waited
+([nuance](../nuances/releases.md#deploys-sent-at-once-run-one-at-a-time-the-later-over-the-earlier-level-2)).
 
 **The gate, or a check reused.** Checked on the engine first (`POST /releases/{id}/check`, as
 when you want the answer before the change window), a deploy within the hour reuses that check
@@ -826,22 +832,120 @@ Merge their commit and release again: what's in `main` is what ships. To undo th
 purpose, `ductus deploy --force -m "why"`: the audit log (`release.force`) names each interface
 and whose work, and the deployment's history keeps the warning. A release is the whole project,
 so a colleague's deployed but unmerged work on *another* interface refuses yours too
-([nuance](../nuances/releases.md#a-deploy-is-refused-when-it-would-undo-someone-elses-work-and-a-release-is-the-whole-project-level-2)).
+([nuance](../nuances/releases.md#a-deploy-is-refused-when-it-would-undo-someone-elses-work-and-a-release-is-the-whole-project-level-2)),
+unless you deploy only your interface ([next](#one-interface-out-of-a-release---interface)).
+
+### One interface out of a release: `--interface`
+
+**When to use it:** several people share an engine (a test engine, most often) and each deploys
+the interface they work on, from releases that also carry others' unfinished or unmerged work.
+**When not:** the change touches shared code other interfaces load, or the project's own files
+(`ductus.yaml`, `resources.yaml`, `environments/`): deploy the release whole.
+
+`ductus deploy R --interface A` deploys A's work from release R and nothing else. The engine
+composes a release of its own: what runs there, with A's folder (`interfaces/<A>/`: its
+interface.yaml, code, tests, fixtures) and every file A's code loads from outside it (`lib/...`)
+taken from R. Every other interface, and the project's own files, stay exactly as they run. An
+interface R doesn't have is removed; one only R has is added. Repeat `--interface` to take
+several at once.
+
+Here (`scripts/demo-promote.sh`, step 15) release `d5d8cb0123b9` carries the lab feed's fix and
+billing's unfinished change; the feed alone goes to test:
+
+```text
+$ DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy .ductus/releases/integrations-d5d8cb0123b9.tar.gz --interface promote-demo --to $TEST -m "the lab fix alone"
+stored release d5d8cb0123b9 on the engine
+deploying promote-demo only: the engine composes a release of what runs there with it from this one, the gate runs on it, then it's applied (in place when it can be, else by the handover)…
+release 57282d3205f3 (project integrations, branch main) to environment `test`
+· promote-demo (changed) from release d5d8cb0123b9, over 9f927fe5fcfe as it runs here (composed and stored now)
+gate: passed in 0.83 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `test` since)
+· promote-demo: code (in place)
+  promote-demo: code → 35d4a9b3f38f, applied in place (6 ms)
+✓ applied in place: 1 interface took its new code between two messages; the others never paused
+changed 1 interface:
+  promote-demo 96e5d793f01b → 35d4a9b3f38f
+recorded in .ductus/releases/integrations-d5d8cb0123b9.tar.gz: deployed to test
+```
+
+`57282d3205f3` is the composed release: what ran (`9f927fe5fcfe`) with the feed from
+`d5d8cb0123b9`. The record written into the file says the feed alone went to test.
+
+The composed release is stored like any other (its id is a hash of its files, so composing A
+from a release that differs from what runs only in A gives that release itself), then the gate
+runs on it, the ["replaces" check](#it-wont-undo-someone-elses-work) holds it, and it's applied
+in place as any deploy is; history records it with R's commit, the one A came from. It's refused
+when taking A alone would change another interface: a file A needs differs in R and another
+interface's code loads it too. The refusal names them, and the command that takes them as well:
+
+```text
+$ DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy d5d8cb0123b9 --interface promote-demo-billing --to $TEST -m "billing, early"
+deploying promote-demo-billing only: the engine composes a release of what runs there with it from this one, the gate runs on it, then it's applied (in place when it can be, else by the handover)…
+release d5d8cb0123b9 (project integrations, branch main) to environment `test`
+✗ refused: taking `promote-demo-billing` alone would change other interfaces: `lib/payers.ts` is different in release d5d8cb0123b9, and `promote-demo-claims` runs it too. Take them too (`ductus deploy d5d8cb0123b9 --interface promote-demo-billing --interface promote-demo-claims`), or deploy the release whole
+```
+
+Promotion works the same way: where `DUCTUS_DEPLOY_REQUIRES=test` holds, A taken alone from R in
+test may be taken alone from R in prod (`ductus deploy R --interface A --from <test> --to
+<prod>`); R whole may not, until it went to test whole
+([nuance](../nuances/releases.md#a-deploy-of-one-interface-composes-a-release-of-what-runs-with-that-interface-level-2)):
+
+```text
+$ DUCTUS_API_TOKEN=$PROD_TOKEN ductus deploy d5d8cb0123b9 --to $PROD -m "everything in 9"
+deploying: the gate runs (or a recent passing check is reused), then it's applied (in place when it can be, else by the handover)…
+release d5d8cb0123b9 (project integrations, branch main) to environment `prod`
+✗ this environment takes only releases deployed to test first (DUCTUS_DEPLOY_REQUIRES), and it was deployed to prod (only promote-demo), test (only promote-demo) only: deploy it there, then bring it here with its record (`ductus deploy d5d8cb0123b9 --from <test's engine> --to <this engine>`)
+✗ refused by this environment's rules (`rules` says why)
+```
+`DUCTUS_DEPLOY_BRANCHES` reads R's branches. A rollback goes back to a whole release that ran
+there; to bring back one interface, deploy the old release with `--interface`.
+
+Two people deploying at once, each their own interface, both get theirs: the second waits its
+turn and composes over the first's result:
+
+```text
+$ DUCTUS_API_TOKEN=$TEST_TOKEN ductus deploy 018fe34853bf --interface promote-demo-billing --to $TEST -m "billing B3" >ann.txt 2>&1 & sleep 0.2; DUCTUS_API_TOKEN=$BOB_TEST ductus deploy 018fe34853bf --interface promote-demo-claims --to $TEST -m "claims C3" >bob.txt 2>&1; wait $!; cat ann.txt; echo; cat bob.txt
+deploying promote-demo-billing only: the engine composes a release of what runs there with it from this one, the gate runs on it, then it's applied (in place when it can be, else by the handover)…
+release ea46a52e55e2 (project integrations, branch main) to environment `test`
+· promote-demo-billing (changed) from release 018fe34853bf, over 57282d3205f3 as it runs here (composed and stored now)
+gate: passed in 0.82 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `test` since)
+· promote-demo-billing: code (in place)
+  promote-demo-billing: code → 8b29c21ea791, applied in place (14 ms)
+✓ applied in place: 1 interface took its new code between two messages; the others never paused
+changed 1 interface:
+  promote-demo-billing f9f541269346 → 8b29c21ea791
+
+deploying promote-demo-claims only: the engine composes a release of what runs there with it from this one, the gate runs on it, then it's applied (in place when it can be, else by the handover)…
+release 018fe34853bf (project integrations, branch main) to environment `test`
+· promote-demo-claims (changed) from release 018fe34853bf, over ea46a52e55e2 as it runs here (it differs from what runs only there, so it's release 018fe34853bf itself)
+· waited 0.7 s for its turn (deploys and checks sent before it run one at a time)
+gate: passed in 0.88 s (no passing check of it here by Ductus 0.7.0-dev in the last 1 h, with nothing deployed to `test` since)
+· promote-demo-claims: code (in place)
+  promote-demo-claims: code → 2501fbdd2484, applied in place (7 ms)
+✓ applied in place: 1 interface took its new code between two messages; the others never paused
+changed 1 interface:
+  promote-demo-claims 2748f4ff2dce → 2501fbdd2484
+```
+
+Bob's deploy waited for Ann's, then composed over what hers left running (`ea46a52e55e2`): with
+both changes in, that's release `018fe34853bf` itself.
 
 ### Through the API
 
 `POST /api/v1/deployments` with `{"release": "<id>", "reason": "…", "force": false,
-"all_tests": false, "rollback": false, "in_place_only": false}` (the `deploy` permission;
-`release` may be left out of a rollback). It answers once the release runs (in place:
-milliseconds; a handover: when the new engine sends): 200 with the report (`ok`, `outcome`,
-`branch`, `rules`, `gate`, `replaces`, `plan`: what it changes here and whether that goes in place,
-`applied`: `in_place` or `handover`, `steps`, `changes`, and `place`: this deployment's record, as
-a release file carries it), 409 when refused before anything ran (folder mode, another deploy or
-check running, the release already runs, the environment's rules, the "replaces" check, a
-rollback to a release that never ran there, `in_place_only` and it needs the handover), 422 when
-the gate found problems, 500 when it couldn't be applied (the engine goes on as it was). One
-deploy or check at a time per engine. Every attempt is in the audit log (`release.deploy`, or
-`release.rollback`, with `detail.ok`, `detail.applied` and `detail.outcome`).
+"all_tests": false, "rollback": false, "in_place_only": false, "interfaces": []}` (the `deploy`
+permission; `release` may be left out of a rollback; `interfaces` as `--interface`). It answers
+once the release runs (in place: milliseconds; a handover: when the new engine sends): 200 with
+the report (`ok`, `outcome`, `waited_ms`, `branch`, `composed`: what was taken from which
+release, `rules`, `gate`, `replaces`, `plan`: what it changes here and whether that goes in
+place, `applied`: `in_place` or `handover`, `steps`, `changes`, and `place`: this deployment's
+record, as a release file carries it), 409 when refused before anything ran (folder mode, 5
+minutes waited for the deploys before it, the release already runs, the environment's rules, the
+"replaces" check, a rollback to a release that never ran there, `in_place_only` and it needs the
+handover, `interfaces` that would change another interface), 422 when the gate found problems,
+500 when it couldn't be applied (the engine goes on as it was). One deploy or check at a time per
+engine, in turn. Every attempt is in the audit log (`release.deploy`, or `release.rollback`, with
+`detail.ok`, `detail.applied`, `detail.outcome` and, for some interfaces only,
+`detail.composed`); a composed release stored is a `release.store` row of its own.
 
 `GET /api/v1/releases/{id}/file` (the `deploy` or `download` permission, audited as
 `release.download`) gives the release's file with its record brought up to date;
@@ -1323,8 +1427,10 @@ each environment's newest report comes with it now, the others when opened.
 each with its own database (dev, test, prod; prod with `DUCTUS_DEPLOY_REQUIRES=test` and
 `DUCTUS_DEPLOY_BRANCHES=main`), a release refused by prod then deployed to dev and test and
 promoted with `--from`, a feature branch's release refused even forced, a colleague's work
-refused then forced in test, two rollbacks, the release's file saying where it went, and the
-lanes limit.
+refused then forced in test, two rollbacks, the release's file saying where it went, the
+lanes limit, one interface taken out of a release (`--interface`) to test and then prod (the
+release whole refused there, an interface needing a shared file another loads refused), and two
+deploys sent at once taking their turns.
 
 `scripts/demo-release.sh` does all of the above on a fresh `ductus init` project against your
 database: a release, the same id from a CRLF checkout, a change not committed refused, the gate
