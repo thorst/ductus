@@ -887,7 +887,9 @@ async fn composed(
             contents.files.into_iter().map(|(path, bytes, _)| release::File::new(path, bytes)).collect::<Vec<_>>(),
         )
     };
+    let started = std::time::Instant::now();
     let (over_files, from_files) = (files(running.id.clone()).await?, files(named.to_vec()).await?);
+    let read = started.elapsed();
     let made = release::Made {
         at: Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true),
         by: caller.name().to_string(),
@@ -930,6 +932,13 @@ async fn composed(
     let audit = caller.audit("release.store");
     let stored = keep(engine, caller.name(), &c.manifest, named_ancestry, &c.files, &audit).await?;
     info.stored = stored.new;
+    tracing::debug!(
+        interfaces = ?only,
+        files = c.files.len(),
+        read = ?read,
+        took = ?started.elapsed(),
+        "deploy: a release composed and stored"
+    );
     let id = deploy::unhex(&c.manifest.id).ok_or_else(|| anyhow::anyhow!("a composed release's id isn't hex"))?;
     // As stored: composed before (the same files), or made by `ductus release` with them, its
     // manifest is the one kept.

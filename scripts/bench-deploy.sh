@@ -24,7 +24,9 @@
 #   6. (0.7.5.2.2) a port moved: v-0012's MLLP port, then back;
 #   7. (0.7.5.2.3) a variable's new value: V13_PORT (v-0013's port), then SEND_TIMEOUT (every
 #      destination's `timeout_ms`: all COUNT interfaces reached);
-#   8. (0.7.5.2.4) A restarted alone: an ordering key, 2 dedicated workers, then back.
+#   8. (0.7.5.2.4) A restarted alone: an ordering key, 2 dedicated workers, then back;
+#   9. (0.7.5.3.2) A alone from a release changing A and T (`--interface`: composed, its gate run
+#      in the deploy), then A and T from the next one sent at once (the second waits its turn).
 # Then CYCLES interfaces added and removed again (two deploys each) and DEPLOYS deploys of A in a
 # row (no traffic), each with the engine's memory before, every 25, and after; and that every
 # message sent arrived once.
@@ -354,6 +356,41 @@ settings 'ordering: { key: PID-3.1 }\nisolation: dedicated\nworkers: 2\n'
 phase "A restarted alone: 2 dedicated workers" deploy "$(release "A dedicated")" in_place
 settings ''
 phase "A restarted alone: back to shared, no key" deploy "$(release "A as it was")" in_place
+
+# One interface out of a release (0.7.5.3.2): a release changing A and T, A taken alone. The
+# composed release isn't known before, so its gate runs inside the timed deploy (validate over
+# every interface: seconds); the log says what reading both releases and composing took. Then A
+# and T from the next one, sent at once: the second waits for the first, then composes over it.
+composed() { # $1 release, $2… interfaces; the report into $WORK/deploy-<first interface>.json
+  local id=$1 out="$WORK/deploy-$2.json"
+  shift
+  local flags=()
+  for i in "$@"; do flags+=(--interface "$i"); done
+  DUCTUS_API_TOKEN=$TOKEN "$BIN" deploy "$id" "${flags[@]}" --to "http://127.0.0.1:$API" -m bench --json >"$out" 2>&1 ||
+    { cat "$out"; exit 1; }
+  grep -q '"applied": "in_place"' "$out" || { echo "not in place:"; cat "$out"; exit 1; }
+}
+composed_report() {
+  grep -o 'deploy: a release composed and stored.*' "$WORK/phase.log" | grep -oE 'files=[^ ]+|read=[^ ]+|took=[^ ]+' |
+    paste -sd' ' | sed 's/^/   composed: /' || true
+  for f in "$WORK"/deploy-v-*.json; do
+    python3 -c 'import json, sys
+r = json.load(open(sys.argv[1]))
+print("   %s: waited %d ms, gate %.2f s, %s" % (", ".join(r["composed"]["interfaces"]), r["waited_ms"], r["gate"]["check"]["seconds"], r["outcome"]))' "$f"
+  done
+  rm -f "$WORK"/deploy-v-*.json
+}
+round_no=$((round_no + 1))
+change 0 0 "$round_no"
+change 8 8 "$round_no"
+phase "A alone from a release changing A and T" composed "$(release "A and T, round $round_no")" v-0000
+composed_report
+round_no=$((round_no + 1))
+change 0 0 "$round_no"
+change 8 8 "$round_no"
+at_once() { composed "$1" v-0000 & sleep 0.2; composed "$1" v-0008; wait $!; }
+phase "A and T from the next release, sent at once" at_once "$(release "A and T, round $round_no")"
+composed_report
 
 echo "== $CYCLES interfaces added and removed again in a row (no traffic)"
 echo "   before: $(memory)"

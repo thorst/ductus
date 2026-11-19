@@ -1399,6 +1399,22 @@ at once: their sending waits up to about half a second and ACKs up to 0.2 s at 1
 Nothing is refused or lost, but deploy such a change (a timeout or URL every interface shares) in a
 quiet moment, as you would a handover.
 
+**One interface out of a release** (`--interface`, 0.7.5.3.2), the same engine and traffic (one
+round each; this run's baseline p99 19–50 ms, max 40–115 ms): A taken alone from a release
+changing A and T, then A and T from the next release sent at once. The composed release can't be
+checked before the deploy (it doesn't exist yet), so its gate runs inside it:
+
+| | Reading both releases + composing + storing | The gate | `ductus deploy` answered in | The interfaces' send latency, p99 / max | Longest ACK wait |
+|---|---|---|---|---|---|
+| A alone | 236 + 122 ms (3,020 files) | 6.2 s | 7.0 s | 101–127 ms / 113–194 ms | 93 ms |
+| A and T sent at once (T waited 6.5 s, then was the release itself) | 141 + 155 ms | 5.9 s, then 5.0 s | 12.3 s | 62–79 ms / 95–104 ms | 45 ms |
+
+Applying stays what a code change costs (A's code loaded in 3–7 ms, paused under 1 ms); what
+raises everyone's latency is the gate running on the engine's CPUs, as any check does
+([above](#check-it-there)). **When to act:** at a thousand interfaces, compose on test engines
+freely; on a busy prod engine, a composed deploy carries a check's cost, like a deploy whose check
+wasn't run first. Deploys sent at once queue for seconds each: give a pipeline's `--timeout` room.
+
 **Memory over many deploys:** the engine went from 242 MB to 278 MB over 100 deploys of one
 interface in a row: 26 MB over the first 25, then about 130 KB a deploy (code an interface no
 longer runs stays loaded until the next handover or restart:
