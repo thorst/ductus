@@ -184,6 +184,25 @@ a few MB, so that's a ceiling, not what you'll see.
   that interface `isolation: dedicated` with its own isolates. **Lower it** on a small server
   with many cores, so the ceiling fits in its memory.
 
+[`isolates.superseded_mb`](../reference/config/ductus.md#isolates) is how much *replaced* code an
+isolate may hold. Default: `64`. A deploy or reload in place loads an interface's new code
+beside the old, and an isolate never lets go of code it loaded: about 14 KB plus 16 times the
+files' size stays behind per version replaced. Once a thread's count passes `superseded_mb`, the
+engine gives that thread a fresh isolate on its own, right after the deploy: a new thread loads
+every interface of the old one, they move over one at a time between messages, and the old
+thread ends with its memory. So an engine deployed to many times a day stays the same size
+without a restart.
+
+- **What it costs:** every interface on that thread starts with fresh module-level state, as at
+  a restart (a module-level cache is empty again,
+  [nuance](../nuances/releases.md#a-thread-that-holds-too-much-replaced-code-gets-a-fresh-isolate-and-its-interfaces-start-over-level-3)),
+  and each pauses while it moves, as for a deploy in place. The log says `renewed: …` with the
+  time it took and the longest pause.
+- **When:** at the default, after roughly 2,000 deploys of a 1 KB interface on one thread; a pool
+  thread running 125 interfaces each deployed daily, every two to three weeks.
+- **Lower it** on a small server (the memory comes back sooner); **raise it** to renew less often
+  where memory is plentiful. Example: `isolates: { superseded_mb: 128 }`.
+
 ## Insisting on documentation
 
 [`require_about`](../reference/config/ductus.md#require_about) makes `ductus validate` fail, not

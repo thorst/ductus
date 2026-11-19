@@ -372,6 +372,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let settings = ductus_core::settings::Settings::from_text(root, project_files.text(SETTINGS))?;
     let alert_settings = settings.alerts(&env)?;
     let heap_mb = settings.isolates.heap_mb;
+    let superseded_bytes = settings.isolates.superseded_bytes();
     let api_address = settings.api.address(options.api_listen.as_deref())?;
     // Release mode before the first deploy runs none, waiting for one.
     let waiting_for_a_release = releases.as_ref().is_some_and(|r| r.running().is_none());
@@ -650,7 +651,8 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             threads: Vec::new(), // once they're spawned (below)
             removed: false,
             retiring,
-            generation: 0, // the start's
+            generation: 0,    // the start's
+            code: Vec::new(), // once loaded (below)
         };
         for slot in 0..config.slots() {
             let job = parts.job(&shared, slot, requests.take(), &shared.waiting);
@@ -687,6 +689,11 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         }
         (tx, rx)
     };
+    // Threads past their budget of superseded code ask here to be renewed (`in_place::renew_beside`).
+    let (renew, renewals) = tokio::sync::mpsc::unbounded_channel();
+    let budget = |commands: &tokio::sync::mpsc::UnboundedSender<worker::Command>| {
+        Some(worker::Budget { bytes: superseded_bytes, renew: renew.clone(), me: commands.downgrade() })
+    };
     // The pool's threads, for an interface a deploy adds (only those the start needs are made).
     let mut pool_threads_made = Vec::new();
     for (i, thread_jobs) in pool.into_iter().enumerate().filter(|(_, j)| !j.is_empty()) {
@@ -696,9 +703,20 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         let ready = ready_tx.clone();
         let stop = stopping.clone();
         let (commands, receiver) = commands_for(&thread_jobs);
+        let budget = budget(&commands);
         pool_threads_made.push(in_place::PoolThread { commands, slots: thread_jobs.len() });
-        let thread =
-            worker::spawn_thread(name, thread_jobs, store.clone(), engine, heap_mb, ready, stop, None, receiver);
+        let thread = worker::spawn_thread(
+            name,
+            thread_jobs,
+            store.clone(),
+            engine,
+            heap_mb,
+            ready,
+            stop,
+            None,
+            receiver,
+            budget,
+        );
         threads.push(thread?);
     }
     // A dedicated interface's own pools are shared by all its worker threads.
@@ -711,8 +729,20 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         let ready = ready_tx.clone();
         let stop = stopping.clone();
         let jobs = vec![job];
-        let (_, commands) = commands_for(&jobs);
-        threads.push(worker::spawn_thread(name, jobs, store.clone(), engine, heap_mb, ready, stop, None, commands)?);
+        let (commands, receiver) = commands_for(&jobs);
+        let budget = budget(&commands);
+        threads.push(worker::spawn_thread(
+            name,
+            jobs,
+            store.clone(),
+            engine,
+            heap_mb,
+            ready,
+            stop,
+            None,
+            receiver,
+            budget,
+        )?);
     }
     let inspector = inspected.map(|i| i.inspector);
     let (debugged_jobs, debugged_interfaces) = (debugged.values().map(Vec::len).sum::<usize>(), debugged.len());
@@ -737,6 +767,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             stop,
             inspector.clone(),
             commands,
+            None, // debugged: never renewed under the debugger
         )?);
     }
     drop(ready_tx);
@@ -753,6 +784,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         reported += 1;
         match result {
             Ok(files) => {
+                if let Some(parts) = kept.get_mut(&name) {
+                    parts.code = in_place::fingerprint(&files);
+                }
                 loaded.entry(name).or_insert(files);
             }
             Err(e) => failed.push(format!("interface `{name}`: {e:#}")),
@@ -877,8 +911,11 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
                     heap_mb,
                     pool_threads,
                     stop: stopping.clone(),
+                    superseded_bytes,
+                    renew,
                 }),
                 handles: std::sync::Mutex::new(threads),
+                renewals: std::sync::Mutex::new(Some(renewals)),
             },
         ),
         retention,
@@ -925,6 +962,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
             alerts::start(&engine).await;
             certificates::start(&engine, certificate_changes).await;
             ldap::start(&engine);
+            in_place::renew_beside(&engine);
             tracing::debug!(took = ?started.elapsed(), "audit log and alerts started beside the start");
         });
     });

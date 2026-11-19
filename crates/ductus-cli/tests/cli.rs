@@ -5909,6 +5909,183 @@ async fn sources_change_in_place_while_their_senders_send() {
     ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
+/// The isolate budget (0.7.5.3.3, `isolates.superseded_mb`), set tiny: one pool thread runs A and
+/// B (MLLP, queued) and H (HTTP, respond mode); each reload of A passes the budget, so the thread is
+/// renewed each time: its interfaces move to a fresh isolate on a new thread, between messages.
+/// Under traffic to all three: no sender refused or retried, every message delivered once, H
+/// answers every call, A runs each reload's code. H's module-level count starts over at each
+/// renewal (it moved to a fresh isolate, its own code unchanged) and at nothing else, and one
+/// thread named pool-0 is left (the old ones ended, their isolates with them).
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn a_thread_past_its_budget_of_replaced_code_is_renewed_under_traffic() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (port_a, port_b, port_h) = (free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let (a, b, h) = (format!("rna-{nanos}"), format!("rnb-{nanos}"), format!("rnh-{nanos}"));
+    let work = tempfile::tempdir().unwrap();
+    let out_dir = |name: &str| work.path().join(format!("out-{name}"));
+    let interface = |name: &str, port: u16| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\ndestinations:\n  out: {{ file: {{ dir: '{}' }}, script: tag.ts }}\n",
+            out_dir(name).display()
+        )
+    };
+    let tag = |t: &str| {
+        format!(
+            "import type {{ Message }} from \"@ductus/sdk\";\n\nexport function transform(m: Message) {{\n  m.set(\"MSH-5\", \"{t}\");\n  return m;\n}}\n"
+        )
+    };
+    let respond = format!(
+        "name: {h}\nsource: {{ http: {{ host: 127.0.0.1, port: {port_h}, path: /h, method: GET, mode: respond }} }}\nformat: text\nscript: count.ts\n"
+    );
+    let count = "let n = 0;\n\nexport function transform() {\n  n += 1;\n  return `call ${n}`;\n}\n";
+    let file = |name: &str, f: &str| format!("interfaces/{name}/{f}");
+    let (a_yaml, b_yaml, a_tag, b_tag) = (interface(&a, port_a), interface(&b, port_b), tag("A0"), tag("B1"));
+    let dir = project(&[
+        (".gitignore", "*.log\n"),
+        ("ductus.yaml", "isolates: { superseded_mb: 0.01 }\n"),
+        ("environments/prod.yaml", "variables: {}\n"),
+        (file(&a, "interface.yaml").as_str(), a_yaml.as_str()),
+        (file(&a, "tag.ts").as_str(), a_tag.as_str()),
+        (file(&b, "interface.yaml").as_str(), b_yaml.as_str()),
+        (file(&b, "tag.ts").as_str(), b_tag.as_str()),
+        (file(&h, "interface.yaml").as_str(), respond.as_str()),
+        (file(&h, "count.ts").as_str(), count),
+    ]);
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    let control = work.path().join("control");
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
+    let log = work.path().join("engine.log");
+    let file_log = std::fs::File::create(&log).unwrap();
+    let engine = Child(
+        Command::new(bin)
+            .args(["run", "--root", &dir.path().to_string_lossy(), "--env", "prod", "--threads", "1"])
+            .args(["--api-listen", "off"])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .env("DUCTUS_CONTROL", &control)
+            .env_remove("DUCTUS_PROJECT")
+            .stdout(file_log.try_clone().unwrap())
+            .stderr(file_log)
+            .spawn()
+            .unwrap(),
+    );
+    assert!(wait_for_log(&log, "deployed:", 60), "{}", read(&log));
+    let pid = engine.0.id();
+    let renewed = || read(&log).matches("renewed: its interfaces run in a fresh isolate").count();
+
+    // 12 s each: past the third reload, so its code takes messages too.
+    let send = |port: u16, offset: &str| {
+        Command::new(bin)
+            .args(["gen", "--to", &format!("127.0.0.1:{port}"), "--count", "600", "--rate", "50"])
+            .args(["--patients", "20", "--offset", offset])
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .unwrap()
+    };
+    let (send_a, send_b) = (send(port_a, "0"), send(port_b, "100000"));
+    // H's caller: a GET every 10 ms until told to stop; each answer's count kept.
+    let calling = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let caller = {
+        let calling = calling.clone();
+        tokio::spawn(async move {
+            let client = reqwest::Client::new();
+            let (mut counts, mut failed) = (Vec::new(), Vec::new());
+            while calling.load(std::sync::atomic::Ordering::Relaxed) {
+                match client.get(format!("http://127.0.0.1:{port_h}/h")).send().await {
+                    Ok(r) if r.status() == 200 => {
+                        let body = r.text().await.unwrap_or_default();
+                        counts.push(body.trim_start_matches("call ").parse::<u32>().unwrap_or(0));
+                    }
+                    Ok(r) => failed.push(r.status().to_string()),
+                    Err(e) => failed.push(e.to_string()),
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            (counts, failed)
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+
+    // Three reloads of A, each followed by its thread's renewal.
+    for round in 1..=3 {
+        std::fs::write(dir.path().join(file(&a, "tag.ts")), tag(&format!("A{round}"))).unwrap();
+        let out = Command::new(bin)
+            .args(["reload", "--json", "-m", &format!("A{round}"), "--control"])
+            .arg(&control)
+            .env("SUDO_USER", "ann-test")
+            .env_remove("RUNTIME_DIRECTORY")
+            .output()
+            .unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && said.contains("in_place"), "{said}\n{}", read(&log));
+        for _ in 0..100 {
+            if renewed() >= round {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert_eq!(renewed(), round, "renewed after reload {round}:\n{}", read(&log));
+        tokio::time::sleep(std::time::Duration::from_millis(1500)).await;
+    }
+
+    let sent = |child: std::process::Child| {
+        let out = child.wait_with_output().unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success(), "{said}");
+        said
+    };
+    let (said_a, said_b) = tokio::task::spawn_blocking(move || (sent(send_a), sent(send_b))).await.unwrap();
+    for said in [&said_a, &said_b] {
+        assert!(said.contains("sent 600 messages"), "{said}");
+        assert!(said.contains("retries 0, rejected 0, refused 0, dropped 0"), "{said}");
+    }
+    calling.store(false, std::sync::atomic::Ordering::Relaxed);
+    let (counts, failed) = caller.await.unwrap();
+    assert!(counts.len() > 100 && failed.is_empty(), "H answered every call ({}): {failed:?}", counts.len());
+    let starts_over = counts.windows(2).filter(|w| w[1] < w[0]).count();
+    assert_eq!(starts_over, 3, "H's count starts over at each renewal and only then: {counts:?}");
+
+    let outputs = |name: &str| -> Vec<String> {
+        std::fs::read_dir(out_dir(name))
+            .map(|d| d.flatten().map(|e| std::fs::read_to_string(e.path()).unwrap_or_default()).collect())
+            .unwrap_or_default()
+    };
+    for _ in 0..600 {
+        if outputs(&a).len() >= 600 && outputs(&b).len() >= 600 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let (out_a, out_b) = (outputs(&a), outputs(&b));
+    assert_eq!((out_a.len(), out_b.len()), (600, 600), "each message delivered once");
+    assert!(out_b.iter().all(|m| m.contains("|B1|")), "B ran its code throughout");
+    for round in 0..=3 {
+        assert!(out_a.iter().any(|m| m.contains(&format!("|A{round}|"))), "A ran A{round}'s code");
+    }
+
+    // The old threads ended: one pool-0 is left.
+    let pool_threads = || {
+        std::fs::read_dir(format!("/proc/{pid}/task"))
+            .unwrap()
+            .flatten()
+            .filter(|t| std::fs::read_to_string(t.path().join("comm")).unwrap_or_default().trim() == "pool-0")
+            .count()
+    };
+    for _ in 0..50 {
+        if pool_threads() == 1 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(pool_threads(), 1, "the renewed threads ended");
+    drop(engine);
+}
+
 /// `ductus reload` (0.7.5.3.1): an engine in folder mode applies the folder in place while A and B
 /// receive. A's code imports a shared file (`lib/stamp.ts`); changing it reloads A alone (its
 /// version and its output change, the same engine runs both, neither sender refused or retried,

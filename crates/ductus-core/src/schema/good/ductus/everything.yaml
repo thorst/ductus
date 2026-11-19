@@ -1,6 +1,6 @@
 # Every setting. Only `alerts:` is read per environment, so only it uses references.
 ports: { mllp: 7000-7099, http: 9080-9099 }
-isolates: { heap_mb: 1024 }
+isolates: { heap_mb: 1024, superseded_mb: 128 }
 require_about: true
 api:
   listen: 0.0.0.0:7700

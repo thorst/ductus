@@ -6,6 +6,7 @@
 //!   http: 8080-8099
 //! isolates:
 //!   heap_mb: 512      # memory limit of each V8 isolate (one per pool thread and per dedicated worker)
+//!   superseded_mb: 64 # replaced code an isolate may hold before its thread gets a fresh one
 //! require_about: true # `ductus validate` fails when an interface doesn't name the systems it connects
 //! api:
 //!   listen: 127.0.0.1:7700  # the REST API (`/api/v1`); `off` to run without it
@@ -54,8 +55,8 @@ pub struct Settings {
     /// `8080-8099`. Example: `ports: { mllp: 7000-7099 }`.
     #[serde(default)]
     pub ports: PortRanges,
-    /// Limits of the JavaScript engine that runs interface code (`heap_mb`). Default: `heap_mb:
-    /// 512`.
+    /// Limits of the JavaScript engine that runs interface code (`heap_mb`, `superseded_mb`).
+    /// Default: `heap_mb: 512`, `superseded_mb: 64`.
     #[serde(default)]
     pub isolates: Isolates,
     /// Make `ductus validate` fail (not only warn) when an interface doesn't name the application
@@ -487,16 +488,43 @@ pub struct Isolates {
     /// Default: `512`. Example: `isolates: { heap_mb: 1024 }`.
     #[serde(default = "default_heap_mb")]
     pub heap_mb: usize,
+    /// How much replaced code, in MB, an isolate may hold before the engine gives its thread a
+    /// fresh one. A deploy or reload in place loads an interface's new code beside the old, and the
+    /// JavaScript engine keeps every version it loaded until its isolate ends: about 14 KB plus 16
+    /// times the size of the files, per version (measured). The engine counts what each deploy
+    /// replaces, and once a thread's count passes this, it makes a new thread beside it, loads
+    /// every interface of the old one there, and moves them over one at a time, between messages;
+    /// the old thread and its memory are then gone. So an engine deployed to many times a day stays
+    /// the same size without a restart.
+    ///
+    /// A move resets the module-level state of every interface on that thread (a cache, a
+    /// counter), as a restart does; each interface pauses only while it moves (the message in
+    /// hand finishes first). It happens only after a deploy, never on a timer. Raise it to move
+    /// less often on a server with memory to spare; lower it on a small one. A fraction is
+    /// allowed. Default: `64`. Example: `isolates: { superseded_mb: 128 }`.
+    #[serde(default = "default_superseded_mb")]
+    pub superseded_mb: f64,
 }
 
 impl Default for Isolates {
     fn default() -> Self {
-        Self { heap_mb: default_heap_mb() }
+        Self { heap_mb: default_heap_mb(), superseded_mb: default_superseded_mb() }
     }
 }
 
 fn default_heap_mb() -> usize {
     512
+}
+
+fn default_superseded_mb() -> f64 {
+    64.0
+}
+
+impl Isolates {
+    /// `superseded_mb` in bytes.
+    pub fn superseded_bytes(&self) -> usize {
+        (self.superseded_mb * 1024.0 * 1024.0) as usize
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -585,6 +613,12 @@ impl Settings {
             return refuse(
                 &["isolates", "heap_mb"],
                 "isolates.heap_mb must be at least 64 (the SDK alone needs a few MB)",
+            );
+        }
+        if !(settings.isolates.superseded_mb > 0.0 && settings.isolates.superseded_mb.is_finite()) {
+            return refuse(
+                &["isolates", "superseded_mb"],
+                "isolates.superseded_mb must be above 0 (how many MB of replaced code an isolate may hold; default 64)",
             );
         }
         at(&["auth"], settings.auth.check().with_context(in_file))?;
@@ -690,6 +724,17 @@ mod tests {
         std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 8 }\n").unwrap();
         let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
         assert!(err.contains("at least 64"), "{err}");
+    }
+
+    #[test]
+    fn loads_the_superseded_code_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().isolates.superseded_bytes(), 64 << 20);
+        std::fs::write(dir.path().join(FILE), "isolates: { superseded_mb: 0.5 }\n").unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().isolates.superseded_bytes(), 512 << 10, "a fraction");
+        std::fs::write(dir.path().join(FILE), "isolates: { superseded_mb: 0 }\n").unwrap();
+        let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
+        assert!(err.contains("superseded_mb must be above 0"), "{err}");
     }
 
     #[test]

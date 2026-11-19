@@ -362,6 +362,82 @@ fn a_new_generation_loads_changed_files_again_and_an_old_one_gets_its_modules_ba
 
 const SECOND: Duration = Duration::from_secs(1);
 
+/// Measures what code loaded again costs an isolate (0.7.5.3.3's count of superseded code): an
+/// interface loaded `LOADS` times under new generations, each called a few times (so its functions
+/// compile, as a running interface's do), for a small and a large file. Prints the heap after a
+/// full collection and the process's resident memory, per load and per byte of source.
+/// `cargo test -p ductus-script --release --test script -- --ignored --nocapture superseded_code_costs`
+#[test]
+#[ignore = "a measurement: run by hand"]
+fn superseded_code_costs() {
+    const LOADS: u64 = 300;
+    let resident = || {
+        let statm = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+        statm.split_whitespace().nth(1).and_then(|p| p.parse::<usize>().ok()).unwrap_or(0) * 4096
+    };
+    // A plausible interface: `functions` small functions doing HL7 edits, and a shared file.
+    let source = |functions: usize| {
+        let mut s =
+            String::from("import type { Message } from \"@ductus/sdk\";\nimport { tag } from \"../lib/shared.ts\";\n");
+        for i in 0..functions {
+            s.push_str(&format!(
+                "function step{i}(m: Message) {{\n  const id = m.get(\"PID-3.1\");\n  if (id.length > {i}) {{ m.set(\"PID-19\", id.slice(0, 4) + \"-{i}\"); }}\n  m.set(\"ZST-{n}\", tag(\"{i}\"));\n}}\n",
+                n = i % 9 + 1
+            ));
+        }
+        s.push_str("export function transform(m: Message) {\n  m.add(\"ZST\");\n");
+        for i in 0..functions {
+            s.push_str(&format!("  step{i}(m);\n"));
+        }
+        s.push_str("  return m;\n}\n");
+        s
+    };
+    let rt = rt();
+    let _guard = rt.enter();
+    for functions in [4, 150] {
+        let text = source(functions);
+        let shared = "export const tag = (s: string) => `t-${s}`;\n";
+        let dir = project(&[("lib/shared.ts", shared), ("adt/t.ts", &text)]);
+        let bytes = text.len() + shared.len();
+        let module = dir.path().join("adt/t.ts");
+        let mut host = Isolate::host();
+        let load = |host: &mut Isolate, generation| {
+            host.set_generation(generation);
+            let f = rt
+                .block_on(host.add_functions(
+                    &[Some(Function { module: &module, name: "transform", formats: DEFAULT_FORMATS })],
+                    SECOND,
+                ))
+                .unwrap()
+                .1[0]
+                .unwrap();
+            for _ in 0..3 {
+                match host.begin_function(f, ADT, None).unwrap() {
+                    ductus_script::Call::Done(out) => drop(out.unwrap()),
+                    ductus_script::Call::Pending(_) => panic!("sync"),
+                }
+            }
+            host.forget_code_files();
+        };
+        load(&mut host, 0);
+        let (heap0, rss0) = (host.heap_used_collected(), resident());
+        for generation in 1..=LOADS {
+            load(&mut host, generation);
+        }
+        let (heap1, rss1) = (host.heap_used_collected(), resident());
+        let per_load = |a: usize, b: usize| (b.saturating_sub(a)) as f64 / LOADS as f64;
+        println!(
+            "{functions} functions, {bytes} bytes of source: heap {:.1} KB/load ({:.1}x source), resident {:.1} KB/load ({:.1}x source); heap {} -> {} KB",
+            per_load(heap0, heap1) / 1024.0,
+            per_load(heap0, heap1) / bytes as f64,
+            per_load(rss0, rss1) / 1024.0,
+            per_load(rss0, rss1) / bytes as f64,
+            heap0 / 1024,
+            heap1 / 1024,
+        );
+    }
+}
+
 /// A replay's isolate (`pin_clock`): `new Date()` and `Date.now()` give the time it's set to, also
 /// across an await and in top-level code; `Math.random` repeats for the same seed; `new Date(x)`,
 /// `Date.UTC` and `instanceof Date` work as before.

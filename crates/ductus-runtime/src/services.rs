@@ -432,6 +432,7 @@ async fn postgres_execute(pool: &PgPool, sql: String, params: Vec<Value>) -> Res
 
 /// Per-thread handle (an `Rc<dyn Services>` lives in each isolate): the shared services plus,
 /// on a dedicated interface's threads, that interface's own pools.
+#[derive(Clone)]
 pub struct EngineServices {
     shared: Arc<SharedServices>,
     own: Pools,

@@ -577,6 +577,7 @@ impl Engine {
             removed: false,
             retiring,
             generation,
+            code: Vec::new(), // once loaded (`Kept::add`)
         };
         let files = self.kept.add(interface, requests).await?;
         // Closed before it receives anything while the engine drains (an MLLP listener then
@@ -812,6 +813,7 @@ impl Engine {
             removed: false,
             retiring: retiring.clone(),
             generation,
+            code: Vec::new(), // once loaded (`Kept::add`)
         };
         let files = self.kept.add(interface, requests).await?;
         undo.added = true;

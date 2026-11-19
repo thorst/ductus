@@ -90,18 +90,31 @@ pub struct LoadedModule {
     pub imports: Vec<String>,
 }
 
-/// Every project file an isolate's loader read, by `file:` URL.
+/// Every project file an isolate's loader read, by `file:` URL, and how many bytes of project
+/// files it has read in all.
 #[derive(Default)]
-pub struct Loaded(RefCell<BTreeMap<String, LoadedModule>>);
+pub struct Loaded(RefCell<BTreeMap<String, LoadedModule>>, std::cell::Cell<u64>);
 
 impl Loaded {
     pub fn get(&self, url: &str) -> Option<LoadedModule> {
         self.0.borrow().get(url).cloned()
     }
 
-    /// Drop what's recorded (its texts): what's loaded later is recorded from then on.
+    /// Drop what's recorded (its texts): what's loaded later is recorded from then on. The bytes
+    /// read in all (`read`) are kept.
     pub fn clear(&self) {
         self.0.borrow_mut().clear();
+    }
+
+    /// The bytes of project files read since the isolate was made (each module once: a file V8
+    /// already has is not read again).
+    pub fn read(&self) -> u64 {
+        self.1.get()
+    }
+
+    fn insert(&self, url: String, module: LoadedModule) {
+        self.1.set(self.1.get() + module.text.len() as u64);
+        self.0.borrow_mut().insert(url, module);
     }
 }
 
@@ -158,7 +171,7 @@ fn load(specifier: &ModuleSpecifier, loaded: &Loaded) -> Result<ModuleSource, Mo
             let normalized = normalize(&text);
             let found = parsed.as_ref().map(|p| imports(p, specifier)).unwrap_or_default();
             let module = LoadedModule { hash: hash(&normalized), text: normalized, imports: found };
-            loaded.0.borrow_mut().insert(specifier.to_string(), module);
+            loaded.insert(specifier.to_string(), module);
             match media_type {
                 deno_ast::MediaType::TypeScript => transpile_parsed(parsed.map_err(generic)?).map_err(generic)?,
                 _ => text,

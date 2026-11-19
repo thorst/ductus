@@ -38,7 +38,7 @@ use crate::lanes::Lanes;
 use crate::limiter::Limiter;
 use crate::services::SharedServices;
 use crate::stats::{DestinationStats, InterfaceStats};
-use crate::worker::{Command, Job, Outlet, Requests, Waiting};
+use crate::worker::{Budget, Command, Job, Outlet, Renewal, Requests, Waiting};
 use anyhow::{Context, Result, anyhow, bail};
 use ductus_core::config::{Destination, DestinationConfig, Isolation};
 use ductus_core::{InterfaceConfig, Resources};
@@ -83,6 +83,9 @@ pub(crate) struct Threads {
     pub spawn: Option<Spawn>,
     /// Every worker thread's handle (`Kept::take_threads`).
     pub handles: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>>,
+    /// Where threads past their budget of superseded code ask to be renewed, until `renew_beside`
+    /// takes it.
+    pub renewals: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<Renewal>>>,
 }
 
 /// One of the shared pool's threads.
@@ -100,6 +103,24 @@ pub(crate) struct Spawn {
     pub pool_threads: usize,
     /// The engine's stop, the workers' (`spawn_thread`'s `stop`).
     pub stop: tokio_util::sync::CancellationToken,
+    /// Each thread's budget of superseded code (`isolates.superseded_mb`), and where it asks.
+    pub superseded_bytes: usize,
+    pub renew: tokio::sync::mpsc::UnboundedSender<Renewal>,
+}
+
+impl Spawn {
+    /// The budget of a new thread whose commands are `commands`.
+    fn budget(&self, commands: &UnboundedSender<Command>) -> Option<Budget> {
+        Some(Budget { bytes: self.superseded_bytes, renew: self.renew.clone(), me: commands.downgrade() })
+    }
+}
+
+/// What a code version's files are, by path: their hashes (`fingerprint`).
+pub(crate) type Fingerprint = Vec<(std::path::PathBuf, [u8; 32])>;
+
+/// The paths and hashes of `files`.
+pub(crate) fn fingerprint(files: &[CodeFile]) -> Fingerprint {
+    files.iter().map(|f| (f.path.clone(), f.hash)).collect()
 }
 
 /// One interface's parts, shared by its slots' jobs.
@@ -128,6 +149,9 @@ pub(crate) struct Interface {
     /// start's 0, then the deploy's or reload's that changed it last. Code put back after a failed
     /// change loads under its old one, and so gets its old modules back.
     pub generation: u64,
+    /// The files its code loaded (its code version's), by hash: a renewal loading it again on a
+    /// new thread must find the same (`Kept::renew`).
+    pub code: Fingerprint,
 }
 
 /// Some of an interface's slots, on one worker thread.
@@ -279,6 +303,7 @@ impl Interface {
             removed: false,
             retiring: self.retiring.clone(),
             generation: self.generation,
+            code: self.code.clone(),
         }
     }
 
@@ -444,9 +469,10 @@ impl Kept {
                 Some(channel) => channel,
                 None => tokio::sync::mpsc::unbounded_channel(),
             };
+            let spawn = spawn.expect("new threads only when they can be made");
+            let budget = spawn.budget(&commands);
             placed.push(Placed { commands, slots: jobs.iter().map(|j| j.slot).collect() });
             waiting_for += jobs.len();
-            let spawn = spawn.expect("new threads only when they can be made");
             let services = crate::services::EngineServices::new(spawn.services.clone(), own);
             let stop = spawn.stop.clone();
             let store = self.shared.store.clone();
@@ -460,6 +486,7 @@ impl Kept {
                 stop,
                 None,
                 receiver,
+                budget,
             ) {
                 Ok(handle) => self.threads.handles.lock().unwrap_or_else(|e| e.into_inner()).push(handle),
                 Err(e) => {
@@ -514,11 +541,13 @@ impl Kept {
         }
         placed.extend(counted);
         interface.threads = placed;
+        let files = files.unwrap_or_default();
+        interface.code = fingerprint(&files);
         if let Some(intake) = &interface.intake {
             self.shared.intakes.write().unwrap_or_else(|e| e.into_inner()).insert(name.clone(), intake.clone());
         }
         self.interfaces.write().unwrap_or_else(|e| e.into_inner()).insert(name, Arc::new(Mutex::new(interface)));
-        Ok(files.unwrap_or_default())
+        Ok(files)
     }
 
     /// Stop running `name` (removed by a deploy): its workers end between messages as at the
@@ -656,6 +685,7 @@ impl Kept {
             }
             return Err(error);
         }
+        interface.code = fingerprint(&files);
         if retarget {
             self.retarget(&interface).await?;
         }
@@ -713,6 +743,176 @@ impl Kept {
         // Its workers started before the messages above were theirs: they read again.
         interface.wake.everyone();
         Ok(())
+    }
+
+    /// Give the thread asking (`renewal`: its isolate holds more superseded code than its budget)
+    /// a fresh isolate. V8 can't drop an isolate made before another on the same thread, so the
+    /// fresh one is on a new thread, of the same name and services:
+    /// 1. Every interface with slots on the old thread is locked, in name order (a deploy of one
+    ///    waits for the renewal; deploys of the others go on).
+    /// 2. The new thread loads each one's code for its slots there, beside everything running (no
+    ///    one waits for it), and must find the files its version names (`Interface::code`): code
+    ///    edited in a project folder and not reloaded is never loaded this way.
+    /// 3. Then each in turn moves, between messages: stopped on the old thread (the message in
+    ///    hand finishes, a respond-mode interface's waiting requests handed over), started on the
+    ///    new, its lock let go. Only that interface pauses, for that long.
+    /// 4. The old thread, commanded by no one and hosting nothing, ends: its isolate and every
+    ///    version it held go with it.
+    ///
+    /// Until step 3 nothing has changed: a failure leaves everything on the old thread (the new one
+    /// ends), and the thread asks again after its next deploy. Answers None when there was nothing
+    /// to do (the thread ended or was renewed already).
+    pub(crate) async fn renew(&self, renewal: Renewal) -> Result<Option<Renewed>> {
+        let Some(old) = renewal.commands.upgrade() else { return Ok(None) };
+        let spawn = self.threads.spawn.as_ref().context("no worker threads can be made here")?;
+        let mut names: Vec<String> =
+            self.interfaces.read().unwrap_or_else(|e| e.into_inner()).keys().cloned().collect();
+        names.sort();
+        let mut moving = Vec::new();
+        for name in names {
+            let Some(interface) = self.get(&name) else { continue };
+            let interface = interface.lock_owned().await;
+            if !interface.removed && interface.threads.iter().any(|p| p.commands.same_channel(&old)) {
+                moving.push(interface);
+            }
+        }
+        if moving.is_empty() {
+            return Ok(None);
+        }
+        let started = std::time::Instant::now();
+        let (commands, receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (ready, _) = std::sync::mpsc::channel(); // it starts with nothing to report
+        let handle = crate::worker::spawn_thread(
+            renewal.thread.clone(),
+            Vec::new(),
+            self.shared.store.clone(),
+            renewal.services,
+            spawn.heap_mb,
+            ready,
+            spawn.stop.clone(),
+            None,
+            receiver,
+            spawn.budget(&commands),
+        )?;
+        self.threads.handles.lock().unwrap_or_else(|e| e.into_inner()).push(handle);
+        let fresh: Arc<Waiting> = Arc::default();
+        let slots_on_old = |interface: &Interface| -> Vec<u32> {
+            interface.threads.iter().filter(|p| p.commands.same_channel(&old)).flat_map(|p| p.slots.clone()).collect()
+        };
+        for interface in &moving {
+            let name = &interface.config.name;
+            let jobs =
+                slots_on_old(interface).into_iter().map(|s| interface.job(&self.shared, s, None, &fresh)).collect();
+            let files = load_held(&commands, name, jobs).await?;
+            if fingerprint(&files) != interface.code {
+                bail!(
+                    "`{name}`'s files on disk aren't the ones it runs (edited since it was loaded, not reloaded): it \
+                     isn't loaded again from them this way"
+                );
+            }
+        }
+        let loading = started.elapsed();
+        let mut longest = Duration::ZERO;
+        let count = moving.len();
+        for mut interface in moving {
+            let name = interface.config.name.clone();
+            let pausing = std::time::Instant::now();
+            let (handed, handing) = oneshot::channel();
+            if let Err(e) = send_handing(&old, &name, Vec::new(), Some(handed)).await {
+                // Its workers there are gone with the thread: it starts on the new one all the same.
+                tracing::warn!(interface = %name, error = %format!("{e:#}"), "couldn't stop it on the thread being renewed");
+            }
+            let requests = handing.await.ok();
+            start_held(&commands, &name, requests).await.with_context(|| {
+                format!("`{name}` stopped on the thread being renewed and couldn't start on the new one (a restart runs it again)")
+            })?;
+            for placed in interface.threads.iter_mut().filter(|p| p.commands.same_channel(&old)) {
+                placed.commands = commands.clone();
+            }
+            longest = longest.max(pausing.elapsed());
+        }
+        let mut pool = self.threads.pool.lock().unwrap_or_else(|e| e.into_inner());
+        for thread in pool.iter_mut().filter(|t| t.commands.same_channel(&old)) {
+            thread.commands = commands.clone();
+        }
+        Ok(Some(Renewed { interfaces: count, loading, took: started.elapsed(), longest_pause: longest }))
+    }
+
+    /// Where threads ask to be renewed, and the engine's stop (once: `renew_beside`).
+    fn renewals(&self) -> Option<(tokio::sync::mpsc::UnboundedReceiver<Renewal>, tokio_util::sync::CancellationToken)> {
+        let stop = self.threads.spawn.as_ref()?.stop.clone();
+        Some((self.threads.renewals.lock().unwrap_or_else(|e| e.into_inner()).take()?, stop))
+    }
+}
+
+/// What `Kept::renew` did.
+pub(crate) struct Renewed {
+    /// How many interfaces moved to the new thread.
+    pub interfaces: usize,
+    /// Loading their code there (nothing paused meanwhile).
+    pub loading: Duration,
+    /// The whole renewal.
+    pub took: Duration,
+    /// The longest one interface paused while it moved.
+    pub longest_pause: Duration,
+}
+
+/// Renew the worker threads that ask (`Kept::renew`), one at a time, beside everything else, until
+/// the engine stops. Never on a timer: a thread asks only after a deploy replaced code on it.
+pub(crate) fn renew_beside(engine: &Arc<crate::control::Engine>) {
+    let Some((mut asked, stop)) = engine.kept.renewals() else { return };
+    let engine = Arc::downgrade(engine);
+    tokio::spawn(async move {
+        loop {
+            let renewal = tokio::select! {
+                _ = stop.cancelled() => return,
+                asked = asked.recv() => match asked {
+                    Some(renewal) => renewal,
+                    None => return,
+                },
+            };
+            let Some(engine) = engine.upgrade() else { return };
+            let (thread, superseded) = (renewal.thread.clone(), renewal.superseded);
+            match engine.kept.renew(renewal).await {
+                Ok(Some(r)) => tracing::info!(
+                    %thread,
+                    superseded_mb = format!("{:.1}", superseded as f64 / (1 << 20) as f64),
+                    interfaces = r.interfaces,
+                    loading = ?r.loading,
+                    took = ?r.took,
+                    longest_pause = ?r.longest_pause,
+                    "renewed: its interfaces run in a fresh isolate on a new thread, and the old one's memory is freed (isolates.superseded_mb)"
+                ),
+                Ok(None) => {}
+                Err(e) => tracing::warn!(
+                    %thread,
+                    error = %format!("{e:#}"),
+                    "couldn't give this thread a fresh isolate (isolates.superseded_mb): its interfaces run on as they were; it's tried again after its next deploy"
+                ),
+            }
+        }
+    });
+}
+
+/// Ask a renewal's new thread to load `jobs` for `interface` and hold them (`Command::Load`).
+async fn load_held(commands: &UnboundedSender<Command>, interface: &str, jobs: Vec<Job>) -> Result<Vec<CodeFile>> {
+    let (answer, answered) = oneshot::channel();
+    commands
+        .send(Command::Load { interface: interface.to_string(), jobs, answer })
+        .map_err(|_| anyhow!("`{interface}`: the new worker thread has stopped"))?;
+    answered.await.map_err(|_| anyhow!("`{interface}`: the new worker thread stopped before answering"))?
+}
+
+/// Ask a renewal's new thread to start what it holds for `interface` (`Command::Start`).
+async fn start_held(commands: &UnboundedSender<Command>, interface: &str, requests: Option<Requests>) -> Result<()> {
+    let (answer, answered) = oneshot::channel();
+    commands
+        .send(Command::Start { interface: interface.to_string(), requests, answer })
+        .map_err(|_| anyhow!("`{interface}`: the new worker thread has stopped"))?;
+    match answered.await {
+        Ok(true) => Ok(()),
+        Ok(false) => bail!("`{interface}`: the new worker thread held nothing for it"),
+        Err(_) => bail!("`{interface}`: the new worker thread stopped before answering"),
     }
 }
 
@@ -902,6 +1102,7 @@ mod tests {
             removed: false,
             retiring: Default::default(),
             generation: 0,
+            code: Vec::new(),
             config,
         };
         (interface, activity)
@@ -924,7 +1125,12 @@ mod tests {
         interface.threads =
             threads.iter().map(|commands| Placed { commands: commands.clone(), slots: vec![0] }).collect();
         let pool = threads.into_iter().map(|commands| PoolThread { commands, slots: 1 }).collect();
-        let threads = Threads { pool: std::sync::Mutex::new(pool), spawn: None, handles: Default::default() };
+        let threads = Threads {
+            pool: std::sync::Mutex::new(pool),
+            spawn: None,
+            handles: Default::default(),
+            renewals: Default::default(),
+        };
         (Kept::new(shared, [interface], threads), activity)
     }
 

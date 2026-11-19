@@ -28,10 +28,13 @@
 #   9. (0.7.5.3.2) A alone from a release changing A and T (`--interface`: composed, its gate run
 #      in the deploy), then A and T from the next one sent at once (the second waits its turn).
 # Then CYCLES interfaces added and removed again (two deploys each) and DEPLOYS deploys of A in a
-# row (no traffic), each with the engine's memory before, every 25, and after; and that every
-# message sent arrived once.
+# row (no traffic), each with the engine's memory before, every 25, and after. Then (0.7.5.3.3)
+# `isolates.superseded_mb: SUPERSEDED` (a handover), so that each deploy of A renews A's thread
+# (its ~COUNT/4 interfaces moved to a fresh isolate): 10. a code change to A under traffic (ROUNDS
+# times: the renewal's time, its longest pause, the neighbours' latency); then DEPLOYS deploys of A
+# in a row again, the memory staying flat. And that every message sent arrived once.
 #
-#   bash scripts/bench-deploy.sh            # COUNT=1001 ROUNDS=3 CYCLES=100 DEPLOYS=100 by default
+#   bash scripts/bench-deploy.sh            # COUNT=1001 ROUNDS=3 CYCLES=100 DEPLOYS=100 SUPERSEDED=0.05
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/dev/db.sh"
 
@@ -43,6 +46,7 @@ CYCLES=${CYCLES:-100}
 RATE=${RATE:-100}
 SECONDS_=${SECONDS_:-8}
 SLOW=${SLOW:-300}
+SUPERSEDED=${SUPERSEDED:-0.05}
 WORK=$(mktemp -d)
 P=$WORK/project
 DB=bench_deploy_$$
@@ -264,6 +268,9 @@ phase() {
     # A restart in place (0.7.5.2.4): how long its sending paused.
     grep -o 'restarted alone on its new settings.*' "$WORK/phase.log" | grep -oE 'interface=[^ ]+|workers=[^ ]+|lanes=[^ ]+|sending_paused=[^ ]+' |
       paste -sd' ' | sed -n 's/^\(..*\)/   restart: \1/p' || true
+    # A thread renewed (0.7.5.3.3): its interfaces moved to a fresh isolate after the deploy.
+    grep 'renewed: its interfaces run' "$WORK/phase.log" |
+      grep -oE '(thread|interfaces|loading|took|longest_pause)=[^ ]+' | paste -sd' ' | sed -n 's/^\(..*\)/   renewed: \1/p' || true
   fi
 }
 deploy_round() { # $1 first interface, $2 last
@@ -412,6 +419,26 @@ for r in $(seq 1 "$DEPLOYS"); do
 done
 sleep 5
 echo "   settled: $(memory); unpacked: $(find "$WORK/releases" -mindepth 1 -maxdepth 1 -type d | wc -l) folders"
+
+# The isolate budget (0.7.5.3.3): tiny, so each deploy of A renews A's thread.
+echo "== isolates.superseded_mb: $SUPERSEDED (applied by a handover)"
+printf 'api: { listen: "off" }\nisolates: { superseded_mb: %s }\n' "$SUPERSEDED" >"$P/ductus.yaml"
+g commit -qam "superseded_mb $SUPERSEDED"
+deploy "$(release "superseded_mb $SUPERSEDED")" handover
+sleep 5 # the engine the handover started logs to the same file
+echo "   engine: $(memory) after the handover"
+for r in $(seq 1 "$ROUNDS"); do deploy_round 0 0 "a code change to A, its thread renewed" "$r"; done
+renewals() { grep -c 'renewed: its interfaces run' "$LOG" || true; }
+echo "== $DEPLOYS deploys of A in a row, each renewing its thread (no traffic)"
+echo "   before: $(memory)"
+for r in $(seq 1 "$DEPLOYS"); do
+  round_no=$((round_no + 1))
+  change 0 0 "$round_no"
+  deploy "$(release "round $round_no")" in_place
+  [ $((r % 25)) = 0 ] && echo "   after $r: $(memory); renewals so far: $(renewals); last: $(grep 'renewed: its interfaces run' "$LOG" | tail -1 | grep -oE '(took|longest_pause)=[^ ]+' | paste -sd' ')"
+done
+sleep 5
+echo "   settled: $(memory); threads named pool-*: $(grep -l '^pool-' /proc/"$(running)"/task/*/comm 2>/dev/null | wc -l)"
 
 pkill -INT -f "ductus sink --port $SINK"
 sleep 0.5

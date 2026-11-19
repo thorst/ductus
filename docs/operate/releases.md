@@ -1417,11 +1417,14 @@ wasn't run first. Deploys sent at once queue for seconds each: give a pipeline's
 
 **Memory over many deploys:** the engine went from 242 MB to 278 MB over 100 deploys of one
 interface in a row: 26 MB over the first 25, then about 130 KB a deploy (code an interface no
-longer runs stays loaded until the next handover or restart:
+longer runs stays loaded in its thread's isolate:
 [nuance](../nuances/releases.md#a-deploy-in-place-pauses-the-changed-interface-while-its-code-loads-level-3)).
-A handover or restart gives it back. An engine deployed in place hundreds of times a day can
-hand over (`sudo ductus handover`) in a quiet hour now and then; a later step replaces an
-isolate on its own past a budget.
+The engine gives it back by itself: once a thread's replaced code passes
+[`isolates.superseded_mb`](../reference/config/ductus.md#isolates) (64 MB), its interfaces move,
+one at a time between messages, to a fresh isolate on a new thread and the old one ends
+([nuance](../nuances/releases.md#a-thread-that-holds-too-much-replaced-code-gets-a-fresh-isolate-and-its-interfaces-start-over-level-3)):
+their module-level state starts over, as at a restart. Nothing to do; the log says
+`renewed: …` each time.
 
 What the Releases page reads, the same project (0.7.4.5, `scripts/bench-release.sh`, three
 rounds; 2 releases stored, 13 deployments of them, the release read checked several times):

@@ -308,6 +308,21 @@ impl Isolate {
         self.loaded.clear();
     }
 
+    /// The bytes of project files this isolate has read since it was made: each module once (V8
+    /// keeps every module it loaded for the isolate's life, so the difference across a load is the
+    /// code that load added).
+    pub fn code_bytes_read(&self) -> u64 {
+        self.loaded.read()
+    }
+
+    /// The bytes V8's heap holds once its garbage is collected. It collects everything first (a
+    /// pause the size of the heap): for measurements and tests, never on a message's path.
+    pub fn heap_used_collected(&mut self) -> usize {
+        let isolate = self.runtime.v8_isolate();
+        isolate.low_memory_notification();
+        isolate.get_heap_statistics().used_heap_size()
+    }
+
     /// A project module's URL at this isolate's generation (`set_generation`).
     fn module_specifier(&self, path: &Path) -> Result<ModuleSpecifier> {
         let mut url = file_url(path)?;

@@ -127,13 +127,48 @@ pub enum Command {
         answer: tokio::sync::oneshot::Sender<Result<Vec<CodeFile>>>,
         handed: Option<tokio::sync::oneshot::Sender<Requests>>,
     },
+    /// Load `interface`'s code for `jobs` and hold them, not started (a renewal's new thread:
+    /// `in_place::Kept::renew`); `Start` starts them. Answers the files the code loaded. Loading
+    /// again replaces what was held.
+    Load { interface: String, jobs: Vec<Job>, answer: tokio::sync::oneshot::Sender<Result<Vec<CodeFile>>> },
+    /// Start what `Load` holds for `interface` (a respond-mode one answering `requests`). Answers
+    /// whether anything was held.
+    Start { interface: String, requests: Option<Requests>, answer: tokio::sync::oneshot::Sender<bool> },
+}
+
+/// What one load of an interface's code costs its isolate, for the isolate's life (V8 never lets
+/// go of a module): about 14 KB, plus 16 bytes for each byte of project files the load read.
+/// Measured as the process's resident memory after 300 loads (ductus-script's
+/// `superseded_code_costs`: 27.7 KB a load of an 866-byte interface, 418 KB of a 26 KB one).
+const LOAD_COST: usize = 14 << 10;
+const BYTE_COST: usize = 16;
+
+/// A thread's budget of superseded code (`isolates.superseded_mb`): past it, the thread asks to be
+/// renewed (`Renewal`). None on a debugged thread (`ductus dev --inspect`).
+pub struct Budget {
+    pub bytes: usize,
+    /// Where it asks.
+    pub renew: mpsc::UnboundedSender<Renewal>,
+    /// Its own commands, to say which thread asks (weak: a thread no one else can command ends).
+    pub me: mpsc::WeakUnboundedSender<Command>,
+}
+
+/// A worker thread asking to be renewed: its isolate holds more superseded code than its budget.
+pub struct Renewal {
+    pub thread: String,
+    pub commands: mpsc::WeakUnboundedSender<Command>,
+    /// Its services, for the new thread (a dedicated interface's own pools stay its own).
+    pub services: EngineServices,
+    /// The superseded code counted, in bytes.
+    pub superseded: usize,
 }
 
 /// Start a worker thread for `jobs`, with one isolate of `heap_mb`. Each job reports on
 /// `ready` once its interface code has loaded (or failed to); then the thread processes
 /// messages until `stop`, and ends once its workers have saved what they finished. Meanwhile it
 /// does what `commands` asks, one at a time. With `inspector` (`ductus dev --inspect`: the thread
-/// holds one interface), its isolate is offered to debuggers there before its code loads.
+/// holds one interface), its isolate is offered to debuggers there before its code loads. With a
+/// `budget`, it asks to be renewed once its isolate holds more superseded code than that.
 #[allow(clippy::too_many_arguments)]
 pub fn spawn_thread(
     name: String,
@@ -145,6 +180,7 @@ pub fn spawn_thread(
     stop: CancellationToken,
     inspector: Option<Arc<Inspector>>,
     mut commands: mpsc::UnboundedReceiver<Command>,
+    budget: Option<Budget>,
 ) -> Result<std::thread::JoinHandle<()>> {
     let io = tokio::runtime::Handle::current(); // the main runtime (see `Worker::db`)
     std::thread::Builder::new()
@@ -154,20 +190,20 @@ pub fn spawn_thread(
                 tokio::runtime::Builder::new_current_thread().enable_all().build().expect("building worker runtime");
             let local = tokio::task::LocalSet::new();
             local.block_on(&runtime, async move {
-                let console = services.console();
+                let kept_services = services.clone();
                 let mut host = Isolate::with_inspector(Some(Rc::new(services)), heap_mb, inspector.is_some());
-                if let Some(job) = jobs.first() {
-                    host.console_to_log(job.config.project_root(), console);
+                let logging = jobs.first().map(|job| {
+                    host.console_to_log(job.config.project_root(), kept_services.console());
                     if let Some(inspector) = &inspector {
                         offer(inspector, &mut host, &job.config);
                     }
-                }
+                });
                 let mut loaded = Vec::with_capacity(jobs.len());
                 for job in jobs {
                     match load(&mut host, &job.config, job.generation).await {
-                        Ok((script, files)) => {
+                        Ok((script, files, cost)) => {
                             let _ = ready.send((job.config.name.clone(), Ok(files)));
-                            loaded.push((job, script));
+                            loaded.push((job, script, cost));
                         }
                         Err(e) => {
                             let _ = ready.send((job.config.name.clone(), Err(e)));
@@ -187,6 +223,11 @@ pub fn spawn_thread(
                     io,
                     stop: stop.clone(),
                     hosted: std::collections::HashMap::new(),
+                    held: std::collections::HashMap::new(),
+                    services: kept_services,
+                    logging: logging.is_some(),
+                    budget,
+                    superseded: 0,
                 };
                 tokio::task::spawn_local(drive_event_loop(
                     thread.name.clone(),
@@ -194,18 +235,26 @@ pub fn spawn_thread(
                     thread.kick.clone(),
                     thread.interrupted.clone(),
                 ));
-                for (job, script) in loaded {
-                    thread.start(job, script, &mut None);
+                for (job, script, cost) in loaded {
+                    thread.start(job, script, cost, &mut None);
                 }
                 // Until the engine stops, even if every worker here has ended (an interface the
                 // runaway guard stopped): the isolate stays. A thread no one can command any more
-                // that hosts nothing (a dedicated interface removed while the engine runs) ends.
+                // that hosts nothing (a dedicated interface removed while the engine runs, a thread
+                // renewed) ends, and its isolate with it.
                 loop {
                     tokio::select! {
                         _ = stop.cancelled() => break,
                         command = commands.recv() => match command {
                             Some(Command::Replace { interface, jobs, answer, handed }) => {
                                 let _ = answer.send(thread.replace(&interface, jobs, handed).await);
+                                thread.over_budget();
+                            }
+                            Some(Command::Load { interface, jobs, answer }) => {
+                                let _ = answer.send(thread.hold(&interface, jobs).await);
+                            }
+                            Some(Command::Start { interface, mut requests, answer }) => {
+                                let _ = answer.send(thread.start_held(&interface, &mut requests));
                             }
                             None if thread.hosted.is_empty() => break,
                             None => {
@@ -230,19 +279,21 @@ pub fn spawn_thread(
 type Loaded = Option<(InterfaceId, Vec<Option<FunctionId>>)>;
 
 /// Load `config`'s code into `host` under `generation`, with the files it loaded (its code
-/// version's).
-async fn load(host: &mut Isolate, config: &InterfaceConfig, generation: u64) -> Result<(Loaded, Vec<CodeFile>)> {
+/// version's) and what the load costs the isolate for its life (`LOAD_COST`).
+async fn load(host: &mut Isolate, config: &InterfaceConfig, generation: u64) -> Result<(Loaded, Vec<CodeFile>, usize)> {
     let functions = config.functions();
     if !functions.iter().any(Option::is_some) {
-        return Ok((None, Vec::new()));
+        return Ok((None, Vec::new(), 0));
     }
     host.set_generation(generation);
+    let before = host.code_bytes_read();
     let loaded = host.add_functions(&Function::all(&functions), config.timeout).await?;
+    let cost = LOAD_COST + BYTE_COST * (host.code_bytes_read() - before) as usize;
     let files = host.code_files(&config.modules()).unwrap_or_else(|e| {
         tracing::warn!(interface = %config.name, error = %format!("{e:#}"), "couldn't tell which files its code loaded: its code version counts its interface.yaml only");
         Vec::new()
     });
-    Ok((Some(loaded), files))
+    Ok((Some(loaded), files, cost))
 }
 
 /// A respond-mode interface's requests, handed from its responder to the next one (`Command::Replace`).
@@ -262,6 +313,16 @@ struct Thread {
     stop: CancellationToken,
     /// Each interface's tasks on this thread, by name.
     hosted: std::collections::HashMap<String, Hosted>,
+    /// Each interface's jobs loaded by `Command::Load`, not started yet, with their code and cost.
+    held: std::collections::HashMap<String, Vec<(Job, Loaded, usize)>>,
+    /// Its isolate's services (a renewal's new thread gets them).
+    services: EngineServices,
+    /// Interface code's `console` goes to the log (set with the first interface loaded).
+    logging: bool,
+    budget: Option<Budget>,
+    /// The cost of the code loaded here that runs no more (`LOAD_COST`): what interfaces replaced
+    /// or removed here ran.
+    superseded: usize,
 }
 
 /// One interface's tasks on a thread, and what stops them for a `Command::Replace`.
@@ -273,16 +334,21 @@ struct Hosted {
     responder: CancellationToken,
     /// A responder's task gives its requests back when told to stop.
     tasks: Vec<tokio::task::JoinHandle<Option<Requests>>>,
+    /// What its code's loads cost the isolate (`LOAD_COST`): superseded once it's replaced.
+    cost: usize,
 }
 
 impl Thread {
-    /// Start `job`'s workers (or its responder, taking `requests` when the job brings none).
-    fn start(&mut self, mut job: Job, loaded: Loaded, requests: &mut Option<Requests>) {
+    /// Start `job`'s workers (or its responder, taking `requests` when the job brings none); its
+    /// code's load cost `cost`.
+    fn start(&mut self, mut job: Job, loaded: Loaded, cost: usize, requests: &mut Option<Requests>) {
         let hosted = self.hosted.entry(job.config.name.clone()).or_insert_with(|| Hosted {
             workers: self.stop.child_token(),
             responder: CancellationToken::new(),
             tasks: Vec::new(),
+            cost: 0,
         });
+        hosted.cost += cost;
         let script = |i: usize| {
             let (interface, functions) = loaded.as_ref()?;
             Some(Script {
@@ -311,28 +377,29 @@ impl Thread {
         }
     }
 
-    /// `Command::Replace`.
+    /// Load the code of `jobs` (one interface's slots here) into the running isolate, each job's
+    /// with its cost, and the files it loaded.
     // The isolate is borrowed across the loads' awaits: the gate is closed meanwhile, so nothing
     // else on the thread borrows it (transforms wait at `Gate::opened`, the driver skips its poll).
     #[allow(clippy::await_holding_refcell_ref)]
-    async fn replace(
-        &mut self,
-        interface: &str,
-        jobs: Vec<Job>,
-        handed: Option<tokio::sync::oneshot::Sender<Requests>>,
-    ) -> Result<Vec<CodeFile>> {
-        let started = std::time::Instant::now();
+    async fn load_beside(&mut self, interface: &str, jobs: &[Job]) -> Result<(Vec<(Loaded, usize)>, Vec<CodeFile>)> {
         self.loading.close();
         let loaded = {
             let mut host = self.host.borrow_mut();
+            if !self.logging
+                && let Some(job) = jobs.first()
+            {
+                host.console_to_log(job.config.project_root(), self.services.console());
+                self.logging = true;
+            }
             let mut loaded = Vec::with_capacity(jobs.len());
             let mut files = None;
             let mut failed = None;
-            for job in &jobs {
+            for job in jobs {
                 match load(&mut host, &job.config, job.generation).await {
-                    Ok((script, f)) => {
+                    Ok((script, f, cost)) => {
                         files.get_or_insert(f);
-                        loaded.push(script);
+                        loaded.push((script, cost));
                     }
                     Err(e) => {
                         failed = Some(e);
@@ -348,20 +415,29 @@ impl Thread {
         };
         self.loading.open();
         self.kick.notify_one(); // the event loop wasn't polled while the code loaded
-        let (loaded, files) = match loaded {
-            Ok(loaded) => loaded,
-            Err(e) => {
-                if let Some(ductus_script::LoadRanAway(runaway)) = e.downcast_ref() {
-                    // Every continuation queued on the isolate was dropped: no call in flight here
-                    // will finish, whoever's it was (they're retried).
-                    self.interrupted.send_replace(Some(*runaway));
-                }
-                return Err(e.context(format!("loading `{interface}`'s new code (its running code goes on)")));
+        loaded.map_err(|e| {
+            if let Some(ductus_script::LoadRanAway(runaway)) = e.downcast_ref() {
+                // Every continuation queued on the isolate was dropped: no call in flight here
+                // will finish, whoever's it was (they're retried).
+                self.interrupted.send_replace(Some(*runaway));
             }
-        };
+            e.context(format!("loading `{interface}`'s new code (its running code goes on)"))
+        })
+    }
+
+    /// `Command::Replace`.
+    async fn replace(
+        &mut self,
+        interface: &str,
+        jobs: Vec<Job>,
+        handed: Option<tokio::sync::oneshot::Sender<Requests>>,
+    ) -> Result<Vec<CodeFile>> {
+        let started = std::time::Instant::now();
+        let (loaded, files) = self.load_beside(interface, &jobs).await?;
         let loading = started.elapsed();
         let mut requests = None;
         if let Some(old) = self.hosted.remove(interface) {
+            self.superseded += old.cost;
             old.workers.cancel();
             old.responder.cancel();
             for task in old.tasks {
@@ -371,8 +447,8 @@ impl Thread {
             }
         }
         let stops = jobs.is_empty();
-        for (job, script) in jobs.into_iter().zip(loaded) {
-            self.start(job, script, &mut requests);
+        for (job, (script, cost)) in jobs.into_iter().zip(loaded) {
+            self.start(job, script, cost, &mut requests);
         }
         if let (Some(requests), Some(handed)) = (requests, handed) {
             let _ = handed.send(requests);
@@ -390,6 +466,37 @@ impl Thread {
             "its new code runs from the next message"
         );
         Ok(files)
+    }
+
+    /// `Command::Load`: `jobs`' code loaded, held until `start_held`.
+    async fn hold(&mut self, interface: &str, jobs: Vec<Job>) -> Result<Vec<CodeFile>> {
+        let (loaded, files) = self.load_beside(interface, &jobs).await?;
+        let held = jobs.into_iter().zip(loaded).map(|(job, (script, cost))| (job, script, cost)).collect();
+        self.held.insert(interface.to_string(), held);
+        Ok(files)
+    }
+
+    /// `Command::Start`: what `hold` loaded for `interface` runs from now on. False: nothing held.
+    fn start_held(&mut self, interface: &str, requests: &mut Option<Requests>) -> bool {
+        let Some(held) = self.held.remove(interface) else { return false };
+        for (job, script, cost) in held {
+            self.start(job, script, cost, requests);
+        }
+        true
+    }
+
+    /// Ask to be renewed when the superseded code here is past the budget (after each
+    /// `Command::Replace`; until the renewal moves everything off this thread).
+    fn over_budget(&self) {
+        let Some(budget) = &self.budget else { return };
+        if self.superseded > budget.bytes {
+            let _ = budget.renew.send(Renewal {
+                thread: self.name.clone(),
+                commands: budget.me.clone(),
+                services: self.services.clone(),
+                superseded: self.superseded,
+            });
+        }
     }
 }
 
@@ -1158,6 +1265,7 @@ mod tests {
             stop.clone(),
             None,
             received,
+            None,
         )
         .unwrap();
         let (name, loaded) = tokio::task::spawn_blocking(move || readied.recv().unwrap()).await.unwrap();
@@ -1196,6 +1304,109 @@ mod tests {
         stop.cancel();
         drop(calls); // the HTTP server's side: its responder ends once it's gone
         tokio::task::spawn_blocking(move || thread.join().unwrap()).await.unwrap();
+    }
+
+    /// A renewal at the thread level (`in_place::Kept::renew` drives it): a thread whose replaced
+    /// code passes its budget asks once a replace is done, not before; a new, empty thread loads
+    /// the interface's code and holds it; the old thread stops it and hands over its requests; the
+    /// new one starts it and answers them; the old thread, hosting nothing and no longer
+    /// commanded, ends (its isolate with it).
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_thread_past_its_budget_asks_and_a_new_one_takes_its_interface_over() {
+        let Ok(url) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+        let store = Store::connect(&url, 2).await.unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let answer = |v: &str| format!("export function transform() {{ return {{ v: \"{v}\" }}; }}\n");
+        let (one, two) = (release(root.path(), "r1", &answer("one")), release(root.path(), "r2", &answer("two")));
+        let env = ductus_core::Environment::with_variables("dev", &[]);
+        let shared = crate::services::SharedServices::new(env, &Default::default(), &Default::default()).unwrap();
+        let services = EngineServices::new(Arc::new(shared), Default::default());
+        let stop = CancellationToken::new();
+        let (renew, mut asked) = mpsc::unbounded_channel();
+        // A thread with no jobs yet: `Load` gives it its first, as a renewal's new thread.
+        let thread = |name: &str| {
+            let (commands, received) = mpsc::unbounded_channel();
+            let budget = Budget { bytes: LOAD_COST + 1, renew: renew.clone(), me: commands.downgrade() };
+            let (ready, _) = std::sync::mpsc::channel();
+            let handle = spawn_thread(
+                name.into(),
+                Vec::new(),
+                store.clone(),
+                services.clone(),
+                64,
+                ready,
+                stop.clone(),
+                None,
+                received,
+                Some(budget),
+            )
+            .unwrap();
+            (commands, handle)
+        };
+        let call = |calls: &mpsc::Sender<HttpCall>| {
+            let (reply, replied) = tokio::sync::oneshot::channel();
+            let envelope = r#"{"method":"GET","path":"/p","params":{},"query":{},"headers":{},"body":""}"#;
+            let calls = calls.clone();
+            async move {
+                calls.send(HttpCall { envelope: envelope.into(), reply }).await.unwrap();
+                replied.await.unwrap().unwrap()
+            }
+        };
+        let load = |commands: &mpsc::UnboundedSender<Command>, dir: &Path, requests| {
+            let (answer, answered) = tokio::sync::oneshot::channel();
+            let jobs = vec![respond_job(dir, requests)];
+            commands.send(Command::Load { interface: "api".into(), jobs, answer }).ok().unwrap();
+            answered
+        };
+        let start = |commands: &mpsc::UnboundedSender<Command>, requests| {
+            let (answer, answered) = tokio::sync::oneshot::channel();
+            commands.send(Command::Start { interface: "api".into(), requests, answer }).ok().unwrap();
+            answered
+        };
+
+        let (old, old_handle) = thread("pool-0");
+        let (calls, requests) = mpsc::channel(16);
+        load(&old, &one, Some(requests)).await.unwrap().unwrap();
+        assert!(start(&old, None).await.unwrap(), "it held what it loaded");
+        assert!(!start(&old, None).await.unwrap(), "and holds it no more");
+        assert!(call(&calls).await.contains("one"));
+        assert!(asked.try_recv().is_err(), "nothing replaced yet: it doesn't ask");
+
+        // A replace supersedes the first load (its 14 KB alone pass the budget): it asks.
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        let jobs = vec![respond_job(&two, None)];
+        old.send(Command::Replace { interface: "api".into(), jobs, answer, handed: None }).ok().unwrap();
+        answered.await.unwrap().unwrap();
+        assert!(call(&calls).await.contains("two"));
+        let renewal = asked.recv().await.unwrap();
+        assert_eq!(renewal.thread, "pool-0");
+        assert!(renewal.superseded > LOAD_COST, "{}", renewal.superseded);
+        assert!(renewal.commands.upgrade().unwrap().same_channel(&old), "it names itself");
+
+        // The renewal: loaded on the new thread first, then stopped on the old, started on the new.
+        let (new, new_handle) = thread("pool-0");
+        load(&new, &two, None).await.unwrap().unwrap();
+        let (handed, handing) = tokio::sync::oneshot::channel();
+        let (answer, answered) = tokio::sync::oneshot::channel();
+        old.send(Command::Replace { interface: "api".into(), jobs: Vec::new(), answer, handed: Some(handed) })
+            .ok()
+            .unwrap();
+        answered.await.unwrap().unwrap();
+        let requests = handing.await.unwrap();
+        assert!(start(&new, Some(requests)).await.unwrap());
+        assert!(call(&calls).await.contains("two"), "the new thread answers");
+
+        // The old thread hosts nothing: once no one can command it, it ends.
+        drop((old, renewal));
+        tokio::time::timeout(Duration::from_secs(10), tokio::task::spawn_blocking(move || old_handle.join().unwrap()))
+            .await
+            .expect("the old thread ends")
+            .unwrap();
+        assert!(call(&calls).await.contains("two"));
+
+        stop.cancel();
+        drop((calls, new));
+        tokio::task::spawn_blocking(move || new_handle.join().unwrap()).await.unwrap();
     }
 
     /// The reason a thrown error quarantines a message with names the `.ts` line it was thrown on
