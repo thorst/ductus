@@ -117,6 +117,66 @@ export function problemsByFile(document: ValidateDocument): Map<string, Finding[
   return byFile;
 }
 
+/** A project's running `ductus dev`, as it wrote `.ductus/dev-engine.json` when it started. */
+export interface DevEngine {
+  /** Its API: `http://127.0.0.1:7700`. */
+  api: string;
+  pid: number;
+}
+
+/** `.ductus/dev-engine.json`'s text, or undefined when it isn't one. */
+export function parseDevEngine(text: string): DevEngine | undefined {
+  try {
+    const value = JSON.parse(text);
+    return value && typeof value.api === "string" && typeof value.pid === "number"
+      ? { api: value.api.replace(/\/+$/, ""), pid: value.pid }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What `POST /engine/reload` answers (and `ductus reload --json` prints): docs/reference's
+ * `ReloadReport`. Fields are only ever added.
+ */
+export interface ReloadReport {
+  ok: boolean;
+  /** `in_place`, `nothing`, `handover` or `refused`. */
+  applied: string;
+  outcome: string;
+  steps?: string[];
+  changes?: { interface: string; from: string | null; to: string }[];
+  warnings?: Record<string, string>;
+  took_ms?: number;
+}
+
+/** The answer's body as a reload's report, or undefined (an error body: `{ "error": … }`). */
+export function parseReload(body: string): ReloadReport | undefined {
+  try {
+    const value = JSON.parse(body);
+    return value && typeof value.ok === "boolean" && typeof value.outcome === "string"
+      ? (value as ReloadReport)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * A reload's report in one line for a notification: which interfaces took the change, or why
+ * nothing changed. The whole report (each step, each warning) goes to the output.
+ */
+export function reloadSummary(report: ReloadReport): string {
+  if (!report.ok) return report.outcome.split("\n")[0].replace(/^refused: /, "");
+  if (report.applied === "nothing") return "nothing to deploy: dev runs the folder as it is";
+  const changed = (report.changes ?? []).map((c) => (c.from === null ? `${c.interface} (new)` : c.interface));
+  const took = report.took_ms === undefined ? "" : ` in ${report.took_ms} ms`;
+  const what = changed.length > 0 ? changed.join(", ") : report.outcome.split("\n")[0];
+  const warned = Object.keys(report.warnings ?? {}).length;
+  return `${what}${took}${warned > 0 ? ` (⚠ ${warned} over someone else's change: see the output)` : ""}`;
+}
+
 /** `ductus 0.7.0-dev` → [0, 7, 0]; undefined when it isn't a version line. */
 export function parseVersion(text: string): [number, number, number] | undefined {
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);

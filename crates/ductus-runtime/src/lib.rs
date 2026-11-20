@@ -149,6 +149,9 @@ pub struct EngineOptions {
     pub on_started: Option<Box<dyn FnOnce() + Send>>,
     /// Take handovers (`ductus handover`, deploys, reloads): `ductus run` does, `ductus dev` not.
     pub control: bool,
+    /// Without `control`: take reloads in place from the API (`POST /engine/reload`), refusing what
+    /// needs the handover and changes to an interface under `inspect` (`ductus dev`, 0.7.6.3).
+    pub reloads_in_place: bool,
     /// How to start an engine again in this process, with its settings read again (the CLI's
     /// `run` gives one): for a handover without a new process (`handover`) and for a start again
     /// after a new engine failed once the old one let go. None: no in-process handover.
@@ -221,6 +224,7 @@ impl Default for EngineOptions {
             stop_request: None,
             on_started: None,
             control: false,
+            reloads_in_place: false,
             rebuild: None,
             takeover: None,
             inspect: None,
@@ -384,6 +388,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     // gives every unit's processes `INVOCATION_ID`).
     let service = options.stop_request.is_some() || std::env::var_os("INVOCATION_ID").is_some();
     let inspected = options.inspect.take();
+    let debugged_names: Vec<String> = inspected.as_ref().map(|i| i.interfaces.clone()).unwrap_or_default();
     if let Some(inspect) = &inspected {
         inspect.check(&configs)?;
     }
@@ -1127,7 +1132,10 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         engine.tidy_releases();
     }
     owner.watch(store.clone(), stopping.clone());
-    let mut control = handover::Control::listen(options.control, options.rebuild.clone(), options.stop_request.clone());
+    let mut control = match options.control || !options.reloads_in_place {
+        true => handover::Control::listen(options.control, options.rebuild.clone(), options.stop_request.clone()),
+        false => handover::Control::in_place_only(debugged_names),
+    };
     // A deploy (`POST /deployments`) asks for its handover here, as `ductus handover` does.
     if let Some(asker) = control.asker() {
         let _ = engine.asker.set(asker);

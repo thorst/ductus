@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde_json::{Value, json};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 pub struct Reload {
@@ -90,16 +90,32 @@ async fn over_api(r: &Reload) -> Result<Value> {
                restart the engine to apply its environment"
         );
     }
-    let token = r.token.as_deref().filter(|t| !t.trim().is_empty()).context(
-        "no control socket here, so `ductus reload` asks the engine's API: set DUCTUS_API_TOKEN to a token with the \
-         `deploy` permission (`ductus token create reload --role operator --permission deploy`), and DUCTUS_API_URL \
-         (`--api`) when it isn't http://127.0.0.1:7700",
-    )?;
-    let base = format!("{}/api/v1", r.api.trim_end_matches('/'));
+    let given = r.token.as_deref().map(str::trim).filter(|t| !t.is_empty()).map(str::to_string);
+    // No token given, in a project whose `ductus dev` runs: that engine, with its editor token.
+    let dev = match given {
+        Some(_) => None,
+        None => dev_engine(Path::new(".")),
+    };
+    let (api, token) = match (given, dev) {
+        (Some(token), _) => (r.api.clone(), token),
+        (None, Some((api, token))) => {
+            if !r.json {
+                println!("the `ductus dev` of this folder, at {api} (.ductus/dev-engine.json)");
+            }
+            (api, token)
+        }
+        (None, None) => bail!(
+            "no control socket here, so `ductus reload` asks the engine's API: set DUCTUS_API_TOKEN to a token with \
+             the `deploy` permission (`ductus token create reload --role operator --permission deploy`), and \
+             DUCTUS_API_URL (`--api`) when it isn't http://127.0.0.1:7700. For a `ductus dev`, run it in the \
+             project's folder"
+        ),
+    };
+    let base = format!("{}/api/v1", api.trim_end_matches('/'));
     let client = reqwest::Client::builder().timeout(r.timeout + Duration::from_secs(30)).build()?;
     let response = client
         .post(format!("{base}/engine/reload"))
-        .bearer_auth(token)
+        .bearer_auth(&token)
         .json(&json!({ "reason": r.reason, "in_place_only": r.in_place_only }))
         .send()
         .await
@@ -110,6 +126,14 @@ async fn over_api(r: &Reload) -> Result<Value> {
         bail!("{status}: {}", report["error"].as_str().unwrap_or("no details"));
     }
     Ok(report)
+}
+
+/// The `ductus dev` running for the project at `root` (`.ductus/dev-engine.json`) and its editor
+/// token (`.ductus/dev-token`), when both are there.
+fn dev_engine(root: &Path) -> Option<(String, String)> {
+    let found = crate::dev::Found::read(root)?;
+    let token = std::fs::read_to_string(root.join(".ductus").join("dev-token")).ok()?;
+    Some((found.api, token.trim().to_string())).filter(|(_, t)| !t.is_empty())
 }
 
 /// The report as people read it.

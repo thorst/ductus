@@ -4,14 +4,80 @@ import { test } from "node:test";
 import {
   LineBuffer,
   atLeast,
+  parseDevEngine,
+  parseReload,
   parseTestLine,
   parseValidate,
   parseVersion,
   plan,
   problemsByFile,
+  reloadSummary,
   testArgs,
   type ValidateDocument,
 } from "../../src/lines.ts";
+
+test("dev-engine.json is read; anything else isn't a dev engine", () => {
+  assert.deepEqual(parseDevEngine('{\n  "api": "http://127.0.0.1:7700/",\n  "pid": 4242\n}\n'), {
+    api: "http://127.0.0.1:7700",
+    pid: 4242,
+  });
+  assert.equal(parseDevEngine(""), undefined);
+  assert.equal(parseDevEngine('{"api": "http://127.0.0.1:7700"}'), undefined);
+  assert.equal(parseDevEngine("{half"), undefined);
+});
+
+test("a reload's report: what took the change, or why not, in one line", () => {
+  const inPlace = parseReload(
+    JSON.stringify({
+      ok: true,
+      applied: "in_place",
+      outcome: "applied in place: adt-in's code",
+      steps: ["adt-in: new code between two messages"],
+      changes: [
+        { interface: "adt-in", from: "0a1b2c3d4e5f", to: "5f4e3d2c1b0a" },
+        { interface: "lab-out", from: null, to: "abcdefabcdef" },
+      ],
+      warnings: {},
+      took_ms: 84,
+    }),
+  );
+  assert.ok(inPlace);
+  assert.equal(reloadSummary(inPlace), "adt-in, lab-out (new) in 84 ms");
+
+  const nothing = parseReload('{"ok":true,"applied":"nothing","outcome":"nothing changed: the folder is what runs"}');
+  assert.ok(nothing);
+  assert.equal(reloadSummary(nothing), "nothing to deploy: dev runs the folder as it is");
+
+  const refused = parseReload(
+    JSON.stringify({
+      ok: false,
+      applied: "refused",
+      outcome:
+        "refused: only a new engine applies it (ductus.yaml changed), and `ductus dev` doesn't hand over: restart it\nNothing changed: every interface runs what it ran.",
+    }),
+  );
+  assert.ok(refused);
+  assert.equal(
+    reloadSummary(refused),
+    "only a new engine applies it (ductus.yaml changed), and `ductus dev` doesn't hand over: restart it",
+  );
+
+  const warned = parseReload(
+    JSON.stringify({
+      ok: true,
+      applied: "in_place",
+      outcome: "x",
+      changes: [{ interface: "adt-in", from: "a", to: "b" }],
+      warnings: { "adt-in": "sam's change" },
+    }),
+  );
+  assert.ok(warned);
+  assert.equal(reloadSummary(warned), "adt-in (⚠ 1 over someone else's change: see the output)");
+
+  // An error body (403 without the permission) isn't a report.
+  assert.equal(parseReload('{"error":"needs the deploy permission"}'), undefined);
+  assert.equal(parseReload("<html>"), undefined);
+});
 
 test("test --json lines are read; anything else is not ours", () => {
   // As docs/write/testing.md shows them.

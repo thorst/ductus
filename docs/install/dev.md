@@ -41,6 +41,10 @@ Web UI login: user `dev`, password `…` (kept in ./.ductus/dev-login)
   and with every command that needs a database: `export DUCTUS_DATABASE_URL=…` (PowerShell:
   `$env:DUCTUS_DATABASE_URL = "…"`), then `ductus status`, `ductus user create`, `ductus token
   create` and the rest talk to it.
+- **A change you made** (code, an interface.yaml, an interface added or removed) runs once you
+  say so: `ductus reload` in the project's folder, from another terminal, or **Deploy to dev** in
+  [VS Code](../write/vscode.md#deploy-to-dev). The interfaces you changed take it between two
+  messages; the others never pause. It finds this engine by itself (below).
 - **Ctrl-C** stops the engine cleanly, then its Postgres.
 - **The data stays** in `.ductus/postgres` between runs, and so does its port. `ductus init`'s
   `.gitignore` leaves `.ductus/` out of Git.
@@ -69,6 +73,24 @@ Postgres you have, with `DUCTUS_DATABASE_URL`.
 
 - One engine per project folder at a time: a second `ductus dev` in the same folder says it's
   already running.
-- No handover: `systemctl reload` is the packages'. After a change to the project, stop and start
-  `ductus dev` again (it starts in well under a second).
+- Reloads in place, but no handover: a change to what only a start reads (ductus.yaml,
+  resources.yaml, docs-schema.yaml, the environment's secrets file) or to an interface under
+  `--inspect` is refused by `ductus reload`, which says so; stop and start `ductus dev` again for
+  those (it starts in well under a second)
+  ([nuance](../nuances/dev.md#ductus-dev-reloads-in-place-only-level-1)).
 - `DUCTUS_DATABASE_URL` is ignored: `dev` always uses its own Postgres.
+
+## How `ductus reload` and editors find it
+
+Once its interfaces and API are up, `ductus dev` writes two files into the project's `.ductus/`
+(which Git leaves out):
+
+| File | What it holds | When |
+|---|---|---|
+| `dev-engine.json` | where its API listens (`{"api": "http://127.0.0.1:7700", "pid": 4242}`) | written at each start, deleted at the stop |
+| `dev-token` | a token of the `dev` user's with the `deploy` and `payloads` permissions, readable by your account only | made at the first start, kept while it works (made again after `--reset`) |
+
+`ductus reload` run in the project's folder with no `DUCTUS_API_TOKEN` uses them, and so does the
+VS Code extension: nothing to sign in to or configure. With `--api-listen off` there's no
+`dev-engine.json`, so neither can reach it. The token is listed under the `dev` user in the web
+UI's tokens (named `editor`); revoking it there makes the next start make a new one.

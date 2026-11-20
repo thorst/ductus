@@ -84,13 +84,19 @@ impl How {
 }
 
 /// How a reload is asked.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Default)]
 pub struct Options {
     /// Refuse a change that needs the handover instead of taking it (`--in-place-only`).
     pub in_place_only: bool,
     /// A new binary on disk is a reason to hand over: the handover would start a new process,
     /// which runs it (an in-process one runs this binary again).
     pub new_binary_counts: bool,
+    /// This engine can't hand over at all (`ductus dev`: its Postgres, its debugger and its lock
+    /// belong to the process): what needs the handover is refused with "restart it".
+    pub no_handover: bool,
+    /// Interfaces under a debugger (`ductus dev --inspect`): a change to one is refused, since
+    /// loading its new code waits for the debugger whenever it's paused at a breakpoint.
+    pub debugged: Vec<String>,
 }
 
 /// What of the engine's settings outside the project (`crate::started_with`) differs when they're
@@ -121,7 +127,11 @@ pub async fn reload(
     options: Options,
     settings_changed: Option<String>,
 ) -> Reloaded {
-    let in_place_only = options.in_place_only;
+    let in_place_only = match options.no_handover {
+        true => InPlaceOnly::NoHandover,
+        false if options.in_place_only => InPlaceOnly::Asked,
+        false => InPlaceOnly::No,
+    };
     let started = std::time::Instant::now();
     let mut reloaded = Reloaded {
         ok: false,
@@ -190,6 +200,22 @@ pub async fn reload(
         let outcome = "nothing changed: the folder is what runs".to_string();
         return finish(reloaded, How::Nothing, outcome);
     }
+    let debugged: Vec<&str> = plan
+        .changes
+        .iter()
+        .map(|c| c.interface.as_str())
+        .filter(|name| options.debugged.iter().any(|d| d == name))
+        .collect();
+    if !debugged.is_empty() {
+        let outcome = format!(
+            "refused: {} {} under the debugger (`--inspect`), and a reload would wait for it whenever it's paused: \
+             stop the debug session and start it again to run the new code\nNothing changed: every interface runs \
+             what it ran.",
+            debugged.join(", "),
+            if debugged.len() == 1 { "is" } else { "are" }
+        );
+        return finish(reloaded, How::Refused, outcome);
+    }
     // The "replaces" check, as a folder-mode start runs it: a warning, recorded.
     let who = Who {
         how: "reload",
@@ -236,22 +262,41 @@ pub async fn reload(
     }
 }
 
+/// Whether what needs the handover is refused, and why.
+#[derive(Clone, Copy)]
+enum InPlaceOnly {
+    /// It goes to the handover.
+    No,
+    /// `--in-place-only` was asked.
+    Asked,
+    /// This engine can't hand over (`ductus dev`).
+    NoHandover,
+}
+
 /// The reload needs the handover because of `why`: said so, or refused (`in_place_only`).
 fn needs_handover(
     reloaded: Reloaded,
     why: String,
-    in_place_only: bool,
+    in_place_only: InPlaceOnly,
     finish: impl FnOnce(Reloaded, How, String) -> Reloaded,
 ) -> Reloaded {
+    let unchanged = "Nothing changed: every interface runs what it ran.";
     match in_place_only {
-        true => finish(
+        InPlaceOnly::Asked => finish(
             reloaded,
             How::Refused,
             format!(
-                "refused: only the handover applies it ({why}), and only in place was asked: reload without that when a handover suits\nNothing changed: every interface runs what it ran."
+                "refused: only the handover applies it ({why}), and only in place was asked: reload without that when a handover suits\n{unchanged}"
             ),
         ),
-        false => finish(reloaded, How::Handover, why),
+        InPlaceOnly::NoHandover => finish(
+            reloaded,
+            How::Refused,
+            format!(
+                "refused: only a new engine applies it ({why}), and `ductus dev` doesn't hand over: restart it (Ctrl-C, then `ductus dev` again)\n{unchanged}"
+            ),
+        ),
+        InPlaceOnly::No => finish(reloaded, How::Handover, why),
     }
 }
 

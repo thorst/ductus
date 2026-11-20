@@ -1,7 +1,7 @@
 {
   "name": "ductus",
   "displayName": "Ductus",
-  "description": "Ductus integration engine: interface tests in the Test Explorer, run and debugged per test; validate's findings in Problems on save; debugging without launch.json.",
+  "description": "Ductus integration engine: interface tests in the Test Explorer, run and debugged per test; validate's findings in Problems on save; debugging without launch.json; Deploy to dev.",
   "version": "0.7.0",
   "publisher": "ductus",
   "license": "Apache-2.0",
@@ -53,10 +53,21 @@
           "type": "boolean",
           "default": true,
           "markdownDescription": "Run `ductus validate` when a file of a project is saved (once for several saves close together) and show its findings in Problems. Off: only when the workspace opens and with **Ductus: Validate the project**."
+        },
+        "ductus.deployToDevOnSave": {
+          "type": "boolean",
+          "default": false,
+          "markdownDescription": "Deploy to dev when a file of a project is saved (once for several saves close together): the project's running `ductus dev` applies the folder in place, as **Ductus: Deploy to dev** does. Nothing happens while no `ductus dev` runs for the project. Off: only with the command."
         }
       }
     },
     "commands": [
+      {
+        "command": "ductus.deployToDev",
+        "title": "Deploy to dev",
+        "category": "Ductus",
+        "icon": "$(cloud-upload)"
+      },
       {
         "command": "ductus.validate",
         "title": "Validate the project",
@@ -68,6 +79,15 @@
         "category": "Ductus"
       }
     ],
+    "menus": {
+      "editor/title": [
+        {
+          "command": "ductus.deployToDev",
+          "when": "ductus.devRunning && resourceScheme == file",
+          "group": "navigation"
+        }
+      ]
+    },
     "debuggers": [
       {
         "type": "ductus",

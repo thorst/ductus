@@ -128,7 +128,25 @@ pub async fn run(options: Options) -> Result<()> {
         if let Err(e) = first_user(&options.root, &url).await {
             eprintln!("couldn't make a dev login ({e:#}): create one with `ductus user create` against the URL above");
         }
-        ductus_runtime::run(&options.root, &url, options.engine).await
+        let mut engine = options.engine;
+        // Reloads in place from the API (an editor's "Deploy to dev", `ductus reload`); no handover.
+        engine.reloads_in_place = true;
+        let found = Found::path(&options.root);
+        match api_url(&options.root, engine.api_listen.as_deref()) {
+            Ok(Some(api)) => {
+                let (path, api) = (found.clone(), api.clone());
+                engine.on_started = Some(Box::new(move || {
+                    if let Err(e) = (Found { api, pid: std::process::id() }).write(&path) {
+                        eprintln!("couldn't write {} ({e:#}): editors won't find this engine", path.display());
+                    }
+                }));
+            }
+            Ok(None) => {} // no API: nothing to find
+            Err(e) => eprintln!("note: editors won't find this engine ({e:#})"),
+        }
+        let ran = ductus_runtime::run(&options.root, &url, engine).await;
+        let _ = std::fs::remove_file(&found);
+        ran
     };
 
     match postgres.stop().await {
@@ -196,7 +214,87 @@ async fn first_user(root: &Path, url: &str) -> Result<()> {
     if let Ok(password) = std::fs::read_to_string(&file) {
         println!("Web UI login: user `dev`, password `{}` (kept in {})", password.trim(), file.display());
     }
+    if let Err(e) = editor_token(&store, root).await {
+        eprintln!("couldn't make the editor's token ({e:#}): Deploy to dev in an editor will ask for one");
+    }
     Ok(())
+}
+
+/// The name of the `dev` user's token kept in `.ductus/dev-token`.
+const EDITOR_TOKEN: &str = "editor";
+
+/// A token of the `dev` user's for editors and `ductus reload` here (`deploy`, and `payloads` to
+/// read a message to debug), kept in `.ductus/dev-token` beside `dev-login`, so an editor's "Deploy
+/// to dev" signs in without asking. Kept while it works; made again when it doesn't (a `--reset`,
+/// revoked). None when there's no `dev` user (someone removed it): said, nothing made.
+async fn editor_token(store: &ductus_store::Store, root: &Path) -> Result<()> {
+    let file = root.join(".ductus").join("dev-token");
+    if let Ok(kept) = std::fs::read_to_string(&file)
+        && store.authenticate(kept.trim()).await?.is_some()
+    {
+        return Ok(());
+    }
+    let user = store.user_by_name("dev").await?.context("there's no `dev` user")?;
+    let audit = ductus_store::Audit::new(ductus_store::By::cli("ductus dev"), "token.create");
+    // One left by an earlier start whose file was deleted: replaced.
+    let revoked = ductus_store::Audit::new(ductus_store::By::cli("ductus dev"), "token.revoke");
+    store.revoke_token(EDITOR_TOKEN, Some(user.id), &revoked).await?;
+    let permissions = ["deploy".to_string(), "payloads".to_string()];
+    let (_, secret) =
+        store.create_token(EDITOR_TOKEN, ductus_store::Role::Operator, &permissions, Some(user.id), &audit).await?;
+    write_private(&file, &secret)
+}
+
+/// Write a file only this account may read (Unix; on Windows the user's profile already is).
+fn write_private(file: &Path, text: &str) -> Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    let mut out = options.open(file).with_context(|| format!("writing {}", file.display()))?;
+    out.write_all(text.as_bytes()).with_context(|| format!("writing {}", file.display()))
+}
+
+/// How editors find the running `ductus dev` of a project: `.ductus/dev-engine.json`, written once
+/// its interfaces and API are up, deleted when it stops (a killed one leaves it: its `api` then
+/// doesn't answer). With `.ductus/dev-token`, all an editor needs to reload it.
+#[derive(Clone)]
+pub struct Found {
+    /// The API's URL, as this machine reaches it: `http://127.0.0.1:7700`.
+    pub api: String,
+    pub pid: u32,
+}
+
+impl Found {
+    pub fn path(root: &Path) -> PathBuf {
+        root.join(".ductus").join("dev-engine.json")
+    }
+
+    fn write(&self, path: &Path) -> Result<()> {
+        let text = serde_json::to_string_pretty(&json!({ "api": self.api, "pid": self.pid }))?;
+        std::fs::write(path, text + "\n").with_context(|| format!("writing {}", path.display()))
+    }
+
+    /// The running dev engine of the project at `root`, as it said when it started.
+    pub fn read(root: &Path) -> Option<Found> {
+        let value: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(Self::path(root)).ok()?).ok()?;
+        Some(Found { api: value["api"].as_str()?.to_string(), pid: u32::try_from(value["pid"].as_u64()?).ok()? })
+    }
+}
+
+/// The URL this machine reaches the engine's API at (None: `off`): its address from ductus.yaml or
+/// `--api-listen`, any address (`0.0.0.0`, `::`) as loopback, https with `api.tls`.
+fn api_url(root: &Path, listen: Option<&str>) -> Result<Option<String>> {
+    let settings = ductus_core::settings::Settings::load(root)?;
+    let Some((host, port)) = settings.api.address(listen)? else { return Ok(None) };
+    let host = match host.as_str() {
+        "0.0.0.0" => "127.0.0.1".to_string(),
+        "::" => "[::1]".to_string(),
+        h if h.contains(':') => format!("[{h}]"),
+        h => h.to_string(),
+    };
+    let scheme = if settings.api.tls.is_some() { "https" } else { "http" };
+    Ok(Some(format!("{scheme}://{host}:{port}")))
 }
 
 impl Kept {

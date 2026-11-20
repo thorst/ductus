@@ -45,13 +45,13 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [SQL Server Windows logins](sqlserver-windows-logins.md) (6)
 - [Certificates](certificates.md) (10)
 - [People and access](people.md) (19)
-- [Local development](dev.md) (2)
+- [Local development](dev.md) (3)
 - [Upgrades](upgrades.md) (17)
 - [What runs, recorded](deployments.md) (19)
 - [Releases](releases.md) (38)
 - [Windows](windows.md) (9)
 
-## Level 1: Foundations (43)
+## Level 1: Foundations (44)
 
 - [Retention is 1, 3 or 7 weeks, not any number of days](retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1) (Retention)
 - [Missing fields read as "" and never throw](transforms.md#missing-fields-read-as--and-never-throw-level-1) (Writing transforms)
@@ -82,6 +82,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [`auth: windows`: the engine's own account, or a named one](sqlserver-windows-logins.md#auth-windows-the-engines-own-account-or-a-named-one-level-1) (SQL Server Windows logins)
 - [Theme and colors follow the account](people.md#theme-and-colors-follow-the-account-level-1) (People and access)
 - [`ductus dev` is a development tool, not a way to run in production](dev.md#ductus-dev-is-a-development-tool-not-a-way-to-run-in-production-level-1) (Local development)
+- [`ductus dev` reloads in place only](dev.md#ductus-dev-reloads-in-place-only-level-1) (Local development)
 - [Your editor's help is the installed version's: run `ductus types` after an upgrade](dev.md#your-editors-help-is-the-installed-versions-run-ductus-types-after-an-upgrade-level-1) (Local development)
 - [Run `ductus upgrade --check` with the new version before every upgrade](upgrades.md#run-ductus-upgrade---check-with-the-new-version-before-every-upgrade-level-1) (Upgrades)
 - [Deploying project changes: `systemctl reload`](upgrades.md#deploying-project-changes-systemctl-reload-level-1) (Upgrades)

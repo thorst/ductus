@@ -1,11 +1,15 @@
 // The extension in a real VS Code on a copy of the guides' project (run.ts): ductus found, the
 // tests discovered at their lines, a run's results, a failure at its place with both values,
-// Problems on save, a breakpoint hit from the Test Explorer's Debug, and a debug configuration
-// with no launch.json. Lines starting `measure:` are read by scripts/demo-vscode.sh.
+// Problems on save, a breakpoint hit from the Test Explorer's Debug, a debug configuration with no
+// launch.json, and Deploy to dev against a real `ductus dev`. Lines starting `measure:` are read
+// by scripts/demo-vscode.sh.
 import * as assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import * as fs from "node:fs";
+import * as net from "node:net";
 import * as path from "node:path";
 import * as vscode from "vscode";
+import type { Deployed } from "../../src/dev";
 import type { Api } from "../../src/extension";
 
 const root = process.env.DUCTUS_E2E_PROJECT ?? vscode.workspace.workspaceFolders![0].uri.fsPath;
@@ -21,6 +25,16 @@ async function waitFor<T>(what: string, check: () => T | undefined | false, ms =
     if (Date.now() > until) throw new Error(`waited ${ms / 1000} s for ${what}`);
     await new Promise((r) => setTimeout(r, 100));
   }
+}
+
+/** A port nothing listens on now. */
+function freePort(): Promise<number> {
+  return new Promise((resolve) => {
+    const server = net.createServer().listen(0, "127.0.0.1", () => {
+      const { port } = server.address() as net.AddressInfo;
+      server.close(() => resolve(port));
+    });
+  });
 }
 
 /** Every `stopped` event any debug session sends, with its top frame's file and line. */
@@ -201,5 +215,96 @@ suite("Ductus", () => {
     } finally {
       vscode.debug.removeBreakpoints([breakpoint]);
     }
+  });
+
+  test("Deploy to dev: a running ductus dev takes a change in place, by the command and on save", async function () {
+    this.timeout(240_000);
+    const binary = await api.binary.get();
+    assert.ok(binary);
+    const port = await freePort();
+    // The guides' project needs its environment's secrets to run: a small project of its own in
+    // the workspace (as scripts/demo-debug.sh does), `adt` and `other` beside it.
+    const project = at("dev-project");
+    const mllp = [await freePort(), await freePort()];
+    for (const [i, name] of ["adt", "other"].entries()) {
+      fs.mkdirSync(path.join(project, "interfaces", name), { recursive: true });
+      fs.writeFileSync(
+        path.join(project, "interfaces", name, "interface.yaml"),
+        `name: ${name}\nsource: { mllp: { host: 127.0.0.1, port: ${mllp[i]} } }\ndestinations: { out: { file: { dir: out }, script: route.ts } }\n`,
+      );
+      fs.writeFileSync(
+        path.join(project, "interfaces", name, "route.ts"),
+        'import type { Message } from "@ductus/sdk";\n\nexport function transform(msg: Message) {\n  msg.set("MSH-5", "LAB");\n  return msg;\n}\n',
+      );
+    }
+    await api.projects.scan();
+    assert.ok(api.projects.roots.includes(project), "a project of its own");
+    const dev = spawn(binary.path, ["dev", "--threads", "1", "--api-listen", `127.0.0.1:${port}`], {
+      cwd: project,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let said = "";
+    dev.stdout.on("data", (d) => (said += d));
+    dev.stderr.on("data", (d) => (said += d));
+    let ended = false;
+    const exited = new Promise<number | null>((resolve) =>
+      dev.on("exit", (code) => {
+        ended = true;
+        resolve(code);
+      }),
+    );
+    const found = path.join(project, ".ductus/dev-engine.json");
+    try {
+      await waitFor("ductus dev's dev-engine.json", () => fs.existsSync(found) || ended, 180_000);
+      assert.ok(!ended, `ductus dev ended:\n${said}`);
+      const code = path.join(project, "interfaces/adt/route.ts");
+      const original = fs.readFileSync(code, "utf8");
+      try {
+        // Changed in the editor as a person would (writing it behind VS Code's back makes the
+        // editor's next save fail: "File Modified Since").
+        const document = await vscode.workspace.openTextDocument(vscode.Uri.file(code));
+        await vscode.window.showTextDocument(document);
+        const append = async (line: string) => {
+          const edit = new vscode.WorkspaceEdit();
+          edit.insert(document.uri, document.positionAt(document.getText().length), `${line}\n`);
+          assert.ok(await vscode.workspace.applyEdit(edit));
+          assert.ok(await document.save());
+        };
+        // The command (as the editor title's button runs it).
+        await append("// deployed by the command");
+        const started = Date.now();
+        const deployed = await api.dev.deploy(project);
+        console.log(`measure: Deploy to dev of one interface ${Date.now() - started} ms`);
+        assert.equal(deployed.error, undefined, said);
+        assert.equal(deployed.report?.applied, "in_place", JSON.stringify(deployed.report));
+        assert.deepEqual(
+          deployed.report?.changes?.map((c) => c.interface),
+          ["adt"],
+          "adt alone",
+        );
+
+        // On save, with the setting.
+        await vscode.workspace.getConfiguration("ductus").update("deployToDevOnSave", true);
+        const next = new Promise<Deployed>((resolve) => {
+          const d = api.dev.onDidDeploy((e) => {
+            d.dispose();
+            resolve(e);
+          });
+        });
+        await append("// deployed on save");
+        const onSave = await next;
+        assert.equal(onSave.report?.applied, "in_place", JSON.stringify(onSave));
+      } finally {
+        await vscode.workspace.getConfiguration("ductus").update("deployToDevOnSave", undefined);
+        fs.writeFileSync(code, original);
+      }
+    } finally {
+      dev.kill("SIGTERM");
+      await exited;
+    }
+    assert.ok(!fs.existsSync(found), "dev-engine.json goes when dev stops");
+    // No dev engine: said, nothing else.
+    const none = await api.dev.deploy(project, false);
+    assert.match(none.error ?? "", /no `ductus dev` is running/);
   });
 });

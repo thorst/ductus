@@ -5,8 +5,9 @@
 # project with the extension and this build of ductus: the tests found at their lines, an
 # interface's tests run, a failing test shown at its expect with the expected and actual values,
 # a mistyped port in Problems on save and gone when fixed, a breakpoint hit from the Test
-# Explorer's Debug, and "Ductus: debug these tests" with no launch.json. Measures the extension's
-# activation, a save to Problems and the package's size.
+# Explorer's Debug, "Ductus: debug these tests" with no launch.json, and (0.7.6.3.1) Deploy to dev
+# against a real `ductus dev`, by the command and on save. Measures the extension's activation, a
+# save to Problems, a deploy to dev and the package's size.
 # Needs: node 24, xvfb-run (a display for VS Code), VS Code's libraries (libgtk-3, libnss3,
 # libasound2, libgbm1; CI's Ubuntu has them).
 set -euo pipefail
@@ -40,8 +41,9 @@ fail=""
 [ "$size" -lt 100000 ] || fail+=" package-over-100KB"
 for t in "finds ductus and activates" "the tests are found by interface" "an interface's tests run" \
   "a failure is shown at its expect" "validate's findings are in Problems" \
-  "Debug from the Test Explorer stops at a breakpoint" "debugging works without launch.json"; do
+  "Debug from the Test Explorer stops at a breakpoint" "debugging works without launch.json" \
+  "Deploy to dev: a running ductus dev takes a change in place"; do
   grep -q "✔ $t" "$LOG" || fail+=" \"$t\""
 done
-grep -q ' 7 passing' "$LOG" || fail+=" not-all-passing"
+grep -q ' 8 passing' "$LOG" || fail+=" not-all-passing"
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

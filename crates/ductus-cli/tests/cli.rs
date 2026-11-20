@@ -1173,6 +1173,125 @@ async fn dev_inspect_holds_only_its_interface_and_an_endless_loop_ends_when_the_
     assert_eq!(written(), 10, "delivered once (it was {at_stop} at the stop)");
 }
 
+/// `ductus dev` takes reloads in place (0.7.6.3.1): once its interfaces and API are up it says where
+/// (`.ductus/dev-engine.json`) and keeps a token for editors (`.ductus/dev-token`, this account's
+/// only); `ductus reload` in the project's folder, with no token given, finds it: A's code changed
+/// is applied in place, A alone, the same engine; a change to `dbg` (under `--inspect`) and a
+/// changed ductus.yaml are refused with nothing changed, saying to restart. Stopped, the file goes.
+#[cfg(target_os = "linux")]
+#[tokio::test(flavor = "multi_thread")]
+async fn dev_reloads_in_place_and_says_where_editors_find_it() {
+    let (port_a, port_dbg, api, inspector) = (free_port(), free_port(), free_port(), free_port());
+    let work = tempfile::tempdir().unwrap();
+    let out_dir = |name: &str| work.path().join(format!("out-{name}"));
+    let interface = |name: &str, port: u16| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\nscript: route.ts\ndestinations:\n  out: {{ file: {{ dir: '{}' }} }}\n",
+            out_dir(name).display()
+        )
+    };
+    let code = |tag: &str| {
+        format!(
+            "import type {{ Message }} from \"@ductus/sdk\";\n\nexport function transform(m: Message) {{\n  m.set(\"MSH-5\", \"{tag}\");\n  return m;\n}}\n"
+        )
+    };
+    let (a_yaml, dbg_yaml, a1) = (interface("a", port_a), interface("dbg", port_dbg), code("A1"));
+    let dir = project(&[
+        (".gitignore", ".ductus/\n*.log\n"),
+        ("ductus.yaml", "{}\n"),
+        ("interfaces/a/interface.yaml", a_yaml.as_str()),
+        ("interfaces/a/route.ts", a1.as_str()),
+        ("interfaces/dbg/interface.yaml", dbg_yaml.as_str()),
+        ("interfaces/dbg/route.ts", a1.as_str()),
+    ]);
+    git(dir.path(), &["init", "-q", "-b", "main"]);
+    git(dir.path(), &["add", "."]);
+    git(dir.path(), &["commit", "-qm", "first"]);
+    let bin = env!("CARGO_BIN_EXE_ductus");
+    let log = dir.path().join("dev.log");
+    let file = std::fs::File::create(&log).unwrap();
+    let mut dev = Command::new(bin)
+        .args(["dev", "--threads", "1", "--api-listen", &format!("127.0.0.1:{api}"), "--inspect", "dbg"])
+        .args(["--inspect-address", &format!("127.0.0.1:{inspector}")])
+        .current_dir(dir.path())
+        .stdout(file.try_clone().unwrap())
+        .stderr(file)
+        .spawn()
+        .unwrap();
+    let stopper = Terminate(dev.id());
+    let read_log = || std::fs::read_to_string(&log).unwrap_or_default();
+    let found = dir.path().join(".ductus/dev-engine.json");
+    assert!(wait_for_path(&found, 120), "no dev-engine.json:\n{}", read_log());
+    let said: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&found).unwrap()).unwrap();
+    assert_eq!(said["api"], format!("http://127.0.0.1:{api}"), "{said}");
+    assert_eq!(said["pid"], dev.id(), "{said}");
+    let token = dir.path().join(".ductus/dev-token");
+    let mode = std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(&token).unwrap().permissions());
+    assert_eq!(mode & 0o777, 0o600, "the token is this account's only");
+
+    // In the project's folder, no token or control socket given: this folder's dev engine.
+    let reload = || {
+        let out = Command::new(bin)
+            .args(["reload", "--json"])
+            .current_dir(dir.path())
+            .env_remove("DUCTUS_API_TOKEN")
+            .env_remove("DUCTUS_API_URL")
+            .env_remove("DUCTUS_CONTROL")
+            .env_remove("RUNTIME_DIRECTORY")
+            .output()
+            .unwrap();
+        let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        let report: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or(serde_json::Value::Null);
+        (out.status.success(), report, said)
+    };
+    let (ok, report, said) = reload();
+    assert!(ok && report["applied"] == "nothing", "{said}\n{}", read_log());
+
+    std::fs::write(dir.path().join("interfaces/a/route.ts"), code("A2")).unwrap();
+    let (ok, report, said) = reload();
+    assert!(ok, "{said}\n{}", read_log());
+    assert_eq!(report["applied"], "in_place", "{said}");
+    let changed: Vec<&str> =
+        report["changes"].as_array().unwrap().iter().map(|c| c["interface"].as_str().unwrap()).collect();
+    assert_eq!(changed, ["a"], "{said}");
+    assert!(stopper.alive(), "the same engine");
+    // A takes messages with its new code.
+    let mut client = ductus_mllp::Client::new(format!("127.0.0.1:{port_a}"), std::time::Duration::from_secs(5));
+    let message = "MSH|^~\\&|EHR|H|LAB|H|20260101||ADT^A01|m1|P|2.5\rPID|1||42\r";
+    let ack = client.send(message.as_bytes()).await.unwrap();
+    assert!(String::from_utf8_lossy(&ack).contains("MSA|AA"), "{}", String::from_utf8_lossy(&ack));
+    let out = out_dir("a");
+    let delivered = eventually(async || {
+        std::fs::read_dir(&out)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|f| std::fs::read_to_string(f.path()).unwrap_or_default().contains("|A2|"))
+    });
+    assert!(delivered.await, "A's new code sent it:\n{}", read_log());
+
+    // The interface under the debugger: refused, nothing changed.
+    std::fs::write(dir.path().join("interfaces/dbg/route.ts"), code("D2")).unwrap();
+    let (ok, report, said) = reload();
+    assert!(!ok && report["applied"] == "refused", "{said}");
+    let outcome = report["outcome"].as_str().unwrap();
+    assert!(outcome.contains("dbg is under the debugger (`--inspect`)"), "{said}");
+    assert!(outcome.contains("Nothing changed"), "{said}");
+    std::fs::write(dir.path().join("interfaces/dbg/route.ts"), code("A1")).unwrap();
+
+    // What only a start reads: refused, restart.
+    std::fs::write(dir.path().join("ductus.yaml"), "isolates: { heap_mb: 96 }\n").unwrap();
+    let (ok, report, said) = reload();
+    assert!(!ok && report["applied"] == "refused", "{said}");
+    assert!(report["outcome"].as_str().unwrap().contains("`ductus dev` doesn't hand over: restart it"), "{said}");
+    assert!(stopper.alive(), "still running: {}", read_log());
+
+    stopper.kill(&[]);
+    assert!(dev.wait().unwrap().success(), "{}", read_log());
+    assert!(!found.exists(), "dev-engine.json goes when dev stops");
+    assert!(token.exists(), "the token stays for the next start");
+}
+
 /// `ductus try` runs one message through every destination's function and sends nothing: what
 /// each would do (sent and what, filtered and why), a write refused and reported instead of made,
 /// each call's console lines, from a file or a fixture, as text or JSON; the interface by name or by

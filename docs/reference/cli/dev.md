@@ -1,6 +1,6 @@
 # `ductus dev`
 
-Run the project with a Postgres of its own, for local development: nothing to install. The first run downloads Postgres (once per user); its data lives in `.ductus/postgres` and it stops with the engine. Prints the connection URL.
+Run the project with a Postgres of its own, for local development: nothing to install. The first run downloads Postgres (once per user); its data lives in `.ductus/postgres` and it stops with the engine. Prints the connection URL. A change to the project is applied in place by `ductus reload` in the project's folder (or an editor's "Deploy to dev"): the changed interfaces take it, the others never pause; a change only a start applies (ductus.yaml, resources.yaml) or to an interface under `--inspect` needs a restart, as the reload says. Editors find it through `.ductus/dev-engine.json` and `.ductus/dev-token`.
 
 ```text
 ductus dev [OPTIONS]

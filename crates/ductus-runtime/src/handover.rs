@@ -324,16 +324,15 @@ impl Requested {
     /// A reload (`Request::in_place`): applied in place where it can, answered, and None; or,
     /// when only the handover applies it, said, and the request given back for the handover.
     /// `new_process`: a handover here starts a new process (which runs a new binary).
-    async fn reload(mut self, engine: &Arc<Engine>, new_process: bool, settings: Option<String>) -> Option<Self> {
+    async fn reload(
+        mut self,
+        engine: &Arc<Engine>,
+        options: crate::reload::Options,
+        settings: Option<String>,
+    ) -> Option<Self> {
         let request = &self.request;
-        let reloaded = crate::reload::reload(
-            engine,
-            &request.asked,
-            request.environment.as_deref(),
-            crate::reload::Options { in_place_only: request.in_place_only, new_binary_counts: new_process },
-            settings,
-        )
-        .await;
+        let reloaded =
+            crate::reload::reload(engine, &request.asked, request.environment.as_deref(), options, settings).await;
         let report = crate::api::reload_report(&reloaded);
         if reloaded.how == crate::reload::How::Handover {
             self.say(format!("reload: by the handover: {}", reloaded.outcome)).await;
@@ -445,6 +444,11 @@ enum How {
         rebuild: Rebuild,
         stop: Option<tokio_util::sync::CancellationToken>,
     },
+    /// No handover at all, only reloads in place asked from inside (`ductus dev`'s API): what needs
+    /// the handover is refused. `debugged`: the interfaces under `--inspect`, never changed in place.
+    InPlaceOnly {
+        debugged: Vec<String>,
+    },
 }
 
 /// Where an engine takes handover requests: its control socket (Linux), a deploy from inside it,
@@ -500,6 +504,15 @@ impl Control {
         Self { requests: Some(requests), busy, asker: Some(asker), how }
     }
 
+    /// Reloads in place only, asked from inside (`POST /engine/reload`): `ductus dev`, which can't
+    /// hand over. No control socket (it would take the service's `/run/ductus/control`) and no
+    /// SIGHUP (it still ends `ductus dev`, as before). `debugged`: the interfaces under `--inspect`.
+    pub fn in_place_only(debugged: Vec<String>) -> Self {
+        let busy = Arc::new(AtomicBool::new(false));
+        let (asker, requests) = mpsc::channel(1);
+        Self { requests: Some(requests), busy, asker: Some(asker), how: Some(How::InPlaceOnly { debugged }) }
+    }
+
     /// Asks for a handover from inside the engine (a deploy), as `ductus handover` asks over the
     /// socket: None when this engine takes no handovers.
     pub fn asker(&self) -> Option<Asker> {
@@ -528,14 +541,32 @@ impl Control {
                         How::InProcess { rebuild, .. } => crate::reload::settings_changed(engine, rebuild),
                         #[cfg(target_os = "linux")]
                         How::Process => None,
+                        How::InPlaceOnly { .. } => None,
                     };
-                    match requested.reload(engine, new_process, settings).await {
+                    let options = crate::reload::Options {
+                        in_place_only: requested.request.in_place_only,
+                        new_binary_counts: new_process,
+                        no_handover: matches!(how, How::InPlaceOnly { .. }),
+                        debugged: match how {
+                            How::InPlaceOnly { debugged } => debugged.clone(),
+                            _ => Vec::new(),
+                        },
+                    };
+                    match requested.reload(engine, options, settings).await {
                         Some(back) => requested = back,
                         None => {
                             self.busy.store(false, Ordering::SeqCst);
                             continue;
                         }
                     }
+                }
+                if matches!(how, How::InPlaceOnly { .. }) {
+                    // Only a deploy asks for the handover itself, and this engine runs no releases:
+                    // never reached, answered all the same.
+                    let text = "this engine takes no handovers (`ductus dev`): restart it instead".to_string();
+                    requested.done(false, text).await;
+                    self.busy.store(false, Ordering::SeqCst);
+                    continue;
                 }
                 if let Some(successor) = start(requested, engine, how).await {
                     return successor; // busy for good: this engine stops
@@ -768,6 +799,7 @@ async fn start(mut requested: Requested, engine: &Engine, how: &How) -> Option<S
         #[cfg(target_os = "linux")]
         How::Process => linux::spawn(&requested.request, &me).await,
         How::InProcess { rebuild, stop } => in_process(rebuild, stop.clone(), me, engine.releases.is_some()).await,
+        How::InPlaceOnly { .. } => Err(anyhow::anyhow!("this engine takes no handovers (`ductus dev`)")),
     };
     let mut started = match started {
         Ok(s) => s,

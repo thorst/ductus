@@ -7,3 +7,6 @@ export const environment = () => ductus().get<string>("environment")?.trim() || 
 
 /** Whether saving a file of a project runs `ductus validate`. */
 export const validateOnSave = () => ductus().get<boolean>("validateOnSave", true);
+
+/** Whether saving a file of a project deploys it to its running `ductus dev`. */
+export const deployToDevOnSave = () => ductus().get<boolean>("deployToDevOnSave", false);

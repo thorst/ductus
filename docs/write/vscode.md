@@ -9,6 +9,7 @@ already look in VS Code:
 | **Testing** (the flask in the activity bar) | every interface's tests, by interface, each at its `test(...)` line with a ▷ beside it in the file. Run or debug one test, one interface or everything. Each result shows the moment its test ends; a failure sits on its `expect` line with the expected and actual values side by side |
 | **Problems** | [`ductus validate`](../reference/validate.md)'s findings at their key in the YAML or their place in the code, when the workspace opens and each time you save a file of the project |
 | **Run and Debug** | **Ductus: debug these tests**, **Ductus: debug this message** and **Ductus: debug this interface** with no `launch.json`, or F5 with a file of an interface open |
+| **Deploy to dev** (the ☁ button above the editor while your `ductus dev` runs) | your change running in your [`ductus dev`](../install/dev.md), in place: the interfaces you changed take it, the others never pause |
 
 It runs the `ductus` you already have, through the same `--json` outputs that tools and CI read
 ([for editors and CI](testing.md#for-editors-and-ci-json)), so what it shows is what `ductus test`
@@ -92,6 +93,29 @@ To keep one with your own options, add it to `launch.json` with the type `ductus
 | `file` | a file of the interface (for `try`, the message); `${file}`, `${fileDirname}` and `${workspaceFolder}` are filled in | the open file |
 | `args` | more options for the command | none |
 
+## Deploy to dev
+
+With [`ductus dev`](../install/dev.md) running for the project (in VS Code's terminal or any
+other), **Ductus: Deploy to dev** (Command Palette, or the ☁ button above the editor) makes it run
+the project as it is now on disk, as `ductus reload` in the project's folder does: the interfaces
+whose code or interface.yaml changed take it between two messages, added ones start, removed ones
+stop, every other interface goes on untouched. A notification says which took it and how long it
+took (`Deployed to dev: adt-in in 84 ms`); each step and code version is in the output.
+
+It finds the engine and signs in by itself, through the two files `ductus dev` keeps in `.ductus/`
+([how](../install/dev.md#how-ductus-reload-and-editors-find-it)): nothing to configure, no token to
+paste. With no `ductus dev` running it says so, with a button that starts one in a terminal.
+
+Refused, with nothing changed and the reason in the notification: a project that doesn't load
+(the same errors as Problems), a change only a start applies (ductus.yaml, resources.yaml: restart
+`ductus dev`), and a change to an interface you're debugging with **Ductus: debug this interface**
+(restart the debug session)
+([nuance](../nuances/dev.md#ductus-dev-reloads-in-place-only-level-1)).
+
+**On every save**: turn on `ductus.deployToDevOnSave`. Several saves close together deploy once;
+a success shows in the status bar instead of a notification, a refusal still notifies. While no
+`ductus dev` runs, saving does nothing more than before.
+
 ## Settings
 
 | Setting | Default | What it does |
@@ -99,6 +123,7 @@ To keep one with your own options, add it to `launch.json` with the type `ductus
 | `ductus.path` | empty: `ductus` on the `PATH` | the program to run, as a full path, relative to the workspace folder, or with `${workspaceFolder}` |
 | `ductus.environment` | `dev` | the environment (`--env`) tests, checks and debugging read the project in |
 | `ductus.validateOnSave` | `true` | `validate` after each save; off, only when the workspace opens and with **Ductus: Validate the project** (Command Palette) |
+| `ductus.deployToDevOnSave` | `false` | [Deploy to dev](#deploy-to-dev) after each save, while the project's `ductus dev` runs |
 
 ## What it costs
 
@@ -122,5 +147,6 @@ doesn't load), that's where it says why.
 copy of this guide's [example project](https://github.com/thorst/ductus/tree/main/examples/guides)
 and the build being tested: the tests found at their lines, an interface's tests run, a failing
 test shown at its `expect` with both values, a port mistyped in interface.yaml shown in Problems on
-save and gone once fixed, a breakpoint in `lab.ts` hit from the Test Explorer's **Debug**, and
-**Ductus: debug these tests** with no `launch.json`.
+save and gone once fixed, a breakpoint in `lab.ts` hit from the Test Explorer's **Debug**,
+**Ductus: debug these tests** with no `launch.json`, and **Deploy to dev** against a real `ductus
+dev`, by the command and on save.

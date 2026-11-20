@@ -327,7 +327,9 @@ export interface paths {
          *     ones start, removed ones stop), the others never pause. What only a start reads (ductus.yaml,
          *     resources.yaml, docs-schema.yaml, the environment's secrets file; a new binary) goes by the
          *     handover, unless `in_place_only`. Recorded as a deployment (`how` = `reload`). In release mode
-         *     it's a handover to the release that runs. 200: it runs the folder (`applied`: `in_place`,
+         *     it's a handover to the release that runs. `ductus dev` applies in place only: what needs the
+         *     handover, and a change to an interface under its debugger (`--inspect`), is refused (409), and
+         *     it says to restart it. 200: it runs the folder (`applied`: `in_place`,
          *     `nothing`, `handover`). 409: refused, nothing changed (the folder doesn't load, a start would
          *     refuse it, `in_place_only` and it needs the handover, another reload or handover under way).
          *     500: a handover that failed (this engine goes on as it was). Needs the `deploy` permission.

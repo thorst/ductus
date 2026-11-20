@@ -187,7 +187,11 @@ enum Command {
     Run(RunArgs),
     /// Run the project with a Postgres of its own, for local development: nothing to install.
     /// The first run downloads Postgres (once per user); its data lives in `.ductus/postgres`
-    /// and it stops with the engine. Prints the connection URL.
+    /// and it stops with the engine. Prints the connection URL. A change to the project is
+    /// applied in place by `ductus reload` in the project's folder (or an editor's "Deploy to
+    /// dev"): the changed interfaces take it, the others never pause; a change only a start
+    /// applies (ductus.yaml, resources.yaml) or to an interface under `--inspect` needs a restart,
+    /// as the reload says. Editors find it through `.ductus/dev-engine.json` and `.ductus/dev-token`.
     Dev {
         /// Project folder containing `interfaces/`.
         #[arg(long, env = "DUCTUS_PROJECT", default_value = ".")]
@@ -604,9 +608,11 @@ enum Command {
     /// by the handover instead, said in the answer. Recorded as a deployment (`ductus history`).
     /// Asks over the control socket where there is one (Linux under the package, containers),
     /// else the engine's API with a `deploy` token (Windows, a plain `ductus run`). `systemctl
-    /// reload ductus` runs it. Exit 0 once the engine runs the folder, 1 when it was refused
-    /// (nothing changed: the reason is printed). Example: `git pull && sudo ductus reload -m
-    /// "lab codes from LAB-142"`.
+    /// reload ductus` runs it. In a project's folder whose `ductus dev` runs, with no token given,
+    /// it reloads that engine (with the token `ductus dev` keeps in `.ductus/dev-token`); a dev
+    /// engine applies in place only and says to restart it for the rest. Exit 0 once the engine
+    /// runs the folder, 1 when it was refused (nothing changed: the reason is printed). Example:
+    /// `git pull && sudo ductus reload -m "lab codes from LAB-142"`.
     Reload {
         /// The running engine's control socket (default: `$RUNTIME_DIRECTORY/control`, else
         /// /run/ductus/control when it's there; without one, the API is asked).
