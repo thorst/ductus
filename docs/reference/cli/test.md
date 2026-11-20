@@ -2,7 +2,7 @@
 
 Run each interface's `*.test.ts` files.
 
-Each test runs inside the engine's own JavaScript runtime with the SDK it uses, one at a time, with no database, network or engine. A failed test prints where it is, where it failed (the `expect`'s line, or the stack of what was thrown) and why; exits 1 when one fails, or when `--filter` matches no test.
+Each test runs inside the engine's own JavaScript runtime with the SDK it uses, one at a time, with no database, network or engine. A failed test prints where it is, where it failed (the `expect`'s line, or the stack of what was thrown) and why; exits 1 when one fails, or when `--filter` or `--test` matches no test. A test that runs past `--timeout` (5 s) without pausing (an endless loop) or fills the script heap is stopped and fails by name; the tests after it run in a fresh runtime.
 
 ```text
 ductus test [OPTIONS]
@@ -15,6 +15,8 @@ ductus test [OPTIONS]
 | `--root <ROOT>` | The project folder: the one with `interfaces/` and ductus.yaml. | `.` |  |
 | `--interface <INTERFACE>` | Only this interface: its name, or a file or folder inside its folder (`interfaces/adt-in/route.test.ts`), as an editor passes the open file. Again for another (`--interface adt-in --interface lab-out`). |  |  |
 | `--filter <FILTER>` | Only the tests whose name contains this text (case matters): `--filter "A31"`. |  |  |
+| `--test <NAME>` | Only the test with this name, exactly as written in `test("...")` (case matters), in every interface (or those `--interface` names); again for another. A name no test has exits 1. With `--filter`, a test must match both. |  |  |
+| `--timeout <TIME>` | How long each test may run without pausing before it's stopped as a runaway (an endless loop) and fails: e.g. 500ms, 30s. Raise it for a test that's meant to take long or a CI machine busy with other jobs; lower it so a looping test fails sooner. Every interface's tests get the same limit; the interface's own `timeout` applies to the engine, not here. Off while a debugger is attached (`--inspect`). | `5s` |  |
 | `--list` | List the tests, with the file and line of each, without running them. |  |  |
 | `--inspect <ADDRESS>` | Run the tests under a debugger (VS Code, Chrome DevTools, anything that speaks the Chrome DevTools Protocol): listen on 127.0.0.1:9229 (or the address given, on this machine only), wait for one to attach, then run one interface's tests (`--interface`, or the only one with tests). Breakpoints and `debugger;` statements pause there; the time limit is off while it's attached. The debugging guide shows VS Code's and Chrome's setup. |  |  |
 | `--json` | JSON Lines for tools (an editor, CI): one object per test (its interface, name, file, line, column, and when run `ok`, `ms`, the error, where it failed and the expected and actual values), then a summary. The testing guide describes every field. |  |  |

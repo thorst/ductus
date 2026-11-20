@@ -74,6 +74,52 @@ adt-in
   engine quarantines a message with the same first line, so the Quarantine page says where too
   ([nuance](../nuances/transforms.md#a-thrown-errors-reason-says-where-it-was-thrown-level-1)).
 
+## When a test runs away
+
+A test that never finishes (an endless loop in the code it runs) or that fills the script heap
+is stopped and fails under its own name; the rest of the run goes on. Here someone rewrote the
+Z-segment removal in `interfaces/adt-in/lab.ts` as a loop,
+`while (i < msg.segmentNames.length) { … }`, and forgot the `i++`:
+
+```text
+$ ductus test --interface adt-in
+adt-in
+  ✓ billing gets admissions and discharges only (1ms)
+  ✗ the lab gets visits, with its own patient class and no Z segments  (interfaces/adt-in/lab.test.ts:4:1)
+      stopped: the script ran longer than its 5s timeout without pausing (endless loop?)
+  ✓ the lab doesn't get patient updates (A31) (0ms)
+  ✓ test patients are dropped with a reason (1ms)
+  ✓ an unknown patient class is quarantined, not guessed (0ms)
+
+4 passed, 1 failed
+```
+
+The other three lab tests pass because they return (or throw) before the loop. A test that
+fills the heap reads the same way, with its own reason:
+
+```text
+  ✗ fills the heap  (interfaces/census-in/heap.test.ts:7:1)
+      stopped: the script used up the 512 MB script heap
+```
+
+- **Each test has its own limit**, 5 seconds by default: the run above took 5.1 s, nearly all
+  of it the runaway's wait. `--timeout 500ms` makes a looping test fail sooner while you look
+  for it; `--timeout 30s` is for a test meant to take long. The heap's limit is the engine's
+  512 MB and isn't a setting.
+- **The tests after it start over.** Stopping the runaway also stops whatever it was in the
+  middle of, so the interface's test files are loaded again for the tests that follow: a value a
+  module keeps between tests (a counter, a cache) starts from what loading sets. Keep each test
+  independent and this never shows
+  ([nuance](../nuances/debugging.md#a-runaway-test-fails-and-the-tests-after-it-start-with-fresh-module-state-level-2)).
+- **Under a debugger** (`--inspect`) the tests after a runaway are reported not run instead
+  (`notRun` in [`--json`](#ductus-test---json)): the debugger was attached to the runtime that
+  was stopped. Run them again without it, or fix the loop first.
+- **Other interfaces' tests are never affected**: each interface's tests run on their own.
+- **To find the loop**, run just that test under a debugger and pause it:
+  `ductus test --test "the lab gets visits, with its own patient class and no Z segments" --inspect`
+  ([debugging](debugging.md)). In the engine, the same loop is stopped after the interface's own
+  `timeout` ([nuance](../nuances/runaway.md#timeout-counts-time-without-pausing-not-total-time-level-2)).
+
 ## Seeing what the code did: `console`
 
 `console.log` in a test, or in the code it runs, is the quick way to see a value. Each line is
