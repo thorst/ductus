@@ -2,8 +2,9 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { Finder } from "./binary";
+import { cause, errorText } from "./engines";
 import { type DevEngine, type ReloadReport, parseDevEngine, parseReload, reloadSummary } from "./lines";
-import type { Projects } from "./projects";
+import { type Projects, chooseRoot } from "./projects";
 import { deployToDevOnSave } from "./settings";
 
 /** How long after a save Deploy to dev waits for the next (saving several files deploys once). */
@@ -112,7 +113,7 @@ export class Dev implements vscode.Disposable {
   }
 
   private async command(uri?: vscode.Uri) {
-    const root = await this.chooseRoot(uri);
+    const root = await chooseRoot(this.projects, uri, "Deploy to dev", "The project to deploy to its ductus dev");
     if (root) await this.deploy(root, true);
   }
 
@@ -190,19 +191,6 @@ export class Dev implements vscode.Disposable {
     if (chosen === "Show the output") this.log.show();
   };
 
-  /** The project of the file given or open, else the only one, else the one picked. */
-  private async chooseRoot(uri?: vscode.Uri): Promise<string | undefined> {
-    const file = uri?.scheme === "file" ? uri.fsPath : vscode.window.activeTextEditor?.document.uri.fsPath;
-    const fromFile = file ? this.projects.rootOf(file) : undefined;
-    if (fromFile) return fromFile;
-    const roots = this.projects.roots;
-    if (roots.length <= 1) {
-      if (roots.length === 0) void vscode.window.showWarningMessage("Deploy to dev: no Ductus project is open.");
-      return roots[0];
-    }
-    return vscode.window.showQuickPick([...roots], { placeHolder: "The project to deploy to its ductus dev" });
-  }
-
   private async refreshContext() {
     const found = await Promise.all(this.projects.roots.map((r) => readText(path.join(r, FOUND))));
     void vscode.commands.executeCommand(
@@ -219,23 +207,6 @@ async function readText(file: string): Promise<string> {
   } catch {
     return "";
   }
-}
-
-/** What a failed fetch says, without the useless "fetch failed". */
-function cause(e: unknown): string {
-  const inner = e instanceof Error && e.cause instanceof Error ? e.cause.message : undefined;
-  return inner ?? (e instanceof Error ? e.message : String(e));
-}
-
-/** An error answer's `error`, else its text. */
-function errorText(body: string): string {
-  try {
-    const value = JSON.parse(body);
-    if (value && typeof value.error === "string") return value.error;
-  } catch {
-    // not JSON
-  }
-  return body.trim() || "no details";
 }
 
 /** A path as a shell reads it (spaces). */

@@ -1,10 +1,11 @@
 // The extension in a real VS Code on a copy of the guides' project (run.ts): ductus found, the
 // tests discovered at their lines, a run's results, a failure at its place with both values,
 // Problems on save, a breakpoint hit from the Test Explorer's Debug, a debug configuration with no
-// launch.json, and Deploy to dev against a real `ductus dev`. Lines starting `measure:` are read
-// by scripts/demo-vscode.sh.
+// launch.json, Deploy to dev against a real `ductus dev`, and Promote… across two engines in
+// release mode (scripts/demo-vscode.sh starts them). Lines starting `measure:` are read by
+// scripts/demo-vscode.sh.
 import * as assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import * as fs from "node:fs";
 import * as net from "node:net";
 import * as path from "node:path";
@@ -306,5 +307,116 @@ suite("Ductus", () => {
     // No dev engine: said, nothing else.
     const none = await api.dev.deploy(project, false);
     assert.match(none.error ?? "", /no `ductus dev` is running/);
+  });
+
+  test("Promote…: a release file to test, then from test to prod; each token asked once, checked first", async function () {
+    this.timeout(300_000);
+    // Two engines in release mode (test, and prod requiring test first), started by
+    // scripts/demo-vscode.sh with a deploy token on each and a viewer's on prod.
+    const given = JSON.parse(process.env.DUCTUS_E2E_ENGINES || "null") as {
+      test: { url: string; token: string };
+      prod: { url: string; token: string; viewer: string };
+    } | null;
+    assert.ok(given, "DUCTUS_E2E_ENGINES (scripts/demo-vscode.sh starts the engines)");
+    const binary = await api.binary.get();
+    assert.ok(binary);
+
+    // A project of its own (its folder's name is the release's project), its port per environment.
+    const project = at("promote-project");
+    const feed = "vscode-promote-feed";
+    fs.mkdirSync(path.join(project, "interfaces", feed), { recursive: true });
+    fs.mkdirSync(path.join(project, "environments"), { recursive: true });
+    fs.writeFileSync(
+      path.join(project, "interfaces", feed, "interface.yaml"),
+      `name: ${feed}\nsource: { mllp: { host: 127.0.0.1, port: \${MLLP_PORT} } }\ndestinations: { out: { file: { dir: out }, script: route.ts } }\n`,
+    );
+    fs.writeFileSync(
+      path.join(project, "interfaces", feed, "route.ts"),
+      'import type { Message } from "@ductus/sdk";\n\nexport function transform(msg: Message) {\n  msg.set("MSH-5", "LAB");\n  return msg;\n}\n',
+    );
+    for (const environment of ["dev", "test", "prod"]) {
+      fs.writeFileSync(
+        path.join(project, "environments", `${environment}.yaml`),
+        `variables:\n  MLLP_PORT: ${await freePort()}\n`,
+      );
+    }
+    await api.projects.scan();
+    // `ductus release`, as a developer runs it in the terminal (no database needed).
+    const environment = { ...process.env };
+    delete environment.DUCTUS_DATABASE_URL;
+    const made = spawnSync(binary.path, ["release", "-m", "the feed"], {
+      cwd: project,
+      env: environment,
+      encoding: "utf8",
+    });
+    assert.equal(made.status, 0, `${made.stdout}${made.stderr}`);
+    const files = fs.readdirSync(path.join(project, ".ductus/releases"));
+    assert.equal(files.length, 1, files.join(", "));
+    const file = path.join(project, ".ductus/releases", files[0]);
+
+    // The engines by name, and the token prompt answered here (prod: a viewer's first).
+    const settings = vscode.workspace.getConfiguration("ductus");
+    await settings.update("engines", { test: given.test.url, prod: given.prod.url });
+    const asked: string[] = [];
+    const answers = new Map([
+      [given.test.url, [given.test.token]],
+      [given.prod.url, [given.prod.viewer, given.prod.token]],
+    ]);
+    const prompt = api.engines.ask;
+    api.engines.ask = async (engine, need, why) => {
+      asked.push(`${engine.name} ${need}${why ? `: ${why}` : ""}`);
+      return answers.get(engine.url)?.shift();
+    };
+    try {
+      const engines = api.engines.list();
+      const test = engines.find((e) => e.name === "test")!;
+      const prod = engines.find((e) => e.name === "prod")!;
+      assert.ok(test && prod, JSON.stringify(engines));
+
+      // 1. The file straight to prod: refused by prod's rules. The viewer's token was turned away
+      //    before anything ran, and asked for again.
+      const refused = await api.promote.promote({ root: project, release: file, to: prod, reason: "the feed" });
+      assert.equal(refused.report?.ok, false, JSON.stringify(refused));
+      assert.match(refused.report?.rules?.[0] ?? "", /deployed to test first/);
+      assert.equal(asked.length, 2, asked.join("\n"));
+      assert.match(asked[1], /^prod deploy: .*viewer's token/);
+
+      // 2. The file to test: deployed, its record written into the file.
+      let started = Date.now();
+      const toTest = await api.promote.promote({ root: project, release: file, to: test, reason: "the feed" });
+      console.log(`measure: Promote a release file to test ${Date.now() - started} ms`);
+      assert.equal(toTest.report?.ok, true, JSON.stringify(toTest));
+      assert.equal(toTest.report?.environment, "test");
+      assert.deepEqual(asked.slice(2), ["test deploy"]);
+      const short = toTest.report!.short!;
+
+      // Test's releases, as the picker lists them: this project's.
+      const signed = await api.engines.signIn(test, "download");
+      assert.ok(signed, "test's token kept");
+      const listed = await api.engines.get(signed, "/releases?limit=50");
+      assert.ok("body" in listed && listed.body.includes(`"project":"promote-project"`), JSON.stringify(listed));
+
+      // 3. From test to prod by its id: both tokens kept (nothing asked), prod's rules met.
+      started = Date.now();
+      const toProd = await api.promote.promote({
+        root: project,
+        release: short,
+        from: test,
+        to: prod,
+        reason: "tested in test",
+      });
+      console.log(`measure: Promote from test to prod ${Date.now() - started} ms`);
+      assert.equal(toProd.report?.ok, true, JSON.stringify(toProd));
+      assert.equal(toProd.report?.environment, "prod");
+      assert.equal(toProd.promotion?.from, test.url);
+      assert.equal(asked.length, 3, `nothing more asked: ${asked.join("\n")}`);
+
+      // 4. Forgotten: the next use asks again.
+      assert.ok(await api.engines.forget(prod));
+      assert.ok(!(await api.engines.forget(prod)), "gone");
+    } finally {
+      api.engines.ask = prompt;
+      await settings.update("engines", undefined);
+    }
   });
 });

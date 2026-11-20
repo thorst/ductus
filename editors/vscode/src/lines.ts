@@ -177,6 +177,266 @@ export function reloadSummary(report: ReloadReport): string {
   return `${what}${took}${warned > 0 ? ` (⚠ ${warned} over someone else's change: see the output)` : ""}`;
 }
 
+/** An engine named in the setting `ductus.engines`. */
+export interface NamedEngine {
+  name: string;
+  /** Its REST API, without a trailing `/`: `https://ductus-test:7700`. */
+  url: string;
+}
+
+/**
+ * The setting `ductus.engines` (`{ "test": "https://ductus-test:7700" }`) as engines in the order
+ * written, and what's wrong with any entry left out (said once in the output, never thrown).
+ */
+export function parseEngines(value: unknown): { engines: NamedEngine[]; problems: string[] } {
+  const engines: NamedEngine[] = [];
+  const problems: string[] = [];
+  if (value === undefined || value === null) return { engines, problems };
+  if (typeof value !== "object" || Array.isArray(value)) {
+    return {
+      engines,
+      problems: ['`ductus.engines` is a map of names to URLs: { "test": "https://ductus-test:7700" }'],
+    };
+  }
+  for (const [name, url] of Object.entries(value as Record<string, unknown>)) {
+    if (typeof url !== "string" || !/^https?:\/\/[^/\s]+/.test(url.trim())) {
+      problems.push(
+        `\`ductus.engines\`: ${name}'s URL isn't one (http:// or https:// and the host): ${JSON.stringify(url)}`,
+      );
+      continue;
+    }
+    engines.push({ name, url: url.trim().replace(/\/+$/, "") });
+  }
+  return { engines, problems };
+}
+
+/** Who a token is, as `GET /session` answers. */
+export interface Session {
+  kind: string;
+  name: string;
+  /** `viewer`, `operator` or `admin`. */
+  role: string;
+  permissions: string[];
+}
+
+export function parseSession(body: string): Session | undefined {
+  try {
+    const value = JSON.parse(body);
+    return value && typeof value.name === "string" && typeof value.role === "string" && Array.isArray(value.permissions)
+      ? (value as Session)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * What a promotion needs of a token: `deploy` on the engine it goes to, `download` on the engine
+ * it comes from (an operator or admin with `deploy` may download too). docs/reference/api: ACCESS.
+ */
+export type Need = "deploy" | "download";
+
+/** Whether `session` may do `need`; when not, what to give the token (undefined: it may). */
+export function lacks(session: Session, need: Need): string | undefined {
+  const deploys = session.role !== "viewer" && session.permissions.includes("deploy");
+  if (need === "deploy" && !deploys) {
+    return session.role === "viewer"
+      ? `${session.name} is a viewer's token: deploying needs an operator's with the \`deploy\` permission`
+      : `${session.name} lacks the \`deploy\` permission`;
+  }
+  if (need === "download" && !deploys && !session.permissions.includes("download")) {
+    return `${session.name} can't fetch releases: it needs the \`download\` permission (or an operator's \`deploy\`)`;
+  }
+  return undefined;
+}
+
+/** What `GET /engine` says that a promotion reads. */
+export interface EngineInfo {
+  version: string;
+  environment: string;
+  /** Release mode; null in folder mode (deploys are refused there). */
+  releases?: { project?: string | null; running?: string | null; requires?: string[] } | null;
+}
+
+export function parseEngineInfo(body: string): EngineInfo | undefined {
+  try {
+    const value = JSON.parse(body);
+    return value && typeof value.environment === "string" ? (value as EngineInfo) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** One release an engine has stored, as `GET /releases` lists it. */
+export interface StoredRelease {
+  id: string;
+  short: string;
+  project: string;
+  made_at?: string | null;
+  made_by?: string;
+  reason?: string | null;
+  branches?: string[];
+  environments?: string[];
+  running?: boolean;
+  composed_from?: string;
+}
+
+export function parseReleases(body: string): StoredRelease[] | undefined {
+  try {
+    const value = JSON.parse(body);
+    return Array.isArray(value)
+      ? value.filter((r) => r && typeof r.id === "string" && typeof r.short === "string")
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** A release file `ductus release` wrote: `<project>-<first 12 of its id>.tar.gz`. */
+export function releaseFile(name: string): { project: string; short: string } | undefined {
+  const m = /^(.+)-([0-9a-f]{12})\.tar\.gz$/.exec(name);
+  return m ? { project: m[1], short: m[2] } : undefined;
+}
+
+/** A promotion: what goes where, as `ductus deploy` takes it. */
+export interface Promotion {
+  /** A release file's path, or a stored release's id. */
+  release: string;
+  /** The engine to fetch the id from (`--from`); none: a file, or a release the target has. */
+  from?: string;
+  to: string;
+  reason: string;
+}
+
+/** `ductus deploy`'s arguments (tokens go in its environment, never here). */
+export function deployArgs(p: Promotion): string[] {
+  const args = ["deploy", p.release, "--to", p.to];
+  if (p.from) args.push("--from", p.from);
+  if (p.reason.trim()) args.push("-m", p.reason.trim());
+  args.push("--json");
+  return args;
+}
+
+/** A finding of the gate: `ductus release check`'s report, as a deploy carries it. */
+export interface GateFinding {
+  level: string;
+  text: string;
+  more?: string[];
+}
+
+/**
+ * What `ductus deploy --json` prints (`POST /deployments`' answer): docs/reference's
+ * `DeployReport`. Fields are only ever added; only those shown here are read.
+ */
+export interface DeployReport {
+  ok: boolean;
+  outcome: string;
+  short?: string;
+  project?: string;
+  environment?: string;
+  rollback?: boolean;
+  forced?: boolean;
+  applied?: string;
+  branches?: string[];
+  rules?: string[];
+  replaces?: Record<string, string>;
+  gate?: {
+    reused?: boolean;
+    why_not_reused?: string;
+    check?: {
+      id?: number;
+      at?: string;
+      by?: string;
+      ok?: boolean;
+      seconds?: number;
+      report?: { checks?: GateFinding[] };
+    };
+  } | null;
+  plan?: { changes?: { interface: string; what?: string[]; restarts?: string | null }[]; project?: string[] } | null;
+  steps?: string[];
+  changes?: { interface: string; from: string | null; to: string }[];
+}
+
+export function parseDeploy(stdout: string): DeployReport | undefined {
+  try {
+    const value = JSON.parse(stdout);
+    return value && typeof value.ok === "boolean" && typeof value.outcome === "string"
+      ? (value as DeployReport)
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The gate's problems and warnings, the most important first. */
+function gateFindings(report: DeployReport): GateFinding[] {
+  const found = (report.gate?.check?.report?.checks ?? []).filter(
+    (c) => c.level === "problem" || c.level === "warning",
+  );
+  return [...found.filter((c) => c.level === "problem"), ...found.filter((c) => c.level === "warning")];
+}
+
+/**
+ * A deploy's report in one line for a notification: what changed, or the first reason it was
+ * refused (a rule, someone else's work, the gate's first problem). The whole report goes to the
+ * output (`deployLines`).
+ */
+export function deploySummary(report: DeployReport): string {
+  if (!report.ok) {
+    const why =
+      report.rules?.[0] ??
+      Object.entries(report.replaces ?? {}).map(([part, w]) => `it would undo ${part}: ${w}`)[0] ??
+      gateFindings(report).find((c) => c.level === "problem")?.text;
+    return why ?? report.outcome.split("\n")[0];
+  }
+  const changed = [
+    ...(report.changes ?? []).map((c) => (c.from === null ? `${c.interface} (new)` : c.interface)),
+    ...(report.plan?.changes ?? []).filter((c) => c.what?.[0] === "removed").map((c) => `${c.interface} (removed)`),
+  ];
+  const how = report.applied === "in_place" ? "in place" : report.applied ? report.applied.replace(/_/g, " ") : "";
+  if (changed.length === 0) return report.outcome.split("\n")[0];
+  return `${changed.join(", ")}${how ? ` (${how})` : ""}`;
+}
+
+/** A deploy's whole report as lines for the output: what `ductus deploy` prints, in short. */
+export function deployLines(report: DeployReport): string[] {
+  const lines: string[] = [];
+  const what = report.rollback ? "rollback to release" : "release";
+  const branches = report.branches?.length ? `, branch ${report.branches.join(", ")}` : "";
+  lines.push(
+    `${what} ${report.short ?? "?"} (project ${report.project ?? "?"}${branches}) to \`${report.environment ?? "?"}\``,
+  );
+  for (const rule of report.rules ?? []) lines.push(`${report.rollback ? "·" : "✗"} ${rule}`);
+  for (const [part, why] of Object.entries(report.replaces ?? {})) {
+    const mark = report.rollback ? "⚠ undoes" : report.forced ? "⚠ deployed over" : "✗ would undo";
+    lines.push(`${mark} ${part}: ${why}`);
+  }
+  const gate = report.gate;
+  if (gate) {
+    const check = gate.check ?? {};
+    const result = check.ok ? "passed" : "found problems";
+    if (gate.reused) {
+      lines.push(`gate: reused check #${check.id ?? "?"} (${check.at ?? "?"} by ${check.by ?? "?"}: ${result})`);
+    } else {
+      const why = gate.why_not_reused ? ` (${gate.why_not_reused})` : "";
+      lines.push(`gate: ${result}${check.seconds === undefined ? "" : ` in ${check.seconds} s`}${why}`);
+      for (const c of gateFindings(report)) {
+        lines.push(`  ${c.level === "problem" ? "✗" : "⚠"} ${c.text}`);
+        for (const more of (c.more ?? []).slice(0, 10)) lines.push(`      ${more}`);
+      }
+    }
+  }
+  for (const c of report.plan?.changes ?? []) {
+    const how = c.restarts ? `in place, restarting alone: ${c.restarts}` : "in place";
+    lines.push(`· ${c.interface}: ${(c.what ?? []).join(", ")} (${how})`);
+  }
+  for (const line of report.plan?.project ?? []) lines.push(`· ${line}`);
+  for (const step of report.steps ?? []) lines.push(`  ${step}`);
+  lines.push(`${report.ok ? "✓" : "✗"} ${report.outcome}`);
+  for (const c of report.changes ?? []) lines.push(`  ${c.interface}: ${c.from ?? "new here"} → ${c.to}`);
+  return lines;
+}
+
 /** `ductus 0.7.0-dev` → [0, 7, 0]; undefined when it isn't a version line. */
 export function parseVersion(text: string): [number, number, number] | undefined {
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);

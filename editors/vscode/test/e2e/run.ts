@@ -37,7 +37,8 @@ async function main() {
         "--skip-release-notes",
         `--user-data-dir=${path.join(work, "u")}`,
       ],
-      extensionTestsEnv: { DUCTUS_E2E_PROJECT: project },
+      // DUCTUS_E2E_ENGINES: the engines Promote… is tested against (scripts/demo-vscode.sh).
+      extensionTestsEnv: { DUCTUS_E2E_PROJECT: project, DUCTUS_E2E_ENGINES: process.env.DUCTUS_E2E_ENGINES ?? "" },
     });
   } finally {
     if (!process.env.DUCTUS_E2E_KEEP) fs.rmSync(work, { recursive: true, force: true });

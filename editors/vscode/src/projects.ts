@@ -48,6 +48,27 @@ export class Projects implements vscode.Disposable {
   }
 }
 
+/**
+ * The project a command acts on: the file given's, else the open file's, else the only one, else
+ * the one picked (`placeHolder` says what for). Undefined, said why, when there's none.
+ */
+export async function chooseRoot(
+  projects: Projects,
+  uri: vscode.Uri | undefined,
+  command: string,
+  placeHolder: string,
+): Promise<string | undefined> {
+  const file = uri?.scheme === "file" ? uri.fsPath : vscode.window.activeTextEditor?.document.uri.fsPath;
+  const fromFile = file ? projects.rootOf(file) : undefined;
+  if (fromFile) return fromFile;
+  const roots = projects.roots;
+  if (roots.length <= 1) {
+    if (roots.length === 0) void vscode.window.showWarningMessage(`${command}: no Ductus project is open.`);
+    return roots[0];
+  }
+  return vscode.window.showQuickPick([...roots], { placeHolder });
+}
+
 /** The interface a file is in: the folder under `interfaces/`, when it is in one. */
 export function interfaceOf(root: string, file: string): string | undefined {
   const parts = path.relative(root, file).split(path.sep);

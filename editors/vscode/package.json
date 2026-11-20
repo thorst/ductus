@@ -1,7 +1,7 @@
 {
   "name": "ductus",
   "displayName": "Ductus",
-  "description": "Ductus integration engine: interface tests in the Test Explorer, run and debugged per test; validate's findings in Problems on save; debugging without launch.json; Deploy to dev.",
+  "description": "Ductus integration engine: interface tests in the Test Explorer, run and debugged per test; validate's findings in Problems on save; debugging without launch.json; Deploy to dev; Promote… a release across your engines.",
   "version": "0.7.0",
   "publisher": "ductus",
   "license": "Apache-2.0",
@@ -58,10 +58,35 @@
           "type": "boolean",
           "default": false,
           "markdownDescription": "Deploy to dev when a file of a project is saved (once for several saves close together): the project's running `ductus dev` applies the folder in place, as **Ductus: Deploy to dev** does. Nothing happens while no `ductus dev` runs for the project. Off: only with the command."
+        },
+        "ductus.engines": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string",
+            "pattern": "^https?://"
+          },
+          "markdownDescription": "The engines **Ductus: Promote…** deploys to and fetches releases from, by name: `{ \"test\": \"https://ductus-test:7700\", \"prod\": \"https://ductus-prod:7700\" }` (each its REST API, as `ductus deploy --to` takes it). Tokens aren't kept here: each is asked for the first time it's needed and kept in your system's keychain. Your own `ductus dev` needs no entry (**Deploy to dev** finds it).",
+          "examples": [
+            {
+              "test": "https://ductus-test:7700",
+              "prod": "https://ductus-prod:7700"
+            }
+          ]
         }
       }
     },
     "commands": [
+      {
+        "command": "ductus.promote",
+        "title": "Promote…",
+        "category": "Ductus"
+      },
+      {
+        "command": "ductus.forgetToken",
+        "title": "Forget an engine's token",
+        "category": "Ductus"
+      },
       {
         "command": "ductus.deployToDev",
         "title": "Deploy to dev",

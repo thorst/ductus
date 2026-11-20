@@ -28,7 +28,8 @@ export interface Stoppable {
 
 /**
  * Run `command` in `cwd`, handing stdout over line by line. Never rejects: a command that can't be
- * started ends with `error`. A stop request kills it.
+ * started ends with `error`. A stop request kills it. `env`: added to the extension's own
+ * environment (secrets go here, never in `args`, which other users of the machine can list).
  */
 export function run(
   command: string,
@@ -36,10 +37,16 @@ export function run(
   cwd: string,
   listeners: Listeners = {},
   stop?: Stoppable,
+  env?: Record<string, string>,
 ): Promise<Ended> {
   const started = Date.now();
   return new Promise((resolve) => {
-    const child = spawn(command, args, { cwd, stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
+    const child = spawn(command, args, {
+      cwd,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+      env: env ? { ...process.env, ...env } : undefined,
+    });
     const lines = new LineBuffer();
     let stderr = "";
     let error: Error | undefined;
@@ -62,8 +69,13 @@ export function run(
 }
 
 /** Run a command and keep its whole stdout (for one JSON document). */
-export async function output(command: string, args: string[], cwd: string): Promise<Ended & { stdout: string }> {
+export async function output(
+  command: string,
+  args: string[],
+  cwd: string,
+  env?: Record<string, string>,
+): Promise<Ended & { stdout: string }> {
   const out: string[] = [];
-  const ended = await run(command, args, cwd, { line: (l) => out.push(l) });
+  const ended = await run(command, args, cwd, { line: (l) => out.push(l) }, undefined, env);
   return { ...ended, stdout: out.join("\n") };
 }

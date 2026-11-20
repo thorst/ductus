@@ -4,6 +4,15 @@ import { test } from "node:test";
 import {
   LineBuffer,
   atLeast,
+  deployArgs,
+  deployLines,
+  deploySummary,
+  lacks,
+  parseDeploy,
+  parseEngines,
+  parseReleases,
+  parseSession,
+  releaseFile,
   parseDevEngine,
   parseReload,
   parseTestLine,
@@ -15,6 +24,140 @@ import {
   testArgs,
   type ValidateDocument,
 } from "../../src/lines.ts";
+
+test("ductus.engines: names to URLs in order; a wrong entry left out and said", () => {
+  assert.deepEqual(parseEngines({ test: "https://ductus-test:7700/", prod: " http://10.0.0.5:7700 " }), {
+    engines: [
+      { name: "test", url: "https://ductus-test:7700" },
+      { name: "prod", url: "http://10.0.0.5:7700" },
+    ],
+    problems: [],
+  });
+  const wrong = parseEngines({ test: "ductus-test:7700", prod: 7700 });
+  assert.deepEqual(wrong.engines, []);
+  assert.equal(wrong.problems.length, 2);
+  assert.match(wrong.problems[0], /test's URL isn't one/);
+  assert.deepEqual(parseEngines(undefined), { engines: [], problems: [] });
+  assert.match(parseEngines(["https://x"]).problems[0], /a map of names to URLs/);
+});
+
+test("a token may deploy, or fetch releases, as its role and permissions say", () => {
+  const session = (role: string, permissions: string[]) =>
+    parseSession(JSON.stringify({ kind: "token", name: "ci", role, permissions, ends_at: null }))!;
+  assert.equal(lacks(session("operator", ["deploy"]), "deploy"), undefined);
+  assert.equal(lacks(session("admin", ["payloads", "audit", "deploy", "download"]), "deploy"), undefined);
+  assert.match(lacks(session("viewer", ["download"]), "deploy")!, /viewer's token/);
+  assert.match(lacks(session("operator", []), "deploy")!, /lacks the `deploy` permission/);
+  // Fetching: `download`, or an operator's `deploy`.
+  assert.equal(lacks(session("viewer", ["download"]), "download"), undefined);
+  assert.equal(lacks(session("operator", ["deploy"]), "download"), undefined);
+  assert.match(lacks(session("viewer", []), "download")!, /`download` permission/);
+  assert.equal(parseSession('{"error": "sign in"}'), undefined);
+});
+
+test("release files and stored releases are read; anything else isn't one", () => {
+  assert.deepEqual(releaseFile("integrations-0a1b2c3d4e5f.tar.gz"), { project: "integrations", short: "0a1b2c3d4e5f" });
+  assert.deepEqual(releaseFile("my-project-0a1b2c3d4e5f.tar.gz"), { project: "my-project", short: "0a1b2c3d4e5f" });
+  assert.equal(releaseFile("integrations-0a1b.tar.gz"), undefined);
+  assert.equal(releaseFile("notes.txt"), undefined);
+  const listed = parseReleases(
+    JSON.stringify([
+      { id: "0a1b2c3d4e5f99", short: "0a1b2c3d4e5f", project: "integrations", running: true },
+      { nope: 1 },
+    ]),
+  );
+  assert.equal(listed?.length, 1);
+  assert.equal(parseReleases('{"error": "x"}'), undefined);
+});
+
+test("ductus deploy's arguments: a file or an id, --from, the reason; never a token", () => {
+  assert.deepEqual(
+    deployArgs({ release: "/p/.ductus/releases/x-0a1b2c3d4e5f.tar.gz", to: "https://t:7700", reason: " why " }),
+    ["deploy", "/p/.ductus/releases/x-0a1b2c3d4e5f.tar.gz", "--to", "https://t:7700", "-m", "why", "--json"],
+  );
+  assert.deepEqual(deployArgs({ release: "0a1b2c3d4e5f", from: "https://t:7700", to: "https://p:7700", reason: "" }), [
+    "deploy",
+    "0a1b2c3d4e5f",
+    "--to",
+    "https://p:7700",
+    "--from",
+    "https://t:7700",
+    "--json",
+  ]);
+});
+
+test("a deploy's report: the outcome in one line, the gate and what changed in the output", () => {
+  const ok = parseDeploy(
+    JSON.stringify({
+      ok: true,
+      outcome: "applied in place: 1 interface took its new code between two messages; the others never paused",
+      short: "0a1b2c3d4e5f",
+      project: "integrations",
+      environment: "prod",
+      applied: "in_place",
+      replaces: {},
+      gate: {
+        reused: false,
+        why_not_reused: "no check of it for prod",
+        check: {
+          ok: true,
+          seconds: 1.2,
+          report: {
+            checks: [
+              { level: "warning", text: "no database: not checked", more: ["a"] },
+              { level: "ok", text: "fine" },
+            ],
+          },
+        },
+      },
+      plan: { changes: [{ interface: "adt", what: ["code"] }] },
+      steps: ["adt: code → bbbbbbbbbbbb, applied in place (3 ms)"],
+      changes: [{ interface: "adt", from: "aaaaaaaaaaaa", to: "bbbbbbbbbbbb" }],
+    }),
+  )!;
+  assert.equal(deploySummary(ok), "adt (in place)");
+  const lines = deployLines(ok);
+  assert.equal(lines[0], "release 0a1b2c3d4e5f (project integrations) to `prod`");
+  assert.ok(lines.includes("gate: passed in 1.2 s (no check of it for prod)"), lines.join("\n"));
+  assert.ok(lines.includes("  ⚠ no database: not checked") && lines.includes("      a"), lines.join("\n"));
+  assert.ok(!lines.some((l) => l.includes("fine")), "only problems and warnings");
+  assert.ok(lines.includes("· adt: code (in place)") && lines.includes("  adt: aaaaaaaaaaaa → bbbbbbbbbbbb"));
+
+  // Refused: the first reason, a rule before someone else's work before the gate.
+  const rules = parseDeploy(
+    JSON.stringify({
+      ok: false,
+      outcome: "refused by this environment's rules (`rules` says why)",
+      rules: ["this environment takes only releases deployed to test first"],
+    }),
+  )!;
+  assert.equal(deploySummary(rules), "this environment takes only releases deployed to test first");
+  assert.ok(deployLines(rules).includes("✗ this environment takes only releases deployed to test first"));
+  const undo = parseDeploy(
+    JSON.stringify({ ok: false, outcome: "refused: …", replaces: { adt: "replaces 1234 (by ann)" } }),
+  )!;
+  assert.equal(deploySummary(undo), "it would undo adt: replaces 1234 (by ann)");
+  assert.ok(deployLines(undo).includes("✗ would undo adt: replaces 1234 (by ann)"));
+  const gate = parseDeploy(
+    JSON.stringify({
+      ok: false,
+      outcome: "the gate found problems",
+      gate: {
+        check: {
+          ok: false,
+          report: {
+            checks: [
+              { level: "warning", text: "w" },
+              { level: "problem", text: "adt: 1 test failed" },
+            ],
+          },
+        },
+      },
+    }),
+  )!;
+  assert.equal(deploySummary(gate), "adt: 1 test failed");
+  assert.equal(parseDeploy("not json"), undefined);
+});
 
 test("dev-engine.json is read; anything else isn't a dev engine", () => {
   assert.deepEqual(parseDevEngine('{\n  "api": "http://127.0.0.1:7700/",\n  "pid": 4242\n}\n'), {
