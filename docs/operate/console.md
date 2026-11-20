@@ -61,6 +61,11 @@ What was received and what each destination did with it:
   it was sent (recomputed by running its code again, unless it has `save_output: true`).
   **Resend** (a quarantined delivery), **Replay** (a sent or filtered one), **Dismiss**.
 - **Edit and resend**: a corrected copy, sent to the destinations you choose.
+- **Debug in VS Code** (whoever may read the payload): opens the message in VS Code with the
+  [Ductus extension](../write/vscode.md#debug-this-message), which runs it through *your* copy of
+  the interface's code under the debugger, sending nothing (`ductus try --message --from
+  --inspect`). The read is logged here as any payload read. Without the extension, the link does
+  nothing; the command it stands for is in [debugging](../write/debugging.md#one-message-ductus-try).
 - **Who viewed the payload** and **History**: every read, resend, edit and dismissal, with who,
   when, and the reason.
 

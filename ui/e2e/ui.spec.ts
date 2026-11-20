@@ -174,6 +174,14 @@ test("a quarantined message: why, what each destination did, and its HL7 fields"
   await page.screenshot({ path: "test-results/message.png", fullPage: true });
   await page.getByRole("button", { name: "Raw" }).click();
   await expect(page.locator("pre")).toContainText("PID|1||100003^^^MRN");
+  // Whoever may read the payload may debug it in VS Code: the link names this engine, the
+  // interface and the message (the extension's handler reads exactly these).
+  const id = /\/messages\/(\d+)/.exec(page.url())?.[1] ?? "";
+  const origin = new URL(page.url()).origin;
+  await expect(page.getByRole("link", { name: "Debug in VS Code" })).toHaveAttribute(
+    "href",
+    `vscode://ductus.ductus/debug-message?${new URLSearchParams({ engine: origin, interface: "orders", message: id })}`,
+  );
   // A viewer looks; acting is for operators.
   await expect(page.getByRole("button", { name: "Edit and resend" })).toHaveCount(0);
   await expect(page.getByRole("button", { name: /^Resend/ })).toHaveCount(0);

@@ -1,8 +1,9 @@
 // The extension in a real VS Code on a copy of the guides' project (run.ts): ductus found, the
 // tests discovered at their lines, a run's results, a failure at its place with both values,
 // Problems on save, a breakpoint hit from the Test Explorer's Debug, a debug configuration with no
-// launch.json, Deploy to dev against a real `ductus dev`, and Promote… across two engines in
-// release mode (scripts/demo-vscode.sh starts them). Lines starting `measure:` are read by
+// launch.json, Deploy to dev against a real `ductus dev`, the History view and Debug this message
+// (a message that dev stored, through the web UI's link) against it, and Promote… across two
+// engines in release mode (scripts/demo-vscode.sh starts them). Lines starting `measure:` are read by
 // scripts/demo-vscode.sh.
 import * as assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
@@ -37,6 +38,38 @@ function freePort(): Promise<number> {
     });
   });
 }
+
+/** One HL7 message over MLLP; resolves with the ACK (sent once the engine has stored it). */
+function sendMllp(port: number, message: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const socket = net.connect(port, "127.0.0.1", () => socket.write(`\x0b${message}\x1c\r`));
+    let got = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (d) => {
+      got += d;
+      if (got.includes("\x1c\r")) {
+        socket.end();
+        resolve(got);
+      }
+    });
+    socket.on("error", reject);
+    socket.setTimeout(30_000, () => {
+      socket.destroy();
+      reject(new Error(`no ACK from 127.0.0.1:${port} in 30 s`));
+    });
+  });
+}
+
+/**
+ * The `ductus dev` the Deploy to dev test starts in a project of its own: the History and Debug
+ * this message test after it uses it, then stops it.
+ */
+let devEngine:
+  { project: string; mllp: number[]; said: () => string; ended: () => boolean; stop: () => Promise<void> } | undefined;
+
+suiteTeardown(async () => {
+  await devEngine?.stop();
+});
 
 /** Every `stopped` event any debug session sends, with its top frame's file and line. */
 const stops: { file: string; line: number }[] = [];
@@ -254,6 +287,17 @@ suite("Ductus", () => {
         resolve(code);
       }),
     );
+    devEngine = {
+      project,
+      mllp,
+      said: () => said,
+      ended: () => ended,
+      stop: async () => {
+        devEngine = undefined;
+        dev.kill("SIGTERM");
+        await exited;
+      },
+    };
     const found = path.join(project, ".ductus/dev-engine.json");
     try {
       await waitFor("ductus dev's dev-engine.json", () => fs.existsSync(found) || ended, 180_000);
@@ -299,11 +343,85 @@ suite("Ductus", () => {
         await vscode.workspace.getConfiguration("ductus").update("deployToDevOnSave", undefined);
         fs.writeFileSync(code, original);
       }
-    } finally {
-      dev.kill("SIGTERM");
-      await exited;
+    } catch (e) {
+      // Left running for the next test only when this one passed.
+      await devEngine?.stop();
+      throw e;
     }
-    assert.ok(!fs.existsSync(found), "dev-engine.json goes when dev stops");
+  });
+
+  test("History and Debug this message: dev's reloads listed, a stored message stopped at a breakpoint", async function () {
+    this.timeout(180_000);
+    assert.ok(devEngine && !devEngine.ended(), "the Deploy to dev test's ductus dev runs");
+    const { project, mllp } = devEngine;
+    const route = vscode.Uri.file(path.join(project, "interfaces/adt/route.ts"));
+    const breakpoint = new vscode.SourceBreakpoint(new vscode.Location(route, new vscode.Position(3, 0)));
+    try {
+      // The History view, from the running dev (where it reads while dev runs): the test before's
+      // two deploys are reloads there.
+      let started = Date.now();
+      const page = await api.history.show(project, "adt");
+      console.log(`measure: History of an interface from ductus dev ${Date.now() - started} ms`);
+      assert.ok("entries" in page, JSON.stringify(page));
+      const reloads = page.entries.filter((e) => e.deployment?.how === "reload");
+      assert.ok(reloads.length >= 2, page.entries.map((e) => `${e.kind}: ${e.what}`).join("\n"));
+      assert.equal(api.history.shownEntries.length, page.entries.length, "the view shows the page");
+      // The folder's own, `ductus history --json`: not in git here, said in its notes.
+      started = Date.now();
+      const folder = await api.history.show(project, "adt", { kind: "folder" });
+      console.log(`measure: History of an interface from the folder ${Date.now() - started} ms`);
+      assert.ok("entries" in folder, JSON.stringify(folder));
+      assert.ok(
+        folder.notes.some((n) => /git/.test(n)),
+        folder.notes.join("\n"),
+      );
+
+      // A message dev stored, debugged as the web UI's link opens it.
+      const ack = await sendMllp(
+        mllp[0],
+        "MSH|^~\\&|ADT|HOSP|LAB|HOSP|20261120120000||ADT^A01|VSCODE1|P|2.5\rPID|1||100001^^^MRN||DOE^JANE\r",
+      );
+      assert.match(ack, /MSA\|AA/, ack);
+      const found = await api.dev.find(project);
+      assert.ok("api" in found, JSON.stringify(found));
+      const listed = await fetch(`${found.api}/api/v1/interfaces/adt/messages?limit=1`, {
+        headers: { authorization: `Bearer ${found.token}` },
+      });
+      const id = ((await listed.json()) as { messages: { id: number }[] }).messages[0]?.id;
+      assert.ok(id, "the message is stored");
+
+      vscode.debug.addBreakpoints([breakpoint]);
+      stops.length = 0;
+      const name = `Ductus: debug message ${id}`;
+      let ours: vscode.DebugSession | undefined;
+      const begun = vscode.debug.onDidStartDebugSession((s) => {
+        if (!s.parentSession && s.name === name) ours ??= s;
+      });
+      const ended = new Promise<void>((resolve) => {
+        const d = vscode.debug.onDidTerminateDebugSession((s) => {
+          if (s === ours) {
+            d.dispose();
+            begun.dispose();
+            resolve();
+          }
+        });
+      });
+      // The link names the engine as the browser reached it: `localhost` is dev's 127.0.0.1.
+      const link = new URLSearchParams({
+        engine: found.api.replace("127.0.0.1", "localhost"),
+        interface: "adt",
+        message: String(id),
+      });
+      started = Date.now();
+      assert.ok(await api.messages.fromLink(link.toString()), "the debugger started");
+      await ended;
+      console.log(`measure: Debug this message, the link to the session's end ${Date.now() - started} ms`);
+      assert.deepEqual(stops[0], { file: route.fsPath, line: 4 }, "stopped at route.ts:4");
+    } finally {
+      vscode.debug.removeBreakpoints([breakpoint]);
+      await devEngine?.stop();
+    }
+    assert.ok(!fs.existsSync(path.join(project, ".ductus/dev-engine.json")), "dev-engine.json goes when dev stops");
     // No dev engine: said, nothing else.
     const none = await api.dev.deploy(project, false);
     assert.match(none.error ?? "", /no `ductus dev` is running/);

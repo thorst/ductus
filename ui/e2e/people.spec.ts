@@ -80,6 +80,8 @@ test("without the payloads permission a message is shown without its content", a
   await expect(page.getByText("You don’t have permission to read payloads")).toBeVisible();
   await expect(page.locator("pre")).toHaveCount(0);
   await expect(page.locator("[data-path]")).toHaveCount(0);
+  // Debugging it would read it: no link.
+  await expect(page.getByRole("link", { name: "Debug in VS Code" })).toHaveCount(0);
   await page.screenshot({ path: "test-results/message-without-payloads.png", fullPage: true });
   const url = page.url();
 

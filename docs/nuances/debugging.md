@@ -67,6 +67,16 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **Why:** this is how a production problem is debugged without a debugger on production: the message comes to the code. Patient data leaving the engine is what the audit log is for.
 - **What to do:** use a personal token, so the audit log names you. The message is on your machine afterwards only in what `ductus try` printed: treat that output as patient data.
 
+## Debug this message runs your copy of the code, not the engine's (level 1)
+- **What:** the web UI's **Debug in VS Code** and the extension's **Debug a stored message…** run `ductus try --message --from --inspect` in your project folder: the message is the engine's, the code is what is on your disk now, on your branch, read in the environment the setting `ductus.environment` names (`dev` by default: its values, its lookups). When that code differs from what the engine ran, the run can decide otherwise than the engine did; the output's `then:` line shows what the engine did, and "decided by code version …, not this one" says the code differed.
+- **Why:** debugging happens where the code is edited, never on the engine (a debugger on production would pause its messages). Running today's code is also what you want after a fix: does the message go through now?
+- **What to do:** to see what the engine itself did, check out the commit it runs (the History view or `ductus history` names the deployment's commit) before debugging. Lookups go to your environment's databases: to see production's data, debug with `ductus.environment` set to an environment whose secrets you have.
+
+## A Debug in VS Code link opens only engines you named (level 2)
+- **What:** the link names the engine it came from (the web page's address). The extension goes on by itself only for your own `ductus dev` or an engine in `ductus.engines` (`localhost`, `127.0.0.1` and `[::1]` count as the same host). For any other address it asks first, showing it, and on **Name it and go on…** adds it to `ductus.engines` in your user settings under the name you give. An engine reached at another address than the one named (a proxy, another host name) counts as another engine.
+- **Why:** a link can come from any web page. Sending a token of yours, or asking you for one, for an engine you never named would let a page you happened to open pose as one of your engines.
+- **What to do:** name each engine once in `ductus.engines` with the address you open its web UI at. A link you didn't expect, to an address you don't know: cancel it.
+
 ## Breakpoints are set on your `.ts` lines; the engine runs JavaScript (level 3)
 - **What:** the engine runs your TypeScript as JavaScript it makes when the file loads (types removed), with a source map inside it. Debuggers read the map, so breakpoints, the current line and stack traces are on your `.ts` lines as written. A client that ignores source maps shows the JavaScript, without types; line numbers can differ there.
 - **What to do:** in VS Code nothing (`sourceMaps` is on by default); in other clients turn source maps on if they're off.

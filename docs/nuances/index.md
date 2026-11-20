@@ -26,7 +26,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
 - [Writing transforms](transforms.md) (19)
-- [Debugging](debugging.md) (15)
+- [Debugging](debugging.md) (17)
 - [Shared pool](shared-pool.md) (3)
 - [Runaway scripts](runaway.md) (6)
 - [Databases and APIs](databases-and-apis.md) (5)
@@ -51,7 +51,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Releases](releases.md) (41)
 - [Windows](windows.md) (9)
 
-## Level 1: Foundations (46)
+## Level 1: Foundations (47)
 
 - [Retention is 1, 3 or 7 weeks, not any number of days](retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1) (Retention)
 - [Missing fields read as "" and never throw](transforms.md#missing-fields-read-as--and-never-throw-level-1) (Writing transforms)
@@ -68,6 +68,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [On Windows, stopping the debug session leaves dev's Postgres until the next start](debugging.md#on-windows-stopping-the-debug-session-leaves-devs-postgres-until-the-next-start-level-1) (Debugging)
 - [A `debugger;` statement pauses every debugging session](debugging.md#a-debugger-statement-pauses-every-debugging-session-level-1) (Debugging)
 - [Without the environment's secrets, `ductus try` runs without databases and APIs](debugging.md#without-the-environments-secrets-ductus-try-runs-without-databases-and-apis-level-1) (Debugging)
+- [Debug this message runs your copy of the code, not the engine's](debugging.md#debug-this-message-runs-your-copy-of-the-code-not-the-engines-level-1) (Debugging)
 - [Debugging several interfaces from the Test Explorer runs them one after another](debugging.md#debugging-several-interfaces-from-the-test-explorer-runs-them-one-after-another-level-1) (Debugging)
 - [A destination's owner is its interface's unless it says otherwise](impact.md#a-destinations-owner-is-its-interfaces-unless-it-says-otherwise-level-1) (Impact and `about:`)
 - [Moving ownership in the web UI is a preview, not a change](impact.md#moving-ownership-in-the-web-ui-is-a-preview-not-a-change-level-1) (Impact and `about:`)
@@ -100,7 +101,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (126)
+## Level 2: Practitioner (127)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -128,6 +129,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A runaway test fails, and the tests after it start with fresh module state](debugging.md#a-runaway-test-fails-and-the-tests-after-it-start-with-fresh-module-state-level-2) (Debugging)
 - [`ductus try` sends nothing; lookups are made, writes aren't](debugging.md#ductus-try-sends-nothing-lookups-are-made-writes-arent-level-2) (Debugging)
 - [A message read with `--from` is in that engine's audit log](debugging.md#a-message-read-with---from-is-in-that-engines-audit-log-level-2) (Debugging)
+- [A Debug in VS Code link opens only engines you named](debugging.md#a-debug-in-vs-code-link-opens-only-engines-you-named-level-2) (Debugging)
 - [Interfaces share a global scope](shared-pool.md#interfaces-share-a-global-scope-level-2) (Shared pool)
 - [Module-level caches live until the engine restarts](shared-pool.md#module-level-caches-live-until-the-engine-restarts-level-2) (Shared pool)
 - [`timeout` counts time without pausing, not total time](runaway.md#timeout-counts-time-without-pausing-not-total-time-level-2) (Runaway scripts)

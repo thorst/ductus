@@ -14,10 +14,14 @@ import { engines as enginesSetting } from "./settings";
 /** A call to an engine answers in seconds; a list of releases is small. */
 const CALL_WITHIN_MS = 30_000;
 
-/** A token checked on its engine, ready to use. */
-export interface Signed {
+/** An engine and the token to call it with (your `ductus dev`'s from `.ductus/dev-token`). */
+export interface Reach {
   engine: NamedEngine;
   token: string;
+}
+
+/** A token checked on its engine, ready to use. */
+export interface Signed extends Reach {
   session: Session;
 }
 
@@ -107,8 +111,8 @@ export class Engines implements vscode.Disposable {
     return info ?? { why: `${signed.engine.name} answered ${answer.status} to GET /engine` };
   }
 
-  /** `GET path` on an engine with a signed token: its body, or why there's none. */
-  async get(signed: Signed, path: string): Promise<{ body: string } | { why: string }> {
+  /** `GET path` on an engine with its token: its body, or why there's none. */
+  async get(signed: Reach, path: string): Promise<{ body: string } | { why: string }> {
     const answer = await call(signed.engine, path, signed.token);
     if ("unreachable" in answer) return { why: answer.unreachable };
     if (answer.status !== 200)
@@ -146,16 +150,23 @@ function key(engine: NamedEngine): string {
   return `ductus.token:${engine.url}`;
 }
 
+/** What each need asks for, and where to make one. */
+const PROMPTS: Record<Need, string> = {
+  deploy:
+    "One with the `deploy` permission: on the web UI's Account page (your own), or `ductus token create NAME --role operator --permission deploy`.",
+  download:
+    "One that can fetch releases (`download`, or an operator's `deploy`): on the web UI's Account page, or `ductus token create NAME --role viewer --permission download`.",
+  payloads:
+    "One with the `payloads` permission (debugging reads the message): on the web UI's Account page, or `ductus token create NAME --role viewer --permission payloads`.",
+  read: "Any token of yours (the History view only reads): on the web UI's Account page, or `ductus token create NAME --role viewer`.",
+};
+
 /** The prompt: a password box saying what the token is for and how to make one. */
 const prompt: Ask = (engine, need, why) =>
   Promise.resolve(
     vscode.window.showInputBox({
       title: `A token for ${engine.name} (${engine.url})`,
-      prompt:
-        (why ? `${why}. ` : "") +
-        (need === "deploy"
-          ? "One with the `deploy` permission: on the web UI's Account page (your own), or `ductus token create NAME --role operator --permission deploy`. Kept in your system's keychain."
-          : "One that can fetch releases (`download`, or an operator's `deploy`): on the web UI's Account page, or `ductus token create NAME --role viewer --permission download`. Kept in your system's keychain."),
+      prompt: (why ? `${why}. ` : "") + PROMPTS[need] + " Kept in your system's keychain.",
       password: true,
       ignoreFocusOut: true,
       placeHolder: "dux_…",

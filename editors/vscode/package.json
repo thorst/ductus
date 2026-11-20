@@ -1,7 +1,7 @@
 {
   "name": "ductus",
   "displayName": "Ductus",
-  "description": "Ductus integration engine: interface tests in the Test Explorer, run and debugged per test; validate's findings in Problems on save; debugging without launch.json; Deploy to dev; Promote… a release across your engines.",
+  "description": "Ductus integration engine: interface tests in the Test Explorer, run and debugged per test; validate's findings in Problems on save; debugging without launch.json; Deploy to dev; Promote… a release across your engines; each interface's history; a stored message debugged from the web UI.",
   "version": "0.7.0",
   "publisher": "ductus",
   "license": "Apache-2.0",
@@ -32,7 +32,8 @@
   ],
   "main": "./dist/extension.js",
   "activationEvents": [
-    "workspaceContains:**/interfaces/*/interface.yaml"
+    "workspaceContains:**/interfaces/*/interface.yaml",
+    "onUri"
   ],
   "contributes": {
     "configuration": {
@@ -76,7 +77,39 @@
         }
       }
     },
+    "views": {
+      "explorer": [
+        {
+          "id": "ductus.history",
+          "name": "Ductus History",
+          "icon": "$(history)",
+          "when": "ductus.hasProject"
+        }
+      ]
+    },
     "commands": [
+      {
+        "command": "ductus.debugMessage",
+        "title": "Debug a stored message…",
+        "category": "Ductus"
+      },
+      {
+        "command": "ductus.historyRefresh",
+        "title": "Refresh the history",
+        "category": "Ductus",
+        "icon": "$(refresh)"
+      },
+      {
+        "command": "ductus.historyFrom",
+        "title": "Choose where the history is read from",
+        "category": "Ductus",
+        "icon": "$(server-environment)"
+      },
+      {
+        "command": "ductus.historyOlder",
+        "title": "Older history",
+        "category": "Ductus"
+      },
       {
         "command": "ductus.promote",
         "title": "Promote…",
@@ -105,6 +138,24 @@
       }
     ],
     "menus": {
+      "commandPalette": [
+        {
+          "command": "ductus.historyOlder",
+          "when": "false"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "ductus.historyFrom",
+          "when": "view == ductus.history",
+          "group": "navigation"
+        },
+        {
+          "command": "ductus.historyRefresh",
+          "when": "view == ductus.history",
+          "group": "navigation"
+        }
+      ],
       "editor/title": [
         {
           "command": "ductus.deployToDev",

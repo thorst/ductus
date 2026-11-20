@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { getRouteApi, Link, useNavigate } from "@tanstack/react-router";
-import { Check, CircleX, Copy, Pencil, RotateCcw } from "lucide-react";
+import { Bug, Check, CircleX, Copy, Pencil, RotateCcw } from "lucide-react";
 import { useMemo, useState } from "react";
 import { dismissDelivery, editAndResend, resend, useCanAudit, useCanOperate, useRefresh } from "@/api/actions";
 import type { Schemas } from "@/api/client";
@@ -14,6 +14,7 @@ import { Table, Td, Th } from "@/components/ui/table";
 import { bytes, timestamp } from "@/lib/format";
 import { fromEditable, isHl7, parseHl7, prettyJson, toEditable, type Hl7Field } from "@/lib/hl7";
 import { cn } from "@/lib/utils";
+import { debugInVsCode } from "@/lib/vscode";
 
 const route = getRouteApi("/app/messages/$id");
 
@@ -33,7 +34,14 @@ export function MessagePage() {
                 <StatusBadge status={m.status} />
               </span>
             }
-            actions={canOperate && m.deliveries.length > 0 && m.payload != null && <EditButton m={m} />}
+            actions={
+              m.payload != null && (
+                <>
+                  <DebugButton m={m} />
+                  {canOperate && m.deliveries.length > 0 && <EditButton m={m} />}
+                </>
+              )
+            }
           >
             <Link to="/interfaces/$name" params={{ name: m.interface }} search={{ tab: "messages" }}>
               {m.interface}
@@ -253,6 +261,23 @@ function Deliveries({ m, canOperate }: { m: Schemas["MessageDetail"]; canOperate
 }
 
 /** Correct a message: a copy with the edits is queued; the original stays as received. */
+/** Opens the message in VS Code under the debugger, through the Ductus extension: your copy of the
+ * interface's code runs it (`ductus try --message --inspect`), sending nothing. Shown only to
+ * those who may read its payload (debugging reads it, through the API, in the audit log). */
+function DebugButton({ m }: { m: Schemas["MessageDetail"] }) {
+  return (
+    <Button variant="outline" asChild>
+      <a
+        href={debugInVsCode(window.location.origin, m.interface, m.id)}
+        title="Runs this message through your copy of the interface's code in VS Code, under the debugger (the Ductus extension: ductus try --message --inspect). Nothing is sent."
+      >
+        <Bug aria-hidden />
+        Debug in VS Code
+      </a>
+    </Button>
+  );
+}
+
 function EditButton({ m }: { m: Schemas["MessageDetail"] }) {
   const [open, setOpen] = useState(false);
   const payload = m.payload ?? "";

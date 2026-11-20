@@ -11,6 +11,7 @@ import {
   deployArgs,
   deployLines,
   deploySummary,
+  firstParagraph,
   parseDeploy,
   parseReleases,
   releaseFile,
@@ -251,7 +252,7 @@ export class Promote implements vscode.Disposable {
     if (!report) {
       // `Error: what\n\nCaused by: …` (anyhow): the first part in the notification, all of it logged.
       const said = ran.stderr.trim().replace(/^Error: /, "");
-      const why = ran.error?.message ?? (said.split(/\n\s*\n/)[0] || `exit ${ran.code}`);
+      const why = ran.error?.message ?? (firstParagraph(ran.stderr) || `exit ${ran.code}`);
       this.log.error(`promote ${name} to ${where}: ${said || why}`);
       void vscode.window
         .showErrorMessage(`Promote to ${to.engine.name}: ${why}`, "Show the output")

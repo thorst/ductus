@@ -9,8 +9,10 @@
 # against a real `ductus dev`, by the command and on save, and (0.7.6.3.2) Promote… across two
 # engines in release mode started here (test, and prod requiring test first, each with its own
 # database): a release file refused by prod's rules, deployed to test, then promoted from test to
-# prod, each token asked for once and checked first (a viewer's turned away). Measures the
-# extension's activation, a save to Problems, a deploy to dev, the promotions and the package's size.
+# prod, each token asked for once and checked first (a viewer's turned away); (0.7.6.3.3) the
+# History view (dev's reloads, then the folder's own) and a message dev stored, debugged through the
+# web UI's `vscode://` link to a breakpoint. Measures the extension's activation, a save to
+# Problems, a deploy to dev, the history, the debugged message, the promotions and the package's size.
 # Needs: node 24, xvfb-run (a display for VS Code), VS Code's libraries (libgtk-3, libnss3,
 # libasound2, libgbm1; CI's Ubuntu has them), the development database's server (scripts/dev/db.sh).
 set -euo pipefail
@@ -79,8 +81,9 @@ for t in "finds ductus and activates" "the tests are found by interface" "an int
   "a failure is shown at its expect" "validate's findings are in Problems" \
   "Debug from the Test Explorer stops at a breakpoint" "debugging works without launch.json" \
   "Deploy to dev: a running ductus dev takes a change in place" \
+  "History and Debug this message: dev's reloads listed" \
   "Promote…: a release file to test, then from test to prod"; do
   grep -q "✔ $t" "$LOG" || fail+=" \"$t\""
 done
-grep -q ' 9 passing' "$LOG" || fail+=" not-all-passing"
+grep -q ' 10 passing' "$LOG" || fail+=" not-all-passing"
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

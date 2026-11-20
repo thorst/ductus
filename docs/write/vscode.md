@@ -11,6 +11,8 @@ already look in VS Code:
 | **Run and Debug** | **Ductus: debug these tests**, **Ductus: debug this message** and **Ductus: debug this interface** with no `launch.json`, or F5 with a file of an interface open |
 | **Deploy to dev** (the ☁ button above the editor while your `ductus dev` runs) | your change running in your [`ductus dev`](../install/dev.md), in place: the interfaces you changed take it, the others never pause |
 | **Promote…** (Command Palette) | a release to test or prod, from the project's release files or from the engine it's on, with the gate's report and the outcome, as [`ductus deploy`](../operate/releases.md) does it |
+| **Ductus History** (in the Explorer) | who changed the open file's interface, what and why, newest first: commits, deployments, the audit log, its documentation, as [`ductus history`](../operate/deployments.md) shows it, from your `ductus dev`, an engine or the folder |
+| **Debug in VS Code** (a message's page in the web UI), or **Ductus: Debug a stored message…** | a message an engine stored, run through your copy of the code under the debugger, stopping at your breakpoints; nothing is sent |
 
 It runs the `ductus` you already have, through the same `--json` outputs that tools and CI read
 ([for editors and CI](testing.md#for-editors-and-ci-json)), so what it shows is what `ductus test`
@@ -175,6 +177,62 @@ the next promotion asks nothing. **Ductus: Forget an engine's token** removes on
 dev](#deploy-to-dev). A rollback, `--force` over someone else's work and `--interface` (some
 interfaces only) are in a terminal, with `ductus deploy`, or on the engine's Releases page.
 
+## History
+
+**Ductus History** in the Explorer shows the [history](../operate/deployments.md) of the
+interface whose file is open, newest first, and follows the editor: open a file of another
+interface and it shows that one's. Each line is one entry with its icon (a commit, a deployment,
+the audit log, documentation), who and when, and the parts it touches (`lab`, `source`); point at
+it for the details (the commit's files, the deployment's reason and code versions, the fields that
+changed). **Older…** at the end reads the next 50.
+
+Where it reads from, chosen with the button at the top of the view (kept per project):
+
+| From | What it shows | Read with |
+|---|---|---|
+| **Your ductus dev** (while it runs: the default then) | its deployments, including each **Deploy to dev**, the audit log, and the commits | `GET /interfaces/{name}/history`, signed in by itself |
+| an engine named in `ductus.engines` | what that engine recorded: who deployed what to test or prod, and why | the same, with a token of yours (any: it only reads), asked once and kept in your keychain |
+| **This folder** (the default with no dev running) | the commits on the interface's files | `ductus history <interface> --json` in the project's folder; the database too when `DUCTUS_DATABASE_URL` is set where VS Code runs |
+
+What the history lacks is said at the top of the view ("the project isn't in a git repository: no
+commits"). It reads only while the view is open: hidden, it does nothing, and an editor change
+reads again only when you look.
+
+## Debug this message
+
+A message that went wrong on test or prod, run through your copy of the code with breakpoints:
+
+1. Set a breakpoint in the code that handles it (interface.yaml names the files).
+2. On the message's page in the web UI, click **Debug in VS Code**. Or, in VS Code, **Ductus:
+   Debug a stored message…** (Command Palette) with a file of its interface open: choose the
+   engine it's on and type its id.
+3. VS Code asks whether to let the extension open the link, then runs, in the project's folder:
+
+   ```text
+   ductus try adt-in --message 20042988 --from https://ductus-prod:7700 --inspect=127.0.0.1:<a free port> --env dev
+   ```
+
+   with the token in its environment (never on the command line), and attaches the debugger. It
+   stops at your breakpoint; when it ends, the Debug Console has what `ductus try` says: what each
+   destination would do with it now, beside what it did then
+   ([`ductus try`](debugging.md#one-message-ductus-try)).
+
+**Nothing is sent**, and the code is *yours*, as it is on disk now, read in `ductus.environment`:
+not the engine's
+([nuance](../nuances/debugging.md#debug-this-message-runs-your-copy-of-the-code-not-the-engines-level-1)).
+Reading the message needs a token with the `payloads` permission, asked for once per engine and
+kept in your keychain (your `ductus dev`'s own has it), and the read is in that engine's audit log
+as any payload read is. The web UI shows the button only to those who may read the payload.
+
+With no breakpoint anywhere in the project, it opens the interface's interface.yaml and asks you to
+set one first (**Debug without one** runs it through). The link names the engine, the interface
+and the message; it opens in the project that has that interface (several: you choose).
+
+**A link only goes to engines you know**: your `ductus dev`, or one named in `ductus.engines`
+(`localhost` and `127.0.0.1` count as the same). A link to any other engine asks first, showing its
+address, and adds it to your user settings under the name you give
+([nuance](../nuances/debugging.md#a-debug-in-vs-code-link-opens-only-engines-you-named-level-2)).
+
 ## Settings
 
 | Setting | Default | What it does |
@@ -183,7 +241,7 @@ interfaces only) are in a terminal, with `ductus deploy`, or on the engine's Rel
 | `ductus.environment` | `dev` | the environment (`--env`) tests, checks and debugging read the project in |
 | `ductus.validateOnSave` | `true` | `validate` after each save; off, only when the workspace opens and with **Ductus: Validate the project** (Command Palette) |
 | `ductus.deployToDevOnSave` | `false` | [Deploy to dev](#deploy-to-dev) after each save, while the project's `ductus dev` runs |
-| `ductus.engines` | none | the engines [Promote…](#promote) deploys to and fetches from, by name: `{ "test": "https://ductus-test:7700" }` (tokens are never kept here) |
+| `ductus.engines` | none | the engines [Promote…](#promote) deploys to and fetches from, [History](#history) and [Debug this message](#debug-this-message) read from, by name: `{ "test": "https://ductus-test:7700" }` (tokens are never kept here) |
 
 ## What it costs
 
@@ -192,12 +250,14 @@ developer's workstation in WSL:
 
 | | |
 |---|---|
-| the extension's start | 1.5 ms: it finds the projects and lists the tests after it has started, never in VS Code's way |
-| its package | 22 KB: one bundled file, nothing else to download |
+| the extension's start | 1.5–3.4 ms: it finds the projects and lists the tests after it has started, never in VS Code's way |
+| its package | 27 KB: one bundled file, nothing else to download |
 | an interface's tests from the Test Explorer (`adt-in`'s 5) | 60–75 ms, as `ductus test` takes in a terminal |
 | a save to its finding in Problems | 1.25 s (the debounce, 0.4 s, and `validate`, most of it the type check) |
 | Deploy to dev of one interface | 23–42 ms from the command to the answer |
-| Promote… of a one-interface release (a file to test; test to prod) | 1.2–1.3 s from **Enter** to the answer, most of it the gate (its tests and `validate` on the engine's machine); a larger project's gate takes longer ([measured](../operate/releases.md#measured)) |
+| Promote… of a one-interface release (a file to test; test to prod) | 1.2–1.4 s from **Enter** to the answer, most of it the gate (its tests and `validate` on the engine's machine); a larger project's gate takes longer ([measured](../operate/releases.md#measured)) |
+| an interface's History (a page of 50) | 14 ms from a `ductus dev`; 233 ms from the folder (`ductus history` starting and reading git) |
+| Debug this message, from the link to the end of the session (one breakpoint, continued at once) | 1.6 s: `ductus try` starting, the debugger attaching, the message read through the API |
 
 Nothing runs in the background besides: no timers or polling. Every command it runs, and how long
 it took, is in **View → Output → Ductus**; when something didn't run (no `ductus`, a project that
@@ -211,7 +271,9 @@ and the build being tested: the tests found at their lines, an interface's tests
 test shown at its `expect` with both values, a port mistyped in interface.yaml shown in Problems on
 save and gone once fixed, a breakpoint in `lab.ts` hit from the Test Explorer's **Debug**,
 **Ductus: debug these tests** with no `launch.json`, **Deploy to dev** against a real `ductus
-dev`, by the command and on save, and **Promote…** across two engines in release mode (test, and
+dev`, by the command and on save, the **History** of an interface from that `ductus dev` (the two
+deploys there) and from the folder, a message that `ductus dev` stored opened through the web UI's
+**Debug in VS Code** link and stopped at a breakpoint, and **Promote…** across two engines in release mode (test, and
 prod requiring test first): a release file refused by prod's rules, deployed to test, then
 promoted from test to prod, each token asked for once and a viewer's turned away before anything
 ran.

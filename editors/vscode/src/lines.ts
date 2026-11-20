@@ -231,13 +231,20 @@ export function parseSession(body: string): Session | undefined {
 }
 
 /**
- * What a promotion needs of a token: `deploy` on the engine it goes to, `download` on the engine
- * it comes from (an operator or admin with `deploy` may download too). docs/reference/api: ACCESS.
+ * What a token is for. A promotion: `deploy` on the engine it goes to, `download` on the engine it
+ * comes from (an operator or admin with `deploy` may download too). Debug this message: `payloads`
+ * (reading the message). The History view: `read` (any token). docs/reference/api: ACCESS.
  */
-export type Need = "deploy" | "download";
+export type Need = "deploy" | "download" | "payloads" | "read";
 
 /** Whether `session` may do `need`; when not, what to give the token (undefined: it may). */
 export function lacks(session: Session, need: Need): string | undefined {
+  if (need === "read") return undefined;
+  if (need === "payloads") {
+    return session.permissions.includes("payloads")
+      ? undefined
+      : `${session.name} may not read payloads: debugging a stored message needs the \`payloads\` permission`;
+  }
   const deploys = session.role !== "viewer" && session.permissions.includes("deploy");
   if (need === "deploy" && !deploys) {
     return session.role === "viewer"
@@ -437,6 +444,15 @@ export function deployLines(report: DeployReport): string[] {
   return lines;
 }
 
+/** What a failed command said on stderr, without anyhow's `Error: ` and `Caused by:` list. */
+export function firstParagraph(stderr: string): string {
+  return stderr
+    .trim()
+    .replace(/^Error: /, "")
+    .split(/\n\s*\n/)[0]
+    .trim();
+}
+
 /** `ductus 0.7.0-dev` → [0, 7, 0]; undefined when it isn't a version line. */
 export function parseVersion(text: string): [number, number, number] | undefined {
   const m = /(\d+)\.(\d+)\.(\d+)/.exec(text);
@@ -541,4 +557,202 @@ export function testArgs(run: Invocation, environment: string, inspect?: string)
   for (const i of run.interfaces) args.push("--interface", i);
   for (const t of run.tests) args.push("--test", t);
   return args;
+}
+
+/**
+ * One entry of an interface's history, as `GET /interfaces/{name}/history` and `ductus history
+ * --json` give it (docs/reference's `HistoryEntry`). Fields are only ever added; those read here.
+ */
+export interface HistoryEntry {
+  at: string;
+  kind: "commit" | "audit" | "documentation" | "deployment";
+  by: string;
+  what: string;
+  key: string;
+  touches?: { everything?: boolean; source?: boolean; destinations?: string[]; unsure?: boolean };
+  commit?: { id: string; email?: string; summary?: string; files?: { path: string; change: string }[] };
+  deployment?: {
+    id: number;
+    how: string;
+    reason?: string | null;
+    host?: string;
+    environment?: string;
+    version?: string;
+    git_commit?: string | null;
+    uncommitted?: string[] | null;
+    from?: string | null;
+    to?: string | null;
+    warning?: string | null;
+    variables_changed?: string[];
+  };
+  audit?: { id: number; action: string; outcome: string; subject?: string | null; message?: number | null };
+  documentation?: {
+    removed?: boolean;
+    fields?: { field: string; before?: unknown; after?: unknown }[];
+  };
+}
+
+/** A page of the history: newest first, `next_before` for the older ones. */
+export interface HistoryPage {
+  interface: string;
+  entries: HistoryEntry[];
+  next_before?: string | null;
+  notes: string[];
+}
+
+export function parseHistory(text: string): HistoryPage | undefined {
+  try {
+    const value = JSON.parse(text);
+    if (!value || typeof value.interface !== "string" || !Array.isArray(value.entries)) return undefined;
+    return {
+      interface: value.interface,
+      entries: value.entries.filter(
+        (e: HistoryEntry) => e && typeof e.at === "string" && typeof e.what === "string" && typeof e.key === "string",
+      ),
+      next_before: typeof value.next_before === "string" ? value.next_before : null,
+      notes: Array.isArray(value.notes) ? value.notes.filter((n: unknown) => typeof n === "string") : [],
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * `ductus history`'s arguments for a page: the folder's own history (git, and the database too when
+ * `DUCTUS_DATABASE_URL` is set where VS Code runs).
+ */
+export function historyArgs(iface: string, environment: string, limit: number, before?: string): string[] {
+  const args = ["history", iface, "--json", "--env", environment, "--limit", String(limit)];
+  if (before) args.push("--before", before);
+  return args;
+}
+
+/** An engine's history path (under `/api/v1`) for a page. */
+export function historyPath(iface: string, limit: number, before?: string): string {
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (before) query.set("before", before);
+  return `/interfaces/${encodeURIComponent(iface)}/history?${query}`;
+}
+
+/** A time as the History view shows it: the local date and minute (`2026-11-20 14:02`). */
+export function shortTime(at: string): string {
+  const d = new Date(at);
+  if (Number.isNaN(d.getTime())) return at;
+  const two = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${two(d.getMonth() + 1)}-${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
+}
+
+/** The parts an entry touches, as `ductus history` ends its lines (`source, lab`); "" for the whole. */
+export function touched(entry: HistoryEntry): string {
+  const t = entry.touches;
+  if (!t || t.everything) return "";
+  const parts = [...(t.source ? ["source"] : []), ...(t.destinations ?? [])];
+  return parts.length > 0 ? `${parts.join(", ")}${t.unsure ? "?" : ""}` : "";
+}
+
+/** A documentation field's value before or after, in one short line. */
+function shown(value: unknown): string {
+  if (value === undefined || value === null) return "(none)";
+  const text = typeof value === "string" ? value : JSON.stringify(value);
+  return text.length > 80 ? `${text.slice(0, 79)}…` : text;
+}
+
+/** An entry's details for its tooltip, a line each (what `ductus history` shows of it). */
+export function entryDetail(entry: HistoryEntry): string[] {
+  const lines = [`${shortTime(entry.at)} · ${entry.by}`];
+  const parts = touched(entry);
+  if (parts) lines.push(`touches ${parts}`);
+  const c = entry.commit;
+  if (c) {
+    lines.push(`commit ${c.id.slice(0, 12)}${c.email ? ` <${c.email}>` : ""}`);
+    if (c.summary && c.summary !== entry.what) lines.push(c.summary);
+    const mark: Record<string, string> = { added: "A", modified: "M", deleted: "D" };
+    for (const f of c.files ?? []) lines.push(`${mark[f.change] ?? "?"} ${f.path}`);
+  }
+  const d = entry.deployment;
+  if (d) {
+    const where = [d.host, d.environment && `environment ${d.environment}`, d.version && `ductus ${d.version}`]
+      .filter(Boolean)
+      .join(", ");
+    lines.push(`${d.how} #${d.id}${where ? ` (${where})` : ""}`);
+    if (d.reason) lines.push(`why: ${d.reason}`);
+    if (d.to) lines.push(`code ${d.from ?? "new here"} → ${d.to}`);
+    for (const v of d.variables_changed ?? []) lines.push(`variable: ${v}`);
+    if (d.git_commit) lines.push(`from commit ${d.git_commit.slice(0, 12)}`);
+    if (d.uncommitted?.length) lines.push(`uncommitted: ${d.uncommitted.join(", ")}`);
+    if (d.warning) lines.push(`⚠ ${d.warning}`);
+  }
+  const a = entry.audit;
+  if (a) {
+    lines.push(`${a.action} (${a.outcome})${a.subject ? `: ${a.subject}` : ""}`);
+    if (a.message !== undefined && a.message !== null) lines.push(`message ${a.message}`);
+  }
+  const doc = entry.documentation;
+  if (doc) {
+    if (doc.removed) lines.push("the interface left the project");
+    for (const f of doc.fields ?? []) lines.push(`${f.field}: ${shown(f.before)} → ${shown(f.after)}`);
+  }
+  return lines;
+}
+
+/** What the web UI's **Debug in VS Code** link (or the command) asks for. */
+export interface DebugLink {
+  /** The engine's URL, as the browser reached it (no trailing `/`). */
+  engine: string;
+  interface: string;
+  message: number;
+}
+
+/**
+ * The query of a `vscode://<extension id>/debug-message?engine=…&interface=…&message=…` link, or
+ * why it isn't one (said to the person: links come from web pages).
+ */
+export function parseDebugLink(query: string): DebugLink | { why: string } {
+  const q = new URLSearchParams(query);
+  const engine = (q.get("engine") ?? "").trim().replace(/\/+$/, "");
+  const iface = (q.get("interface") ?? "").trim();
+  const id = (q.get("message") ?? "").trim();
+  if (!/^https?:\/\/[^/\s]+$/.test(engine))
+    return { why: "the link names no engine (http:// or https:// and the host)" };
+  if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(iface)) return { why: "the link names no interface" };
+  if (!/^[1-9][0-9]{0,15}$/.test(id)) return { why: "the link names no message id" };
+  return { engine, interface: iface, message: Number(id) };
+}
+
+/**
+ * Whether two engine URLs are the same engine: scheme, host and port alike, a trailing `/` aside,
+ * with `localhost`, `127.0.0.1` and `[::1]` one host (a browser on `localhost:7700` and `ductus
+ * dev`'s `127.0.0.1:7700`).
+ */
+export function sameEngine(a: string, b: string): boolean {
+  const norm = (u: string) => {
+    try {
+      const url = new URL(u.trim());
+      const local = ["localhost", "127.0.0.1", "[::1]"].includes(url.hostname);
+      const port = url.port || (url.protocol === "https:" ? "443" : "80");
+      const host = local ? "127.0.0.1" : url.hostname.toLowerCase();
+      return `${url.protocol}//${host}:${port}${url.pathname.replace(/\/+$/, "")}`;
+    } catch {
+      return u.trim().replace(/\/+$/, "");
+    }
+  };
+  return norm(a) === norm(b);
+}
+
+/**
+ * `ductus try`'s arguments to debug a stored message read from an engine (the token goes in
+ * `DUCTUS_API_TOKEN`, never here).
+ */
+export function tryMessageArgs(link: DebugLink, environment: string, inspect: string): string[] {
+  return [
+    "try",
+    link.interface,
+    "--message",
+    String(link.message),
+    "--from",
+    link.engine,
+    `--inspect=${inspect}`,
+    "--env",
+    environment,
+  ];
 }

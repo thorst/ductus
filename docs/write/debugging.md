@@ -234,6 +234,10 @@ adt-in: fixture a01.hl7, received 2026-11-06 16:12:24 UTC, through the code as i
 | one the engine stored, from its database | `ductus try adt-in --message 20042988` (DUCTUS_DATABASE_URL) |
 | one a running engine stored, through its API | `ductus try adt-in --message 20042988 --from https://ductus-prod:7700` (a token with `payloads` in DUCTUS_API_TOKEN) |
 
+**In VS Code**, the last row is **Debug in VS Code** on the message's page in the web UI, or
+**Ductus: Debug a stored message…**: the [extension](vscode.md#debug-this-message) runs it with
+`--inspect` and attaches the debugger, so it stops at your breakpoints.
+
 **One destination's code** with `--destination NAME` (with any of the above): only that
 destination runs, when the others don't matter or aren't ready. A name the interface doesn't
 have is refused with the ones it has:

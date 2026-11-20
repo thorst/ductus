@@ -7,7 +7,18 @@ import {
   deployArgs,
   deployLines,
   deploySummary,
+  entryDetail,
+  firstParagraph,
+  historyArgs,
+  historyPath,
   lacks,
+  parseDebugLink,
+  parseHistory,
+  sameEngine,
+  shortTime,
+  touched,
+  tryMessageArgs,
+  type HistoryEntry,
   parseDeploy,
   parseEngines,
   parseReleases,
@@ -52,6 +63,10 @@ test("a token may deploy, or fetch releases, as its role and permissions say", (
   assert.equal(lacks(session("viewer", ["download"]), "download"), undefined);
   assert.equal(lacks(session("operator", ["deploy"]), "download"), undefined);
   assert.match(lacks(session("viewer", []), "download")!, /`download` permission/);
+  // Debugging a stored message: `payloads`, whatever the role. The History view: any token.
+  assert.equal(lacks(session("viewer", ["payloads"]), "payloads"), undefined);
+  assert.match(lacks(session("admin", ["deploy"]), "payloads")!, /`payloads` permission/);
+  assert.equal(lacks(session("viewer", []), "read"), undefined);
   assert.equal(parseSession('{"error": "sign in"}'), undefined);
 });
 
@@ -358,4 +373,150 @@ test("ductus test's arguments", () => {
     "--test",
     "a b",
   ]);
+});
+
+const DEPLOYED: HistoryEntry = {
+  at: "2026-11-20T14:02:00Z",
+  kind: "deployment",
+  by: "todd",
+  what: "reload: code a3f9c2e81b07 → 0b1c2d3e4f50",
+  key: "2026-11-20T14:02:00Z/d/7",
+  touches: { everything: false, source: false, destinations: ["lab"], unsure: false },
+  deployment: {
+    id: 7,
+    how: "reload",
+    reason: "fix PV1-3",
+    host: "dev-box",
+    environment: "dev",
+    version: "0.7.0",
+    git_commit: "0123456789abcdef0123",
+    uncommitted: ["interfaces/adt/route.ts"],
+    from: "a3f9c2e81b07",
+    to: "0b1c2d3e4f50",
+    warning: null,
+    variables_changed: [],
+  },
+};
+
+test("a history page is read; entries without their time, text or key are left out", () => {
+  const page = parseHistory(
+    JSON.stringify({
+      interface: "adt",
+      entries: [DEPLOYED, { kind: "commit" }],
+      next_before: "k",
+      notes: ["no git repository"],
+      destinations: ["lab"],
+    }),
+  );
+  assert.equal(page?.entries.length, 1);
+  assert.equal(page?.next_before, "k");
+  assert.deepEqual(page?.notes, ["no git repository"]);
+  assert.equal(parseHistory(JSON.stringify({ interface: "adt", entries: [] }))?.next_before, null);
+  assert.equal(parseHistory('{"error": "no interface"}'), undefined);
+  assert.equal(parseHistory("not json"), undefined);
+});
+
+test("history's arguments and path, a page at a time", () => {
+  assert.deepEqual(historyArgs("adt", "dev", 50), ["history", "adt", "--json", "--env", "dev", "--limit", "50"]);
+  assert.deepEqual(historyArgs("adt", "dev", 50, "k 1").slice(-2), ["--before", "k 1"]);
+  assert.equal(historyPath("adt in", 50), "/interfaces/adt%20in/history?limit=50");
+  assert.equal(historyPath("adt", 50, "a/b"), "/interfaces/adt/history?limit=50&before=a%2Fb");
+});
+
+test("an entry's parts and details, as ductus history shows them", () => {
+  assert.equal(touched(DEPLOYED), "lab");
+  assert.equal(touched({ ...DEPLOYED, touches: { everything: true } }), "");
+  assert.equal(
+    touched({ ...DEPLOYED, touches: { source: true, destinations: ["lab"], unsure: true } }),
+    "source, lab?",
+  );
+  assert.match(shortTime(DEPLOYED.at), /^2026-11-2\d \d\d:\d\d$/);
+  assert.equal(shortTime("not a time"), "not a time");
+  const lines = entryDetail(DEPLOYED);
+  assert.ok(lines.includes("touches lab"), lines.join("\n"));
+  assert.ok(lines.includes("reload #7 (dev-box, environment dev, ductus 0.7.0)"), lines.join("\n"));
+  assert.ok(lines.includes("why: fix PV1-3"));
+  assert.ok(lines.includes("code a3f9c2e81b07 → 0b1c2d3e4f50"));
+  assert.ok(lines.includes("from commit 0123456789ab"));
+  assert.ok(lines.includes("uncommitted: interfaces/adt/route.ts"));
+  const commit = entryDetail({
+    at: DEPLOYED.at,
+    kind: "commit",
+    by: "Todd",
+    what: "map PV1-3",
+    key: "c",
+    commit: {
+      id: "fedcba9876543210",
+      email: "t@example.com",
+      summary: "map PV1-3",
+      files: [{ path: "a.ts", change: "modified" }],
+    },
+  });
+  assert.deepEqual(commit.slice(1), ["commit fedcba987654 <t@example.com>", "M a.ts"]);
+  const doc = entryDetail({
+    at: DEPLOYED.at,
+    kind: "documentation",
+    by: "engine",
+    what: "documentation changed",
+    key: "d",
+    documentation: { fields: [{ field: "owner", before: null, after: "lab team" }] },
+  });
+  assert.deepEqual(doc.slice(1), ["owner: (none) → lab team"]);
+  const audit = entryDetail({
+    at: DEPLOYED.at,
+    kind: "audit",
+    by: "ops",
+    what: "paused lab",
+    key: "a",
+    audit: { id: 3, action: "destination.pause", outcome: "ok", subject: "lab", message: null },
+  });
+  assert.deepEqual(audit.slice(1), ["destination.pause (ok): lab"]);
+});
+
+test("the web UI's link: its engine, interface and message, or why it isn't one", () => {
+  assert.deepEqual(parseDebugLink("engine=https%3A%2F%2Fductus-prod%3A7700%2F&interface=adt-in&message=42"), {
+    engine: "https://ductus-prod:7700",
+    interface: "adt-in",
+    message: 42,
+  });
+  assert.match((parseDebugLink("interface=adt&message=1") as { why: string }).why, /no engine/);
+  assert.match(
+    (parseDebugLink("engine=javascript:alert(1)&interface=adt&message=1") as { why: string }).why,
+    /no engine/,
+  );
+  assert.match((parseDebugLink("engine=https://e/path&interface=adt&message=1") as { why: string }).why, /no engine/);
+  assert.match((parseDebugLink("engine=https://e&interface=../x&message=1") as { why: string }).why, /no interface/);
+  assert.match((parseDebugLink("engine=https://e&interface=adt&message=0") as { why: string }).why, /no message/);
+  assert.match((parseDebugLink("engine=https://e&interface=adt&message=1;rm") as { why: string }).why, /no message/);
+});
+
+test("the same engine whatever the spelling of its address", () => {
+  assert.ok(sameEngine("http://localhost:7700/", "http://127.0.0.1:7700"));
+  assert.ok(sameEngine("http://[::1]:7700", "http://127.0.0.1:7700"));
+  assert.ok(sameEngine("https://Ductus-Prod:443", "https://ductus-prod"));
+  assert.ok(!sameEngine("https://ductus-prod:7700", "http://ductus-prod:7700"));
+  assert.ok(!sameEngine("https://ductus-prod:7700", "https://ductus-test:7700"));
+  assert.ok(!sameEngine("http://127.0.0.1:7700", "http://127.0.0.1:7701"));
+});
+
+test("try's arguments to debug a stored message, never its token", () => {
+  assert.deepEqual(
+    tryMessageArgs({ engine: "https://ductus-prod:7700", interface: "adt-in", message: 42 }, "dev", "127.0.0.1:9300"),
+    [
+      "try",
+      "adt-in",
+      "--message",
+      "42",
+      "--from",
+      "https://ductus-prod:7700",
+      "--inspect=127.0.0.1:9300",
+      "--env",
+      "dev",
+    ],
+  );
+});
+
+test("a failed command's first paragraph, without anyhow's framing", () => {
+  assert.equal(firstParagraph("Error: reading message 5\n\nCaused by:\n    404"), "reading message 5");
+  assert.equal(firstParagraph(""), "");
 });
