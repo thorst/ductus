@@ -32,6 +32,7 @@ echo "== in VS Code, on a copy of the guides' project"
 npm run -s build
 # VS Code's own lines (GPU, D-Bus, its built-in chat looking for a sign-in) are noise here.
 DUCTUS_BIN=$BIN timeout 600 xvfb-run -a node dist/test/e2e/run.js 2>&1 |
+  sed -u 's/\x1b\[[0-9;]*m//g' | # Mocha colours its marks where FORCE_COLOR is set (CI)
   grep -vE '^\[[0-9:/.]+|Gtk-|dbus|libva|DevTools|AgentHost|ChatModel|ERROR:|trace-deprecation|DEP0169|^$' |
   tee "$LOG" || true
 
