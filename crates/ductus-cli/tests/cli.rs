@@ -475,11 +475,15 @@ fn validate_and_test_on_threads_say_what_one_thread_said() {
     let expected: Vec<String> = (0..24).map(|i| format!("t-{i:02}")).collect();
     assert_eq!(told, expected, "interfaces in their order:\n{out}");
     assert!(out.contains("reads: no tests") && out.contains("24 passed, 0 failed"), "{out}");
+    // `--json` lines are written as each test ends (0.7.6.1), so they come in the order tests
+    // finish; each names its interface, and the summary is last.
     let (ok, json) = ductus(dir.path(), &["test", "--read-only", "--json"]);
     assert!(ok, "{json}");
-    let order: Vec<String> =
-        json_lines(&json).iter().filter_map(|l| l["interface"].as_str().map(str::to_string)).collect();
-    assert_eq!(order, expected, "JSON lines in their order too");
+    let lines = json_lines(&json);
+    let mut order: Vec<String> = lines.iter().filter_map(|l| l["interface"].as_str().map(str::to_string)).collect();
+    order.sort();
+    assert_eq!(order, expected, "every interface's line, once");
+    assert_eq!(lines.last().unwrap()["type"], "summary", "{json}");
 
     let mut verdicts = Vec::new();
     for _ in 0..3 {
@@ -636,6 +640,107 @@ fn console_output_is_shown_under_its_test_and_kept_out_of_json() {
     assert_eq!((&lines[0]["type"], &lines[0]["output"]), (&"load".into(), &"starting\n".into()));
 }
 
+/// A test that runs away (0.7.6.1) fails by name with the guard's reason and what it wrote; the
+/// tests before it are reported, those after it run in a fresh runtime (module state starts over),
+/// a runaway after an `await` too, and other interfaces' tests are untouched. `--json` lines come
+/// as each test ends, not when its interface's tests are done. `--test` chooses by exact name.
+#[test]
+fn a_runaway_test_fails_by_name_and_the_rest_run_in_a_fresh_runtime() {
+    use std::io::BufRead;
+    let yaml = |name: &str, port: u16| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ port: {port} }} }}\ndestinations: {{ files: {{ file: {{ dir: out }} }} }}\n"
+        )
+    };
+    let (loopy, calm) = (yaml("loopy", 6671), yaml("calm", 6672));
+    let dir = project(&[
+        ("interfaces/loopy/interface.yaml", loopy.as_str()),
+        (
+            "interfaces/loopy/route.test.ts",
+            r#"import { test, expect } from "@ductus/sdk";
+
+let count = 0;
+test("counts first", () => {
+  count++;
+  expect(count).toBe(1);
+});
+test("loops", () => {
+  console.log("looping");
+  count = 100;
+  while (true) {}
+});
+test("starts over after a runaway", () => {
+  count++;
+  expect(count).toBe(1);
+});
+test("loops after an await", async () => {
+  await Promise.resolve();
+  while (true) {}
+});
+test("last", () => {
+  expect(1).toBe(1);
+});
+"#,
+        ),
+        ("interfaces/calm/interface.yaml", calm.as_str()),
+        ("interfaces/calm/calm.test.ts", "import { test } from \"@ductus/sdk\";\n\ntest(\"calm\", () => {});\n"),
+    ]);
+
+    // `--timeout` keeps each runaway's wait short (the default is 5 s).
+    let started = std::time::Instant::now();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["test", "--read-only", "--json", "--timeout", "300ms"])
+        .current_dir(dir.path())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut lines = Vec::new();
+    for line in std::io::BufReader::new(child.stdout.take().unwrap()).lines() {
+        let line = line.unwrap();
+        let value: serde_json::Value = serde_json::from_str(&line).unwrap_or_else(|e| panic!("{e}: {line}"));
+        lines.push((started.elapsed(), value));
+    }
+    let status = child.wait().unwrap();
+    let all: Vec<&serde_json::Value> = lines.iter().map(|(_, l)| l).collect();
+    assert!(!status.success(), "{all:#?}");
+    let loopy: Vec<&serde_json::Value> = all.iter().copied().filter(|l| l["interface"] == "loopy").collect();
+    let names: Vec<&str> = loopy.iter().map(|l| l["name"].as_str().unwrap()).collect();
+    assert_eq!(names, ["counts first", "loops", "starts over after a runaway", "loops after an await", "last"]);
+    let oks: Vec<bool> = loopy.iter().map(|l| l["ok"].as_bool().unwrap()).collect();
+    assert_eq!(oks, [true, false, true, false, true], "{loopy:#?}");
+    for runaway in [loopy[1], loopy[3]] {
+        assert!(runaway["error"].as_str().unwrap().contains("300ms timeout"), "{runaway}");
+        assert_eq!(runaway["file"], "interfaces/loopy/route.test.ts", "{runaway}");
+        assert!((300..5_000).contains(&runaway["ms"].as_u64().unwrap()), "{runaway}");
+    }
+    assert_eq!((&loopy[1]["line"], &loopy[1]["output"]), (&8.into(), &"looping\n".into()));
+    assert!(all.iter().any(|l| l["interface"] == "calm" && l["ok"] == true), "{all:#?}");
+    let summary = all.last().unwrap();
+    assert_eq!((&summary["passed"], &summary["failed"]), (&4.into(), &2.into()), "{summary}");
+    assert!(summary.get("notRun").is_none(), "{summary}");
+    // Streamed: the first test's line came out before the two runaways' 600 ms, not with the last.
+    let at = |name: &str| lines.iter().find(|(_, l)| l["name"] == name).unwrap().0;
+    let (first, last) = (at("counts first"), at("last"));
+    assert!(last - first >= std::time::Duration::from_millis(500), "first line at {first:?}, last at {last:?}");
+
+    // `--test` is the exact name ("loops" isn't "loops after an await"), in the text output too.
+    let (ok, out) =
+        ductus(dir.path(), &["test", "--read-only", "--timeout", "300ms", "--test", "loops", "--test", "last"]);
+    assert!(!ok, "{out}");
+    for expected in [
+        "loopy\n  ✗ loops  (interfaces/loopy/route.test.ts:8:1)\n      │ looping\n      stopped: the script ran longer than its 300ms timeout",
+        "  ✓ last (",
+        "1 passed, 1 failed",
+    ] {
+        assert!(out.contains(expected), "missing {expected:?} in\n{out}");
+    }
+    let (ok, out) = ductus(dir.path(), &["test", "--read-only", "--test", "calm", "--test", "count"]);
+    assert!(!ok && out.contains("  ✓ calm (") && out.contains("no test is named `count`"), "{out}");
+    let (ok, out) = ductus(dir.path(), &["test", "--read-only", "--timeout", "0s"]);
+    assert!(!ok && out.contains("`--timeout` must be above 0"), "{out}");
+}
+
 /// `GET path` on 127.0.0.1:port, its body (or None while nothing answers).
 fn http_get(port: u16, path: &str) -> Option<String> {
     use std::io::{Read, Write};
@@ -707,8 +812,8 @@ mod cdp {
 
 /// `ductus test --inspect` as a debugger sees it: the target listed, a pause at `debugger;` with
 /// the test's locals, and Todd's condition: an endless loop runs on while a debugger is attached
-/// (past the 5 s limit) and, once it detaches, is stopped within the limit, the test failed and
-/// the run over. stdout stays `--json`'s.
+/// (past the limit, 1 s here) and, once it detaches, is stopped within the limit and fails by name,
+/// the test after it not run. stdout stays `--json`'s.
 #[test]
 fn test_inspect_pauses_for_a_debugger_and_an_endless_loop_ends_when_it_detaches() {
     use cdp::{next, script, send};
@@ -719,12 +824,12 @@ fn test_inspect_pauses_for_a_debugger_and_an_endless_loop_ends_when_it_detaches(
         ),
         (
             "interfaces/dbg/dbg.test.ts",
-            "import { test, expect } from \"@ductus/sdk\";\n\ntest(\"pauses\", () => {\n  const n = 41;\n  debugger;\n  expect(n + 1).toBe(42);\n});\n\ntest(\"loops\", () => {\n  let i = 0;\n  while (true) i++;\n});\n",
+            "import { test, expect } from \"@ductus/sdk\";\n\ntest(\"pauses\", () => {\n  const n = 41;\n  debugger;\n  expect(n + 1).toBe(42);\n});\n\ntest(\"loops\", () => {\n  let i = 0;\n  while (true) i++;\n});\n\ntest(\"after\", () => {});\n",
         ),
     ]);
     let port = free_port();
     let child = Command::new(env!("CARGO_BIN_EXE_ductus"))
-        .args(["test", &format!("--inspect=127.0.0.1:{port}"), "--json"])
+        .args(["test", &format!("--inspect=127.0.0.1:{port}"), "--json", "--timeout", "1s"])
         .current_dir(dir.path())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
@@ -763,9 +868,9 @@ fn test_inspect_pauses_for_a_debugger_and_an_endless_loop_ends_when_it_detaches(
         assert_eq!(n["result"]["result"]["value"], 41, "{n}");
         send(&mut socket, id, "Debugger.resume", serde_json::json!({})).await;
 
-        // The second test loops; with the debugger attached it still runs past the 5 s limit:
-        // pausing it lands inside the loop.
-        tokio::time::sleep(std::time::Duration::from_millis(6_000)).await;
+        // The second test loops; with the debugger attached it still runs past the 1 s limit
+        // (`--timeout`): pausing it lands inside the loop.
+        tokio::time::sleep(std::time::Duration::from_millis(2_000)).await;
         send(&mut socket, id, "Debugger.pause", serde_json::json!({})).await;
         let in_loop = next(&mut socket, scripts, |v| v["method"] == "Debugger.paused").await;
         let frame = &in_loop["params"]["callFrames"][0];
@@ -777,13 +882,19 @@ fn test_inspect_pauses_for_a_debugger_and_an_endless_loop_ends_when_it_detaches(
 
     let out = child.wait_with_output().unwrap();
     let ended = detached_at.elapsed();
-    assert!(ended < std::time::Duration::from_secs(9), "stopped within the 5 s limit after detaching: {ended:?}");
+    assert!(ended < std::time::Duration::from_secs(5), "stopped within the 1 s limit after detaching: {ended:?}");
     assert!(!out.status.success());
     let stdout = String::from_utf8_lossy(&out.stdout);
     let lines = json_lines(&stdout); // only JSON on stdout
-    // A runaway ends the interface's whole run (V8 drops the runner's pending work with it).
-    assert_eq!(lines[0]["type"], "load", "{stdout}");
-    assert!(lines[0]["error"].as_str().unwrap().contains("5s timeout"), "{stdout}");
+    // The test before it reported, the runaway failed by name; the one after it isn't run (its
+    // debugger's session was the old runtime's).
+    assert_eq!((&lines[0]["name"], &lines[0]["ok"]), (&"pauses".into(), &true.into()), "{stdout}");
+    assert_eq!((&lines[1]["name"], &lines[1]["ok"], &lines[1]["line"]), (&"loops".into(), &false.into(), &9.into()));
+    assert!(lines[1]["error"].as_str().unwrap().contains("1s timeout"), "{stdout}");
+    assert_eq!(lines[2]["name"], "after", "{stdout}");
+    assert!(lines[2]["notRun"].as_str().unwrap().contains("debugger"), "{stdout}");
+    assert!(lines[2].get("ok").is_none(), "{stdout}");
+    assert_eq!((&lines[3]["type"], &lines[3]["notRun"]), (&"summary".into(), &1.into()), "{stdout}");
     let stderr = String::from_utf8_lossy(&out.stderr);
     for said in [
         format!("dbg: waiting for a debugger on 127.0.0.1:{port}"),

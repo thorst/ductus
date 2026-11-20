@@ -234,7 +234,9 @@ enum Command {
     /// Each test runs inside the engine's own JavaScript runtime with the SDK it uses, one at a
     /// time, with no database, network or engine. A failed test prints where it is, where it failed
     /// (the `expect`'s line, or the stack of what was thrown) and why; exits 1 when one fails, or
-    /// when `--filter` matches no test.
+    /// when `--filter` or `--test` matches no test. A test that runs past `--timeout` (5 s) without
+    /// pausing (an endless loop) or fills the script heap is stopped and fails by name; the tests
+    /// after it run in a fresh runtime.
     Test {
         /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
@@ -247,6 +249,18 @@ enum Command {
         /// Only the tests whose name contains this text (case matters): `--filter "A31"`.
         #[arg(long)]
         filter: Option<String>,
+        /// Only the test with this name, exactly as written in `test("...")` (case matters), in
+        /// every interface (or those `--interface` names); again for another. A name no test has
+        /// exits 1. With `--filter`, a test must match both.
+        #[arg(long, value_name = "NAME")]
+        test: Vec<String>,
+        /// How long each test may run without pausing before it's stopped as a runaway (an
+        /// endless loop) and fails: e.g. 500ms, 30s. Raise it for a test that's meant to take long
+        /// or a CI machine busy with other jobs; lower it so a looping test fails sooner. Every
+        /// interface's tests get the same limit; the interface's own `timeout` applies to the
+        /// engine, not here. Off while a debugger is attached (`--inspect`).
+        #[arg(long, value_name = "TIME", default_value = "5s", value_parser = parse_duration)]
+        timeout: std::time::Duration,
         /// List the tests, with the file and line of each, without running them.
         #[arg(long)]
         list: bool,
@@ -1477,7 +1491,10 @@ async fn run(cli: Cli) -> Result<()> {
             };
             dev::run(dev::Options { root, engine, port, reset, yes, database_only }).await
         }
-        Command::Test { root, interface, filter, list, inspect, json, env, read_only } => {
+        Command::Test { root, interface, filter, test, timeout, list, inspect, json, env, read_only } => {
+            if timeout.is_zero() {
+                anyhow::bail!("`--timeout` must be above 0 (every test would be stopped at once): e.g. 500ms");
+            }
             let inspect = inspect.as_deref().map(ductus_runtime::inspect::address).transpose()?;
             if inspect.is_some() && list {
                 anyhow::bail!("`--list` runs nothing to debug: leave out `--inspect`, or `--list`");
@@ -1488,10 +1505,12 @@ async fn run(cli: Cli) -> Result<()> {
             let options = project::TestOptions {
                 interface: &interface,
                 filter: filter.as_deref(),
+                names: &test,
                 list,
                 json,
                 read_only,
                 inspect,
+                timeout,
             };
             exit_on_failure(project::test(&root, &env, options).await)
         }

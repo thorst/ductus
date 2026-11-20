@@ -37,10 +37,11 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **Why:** VS Code's `attachSimplePort` takes the first target a port lists.
 - **What to do:** in VS Code, debug one interface at a time (open its file, "Ductus: debug this interface"); for two at once, use Chrome DevTools.
 
-## A runaway test ends that interface's test run (level 2)
-- **What:** when a test is stopped for running past the time limit (an endless loop, with or without a debugger), the interface's whole test run ends: `ductus test` reports it as `✗ failed to load tests` with "stopped: the script ran longer than its 5s timeout", the tests before it aren't reported, and those after it don't run. Other interfaces' tests run as usual.
-- **Why:** stopping JavaScript that runs away also drops what the test runner was waiting on.
-- **What to do:** run the interface's tests with `--filter` to find the one that loops, or attach a debugger and pause it.
+## A runaway test fails, and the tests after it start with fresh module state (level 2)
+- **What:** a test stopped for running past the time limit (an endless loop, with or without a debugger once it detaches) or for filling the script heap fails under its own name, with the reason ("stopped: the script ran longer than its 5s timeout without pausing (endless loop?)") and whatever it wrote to `console`. The tests before it keep their results. The tests after it run in a fresh runtime: the interface's test files are loaded again, so anything a module keeps between tests (a counter, a cache, a variable set at the top of a file) starts over from what loading sets, as if those tests ran first. Under `--inspect`, the tests after it are reported "not run" instead (`notRun` in `--json`), because the debugger's session belonged to the runtime that was stopped. Other interfaces' tests are never affected.
+- **Why:** stopping JavaScript that runs away also drops everything it was in the middle of, and the code it ran may have left module state half-changed; a fresh runtime is the only state the next tests can trust. The time limit applies to each test on its own.
+- **When it's different:** tests that rely on an earlier test having changed module state can pass or fail differently after a runaway than in a clean run: keep each test independent (set what it needs itself).
+- **What to do:** fix the loop the failed test points at (`--test "its name"` runs just it); to see where it loops, run it under a debugger (`--inspect`) and pause it. Each runaway costs the test's limit in waiting: 5 s, or what `ductus test --timeout` gives (the same for every interface; the interface's own `timeout` is the engine's, not the tests'). `--timeout 500ms` makes a looping test fail sooner while you look for it.
 
 ## The debugger listens on this machine only, and never in `ductus run` (level 3)
 - **What:** `--inspect` takes a port or an address on this machine (127.0.0.1, ::1, `localhost`); anything else is refused, saying why. The engine (`ductus run`, the services) has no debugger at all.

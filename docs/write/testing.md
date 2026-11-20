@@ -29,7 +29,9 @@ the code and checks the configuration against that environment.
 |---|---|
 | `--interface adt-in` | one interface's tests; again for more (`--interface adt-in --interface lab-out`). A name that isn't an interface of the project exits 1, naming those there are |
 | `--filter "A31"` | the tests whose name contains the text, in every interface (or the one `--interface` names); case matters. A filter that matches nothing exits 1, so a typo in a CI script can't pass by running nothing ([nuance](../nuances/transforms.md#a-test-filter-matches-part-of-a-name-level-1)) |
-| `--list` | nothing: it lists the tests with where each is, and takes `--interface` and `--filter` too |
+| `--test "the lab doesn't get patient updates (A31)"` | the test with that name exactly (case matters), in every interface (or those `--interface` names); again for another. Where `--filter` takes every name containing the text, this takes one: what an editor's "run this test" uses. A name no test has exits 1 ("no test is named `…`"). With `--filter` too, a test must match both |
+| `--timeout 30s` | every test, each allowed to run this long without pausing before it's stopped as a runaway and fails (default `5s`). Raise it for a test meant to take long, or on a CI machine busy with other jobs; lower it (`500ms`) so a looping test fails sooner. The interface's own `timeout` is the engine's limit and doesn't apply here ([nuance](../nuances/debugging.md#a-runaway-test-fails-and-the-tests-after-it-start-with-fresh-module-state-level-2)) |
+| `--list` | nothing: it lists the tests with where each is, and takes `--interface`, `--filter` and `--test` too |
 | `--json` | the same, as JSON Lines for an editor or CI ([below](#for-editors-and-ci-json)) |
 
 ```text
@@ -270,8 +272,11 @@ so a tool should ignore fields it doesn't know
 
 ### `ductus test --json`
 
-JSON Lines: one object per line, one line per test as each interface's tests finish, and a
-summary last. The exit code is the same as without `--json`.
+JSON Lines: one object per line, one line per test written the moment that test ends (an editor
+can show each result as it comes), and a summary last. Interfaces' tests run at the same time, so
+their lines interleave; each names its interface, and an interface's own lines keep its tests'
+order ([nuance](../nuances/transforms.md#interfaces-tests-run-at-the-same-time-level-2)). The exit
+code is the same as without `--json`.
 
 ```text
 $ ductus test --interface adt-in --filter "visits" --json
@@ -296,10 +301,12 @@ $ ductus test --json
 | `name` | `test` | the name given to `test(...)` |
 | `file`, `line`, `column` | `test` | where the `test(...)` call is: the file relative to the project, with `/`; line and column from 1, on the `.ts` as written |
 | `ok`, `ms` | `test`, when run | whether it passed, and how long it took |
+| `notRun` | `test`, when it didn't run | why: a test before it [ran away](#when-a-test-runs-away) under `--inspect`. Such a line has no `ok` or `ms` |
 | `error` | a failed `test`, `load` | what failed: an `expect`'s message, or a thrown error's stack as the text output shows it |
 | `failure` | a failed `test` | `{ file, line, column }` of where it failed: the `expect`, or the first frame of a thrown error in project code (which may be in the code under test) |
 | `expected`, `actual` | a failed `toBe`, `toEqual` or `toBeNull` | both values as text, objects and arrays as indented JSON, for a side-by-side view |
 | `passed`, `failed`, `ms` | `summary` | the counts (a `load` line counts as one failed) and the run's time |
+| `notRun` | `summary`, when a test didn't run | how many didn't |
 | `tests` | `summary` with `--list` | how many tests were listed |
 
 With `--list`, test lines have no `ok`, `ms` or failure: nothing ran.

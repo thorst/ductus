@@ -349,18 +349,39 @@ export function __setFixtures(map: Record<string, string>, formats?: { input: Fo
   __useOps(mockOps);
 }
 
+/** The tests the last options chose, kept: `ductus test` asks for one test at a time. */
+let chosenFor: { key: string; tests: TestCase[] } | null = null;
+
+function choose(filter: string | null | undefined, names: string[] | null | undefined): TestCase[] {
+  const key = JSON.stringify([filter ?? null, names ?? null]);
+  if (chosenFor?.key !== key) {
+    const named = names && names.length > 0 ? new Set(names) : null;
+    const chosen = tests.filter(
+      (t) => (typeof filter !== "string" || t.name.includes(filter)) && (named === null || named.has(t.name)),
+    );
+    chosenFor = { key, tests: chosen };
+  }
+  return chosenFor.tests;
+}
+
 /**
  * Run the registered tests, one at a time (async ones are awaited); returns a JSON report.
- * `options` (JSON): `filter`, only tests whose name contains it; `list`, report the tests without
- * running them; `places`, where every test is (else only failed ones say).
+ * `options` (JSON): `filter`, only tests whose name contains it; `names`, only tests with one of
+ * these names exactly; `list`, report the tests without running them; `places`, where every test
+ * is (else only failed ones say); `index`, only the test at this place among those chosen (none
+ * past the last). `ductus test` runs one test a call, so a test that runs away (and V8 dropping
+ * this function's pending work with it) costs only that test's report.
  */
 export async function __runTests(options?: string): Promise<string> {
-  const { filter, list, places } = JSON.parse(options ?? "{}") as {
+  const { filter, names, list, places, index } = JSON.parse(options ?? "{}") as {
     filter?: string | null;
+    names?: string[] | null;
     list?: boolean;
     places?: boolean;
+    index?: number;
   };
-  const chosen = typeof filter === "string" ? tests.filter((t) => t.name.includes(filter)) : tests;
+  const all = choose(filter, names);
+  const chosen = typeof index === "number" ? all.slice(index, index + 1) : all;
   const at = (t: TestCase) => where(t.site.stack);
   if (list) return JSON.stringify(chosen.map((t): TestResult => ({ name: t.name, at: at(t) })));
   const results: TestResult[] = [];

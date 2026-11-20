@@ -878,6 +878,20 @@ test("fails a negated expect", () => {
         serde_json::from_str(&rt.block_on(isolate.run_tests_with(r#"{"list": true}"#)).unwrap()).unwrap();
     assert_eq!(listed.len(), 6);
     assert!(listed.iter().all(|r| r.get("ok").is_none() && r["at"]["line"].is_u64()), "{listed:#?}");
+
+    // One test a call, by its place among those chosen (how `ductus test` runs them, 0.7.6.1),
+    // nothing past the last; and by exact name (`--test`), with a filter too.
+    let mut isolate = rt.block_on(Isolate::tests(&[&test_file], "{}", DEFAULT_FORMATS)).unwrap();
+    let mut run = |options: &str| -> Vec<String> {
+        let report: Vec<serde_json::Value> =
+            serde_json::from_str(&rt.block_on(isolate.run_tests_with(options)).unwrap()).unwrap();
+        report.iter().map(|r| format!("{} {}", r["name"].as_str().unwrap(), r["ok"])).collect()
+    };
+    assert_eq!(run(r#"{"filter": "fails a", "index": 1}"#), ["fails after an await false"]);
+    assert_eq!(run(r#"{"index": 0}"#), ["adds true"]);
+    assert!(run(r#"{"index": 6}"#).is_empty());
+    assert_eq!(run(r#"{"names": ["throws", "fails a"], "list": true}"#), ["throws null"]);
+    assert_eq!(run(r#"{"names": ["throws", "adds"], "filter": "add"}"#), ["adds true"]);
 }
 
 /// Under `ductus test`, `console` lines are each test's own (the code under test's too, after an

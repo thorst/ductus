@@ -421,13 +421,14 @@ time limit until it detaches", "the debugger detached: the time limit (`timeout`
 again".)
 
 The moment it detaches (you stop debugging, close the window, the connection drops), the limit
-applies again from then: code still in an endless loop is stopped within the timeout, the run
-ends and `ductus test` exits 1 (under `dev`, that message is quarantined and the interface goes
+applies again from then: code still in an endless loop is stopped within the timeout, that test
+fails and `ductus test` exits 1 (under `dev`, that message is quarantined and the interface goes
 on). An endless loop under a debugger therefore can't hang anything:
 pause it to see where it loops; stop debugging and it's stopped
 ([nuance](../nuances/debugging.md#the-time-limit-is-off-while-a-debugger-is-attached-level-2)).
-A test stopped this way ends its interface's run, with or without a debugger
-([nuance](../nuances/debugging.md#a-runaway-test-ends-that-interfaces-test-run-level-2)).
+The tests after it are reported "not run" under a debugger, since its session ended with the
+runtime that was stopped; without one they run in a fresh runtime
+([nuance](../nuances/debugging.md#a-runaway-test-fails-and-the-tests-after-it-start-with-fresh-module-state-level-2)).
 
 ## `debugger;` statements
 

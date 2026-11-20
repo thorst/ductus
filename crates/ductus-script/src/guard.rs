@@ -156,6 +156,13 @@ impl Guard {
         self.shared.interfaces().push(Interface { timeout, module });
     }
 
+    /// Change a registered interface's time budget (from its next call).
+    pub fn set_timeout(&self, interface: usize, timeout: Duration) {
+        if let Some(registered) = self.shared.interfaces().get_mut(interface) {
+            registered.timeout = timeout;
+        }
+    }
+
     /// For the near-heap-limit callback: stop the running call, and return the new limit.
     /// V8 crashes the process if we don't raise it, so we give a quarter more each time; the
     /// stopped interface's garbage is then collected (or, if it holds on to it, at least it

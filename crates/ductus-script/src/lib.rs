@@ -737,6 +737,13 @@ __setFixtures({fixtures_json}, {formats_json});
         }
     }
 
+    /// The time limit of each call into a loaded test suite (`ductus test --timeout`), for its
+    /// synchronous part and for code it resumes after an `await` alike. Default
+    /// [`DEFAULT_TIMEOUT`]; loading the test files keeps the default.
+    pub fn set_tests_timeout(&mut self, timeout: Duration) {
+        self.guard.set_timeout(0, timeout); // the suite's entry is the isolate's only one
+    }
+
     /// Run the loaded test suite (tests may be async); returns the JSON report.
     pub async fn run_tests(&mut self) -> Result<String> {
         self.run_tests_with("{}").await

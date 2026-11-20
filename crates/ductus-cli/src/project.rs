@@ -2,8 +2,8 @@
 
 use anyhow::{Context, Result, bail};
 use ductus_core::{Environment, InterfaceConfig};
-use ductus_script::Isolate;
-use std::collections::BTreeMap;
+use ductus_script::{Isolate, Runaway};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use crate::findings::{Finding, Report, Severity};
@@ -260,12 +260,13 @@ fn vscode_schemas(root: &Path) -> Result<Mapped> {
 }
 
 /// What `ductus test` runs and how it reports.
-#[derive(Default)]
 pub struct TestOptions<'a> {
     /// Only these interfaces' tests (none: every interface's).
     pub interface: &'a [String],
     /// Only tests whose name contains this.
     pub filter: Option<&'a str>,
+    /// Only tests with one of these names, exactly (`--test`; none: any name).
+    pub names: &'a [String],
     /// List the tests (and where they are) without running them.
     pub list: bool,
     /// JSON Lines instead of text.
@@ -275,6 +276,8 @@ pub struct TestOptions<'a> {
     pub read_only: bool,
     /// Under a debugger listening here (one interface's tests).
     pub inspect: Option<std::net::SocketAddr>,
+    /// Each test's time limit (`--timeout`; default 5 s).
+    pub timeout: std::time::Duration,
 }
 
 /// Whether `--interface` names this interface: by name, or a path inside its folder (an editor
@@ -322,16 +325,84 @@ struct Suite {
     formats: String,
 }
 
-/// One interface's tests, loaded and run: the runner's report (JSON), and what loading wrote to
-/// `console`. Under a debugger (`debugged`: where it listens, the interface) the isolate is
-/// offered to one and waits for it before any code loads.
+/// What the SDK's runner is asked (the options of `__runTests` in testing.ts).
+#[derive(serde::Serialize, Clone, Copy)]
+struct Runner<'a> {
+    filter: Option<&'a str>,
+    #[serde(skip_serializing_if = "<[String]>::is_empty")]
+    names: &'a [String],
+    list: bool,
+    places: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    index: Option<usize>,
+    /// Each test's time limit (`--timeout`): set on the isolate, not sent to the runner.
+    #[serde(skip)]
+    timeout: std::time::Duration,
+}
+
+impl Runner<'_> {
+    fn options(self) -> String {
+        serde_json::to_string(&self).expect("the runner's options are JSON")
+    }
+}
+
+/// Why the tests after a runaway didn't run under a debugger.
+const NOT_RUN_DEBUGGED: &str =
+    "a test before it ran away, and the debugger's session belonged to its runtime: run them again";
+
+/// One interface's tests, as they went.
+#[derive(Default)]
+struct Ran {
+    /// What the test files (and the code they import) wrote to `console` while loading.
+    loading: String,
+    /// Each test's report in order (with `--list`, each test listed).
+    results: Vec<TestReport>,
+    /// The test files didn't load (or didn't load again after a runaway): the error, and what
+    /// they wrote to `console` until then.
+    failed: Option<(String, String)>,
+}
+
+/// What `run_suite` tells as it happens: with `--json`, each becomes a line at once.
+enum Told<'a> {
+    Loaded(&'a str),
+    Test(&'a TestReport),
+    Failed { error: &'a str, output: &'a str },
+}
+
+impl Ran {
+    fn test(&mut self, report: TestReport, told: &mut dyn FnMut(Told<'_>)) {
+        told(Told::Test(&report));
+        self.results.push(report);
+    }
+
+    fn fail(&mut self, error: String, output: String, told: &mut dyn FnMut(Told<'_>)) {
+        told(Told::Failed { error: &error, output: &output });
+        self.failed = Some((error, output));
+    }
+}
+
+/// The tests `runner` chooses, listed (only the one at `index` when given).
+async fn listed(isolate: &mut Isolate, runner: Runner<'_>, index: Option<usize>) -> Result<Vec<TestReport>> {
+    let options = Runner { list: true, index, ..runner }.options();
+    Ok(serde_json::from_str(&isolate.run_tests_with(&options).await?)?)
+}
+
+/// One interface's tests, loaded and run one test a call, each told as it ends. Under a debugger
+/// (`debugged`: where it listens, the interface) the isolate is offered to one and waits for it
+/// before any code loads.
+///
+/// A test that runs away (past its time limit, or the heap) is that test's failure: V8 drops all
+/// the isolate's pending work with it, so the runner's own call goes too, and the code the test
+/// ran may have left module state half-changed. The tests after it run in a fresh isolate (the
+/// files loaded again); under a debugger they're reported not run, as its session is the old one's.
 async fn run_suite(
     paths: &[&Path],
     fixtures: &str,
     formats: &str,
-    options: &str,
+    runner: Runner<'_>,
     debugged: Option<(std::net::SocketAddr, &str)>,
-) -> (Result<String>, String) {
+    told: &mut dyn FnMut(Told<'_>),
+) -> Ran {
     let mut server = None; // the debugger's, serving until these tests are done
     let mut before_loading = |isolate: &mut Isolate| -> Result<()> {
         if let Some((addr, label)) = debugged {
@@ -341,13 +412,104 @@ async fn run_suite(
     };
     let hook: Option<ductus_script::BeforeLoading> = if debugged.is_some() { Some(&mut before_loading) } else { None };
     let ran = match Isolate::tests_inspected(paths, fixtures, formats, hook).await {
-        Ok(mut isolate) => {
-            let loading = isolate.take_console();
-            (isolate.run_tests_with(options).await, loading)
+        Ok(isolate) => run_loaded(isolate, paths, fixtures, formats, runner, debugged.is_some(), told).await,
+        Err(failed) => {
+            let mut ran = Ran::default();
+            ran.fail(format!("{:#}", failed.error), failed.output, told);
+            ran
         }
-        Err(failed) => (Err(failed.error), failed.output),
     };
     drop(server); // the debugger's session ends with the run
+    ran
+}
+
+/// `run_suite` once the test files loaded into `isolate`.
+async fn run_loaded(
+    mut isolate: Isolate,
+    paths: &[&Path],
+    fixtures: &str,
+    formats: &str,
+    runner: Runner<'_>,
+    debugged: bool,
+    told: &mut dyn FnMut(Told<'_>),
+) -> Ran {
+    let mut ran = Ran { loading: isolate.take_console(), ..Default::default() };
+    isolate.set_tests_timeout(runner.timeout);
+    if !ran.loading.is_empty() {
+        told(Told::Loaded(&ran.loading));
+    }
+    if runner.list {
+        match listed(&mut isolate, runner, None).await {
+            Ok(tests) => tests.into_iter().for_each(|t| ran.test(t, told)),
+            Err(e) => ran.fail(format!("{e:#}"), isolate.take_console(), told),
+        }
+        return ran;
+    }
+    let mut index = 0;
+    loop {
+        let started = std::time::Instant::now();
+        let runaway = match isolate.run_tests_with(&Runner { index: Some(index), ..runner }.options()).await {
+            Ok(report) => match serde_json::from_str::<Vec<TestReport>>(&report) {
+                Ok(reports) if reports.is_empty() => break, // past the last
+                Ok(reports) => {
+                    reports.into_iter().for_each(|r| ran.test(r, told));
+                    index += 1;
+                    continue;
+                }
+                Err(e) => {
+                    ran.fail(format!("the test runner's report: {e}"), String::new(), told);
+                    break;
+                }
+            },
+            Err(e) => match e.downcast_ref::<Runaway>() {
+                Some(runaway) => *runaway,
+                None => {
+                    ran.fail(format!("{e:#}"), isolate.take_console(), told);
+                    break;
+                }
+            },
+        };
+        let ms = started.elapsed().as_millis() as u64;
+        let output = isolate.take_console();
+        let stopped = |listed: Option<TestReport>| TestReport {
+            ok: Some(false),
+            error: Some(runaway.to_string()),
+            ms: Some(ms),
+            output: (!output.is_empty()).then(|| output.clone()),
+            // Its name and place come from listing it; should that fail, its number says which.
+            ..listed.unwrap_or_else(|| TestReport {
+                name: format!("test {} of this interface", index + 1),
+                ..Default::default()
+            })
+        };
+        if debugged {
+            let mut rest = listed(&mut isolate, runner, None).await.unwrap_or_default().into_iter().skip(index);
+            ran.test(stopped(rest.next()), told);
+            for test in rest {
+                ran.test(TestReport { not_run: Some(NOT_RUN_DEBUGGED.into()), ..test }, told);
+            }
+            break;
+        }
+        // The old isolate goes first: a thread's isolates must be dropped in the reverse order
+        // they were made (dev-guide/script-runtime.md).
+        drop(isolate);
+        isolate = match Isolate::tests(paths, fixtures, formats).await {
+            Ok(mut fresh) => {
+                fresh.take_console(); // what loading writes was shown the first time
+                fresh.set_tests_timeout(runner.timeout);
+                let this = listed(&mut fresh, runner, Some(index)).await.ok().and_then(|mut l| l.pop());
+                ran.test(stopped(this), told);
+                fresh
+            }
+            Err(failed) => {
+                ran.test(stopped(None), told);
+                let error = format!("loading the tests again after a runaway: {:#}", failed.error);
+                ran.fail(error, failed.output, told);
+                break;
+            }
+        };
+        index += 1;
+    }
     ran
 }
 
@@ -379,9 +541,13 @@ fn wait_for_debugger(
     Ok(inspector)
 }
 
-/// A test's report from the SDK's runner (`TestResult` in testing.ts).
-#[derive(serde::Deserialize)]
+/// A test's report from the SDK's runner (`TestResult` in testing.ts), or made here for a test
+/// that ran away or didn't run.
+#[derive(serde::Deserialize, Default)]
 struct TestReport {
+    /// Why it didn't run (set here, never by the runner).
+    #[serde(skip)]
+    not_run: Option<String>,
     name: String,
     ok: Option<bool>,
     error: Option<String>,
@@ -419,7 +585,7 @@ impl Where {
 /// Run each interface's `*.test.ts` files (or list them). Returns false if anything failed, or
 /// a filter matched nothing.
 pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bool> {
-    let TestOptions { interface: only, filter, list, json, read_only, inspect } = options;
+    let TestOptions { interface: only, filter, names, list, json, read_only, inspect, timeout } = options;
     if !read_only {
         write_types(root).await?;
     }
@@ -435,7 +601,9 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
         bail!("`--interface {unknown}` isn't an interface of this project (they are: {})", names.join(", "));
     }
     let project = &Root::new(root);
-    let (mut passed, mut failed, mut found) = (0, 0, 0);
+    let (mut passed, mut failed, mut found, mut not_run) = (0, 0, 0, 0);
+    let mut loads_failed = false;
+    let mut seen = BTreeSet::new(); // the names that ran (or were listed), for `--test`
     let started = std::time::Instant::now();
     let say = |line: String| {
         if !json {
@@ -448,7 +616,7 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
         }
     };
     // Every test's place only where it's shown (writing a stack costs ~30 µs a test).
-    let runner_options = serde_json::json!({ "filter": filter, "list": list, "places": json }).to_string();
+    let runner = Runner { filter, names, list, places: json, index: None, timeout };
 
     // Each interface's suite on this thread first (what to run, its fixtures read), in order.
     let mut suites = Vec::new();
@@ -478,99 +646,60 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
         suites.push(Suite { label, tests, fixtures: serde_json::to_string(&fixtures)?, formats });
     }
 
-    // Then run, spread over threads (each suite in an isolate of its own, as before), and told in
-    // the same order. Under a debugger there's one suite: its thread is the one the inspector's
-    // tasks need (a single-threaded runtime of its own, as the engine's workers have).
+    // Then run, spread over threads (each suite in an isolate of its own, as before). With
+    // `--json` each line is written the moment it's known, from the suite's thread (an editor
+    // shows a test's result as it ends; each line names its interface); the text waits for the
+    // interface's turn below, so it reads as one thread wrote it. Under a debugger there's one
+    // suite: its thread is the one the inspector's tasks need (a single-threaded runtime of its
+    // own, as the engine's workers have).
     let run = |runtime: &tokio::runtime::Runtime, _: &mut (), suite: &Suite| {
         if suite.tests.is_empty() {
             return None;
         }
         let paths: Vec<&Path> = suite.tests.iter().map(PathBuf::as_path).collect();
         let debugged = inspect.map(|addr| (addr, suite.label.as_str()));
-        Some(runtime.block_on(run_suite(&paths, &suite.fixtures, &suite.formats, &runner_options, debugged)))
+        let mut told = |what: Told<'_>| {
+            if json {
+                println!("{}", told_line(&suite.label, what, project));
+            }
+        };
+        Some(runtime.block_on(run_suite(&paths, &suite.fixtures, &suite.formats, runner, debugged, &mut told)))
     };
-    // `loading`: what the test files and the code they import wrote to `console` while loading.
     crate::spread::in_order(&suites, crate::spread::threads(), run, |i, ran| {
-        let label = suites[i].label.clone();
-        let Some((report, loading)) = ran else {
-            if filter.is_none() {
+        let label = &suites[i].label;
+        let Some(Ran { loading, results, failed: load_failed }) = ran else {
+            if filter.is_none() && names.is_empty() {
                 say(format!("{label}: no tests"));
             }
             return Ok(());
         };
-        let report = match report {
-            Ok(r) => r,
-            Err(e) => {
-                let error = project.readable(&format!("{e:#}"));
-                let mut text = format!("{label}\n  ✗ failed to load tests\n");
-                if !loading.is_empty() {
-                    text.push_str(&format!("{}\n", output_lines(&loading)));
-                }
-                text.push_str(&indent(&error, 6));
-                say(text);
-                let mut line = serde_json::json!({ "type": "load", "interface": label, "error": error });
-                if !loading.is_empty() {
-                    line["output"] = loading.into();
-                }
-                emit(line);
-                failed += 1;
-                return Ok(());
-            }
-        };
-        let results: Vec<TestReport> = serde_json::from_str(&report)?;
-        if results.is_empty() && loading.is_empty() {
+        if results.is_empty() && loading.is_empty() && load_failed.is_none() {
             return Ok(()); // nothing matched the filter here
         }
         say(label.clone());
         if !loading.is_empty() {
             say(format!("  while loading\n{}", output_lines(&loading)));
-            emit(serde_json::json!({ "type": "output", "interface": label, "output": loading }));
         }
-        for r in results {
+        for r in &results {
             found += 1;
-            let place = r.at.as_ref().map(|w| w.text(project)).unwrap_or_default();
-            let mut line = serde_json::json!({ "type": "test", "interface": label, "name": r.name });
-            if let Some(at) = &r.at {
-                line["file"] = project.relative(&at.url).into();
-                (line["line"], line["column"]) = (at.line.into(), at.column.into());
+            seen.insert(r.name.clone());
+            match (&r.not_run, r.ok) {
+                (Some(_), _) => not_run += 1,
+                (None, Some(true)) => passed += 1,
+                (None, Some(false)) => failed += 1,
+                (None, None) => {}
             }
-            // Its output first: it was written before the failure (if any) below.
-            let output = r.output.as_deref().map(|o| format!("\n{}", output_lines(o))).unwrap_or_default();
-            if let Some(o) = &r.output {
-                line["output"] = o.as_str().into();
+            say(test_text(r, project));
+        }
+        if let Some((error, output)) = load_failed {
+            failed += 1;
+            loads_failed = true;
+            let mut text = "  ✗ failed to load tests\n".to_string();
+            if !output.is_empty() {
+                text.push_str(&format!("{}\n", output_lines(&output)));
             }
-            match r.ok {
-                None => say(format!("  {}  ({place})", r.name)),
-                Some(true) => {
-                    passed += 1;
-                    say(format!("  ✓ {} ({}ms){output}", r.name, r.ms.unwrap_or(0)));
-                }
-                Some(false) => {
-                    failed += 1;
-                    // A thrown error's stack says where (readable); a failed `expect` has none.
-                    let error = project.readable(r.error.as_deref().unwrap_or(""));
-                    let mut shown = error.clone();
-                    if let Some(w) = &r.failed_at
-                        && !error.lines().any(|l| l.trim_start().starts_with("at "))
-                    {
-                        shown.push_str(&format!("\nat {}", w.text(project)));
-                    }
-                    say(format!("  ✗ {}  ({place}){output}\n{}", r.name, indent(&shown, 6)));
-                    line["error"] = error.into();
-                    if let Some(w) = &r.failed_at {
-                        line["failure"] = w.json(project);
-                    }
-                    if let (Some(expected), Some(actual)) = (&r.expected, &r.actual) {
-                        line["expected"] = expected.as_str().into();
-                        line["actual"] = actual.as_str().into();
-                    }
-                }
-            }
-            if let Some(ok) = r.ok {
-                line["ok"] = ok.into();
-                line["ms"] = r.ms.unwrap_or(0).into();
-            }
-            emit(line);
+            text.push_str(&indent(&project.readable(&error), 6));
+            say(text);
         }
         Ok(())
     })?;
@@ -579,15 +708,98 @@ pub async fn test(root: &Path, env: &str, options: TestOptions<'_>) -> Result<bo
     if let Some(text) = unmatched {
         say(format!("no test's name contains `{text}`"));
     }
+    // Every name given must be a test's: a typo would otherwise run nothing of it and pass.
+    let unnamed: Vec<&String> =
+        if loads_failed { Vec::new() } else { names.iter().filter(|n| !seen.contains(*n)).collect() };
+    for name in &unnamed {
+        say(format!("no test is named `{name}`"));
+    }
     if list {
         say(format!("\n{found} test(s)"));
         emit(serde_json::json!({ "type": "summary", "tests": found }));
     } else {
-        say(format!("\n{passed} passed, {failed} failed"));
+        let also = if not_run > 0 { format!(", {not_run} not run") } else { String::new() };
+        say(format!("\n{passed} passed, {failed} failed{also}"));
         let ms = started.elapsed().as_millis() as u64;
-        emit(serde_json::json!({ "type": "summary", "passed": passed, "failed": failed, "ms": ms }));
+        let mut summary = serde_json::json!({ "type": "summary", "passed": passed, "failed": failed, "ms": ms });
+        if not_run > 0 {
+            summary["notRun"] = not_run.into();
+        }
+        emit(summary);
     }
-    Ok(failed == 0 && unmatched.is_none())
+    Ok(failed == 0 && unmatched.is_none() && unnamed.is_empty())
+}
+
+/// A `--json` line for what `run_suite` told about `interface`'s tests.
+fn told_line(interface: &str, what: Told<'_>, project: &Root) -> serde_json::Value {
+    match what {
+        Told::Loaded(output) => serde_json::json!({ "type": "output", "interface": interface, "output": output }),
+        Told::Test(r) => test_json(interface, r, project),
+        Told::Failed { error, output } => {
+            let error = project.readable(error);
+            let mut line = serde_json::json!({ "type": "load", "interface": interface, "error": error });
+            if !output.is_empty() {
+                line["output"] = output.into();
+            }
+            line
+        }
+    }
+}
+
+/// A test's `--json` line.
+fn test_json(interface: &str, r: &TestReport, project: &Root) -> serde_json::Value {
+    let mut line = serde_json::json!({ "type": "test", "interface": interface, "name": r.name });
+    if let Some(at) = &r.at {
+        line["file"] = project.relative(&at.url).into();
+        (line["line"], line["column"]) = (at.line.into(), at.column.into());
+    }
+    if let Some(o) = &r.output {
+        line["output"] = o.as_str().into();
+    }
+    if let Some(why) = &r.not_run {
+        line["notRun"] = why.as_str().into();
+        return line;
+    }
+    if r.ok == Some(false) {
+        line["error"] = project.readable(r.error.as_deref().unwrap_or("")).into();
+        if let Some(w) = &r.failed_at {
+            line["failure"] = w.json(project);
+        }
+        if let (Some(expected), Some(actual)) = (&r.expected, &r.actual) {
+            line["expected"] = expected.as_str().into();
+            line["actual"] = actual.as_str().into();
+        }
+    }
+    if let Some(ok) = r.ok {
+        line["ok"] = ok.into();
+        line["ms"] = r.ms.unwrap_or(0).into();
+    }
+    line
+}
+
+/// A test as the text output shows it.
+fn test_text(r: &TestReport, project: &Root) -> String {
+    let place = r.at.as_ref().map(|w| w.text(project)).unwrap_or_default();
+    // Its output first: it was written before the failure (if any) below.
+    let output = r.output.as_deref().map(|o| format!("\n{}", output_lines(o))).unwrap_or_default();
+    if let Some(why) = &r.not_run {
+        return format!("  - {}  ({place})  not run: {why}", r.name);
+    }
+    match r.ok {
+        None => format!("  {}  ({place})", r.name),
+        Some(true) => format!("  ✓ {} ({}ms){output}", r.name, r.ms.unwrap_or(0)),
+        Some(false) => {
+            // A thrown error's stack says where (readable); a failed `expect` has none.
+            let error = project.readable(r.error.as_deref().unwrap_or(""));
+            let mut shown = error.clone();
+            if let Some(w) = &r.failed_at
+                && !error.lines().any(|l| l.trim_start().starts_with("at "))
+            {
+                shown.push_str(&format!("\nat {}", w.text(project)));
+            }
+            format!("  ✗ {}  ({place}){output}\n{}", r.name, indent(&shown, 6))
+        }
+    }
 }
 
 /// Project files by interface name (`interfaces/adt/interface.yaml`), with each one's config, to
