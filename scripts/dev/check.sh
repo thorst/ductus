@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # The gates every change must pass before commit (CI runs the same):
-#   web UI (format, types, lint, tests, build) -> format -> build (incl. the ductus binary, with
+#   web UI (format, types, lint, tests, build) -> the VS Code extension (format, types, lint,
+#   unit tests) -> format -> build (incl. the ductus binary, with
 #   the UI embedded) -> the API document the UI is typed from is current -> the docs' reference
 #   pages, the docs site and its links (when mdBook and lychee are installed) -> clippy -D warnings
 #   -> all tests.
@@ -40,6 +41,17 @@ echo "== ui"
   sed 's/\x1b\[[0-9;]*m//g' /tmp/ductus-ui-check.log | grep -E '^ *Tests +[0-9]+ passed' || true
   npm run -s build 2>&1 | grep -E 'error|UI size|over the' || true
   [ -f dist/index.html ] || { echo "UI BUILD FAILED"; exit 1; }
+)
+# The VS Code extension's types, lint, format and unit tests (in a real VS Code: demo-vscode.sh).
+echo "== vscode extension"
+(
+  cd editors/vscode
+  [ -d node_modules ] || npm ci --no-audit --no-fund >/dev/null
+  npm run -s format >/dev/null
+  npm run -s check >/tmp/ductus-vscode-check.log 2>&1 ||
+    { cat /tmp/ductus-vscode-check.log; echo "VS CODE EXTENSION CHECKS FAILED"; exit 1; }
+  grep -E '^ℹ (pass|fail) ' /tmp/ductus-vscode-check.log | tr '\n' ' ' || true
+  echo
 )
 export DUCTUS_REQUIRE_UI=1
 echo "== fmt";    cargo fmt --all

@@ -1,0 +1,169 @@
+{
+  "name": "ductus",
+  "displayName": "Ductus",
+  "description": "Ductus integration engine: interface tests in the Test Explorer, run and debugged per test; validate's findings in Problems on save; debugging without launch.json.",
+  "version": "0.7.0",
+  "publisher": "ductus",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/thorst/ductus",
+    "directory": "editors/vscode"
+  },
+  "homepage": "https://getductus.com",
+  "bugs": "https://github.com/thorst/ductus/issues",
+  "engines": {
+    "vscode": "^1.95.0"
+  },
+  "categories": [
+    "Testing",
+    "Debuggers",
+    "Linters"
+  ],
+  "keywords": [
+    "ductus",
+    "integration engine",
+    "hl7",
+    "fhir",
+    "interfaces"
+  ],
+  "extensionKind": [
+    "workspace"
+  ],
+  "main": "./dist/extension.js",
+  "activationEvents": [
+    "workspaceContains:**/interfaces/*/interface.yaml"
+  ],
+  "contributes": {
+    "configuration": {
+      "title": "Ductus",
+      "properties": {
+        "ductus.path": {
+          "type": "string",
+          "default": "",
+          "scope": "machine-overridable",
+          "markdownDescription": "The `ductus` program the extension runs (tests, `validate`, debugging). Empty: `ductus` on the `PATH`, as a terminal finds it. A path relative to the workspace folder or with `${workspaceFolder}` works too. It must be 0.7.0 or newer."
+        },
+        "ductus.environment": {
+          "type": "string",
+          "default": "dev",
+          "markdownDescription": "The environment the project is read in for tests, `validate` and debugging (`--env`): `${NAME}` values come from `environments/<env>.yaml`."
+        },
+        "ductus.validateOnSave": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Run `ductus validate` when a file of a project is saved (once for several saves close together) and show its findings in Problems. Off: only when the workspace opens and with **Ductus: Validate the project**."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "ductus.validate",
+        "title": "Validate the project",
+        "category": "Ductus"
+      },
+      {
+        "command": "ductus.showOutput",
+        "title": "Show the output",
+        "category": "Ductus"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "ductus",
+        "label": "Ductus",
+        "languages": [
+          "typescript"
+        ],
+        "configurationAttributes": {
+          "launch": {
+            "properties": {
+              "command": {
+                "type": "string",
+                "enum": [
+                  "test",
+                  "try",
+                  "dev"
+                ],
+                "enumDescriptions": [
+                  "`ductus test --inspect`: the tests of the open file's interface",
+                  "`ductus try --inspect`: the open file (a message, a fixture) through its interface",
+                  "`ductus dev --inspect`: a dev engine with the open file's interface under the debugger"
+                ],
+                "default": "test",
+                "description": "What runs under the debugger."
+              },
+              "file": {
+                "type": "string",
+                "default": "${file}",
+                "description": "A file of the interface (try: the message). Default: the open file."
+              },
+              "args": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                },
+                "default": [],
+                "description": "More options for the command, e.g. [\"--filter\", \"A31\"]."
+              }
+            }
+          }
+        },
+        "configurationSnippets": [
+          {
+            "label": "Ductus: debug these tests",
+            "description": "The open file's interface's tests under the debugger",
+            "body": {
+              "type": "ductus",
+              "request": "launch",
+              "name": "Ductus: debug these tests",
+              "command": "test"
+            }
+          },
+          {
+            "label": "Ductus: debug this message",
+            "description": "The open message file through its interface, under the debugger",
+            "body": {
+              "type": "ductus",
+              "request": "launch",
+              "name": "Ductus: debug this message",
+              "command": "try"
+            }
+          },
+          {
+            "label": "Ductus: debug this interface",
+            "description": "ductus dev with the open file's interface under the debugger",
+            "body": {
+              "type": "ductus",
+              "request": "launch",
+              "name": "Ductus: debug this interface",
+              "command": "dev"
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "scripts": {
+    "build": "node esbuild.mjs",
+    "check": "tsc -p . && eslint . && prettier --check . && node --test \"test/unit/*.test.ts\"",
+    "format": "prettier --write .",
+    "test:unit": "node --test \"test/unit/*.test.ts\"",
+    "test:e2e": "node esbuild.mjs && node dist/test/e2e/run.js",
+    "package": "node esbuild.mjs --production && node -e \"require('fs').copyFileSync('../../LICENSE','LICENSE')\" && vsce package --no-dependencies -o dist/ductus.vsix"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/mocha": "^10.0.10",
+    "@types/node": "^24.19.2",
+    "@types/vscode": "~1.95.0",
+    "@vscode/test-electron": "^3.1.0",
+    "@vscode/vsce": "^4.1.1",
+    "esbuild": "^0.28.2",
+    "eslint": "^10.15.0",
+    "mocha": "^12.0.3",
+    "prettier": "^3.10.1",
+    "typescript": "~6.0.3",
+    "typescript-eslint": "^8.73.0"
+  }
+}

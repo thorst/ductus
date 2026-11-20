@@ -35,6 +35,7 @@ echo "##### web UI";          bash scripts/demo-ui.sh | tail -1
 echo "##### v0.5 release";    bash scripts/demo-v05.sh | tail -1
 echo "##### ductus dev";      bash scripts/demo-dev.sh | tail -1
 echo "##### debugging";       bash scripts/demo-debug.sh | tail -1
+echo "##### VS Code";         bash scripts/demo-vscode.sh | tail -1
 echo "##### ductus try";      bash scripts/demo-try.sh | tail -1
 echo "##### releases";        bash scripts/demo-release.sh | tail -1
 echo "##### promote";         bash scripts/demo-promote.sh | tail -1

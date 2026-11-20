@@ -78,3 +78,13 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 ## A quoted number in an environment file is text (level 1)
 - **What:** a setting that's only a reference keeps the variable's type, so `port: ${LAB_PORT}` with `LAB_PORT: "6670"` in `environments/dev.yaml` is the text "6670", and the interface is refused: "invalid type: string "6670", expected u16". `LAB_PORT: 6670` is the number.
 - **What to do:** write numbers in environment files without quotes. Quote only what YAML would otherwise read wrongly (a value starting with `*`, `&`, `{` or `[`; `yes`/`no` meant as text; a time like `07:00`).
+
+## VS Code's Test Explorer shows the tests as they were last listed (level 1)
+- **What:** the [Ductus extension](../write/vscode.md) lists the tests with `ductus test --list` when the workspace opens and again when you **save** a test file or an interface.yaml. A test you've typed but not saved isn't in the tree yet; one renamed shows its new name after the save. A run still runs what's in the files: a test the tree doesn't know yet is added when its result arrives.
+- **Why:** listing loads every test file of the project in the engine's runtime (a few hundred milliseconds): once per save, not per keystroke.
+- **What to do:** save, or click **Refresh Tests** in the Test Explorer.
+
+## Problems shows Ductus's findings; TypeScript's come from VS Code itself (level 1)
+- **What:** with the [Ductus extension](../write/vscode.md), `ductus validate`'s findings appear in VS Code's Problems view when the workspace opens and after each save (about a second later on a small project; once for several saves close together), except TypeScript's own errors (`TS…`): VS Code's TypeScript already shows those as you type, so they'd be there twice. `ductus validate` in a terminal or CI shows them all. Notes about what wasn't checked (`DUC390`, no database given) aren't shown.
+- **Why:** each finding once, from whoever finds it first; validate's type check needs the file saved, VS Code's doesn't.
+- **What to do:** nothing; turn the on-save check off with the setting `ductus.validateOnSave: false` and run **Ductus: Validate the project** when you like.

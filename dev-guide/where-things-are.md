@@ -59,6 +59,10 @@ crates/ductus-cli      the `ductus` command (init.rs: `init`, a new project; dev
 ui/                    web UI (React + Vite; README.md): src/api (typed client, queries, live updates), src/pages,
                        src/components, src/lib (format, hl7, health, theme, openapi: the API reference's reading of the
                        document); e2e/ (Playwright, run by scripts/demo-ui.sh)
+editors/vscode/        the VS Code extension (README.md is its Marketplace page; dev-guide/vscode-extension.md): src/lines.ts
+                       (what it reads from the CLI's --json and the runs it plans: no VS Code, unit-tested in test/unit),
+                       testing.ts (Test Explorer), problems.ts (validate on save), debug.ts (the `ductus` debug type),
+                       binary.ts (finding ductus); test/e2e (a real VS Code, run by scripts/demo-vscode.sh)
 sdk/src                TypeScript SDK (embedded via include_str! in ductus-script/src/loader.rs: add new files there)
 sdk/tests              SDK tests (TypeScript)
 scripts/               demos (end-to-end, PASS/FAIL) and scripts/dev (check.sh, demos.sh)

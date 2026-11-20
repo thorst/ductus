@@ -9,7 +9,9 @@ messages arriving from its senders while the rest of your dev engine carries on.
 
 **No extension is needed.** The engine speaks the protocol every JavaScript debugger speaks (the
 Chrome DevTools Protocol, as Node and Deno do), so VS Code's built-in debugger, Chrome DevTools,
-JetBrains IDEs and anything else that can attach to Node attach to Ductus too.
+JetBrains IDEs and anything else that can attach to Node attach to Ductus too. In VS Code, the
+[Ductus extension](vscode.md) adds **Debug** to each test in the Test Explorer and offers the
+configurations below without a `launch.json`.
 
 | You use | What to do |
 |---|---|

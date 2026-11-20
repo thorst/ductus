@@ -905,6 +905,29 @@ fn test_inspect_pauses_for_a_debugger_and_an_endless_loop_ends_when_it_detaches(
     }
 }
 
+/// `test` and `validate` write the typings and schemas on every run, and the VS Code extension
+/// runs `validate` on every save: a file already as it should be isn't written again (its time
+/// unchanged), so the editor's TypeScript server isn't made to check the project again; one that
+/// differs is written.
+#[test]
+fn typings_already_current_are_not_written_again() {
+    let dir = logging();
+    assert!(ductus(dir.path(), &["types"]).0);
+    let files = [".ductus/types/ductus-sdk.d.ts", ".ductus/schema/interface.json"];
+    let modified = |file: &str| std::fs::metadata(dir.path().join(file)).unwrap().modified().unwrap();
+    let before: Vec<_> = files.iter().map(|f| modified(f)).collect();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert!(ductus(dir.path(), &["validate"]).0);
+    // (This project has a failing test on purpose: only that `test` ran matters here.)
+    let (_, out) = ductus(dir.path(), &["test"]);
+    assert!(out.contains("passed"), "{out}");
+    assert_eq!(files.iter().map(|f| modified(f)).collect::<Vec<_>>(), before, "not written again");
+
+    std::fs::write(dir.path().join(files[0]), "// old").unwrap();
+    assert!(ductus(dir.path(), &["types"]).0);
+    assert!(std::fs::read_to_string(dir.path().join(files[0])).unwrap().contains("declare module \"@ductus/sdk\""));
+}
+
 /// `ductus types` adds VS Code's "Ductus: debug these tests" to `.vscode/launch.json` (made if
 /// missing, added beside the project's own, never over one of the same name), and `--interface`
 /// takes the open file's folder as that configuration passes it.

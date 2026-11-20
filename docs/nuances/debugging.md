@@ -70,3 +70,8 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 ## Breakpoints are set on your `.ts` lines; the engine runs JavaScript (level 3)
 - **What:** the engine runs your TypeScript as JavaScript it makes when the file loads (types removed), with a source map inside it. Debuggers read the map, so breakpoints, the current line and stack traces are on your `.ts` lines as written. A client that ignores source maps shows the JavaScript, without types; line numbers can differ there.
 - **What to do:** in VS Code nothing (`sourceMaps` is on by default); in other clients turn source maps on if they're off.
+
+## Debugging several interfaces from the Test Explorer runs them one after another (level 1)
+- **What:** in VS Code's Test Explorer (the [Ductus extension](../write/vscode.md)), **Debug** on a test, an interface or the whole project starts `ductus test --inspect` for one interface at a time, each on a free port, and attaches VS Code's debugger to it; with several interfaces chosen, the next starts when the previous one's tests end. **Run** (no debugger) runs them all in one `ductus test`, at the same time.
+- **Why:** a debugger attaches to one interface's JavaScript runtime ([one interface's tests per debugging run](#one-interfaces-tests-per-debugging-run-level-1)).
+- **What to do:** nothing; to debug one test, use the ▷ beside its `test(...)` (right-click → **Debug Test**) or its row in the Test Explorer.

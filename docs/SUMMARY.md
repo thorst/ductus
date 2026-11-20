@@ -42,6 +42,7 @@
   - [Lookups and code tables](write/lookups.md)
   - [Testing with fixtures](write/testing.md)
   - [Debugging: breakpoints in your code](write/debugging.md)
+  - [In VS Code: the Ductus extension](write/vscode.md)
 
 # Operate
 

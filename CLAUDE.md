@@ -52,4 +52,5 @@ Read the file for each area a step touches before changing it; each note there a
 | `ductus dev`, Windows (service, MSI, native build), systemd, handover, replay, code versions, history, releases, the release job | `dev-guide/lifecycle-and-packaging.md` |
 | bash scripts and demos, CI, WSL, comparing against an older build | `dev-guide/scripts-ci-wsl.md` |
 | REST API/OpenAPI, web UI and Playwright, docs reference and site, YAML/config parsing | `dev-guide/api-ui-docs-config.md` |
+| the VS Code extension (`editors/vscode`), or the `--json`/`--inspect` outputs it reads | `dev-guide/vscode-extension.md` |
 | which file does what | `dev-guide/where-things-are.md` |

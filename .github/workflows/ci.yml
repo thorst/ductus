@@ -222,6 +222,10 @@ jobs:
       - name: Debugging demo (VS Code's own debugger, js-debug, starts `ductus test --inspect` on the guides project and stops at a breakpoint on a .ts line, through the source map; no extension)
         run: BIN=target/release/ductus bash scripts/demo-debug.sh
 
+      # VS Code is downloaded by @vscode/test-electron (~150 MB) into editors/vscode/.vscode-test.
+      - name: VS Code extension demo (in a real VS Code under xvfb - the guides' tests found and run, a failure at its expect with both values, a port mistyped in Problems on save, a breakpoint from the Test Explorer, debugging with no launch.json; its activation and package size)
+        run: BIN=target/release/ductus bash scripts/demo-vscode.sh
+
       - name: Try demo (`ductus try` on a stored message from the database and through the API, the record beside the new decision, nothing sent again)
         run: BIN=target/release/ductus bash scripts/demo-try.sh
 

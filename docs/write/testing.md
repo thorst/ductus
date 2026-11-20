@@ -25,6 +25,10 @@ It exits 1 when a test fails, so it belongs in the checks every change goes thro
 request's CI, a script before deploying), next to `ductus validate --env prod`, which type-checks
 the code and checks the configuration against that environment.
 
+**In VS Code**, the [Ductus extension](vscode.md) shows the same tests in the Test Explorer, runs
+or debugs one test, an interface or all of them from there or from the ▷ beside each `test(...)`,
+and puts a failure on its `expect` line with the expected and actual values side by side.
+
 | Option | Runs |
 |---|---|
 | `--interface adt-in` | one interface's tests; again for more (`--interface adt-in --interface lab-out`). A name that isn't an interface of the project exits 1, naming those there are |

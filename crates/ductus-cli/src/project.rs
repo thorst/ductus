@@ -61,13 +61,24 @@ fn relative(root: &Path, file: &str) -> String {
     file.strip_prefix(&root).map(|r| r.trim_start_matches('/').to_string()).unwrap_or_else(|| file.to_string())
 }
 
+/// Write `text` to `path` unless it already holds exactly that. `test` and `validate` write the
+/// typings and schemas on every run, and the VS Code extension runs `validate` on every save: an
+/// unchanged file rewritten would still make the editor's TypeScript server check the project again.
+fn write_if_changed(path: &Path, text: &str) -> Result<()> {
+    if std::fs::read(path).is_ok_and(|old| old == text.as_bytes()) {
+        return Ok(());
+    }
+    std::fs::write(path, text).with_context(|| format!("writing {}", path.display()))
+}
+
 /// Write the SDK typings and (if missing) a tsconfig.json, so VS Code gets IntelliSense and hover
 /// docs in interface code; and the configuration files' schemas, for the same in the YAML files.
+/// Files already as they should be aren't touched.
 pub async fn write_types(root: &Path) -> Result<String> {
     let types = Isolate::generate_types().await?;
     let path = root.join(TYPES_FILE);
     std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, &types).with_context(|| format!("writing {}", path.display()))?;
+    write_if_changed(&path, &types)?;
     let tsconfig = root.join("tsconfig.json");
     if !tsconfig.exists() {
         std::fs::write(&tsconfig, TSCONFIG)?;
@@ -182,8 +193,7 @@ fn write_schemas(root: &Path) -> Result<()> {
     let dir = root.join(SCHEMA_DIR);
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
     for schema in &ductus_core::schema::SCHEMAS {
-        let file = dir.join(schema.name);
-        std::fs::write(&file, schema.text).with_context(|| format!("writing {}", file.display()))?;
+        write_if_changed(&dir.join(schema.name), schema.text)?;
     }
     vscode_schemas(root).map(|_| ())
 }

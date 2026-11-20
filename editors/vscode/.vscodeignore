@@ -1,0 +1,7 @@
+# The package holds the bundle (dist/extension.js), package.json, README.md and LICENSE: nothing
+# else is needed at run time.
+**
+!dist/extension.js
+!package.json
+!README.md
+!LICENSE
