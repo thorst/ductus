@@ -12,8 +12,10 @@ pub enum Error {
     MissingMsh,
     #[error("MSH segment is too short to contain delimiters")]
     ShortMsh,
-    #[error("invalid HL7 path `{0}` (expected e.g. `PID-3` or `PID-3.1`)")]
-    InvalidPath(String),
+    #[error(
+        "invalid HL7 path `{0}`: {1} (e.g. `PID-3.1`, `PID-3[2].1`, `PID-3[.5=MR].1`, `PID-3[.5=MR|.4=HOSP].1`, `PID-3.4.1`)"
+    )]
+    InvalidPath(String, &'static str),
 }
 
 /// The five HL7 delimiters declared in MSH-1 and MSH-2.
@@ -27,39 +29,170 @@ pub struct Delimiters {
 }
 
 /// A location in a message, using HL7 numbering: `PID-3.1` = PID, field 3, component 1.
+///
+/// | path | reads |
+/// |---|---|
+/// | `PID-3` | the field's first repetition, as written |
+/// | `PID-3.1` | its first component, escapes decoded |
+/// | `PID-3.4.1` | the first subcomponent of component 4 |
+/// | `PID-3[2].1` | the second repetition's first component |
+/// | `PID-3[.5=MR].1` | the first repetition whose component 5 is `MR` |
+/// | `PID-3[.5=MR\|.4=HOSP].1` | that, else the first whose component 4 is `HOSP` |
+///
+/// A filter compares a component (or `.4.1`, a subcomponent) decoded, exactly; a value with `|`,
+/// `]` or spaces at its ends is quoted (`[.4='A|B']`). The SDK's `msg.get` reads the same syntax
+/// (`sdk/src/hl7.ts`), checked by `sdk/tests/key-paths.json`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Path {
     pub segment: String,
     pub field: usize,
+    pub repetition: Repetition,
     pub component: Option<usize>,
+    /// Only with a component.
+    pub subcomponent: Option<usize>,
+}
+
+/// Which repetition of a field a path reads.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Repetition {
+    First,
+    /// From 1.
+    Index(usize),
+    /// The first repetition the first filter matches; if none does, the second filter's; and so on.
+    Where(Vec<Filter>),
+}
+
+/// `.5=MR`: a repetition whose component 5 (decoded) is `MR`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Filter {
+    pub component: usize,
+    pub subcomponent: Option<usize>,
+    pub value: String,
 }
 
 impl FromStr for Path {
     type Err = Error;
 
     fn from_str(s: &str) -> Result<Self, Error> {
-        let invalid = || Error::InvalidPath(s.to_string());
-        let (segment, rest) = s.split_once('-').ok_or_else(invalid)?;
+        let invalid = |why| Error::InvalidPath(s.to_string(), why);
+        let (segment, rest) = s.split_once('-').ok_or(invalid("no `-` between the segment and the field"))?;
         if segment.len() != 3 || !segment.chars().all(|c| c.is_ascii_alphanumeric()) {
-            return Err(invalid());
+            return Err(invalid("a segment is three letters or digits"));
         }
-        let (field, component) = match rest.split_once('.') {
-            Some((f, c)) => (f, Some(c.parse::<usize>().map_err(|_| invalid())?)),
-            None => (rest, None),
+        let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let field = number(&rest[..digits]).ok_or(invalid("the field is a number from 1"))?;
+        let mut rest = &rest[digits..];
+        let mut repetition = Repetition::First;
+        if let Some(inside) = rest.strip_prefix('[') {
+            let end = closing(inside).ok_or(invalid("a `[` without its `]`"))?;
+            repetition = repetition_of(&inside[..end]).map_err(invalid)?;
+            rest = &inside[end + 1..];
+        }
+        let (component, subcomponent) = if rest.is_empty() {
+            (None, None)
+        } else {
+            let (c, s) = components(rest.strip_prefix('.').ok_or(invalid("`.` before a component"))?)
+                .ok_or(invalid("components are numbers from 1, at most two deep (`.4.1`)"))?;
+            (Some(c), s)
         };
-        let field = field.parse::<usize>().map_err(|_| invalid())?;
-        if field == 0 || component == Some(0) {
-            return Err(invalid());
+        Ok(Path { segment: segment.to_ascii_uppercase(), field, repetition, component, subcomponent })
+    }
+}
+
+/// A number from 1.
+fn number(text: &str) -> Option<usize> {
+    text.parse().ok().filter(|n| *n > 0 && text.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// `4` or `4.1`.
+fn components(text: &str) -> Option<(usize, Option<usize>)> {
+    match text.split_once('.') {
+        Some((c, s)) => Some((number(c)?, Some(number(s)?))),
+        None => Some((number(text)?, None)),
+    }
+}
+
+/// Where the `]` closing a bracket is (`text` starts inside it), past quoted values.
+fn closing(text: &str) -> Option<usize> {
+    let mut quote = None;
+    for (i, c) in text.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, ']') => return Some(i),
+            (None, _) => {}
         }
-        Ok(Path { segment: segment.to_ascii_uppercase(), field, component })
+    }
+    None
+}
+
+/// What's inside a field's brackets: `2`, or filters `.5=MR|.4=HOSP`.
+fn repetition_of(inside: &str) -> Result<Repetition, &'static str> {
+    if inside.bytes().all(|b| b.is_ascii_digit()) {
+        return number(inside).map(Repetition::Index).ok_or("a repetition is a number from 1 (`[2]`)");
+    }
+    let mut filters = Vec::new();
+    let mut rest = inside;
+    loop {
+        let (place, after) = rest.split_once('=').ok_or("a filter is `.component=value` (`[.5=MR]`)")?;
+        let (component, subcomponent) = place
+            .strip_prefix('.')
+            .and_then(components)
+            .ok_or("a filter names a component from 1 after a `.` (`[.5=MR]`, `[.4.1=HOSP]`)")?;
+        let (value, after) = filter_value(after)?;
+        filters.push(Filter { component, subcomponent, value });
+        match after.strip_prefix('|') {
+            Some(next) => rest = next,
+            None if after.is_empty() => return Ok(Repetition::Where(filters)),
+            None => return Err("after a quoted value, `|` or `]`"),
+        }
+    }
+}
+
+/// A filter's value and what follows it: `'A|B'` or `"A]"` quoted, else up to the next `|`.
+fn filter_value(text: &str) -> Result<(String, &str), &'static str> {
+    match text.chars().next() {
+        Some(q @ ('\'' | '"')) => {
+            let end = text[1..].find(q).ok_or("a quoted value without its closing quote")?;
+            Ok((text[1..1 + end].to_string(), &text[end + 2..]))
+        }
+        _ => {
+            let end = text.find('|').unwrap_or(text.len());
+            Ok((text[..end].to_string(), &text[end..]))
+        }
     }
 }
 
 impl fmt::Display for Path {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}-{}", self.segment, self.field)?;
+        match &self.repetition {
+            Repetition::First => {}
+            Repetition::Index(n) => write!(f, "[{n}]")?,
+            Repetition::Where(filters) => {
+                f.write_str("[")?;
+                for (i, filter) in filters.iter().enumerate() {
+                    let quote = if filter.value.contains('\'') { '"' } else { '\'' };
+                    let plain = !filter.value.contains(['|', ']', '\'', '"']) && filter.value.trim() == filter.value;
+                    let sep = if i == 0 { "" } else { "|" };
+                    write!(f, "{sep}.{}", filter.component)?;
+                    if let Some(s) = filter.subcomponent {
+                        write!(f, ".{s}")?;
+                    }
+                    match plain {
+                        true => write!(f, "={}", filter.value)?,
+                        false => write!(f, "={quote}{}{quote}", filter.value)?,
+                    }
+                }
+                f.write_str("]")?;
+            }
+        }
         if let Some(c) = self.component {
             write!(f, ".{c}")?;
+        }
+        if let Some(s) = self.subcomponent {
+            write!(f, ".{s}")?;
         }
         Ok(())
     }
@@ -138,22 +271,45 @@ impl<'a> Message<'a> {
         self.segments().find(|s| s.get(..3) == Some(name) && s[3..].chars().next().is_none_or(|c| c == field))
     }
 
-    /// Value at `path`, first repetition. Anything missing reads as `""`.
+    /// Value at `path` as written (escapes not decoded): the repetition it names (the first by
+    /// default), its component and subcomponent. Anything missing reads as `""`.
     pub fn get(&self, path: &Path) -> &'a str {
         let Some(segment) = self.segment(&path.segment) else { return "" };
+        if path.segment == "MSH" && path.field == 1 {
+            return &segment[3..3 + self.delims.field.len_utf8()];
+        }
         // MSH-1 is the field separator itself, so MSH field n sits at split index n-1.
         let index = if path.segment == "MSH" { path.field - 1 } else { path.field };
         let Some(field) = segment.split(self.delims.field).nth(index) else { return "" };
-        let first_rep = field.split(self.delims.repetition).next().unwrap_or("");
-        match path.component {
-            None => first_rep,
-            Some(c) => first_rep.split(self.delims.component).nth(c - 1).unwrap_or(""),
+        if path.segment == "MSH" && path.field <= 2 {
+            return field; // the delimiters themselves: never split (as the SDK reads them)
+        }
+        let mut repetitions = field.split(self.delims.repetition);
+        let repetition = match &path.repetition {
+            Repetition::First => repetitions.next(),
+            Repetition::Index(n) => repetitions.nth(n - 1),
+            Repetition::Where(filters) => filters.iter().find_map(|f| {
+                field
+                    .split(self.delims.repetition)
+                    .find(|r| decode(self.part(r, Some(f.component), f.subcomponent), &self.delims) == f.value.as_str())
+            }),
+        };
+        repetition.map(|r| self.part(r, path.component, path.subcomponent)).unwrap_or("")
+    }
+
+    /// A component (and subcomponent) of one repetition; the whole of it without one.
+    fn part(&self, repetition: &'a str, component: Option<usize>, subcomponent: Option<usize>) -> &'a str {
+        let Some(c) = component else { return repetition };
+        let component = repetition.split(self.delims.component).nth(c - 1).unwrap_or("");
+        match subcomponent {
+            Some(s) => component.split(self.delims.subcomponent).nth(s - 1).unwrap_or(""),
+            None => component,
         }
     }
 
-    /// Value at `path` as interface code reads it (the SDK's `msg.get`): a component's escape
-    /// sequences decoded (`\T\` → `&`), a whole field as written. What ordering and dedupe keys
-    /// read, so a key means the same in config and in code.
+    /// Value at `path` as interface code reads it (the SDK's `msg.get`): a component's (or
+    /// subcomponent's) escape sequences decoded (`\T\` → `&`), a whole field or repetition as
+    /// written. What ordering and dedupe keys read, so a key means the same in config and in code.
     pub fn read(&self, path: &Path) -> std::borrow::Cow<'a, str> {
         let raw = self.get(path);
         match path.component {
@@ -248,7 +404,70 @@ mod tests {
     #[test]
     fn rejects_bad_input() {
         assert_eq!(Message::parse("PID|1").err(), Some(Error::MissingMsh));
-        assert!("PID3".parse::<Path>().is_err());
-        assert!("PID-0".parse::<Path>().is_err());
+        for bad in [
+            "PID3",
+            "PID-0",
+            "PID-3.0",
+            "PID-3.1.2.3",
+            "PID-3[0]",
+            "PID-3[",
+            "PID-3[5=MR]",
+            "PID-3[.5]",
+            "PID-3[.5=MR|]",
+            "PID-3[.5='MR]",
+            "PID-3[.5='MR'x]",
+            "PID-3[2]x",
+            "PID-3x",
+            "PI-3",
+            "PID-",
+        ] {
+            assert!(bad.parse::<Path>().is_err(), "{bad} should be refused");
+        }
+        let why = "PID-3[.5]".parse::<Path>().unwrap_err().to_string();
+        assert!(why.contains("a filter is `.component=value`"), "{why}");
+    }
+
+    const IDS: &str = "MSH|^~\\&|A|B|C|D|1||ADT^A08|1|P|2.5\r\
+        PID|1||999^^^SSA^SS~123^^^HOSP&1.2.3&ISO^MR~456^^^CLINIC^PI~A\\T\\B^^^ESC^XX\r";
+
+    fn read(path: &str) -> String {
+        Message::parse(IDS).unwrap().read(&path.parse().unwrap()).into_owned()
+    }
+
+    #[test]
+    fn repetitions_by_index_and_by_filter() {
+        assert_eq!(read("PID-3.1"), "999", "the first repetition by default");
+        assert_eq!(read("PID-3[2].1"), "123");
+        assert_eq!(read("PID-3[9].1"), "");
+        assert_eq!(read("PID-3[.5=MR].1"), "123");
+        assert_eq!(read("PID-3[.5=XX].1"), "A&B", "escapes decoded in the value read");
+        assert_eq!(read("PID-3[.5=NONE].1"), "", "no repetition matches: empty");
+        assert_eq!(read("PID-3[.5=MR]"), "123^^^HOSP&1.2.3&ISO^MR", "a repetition as written");
+        assert_eq!(read("PID-3[.5=NONE|.4=CLINIC].1"), "456", "alternatives in order");
+        assert_eq!(read("PID-3[.4=CLINIC|.5=MR].1"), "456", "the first alternative wins, wherever it is");
+        assert_eq!(read("PID-3[.4.1=HOSP].1"), "123", "a filter on a subcomponent");
+        assert_eq!(read("PID-3[.1='A&B'].5"), "XX", "a filter compares decoded values");
+    }
+
+    #[test]
+    fn subcomponents() {
+        assert_eq!(read("PID-3[.5=MR].4.1"), "HOSP");
+        assert_eq!(read("PID-3[.5=MR].4.2"), "1.2.3");
+        assert_eq!(read("PID-3[.5=MR].4.9"), "");
+        assert_eq!(read("PID-3[.5=MR].4"), "HOSP&1.2.3&ISO", "a component holds its subcomponents");
+        assert_eq!(read("PID-3.4.1"), "SSA", "a component without subcomponents is its first");
+    }
+
+    #[test]
+    fn msh_delimiters_read_whole() {
+        assert_eq!(read("MSH-1"), "|");
+        assert_eq!(read("MSH-2"), "^~\\&");
+    }
+
+    #[test]
+    fn paths_display_as_written() {
+        for path in ["PID-3", "PID-3.1", "PID-3.4.1", "PID-3[2].1", "PID-3[.5=MR|.4.1=HOSP].1", "PID-3[.4='A|B']"] {
+            assert_eq!(path.parse::<Path>().unwrap().to_string(), path);
+        }
     }
 }

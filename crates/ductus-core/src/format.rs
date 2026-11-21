@@ -3,6 +3,7 @@
 //! ```yaml
 //! format: json                     # hl7 (default), json, xml, text, csv, fixed
 //! format: { csv: { delimiter: "|", header: true } }
+//! format: { xml: { names: qualified } }   # names match with their prefix (default: local names)
 //! format:
 //!   fixed:
 //!     fields:
@@ -22,10 +23,49 @@ pub enum Format {
     #[default]
     Hl7,
     Json,
-    Xml,
+    Xml(XmlOptions),
     Text,
     Csv(CsvOptions),
     Fixed(FixedLayout),
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct XmlOptions {
+    /// How element and attribute names in paths (keys, and `get`, `find`, `set` in code) match the
+    /// document's:
+    ///
+    /// - `local`: by the name without its namespace prefix, on both sides: `Patient` matches
+    ///   `<Patient>`, `<hl7:Patient>` and `<v3:Patient>`, so a sender changing its prefixes
+    ///   changes nothing. A prefix written in a path is ignored when matching (and kept on
+    ///   elements `set` creates).
+    /// - `qualified`: exactly as written, prefix included: `hl7:Patient` matches only
+    ///   `<hl7:Patient>`. For documents where the same local name means different things under
+    ///   two prefixes (a filter on the namespace's attribute often does it too).
+    ///
+    /// Default: `local`. Example: `format: { xml: { names: qualified } }`.
+    #[serde(default)]
+    pub names: XmlNames,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(rename_all = "lowercase")]
+pub enum XmlNames {
+    #[default]
+    Local,
+    Qualified,
+}
+
+impl XmlNames {
+    /// Whether a name in a path matches one in a document.
+    pub fn matches(self, path: &str, document: &str) -> bool {
+        match self {
+            XmlNames::Qualified => path == document,
+            XmlNames::Local => crate::keys::local_name(path) == crate::keys::local_name(document),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -131,7 +171,7 @@ impl Format {
         match self {
             Format::Hl7 => "hl7",
             Format::Json => "json",
-            Format::Xml => "xml",
+            Format::Xml(_) => "xml",
             Format::Text => "text",
             Format::Csv(_) => "csv",
             Format::Fixed(_) => "fixed",
@@ -156,7 +196,10 @@ impl Format {
         match name {
             "hl7" => no_options(Format::Hl7),
             "json" => no_options(Format::Json),
-            "xml" => no_options(Format::Xml),
+            "xml" => Ok(Format::Xml(match options {
+                None | Some(Value::Null) => XmlOptions::default(),
+                Some(v) => serde_yaml_ng::from_value(v)?,
+            })),
             "text" => no_options(Format::Text),
             "csv" => Ok(Format::Csv(match options {
                 None | Some(Value::Null) => CsvOptions::default(),
@@ -170,16 +213,11 @@ impl Format {
         }
     }
 
-    /// Check that an ordering/dedupe key path makes sense for this format.
-    pub fn check_key_path(&self, path: &str) -> Result<()> {
+    /// How names in XML paths match (`local` for every format but XML's `names: qualified`).
+    pub fn xml_names(&self) -> XmlNames {
         match self {
-            Format::Hl7 => Ok(()), // checked by the HL7 path parser at startup
-            Format::Text => bail!("text messages have no fields to use as a key"),
-            Format::Fixed(layout) if !layout.fields.iter().any(|f| f.name == path) => {
-                bail!("no fixed-length field named `{path}`")
-            }
-            _ if path.trim().is_empty() => bail!("empty key path"),
-            _ => Ok(()),
+            Format::Xml(o) => o.names,
+            _ => XmlNames::Local,
         }
     }
 }
@@ -235,6 +273,18 @@ mod tests {
         );
         assert!(parse("yaml").is_err());
         assert!(parse("{ json: { x: 1 } }").is_err());
+        assert_eq!(parse("xml").unwrap(), Format::Xml(XmlOptions { names: XmlNames::Local }));
+        assert_eq!(parse("{ xml: { names: qualified } }").unwrap().xml_names(), XmlNames::Qualified);
+        assert!(parse("{ xml: { names: exact } }").is_err());
+    }
+
+    #[test]
+    fn xml_names_match_by_local_name_unless_qualified() {
+        assert!(XmlNames::Local.matches("Patient", "hl7:Patient"));
+        assert!(XmlNames::Local.matches("v3:Patient", "hl7:Patient"), "a prefix in a path is ignored");
+        assert!(!XmlNames::Local.matches("Patient", "hl7:Patients"));
+        assert!(XmlNames::Qualified.matches("hl7:Patient", "hl7:Patient"));
+        assert!(!XmlNames::Qualified.matches("Patient", "hl7:Patient"));
     }
 
     #[test]
@@ -244,8 +294,8 @@ mod tests {
         let Format::Fixed(layout) = &f else { panic!() };
         let spans: Vec<_> = layout.fields.iter().map(|x| (x.name.as_str(), x.start, x.width)).collect();
         assert_eq!(spans, [("mrn", 0, 10), ("last", 10, 20), ("dob", 40, 8)]);
-        assert!(f.check_key_path("mrn").is_ok());
-        assert!(f.check_key_path("nope").is_err());
+        assert!(crate::keys::compile(&f, &"mrn".into()).is_ok());
+        assert!(crate::keys::compile(&f, &"nope".into()).is_err());
         assert!(parse("{ fixed: { fields: [ { name: a, width: 0 } ] } }").is_err());
         assert!(parse("fixed").is_err());
     }
@@ -254,5 +304,7 @@ mod tests {
     fn serializes_for_interface_code() {
         let json = serde_json::to_string(&parse("{ csv: { delimiter: ';' } }").unwrap()).unwrap();
         assert_eq!(json, r#"{"kind":"csv","delimiter":";","header":true}"#);
+        let xml = serde_json::to_string(&parse("xml").unwrap()).unwrap();
+        assert_eq!(xml, r#"{"kind":"xml","names":"local"}"#);
     }
 }

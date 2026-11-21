@@ -218,16 +218,69 @@ impl JsonSchema for crate::resources::Encrypt {
     }
 }
 
+impl JsonSchema for crate::keys::KeyPart {
+    fn inline_schema() -> bool {
+        true
+    }
+    fn schema_name() -> Cow<'static, str> {
+        "KeyPart".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        json_schema!({
+            "anyOf": [
+                { "type": "string" },
+                { "type": "integer", "minimum": 1 },
+                {
+                    "type": "object",
+                    "properties": { "regex": {
+                        "type": "string",
+                        "description": "A regular expression over the message's text: the key is its first group (the whole match without one), empty when it doesn't match. Example: `{ regex: 'MRN=(\\d+)' }`."
+                    } },
+                    "required": ["regex"],
+                    "additionalProperties": false
+                }
+            ],
+            "x-type": "path, or { regex }"
+        })
+    }
+}
+
+impl JsonSchema for crate::keys::Key {
+    fn inline_schema() -> bool {
+        true
+    }
+    fn schema_name() -> Cow<'static, str> {
+        "Key".into()
+    }
+    fn json_schema(generator: &mut SchemaGenerator) -> Schema {
+        let part = generator.subschema_for::<crate::keys::KeyPart>();
+        json_schema!({
+            "anyOf": [part, { "type": "array", "items": part, "minItems": 1 }],
+            "x-type": "path, { regex }, or a list of them"
+        })
+    }
+}
+
 impl JsonSchema for crate::format::Format {
     fn schema_name() -> Cow<'static, str> {
         "Format".into()
     }
     fn json_schema(generator: &mut SchemaGenerator) -> Schema {
         let csv = generator.subschema_for::<Option<crate::format::CsvOptions>>();
+        let xml = generator.subschema_for::<Option<crate::format::XmlOptions>>();
         let fixed = generator.subschema_for::<crate::format::FixedLayoutConfig>();
         json_schema!({
             "anyOf": [
                 { "enum": ["hl7", "json", "xml", "text", "csv"] },
+                {
+                    "type": "object",
+                    "properties": { "xml": {
+                        "allOf": [xml],
+                        "description": "XML with its options (`names`). `format: xml` alone matches names by their local name, whatever the prefix. Example: `format: { xml: { names: qualified } }`."
+                    } },
+                    "required": ["xml"],
+                    "additionalProperties": false
+                },
                 {
                     "type": "object",
                     "properties": { "csv": {
@@ -247,7 +300,7 @@ impl JsonSchema for crate::format::Format {
                     "additionalProperties": false
                 }
             ],
-            "x-type": "hl7, json, xml, text, csv, or { csv | fixed: options }"
+            "x-type": "hl7, json, xml, text, csv, or { csv | xml | fixed: options }"
         })
     }
 }

@@ -27,14 +27,18 @@ const ADT: &str = "MSH|^~\\&|EPIC|HOSP|DUCTUS|HOSP|20261005120000||ADT^A08|1|P|2
 fn sdk_test_suite_passes() {
     let rt = rt();
     let _guard = rt.enter();
-    let suite: Vec<PathBuf> =
-        ["hl7", "formats", "services"].iter().map(|s| workspace().join(format!("sdk/tests/{s}.test.ts"))).collect();
+    let suite: Vec<PathBuf> = ["hl7", "formats", "services", "paths"]
+        .iter()
+        .map(|s| workspace().join(format!("sdk/tests/{s}.test.ts")))
+        .collect();
     let paths: Vec<&Path> = suite.iter().map(PathBuf::as_path).collect();
-    let fixtures = serde_json::json!({ "adt.hl7": ADT }).to_string();
+    // The key paths both the engine's reader and the SDK are tested against (`paths.test.ts`).
+    let key_paths = std::fs::read_to_string(workspace().join("sdk/tests/key-paths.json")).unwrap();
+    let fixtures = serde_json::json!({ "adt.hl7": ADT, "key-paths.json": key_paths }).to_string();
     let mut isolate = rt.block_on(Isolate::tests(&paths, &fixtures, ductus_script::DEFAULT_FORMATS)).unwrap();
     let report: serde_json::Value = serde_json::from_str(&rt.block_on(isolate.run_tests()).unwrap()).unwrap();
     let results = report.as_array().unwrap();
-    assert!(results.len() >= 37, "expected the full suite, got {}", results.len());
+    assert!(results.len() >= 43, "expected the full suite, got {}", results.len());
     let failures: Vec<_> = results.iter().filter(|r| r["ok"] != true).collect();
     assert!(failures.is_empty(), "SDK test failures:\n{failures:#?}");
 }

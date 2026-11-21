@@ -25,7 +25,6 @@ export interface Delimiters {
 
 const SEGMENT_NAME = /^[A-Z][A-Z0-9]{2}$/;
 const INDEX = /^[1-9][0-9]*$/;
-const PATH = /^([A-Z][A-Z0-9]{2})-([1-9][0-9]*)(?:\.([1-9][0-9]*))?$/;
 
 // ---------------------------------------------------------------------------
 // Escaping
@@ -319,22 +318,41 @@ class MessageImpl {
     );
   }
 
+  /** The value at a path, as the engine reads keys (`crates/ductus-hl7`): see `parsePath`. */
   get(path: string): string {
-    const [segment, field, component] = parsePath(path);
-    const seg = this.named(segment)[0];
+    const p = parsePath(path);
+    const seg = this.named(p.segment)[0];
     if (!seg) return "";
-    const rep = seg.getField(field, this.delimiters).split(this.delimiters.repetition)[0];
-    if (component === undefined) return rep;
-    return decode(rep.split(this.delimiters.component)[component - 1] ?? "", this.delimiters);
+    const d = this.delimiters;
+    const field = seg.getField(p.field, d);
+    if (p.segment === "MSH" && p.field <= 2) return field; // the delimiters themselves
+    const reps = field.split(d.repetition);
+    let rep: string | undefined;
+    if (p.repetition === undefined) rep = reps[0];
+    else if (typeof p.repetition === "number") rep = reps[p.repetition - 1];
+    else {
+      for (const f of p.repetition) {
+        rep = reps.find((r) => decode(part(r, f.component, f.subcomponent, d), d) === f.value);
+        if (rep !== undefined) break;
+      }
+    }
+    if (rep === undefined) return "";
+    const raw = part(rep, p.component, p.subcomponent, d);
+    return p.component === undefined ? raw : decode(raw, d);
   }
 
   set(path: string, value: string): void {
-    const [segment, field, component] = parsePath(path);
-    const s = new Segments(this, segment) as unknown as Record<number, unknown> & Segments;
-    if (component === undefined) {
-      s[field] = value;
+    const p = parsePath(path);
+    if (p.repetition !== undefined || p.subcomponent !== undefined) {
+      throw new Error(
+        `msg.set("${path}"): set takes a field or a component ("PID-5", "PID-5.1"); for another repetition, msg.PID[3].rep(2)[1] = value`,
+      );
+    }
+    const s = new Segments(this, p.segment) as unknown as Record<number, unknown> & Segments;
+    if (p.component === undefined) {
+      s[p.field] = value;
     } else {
-      (s.field(field) as unknown as Record<number, string>)[component] = value;
+      (s.field(p.field) as unknown as Record<number, string>)[p.component] = value;
     }
   }
 
@@ -377,10 +395,127 @@ class MessageImpl {
   }
 }
 
-function parsePath(path: string): [string, number, number | undefined] {
-  const m = PATH.exec(path);
-  if (!m) throw new Error(`invalid HL7 path "${path}" (expected e.g. "PID-3" or "PID-3.1")`);
-  return [m[1], Number(m[2]), m[3] === undefined ? undefined : Number(m[3])];
+/** `.5=MR`: a repetition whose component 5 (decoded) is `MR`. */
+interface Filter {
+  component: number;
+  subcomponent?: number;
+  value: string;
+}
+
+/** A parsed path. `repetition`: the first when undefined, a number from 1, or filters in order. */
+interface Hl7Path {
+  segment: string;
+  field: number;
+  repetition?: number | Filter[];
+  component?: number;
+  subcomponent?: number;
+}
+
+/** A component (and subcomponent) of one repetition; the whole of it without one. */
+function part(rep: string, component: number | undefined, subcomponent: number | undefined, d: Delimiters): string {
+  if (component === undefined) return rep;
+  const c = rep.split(d.component)[component - 1] ?? "";
+  return subcomponent === undefined ? c : (c.split(d.subcomponent)[subcomponent - 1] ?? "");
+}
+
+const number = (text: string): number | undefined => (/^[0-9]+$/.test(text) && Number(text) > 0 ? Number(text) : undefined);
+
+/** `4` or `4.1`. */
+function components(text: string): [number, number | undefined] | undefined {
+  const dot = text.indexOf(".");
+  if (dot < 0) {
+    const c = number(text);
+    return c === undefined ? undefined : [c, undefined];
+  }
+  const c = number(text.slice(0, dot));
+  const s = number(text.slice(dot + 1));
+  return c === undefined || s === undefined ? undefined : [c, s];
+}
+
+/** Where the `]` closing a bracket is (`text` starts inside it), past quoted values; -1 if none. */
+function closing(text: string): number {
+  let quote: string | undefined;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote !== undefined) {
+      if (c === quote) quote = undefined;
+    } else if (c === "'" || c === '"') quote = c;
+    else if (c === "]") return i;
+  }
+  return -1;
+}
+
+/**
+ * An HL7 path, the syntax `ordering.key` and `dedupe.keys` take (`crates/ductus-hl7/src/lib.rs`,
+ * checked against it by `sdk/tests/key-paths.json`):
+ *
+ *   PID-3              the field's first repetition, as written
+ *   PID-3.1            its first component, escapes decoded
+ *   PID-3.4.1          the first subcomponent of component 4
+ *   PID-3[2].1         the second repetition's first component
+ *   PID-3[.5=MR].1     the first repetition whose component 5 is MR
+ *   PID-3[.5=MR|.4=HOSP].1   that, else the first whose component 4 is HOSP
+ */
+function parsePath(path: string): Hl7Path {
+  const fail = (why: string): never => {
+    throw new Error(
+      `invalid HL7 path "${path}": ${why} (e.g. "PID-3.1", "PID-3[2].1", "PID-3[.5=MR].1", "PID-3[.5=MR|.4=HOSP].1", "PID-3.4.1")`,
+    );
+  };
+  const dash = path.indexOf("-");
+  if (dash < 0) fail("no `-` between the segment and the field");
+  const segment = path.slice(0, dash);
+  if (!/^[A-Za-z0-9]{3}$/.test(segment)) fail("a segment is three letters or digits");
+  let rest = path.slice(dash + 1);
+  const digits = /^[0-9]*/.exec(rest)![0];
+  const field = number(digits) ?? fail("the field is a number from 1");
+  rest = rest.slice(digits.length);
+  let repetition: number | Filter[] | undefined;
+  if (rest.startsWith("[")) {
+    const end = closing(rest.slice(1));
+    if (end < 0) fail("a `[` without its `]`");
+    repetition = repetitionOf(rest.slice(1, end + 1), fail);
+    rest = rest.slice(end + 2);
+  }
+  let component: number | undefined;
+  let subcomponent: number | undefined;
+  if (rest !== "") {
+    if (!rest.startsWith(".")) fail("`.` before a component");
+    [component, subcomponent] = components(rest.slice(1)) ??
+      fail("components are numbers from 1, at most two deep (`.4.1`)");
+  }
+  return { segment: segment.toUpperCase(), field, repetition, component, subcomponent };
+}
+
+/** What's inside a field's brackets: `2`, or filters `.5=MR|.4=HOSP`. */
+function repetitionOf(inside: string, fail: (why: string) => never): number | Filter[] {
+  if (/^[0-9]*$/.test(inside)) return number(inside) ?? fail("a repetition is a number from 1 (`[2]`)");
+  const filters: Filter[] = [];
+  let rest = inside;
+  for (;;) {
+    const eq = rest.indexOf("=");
+    if (eq < 0) fail("a filter is `.component=value` (`[.5=MR]`)");
+    const place = rest.slice(0, eq);
+    const c = place.startsWith(".") ? components(place.slice(1)) : undefined;
+    if (!c) fail("a filter names a component from 1 after a `.` (`[.5=MR]`, `[.4.1=HOSP]`)");
+    let after = rest.slice(eq + 1);
+    let value: string;
+    const q = after[0];
+    if (q === "'" || q === '"') {
+      const end = after.indexOf(q, 1);
+      if (end < 0) fail("a quoted value without its closing quote");
+      value = after.slice(1, end);
+      after = after.slice(end + 1);
+    } else {
+      const end = after.indexOf("|");
+      value = end < 0 ? after : after.slice(0, end);
+      after = end < 0 ? "" : after.slice(end);
+    }
+    filters.push({ component: c![0], subcomponent: c![1], value });
+    if (after.startsWith("|")) rest = after.slice(1);
+    else if (after === "") return filters;
+    else fail("after a quoted value, `|` or `]`");
+  }
 }
 
 /** Parse raw HL7 into a Message. */

@@ -1,166 +1,151 @@
-//! Ordering and dedupe keys for every format, read at ingest without running interface code.
-//!
-//! | format | key path                         | example            |
-//! |--------|----------------------------------|--------------------|
-//! | hl7    | segment-field.component          | `PID-3.1`          |
-//! | json   | dotted, `[n]` 0-based indexes    | `patient.ids[0].mrn` |
-//! | xml    | from the root, `[n]` 1-based, `@attr` | `Patient/MRN`, `Item[2]/@code` |
-//! | csv    | column name (or 1-based number without a header) | `mrn` |
-//! | fixed  | field name                       | `mrn`              |
+//! Ordering and dedupe keys read at intake without running interface code. The paths themselves
+//! (their syntax per format, filters, `{ regex }`) are `ductus_core::keys`; here they're read from a
+//! message, parsed once for all its keys (`Document`).
 //!
 //! Missing values read as "". For CSV and fixed-length, the first record is used. An HL7
-//! component's escape sequences are decoded (`\T\` → `&`), as the SDK's `msg.get` reads it.
+//! component's escape sequences are decoded (`\T\` → `&`), as the SDK's `msg.get` reads it. XML
+//! names match by local name unless the format says `names: qualified`. `sdk/tests/key-paths.json`
+//! holds cases the SDK's readers are tested against too, so a path means the same in config and
+//! code.
 
-use anyhow::{Context, Result, bail};
-use ductus_core::format::{FixedField, Format};
+use ductus_core::format::{Format, XmlNames};
+pub use ductus_core::keys::{JsonStep, KeyPath, XmlFilter, XmlStep, XmlWhich, compile, compile_all};
+use std::cell::OnceCell;
 
-#[derive(Debug, Clone)]
-pub enum KeyPath {
-    Hl7(ductus_hl7::Path),
-    Json(Vec<JsonStep>),
-    Xml(Vec<XmlStep>),
-    Csv(String),
-    Fixed(FixedField),
+/// A message, parsed for its format the first time a key needs it (a regex reads the text alone).
+pub struct Document<'a> {
+    format: &'a Format,
+    text: &'a str,
+    parsed: OnceCell<Option<Parsed<'a>>>,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum JsonStep {
-    Key(String),
-    Index(usize),
+enum Parsed<'a> {
+    Hl7(ductus_hl7::Message<'a>),
+    Json(serde_json::Value),
+    Xml(Element),
+    /// The header (when the format has one) and the first record.
+    Csv(Option<csv::StringRecord>, csv::StringRecord),
+    /// The first line.
+    Fixed(&'a str),
+    Text,
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub enum XmlStep {
-    Element { name: String, index: usize },
-    Attribute(String),
-}
+impl<'a> Document<'a> {
+    pub fn new(format: &'a Format, text: &'a str) -> Self {
+        Self { format, text, parsed: OnceCell::new() }
+    }
 
-/// Parse a key path for a format (done once, at startup).
-pub fn compile(format: &Format, path: &str) -> Result<KeyPath> {
-    Ok(match format {
-        Format::Hl7 => KeyPath::Hl7(path.parse()?),
-        Format::Json => KeyPath::Json(json_steps(path)?),
-        Format::Xml => KeyPath::Xml(xml_steps(path)?),
-        Format::Csv(_) => KeyPath::Csv(path.to_string()),
-        Format::Fixed(layout) => KeyPath::Fixed(
-            layout.fields.iter().find(|f| f.name == path).cloned().with_context(|| format!("no field `{path}`"))?,
-        ),
-        Format::Text => bail!("text messages have no fields to use as a key"),
-    })
-}
+    /// None: not a message of the format (not HL7, not JSON, not XML; an empty file).
+    fn parsed(&self) -> Option<&Parsed<'a>> {
+        self.parsed
+            .get_or_init(|| {
+                let text = self.text;
+                Some(match self.format {
+                    Format::Hl7 => Parsed::Hl7(ductus_hl7::Message::parse(text).ok()?),
+                    Format::Json => Parsed::Json(serde_json::from_str(text).ok()?),
+                    Format::Xml(_) => Parsed::Xml(XmlParser { text, pos: 0 }.document()?),
+                    _ if text.trim().is_empty() => return None,
+                    Format::Csv(options) => {
+                        let mut reader = csv::ReaderBuilder::new()
+                            .delimiter(u8::try_from(options.delimiter).unwrap_or(b','))
+                            .has_headers(options.header)
+                            .flexible(true)
+                            .from_reader(text.as_bytes());
+                        let header = if options.header { reader.headers().ok().cloned() } else { None };
+                        let record = reader.records().next().and_then(|r| r.ok()).unwrap_or_default();
+                        Parsed::Csv(header, record)
+                    }
+                    Format::Fixed(_) => Parsed::Fixed(text.lines().find(|l| !l.is_empty()).unwrap_or("")),
+                    Format::Text => Parsed::Text,
+                })
+            })
+            .as_ref()
+    }
 
-fn json_steps(path: &str) -> Result<Vec<JsonStep>> {
-    let mut steps = Vec::new();
-    for part in path.split('.') {
-        let (name, mut rest) = part.split_once('[').map(|(n, r)| (n, Some(r))).unwrap_or((part, None));
-        if !name.is_empty() {
-            steps.push(JsonStep::Key(name.to_string()));
-        }
-        while let Some(r) = rest {
-            let (index, after) = r.split_once(']').with_context(|| format!("unclosed [ in `{path}`"))?;
-            steps.push(JsonStep::Index(index.parse().with_context(|| format!("bad index in `{path}`"))?));
-            rest = after.strip_prefix('[');
-            if rest.is_none() && !after.is_empty() {
-                bail!("unexpected `{after}` in `{path}`");
+    /// A key part's value, or `None` when the message isn't one of the format at all: what
+    /// `validate` tells apart when it reads fixtures, since a test's expected output in another
+    /// format says nothing about the key. Missing fields in a message of the format read as
+    /// `Some("")`.
+    pub fn read(&self, key: &KeyPath) -> Option<String> {
+        if let KeyPath::Regex(regex) = key {
+            if self.text.trim().is_empty() {
+                return None;
             }
+            let group = usize::from(regex.captures_len() > 1);
+            let found = regex.captures(self.text).and_then(|c| c.get(group));
+            return Some(found.map(|m| m.as_str().to_string()).unwrap_or_default());
         }
+        Some(match (key, self.parsed()?) {
+            (KeyPath::Hl7(path), Parsed::Hl7(message)) => message.read(path).into_owned(),
+            (KeyPath::Json(steps), Parsed::Json(value)) => json_text(json_at(value, steps)),
+            (KeyPath::Xml(steps), Parsed::Xml(root)) => {
+                xml_value(root, steps, self.format.xml_names()).unwrap_or_default()
+            }
+            (KeyPath::Csv(column), Parsed::Csv(header, record)) => {
+                let index = match header {
+                    Some(h) => h.iter().position(|c| c == column),
+                    None => column.parse::<usize>().ok().and_then(|n| n.checked_sub(1)),
+                };
+                index.and_then(|i| record.get(i)).unwrap_or_default().to_string()
+            }
+            (KeyPath::Fixed(field), Parsed::Fixed(line)) => {
+                line.chars().skip(field.start).take(field.width).collect::<String>().trim().to_string()
+            }
+            _ => String::new(),
+        })
     }
-    if steps.is_empty() {
-        bail!("empty JSON key path");
+
+    /// A key's value with all its parts (`key: [MSH-4, PID-3.1]`): joined by `/`, and empty when
+    /// any part is (the key doesn't identify the message without all of them). `None` as `read`.
+    pub fn read_all(&self, parts: &[KeyPath]) -> Option<String> {
+        let mut values = Vec::with_capacity(parts.len());
+        for part in parts {
+            values.push(self.read(part)?);
+        }
+        Some(if values.iter().any(String::is_empty) { String::new() } else { values.join(KEY_SEPARATOR) })
     }
-    Ok(steps)
 }
 
-fn xml_steps(path: &str) -> Result<Vec<XmlStep>> {
-    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
-    let mut steps = Vec::new();
-    for (i, part) in parts.iter().enumerate() {
-        if let Some(attr) = part.strip_prefix('@') {
-            if i != parts.len() - 1 {
-                bail!("`@{attr}` must be the last step of `{path}`");
-            }
-            steps.push(XmlStep::Attribute(attr.to_string()));
-            continue;
-        }
-        let (name, index) = match part.split_once('[') {
-            Some((n, r)) => {
-                let index: usize = r
-                    .strip_suffix(']')
-                    .and_then(|i| i.parse().ok())
-                    .with_context(|| format!("bad index in `{path}`"))?;
-                if index == 0 {
-                    bail!("XML indexes are 1-based in `{path}`");
-                }
-                (n, index)
-            }
-            None => (*part, 1),
-        };
-        steps.push(XmlStep::Element { name: name.to_string(), index });
-    }
-    if steps.is_empty() {
-        bail!("empty XML key path");
-    }
-    Ok(steps)
-}
+/// Between a composite key's values: visible where keys are shown (the message's page, hotspots).
+/// A value holding it can only merge two keys' lanes, which keeps each in order.
+pub const KEY_SEPARATOR: &str = "/";
 
-/// Read a key's value from a payload. Anything missing or unparseable reads as "".
+/// Read one key part from a payload. Anything missing or unparseable reads as "".
 pub fn extract(format: &Format, key: &KeyPath, payload: &str) -> String {
-    read(format, key, payload).unwrap_or_default()
+    Document::new(format, payload).read(key).unwrap_or_default()
 }
 
-/// A key's value, or `None` when the payload isn't a message of the format at all (not HL7, not
-/// JSON, not XML; an empty file): what `validate` tells apart when it reads fixtures, since a
-/// test's expected output in another format says nothing about the key. Missing fields in a
-/// message of the format read as `Some("")`.
+/// `Document::read` on a payload of its own.
 pub fn read(format: &Format, key: &KeyPath, payload: &str) -> Option<String> {
-    Some(match (key, format) {
-        (KeyPath::Hl7(path), _) => ductus_hl7::Message::parse(payload).ok()?.read(path).into_owned(),
-        (KeyPath::Json(steps), _) => json_value(serde_json::from_str(payload).ok()?, steps),
-        (KeyPath::Xml(steps), _) => {
-            let root = XmlParser { text: payload, pos: 0 }.document()?;
-            xml_value(&root, steps).unwrap_or_default()
-        }
-        _ if payload.trim().is_empty() => return None,
-        (KeyPath::Csv(column), Format::Csv(options)) => csv_value(payload, column, options.delimiter, options.header),
-        (KeyPath::Fixed(field), _) => {
-            let line = payload.lines().find(|l| !l.is_empty()).unwrap_or("");
-            line.chars().skip(field.start).take(field.width).collect::<String>().trim().to_string()
-        }
-        _ => String::new(),
-    })
+    Document::new(format, payload).read(key)
 }
 
-fn json_value(mut value: serde_json::Value, steps: &[JsonStep]) -> String {
+fn json_at<'v>(value: &'v serde_json::Value, steps: &[JsonStep]) -> Option<&'v serde_json::Value> {
+    use serde_json::Value;
+    let mut current = value;
     for step in steps {
-        value = match (step, value) {
-            (JsonStep::Key(k), serde_json::Value::Object(mut map)) => map.remove(k).unwrap_or_default(),
-            (JsonStep::Index(i), serde_json::Value::Array(mut items)) if *i < items.len() => items.swap_remove(*i),
-            _ => return String::new(),
+        current = match (step, current) {
+            (JsonStep::Key(k), Value::Object(map)) => map.get(k)?,
+            (JsonStep::Index(i), Value::Array(items)) => items.get(*i)?,
+            (JsonStep::Where(filters), Value::Array(items)) => {
+                filters.iter().find_map(|f| items.iter().find(|item| json_text(json_at(item, &f.path)) == f.value))?
+            }
+            (JsonStep::Where(filters), item @ Value::Object(_)) => {
+                filters.iter().any(|f| json_text(json_at(item, &f.path)) == f.value).then_some(item)?
+            }
+            _ => return None,
         };
     }
-    match value {
-        serde_json::Value::String(s) => s,
-        serde_json::Value::Null => String::new(),
-        other => other.to_string(),
-    }
+    Some(current)
 }
 
-fn csv_value(payload: &str, column: &str, delimiter: char, header: bool) -> String {
-    let mut reader = csv::ReaderBuilder::new()
-        .delimiter(u8::try_from(delimiter).unwrap_or(b','))
-        .has_headers(header)
-        .flexible(true)
-        .from_reader(payload.as_bytes());
-    let index = if header {
-        match reader.headers() {
-            Ok(h) => h.iter().position(|c| c == column),
-            Err(_) => None,
-        }
-    } else {
-        column.parse::<usize>().ok().and_then(|n| n.checked_sub(1))
-    };
-    let Some(index) = index else { return String::new() };
-    reader.records().next().and_then(|r| r.ok()).and_then(|r| r.get(index).map(str::to_string)).unwrap_or_default()
+/// A JSON value as a key: text as it is, nothing or `null` as "", anything else as JSON.
+fn json_text(value: Option<&serde_json::Value>) -> String {
+    match value {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        None | Some(serde_json::Value::Null) => String::new(),
+        Some(other) => other.to_string(),
+    }
 }
 
 /// A minimal XML element tree with the same rules as the SDK's `parseXml`, so a path means
@@ -174,6 +159,40 @@ struct Element {
 enum Node {
     Element(Element),
     Text(String),
+}
+
+impl Element {
+    fn elements<'e>(&'e self, name: &'e str, names: XmlNames) -> impl Iterator<Item = &'e Element> {
+        self.children.iter().filter_map(move |c| match c {
+            Node::Element(e) if names.matches(name, &e.name) => Some(e),
+            _ => None,
+        })
+    }
+
+    /// An attribute by name; namespace declarations (`xmlns:hl7`) are never one.
+    fn attribute(&self, name: &str, names: XmlNames) -> Option<&str> {
+        let declaration = |k: &str| k == "xmlns" || k.starts_with("xmlns:");
+        self.attributes.iter().find(|(k, _)| !declaration(k) && names.matches(name, k)).map(|(_, v)| v.as_str())
+    }
+
+    /// Text directly inside it.
+    fn text(&self) -> String {
+        self.children
+            .iter()
+            .filter_map(|c| match c {
+                Node::Text(t) => Some(t.as_str()),
+                Node::Element(_) => None,
+            })
+            .collect()
+    }
+
+    fn matches(&self, filter: &XmlFilter, names: XmlNames) -> bool {
+        let value = match filter.attribute {
+            true => self.attribute(&filter.name, names).unwrap_or_default().to_string(),
+            false => self.elements(&filter.name, names).next().map(Element::text).unwrap_or_default(),
+        };
+        value == filter.value
+    }
 }
 
 fn decode_entities(s: &str) -> String {
@@ -317,41 +336,37 @@ impl<'a> XmlParser<'a> {
     }
 }
 
-fn xml_value(root: &Element, steps: &[XmlStep]) -> Option<String> {
+/// From the root's children: the text at a path, or an attribute at its last step.
+fn xml_value(root: &Element, steps: &[XmlStep], names: XmlNames) -> Option<String> {
     let mut current = root;
     for step in steps {
         match step {
-            XmlStep::Element { name, index } => {
-                current = current
-                    .children
-                    .iter()
-                    .filter_map(|c| match c {
-                        Node::Element(e) if e.name == *name => Some(e),
-                        _ => None,
-                    })
-                    .nth(index - 1)?;
+            XmlStep::Element { name, which } => {
+                current = match which {
+                    XmlWhich::Index(n) => current.elements(name, names).nth(n - 1)?,
+                    XmlWhich::Where(filters) => {
+                        filters.iter().find_map(|f| current.elements(name, names).find(|e| e.matches(f, names)))?
+                    }
+                };
             }
-            XmlStep::Attribute(a) => return current.attributes.iter().find(|(k, _)| k == a).map(|(_, v)| v.clone()),
+            XmlStep::Attribute(a) => return current.attribute(a, names).map(str::to_string),
         }
     }
-    Some(
-        current
-            .children
-            .iter()
-            .filter_map(|c| match c {
-                Node::Text(t) => Some(t.as_str()),
-                Node::Element(_) => None,
-            })
-            .collect(),
-    )
+    Some(current.text())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ductus_core::format::XmlOptions;
+    use ductus_core::keys::KeyPart;
 
     fn key(format: &Format, path: &str, payload: &str) -> String {
-        extract(format, &compile(format, path).unwrap(), payload)
+        extract(format, &compile(format, &path.into()).unwrap(), payload)
+    }
+
+    fn xml() -> Format {
+        Format::Xml(XmlOptions::default())
     }
 
     #[test]
@@ -362,24 +377,27 @@ mod tests {
         assert_eq!(key(&Format::Json, "patient.age", doc), "42");
         assert_eq!(key(&Format::Json, "patient.none", doc), "");
         assert_eq!(key(&Format::Json, "patient.ids[9].v", doc), "");
+        assert_eq!(key(&Format::Json, "patient.ids[v=B].v", doc), "B");
         assert_eq!(key(&Format::Json, "patient.mrn", "not json"), "");
-        assert!(compile(&Format::Json, "a[x]").is_err());
+        assert!(compile(&Format::Json, &"a[x]".into()).is_err());
     }
 
     #[test]
     fn xml_keys() {
         let doc = r#"<?xml version="1.0"?><Order id="A1"><Patient><MRN>123</MRN><Name>O&apos;Brien</Name></Patient><Item code="GLU"><Qty>1</Qty></Item><Item code="NA"><Qty>2</Qty></Item><Note><![CDATA[a < b]]></Note><Empty/></Order>"#;
-        assert_eq!(key(&Format::Xml, "Patient/MRN", doc), "123");
-        assert_eq!(key(&Format::Xml, "Patient/Name", doc), "O'Brien");
-        assert_eq!(key(&Format::Xml, "Item[2]/Qty", doc), "2");
-        assert_eq!(key(&Format::Xml, "Item[2]/@code", doc), "NA");
-        assert_eq!(key(&Format::Xml, "@id", doc), "A1");
-        assert_eq!(key(&Format::Xml, "Note", doc), "a < b");
-        assert_eq!(key(&Format::Xml, "Empty", doc), "");
-        assert_eq!(key(&Format::Xml, "Item[3]/Qty", doc), "");
-        assert_eq!(key(&Format::Xml, "Missing", doc), "");
-        assert!(compile(&Format::Xml, "Item[0]").is_err());
-        assert!(compile(&Format::Xml, "@a/B").is_err());
+        assert_eq!(key(&xml(), "Patient/MRN", doc), "123");
+        assert_eq!(key(&xml(), "Patient/Name", doc), "O'Brien");
+        assert_eq!(key(&xml(), "Item[2]/Qty", doc), "2");
+        assert_eq!(key(&xml(), "Item[2]/@code", doc), "NA");
+        assert_eq!(key(&xml(), "Item[@code=NA]/Qty", doc), "2");
+        assert_eq!(key(&xml(), "Item[Qty=1]/@code", doc), "GLU");
+        assert_eq!(key(&xml(), "@id", doc), "A1");
+        assert_eq!(key(&xml(), "Note", doc), "a < b");
+        assert_eq!(key(&xml(), "Empty", doc), "");
+        assert_eq!(key(&xml(), "Item[3]/Qty", doc), "");
+        assert_eq!(key(&xml(), "Missing", doc), "");
+        assert!(compile(&xml(), &"Item[0]".into()).is_err());
+        assert!(compile(&xml(), &"@a/B".into()).is_err());
     }
 
     #[test]
@@ -390,14 +408,37 @@ mod tests {
     }
 
     #[test]
+    fn regex_keys_read_the_first_group_of_any_format() {
+        let regex = |r: &str| compile(&Format::Text, &KeyPart::Regex(r.into())).unwrap();
+        let text = "ORDER 77 FOR MRN=12345 AT 10:00";
+        assert_eq!(read(&Format::Text, &regex(r"MRN=(\d+)"), text).unwrap(), "12345");
+        assert_eq!(read(&Format::Text, &regex(r"ORDER \d+"), text).unwrap(), "ORDER 77", "no group: the match");
+        assert_eq!(read(&Format::Text, &regex(r"MRN=(\d+)"), "nothing").unwrap(), "");
+        assert_eq!(read(&Format::Text, &regex(r"X(Y)?"), "X").unwrap(), "", "the group didn't take part");
+        assert_eq!(read(&Format::Text, &regex(r"MRN=(\d+)"), "  "), None, "an empty file is no message");
+        let in_hl7 = compile(&Format::Hl7, &KeyPart::Regex(r"\|MRN(\d+)\^".into())).unwrap();
+        assert_eq!(read(&Format::Hl7, &in_hl7, "MSH|^~\\&|A\rPID|1||MRN42^^^X\r").unwrap(), "42");
+    }
+
+    #[test]
+    fn a_composite_key_is_empty_when_any_part_is() {
+        let parts = compile_all(&Format::Hl7, &[KeyPart::from("MSH-4"), "PID-3.1".into()]).unwrap();
+        let doc = |text| Document::new(&Format::Hl7, text).read_all(&parts);
+        assert_eq!(doc("MSH|^~\\&|A|EAST\rPID|1||123\r").unwrap(), "EAST/123");
+        assert_eq!(doc("MSH|^~\\&|A|EAST\rPID|1||\r").unwrap(), "", "no MRN: no key");
+        assert_eq!(doc("not HL7"), None);
+    }
+
+    #[test]
     fn reading_tells_a_missing_field_from_another_format() {
-        let read = |format: &Format, path: &str, payload: &str| read(format, &compile(format, path).unwrap(), payload);
+        let read =
+            |format: &Format, path: &str, payload: &str| read(format, &compile(format, &path.into()).unwrap(), payload);
         assert_eq!(read(&Format::Hl7, "PID-3.1", "MSH|^~\\&|A\rEVN|A08\r"), Some(String::new()));
         assert_eq!(read(&Format::Hl7, "PID-3.1", "{\"mrn\":1}"), None);
         assert_eq!(read(&Format::Json, "mrn", "{\"id\":1}"), Some(String::new()));
         assert_eq!(read(&Format::Json, "mrn", "MSH|^~\\&|A\r"), None);
-        assert_eq!(read(&Format::Xml, "MRN", "<a><MRN>1</MRN></a>"), Some("1".into()));
-        assert_eq!(read(&Format::Xml, "MRN", "not xml"), None);
+        assert_eq!(read(&xml(), "MRN", "<a><MRN>1</MRN></a>"), Some("1".into()));
+        assert_eq!(read(&xml(), "MRN", "not xml"), None);
         let csv = Format::from_yaml(&serde_yaml_ng::from_str("csv").unwrap()).unwrap();
         assert_eq!(read(&csv, "mrn", "  \n"), None);
         assert_eq!(read(&csv, "mrn", "name\nA\n"), Some(String::new()));
@@ -418,7 +459,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(key(&fixed, "name", "123456SMITH     \n"), "SMITH");
-        assert!(compile(&fixed, "nope").is_err());
-        assert!(compile(&Format::Text, "x").is_err());
+        assert!(compile(&fixed, &"nope".into()).is_err());
+        assert!(compile(&Format::Text, &"x".into()).is_err());
+    }
+
+    /// The cases the SDK's test suite reads too (`sdk/tests/paths.test.ts`): a path reads the same
+    /// value at intake as in interface code, and what one refuses the other does.
+    #[test]
+    fn the_shared_table_of_key_paths() {
+        let table: serde_json::Value = serde_json::from_str(include_str!("../../../sdk/tests/key-paths.json")).unwrap();
+        let cases = table["cases"].as_array().unwrap();
+        assert!(cases.len() >= 40, "the whole table: {}", cases.len());
+        for case in cases {
+            let path = case["path"].as_str().unwrap();
+            let format = match (case["format"].as_str().unwrap(), case["names"].as_str()) {
+                ("hl7", _) => Format::Hl7,
+                ("json", _) => Format::Json,
+                ("xml", Some("qualified")) => Format::Xml(XmlOptions { names: XmlNames::Qualified }),
+                ("xml", _) => xml(),
+                (other, _) => panic!("format {other}"),
+            };
+            let compiled = compile(&format, &path.into());
+            if case["refused"] == true {
+                assert!(compiled.is_err(), "{path} should be refused: {case}");
+                continue;
+            }
+            let compiled = compiled.unwrap_or_else(|e| panic!("{path}: {e:#}"));
+            let message = match &table["messages"][case["message"].as_str().unwrap()] {
+                serde_json::Value::String(text) => text.clone(),
+                document => document.to_string(),
+            };
+            assert_eq!(extract(&format, &compiled, &message), case["value"].as_str().unwrap(), "{case}");
+        }
     }
 }

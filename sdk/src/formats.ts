@@ -23,7 +23,8 @@ export interface FixedLayout {
 /** `record`: each message is one record (a file split with `split: records`), so `transform`
  *  receives that record rather than a list of one. */
 export type FormatSpec =
-  | { kind: "hl7" | "json" | "xml" | "text" }
+  | { kind: "hl7" | "json" | "text" }
+  | { kind: "xml"; names?: XmlNames }
   | { kind: "csv"; delimiter: string; header: boolean; record?: boolean }
   | ({ kind: "fixed"; record?: boolean } & FixedLayout);
 
@@ -159,21 +160,148 @@ function decodeEntities(s: string): string {
 const escapeText = (s: string) => s.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 const escapeAttr = (s: string) => escapeText(s).replaceAll('"', "&quot;");
 
-/** One step of a path: `Name`, `Name[2]` (1-based), or `@attribute` (last step only). */
-function splitPath(path: string): { name: string; index: number }[] {
-  return path.split("/").filter((p) => p.length > 0).map((p) => {
-    const m = /^([^[\]]+)(?:\[(\d+)\])?$/.exec(p);
-    if (!m) throw new Error(`invalid XML path step "${p}"`);
-    return { name: m[1], index: m[2] === undefined ? 1 : Number(m[2]) };
-  });
+/**
+ * How names in paths match an XML document's (the format's `names`): `local` by the name without
+ * its namespace prefix, on both sides (`Patient` matches `<hl7:Patient>`); `qualified` exactly as
+ * written.
+ */
+export type XmlNames = "local" | "qualified";
+
+const localName = (name: string) => name.slice(name.lastIndexOf(":") + 1);
+
+function sameName(names: XmlNames, path: string, document: string): boolean {
+  return names === "qualified" ? path === document : localName(path) === localName(document);
 }
 
-/** An XML element. Paths are relative to the element: `doc.get("Patient/MRN")`, `"Order[2]/Id"`, `"@id"`. */
+const isDeclaration = (attribute: string) => attribute === "xmlns" || attribute.startsWith("xmlns:");
+
+/** `[@root=1.2.3]` (an attribute) or `[Code=GLU]` (a child element's text). */
+interface XmlFilter {
+  attribute: boolean;
+  name: string;
+  value: string;
+}
+
+/** One step of a path: an element (the n-th from 1, or the first a filter matches) or `@attribute`. */
+type XmlStep = { name: string; index: number; filters?: undefined } | { name: string; index?: undefined; filters: XmlFilter[] };
+
+/** `text` split at `sep` where it's outside brackets and quotes. */
+export function splitOutside(text: string, sep: string): string[] {
+  const parts: string[] = [];
+  let start = 0;
+  let depth = 0;
+  let quote: string | undefined;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote !== undefined) {
+      if (c === quote) quote = undefined;
+    } else if (c === "'" || c === '"') quote = c;
+    else if (c === "[") depth++;
+    else if (c === "]") depth--;
+    else if (c === sep && depth === 0) {
+      parts.push(text.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(text.slice(start));
+  return parts;
+}
+
+/** Where the `]` closing a bracket is (`text` starts inside it), past quotes and inner brackets; -1 if none. */
+export function closingBracket(text: string): number {
+  let quote: string | undefined;
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (quote !== undefined) {
+      if (c === quote) quote = undefined;
+    } else if (c === "'" || c === '"') quote = c;
+    else if (c === "[") depth++;
+    else if (c === "]") {
+      if (depth === 0) return i;
+      depth--;
+    }
+  }
+  return -1;
+}
+
+/** A filter's value: quoted (`'A|B'`) or as written. */
+export function filterValue(text: string, fail: (why: string) => never): string {
+  const q = text[0];
+  if (q === "'" || q === '"') {
+    const inner = text.slice(1, -1);
+    if (text.length < 2 || !text.endsWith(q) || inner.includes(q)) fail(`a quoted value runs from one quote to the next: \`${text}\``);
+    return inner;
+  }
+  if (/['"[\]]/.test(text)) fail(`quote a value with brackets or quotes in it: \`${text}\``);
+  return text;
+}
+
+/**
+ * An XML path, the syntax keys take (`crates/ductus-core/src/keys.rs`, checked against it by
+ * `sdk/tests/key-paths.json`): element names between `/`, `[n]` from 1, `[@attr=value]` or
+ * `[Child=value]` filters with `|` between alternatives, and `@attr` as the last step.
+ */
+function xmlPath(path: string): { steps: XmlStep[]; attribute?: string } {
+  const fail = (why: string): never => {
+    throw new Error(
+      `invalid XML path "${path}": ${why} (e.g. "Patient/MRN", "Item[2]/@code", "id[@root=2.16.840.1]/@extension")`,
+    );
+  };
+  const name = (text: string) => {
+    if (text === "" || /[\s[\]=|'"@/]/.test(text)) fail(`\`${text}\` isn't an element or attribute name`);
+    return text;
+  };
+  const parts = splitOutside(path, "/").filter((p) => p.length > 0);
+  const steps: XmlStep[] = [];
+  let attribute: string | undefined;
+  parts.forEach((part, i) => {
+    if (part.startsWith("@")) {
+      if (i !== parts.length - 1) fail(`\`${part}\` must be the last step`);
+      attribute = name(part.slice(1));
+      return;
+    }
+    const open = part.indexOf("[");
+    if (open < 0) {
+      steps.push({ name: name(part), index: 1 });
+      return;
+    }
+    const inside = part.slice(open + 1);
+    const end = closingBracket(inside);
+    if (end < 0) fail("a `[` without its `]`");
+    if (end + 1 !== inside.length) fail(`\`${inside.slice(end + 1)}\` after \`]\``);
+    const bracket = inside.slice(0, end);
+    if (/^[0-9]*$/.test(bracket)) {
+      const n = Number(bracket);
+      if (bracket === "" || n < 1) fail("XML positions count from 1");
+      steps.push({ name: name(part.slice(0, open)), index: n });
+      return;
+    }
+    const filters = splitOutside(bracket, "|").map((alt): XmlFilter => {
+      const eq = alt.indexOf("=");
+      if (eq < 0) fail(`a filter is \`@attr=value\`: \`${alt}\``);
+      const on = alt.slice(0, eq);
+      const attr = on.startsWith("@");
+      return { attribute: attr, name: name(attr ? on.slice(1) : on), value: filterValue(alt.slice(eq + 1), fail) };
+    });
+    steps.push({ name: name(part.slice(0, open)), filters });
+  });
+  if (steps.length === 0 && attribute === undefined) fail("no steps");
+  return { steps, attribute };
+}
+
+/**
+ * An XML element. Paths are relative to it: `doc.get("Patient/MRN")`, `"Order[2]/Id"`, `"@id"`,
+ * `"id[@root=2.16.840.1]/@extension"`. Names match by their local name unless the document was
+ * parsed with `names: "qualified"` (the interface's `format: { xml: { names: qualified } }`).
+ */
 export class XmlElement {
   attributes: Record<string, string>;
   children: (XmlElement | string)[];
   /** The `<?xml ...?>` declaration, kept on the document root. */
   declaration?: string;
+  /** How names in paths match (from `parseXml`; elements `add` and `set` create keep their parent's). */
+  names: XmlNames = "local";
 
   constructor(public name: string, attributes: Record<string, string> = {}, children: (XmlElement | string)[] = []) {
     this.attributes = attributes;
@@ -191,7 +319,9 @@ export class XmlElement {
 
   /** Child elements, optionally only those with a name. */
   elements(name?: string): XmlElement[] {
-    return this.children.filter((c): c is XmlElement => c instanceof XmlElement && (name === undefined || c.name === name));
+    return this.children.filter((c): c is XmlElement =>
+      c instanceof XmlElement && (name === undefined || sameName(this.names, name, c.name))
+    );
   }
 
   /** First child element with this name. */
@@ -199,56 +329,81 @@ export class XmlElement {
     return this.elements(name)[0];
   }
 
-  /** The element at a path (no `@attribute` step), or undefined. */
-  find(path: string): XmlElement | undefined {
+  /** An attribute's name as the element has it (matched as names are); namespace declarations never. */
+  private attributeName(name: string): string | undefined {
+    return Object.keys(this.attributes).find((k) => !isDeclaration(k) && sameName(this.names, name, k));
+  }
+
+  private matches(filter: XmlFilter): boolean {
+    let value: string;
+    if (filter.attribute) {
+      const at = this.attributeName(filter.name);
+      value = at === undefined ? "" : this.attributes[at];
+    } else value = this.element(filter.name)?.text ?? "";
+    return value === filter.value;
+  }
+
+  private walk(steps: XmlStep[]): XmlElement | undefined {
     let current: XmlElement | undefined = this;
-    for (const step of splitPath(path)) {
-      current = current?.elements(step.name)[step.index - 1];
+    for (const step of steps) {
+      const candidates: XmlElement[] = current.elements(step.name);
+      if (step.filters === undefined) current = candidates[step.index - 1];
+      else {
+        current = undefined;
+        for (const f of step.filters) {
+          current = candidates.find((e) => e.matches(f));
+          if (current) break;
+        }
+      }
       if (!current) return undefined;
     }
     return current;
   }
 
+  /** The element at a path (no `@attribute` step), or undefined. */
+  find(path: string): XmlElement | undefined {
+    const { steps, attribute } = xmlPath(path);
+    if (attribute !== undefined) throw new Error(`find("${path}"): find gives elements; get("${path}") reads an attribute`);
+    return this.walk(steps);
+  }
+
   /** Text at a path, or an attribute with a final `@name` step. Missing reads as "". */
   get(path: string): string {
-    const steps = path.split("/");
-    const last = steps[steps.length - 1];
-    if (last.startsWith("@")) {
-      const owner = steps.length > 1 ? this.find(steps.slice(0, -1).join("/")) : this;
-      return owner?.attributes[last.slice(1)] ?? "";
-    }
-    return this.find(path)?.text ?? "";
+    const { steps, attribute } = xmlPath(path);
+    const owner = this.walk(steps);
+    if (!owner) return "";
+    if (attribute === undefined) return owner.text;
+    const at = owner.attributeName(attribute);
+    return at === undefined ? "" : owner.attributes[at];
   }
 
   /** Set text at a path (or an attribute with `@name`), creating missing elements. */
   set(path: string, value: string): void {
-    const steps = path.split("/").filter((s) => s.length > 0);
-    const last = steps[steps.length - 1];
-    const elementSteps = last.startsWith("@") ? steps.slice(0, -1) : steps;
+    const { steps, attribute } = xmlPath(path);
     let current: XmlElement = this;
-    for (const step of splitPath(elementSteps.join("/"))) {
-      const matches = current.elements(step.name);
-      while (matches.length < step.index) {
-        const created = new XmlElement(step.name);
-        current.children.push(created);
-        matches.push(created);
+    for (const step of steps) {
+      if (step.filters !== undefined) {
+        throw new Error(`set("${path}"): set takes names and positions; find the element first: find("…[…]")?.set(…)`);
       }
+      const matches = current.elements(step.name);
+      while (matches.length < step.index) matches.push(current.add(step.name));
       current = matches[step.index - 1];
     }
-    if (last.startsWith("@")) current.attributes[last.slice(1)] = value;
+    if (attribute !== undefined) current.attributes[current.attributeName(attribute) ?? attribute] = value;
     else current.text = value;
   }
 
   /** Append a child element. */
   add(name: string, text?: string, attributes: Record<string, string> = {}): XmlElement {
     const child = new XmlElement(name, attributes, text === undefined ? [] : [text]);
+    child.names = this.names;
     this.children.push(child);
     return child;
   }
 
   /** Remove child elements with this name. */
   remove(name: string): void {
-    this.children = this.children.filter((c) => !(c instanceof XmlElement && c.name === name));
+    this.children = this.children.filter((c) => !(c instanceof XmlElement && sameName(this.names, name, c.name)));
   }
 
   toString(): string {
@@ -259,8 +414,12 @@ export class XmlElement {
   }
 }
 
-/** Parse an XML document into its root element. Comments and processing instructions are dropped. */
-export function parseXml(text: string): XmlElement {
+/**
+ * Parse an XML document into its root element. Comments and processing instructions are dropped.
+ * `names`: how paths match its names (default `local`, the prefix ignored).
+ */
+export function parseXml(text: string, options: { names?: XmlNames } = {}): XmlElement {
+  const names = options.names ?? "local";
   let i = 0;
   const fail = (what: string): never => {
     throw new Error(`invalid XML at position ${i}: ${what}`);
@@ -300,6 +459,7 @@ export function parseXml(text: string): XmlElement {
     if (text[i] !== "<") fail("expected <");
     i++;
     const el = new XmlElement(readName());
+    el.names = names;
     for (;;) {
       skipSpace();
       if (text.startsWith("/>", i)) {
@@ -377,7 +537,7 @@ export function decode(raw: string, spec: FormatSpec): unknown {
     case "json":
       return JSON.parse(raw);
     case "xml":
-      return parseXml(raw);
+      return parseXml(raw, { names: spec.names });
     case "csv": {
       const records = parseCsv(raw, { delimiter: spec.delimiter, header: spec.header as true });
       return spec.record ? records[0] : records;

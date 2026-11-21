@@ -49,7 +49,8 @@ pub struct Intake {
 /// nothing stores with the old one any more.
 pub(crate) struct Settings {
     config: Arc<InterfaceConfig>,
-    ordering: Option<KeyPath>,
+    /// `ordering.key`'s parts.
+    ordering: Option<Vec<KeyPath>>,
     dedupe: Vec<KeyPath>,
     control_id: Option<KeyPath>,
     /// Its lanes: messages go to the newest generation's (`crate::lanes`).
@@ -78,13 +79,15 @@ impl Settings {
         tier: Arc<AtomicI16>,
         targets: Targets,
     ) -> Result<Self> {
-        let compile = |path: &str| {
-            keys::compile(&config.format, path).with_context(|| format!("interface `{}`: key `{path}`", config.name))
+        let compile = |parts: &[ductus_core::keys::KeyPart]| {
+            keys::compile_all(&config.format, parts).with_context(|| format!("interface `{}`", config.name))
         };
-        let ordering = config.ordering.key.as_deref().map(compile).transpose()?;
-        let dedupe: Vec<KeyPath> =
-            config.dedupe.iter().flat_map(|d| d.keys.iter()).map(|k| compile(k)).collect::<Result<_>>()?;
-        let control_id = (config.format == Format::Hl7).then(|| compile("MSH-10")).transpose()?;
+        let ordering = config.ordering.key.as_ref().map(|k| compile(&k.0)).transpose()?;
+        let dedupe = compile(config.dedupe.as_ref().map_or(&[][..], |d| &d.keys))?;
+        let control_id = match config.format {
+            Format::Hl7 => compile(&["MSH-10".into()])?.pop(),
+            _ => None,
+        };
         let window = || EmptyWindow::new(config.monitor.empty_keys.last);
         let empty = Arc::new(EmptyKeys {
             ordering: ordering.as_ref().map(|_| window()),
@@ -134,24 +137,24 @@ impl Settings {
             empty: window.empty(),
             seen: window.seen(),
         };
-        let ordering = self
-            .empty
-            .ordering
-            .as_ref()
-            .map(|w| seen(KeyKind::Ordering, w, self.config.ordering.key.iter().cloned().collect()));
-        let dedupe = self
-            .empty
-            .dedupe
-            .as_ref()
-            .map(|w| seen(KeyKind::Dedupe, w, self.config.dedupe.iter().flat_map(|d| d.keys.clone()).collect()));
+        let written = |parts: &[ductus_core::keys::KeyPart]| parts.iter().map(ToString::to_string).collect();
+        let ordering = self.empty.ordering.as_ref().map(|w| {
+            seen(KeyKind::Ordering, w, self.config.ordering.key.as_ref().map_or_else(Vec::new, |k| written(&k.0)))
+        });
+        let dedupe =
+            self.empty.dedupe.as_ref().map(|w| {
+                seen(KeyKind::Dedupe, w, self.config.dedupe.as_ref().map_or_else(Vec::new, |d| written(&d.keys)))
+            });
         ordering.into_iter().chain(dedupe).collect()
     }
 
-    /// Read a message's lane, ordering key, control ID and dedupe key.
+    /// Read a message's lane, ordering key, control ID and dedupe key (the message parsed once for
+    /// all of them).
     fn keys(&self, payload: &[u8]) -> Keys {
         let text = String::from_utf8_lossy(payload);
-        let read = |k: &KeyPath| keys::extract(&self.config.format, k, &text);
-        let ordering_key = self.ordering.as_ref().map(read);
+        let document = keys::Document::new(&self.config.format, &text);
+        let read = |k: &KeyPath| document.read(k).unwrap_or_default();
+        let ordering_key = self.ordering.as_ref().map(|parts| document.read_all(parts).unwrap_or_default());
         let values: Vec<String> = self.dedupe.iter().map(read).collect();
         Keys {
             partition: self.lanes.lane_of(ordering_key.as_deref().unwrap_or("")),

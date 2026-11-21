@@ -2,6 +2,7 @@
 
 use crate::about::{About, System};
 use crate::format::Format;
+use crate::keys::{Key, KeyPart};
 use crate::resources::Kind;
 use crate::yaml::Problem;
 use anyhow::{Context, Result, bail};
@@ -1031,12 +1032,14 @@ pub enum OnReject {
 #[serde(deny_unknown_fields)]
 pub struct Dedupe {
     /// The fields whose values, together, make a message the same as one seen before, as key
-    /// paths in the interface's `format`: HL7 `MSH-10`, JSON `order.id`, XML `Order/@id`, a CSV
-    /// column or a fixed-length field's name. Choose fields a resend repeats and a new message
-    /// never does: the sender's control ID, or an order number with its status. Default:
-    /// `[MSH-10]` (HL7's message control ID). Example: `keys: [ORC-2, ORC-5]`.
+    /// paths in the interface's `format` (the same paths as `ordering.key`, filters included): HL7
+    /// `MSH-10`, JSON `order.id`, XML `Order/@id`, a CSV column or a fixed-length field's name, or
+    /// `{ regex: '…' }` over the message's text. Choose fields a resend repeats and a new message
+    /// never does: the sender's control ID, or an order number with its status. A message whose
+    /// keys all read empty isn't checked. Default: `[MSH-10]` (HL7's message control ID). Example:
+    /// `keys: [ORC-2, ORC-5]`.
     #[serde(default = "defaults::dedupe_keys")]
-    pub keys: Vec<String>,
+    pub keys: Vec<KeyPart>,
     /// How long a message's keys are remembered: a repeat within this long is a duplicate,
     /// after it a new message. Cover the longest a sender may take to resend (after a
     /// restart, a weekend). Default: `24h`. Example: `window: 7d`.
@@ -1136,12 +1139,27 @@ pub struct Ordering {
     /// account. Messages with the same value are delivered in arrival order; different values
     /// can overtake each other, so one patient's failing message doesn't hold up everyone.
     ///
+    /// Paths read real feeds' values without code:
+    ///
+    /// - HL7: a repetition `PID-3[2].1`; the repetition whose component says what it is
+    ///   `PID-3[.5=MR].1`, with alternatives tried in order `PID-3[.5=MR|.4=HOSP].1`; a
+    ///   subcomponent `PID-3.4.1`.
+    /// - JSON: an array's item by a field `identifier[system=urn:oid:1.2.3].value`.
+    /// - XML: an element by an attribute or a child's text `id[@root=2.16.840.1]/@extension`;
+    ///   names match by their local name, whatever the prefix (the format's `names`).
+    /// - Any format: `{ regex: 'MRN=(\d+)' }` over the message's text (the first group), the only
+    ///   key `text` messages have.
+    ///
+    /// Several values together are a list: `key: [MSH-4, PID-3.1]` (one patient of one facility);
+    /// it reads empty when any of them does. The code reads the same paths (`msg.get`, `getPath`).
+    ///
     /// Choose the narrowest value correctness allows: by patient for ADT, by order for results.
-    /// A message whose field is empty goes to the lane of the empty value. Without a key, the
+    /// A message whose key is empty goes to the lane of the empty value. Without a key, the
     /// whole interface is delivered in one strict order, one message at a time per destination.
     /// Changing it (or adding or removing it) with messages waiting is safe: they're sent first,
-    /// before any new message. Default: none. Example: `key: PID-3.1`.
-    pub key: Option<String>,
+    /// before any new message. Default: none. Example: `key: PID-3[.5=MR].1`.
+    #[cfg_attr(test, schemars(with = "Option<Key>"))]
+    pub key: Option<Key>,
     /// How many lanes messages are spread over by their `key`. Messages with the same key value
     /// always go to the same lane, and each lane is delivered strictly in arrival order, so more
     /// lanes let more patients' messages move at once while each patient's stay in order.
@@ -1220,7 +1238,7 @@ mod defaults {
     pub fn max_backoff_ms() -> u64 {
         60_000
     }
-    pub fn dedupe_keys() -> Vec<String> {
+    pub fn dedupe_keys() -> Vec<super::KeyPart> {
         vec!["MSH-10".into()]
     }
     pub fn dedupe_window() -> std::time::Duration {
@@ -1304,11 +1322,18 @@ impl InterfaceConfig {
         {
             refuse!(["dedupe", "keys"], "dedupe.keys must list at least one key path");
         }
-        let keys = self.ordering.key.iter().map(|k| (["ordering", "key"], k));
-        for (place, key) in keys.chain(self.dedupe.iter().flat_map(|d| d.keys.iter().map(|k| (["dedupe", "keys"], k))))
-        {
-            let checked = self.format.check_key_path(key);
-            at(&place, checked.with_context(|| format!("key `{key}` (format {})", self.format.name())))?;
+        // Each part at its own place: `ordering.key` (or its n-th part), `dedupe.keys`' n-th.
+        let ordering = self.ordering.key.iter().flat_map(|k| {
+            let several = k.0.len() > 1;
+            k.0.iter().enumerate().map(move |(i, p)| (["ordering", "key"], several.then_some(i), p))
+        });
+        let dedupe =
+            self.dedupe.iter().flat_map(|d| d.keys.iter().enumerate().map(|(i, p)| (["dedupe", "keys"], Some(i), p)));
+        for (setting, index, part) in ordering.chain(dedupe) {
+            let index = index.map(|i| i.to_string());
+            let place: Vec<&str> = setting.into_iter().chain(index.as_deref()).collect();
+            let checked = crate::keys::compile(&self.format, part).map(drop);
+            at(&place, checked.with_context(|| format!("key `{part}` (format {})", self.format.name())))?;
         }
         if matches!(self.source, Source::Mllp { .. }) && self.format != Format::Hl7 {
             refuse!(
@@ -1474,7 +1499,7 @@ impl InterfaceConfig {
                 if f.marker.as_deref().is_some_and(|m| m.trim().is_empty()) {
                     refuse!(["source", kind, "marker"], "marker can't be empty (e.g. `.done`)");
                 }
-                if f.split == Split::Records && self.format == Format::Xml {
+                if f.split == Split::Records && matches!(self.format, Format::Xml(_)) {
                     refuse!(
                         ["source", kind, "split"],
                         "`split: records` doesn't apply to XML; each XML file is one message"
@@ -1690,7 +1715,7 @@ retry: { max_attempts: 3 }
         let c: InterfaceConfig = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(c.name, "adt");
         assert!(matches!(c.source, Source::Mllp { port: 6661, .. }));
-        assert_eq!(c.ordering.key.as_deref(), Some("PID-3.1"));
+        assert_eq!(c.ordering.key.as_ref().map(|k| k.to_string()).as_deref(), Some("PID-3.1"));
         assert_eq!(c.retry.max_attempts, Some(3));
         assert_eq!((c.partition_count(), c.slots()), (8, 2));
     }
@@ -1846,7 +1871,7 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
             Destination::Mllp { ack: AckMode::None, on_reject: OnReject::Retry, .. }
         ));
         let d = c.dedupe.unwrap();
-        assert_eq!(d.keys, ["PID-3.1", "EVN-2"]);
+        assert_eq!(d.keys, [KeyPart::from("PID-3.1"), "EVN-2".into()]);
         assert_eq!(d.window, Duration::from_secs(1800));
         let r = c.rate_limit.unwrap();
         assert_eq!((r.per_minute, r.burst, r.mode, r.over_limit), (100, Some(500), RateMode::Average, OverLimit::Drop));
@@ -1859,7 +1884,32 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
             defaults.destinations.values().next().unwrap().connector,
             Destination::Mllp { ack: AckMode::Wait, on_reject: OnReject::Quarantine, .. }
         ));
-        assert_eq!(defaults.dedupe.unwrap().keys, ["MSH-10"]);
+        assert_eq!(defaults.dedupe.unwrap().keys, [KeyPart::from("MSH-10")]);
+    }
+
+    #[test]
+    fn a_malformed_key_is_refused_at_its_part() {
+        let refused = |settings: &str| {
+            let yaml = format!(
+                "name: x\nsource: {{ mllp: {{ port: 1 }} }}\ndestinations: {{ f: {{ file: {{ dir: o }} }} }}\n{settings}"
+            );
+            let c: InterfaceConfig = serde_yaml_ng::from_str(&yaml).unwrap();
+            let e = c.validate().unwrap_err();
+            let located = crate::yaml::Located::of(&e).expect("located");
+            (located.key.join("."), e.to_string())
+        };
+        let (place, text) = refused("ordering: { key: 'PID-3[.5]' }\n");
+        assert_eq!(place, "ordering.key");
+        assert!(text.contains("a filter is `.component=value`"), "{text}");
+        assert_eq!(refused("ordering: { key: [MSH-4, 'PID-3[0]'] }\n").0, "ordering.key.1");
+        assert_eq!(refused("dedupe: { keys: [MSH-10, { regex: '(' }] }\n").0, "dedupe.keys.1");
+
+        let composite: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: x\nsource: { mllp: { port: 1 } }\ndestinations: { f: { file: { dir: o } } }\nordering: { key: [MSH-4, 'PID-3[.5=MR].1'] }\n",
+        )
+        .unwrap();
+        assert!(composite.validate().is_ok());
+        assert_eq!(composite.ordering.key.unwrap().to_string(), "[MSH-4, PID-3[.5=MR].1]");
     }
 
     #[test]

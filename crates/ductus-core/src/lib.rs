@@ -10,6 +10,7 @@ pub mod env;
 pub mod format;
 pub mod hotspots;
 pub mod impact;
+pub mod keys;
 pub mod ldap;
 pub mod monitor;
 pub mod owners;

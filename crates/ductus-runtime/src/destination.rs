@@ -27,7 +27,7 @@ pub enum Sender {
 pub fn content_type(format: &Format) -> &'static str {
     match format {
         Format::Json => "application/json",
-        Format::Xml => "application/xml",
+        Format::Xml(_) => "application/xml",
         Format::Csv(_) => "text/csv",
         Format::Hl7 => "x-application/hl7-v2+er7",
         Format::Text | Format::Fixed(_) => "text/plain; charset=utf-8",
@@ -39,7 +39,7 @@ fn extension(format: &Format) -> &'static str {
     match format {
         Format::Hl7 => "hl7",
         Format::Json => "json",
-        Format::Xml => "xml",
+        Format::Xml(_) => "xml",
         Format::Csv(_) => "csv",
         Format::Text | Format::Fixed(_) => "txt",
     }

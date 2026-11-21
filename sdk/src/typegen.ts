@@ -263,22 +263,31 @@ const BASE = `
   export function parseFixed(text: string, layout: FixedLayout): CsvRecord[];
   /** Write records as fixed-length lines; long values are cut to their field width. */
   export function toFixed(records: readonly Record<string, unknown>[], layout: FixedLayout): string;
-  /** Parse an XML document into its root element. */
-  export function parseXml(text: string): XmlElement;
-  /** An XML element. Paths are relative to it: \`doc.get("Patient/MRN")\`, \`"Item[2]/Qty"\`, \`"@id"\`. */
+  /** How names in XML paths match: \`local\` by the name without its prefix (\`Patient\` matches \`<hl7:Patient>\`), \`qualified\` exactly. */
+  export type XmlNames = "local" | "qualified";
+  /** Parse an XML document into its root element. \`names\`: how paths match its names (default \`local\`). */
+  export function parseXml(text: string, options?: { names?: XmlNames }): XmlElement;
+  /**
+   * An XML element. Paths are relative to it: \`doc.get("Patient/MRN")\`, \`"Item[2]/Qty"\`, \`"@id"\`,
+   * \`"id[@root=2.16.840.1]/@extension"\` (filters: \`[@attr=value]\`, \`[Child=value]\`, \`|\` between
+   * alternatives). Names match by local name unless the interface says \`names: qualified\`.
+   */
   export class XmlElement {
     constructor(name: string, attributes?: Record<string, string>, children?: (XmlElement | string)[]);
     name: string;
     attributes: Record<string, string>;
     children: (XmlElement | string)[];
+    /** How names in paths match (from \`parseXml\`). */
+    names: XmlNames;
     /** Text directly inside this element; setting it replaces the content. */
     text: string;
     elements(name?: string): XmlElement[];
     element(name: string): XmlElement | undefined;
+    /** The element at a path (filters allowed), or undefined. */
     find(path: string): XmlElement | undefined;
-    /** Text at a path (or attribute with a final \`@name\`). Missing reads as "". */
+    /** Text at a path (or attribute with a final \`@name\`), as keys read it. Missing reads as "". */
     get(path: string): string;
-    /** Set text (or \`@attribute\`) at a path, creating missing elements. */
+    /** Set text (or \`@attribute\`) at a path of names and positions, creating missing elements. */
     set(path: string, value: string): void;
     add(name: string, text?: string, attributes?: Record<string, string>): XmlElement;
     remove(name: string): void;
@@ -286,6 +295,13 @@ const BASE = `
   }
   /** A fixture parsed as an HL7 message. */
   export function hl7(name: string): Message;
+  /**
+   * The value at a path in a decoded message, as text ("" when missing), with the paths
+   * \`ordering.key\` and \`dedupe.keys\` take, so a key read here is the one the engine orders by:
+   * \`getPath(msg, "PID-3[.5=MR].1")\`, \`getPath(doc, "id[@root=1.2.3]/@extension")\`,
+   * \`getPath(patient, "identifier[system=urn:oid:1.2.3].value")\` (JSON). An invalid path throws.
+   */
+  export function getPath(message: unknown, path: string): string;
 `;
 
 /** Full contents of the generated `ductus-sdk.d.ts`. */
@@ -304,9 +320,13 @@ export function generateTypes(): string {
   for (const name of GENERIC_SEGMENTS) out += `    readonly ${name}: Segments;\n`;
   out += `    /** Custom Z-segments. */
     readonly [segment: \`Z\${string}\`]: Segments;
-    /** Value at an HL7 path like "PID-3.1" (first repetition). Missing reads as "". */
+    /**
+     * Value at an HL7 path, as \`ordering.key\` reads it: "PID-3.1" (first repetition), "PID-3[2].1",
+     * "PID-3[.5=MR].1" (the repetition whose component 5 is MR), "PID-3[.5=MR|.4=HOSP].1"
+     * (alternatives in order), "PID-3.4.1" (a subcomponent). Missing reads as "".
+     */
     get(path: string): string;
-    /** Set the value at an HL7 path like "PID-5.1". */
+    /** Set the value at a field or component path like "PID-5" or "PID-5.1". */
     set(path: string, value: string): void;
     /** Append a segment. Field values are raw HL7, index 0 = field 1. */
     add(name: string, fields?: readonly string[]): Segment;

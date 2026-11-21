@@ -329,7 +329,8 @@ impl Wanted {
         (!config.responds()).then(|| Self {
             interface: config.name.clone(),
             lanes: config.partition_count() as i32,
-            key: config.ordering.key.clone().unwrap_or_default(),
+            // As written (`[MSH-4, PID-3.1]` for several parts): one path reads as it always did.
+            key: config.ordering.key.as_ref().map(ToString::to_string).unwrap_or_default(),
         })
     }
 }

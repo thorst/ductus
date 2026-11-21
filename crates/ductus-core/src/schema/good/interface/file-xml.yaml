@@ -1,0 +1,10 @@
+# CDA documents dropped by two facilities, kept in order per facility and patient.
+name: cda-in
+source: { file: { dir: /data/inbound/cda, pattern: "*.xml" } }
+format: { xml: { names: qualified } }
+ordering:
+  key:
+    - { regex: 'facility="([A-Z]+)"' }
+    - "hl7:recordTarget/hl7:patientRole/hl7:id[@root=1.2.3]/@extension"
+dedupe: { keys: [{ regex: '<hl7:id root="2\.16\.840\.1\.113883\.19" extension="([^"]+)"' }] }
+destinations: { files: { file: { dir: out } } }

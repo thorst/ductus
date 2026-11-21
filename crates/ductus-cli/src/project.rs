@@ -1564,8 +1564,8 @@ struct KeyMissed {
 /// expected output) and folders say nothing either way, and no fixtures means nothing to say.
 fn keys_missed_in_fixtures(config: &InterfaceConfig, dir: &Path) -> Vec<KeyMissed> {
     use ductus_runtime::keys;
-    let ordering: Vec<&str> = config.ordering.key.iter().map(String::as_str).collect();
-    let dedupe: Vec<&str> = config.dedupe.iter().flat_map(|d| d.keys.iter().map(String::as_str)).collect();
+    let ordering = config.ordering.key.as_ref().map_or(&[][..], |k| &k.0);
+    let dedupe = config.dedupe.as_ref().map_or(&[][..], |d| &d.keys);
     if ordering.is_empty() && dedupe.is_empty() {
         return Vec::new();
     }
@@ -1577,23 +1577,25 @@ fn keys_missed_in_fixtures(config: &InterfaceConfig, dir: &Path) -> Vec<KeyMisse
         .collect();
     fixtures.sort();
     let mut missed = Vec::new();
-    for (paths, key, what) in [
-        (ordering, vec!["ordering", "key"], "every message would wait in one lane"),
-        (dedupe, vec!["dedupe", "keys"], "no message would be checked for duplicates"),
+    // As intake reads them: an ordering key's parts all or nothing, dedupe keys any one of them.
+    for (paths, key, what, all) in [
+        (ordering, vec!["ordering", "key"], "every message would wait in one lane", true),
+        (dedupe, vec!["dedupe", "keys"], "no message would be checked for duplicates", false),
     ] {
         // A path that doesn't compile is the config check's error already.
-        let Ok(compiled) = paths.iter().map(|p| keys::compile(&config.format, p)).collect::<Result<Vec<_>>>() else {
-            continue;
-        };
+        let Ok(compiled) = keys::compile_all(&config.format, paths) else { continue };
         if compiled.is_empty() {
             continue;
         }
         let mut read = Vec::new();
         for (name, text) in &fixtures {
-            let values: Option<Vec<String>> = compiled.iter().map(|k| keys::read(&config.format, k, text)).collect();
+            let document = keys::Document::new(&config.format, text);
+            let values: Option<Vec<String>> = compiled.iter().map(|k| document.read(k)).collect();
             if let Some(values) = values {
                 read.push(name.as_str());
-                if values.iter().any(|v| !v.is_empty()) {
+                let found = |v: &String| !v.is_empty();
+                let keyed = if all { values.iter().all(found) } else { values.iter().any(found) };
+                if keyed {
                     read.clear();
                     break;
                 }
