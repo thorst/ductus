@@ -9,6 +9,11 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 ## `return null` filters; throwing quarantines (level 1)
 - **What:** `null` → filtered (kept for audit, never delivered); `kill("reason")` → filtered with a reason; a thrown error or `quarantine("reason")` → quarantined for a person to look at.
 
+## XML names match whatever their prefix (level 2)
+- **What:** in XML paths (`doc.get`, `find`, `set`, `elements`, `remove`, and keys in interface.yaml), `Patient` matches `<Patient>`, `<hl7:Patient>` and `<v3:Patient>`, and `@type` matches `xsi:type`: names compare without their namespace prefix, on both sides (a prefix written in a path is ignored too). Namespace declarations (`xmlns`, `xmlns:hl7`) are never attributes a path reads. `el.name` and the XML written out keep the prefixes as they were.
+- **Why:** a prefix is the sender's shorthand, not part of the meaning, and senders change them (an upgrade, a different library); paths written with them broke on that, silently reading `""`.
+- **What to do:** nothing, usually. Where one document uses the same local name for two different things under two namespaces (an `id` in the document's namespace and an `sdtc:id` extension), tell them apart with a filter on what differs (`id[@root=…]`), or set `format: { xml: { names: qualified } }` so names match exactly, prefixes included (`parseXml(text, { names: "qualified" })` in code).
+
 ## Imports used only for their side effects are removed (level 2)
 - **What:** TypeScript drops `import { x } from "./m.ts"` if `x` is never used, so code that runs when `m.ts` loads won't run.
 - **What to do:** write `import "./m.ts";` when you need a module only for what it does on load.

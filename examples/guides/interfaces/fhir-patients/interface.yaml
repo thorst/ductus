@@ -1,0 +1,10 @@
+name: fhir-patients
+about:
+  description: Patients from the registration system's FHIR export, for the master patient index
+  owner: integration-team
+  from: { application: Registration }
+  to: { application: Master patient index }
+source: { file: { dir: inbound, pattern: "patient_*.json" } }
+format: json
+ordering: { key: "identifier[system=urn:oid:1.2.3].value" }   # each patient's in order, by our MRN
+destinations: { mpi: { file: { dir: out }, script: patients.ts } }

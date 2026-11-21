@@ -38,6 +38,53 @@ ordering:
   against the database says what the next start will do
   ([nuance](../nuances/ordering.md#after-a-change-of-ordering-new-messages-of-a-key-wait-for-its-older-ones-level-4)).
 
+### Key paths
+
+A key (`ordering.key`, each of `dedupe.keys`) is a path in the interface's `format`, read by the
+engine as each message arrives, before any code runs. Real feeds rarely put the value where a
+plain path looks, so a path can pick a repetition by what it says:
+
+| format | plain | picking by what it says |
+|---|---|---|
+| hl7 | `PID-3.1`, `PID-3[2].1`, `PID-3.4.1` | `PID-3[.5=MR].1`: the identifier whose type (component 5) is `MR`; `PID-3[.5=MR\|.4=HOSP].1`: that, else the one from `HOSP` |
+| json | `patient.mrn`, `ids[0].value` | `identifier[system=urn:oid:1.2.3].value`: the identifier of that system (`[type.coding[0].code=MR]` works too) |
+| xml | `Patient/MRN`, `Item[2]/@code` | `id[@root=2.16.840.1.113883.19]/@extension`, `Item[Code=GLU]/Qty`: by an attribute or a child's text |
+| csv, fixed | a column's or field's name | |
+| any, and text | | `{ regex: 'MRN=(\d+)' }`: the first group of a regular expression over the message's text |
+
+```yaml
+# interfaces/adt-from-two-hospitals/interface.yaml, in part
+ordering:
+  key: [MSH-4, "PID-3[.5=MR].1"]   # one patient of one facility: MRNs repeat across facilities
+```
+
+- **Why filters**: an ADT feed's PID-3 often carries an SSN, a medical record number and an
+  account number in any order, and a FHIR Patient lists identifiers by system. `PID-3.1` is
+  whichever came first; a filter names the one you mean, without code.
+- **Alternatives** (`|`) are tried in order: the first repetition the first filter matches, else
+  the first the second matches. A filter that matches nothing reads empty, like a missing field.
+- **A filter compares exactly**, the decoded value (HL7 escapes like `\T\` turned back into `&`).
+  Quote a value with `|`, `]` or quotes in it: `PID-3[.4='A|B'].1`.
+- **Several parts together** (`key: [MSH-4, PID-3.1]`) are one key, its values joined by `/`
+  (`EAST/123456`). It **reads empty when any part does**: a message without an MRN has no patient
+  to keep in order, and the interface's *keyless* health then says so
+  ([nuance](../nuances/ordering.md#a-key-with-several-parts-is-empty-when-any-part-is-a-filter-that-matches-nothing-reads-empty-level-2)).
+- **XML names match by their local name**, whatever the namespace prefix (`Patient` matches
+  `<hl7:Patient>` and `<v3:Patient>`), since a sender's prefixes can change. Set
+  `format: { xml: { names: qualified } }` to match prefixes exactly
+  ([reference](../reference/config/interface.md#formatxml)).
+- **A regex** is for what has no fields (`format: text`, a vendor's layout) or no path that
+  reaches it. It reads the whole message as text (an HL7 message's segments end with a carriage
+  return), uses Rust's syntax (no look-around; linear time, so no message can make it slow) and
+  takes the first group, or the whole match without one. Prefer a path when one exists: it
+  reads the field, not text that may also appear elsewhere.
+- **The code reads the same paths**: `msg.get("PID-3[.5=MR].1")`, `doc.get("id[@root=…]/@extension")`,
+  and `getPath(value, path)` for any message, JSON included
+  ([formats](../write/formats.md#reading-by-the-keys-paths)). A test that reads the key with them
+  tests the key the engine orders by.
+- **A malformed path is refused** by `ductus validate` and at the start, at its place in
+  interface.yaml (`ordering.key.1` for a list's second part), with what's wrong and an example.
+
 ## Failures: `retry`
 
 [`retry`](../reference/config/interface.md#retry) is how a delivery that failed for a reason that

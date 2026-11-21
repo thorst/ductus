@@ -463,6 +463,46 @@ mod tests {
         assert!(compile(&Format::Text, &"x".into()).is_err());
     }
 
+    /// What a key costs intake per message, the message parsed each time as intake does: a plain
+    /// path, a filter reading the same value, and a regex. Run in release:
+    /// `cargo test --release -p ductus-runtime --lib keys::tests::measure -- --ignored --nocapture`.
+    #[test]
+    #[ignore]
+    fn measure_filters_against_plain_paths() {
+        let table: serde_json::Value = serde_json::from_str(include_str!("../../../sdk/tests/key-paths.json")).unwrap();
+        let message = |name: &str| match &table["messages"][name] {
+            serde_json::Value::String(text) => text.clone(),
+            document => document.to_string(),
+        };
+        let regex = |r: &str| KeyPart::Regex(r.into());
+        let cases: [(Format, &str, KeyPart, KeyPart); 4] = [
+            (Format::Hl7, "adt", "PID-3[2].1".into(), "PID-3[.5=MR].1".into()),
+            (Format::Json, "patient", "identifier[1].value".into(), "identifier[system=urn:oid:1.2.3].value".into()),
+            (
+                xml(),
+                "cda",
+                "recordTarget/patientRole/id[2]/@extension".into(),
+                "recordTarget/patientRole/id[@root=1.2.3]/@extension".into(),
+            ),
+            (Format::Hl7, "adt", "PID-3[2].1".into(), regex(r"~([^~^]*)\^\^\^HOSP")),
+        ];
+        const N: u32 = 200_000;
+        for (format, name, plain, other) in cases {
+            let text = message(name);
+            let time = |part: &KeyPart| {
+                let key = compile(&format, part).unwrap();
+                assert_eq!(extract(&format, &key, &text), "123", "{part}");
+                let start = std::time::Instant::now();
+                for _ in 0..N {
+                    std::hint::black_box(extract(&format, &key, std::hint::black_box(&text)));
+                }
+                start.elapsed().as_nanos() as f64 / f64::from(N)
+            };
+            let (a, b) = (time(&plain), time(&other));
+            println!("{:5} {} bytes: `{plain}` {a:.0} ns, `{other}` {b:.0} ns", format.name(), text.len());
+        }
+    }
+
     /// The cases the SDK's test suite reads too (`sdk/tests/paths.test.ts`): a path reads the same
     /// value at intake as in interface code, and what one refuses the other does.
     #[test]

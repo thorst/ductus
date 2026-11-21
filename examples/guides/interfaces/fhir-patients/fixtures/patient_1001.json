@@ -1,0 +1,8 @@
+{
+  "resourceType": "Patient",
+  "identifier": [
+    { "system": "http://hl7.org/fhir/sid/us-ssn", "value": "999-88-7777" },
+    { "system": "urn:oid:1.2.3", "value": "100234" }
+  ],
+  "name": [{ "family": "Rivera", "given": ["Ana"] }]
+}

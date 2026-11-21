@@ -220,11 +220,28 @@ Most interfaces give each destination a file of its own instead (`script:` on th
 
 ### `format`
 
-**Type:** hl7, json, xml, text, csv, or { csv | fixed: options }
+**Type:** hl7, json, xml, text, csv, or { csv | xml | fixed: options }
 
 What the messages are, so the code gets them parsed and keys can be read: `hl7`, `json`, `xml`, `text`, `csv` or `fixed` (fixed-length records, with their fields' widths).
 
 `hl7` gives the code segments and fields (`msg.get("PID-3.1")`); `json` and `xml` a document; `csv` rows (objects by column name with a header line); `fixed` an object per record; `text` the payload as a string. An MLLP source always carries HL7. What the code returns is written in this format too, unless `output` says otherwise. Default: `hl7`. Example: `format: { csv: { delimiter: "|" } }`.
+
+### `format.xml`
+
+**Type:** settings, below
+
+XML with its options (`names`). `format: xml` alone matches names by their local name, whatever the prefix. Example: `format: { xml: { names: qualified } }`.
+
+### `format.xml.names`
+
+**Type:** `local`, `qualified`
+
+How element and attribute names in paths (keys, and `get`, `find`, `set` in code) match the document's:
+
+- `local`: by the name without its namespace prefix, on both sides: `Patient` matches `<Patient>`, `<hl7:Patient>` and `<v3:Patient>`, so a sender changing its prefixes changes nothing. A prefix written in a path is ignored when matching (and kept on elements `set` creates).
+- `qualified`: exactly as written, prefix included: `hl7:Patient` matches only `<hl7:Patient>`. For documents where the same local name means different things under two prefixes (a filter on the namespace's attribute often does it too).
+
+Default: `local`. Example: `format: { xml: { names: qualified } }`.
 
 ### `format.csv`
 
@@ -294,7 +311,7 @@ Remove the padding around each field's value when reading (`"SMITH     "` reads 
 
 ### `output`
 
-**Type:** hl7, json, xml, text, csv, or { csv | fixed: options }
+**Type:** hl7, json, xml, text, csv, or { csv | xml | fixed: options }
 
 The format the code's results are written in, when it isn't `format`: an HL7 feed turned into JSON for an API, a CSV file turned into HL7. Same values as `format`. A destination can set its own `output`. Default: the same as `format`. Example: `output: json`.
 
@@ -308,11 +325,20 @@ Which messages must be delivered in the order they arrived: those with the same 
 
 ### `ordering.key`
 
-**Type:** text
+**Type:** path, { regex }, or a list of them
 
 The field whose value decides which messages stay in order with each other, as a key path in the interface's `format`: usually the patient (`PID-3.1`, the MRN), or an order or account. Messages with the same value are delivered in arrival order; different values can overtake each other, so one patient's failing message doesn't hold up everyone.
 
-Choose the narrowest value correctness allows: by patient for ADT, by order for results. A message whose field is empty goes to the lane of the empty value. Without a key, the whole interface is delivered in one strict order, one message at a time per destination. Changing it (or adding or removing it) with messages waiting is safe: they're sent first, before any new message. Default: none. Example: `key: PID-3.1`.
+Paths read real feeds' values without code:
+
+- HL7: a repetition `PID-3[2].1`; the repetition whose component says what it is `PID-3[.5=MR].1`, with alternatives tried in order `PID-3[.5=MR|.4=HOSP].1`; a subcomponent `PID-3.4.1`.
+- JSON: an array's item by a field `identifier[system=urn:oid:1.2.3].value`.
+- XML: an element by an attribute or a child's text `id[@root=2.16.840.1]/@extension`; names match by their local name, whatever the prefix (the format's `names`).
+- Any format: `{ regex: 'MRN=(\d+)' }` over the message's text (the first group), the only key `text` messages have.
+
+Several values together are a list: `key: [MSH-4, PID-3.1]` (one patient of one facility); it reads empty when any of them does. The code reads the same paths (`msg.get`, `getPath`).
+
+Choose the narrowest value correctness allows: by patient for ADT, by order for results. A message whose key is empty goes to the lane of the empty value. Without a key, the whole interface is delivered in one strict order, one message at a time per destination. Changing it (or adding or removing it) with messages waiting is safe: they're sent first, before any new message. Default: none. Example: `key: PID-3[.5=MR].1`.
 
 ### `ordering.partitions`
 
@@ -386,7 +412,15 @@ The exported function that prepares messages for this destination, in its `scrip
 
 ### `destinations.<name>.output`
 
-**Type:** hl7, json, xml, text, csv, or { csv | fixed: options }
+**Type:** hl7, json, xml, text, csv, or { csv | xml | fixed: options }
+
+### `destinations.<name>.output.xml`
+
+**Type:** settings, below
+
+XML with its options (`names`). `format: xml` alone matches names by their local name, whatever the prefix. Example: `format: { xml: { names: qualified } }`.
+
+Its settings are those of [`format.xml`](#formatxml).
 
 ### `destinations.<name>.output.csv`
 
@@ -690,9 +724,15 @@ A repeat is stored with the status `duplicate` (so it can be found) but never qu
 
 ### `dedupe.keys`
 
-**Type:** list of text
+**Type:** list of path, or { regex }
 
-The fields whose values, together, make a message the same as one seen before, as key paths in the interface's `format`: HL7 `MSH-10`, JSON `order.id`, XML `Order/@id`, a CSV column or a fixed-length field's name. Choose fields a resend repeats and a new message never does: the sender's control ID, or an order number with its status. Default: `[MSH-10]` (HL7's message control ID). Example: `keys: [ORC-2, ORC-5]`.
+The fields whose values, together, make a message the same as one seen before, as key paths in the interface's `format` (the same paths as `ordering.key`, filters included): HL7 `MSH-10`, JSON `order.id`, XML `Order/@id`, a CSV column or a fixed-length field's name, or `{ regex: '…' }` over the message's text. Choose fields a resend repeats and a new message never does: the sender's control ID, or an order number with its status. A message whose keys all read empty isn't checked. Default: `[MSH-10]` (HL7's message control ID). Example: `keys: [ORC-2, ORC-5]`.
+
+### `dedupe.keys.regex`
+
+**Type:** text
+
+A regular expression over the message's text: the key is its first group (the whole match without one), empty when it doesn't match. Example: `{ regex: 'MRN=(\d+)' }`.
 
 ### `dedupe.window`
 

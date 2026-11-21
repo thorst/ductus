@@ -44,6 +44,8 @@ itself, so MSH-9 is the message type, as in every spec.
 | Every occurrence of a segment | `for (const obx of msg.OBX)` | each OBX, in order |
 | The n-th occurrence | `msg.OBX.rep(2)`, `msg.OBX.count` | the second OBX; how many |
 | Repetitions of a field | `for (const id of msg.PID[3])`, `msg.PID[3].rep(2)`, `.count` | each PID-3 identifier |
+| The repetition that says what it is | `msg.get("PID-3[.5=MR].1")`, `msg.get("PID-3[.5=MR\|.4=HOSP].1")` | the MRN, wherever it is in PID-3 |
+| A repetition, a subcomponent | `msg.get("PID-3[2].1")`, `msg.get("PID-3.4.1")` | the second identifier; the first part of its assigning authority |
 | Whether a segment is there | `msg.PV1.exists` | `true` / `false` |
 | Segment names in order | `msg.segmentNames` | `["MSH", "EVN", "PID", "PV1"]` |
 | Set a field or component | `msg.PV1[2] = "IN"`, `msg.set("PID-5.1", "SMITH")` | |
@@ -255,14 +257,50 @@ export function transform(doc: XmlElement) {
 ```
 
 - **Paths are relative to the element**, with `/` between names, `[n]` for the n-th of a name
-  (1-based) and `@name` for an attribute as the last step. `find` gives the element,
-  `elements(name)` all children with a name, `add(name, text)` a new child.
-- **Namespaces are part of the name**: an element written `<hl7:patient>` is `hl7:patient` in a
-  path, prefix and all. The prefix is the document's, so if a sender can change its prefixes,
-  compare local names (`el.name.split(":").pop()`).
+  (1-based), `[@attr=value]` or `[Child=value]` for the first one with that attribute or child
+  text (`id[@root=2.16.840.1.113883.19]/@extension`), and `@name` for an attribute as the last
+  step. `find` gives the element, `elements(name)` all children with a name, `add(name, text)` a
+  new child. `set` takes names and positions; to change an element found by a filter, `find` it
+  first: `doc.find("id[@root=1.2.3]")?.set("@extension", mrn)`.
+- **Names match by their local name**, the namespace prefix ignored on both sides: `Patient`
+  finds `<hl7:Patient>` and `<v3:Patient>`, since a sender's prefixes are its own choice and can
+  change. `el.name` keeps the prefix as written, and `set` creates elements with the name you
+  write (`doc.set("hl7:Status", "ok")`). Where one document uses the same local name for two
+  things under different prefixes, set
+  [`format: { xml: { names: qualified } }`](../reference/config/interface.md#formatxml): names then match
+  exactly, prefix included. `parseXml(text, { names: "qualified" })` does the same in code
+  ([nuance](../nuances/transforms.md#xml-names-match-whatever-their-prefix-level-2)).
 - **The `<?xml …?>` declaration is kept**; comments and processing instructions are dropped, and
   whitespace between elements is formatting, not content.
 - **An XML file is always one message**: `split: records` doesn't split XML.
+
+## Reading by the keys' paths
+
+`getPath(message, path)` reads any decoded message with the paths
+[`ordering.key` and `dedupe.keys`](../configure/delivery.md#key-paths) take, as text (`""` when
+missing): `msg.get` for HL7, `doc.get` for XML, and the same syntax for JSON, which has no reader
+of its own.
+
+```ts
+// interfaces/fhir-patients/patients.ts
+import { getPath, quarantine } from "@ductus/sdk";
+
+/** A FHIR Patient as the master patient index loads it: our MRN, the family name. */
+export function transform(patient: Record<string, unknown>) {
+  const mrn = getPath(patient, "identifier[system=urn:oid:1.2.3].value"); // the MRN, wherever it is
+  if (!mrn) throw quarantine("a Patient without our MRN");
+  return { mrn, family: getPath(patient, "name[0].family") };
+}
+```
+
+- **Why**: a key in interface.yaml decides each message's lane; reading it with the same path in
+  code (or in a test) checks the key the engine actually uses. The engine's reader and the SDK's
+  are tested against one table of cases, so they agree.
+- **JSON paths**: names between dots, `[n]` from 0, `[name=value]` for the first item whose
+  `name` reads `value` (the name may be a path, `[type.coding[0].code=MR]`; `|` between
+  alternatives tried in order). A number or `true` reads as its text, an object as its JSON.
+- **An invalid path throws**, saying what's wrong and showing a valid one (`a[x]` has a filter
+  without `=`): a path is code, not data, so a typo fails the test instead of reading `""`.
 
 ## Text
 

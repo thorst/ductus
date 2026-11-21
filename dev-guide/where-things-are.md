@@ -7,8 +7,10 @@ crates/ductus-core     config, yaml (loading project files with places: `Located
                        documentation fields: docs-schema.yaml, `custom:` values, checks, the snapshot), monitor
                        (`monitor:` expectations and their time rules), hotspots (backlog by lane and worker), about (systems,
                        host/subnet matching), impact, owners (report + in-place reassign), schedule timing, ports,
-                       settings (ductus.yaml), deprecated (settings going away, found in a project)
-crates/ductus-hl7      HL7 field lookup + ACKs (ingest)
+                       settings (ductus.yaml), deprecated (settings going away, found in a project), keys
+                       (`ordering.key`/`dedupe.keys` as written and compiled per format: JSON/XML paths, filters,
+                       `{ regex }`; read by runtime keys.rs; the cases both readers run: sdk/tests/key-paths.json)
+crates/ductus-hl7      HL7 paths (`PID-3[.5=MR].4.1`), field lookup + ACKs (ingest)
 crates/ductus-mllp     MLLP framing/listener/client
 crates/ductus-store    Postgres store + migrations (crates/ductus-store/migrations; migrations.rs: what each does, applied vs
                        carried, table sizes for `upgrade --check`); tls.rs (pg_stat_ssl, refusals in words, `connect_url`); testing.rs (`TestUsers`, `PgTls`); retention.rs (tiers, changes, drops, held area); activity.rs (last activity, pauses);
@@ -34,7 +36,8 @@ crates/ductus-runtime  engine: lib.rs (startup, its phases timed), code.rs (code
                        session (browser sign-in), ui (serves the embedded web UI; build.rs embeds ui/dist)),
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
-                       schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs,
+                       schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs (reading
+                       keys from a message parsed once: `Document`),
                        allow.rs (who may connect: admissions per listener, the one task keeping host names
                        resolved, TCP keepalive), systemd.rs (every listener's socket: kept in systemd's
                        store across restarts and crashes, passed on by a handover; READY/STOPPING/MAINPID),
