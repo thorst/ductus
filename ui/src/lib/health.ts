@@ -1,5 +1,5 @@
 // The engine's health states (decisions.md "Monitoring"), ranked so a list can show the worst
-// first. Interfaces: ok / silent / missed / stopped. Destinations: ok / behind / error /
+// first. Interfaces: ok / keyless / silent / missed / stopped. Destinations: ok / behind / error /
 // stalled / paused. A paused destination was paused on purpose: shown, but not an alarm.
 
 import type { Schemas } from "@/api/client";
@@ -9,6 +9,7 @@ export type Tone = "ok" | "warn" | "bad" | "paused";
 const STATES: Record<string, { tone: Tone; rank: number; label: string }> = {
   ok: { tone: "ok", rank: 0, label: "OK" },
   paused: { tone: "paused", rank: 1, label: "Paused" },
+  keyless: { tone: "warn", rank: 2, label: "Keys empty" },
   behind: { tone: "warn", rank: 2, label: "Behind" },
   silent: { tone: "warn", rank: 2, label: "Silent" },
   error: { tone: "bad", rank: 3, label: "Errors" },

@@ -206,8 +206,9 @@ pub struct InterfaceConfig {
     /// in the web UI, `ductus status` and Prometheus, and alerts when a rule names it.
     ///
     /// Nothing is expected by default: the engine can't know that a quiet feed is a problem, so
-    /// these are operations' decisions. Example: `monitor: { active_within: 30m, between:
-    /// "06:00-22:00", behind: 10m }`.
+    /// these are operations' decisions. The exception is `empty_keys` (keys that read empty make
+    /// the interface *keyless*), a config mistake rather than a decision. Example: `monitor: {
+    /// active_within: 30m, between: "06:00-22:00", behind: 10m }`.
     #[serde(default)]
     pub monitor: crate::monitor::Monitor,
     /// This interface's alerts: more recipients on top of the rules' (`to`), or none at all

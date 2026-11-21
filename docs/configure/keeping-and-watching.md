@@ -55,8 +55,26 @@ monitor:
 | `active_within` (with `between`) | **silent** | Feeds that never stop in normal operation: set it a little above the longest normal gap. |
 | `active_by` (with `from`) | **missed** | Feeds that come once a day or week: a nightly file, a Monday batch. |
 | `behind` (messages, age, or both) | **behind** | Queues: when the receiving department would call it late. A count alone misses an overnight stall; an age alone misses a daytime pile-up that still moves; give both for busy feeds. |
+| `empty_keys` (`last`, `percent`) | **keyless** | On by default: an `ordering.key` or `dedupe.keys` that reads empty in 90% of the last 100 messages is almost always a path that doesn't match the sender's messages. Lower `last` for a quiet feed, `percent` where some messages carry no key on purpose, `percent: 0` to turn it off. |
 
 Only receiving counts for `active_within` and `active_by`. A destination can set its own `behind`.
+
+**`empty_keys` is the one expectation that's on by default**, because it isn't an operations
+choice: a key that reads nothing is a mistake in the config. An ordering key that reads empty puts
+every such message in one lane, in one strict order (one patient's failing message then holds up
+everyone's), and a dedupe key that reads empty checks nothing for duplicates; the messages still
+flow, which is why it's easy to miss
+([nuance](../nuances/ordering.md#an-empty-ordering-key-is-a-lane-of-its-own-level-2)). `ductus
+validate` reads the keys from the interface's fixtures too, and warns before deploy (DUC207). For
+a feed that takes days to reach 100 messages, say sooner:
+
+```yaml
+# interfaces/census/interface.yaml, in part
+ordering: { key: PID-3.1 }
+monitor:
+  empty_keys: { last: 20 }        # judged from the 20th message on
+```
+
 Besides these, some states need no setting: a destination with messages waiting that has sent
 nothing for a minute is **stalled**, one with quarantined messages is in **error**, an interface
 whose code was stopped is **stopped**, and a paused destination is **paused** (never an alert).

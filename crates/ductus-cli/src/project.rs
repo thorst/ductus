@@ -1249,6 +1249,20 @@ async fn check_project(
         }
     }
 
+    // Keys that read nothing in any of the interface's own sample messages: a path that doesn't
+    // match the sender's messages, caught before the engine is keyless with it.
+    for iface in &interfaces {
+        let Ok(config) = &iface.config else { continue };
+        let label = iface.label();
+        let file = places.file(&label).unwrap_or_default().to_string();
+        for missed in keys_missed_in_fixtures(config, &iface.dir) {
+            let finding = Finding::warning("DUC207", format!("{label}: {}", missed.text))
+                .hint("open a fixture and find where the value is; write that path")
+                .interface(&label);
+            report.add(report.at_key(finding, &file, &missed.key));
+        }
+    }
+
     let configs = || interfaces.iter().filter_map(|i| i.config.as_ref().ok());
     let mut wiring: Vec<(&str, ductus_core::yaml::Problem)> =
         ductus_core::config::check_endpoints(configs()).into_iter().map(|p| ("DUC200", p)).collect();
@@ -1535,6 +1549,75 @@ fn add_uses<'a>(
             });
         }
     }
+}
+
+/// A key that read empty in every fixture of the interface's format (DUC207): what to say, and
+/// where in interface.yaml.
+struct KeyMissed {
+    text: String,
+    key: Vec<&'static str>,
+}
+
+/// The interface's keys (`ordering.key`, `dedupe.keys`) read from each file in its `fixtures/`
+/// folder as the engine reads them at intake. A key is reported when it reads empty in every
+/// fixture that is a message of the interface's format; files in another format (a test's
+/// expected output) and folders say nothing either way, and no fixtures means nothing to say.
+fn keys_missed_in_fixtures(config: &InterfaceConfig, dir: &Path) -> Vec<KeyMissed> {
+    use ductus_runtime::keys;
+    let ordering: Vec<&str> = config.ordering.key.iter().map(String::as_str).collect();
+    let dedupe: Vec<&str> = config.dedupe.iter().flat_map(|d| d.keys.iter().map(String::as_str)).collect();
+    if ordering.is_empty() && dedupe.is_empty() {
+        return Vec::new();
+    }
+    let Ok(entries) = std::fs::read_dir(dir.join("fixtures")) else { return Vec::new() };
+    let mut fixtures: Vec<(String, String)> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .filter_map(|p| Some((p.file_name()?.to_string_lossy().into_owned(), std::fs::read_to_string(&p).ok()?)))
+        .collect();
+    fixtures.sort();
+    let mut missed = Vec::new();
+    for (paths, key, what) in [
+        (ordering, vec!["ordering", "key"], "every message would wait in one lane"),
+        (dedupe, vec!["dedupe", "keys"], "no message would be checked for duplicates"),
+    ] {
+        // A path that doesn't compile is the config check's error already.
+        let Ok(compiled) = paths.iter().map(|p| keys::compile(&config.format, p)).collect::<Result<Vec<_>>>() else {
+            continue;
+        };
+        if compiled.is_empty() {
+            continue;
+        }
+        let mut read = Vec::new();
+        for (name, text) in &fixtures {
+            let values: Option<Vec<String>> = compiled.iter().map(|k| keys::read(&config.format, k, text)).collect();
+            if let Some(values) = values {
+                read.push(name.as_str());
+                if values.iter().any(|v| !v.is_empty()) {
+                    read.clear();
+                    break;
+                }
+            }
+        }
+        if read.is_empty() {
+            continue;
+        }
+        let written = paths.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+        let (noun, reads) = if paths.len() == 1 { ("key", "reads") } else { ("keys", "read") };
+        let in_which = match read.as_slice() {
+            [one] => format!("the fixture {one}"),
+            few if few.len() <= 3 => format!("all {} fixtures ({})", few.len(), few.join(", ")),
+            many => format!("all {} fixtures ({}, …)", many.len(), many[..3].join(", ")),
+        };
+        missed.push(KeyMissed {
+            text: format!(
+                "{} {noun} {written} {reads} empty in {in_which}: {what}; is the path right for the sender's messages?",
+                key[0]
+            ),
+            key,
+        });
+    }
+    missed
 }
 
 /// Where in interface.yaml a code loading error points: the destination whose function its file

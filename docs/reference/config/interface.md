@@ -823,7 +823,7 @@ What happens to quarantined messages once the retention window has passed: `keep
 
 What operations expects of this interface, in the terms its teams use: something received within a time (`active_within`) or by a deadline (`active_by`), and queues not too far behind (`behind`). Breaking one shows as a health state (silent, missed, behind) in the web UI, `ductus status` and Prometheus, and alerts when a rule names it.
 
-Nothing is expected by default: the engine can't know that a quiet feed is a problem, so these are operations' decisions. Example: `monitor: { active_within: 30m, between: "06:00-22:00", behind: 10m }`.
+Nothing is expected by default: the engine can't know that a quiet feed is a problem, so these are operations' decisions. The exception is `empty_keys` (keys that read empty make the interface *keyless*), a config mistake rather than a decision. Example: `monitor: { active_within: 30m, between: "06:00-22:00", behind: 10m }`.
 
 ### `monitor.active_within`
 
@@ -868,6 +868,26 @@ Behind once this many messages wait for the destination, at least 1. Default: no
 **Type:** text
 
 Behind once the oldest waiting message has waited this long, at least `1s`. Default: no age limit. Example: `age: 10m`.
+
+### `monitor.empty_keys`
+
+**Type:** settings, below
+
+When the interface says its keys read empty (state *keyless*): when at least `percent` of the `last` messages it received had an empty `ordering.key` (every keyless message waits in one lane, in one strict order) or empty `dedupe.keys` (those aren't checked for duplicates). Almost always a key path that doesn't match the sender's messages (`PID-3.1` where the MRN is in `PID-2`), so it's on by default; it says nothing until `last` messages have arrived since the start, then keeps looking at the latest `last`.
+
+Lower `last` for a quiet feed (it's told sooner), or `percent` for a feed where some messages carry no key on purpose (a batch header, a master file update); `percent: 0` turns it off. Default: `{ last: 100, percent: 90 }`. Example: `empty_keys: { last: 20 }`.
+
+### `monitor.empty_keys.last`
+
+**Type:** number
+
+How many of the latest messages are looked at, from 20 to 10,000: nothing is said before this many have arrived. A feed of a few messages a day wants a small number. Default: `100`. Example: `last: 20`.
+
+### `monitor.empty_keys.percent`
+
+**Type:** number
+
+How many of them, in percent, must have read empty: 1 to 100, or `0` for never. Default: `90`. Example: `percent: 50`.
 
 ### `alert`
 

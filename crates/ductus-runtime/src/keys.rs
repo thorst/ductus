@@ -8,7 +8,8 @@
 //! | csv    | column name (or 1-based number without a header) | `mrn` |
 //! | fixed  | field name                       | `mrn`              |
 //!
-//! Missing values read as "". For CSV and fixed-length, the first record is used.
+//! Missing values read as "". For CSV and fixed-length, the first record is used. An HL7
+//! component's escape sequences are decoded (`\T\` → `&`), as the SDK's `msg.get` reads it.
 
 use anyhow::{Context, Result, bail};
 use ductus_core::format::{FixedField, Format};
@@ -104,23 +105,32 @@ fn xml_steps(path: &str) -> Result<Vec<XmlStep>> {
 
 /// Read a key's value from a payload. Anything missing or unparseable reads as "".
 pub fn extract(format: &Format, key: &KeyPath, payload: &str) -> String {
-    match (key, format) {
-        (KeyPath::Hl7(path), _) => {
-            ductus_hl7::Message::parse(payload).map(|m| m.get(path).to_string()).unwrap_or_default()
+    read(format, key, payload).unwrap_or_default()
+}
+
+/// A key's value, or `None` when the payload isn't a message of the format at all (not HL7, not
+/// JSON, not XML; an empty file): what `validate` tells apart when it reads fixtures, since a
+/// test's expected output in another format says nothing about the key. Missing fields in a
+/// message of the format read as `Some("")`.
+pub fn read(format: &Format, key: &KeyPath, payload: &str) -> Option<String> {
+    Some(match (key, format) {
+        (KeyPath::Hl7(path), _) => ductus_hl7::Message::parse(payload).ok()?.read(path).into_owned(),
+        (KeyPath::Json(steps), _) => json_value(serde_json::from_str(payload).ok()?, steps),
+        (KeyPath::Xml(steps), _) => {
+            let root = XmlParser { text: payload, pos: 0 }.document()?;
+            xml_value(&root, steps).unwrap_or_default()
         }
-        (KeyPath::Json(steps), _) => json_value(payload, steps),
-        (KeyPath::Xml(steps), _) => xml_value(payload, steps).unwrap_or_default(),
+        _ if payload.trim().is_empty() => return None,
         (KeyPath::Csv(column), Format::Csv(options)) => csv_value(payload, column, options.delimiter, options.header),
         (KeyPath::Fixed(field), _) => {
             let line = payload.lines().find(|l| !l.is_empty()).unwrap_or("");
             line.chars().skip(field.start).take(field.width).collect::<String>().trim().to_string()
         }
         _ => String::new(),
-    }
+    })
 }
 
-fn json_value(payload: &str, steps: &[JsonStep]) -> String {
-    let Ok(mut value) = serde_json::from_str::<serde_json::Value>(payload) else { return String::new() };
+fn json_value(mut value: serde_json::Value, steps: &[JsonStep]) -> String {
     for step in steps {
         value = match (step, value) {
             (JsonStep::Key(k), serde_json::Value::Object(mut map)) => map.remove(k).unwrap_or_default(),
@@ -307,9 +317,8 @@ impl<'a> XmlParser<'a> {
     }
 }
 
-fn xml_value(payload: &str, steps: &[XmlStep]) -> Option<String> {
-    let root = XmlParser { text: payload, pos: 0 }.document()?;
-    let mut current = &root;
+fn xml_value(root: &Element, steps: &[XmlStep]) -> Option<String> {
+    let mut current = root;
     for step in steps {
         match step {
             XmlStep::Element { name, index } => {
@@ -371,6 +380,27 @@ mod tests {
         assert_eq!(key(&Format::Xml, "Missing", doc), "");
         assert!(compile(&Format::Xml, "Item[0]").is_err());
         assert!(compile(&Format::Xml, "@a/B").is_err());
+    }
+
+    #[test]
+    fn hl7_keys_read_as_the_sdk_does() {
+        let adt = "MSH|^~\\&|A|B|C|D|1||ADT^A08|1|P|2.5\rPID|1||12\\T\\34^^^MRN\r";
+        assert_eq!(key(&Format::Hl7, "PID-3.1", adt), "12&34", "escapes decoded, as msg.get reads it");
+        assert_eq!(key(&Format::Hl7, "PID-2", adt), "");
+    }
+
+    #[test]
+    fn reading_tells_a_missing_field_from_another_format() {
+        let read = |format: &Format, path: &str, payload: &str| read(format, &compile(format, path).unwrap(), payload);
+        assert_eq!(read(&Format::Hl7, "PID-3.1", "MSH|^~\\&|A\rEVN|A08\r"), Some(String::new()));
+        assert_eq!(read(&Format::Hl7, "PID-3.1", "{\"mrn\":1}"), None);
+        assert_eq!(read(&Format::Json, "mrn", "{\"id\":1}"), Some(String::new()));
+        assert_eq!(read(&Format::Json, "mrn", "MSH|^~\\&|A\r"), None);
+        assert_eq!(read(&Format::Xml, "MRN", "<a><MRN>1</MRN></a>"), Some("1".into()));
+        assert_eq!(read(&Format::Xml, "MRN", "not xml"), None);
+        let csv = Format::from_yaml(&serde_yaml_ng::from_str("csv").unwrap()).unwrap();
+        assert_eq!(read(&csv, "mrn", "  \n"), None);
+        assert_eq!(read(&csv, "mrn", "name\nA\n"), Some(String::new()));
     }
 
     #[test]

@@ -15,7 +15,7 @@
 //!     chat:   { webhook: { url: "${secret:CHAT_WEBHOOK}", format: slack } }   # slack | teams | json
 //!   rules:                                   # first match wins
 //!     - { when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }
-//!     - { when: [behind, silent, missed],  severity: warning,  to: [chat] }
+//!     - { when: [behind, silent, missed, keyless], severity: warning, to: [chat] }
 //!     # `owner` in `to:` also mails whoever owns the interface (optional; teams usually suffice)
 //!   repeat: 4h          # remind while still bad and not acknowledged (0 = never)
 //!   recovery: true      # say when it's fine again
@@ -63,7 +63,7 @@ pub struct AlertSettings {
     /// Which health states alert, how badly, and to whom. Each state is matched by the first
     /// rule that names it; a state no rule names doesn't alert (`ductus validate` says which).
     /// Default: none (nothing alerts). Example: `rules: [{ when: [error, stalled, stopped],
-    /// severity: critical, to: [oncall, chat] }, { when: [behind, silent, missed, certificate],
+    /// severity: critical, to: [oncall, chat] }, { when: [behind, silent, missed, keyless, certificate],
     /// severity: warning, to: [chat] }]`.
     #[serde(default)]
     pub rules: Vec<Rule>,
@@ -356,6 +356,8 @@ pub struct Rule {
     /// - `stopped`: an interface's code was stopped (it ran away or ran out of memory).
     /// - `silent`: nothing received within `monitor.active_within`.
     /// - `missed`: nothing received by `monitor.active_by`.
+    /// - `keyless`: an interface's ordering or dedupe keys read empty in most of its latest
+    ///   messages (`monitor.empty_keys`): usually a key path that doesn't match the sender's.
     /// - `certificate`: a certificate the engine uses or connects to nears expiry, or expired.
     ///
     /// A paused destination never alerts: it's paused on purpose. Required. Example: `when:
@@ -374,7 +376,7 @@ pub struct Rule {
 }
 
 /// A bad health state an alert is about: a destination's (`error`, `stalled`, `behind`), an
-/// interface's (`stopped`, `silent`, `missed`), or a certificate's that is close to expiring or
+/// interface's (`stopped`, `silent`, `missed`, `keyless`), or a certificate's that is close to expiring or
 /// has expired (`certificate`). A pause is on purpose, so it never alerts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
@@ -387,10 +389,11 @@ pub enum Condition {
     Silent,
     Missed,
     Certificate,
+    Keyless,
 }
 
 impl Condition {
-    pub const ALL: [Condition; 7] = [
+    pub const ALL: [Condition; 8] = [
         Condition::Error,
         Condition::Stalled,
         Condition::Behind,
@@ -398,6 +401,7 @@ impl Condition {
         Condition::Silent,
         Condition::Missed,
         Condition::Certificate,
+        Condition::Keyless,
     ];
 
     pub fn label(self) -> &'static str {
@@ -409,6 +413,7 @@ impl Condition {
             Condition::Silent => "silent",
             Condition::Missed => "missed",
             Condition::Certificate => "certificate",
+            Condition::Keyless => "keyless",
         }
     }
 
@@ -432,6 +437,7 @@ impl Condition {
             InterfaceState::Silent => Some(Condition::Silent),
             InterfaceState::Missed => Some(Condition::Missed),
             InterfaceState::Stopped => Some(Condition::Stopped),
+            InterfaceState::Keyless => Some(Condition::Keyless),
         }
     }
 
@@ -1128,7 +1134,7 @@ channels:
   chat: { webhook: { url: 'https://hooks.example.org/T0/B0/secret', format: slack } }
 rules:
   - { when: [error, stalled, stopped], severity: critical, to: [oncall, chat, owner] }
-  - { when: [behind, silent, missed], severity: warning, to: [chat, owner] }
+  - { when: [behind, silent, missed, keyless], severity: warning, to: [chat, owner] }
   - { when: [certificate], severity: warning, to: [oncall] }
 ";
 
@@ -1152,7 +1158,9 @@ rules:
         assert!(s.repeat.is_zero() && s.settle.is_zero());
         assert_eq!(
             s.warnings(),
-            ["alerts: no rule names stalled, behind, stopped, silent, missed, certificate: those states won't alert"]
+            [
+                "alerts: no rule names stalled, behind, stopped, silent, missed, certificate, keyless: those states won't alert"
+            ]
         );
         assert_eq!(s.certificates.warn_days, [30, 14, 7]);
     }

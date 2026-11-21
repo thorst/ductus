@@ -164,7 +164,7 @@ The JSON bodies the operations above take and return.
 | `silenced_by` (optional) | text or null |  |
 | `silenced_until` (optional) | time (RFC 3339) or null | Set while silenced: nothing is sent until then. |
 | `since` (optional) | time (RFC 3339) or null | Bad since. |
-| `state` | text | `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`, `missed` (an interface), `certificate` (expiring or expired). |
+| `state` | text | `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`, `missed`, `keyless` (an interface), `certificate` (expiring or expired). |
 | `summary` (optional) | text or null | The health view's words, as of the last check. |
 
 ### `AlertsOverview`

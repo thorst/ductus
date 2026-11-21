@@ -144,7 +144,8 @@ groups:
 ```
 
 `ductus_destination_state` is 0 ok, 1 behind, 2 error, 3 stalled, 4 paused;
-`ductus_interface_state` is 0 ok, 1 silent, 2 missed, 3 stopped. **Watch the engine itself
+`ductus_interface_state` is 0 ok, 1 silent, 2 missed, 3 stopped, 4 keyless (the numbers aren't an
+order: keyless is the mildest; `ductus_keys_empty_total` counts the empty keys). **Watch the engine itself
 too**: an engine that's down reports nothing, so `up == 0` (or the engine's
 [heartbeat](alerts.md#an-engine-thats-down-tells-nobody-the-heartbeat)) is the alert that covers
 it. And `ductus_alert_send_failures_total` going up means the engine's own alerts aren't

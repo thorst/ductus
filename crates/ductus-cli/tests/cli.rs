@@ -1550,6 +1550,61 @@ fn validate_json_places_each_finding_in_its_file() {
     assert!(note.get("file").is_none(), "{note}");
 }
 
+/// A key path that reads nothing in any of the interface's fixtures is told before deploy (DUC207),
+/// at the key in interface.yaml; fixtures in another format (an expected output) don't count, a
+/// key one fixture has is fine, and an interface without fixtures isn't judged.
+#[test]
+fn validate_warns_when_a_key_reads_empty_in_every_fixture() {
+    let interface = |name: &str, port: u16, keys: &str| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ port: {port} }} }}\nabout: {{ from: {{ application: EHR }}, to: {{ application: Lab }} }}\n{keys}destinations: {{ lab: {{ file: {{ dir: out }} }} }}\n"
+        )
+    };
+    // The MRN is in PID-2 here, not PID-3.
+    let a01 = "MSH|^~\\&|EHR|H|LAB|H|20261121||ADT^A01|1|P|2.5\rPID|1|123456||||SMITH^J\r";
+    let a08 = "MSH|^~\\&|EHR|H|LAB|H|20261121||ADT^A08|2|P|2.5\rPID|1|123456||||SMITH^J\r";
+    let good = "MSH|^~\\&|EHR|H|LAB|H|20261121||ADT^A08|3|P|2.5\rPID|1||123456^^^MRN||SMITH^J\r";
+    let dir = project(&[
+        (
+            "interfaces/a/interface.yaml",
+            &interface("a", 7101, "ordering: { key: PID-3.1 }\ndedupe: { keys: [ORC-2] }\n"),
+        ),
+        ("interfaces/a/fixtures/a01.hl7", a01),
+        ("interfaces/a/fixtures/a08.hl7", a08),
+        ("interfaces/a/fixtures/expected.json", "{\"mrn\": \"123456\"}"),
+        ("interfaces/b/interface.yaml", &interface("b", 7102, "ordering: { key: PID-3.1 }\n")),
+        ("interfaces/b/fixtures/a01.hl7", a01),
+        ("interfaces/b/fixtures/a08.hl7", good),
+        ("interfaces/c/interface.yaml", &interface("c", 7103, "ordering: { key: PID-3.1 }\n")),
+    ]);
+    let (ok, out) = without_a_database(dir.path(), &["validate", "--json"]);
+    assert!(ok, "warnings only: {out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    let missed: Vec<&serde_json::Value> =
+        doc["findings"].as_array().unwrap().iter().filter(|f| f["code"] == "DUC207").collect();
+    let said: Vec<(&str, &str, &serde_json::Value)> =
+        missed.iter().map(|f| (f["message"].as_str().unwrap(), f["file"].as_str().unwrap(), &f["line"])).collect();
+    assert_eq!(
+        said,
+        [
+            (
+                "a: ordering key `PID-3.1` reads empty in all 2 fixtures (a01.hl7, a08.hl7): every message would wait in one lane; is the path right for the sender's messages?",
+                "interfaces/a/interface.yaml",
+                &4.into()
+            ),
+            (
+                "a: dedupe key `ORC-2` reads empty in all 2 fixtures (a01.hl7, a08.hl7): no message would be checked for duplicates; is the path right for the sender's messages?",
+                "interfaces/a/interface.yaml",
+                &5.into()
+            ),
+        ],
+        "{out}"
+    );
+    assert!(missed.iter().all(|f| f["severity"] == "warning" && f["interface"] == "a"), "{out}");
+    let (_, text) = without_a_database(dir.path(), &["validate"]);
+    assert!(text.contains("⚠ a: ordering key `PID-3.1` reads empty in all 2 fixtures"), "{text}");
+}
+
 /// `validate --json`'s `uses`: each function the engine calls, where interface.yaml names it (the
 /// `transform:` value, the `script:` value, the destination's key, respond mode's `script:`) and
 /// where it's declared, through a renamed re-export into a shared file. What an editor's code
@@ -2323,6 +2378,82 @@ async fn within(seconds: f64, mut check: impl AsyncFnMut() -> bool) -> bool {
 /// The engine with its REST API: tokens and roles, status and queues, the message browser, the
 /// OpenAPI document, and drain mode end to end (the MLLP listener closes, what's stored is
 /// delivered once the receiver is back, then the engine stops).
+/// An interface whose ordering key reads empty in most messages says so in its health (`keyless`,
+/// with the path) and in `/metrics`; one beside it whose path is right stays ok.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_ordering_key_that_reads_empty_makes_the_interface_keyless() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (wrong_port, right_port, api) = (free_port(), free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let (wrong, right) = (format!("keyless-{nanos}"), format!("keyed-{nanos}"));
+    let config = |name: &str, port: u16, key: &str| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\nordering: {{ key: {key} }}\ndedupe: {{ keys: [MSH-10] }}\nmonitor: {{ empty_keys: {{ last: 20 }} }}\ndestinations: {{ out: {{ file: {{ dir: out-{name} }} }} }}\n"
+        )
+    };
+    let dir = project(&[
+        (format!("interfaces/{wrong}/interface.yaml").as_str(), config(&wrong, wrong_port, "PID-2").as_str()),
+        (format!("interfaces/{right}/interface.yaml").as_str(), config(&right, right_port, "PID-3.1").as_str()),
+    ]);
+    let token_name = format!("{wrong}-viewer");
+    let _tokens = Tokens::new([token_name.clone()]);
+    let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["token", "create", &token_name, "--role", "viewer"])
+        .env("DUCTUS_DATABASE_URL", &db)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let viewer = String::from_utf8_lossy(&out.stdout).lines().next().unwrap().to_string();
+    let _engine = Child(
+        Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["run", "--root", &dir.path().to_string_lossy(), "--threads", "1"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let base = format!("http://127.0.0.1:{api}/api/v1");
+    let http = reqwest::Client::new();
+    let up =
+        eventually(async || http.get(format!("{base}/health")).send().await.is_ok_and(|r| r.status().is_success()));
+    assert!(up.await, "the API never came up");
+
+    // 20 messages each (`last: 20`). The MRN is in PID-3, so `PID-2` reads empty.
+    for (port, name) in [(wrong_port, &wrong), (right_port, &right)] {
+        let mut sender = ductus_mllp::Client::new(format!("127.0.0.1:{port}"), std::time::Duration::from_secs(5));
+        for n in 1..=20 {
+            let msg = format!("MSH|^~\\&|EPIC|H|LAB|H|20260101||ADT^A08|{name}-{n}|P|2.5\rPID|1||MRN{n}^^^MRN\r");
+            let ack = sender.send(msg.as_bytes()).await.unwrap();
+            assert!(String::from_utf8_lossy(&ack).contains("MSA|AA"));
+        }
+    }
+    let health = async |name: &str| -> serde_json::Value {
+        let interfaces: serde_json::Value =
+            http.get(format!("{base}/interfaces")).bearer_auth(&viewer).send().await.unwrap().json().await.unwrap();
+        interfaces.as_array().unwrap().iter().find(|i| i["name"] == name).unwrap()["health"].clone()
+    };
+    let keyless = health(&wrong).await;
+    assert_eq!(keyless["state"], "keyless", "{keyless}");
+    assert_eq!(
+        keyless["summary"],
+        "keyless: ordering key `PID-2` empty in 100% of the last 20 messages, so they wait in one lane: is the path right for the sender's messages?"
+    );
+    let keyed = health(&right).await;
+    assert_eq!(keyed["state"], "ok", "{keyed}");
+
+    let metrics = http.get(format!("{base}/metrics")).bearer_auth(&viewer).send().await.unwrap().text().await.unwrap();
+    for line in [
+        format!("ductus_keys_empty_total{{interface=\"{wrong}\",key=\"ordering\"}} 20\n"),
+        format!("ductus_keys_empty_total{{interface=\"{wrong}\",key=\"dedupe\"}} 0\n"),
+        format!("ductus_keys_empty_total{{interface=\"{right}\",key=\"ordering\"}} 0\n"),
+        format!("ductus_interface_state{{interface=\"{wrong}\"}} 4\n"),
+        format!("ductus_interface_state{{interface=\"{right}\"}} 0\n"),
+    ] {
+        assert!(metrics.contains(&line), "{line} in {metrics}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn the_api_shows_the_engine_and_drains_it() {
     let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };

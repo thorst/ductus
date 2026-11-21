@@ -76,5 +76,6 @@ monitor:
   active_by: "Mon-Fri 07:00"
   from: "18:00"
   behind: { messages: 1000, age: 15m }
+  empty_keys: { last: 50, percent: 80 }
 alert: { to: [lab-team, owner], mute: false }
 custom: { baa_signed: "yes", runbook: "https://wiki.hospital.org/adt" }

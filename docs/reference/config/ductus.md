@@ -458,11 +458,11 @@ A client certificate to present to the webhook's server (a `certificates:` entry
 
 **Type:** list of settings, below
 
-Which health states alert, how badly, and to whom. Each state is matched by the first rule that names it; a state no rule names doesn't alert (`ductus validate` says which). Default: none (nothing alerts). Example: `rules: [{ when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }, { when: [behind, silent, missed, certificate], severity: warning, to: [chat] }]`.
+Which health states alert, how badly, and to whom. Each state is matched by the first rule that names it; a state no rule names doesn't alert (`ductus validate` says which). Default: none (nothing alerts). Example: `rules: [{ when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }, { when: [behind, silent, missed, keyless, certificate], severity: warning, to: [chat] }]`.
 
 ### `alerts.rules.when`
 
-**Type:** list of `error`, `stalled`, `behind`, `stopped`, `silent`, `missed`, `certificate` · **Required**
+**Type:** list of `error`, `stalled`, `behind`, `stopped`, `silent`, `missed`, `certificate`, `keyless` · **Required**
 
 The health states this rule covers:
 
@@ -472,6 +472,7 @@ The health states this rule covers:
 - `stopped`: an interface's code was stopped (it ran away or ran out of memory).
 - `silent`: nothing received within `monitor.active_within`.
 - `missed`: nothing received by `monitor.active_by`.
+- `keyless`: an interface's ordering or dedupe keys read empty in most of its latest messages (`monitor.empty_keys`): usually a key path that doesn't match the sender's.
 - `certificate`: a certificate the engine uses or connects to nears expiry, or expired.
 
 A paused destination never alerts: it's paused on purpose. Required. Example: `when: [error, stalled, stopped]`.

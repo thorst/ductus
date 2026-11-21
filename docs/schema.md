@@ -566,7 +566,7 @@ One row per thing that can alert: each interface (`iface:<interface>`), each des
 | `key` | text | `iface:<interface>`, `dest:<interface>/<destination>` or `cert:<resource>:<host>:<port>` (unique). |
 | `interface` | text | The interface; for a certificate, its resource (as in `certificate_status`). |
 | `destination` | text | The destination; none for the interface's own alert; `host:port` for a certificate. |
-| `state` | text | `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`, `missed` (an interface), `certificate` (expires within `alerts.certificates.warn_days`, or has expired). |
+| `state` | text | `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`, `missed`, `keyless` (an interface; since migration 0036), `certificate` (expires within `alerts.certificates.warn_days`, or has expired). |
 | `severity` | text | `warning` or `critical` (from the first rule naming the state), while open. |
 | `since` | timestamptz | Bad since (when it fired). |
 | `ok_since` | timestamptz | Fine again since then, not yet for `alerts.settle`: bad again before that reopens the same alert. |

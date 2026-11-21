@@ -30,7 +30,7 @@ use tokio::sync::Notify;
 
 /// How often states are judged.
 const EVERY: Duration = Duration::from_secs(15);
-/// After the engine starts, states that need watching (stalled, behind, silent, missed) are
+/// After the engine starts, states that need watching (stalled, behind, silent, missed, keyless) are
 /// judged only once it has watched this long: a restart is not an alert storm.
 const WATCH_FIRST: Duration = Duration::from_secs(60);
 /// A notification claimed by an engine is its own for this long (then anyone may retry it).

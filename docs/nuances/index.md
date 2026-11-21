@@ -22,7 +22,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Several engines on one database](engines.md) (5)
 - [Retention](retention.md) (7)
 - [Several destinations](destinations.md) (8)
-- [Order, retries and durability](ordering.md) (8)
+- [Order, retries and durability](ordering.md) (9)
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
 - [Writing transforms](transforms.md) (20)
@@ -102,7 +102,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (127)
+## Level 2: Practitioner (128)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -115,6 +115,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [One destination down holds up only itself](destinations.md#one-destination-down-holds-up-only-itself-level-2) (Several destinations)
 - [Pausing a destination: at once, no questions, and it holds](destinations.md#pausing-a-destination-at-once-no-questions-and-it-holds-level-2) (Several destinations)
 - [Filtering and quarantine are per destination](destinations.md#filtering-and-quarantine-are-per-destination-level-2) (Several destinations)
+- [An empty ordering key is a lane of its own](ordering.md#an-empty-ordering-key-is-a-lane-of-its-own-level-2) (Order, retries and durability)
 - [Resend sends a message again in place: first in its lane, not last](resend.md#resend-sends-a-message-again-in-place-first-in-its-lane-not-last-level-2) (Resending and correcting messages)
 - [The receiving interface's keys, dedupe and destinations apply](routes.md#the-receiving-interfaces-keys-dedupe-and-destinations-apply-level-2) (Routing between interfaces)
 - [Routes are fixed in interface.yaml, and loops are refused](routes.md#routes-are-fixed-in-interfaceyaml-and-loops-are-refused-level-2) (Routing between interfaces)

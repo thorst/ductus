@@ -65,6 +65,20 @@ impl fmt::Display for Path {
     }
 }
 
+/// A value's escape sequences decoded, in the SDK's order (`decode` in `sdk/src/hl7.ts`): `\F\`,
+/// `\S\`, `\T\`, `\R\`, then `\E\`.
+pub fn decode<'a>(value: &'a str, d: &Delimiters) -> std::borrow::Cow<'a, str> {
+    let e = d.escape;
+    if !value.contains(e) {
+        return value.into();
+    }
+    let mut out = value.to_string();
+    for (code, to) in [('F', d.field), ('S', d.component), ('T', d.subcomponent), ('R', d.repetition), ('E', e)] {
+        out = out.replace(&format!("{e}{code}{e}"), &to.to_string());
+    }
+    out.into()
+}
+
 /// Acknowledgment codes for MSA-1.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum AckCode {
@@ -137,6 +151,17 @@ impl<'a> Message<'a> {
         }
     }
 
+    /// Value at `path` as interface code reads it (the SDK's `msg.get`): a component's escape
+    /// sequences decoded (`\T\` → `&`), a whole field as written. What ordering and dedupe keys
+    /// read, so a key means the same in config and in code.
+    pub fn read(&self, path: &Path) -> std::borrow::Cow<'a, str> {
+        let raw = self.get(path);
+        match path.component {
+            Some(_) => decode(raw, &self.delims),
+            None => raw.into(),
+        }
+    }
+
     /// Shorthand for `get` with a path string. Invalid paths read as `""`.
     pub fn value(&self, path: &str) -> &'a str {
         path.parse().map(|p| self.get(&p)).unwrap_or("")
@@ -188,6 +213,16 @@ mod tests {
         assert_eq!(m.value("PID-3.1"), "123456");
         assert_eq!(m.value("PID-5.2"), "JOHN");
         assert_eq!(m.value("PID-8"), "M");
+    }
+
+    #[test]
+    fn reads_a_component_decoded_like_the_sdk() {
+        let m = Message::parse("MSH|^~\\&|A|B|C|D|1||ADT^A08|1|P|2.5\rPID|1||AB\\T\\C\\E\\X^^^MRN\r").unwrap();
+        let path = |p: &str| p.parse::<Path>().unwrap();
+        assert_eq!(m.read(&path("PID-3.1")), "AB&C\\X");
+        // A whole field reads as written, as the SDK's `msg.get("PID-3")` does.
+        assert_eq!(m.read(&path("PID-3")), "AB\\T\\C\\E\\X^^^MRN");
+        assert_eq!(m.read(&path("PID-3.4")), "MRN");
     }
 
     #[test]

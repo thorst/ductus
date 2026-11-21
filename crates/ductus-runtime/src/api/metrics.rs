@@ -87,6 +87,12 @@ pub const METRICS: &[Metric] = &[
         help: "Messages that couldn't be stored (the sender was told to retry).",
     },
     Metric {
+        name: "ductus_keys_empty_total",
+        kind: "counter",
+        labels: "interface, key",
+        help: "Messages stored whose key read empty: `key=\"ordering\"` (`ordering.key`: it waited in one lane with every other keyless message) or `key=\"dedupe\"` (every `dedupe.keys` empty: not checked for duplicates). Only for interfaces with that key. Mostly empty means a wrong key path (the interface is `keyless`).",
+    },
+    Metric {
         name: "ductus_deliveries_total",
         kind: "counter",
         labels: "interface, destination, outcome",
@@ -144,7 +150,7 @@ pub const METRICS: &[Metric] = &[
         name: "ductus_interface_state",
         kind: "gauge",
         labels: "interface",
-        help: "0 ok, 1 silent (nothing within `active_within`), 2 missed (nothing by `active_by`), 3 stopped.",
+        help: "0 ok, 1 silent (nothing within `active_within`), 2 missed (nothing by `active_by`), 3 stopped, 4 keyless (keys read empty: `empty_keys`). The numbers aren't an order: keyless is the mildest problem.",
     },
     Metric {
         name: "ductus_destination_paused",
@@ -278,6 +284,18 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
         family(&mut out, name);
         for i in queued() {
             out.sample(name, &iface(&i.config.name), value(&i.stats));
+        }
+    }
+    family(&mut out, "ductus_keys_empty_total");
+    for i in queued() {
+        let labels = iface(&i.config.name);
+        if i.config.ordering.key.is_some() {
+            let empty = stats::get(&i.stats.ordering_keys_empty);
+            out.sample("ductus_keys_empty_total", &format!("{labels},key=\"ordering\""), empty);
+        }
+        if i.config.dedupe.is_some() {
+            let empty = stats::get(&i.stats.dedupe_keys_empty);
+            out.sample("ductus_keys_empty_total", &format!("{labels},key=\"dedupe\""), empty);
         }
     }
 

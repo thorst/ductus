@@ -25,7 +25,11 @@ ordering:
   holds up only its own lane, not everyone
   ([nuance](../nuances/ordering.md#order-is-per-key-and-one-stuck-message-holds-up-its-key-level-3)).
 - **Choose the narrowest key correctness allows**: by patient for ADT (`PID-3.1`), by order for
-  results (`ORC-2`). A message whose field is empty goes to the empty value's lane.
+  results (`ORC-2`). A message whose field is empty goes to the empty value's lane, shared by
+  every keyless message; when most messages read empty (a path that doesn't match the sender's
+  messages), the interface's health says **keyless** and names the path, and `ductus validate`
+  warns when the key is empty in every fixture
+  ([nuance](../nuances/ordering.md#an-empty-ordering-key-is-a-lane-of-its-own-level-2)).
 - **More workers help only with a key**: with one lane, one worker does everything
   ([nuance](../nuances/ordering.md#without-an-ordering-key-more-workers-dont-help-level-3)).
 - **Change `partitions` or `key` when you need to**, with messages waiting or not: new messages

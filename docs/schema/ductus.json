@@ -676,12 +676,12 @@
           "markdownDescription": "Where alerts can go, by a name rules use in `to:`: each an email list, a chat webhook, or both. Send to teams (a mailing list, a chat channel) rather than to one person: people change and sleep; a team's list doesn't. `ductus alerts test <channel>` sends a test from the command line, no engine needed. Default: none. Example: `channels: { oncall: { email: interfaces-oncall@hospital.org }, chat: { webhook: { url: \"${secret:CHAT_WEBHOOK}\", format: teams } } }`."
         },
         "rules": {
-          "description": "Which health states alert, how badly, and to whom. Each state is matched by the first rule that names it; a state no rule names doesn't alert (`ductus validate` says which). Default: none (nothing alerts). Example: `rules: [{ when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }, { when: [behind, silent, missed, certificate], severity: warning, to: [chat] }]`.",
+          "description": "Which health states alert, how badly, and to whom. Each state is matched by the first rule that names it; a state no rule names doesn't alert (`ductus validate` says which). Default: none (nothing alerts). Example: `rules: [{ when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }, { when: [behind, silent, missed, keyless, certificate], severity: warning, to: [chat] }]`.",
           "type": "array",
           "items": {
             "$ref": "#/definitions/Rule"
           },
-          "markdownDescription": "Which health states alert, how badly, and to whom. Each state is matched by the first rule that names it; a state no rule names doesn't alert (`ductus validate` says which). Default: none (nothing alerts). Example: `rules: [{ when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }, { when: [behind, silent, missed, certificate], severity: warning, to: [chat] }]`."
+          "markdownDescription": "Which health states alert, how badly, and to whom. Each state is matched by the first rule that names it; a state no rule names doesn't alert (`ductus validate` says which). Default: none (nothing alerts). Example: `rules: [{ when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }, { when: [behind, silent, missed, keyless, certificate], severity: warning, to: [chat] }]`."
         },
         "repeat": {
           "description": "While an alert stays open and nobody has acknowledged it, remind its recipients this often; `0` never reminds. Acknowledging (on the Alerts page) stops reminders until it gets worse or recovers. Keep it long where a channel pages someone. Default: `4h`. Example: `repeat: 1h`.",
@@ -1017,12 +1017,12 @@
       "type": "object",
       "properties": {
         "when": {
-          "description": "The health states this rule covers:\n\n- `error`: a destination has quarantined messages someone must look at.\n- `stalled`: a destination has had messages waiting for over a minute and sent none (its receiver is down, or a message keeps failing).\n- `behind`: a destination's queue is past its `monitor.behind`.\n- `stopped`: an interface's code was stopped (it ran away or ran out of memory).\n- `silent`: nothing received within `monitor.active_within`.\n- `missed`: nothing received by `monitor.active_by`.\n- `certificate`: a certificate the engine uses or connects to nears expiry, or expired.\n\nA paused destination never alerts: it's paused on purpose. Required. Example: `when: [error, stalled, stopped]`.",
+          "description": "The health states this rule covers:\n\n- `error`: a destination has quarantined messages someone must look at.\n- `stalled`: a destination has had messages waiting for over a minute and sent none (its receiver is down, or a message keeps failing).\n- `behind`: a destination's queue is past its `monitor.behind`.\n- `stopped`: an interface's code was stopped (it ran away or ran out of memory).\n- `silent`: nothing received within `monitor.active_within`.\n- `missed`: nothing received by `monitor.active_by`.\n- `keyless`: an interface's ordering or dedupe keys read empty in most of its latest messages (`monitor.empty_keys`): usually a key path that doesn't match the sender's.\n- `certificate`: a certificate the engine uses or connects to nears expiry, or expired.\n\nA paused destination never alerts: it's paused on purpose. Required. Example: `when: [error, stalled, stopped]`.",
           "type": "array",
           "items": {
             "$ref": "#/definitions/Condition"
           },
-          "markdownDescription": "The health states this rule covers:\n\n- `error`: a destination has quarantined messages someone must look at.\n- `stalled`: a destination has had messages waiting for over a minute and sent none (its receiver is down, or a message keeps failing).\n- `behind`: a destination's queue is past its `monitor.behind`.\n- `stopped`: an interface's code was stopped (it ran away or ran out of memory).\n- `silent`: nothing received within `monitor.active_within`.\n- `missed`: nothing received by `monitor.active_by`.\n- `certificate`: a certificate the engine uses or connects to nears expiry, or expired.\n\nA paused destination never alerts: it's paused on purpose. Required. Example: `when: [error, stalled, stopped]`."
+          "markdownDescription": "The health states this rule covers:\n\n- `error`: a destination has quarantined messages someone must look at.\n- `stalled`: a destination has had messages waiting for over a minute and sent none (its receiver is down, or a message keeps failing).\n- `behind`: a destination's queue is past its `monitor.behind`.\n- `stopped`: an interface's code was stopped (it ran away or ran out of memory).\n- `silent`: nothing received within `monitor.active_within`.\n- `missed`: nothing received by `monitor.active_by`.\n- `keyless`: an interface's ordering or dedupe keys read empty in most of its latest messages (`monitor.empty_keys`): usually a key path that doesn't match the sender's.\n- `certificate`: a certificate the engine uses or connects to nears expiry, or expired.\n\nA paused destination never alerts: it's paused on purpose. Required. Example: `when: [error, stalled, stopped]`."
         },
         "severity": {
           "description": "How bad these states are: `warning` (worth knowing today; held during quiet hours) or `critical` (act now; never held). An alert that goes from warning to critical is told again. An expired certificate is always critical. Required. Example: `severity: critical`.",
@@ -1050,7 +1050,7 @@
       ]
     },
     "Condition": {
-      "description": "A bad health state an alert is about: a destination's (`error`, `stalled`, `behind`), an interface's (`stopped`, `silent`, `missed`), or a certificate's that is close to expiring or has expired (`certificate`). A pause is on purpose, so it never alerts.",
+      "description": "A bad health state an alert is about: a destination's (`error`, `stalled`, `behind`), an interface's (`stopped`, `silent`, `missed`, `keyless`), or a certificate's that is close to expiring or has expired (`certificate`). A pause is on purpose, so it never alerts.",
       "anyOf": [
         {
           "enum": [
@@ -1060,7 +1060,8 @@
             "stopped",
             "silent",
             "missed",
-            "certificate"
+            "certificate",
+            "keyless"
           ],
           "type": "string"
         },
@@ -1069,7 +1070,7 @@
           "pattern": "^\\$\\{[^}]+\\}$"
         }
       ],
-      "markdownDescription": "A bad health state an alert is about: a destination's (`error`, `stalled`, `behind`), an interface's (`stopped`, `silent`, `missed`), or a certificate's that is close to expiring or has expired (`certificate`). A pause is on purpose, so it never alerts."
+      "markdownDescription": "A bad health state an alert is about: a destination's (`error`, `stalled`, `behind`), an interface's (`stopped`, `silent`, `missed`, `keyless`), or a certificate's that is close to expiring or has expired (`certificate`). A pause is on purpose, so it never alerts."
     },
     "Severity": {
       "anyOf": [

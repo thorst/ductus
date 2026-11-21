@@ -199,6 +199,11 @@ A test's messages are files in the interface's `fixtures/` folder:
   Replace names, MRNs, dates of birth, addresses and identifiers with made-up ones before saving
   the file; keep the structure (how many repetitions, which fields are empty, the sender's
   quirks), which is what the test needs.
+- **`ductus validate` reads them too**: it reads the interface's `ordering.key` and `dedupe.keys`
+  from each fixture as the engine would, and warns when a key is empty in every one (DUC207: the
+  path doesn't match the sender's messages). Fixtures in another format, such as a test's
+  expected output, are left out
+  ([nuance](../nuances/ordering.md#an-empty-ordering-key-is-a-lane-of-its-own-level-2)).
 - **Fixtures can be read only inside a test**, not when the test file loads: put
   `hl7("a01.hl7")` inside `test(...)`, or in a function the test calls
   ([nuance](../nuances/transforms.md#fixtures-can-be-read-only-inside-a-test-level-1)).

@@ -482,7 +482,7 @@ A variable of the engine's environment file whose value a deploy changes (0.7.5.
 | Field | Type | |
 |---|---|---|
 | `last_received` (optional) | time (RFC 3339) or null | When something last arrived (kept across restarts). |
-| `state` | text | `ok`, `silent` (nothing within `active_within`), `missed` (nothing by `active_by`) or `stopped` (best to worst). |
+| `state` | text | `ok`, `keyless` (its ordering or dedupe keys read empty in most of its latest messages: `empty_keys`), `silent` (nothing within `active_within`), `missed` (nothing by `active_by`) or `stopped` (best to worst). |
 | `summary` | text | In operations' words: "silent: nothing received for 47 min". |
 
 ### `InterfaceStatus`

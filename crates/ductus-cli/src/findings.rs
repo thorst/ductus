@@ -524,6 +524,12 @@ pub const CODES: &[Code] = &[
         "A `console` call (not in a test) whose lines the environment's `console:` lets through (`info` when it isn't set): each message the code runs for adds a log line, kept with the engine's own. Fine while looking into something; then remove it, or set `console: warn` (or `off`) in `environments/<env>.yaml`. Not reported for an environment that says `console: debug` (development and test, where logging everything is the point).",
     ),
     code(
+        "DUC207",
+        "warning",
+        "A key reads empty in every fixture",
+        "`ordering.key` (or `dedupe.keys`) read from each file in the interface's `fixtures/` folder, as the engine reads it when a message arrives, is empty in all of them: the path probably doesn't match where the sender puts the value (`PID-3.1` when the MRN is in `PID-2`). The engine would keep every such message in one lane (or check none for duplicates) and say the interface is `keyless`. Open a fixture, find the value, write its path. Files that aren't messages of the interface's format (a test's expected output) are left out; with no fixtures nothing is checked.",
+    ),
+    code(
         "DUC210",
         "error",
         "A TLS setting names the wrong certificate",

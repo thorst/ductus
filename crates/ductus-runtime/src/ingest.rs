@@ -6,12 +6,13 @@ use crate::gate::{Closed, Gate};
 use crate::hl7_now;
 use crate::keys::{self, KeyPath};
 use crate::lanes::Lanes;
-use crate::stats::{self, InterfaceStats};
+use crate::stats::{self, EmptyWindow, InterfaceStats};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use ductus_core::InterfaceConfig;
 use ductus_core::config::Durability;
 use ductus_core::format::Format;
+use ductus_core::monitor::{KeyKind, KeysSeen};
 use ductus_hl7::{AckCode, Message};
 use ductus_store::{Batch, BatchMessage, DedupeKey, DestinationId, Done, MessageRef, NewMessage, Store};
 use std::sync::atomic::{AtomicI16, Ordering::Relaxed};
@@ -56,6 +57,15 @@ pub(crate) struct Settings {
     /// The retention tier new messages go to (changes when a retention change starts).
     tier: Arc<AtomicI16>,
     targets: Targets,
+    /// Which of the latest messages had empty keys (`monitor.empty_keys`): new with new keys, so a
+    /// fixed path clears the interface's *keyless* at once.
+    empty: Arc<EmptyKeys>,
+}
+
+/// The windows of `monitor.empty_keys`, one per key the interface has.
+struct EmptyKeys {
+    ordering: Option<EmptyWindow>,
+    dedupe: Option<EmptyWindow>,
 }
 
 impl Settings {
@@ -72,9 +82,15 @@ impl Settings {
             keys::compile(&config.format, path).with_context(|| format!("interface `{}`: key `{path}`", config.name))
         };
         let ordering = config.ordering.key.as_deref().map(compile).transpose()?;
-        let dedupe = config.dedupe.iter().flat_map(|d| d.keys.iter()).map(|k| compile(k)).collect::<Result<_>>()?;
+        let dedupe: Vec<KeyPath> =
+            config.dedupe.iter().flat_map(|d| d.keys.iter()).map(|k| compile(k)).collect::<Result<_>>()?;
         let control_id = (config.format == Format::Hl7).then(|| compile("MSH-10")).transpose()?;
-        Ok(Self { config, ordering, dedupe, control_id, lanes, tier, targets })
+        let window = || EmptyWindow::new(config.monitor.empty_keys.last);
+        let empty = Arc::new(EmptyKeys {
+            ordering: ordering.as_ref().map(|_| window()),
+            dedupe: (!dedupe.is_empty()).then(window),
+        });
+        Ok(Self { config, ordering, dedupe, control_id, lanes, tier, targets, empty })
     }
 
     /// The same, queueing for `targets` instead.
@@ -87,7 +103,48 @@ impl Settings {
             lanes: self.lanes.clone(),
             tier: self.tier.clone(),
             targets,
+            empty: self.empty.clone(),
         }
+    }
+
+    /// Count the keys of messages just stored (`keys`, one per message): the interface's totals
+    /// and the windows `monitor.empty_keys` reads.
+    fn watch<'k>(&self, stats: &InterfaceStats, keys: impl IntoIterator<Item = &'k Keys>) {
+        for k in keys {
+            if let (Some(window), Some(key)) = (&self.empty.ordering, &k.ordering_key) {
+                window.record(key.is_empty());
+                if key.is_empty() {
+                    stats::add(&stats.ordering_keys_empty);
+                }
+            }
+            if let Some(window) = &self.empty.dedupe {
+                window.record(k.dedupe.is_none());
+                if k.dedupe.is_none() {
+                    stats::add(&stats.dedupe_keys_empty);
+                }
+            }
+        }
+    }
+
+    /// How many of the latest messages had empty keys, per key.
+    fn keys_seen(&self) -> Vec<KeysSeen> {
+        let seen = |kind, window: &EmptyWindow, paths: Vec<String>| KeysSeen {
+            kind,
+            paths,
+            empty: window.empty(),
+            seen: window.seen(),
+        };
+        let ordering = self
+            .empty
+            .ordering
+            .as_ref()
+            .map(|w| seen(KeyKind::Ordering, w, self.config.ordering.key.iter().cloned().collect()));
+        let dedupe = self
+            .empty
+            .dedupe
+            .as_ref()
+            .map(|w| seen(KeyKind::Dedupe, w, self.config.dedupe.iter().flat_map(|d| d.keys.clone()).collect()));
+        ordering.into_iter().chain(dedupe).collect()
     }
 
     /// Read a message's lane, ordering key, control ID and dedupe key.
@@ -132,6 +189,11 @@ impl Intake {
     /// The interface's name.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// How many of its latest messages had empty keys, per key it has (`monitor.empty_keys`).
+    pub fn keys_seen(&self) -> Vec<KeysSeen> {
+        self.settings().keys_seen()
     }
 
     /// What it stores with now. Held for the whole of a store (see `swap`).
@@ -257,6 +319,7 @@ impl Intake {
             }
             _ => Accepted::Queued(self.store.insert(new).await?),
         };
+        settings.watch(&self.stats, std::slice::from_ref(&keys));
         if matches!(accepted, Accepted::Queued(_)) {
             targets.wake.lane(keys.partition);
         }
@@ -297,6 +360,7 @@ impl Intake {
             tier: settings.tier(),
         };
         let duplicates = self.store.insert_batch(&batch).await?;
+        settings.watch(&self.stats, &keys);
         let mut woken = vec![false; targets.wake.slots()];
         let mut queued = 0;
         for (k, _) in keys.iter().zip(&duplicates).filter(|(_, duplicate)| !**duplicate) {
@@ -345,7 +409,10 @@ impl Intake {
         let queued = self.store.finish_routed(destination, done, &batch).await;
         // Not queued here: a duplicate, or already routed by an earlier try of this flush.
         self.count(&queued, |q| (q.iter().filter(|q| **q).count() as u64, 0));
-        for (k, _) in keys.iter().zip(&queued?).filter(|(_, queued)| **queued) {
+        let queued = queued?;
+        let stored = || keys.iter().zip(&queued).filter(|(_, queued)| **queued).map(|(k, _)| k);
+        settings.watch(&self.stats, stored());
+        for k in stored() {
             targets.wake.lane(k.partition);
         }
         Ok(())

@@ -1075,11 +1075,14 @@ impl Engine {
             .collect()
     }
 
-    /// An interface's own state: what it should have received (`monitor:`), or stopped.
+    /// An interface's own state: what it should have received (`monitor:`), whether its keys read
+    /// empty, or stopped.
     pub fn interface_state(&self, i: &Running, now: DateTime<Utc>) -> (InterfaceState, String) {
         let watched_since = self.activity.watched_since(&i.config.name).unwrap_or(self.started_at);
         let stopped = i.health.stopped();
-        monitor::interface_state(&i.config.monitor, i.stats.last_received.get(), watched_since, stopped, now)
+        let keys = i.intake.as_ref().map(|intake| intake.keys_seen()).unwrap_or_default();
+        let last = i.stats.last_received.get();
+        monitor::interface_state(&i.config.monitor, last, watched_since, stopped, &keys, now)
     }
 
     /// A destination's state and why (`n`: its place in `i.destinations`).

@@ -234,13 +234,13 @@
       "markdownDescription": "What happens to quarantined messages once the retention window has passed: `keep` them in the held area until someone resends, corrects or dismisses them, or `purge` them with the rest. A quarantined message is a question nobody has answered yet, so `keep` is the safe choice; `purge` suits a feed whose sender resends anyway. Not for HTTP `respond` mode. Default: `quarantined` in ductus.yaml (`keep`). Example: `quarantined: purge`."
     },
     "monitor": {
-      "description": "What operations expects of this interface, in the terms its teams use: something received within a time (`active_within`) or by a deadline (`active_by`), and queues not too far behind (`behind`). Breaking one shows as a health state (silent, missed, behind) in the web UI, `ductus status` and Prometheus, and alerts when a rule names it.\n\nNothing is expected by default: the engine can't know that a quiet feed is a problem, so these are operations' decisions. Example: `monitor: { active_within: 30m, between: \"06:00-22:00\", behind: 10m }`.",
+      "description": "What operations expects of this interface, in the terms its teams use: something received within a time (`active_within`) or by a deadline (`active_by`), and queues not too far behind (`behind`). Breaking one shows as a health state (silent, missed, behind) in the web UI, `ductus status` and Prometheus, and alerts when a rule names it.\n\nNothing is expected by default: the engine can't know that a quiet feed is a problem, so these are operations' decisions. The exception is `empty_keys` (keys that read empty make the interface *keyless*), a config mistake rather than a decision. Example: `monitor: { active_within: 30m, between: \"06:00-22:00\", behind: 10m }`.",
       "allOf": [
         {
           "$ref": "#/definitions/Monitor"
         }
       ],
-      "markdownDescription": "What operations expects of this interface, in the terms its teams use: something received within a time (`active_within`) or by a deadline (`active_by`), and queues not too far behind (`behind`). Breaking one shows as a health state (silent, missed, behind) in the web UI, `ductus status` and Prometheus, and alerts when a rule names it.\n\nNothing is expected by default: the engine can't know that a quiet feed is a problem, so these are operations' decisions. Example: `monitor: { active_within: 30m, between: \"06:00-22:00\", behind: 10m }`."
+      "markdownDescription": "What operations expects of this interface, in the terms its teams use: something received within a time (`active_within`) or by a deadline (`active_by`), and queues not too far behind (`behind`). Breaking one shows as a health state (silent, missed, behind) in the web UI, `ductus status` and Prometheus, and alerts when a rule names it.\n\nNothing is expected by default: the engine can't know that a quiet feed is a problem, so these are operations' decisions. The exception is `empty_keys` (keys that read empty make the interface *keyless*), a config mistake rather than a decision. Example: `monitor: { active_within: 30m, between: \"06:00-22:00\", behind: 10m }`."
     },
     "alert": {
       "description": "This interface's alerts: more recipients on top of the rules' (`to`), or none at all (`mute`). The rules in ductus.yaml decide which states alert. Default: the rules' recipients only. Example: `alert: { to: [lab-team] }`.",
@@ -2082,9 +2082,59 @@
             }
           ],
           "markdownDescription": "When a destination's queue counts as *behind*: `500` (that many messages waiting), `10m` (the oldest has waited that long), or `{ messages: 500, age: 10m }` (either one).\n\nA count alone misses an overnight stall when little arrives; an age alone misses a daytime pile-up that still moves, so give both for busy feeds. Set it at what the receiving department would call late. A destination can set its own. Default: none (a destination that stops sending still shows as *stalled* after a minute). Example: `behind: { messages: 1000, age: 15m }`."
+        },
+        "empty_keys": {
+          "description": "When the interface says its keys read empty (state *keyless*): when at least `percent` of the `last` messages it received had an empty `ordering.key` (every keyless message waits in one lane, in one strict order) or empty `dedupe.keys` (those aren't checked for duplicates). Almost always a key path that doesn't match the sender's messages (`PID-3.1` where the MRN is in `PID-2`), so it's on by default; it says nothing until `last` messages have arrived since the start, then keeps looking at the latest `last`.\n\nLower `last` for a quiet feed (it's told sooner), or `percent` for a feed where some messages carry no key on purpose (a batch header, a master file update); `percent: 0` turns it off. Default: `{ last: 100, percent: 90 }`. Example: `empty_keys: { last: 20 }`.",
+          "allOf": [
+            {
+              "$ref": "#/definitions/EmptyKeys"
+            }
+          ],
+          "markdownDescription": "When the interface says its keys read empty (state *keyless*): when at least `percent` of the `last` messages it received had an empty `ordering.key` (every keyless message waits in one lane, in one strict order) or empty `dedupe.keys` (those aren't checked for duplicates). Almost always a key path that doesn't match the sender's messages (`PID-3.1` where the MRN is in `PID-2`), so it's on by default; it says nothing until `last` messages have arrived since the start, then keeps looking at the latest `last`.\n\nLower `last` for a quiet feed (it's told sooner), or `percent` for a feed where some messages carry no key on purpose (a batch header, a master file update); `percent: 0` turns it off. Default: `{ last: 100, percent: 90 }`. Example: `empty_keys: { last: 20 }`."
         }
       },
       "additionalProperties": false
+    },
+    "EmptyKeys": {
+      "description": "`monitor.empty_keys`: how many empty keys make an interface *keyless*.",
+      "type": "object",
+      "properties": {
+        "last": {
+          "description": "How many of the latest messages are looked at, from 20 to 10,000: nothing is said before this many have arrived. A feed of a few messages a day wants a small number. Default: `100`. Example: `last: 20`.",
+          "default": 100,
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer",
+              "format": "uint32"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "How many of the latest messages are looked at, from 20 to 10,000: nothing is said before this many have arrived. A feed of a few messages a day wants a small number. Default: `100`. Example: `last: 20`."
+        },
+        "percent": {
+          "description": "How many of them, in percent, must have read empty: 1 to 100, or `0` for never. Default: `90`. Example: `percent: 50`.",
+          "default": 90,
+          "anyOf": [
+            {
+              "maximum": 255,
+              "type": "integer",
+              "format": "uint8",
+              "minimum": 0
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "How many of them, in percent, must have read empty: 1 to 100, or `0` for never. Default: `90`. Example: `percent: 50`."
+        }
+      },
+      "additionalProperties": false,
+      "markdownDescription": "`monitor.empty_keys`: how many empty keys make an interface *keyless*."
     },
     "AlertOptions": {
       "description": "`alert:` in interface.yaml.",

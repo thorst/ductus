@@ -3714,7 +3714,7 @@
           },
           "state": {
             "type": "string",
-            "description": "`ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`,\n`missed` (an interface), `certificate` (expiring or expired)."
+            "description": "`ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`,\n`missed`, `keyless` (an interface), `certificate` (expiring or expired)."
           },
           "summary": {
             "type": [
@@ -6754,7 +6754,7 @@
           },
           "state": {
             "type": "string",
-            "description": "`ok`, `silent` (nothing within `active_within`), `missed` (nothing by `active_by`) or\n`stopped` (best to worst)."
+            "description": "`ok`, `keyless` (its ordering or dedupe keys read empty in most of its latest messages:\n`empty_keys`), `silent` (nothing within `active_within`), `missed` (nothing by\n`active_by`) or `stopped` (best to worst)."
           },
           "summary": {
             "type": "string",

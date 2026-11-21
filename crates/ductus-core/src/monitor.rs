@@ -8,10 +8,12 @@
 //!   active_by: "Mon-Fri 09:00"  # something received by 09:00 on weekdays (or "09:00", or cron)
 //!   from: "18:00"               # counted from 18:00 the evening before (default: midnight)
 //!   behind: { messages: 500, age: 10m }   # either one trips it; `behind: 500` or `behind: 10m`
+//!   empty_keys: { last: 100, percent: 90 }   # the default: keys that read empty say so
 //! ```
 //!
 //! A destination can set its own `behind` (`monitor: { behind: 10m }` on the destination).
-//! Times are the server's local time, like schedules.
+//! Times are the server's local time, like schedules. `empty_keys` is the one expectation on by
+//! default: a key path that reads nothing is a mistake in the config, not an operations choice.
 
 use anyhow::{Result, anyhow, bail};
 use chrono::{DateTime, Duration as Span, Local, NaiveTime, TimeZone, Utc};
@@ -59,6 +61,113 @@ pub struct Monitor {
     /// 1000, age: 15m }`.
     #[serde(default)]
     pub behind: Option<Behind>,
+    /// When the interface says its keys read empty (state *keyless*): when at least `percent` of
+    /// the `last` messages it received had an empty `ordering.key` (every keyless message waits in
+    /// one lane, in one strict order) or empty `dedupe.keys` (those aren't checked for
+    /// duplicates). Almost always a key path that doesn't match the sender's messages (`PID-3.1`
+    /// where the MRN is in `PID-2`), so it's on by default; it says nothing until `last` messages
+    /// have arrived since the start, then keeps looking at the latest `last`.
+    ///
+    /// Lower `last` for a quiet feed (it's told sooner), or `percent` for a feed where some
+    /// messages carry no key on purpose (a batch header, a master file update); `percent: 0`
+    /// turns it off. Default: `{ last: 100, percent: 90 }`. Example: `empty_keys: { last: 20 }`.
+    #[serde(default)]
+    pub empty_keys: EmptyKeys,
+}
+
+/// `monitor.empty_keys`: how many empty keys make an interface *keyless*.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[cfg_attr(test, derive(schemars::JsonSchema))]
+#[serde(deny_unknown_fields)]
+pub struct EmptyKeys {
+    /// How many of the latest messages are looked at, from 20 to 10,000: nothing is said before
+    /// this many have arrived. A feed of a few messages a day wants a small number. Default:
+    /// `100`. Example: `last: 20`.
+    #[serde(default = "EmptyKeys::default_last")]
+    pub last: u32,
+    /// How many of them, in percent, must have read empty: 1 to 100, or `0` for never. Default:
+    /// `90`. Example: `percent: 50`.
+    #[serde(default = "EmptyKeys::default_percent")]
+    pub percent: u8,
+}
+
+impl EmptyKeys {
+    fn default_last() -> u32 {
+        100
+    }
+
+    fn default_percent() -> u8 {
+        90
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        if !(20..=10_000).contains(&self.last) {
+            bail!("monitor.empty_keys.last must be between 20 and 10000 (messages looked at)");
+        }
+        if self.percent > 100 {
+            bail!("monitor.empty_keys.percent must be between 0 (never) and 100");
+        }
+        Ok(())
+    }
+
+    /// Whether `empty` of the `seen` latest messages are enough to say so.
+    pub fn tripped(&self, empty: u64, seen: u64) -> bool {
+        self.percent > 0 && seen >= u64::from(self.last) && empty * 100 >= u64::from(self.percent) * seen
+    }
+}
+
+impl Default for EmptyKeys {
+    fn default() -> Self {
+        Self { last: Self::default_last(), percent: Self::default_percent() }
+    }
+}
+
+/// Which of an interface's keys a count is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyKind {
+    /// `ordering.key`.
+    Ordering,
+    /// `dedupe.keys` (empty when every one of them is).
+    Dedupe,
+}
+
+impl KeyKind {
+    /// As Prometheus labels it (`ductus_keys_empty_total{key=…}`).
+    pub fn label(self) -> &'static str {
+        match self {
+            KeyKind::Ordering => "ordering",
+            KeyKind::Dedupe => "dedupe",
+        }
+    }
+}
+
+/// How many of an interface's latest messages had a key that read empty.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeysSeen {
+    pub kind: KeyKind,
+    /// The key paths as written (`PID-3.1`).
+    pub paths: Vec<String>,
+    pub empty: u64,
+    /// Messages looked at: up to `empty_keys.last`.
+    pub seen: u64,
+}
+
+impl KeysSeen {
+    /// "ordering key `PID-3.1` empty in 97% of the last 100 messages: is the path right for
+    /// the sender's messages?"
+    fn summary(&self) -> String {
+        let percent = self.empty * 100 / self.seen.max(1);
+        let paths = self.paths.iter().map(|p| format!("`{p}`")).collect::<Vec<_>>().join(", ");
+        let last = format!("{percent}% of the last {} messages", count(self.seen));
+        match self.kind {
+            KeyKind::Ordering => format!(
+                "keyless: ordering key {paths} empty in {last}, so they wait in one lane: is the path right for the sender's messages?"
+            ),
+            KeyKind::Dedupe => format!(
+                "keyless: dedupe keys {paths} empty in {last}, so they weren't checked for duplicates: is the path right for the sender's messages?"
+            ),
+        }
+    }
 }
 
 /// A destination's own expectations (`monitor:` on the destination).
@@ -84,10 +193,10 @@ impl Monitor {
         if self.active_within.is_some_and(|d| d < Duration::from_secs(60)) {
             bail!("monitor.active_within must be at least 1m");
         }
-        Ok(())
+        self.empty_keys.validate()
     }
 
-    /// Nothing is expected.
+    /// Nothing is expected (`empty_keys` aside: it's on by default and needs keys).
     pub fn is_empty(&self) -> bool {
         self.active_within.is_none() && self.active_by.is_none() && self.behind.is_none()
     }
@@ -574,8 +683,9 @@ pub fn diagnose(facts: &Facts, now: DateTime<Utc>) -> Diagnosis {
 }
 
 /// An interface's own state: its expectations of what it receives. The numbers are
-/// Prometheus's (`ductus_interface_state`): never change them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+/// Prometheus's (`ductus_interface_state`): never change them (a new state gets the next number,
+/// whatever its rank: `worse` compares by rank).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InterfaceState {
     Ok = 0,
     /// Nothing received within `active_within`.
@@ -584,25 +694,47 @@ pub enum InterfaceState {
     Missed = 2,
     /// Its code ran away; nothing is processed until it's fixed and the engine restarted.
     Stopped = 3,
+    /// Its keys read empty in most messages (`empty_keys`): messages flow, but out of their
+    /// lanes or past dedupe. The mildest of the problems.
+    Keyless = 4,
 }
 
 impl InterfaceState {
     pub fn label(self) -> &'static str {
         match self {
             InterfaceState::Ok => "ok",
+            InterfaceState::Keyless => "keyless",
             InterfaceState::Silent => "silent",
             InterfaceState::Missed => "missed",
             InterfaceState::Stopped => "stopped",
         }
     }
+
+    /// Best to worst.
+    fn rank(self) -> u8 {
+        match self {
+            InterfaceState::Ok => 0,
+            InterfaceState::Keyless => 1,
+            InterfaceState::Silent => 2,
+            InterfaceState::Missed => 3,
+            InterfaceState::Stopped => 4,
+        }
+    }
+
+    /// The worse of the two.
+    pub fn worse(self, other: Self) -> Self {
+        if other.rank() > self.rank() { other } else { self }
+    }
 }
 
-/// An interface's state and how to say it ("silent: nothing received for 47 min").
+/// An interface's state and how to say it ("silent: nothing received for 47 min"). `keys`: how
+/// many of its latest messages had an empty key, per key it has.
 pub fn interface_state(
     monitor: &Monitor,
     last_received: Option<DateTime<Utc>>,
     watched_since: DateTime<Utc>,
     stopped: Option<&str>,
+    keys: &[KeysSeen],
     now: DateTime<Utc>,
 ) -> (InterfaceState, String) {
     let mut state = InterfaceState::Ok;
@@ -612,13 +744,17 @@ pub fn interface_state(
         parts.push(format!("stopped: {reason}"));
     }
     if let Some((start, deadline)) = monitor.missed(last_received, watched_since, now) {
-        state = state.max(InterfaceState::Missed);
+        state = state.worse(InterfaceState::Missed);
         let at = |t: DateTime<Utc>| t.with_timezone(&Local).format("%a %H:%M").to_string();
         parts.push(format!("missed {}: nothing received since {}", at(deadline), at(start)));
     }
     if let Some(quiet) = monitor.silent(last_received.unwrap_or(watched_since), now) {
-        state = state.max(InterfaceState::Silent);
+        state = state.worse(InterfaceState::Silent);
         parts.push(format!("silent: nothing received for {}", human(quiet.to_std().unwrap_or_default())));
+    }
+    for seen in keys.iter().filter(|k| monitor.empty_keys.tripped(k.empty, k.seen)) {
+        state = state.worse(InterfaceState::Keyless);
+        parts.push(seen.summary());
     }
     if parts.is_empty() {
         parts.push(match last_received {
@@ -892,19 +1028,64 @@ mod tests {
         let m = monitor("{ active_within: 30m, active_by: '09:00' }");
         let now = local("2026-10-08 09:47");
         let watched = local("2026-10-01 00:00");
-        let (state, text) = interface_state(&m, Some(local("2026-10-07 23:00")), watched, None, now);
+        let (state, text) = interface_state(&m, Some(local("2026-10-07 23:00")), watched, None, &[], now);
         assert_eq!(state, InterfaceState::Missed);
         assert_eq!(
             text,
             "missed Thu 09:00: nothing received since Thu 00:00; silent: nothing received for 10 h 47 min"
         );
-        let (state, text) = interface_state(&m, Some(local("2026-10-08 09:46")), watched, None, now);
+        let (state, text) = interface_state(&m, Some(local("2026-10-08 09:46")), watched, None, &[], now);
         assert_eq!((state, text.as_str()), (InterfaceState::Ok, "ok, received 1 min ago"));
-        let (state, _) = interface_state(&m, Some(local("2026-10-08 09:46")), watched, Some("heap"), now);
+        let (state, _) = interface_state(&m, Some(local("2026-10-08 09:46")), watched, Some("heap"), &[], now);
         assert_eq!(state, InterfaceState::Stopped);
         // Never received: quiet since it was first watched.
-        let (_, text) = interface_state(&m, None, local("2026-10-08 09:00"), None, now);
+        let (_, text) = interface_state(&m, None, local("2026-10-08 09:00"), None, &[], now);
         assert_eq!(text, "silent: nothing received for 47 min");
+    }
+
+    #[test]
+    fn keys_that_read_empty_say_so() {
+        let now = local("2026-10-08 09:47");
+        let received = Some(local("2026-10-08 09:46"));
+        let seen = |kind, empty, seen| KeysSeen { kind, paths: vec!["PID-3.1".into()], empty, seen };
+        let state = |m: &Monitor, keys: &[KeysSeen]| interface_state(m, received, now, None, keys, now);
+
+        // The default: 90% of the last 100.
+        let m = Monitor::default();
+        let (s, text) = state(&m, &[seen(KeyKind::Ordering, 97, 100)]);
+        assert_eq!(s, InterfaceState::Keyless);
+        assert_eq!(
+            text,
+            "keyless: ordering key `PID-3.1` empty in 97% of the last 100 messages, so they wait in one lane: is the path right for the sender's messages?"
+        );
+        assert_eq!(state(&m, &[seen(KeyKind::Ordering, 89, 100)]).0, InterfaceState::Ok, "under 90%");
+        assert_eq!(state(&m, &[seen(KeyKind::Ordering, 19, 19)]).0, InterfaceState::Ok, "too few seen yet");
+        let dedupe = KeysSeen { paths: vec!["ORC-2".into(), "ORC-5".into()], ..seen(KeyKind::Dedupe, 100, 100) };
+        let (s, text) = state(&m, &[seen(KeyKind::Ordering, 0, 100), dedupe]);
+        assert_eq!(s, InterfaceState::Keyless);
+        assert!(text.starts_with("keyless: dedupe keys `ORC-2`, `ORC-5` empty in 100% of the last 100"), "{text}");
+
+        // A quiet feed's smaller window, a lower share, or off.
+        let quiet = monitor("{ empty_keys: { last: 20 } }");
+        assert_eq!(state(&quiet, &[seen(KeyKind::Ordering, 20, 20)]).0, InterfaceState::Keyless);
+        let half = monitor("{ empty_keys: { percent: 50 } }");
+        assert_eq!(state(&half, &[seen(KeyKind::Ordering, 50, 100)]).0, InterfaceState::Keyless);
+        let off = monitor("{ empty_keys: { percent: 0 } }");
+        assert_eq!(state(&off, &[seen(KeyKind::Ordering, 100, 100)]).0, InterfaceState::Ok);
+        for bad in
+            ["{ empty_keys: { last: 19 } }", "{ empty_keys: { last: 10001 } }", "{ empty_keys: { percent: 101 } }"]
+        {
+            assert!(serde_yaml_ng::from_str::<Monitor>(bad).unwrap().validate().is_err(), "{bad}");
+        }
+
+        // Keyless is the mildest problem: silent, missed and stopped outrank it.
+        let silent = monitor("{ active_within: 30m }");
+        let keyless = [seen(KeyKind::Ordering, 100, 100)];
+        let (s, text) = interface_state(&silent, Some(local("2026-10-08 08:00")), now, None, &keyless, now);
+        assert_eq!(s, InterfaceState::Silent);
+        assert!(text.starts_with("silent: nothing received for 1 h 47 min; keyless: ordering key"), "{text}");
+        assert_eq!(InterfaceState::Keyless.worse(InterfaceState::Ok), InterfaceState::Keyless);
+        assert_eq!(InterfaceState::Keyless as u8, 4, "Prometheus's number");
     }
 
     #[test]

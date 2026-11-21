@@ -37,7 +37,7 @@ pub struct AlertInfo {
     /// The destination; for a certificate, `host:port`.
     pub destination: Option<String>,
     /// `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`,
-    /// `missed` (an interface), `certificate` (expiring or expired).
+    /// `missed`, `keyless` (an interface), `certificate` (expiring or expired).
     pub state: String,
     /// `warning` or `critical` while open.
     pub severity: Option<String>,

@@ -1339,7 +1339,7 @@ export interface components {
             since?: string | null;
             /**
              * @description `ok`, or what is wrong: `error`, `stalled`, `behind` (a destination), `stopped`, `silent`,
-             *     `missed` (an interface), `certificate` (expiring or expired).
+             *     `missed`, `keyless` (an interface), `certificate` (expiring or expired).
              */
             state: string;
             /** @description The health view's words, as of the last check. */
@@ -2522,8 +2522,9 @@ export interface components {
              */
             last_received?: string | null;
             /**
-             * @description `ok`, `silent` (nothing within `active_within`), `missed` (nothing by `active_by`) or
-             *     `stopped` (best to worst).
+             * @description `ok`, `keyless` (its ordering or dedupe keys read empty in most of its latest messages:
+             *     `empty_keys`), `silent` (nothing within `active_within`), `missed` (nothing by
+             *     `active_by`) or `stopped` (best to worst).
              */
             state: string;
             /** @description In operations' words: "silent: nothing received for 47 min". */

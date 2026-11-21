@@ -32,7 +32,7 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **What to do:** send alerts to team channels in your rules; add `owner` only where a person should hear directly. Put teams in `owners:` with their list address, write people as their email, and give accounts an email. A test interface can say `alert: { mute: true }`; `alert: { to: [pager] }` adds recipients for one interface.
 
 ## A restart doesn't alert on what it hasn't watched yet (level 3)
-- **What:** states that need watching (`stalled`, `behind`, `silent`, `missed`) are judged only after the engine has run a minute. `error` and `stopped` are facts in the database and alert at once. Open alerts are in the database too, so a restart neither repeats them nor forgets them.
+- **What:** states that need watching (`stalled`, `behind`, `silent`, `missed`, `keyless`) are judged only after the engine has run a minute (`keyless` also needs `monitor.empty_keys.last` messages since the start). `error` and `stopped` are facts in the database and alert at once. Open alerts are in the database too, so a restart neither repeats them nor forgets them.
 - **What to do:** nothing. Expect the first alerts about a problem that was already there about a minute after a start.
 
 ## Webhook URLs are secrets (level 2)

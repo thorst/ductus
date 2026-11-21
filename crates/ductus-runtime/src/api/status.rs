@@ -432,8 +432,9 @@ pub struct InterfaceStatus {
 
 #[derive(Serialize, ToSchema)]
 pub struct InterfaceHealth {
-    /// `ok`, `silent` (nothing within `active_within`), `missed` (nothing by `active_by`) or
-    /// `stopped` (best to worst).
+    /// `ok`, `keyless` (its ordering or dedupe keys read empty in most of its latest messages:
+    /// `empty_keys`), `silent` (nothing within `active_within`), `missed` (nothing by
+    /// `active_by`) or `stopped` (best to worst).
     state: &'static str,
     /// In operations' words: "silent: nothing received for 47 min".
     summary: String,

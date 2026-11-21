@@ -52,7 +52,7 @@ alerts:
       webhook: { url: "https://hooks.example.org/T000/B000", format: teams, ca: hospital-ca, certificate: ductus-client }
   rules:
     - { when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }
-    - { when: [behind, silent, missed, certificate], severity: warning, to: [chat, owner] }
+    - { when: [behind, silent, missed, keyless, certificate], severity: warning, to: [chat, owner] }
   repeat: 1h
   recovery: ${STRICT}
   settle: 10m

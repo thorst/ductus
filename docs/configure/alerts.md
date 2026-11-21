@@ -22,7 +22,7 @@ alerts:
     chat: { webhook: { url: "${secret:TEAMS_WEBHOOK}", format: teams } }
   rules:
     - { when: [error, stalled, stopped], severity: critical, to: [oncall, chat] }
-    - { when: [behind, silent, missed, certificate], severity: warning, to: [chat] }
+    - { when: [behind, silent, missed, keyless, certificate], severity: warning, to: [chat] }
   repeat: 4h
   quiet: { between: "22:00-06:00", severities: [warning] }
   heartbeat: { url: "${secret:HEARTBEAT_URL}", every: 5m }
@@ -57,10 +57,12 @@ which.
 | `behind` | A queue is past its `monitor.behind` | warning |
 | `silent` | Nothing received within `monitor.active_within` | warning, or critical for a core feed |
 | `missed` | Nothing received by `monitor.active_by` | warning |
+| `keyless` | An interface's ordering or dedupe keys read empty in most of its latest messages (`monitor.empty_keys`, on by default): usually a key path that doesn't match the sender's messages | warning |
 | `certificate` | A certificate the engine presents or connects to nears expiry (30, 14, 7 days) or expired (always critical) | warning |
 
 `behind`, `silent` and `missed` need an interface's [`monitor`](keeping-and-watching.md#whats-expected-monitor)
-settings: nothing is expected until you say so. **A paused destination never alerts** (it's paused
+settings: nothing is expected until you say so (`keyless` is on by default for interfaces with
+keys). **A paused destination never alerts** (it's paused
 on purpose), and an alert that's open when someone pauses stays open, quietly, until it's resumed
 ([nuance](../nuances/alerts.md#a-pause-never-alerts-and-holds-an-alert-open-level-2)).
 

@@ -64,7 +64,7 @@ function NotConfigured() {
     oncall: { email: [interfaces-oncall@hospital.org] }
   rules:
     - { when: [error, stalled, stopped], severity: critical, to: [oncall, owner] }
-    - { when: [behind, silent, missed], severity: warning, to: [owner] }`}</pre>
+    - { when: [behind, silent, missed, keyless], severity: warning, to: [owner] }`}</pre>
     </div>
   );
 }

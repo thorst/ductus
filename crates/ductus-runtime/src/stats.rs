@@ -122,6 +122,10 @@ pub struct InterfaceStats {
     pub request_errors: AtomicU64,
     /// When a message (or a duplicate) last arrived.
     pub last_received: Moment,
+    /// Messages stored whose `ordering.key` read empty (`ductus_keys_empty_total{key="ordering"}`).
+    pub ordering_keys_empty: AtomicU64,
+    /// Messages stored whose `dedupe.keys` all read empty, so weren't checked for duplicates.
+    pub dedupe_keys_empty: AtomicU64,
 }
 
 impl InterfaceStats {
@@ -134,7 +138,47 @@ impl InterfaceStats {
             requests: Histogram::default(),
             request_errors: AtomicU64::new(0),
             last_received: Moment::default(),
+            ordering_keys_empty: AtomicU64::new(0),
+            dedupe_keys_empty: AtomicU64::new(0),
         }
+    }
+}
+
+/// Whether each of the latest `len` messages had an empty key (`monitor.empty_keys`): a ring of
+/// bits, one per message, written without a lock (an interface stores from many connections at
+/// once) and counted when health is read. Two 64-bit words for the default 100 messages.
+pub struct EmptyWindow {
+    bits: Box<[AtomicU64]>,
+    len: u64,
+    /// Messages recorded so far; the next one's bit is `next % len`.
+    next: AtomicU64,
+}
+
+impl EmptyWindow {
+    pub fn new(len: u32) -> Self {
+        let len = u64::from(len.max(1));
+        Self { bits: (0..len.div_ceil(64)).map(|_| AtomicU64::new(0)).collect(), len, next: AtomicU64::new(0) }
+    }
+
+    pub fn record(&self, empty: bool) {
+        let at = self.next.fetch_add(1, Relaxed) % self.len;
+        let (word, bit) = (&self.bits[(at / 64) as usize], 1u64 << (at % 64));
+        if empty {
+            word.fetch_or(bit, Relaxed);
+        } else {
+            word.fetch_and(!bit, Relaxed);
+        }
+    }
+
+    /// Messages looked at: up to `len`.
+    pub fn seen(&self) -> u64 {
+        self.next.load(Relaxed).min(self.len)
+    }
+
+    /// How many of them had an empty key (while messages arrive, give or take the ones being
+    /// recorded).
+    pub fn empty(&self) -> u64 {
+        self.bits.iter().map(|w| u64::from(w.load(Relaxed).count_ones())).sum()
     }
 }
 
@@ -342,6 +386,30 @@ mod tests {
         assert!(text.contains("x_seconds_bucket{interface=\"a\",le=\"+Inf\"} 3\n"), "{text}");
         assert!(text.contains("x_seconds_count{interface=\"a\"} 3\n"), "{text}");
         assert!(text.contains("x_seconds_sum{interface=\"a\"} 4000.0035\n"), "{text}");
+    }
+
+    #[test]
+    fn the_window_counts_only_the_latest_messages() {
+        let w = EmptyWindow::new(100);
+        assert_eq!((w.seen(), w.empty()), (0, 0));
+        for _ in 0..30 {
+            w.record(true);
+        }
+        assert_eq!((w.seen(), w.empty()), (30, 30));
+        for _ in 0..100 {
+            w.record(false);
+        }
+        assert_eq!((w.seen(), w.empty()), (100, 0), "the empty ones scrolled out");
+        for n in 0..150 {
+            w.record(n % 2 == 0);
+        }
+        assert_eq!((w.seen(), w.empty()), (100, 50));
+        // A length that isn't a multiple of 64 never counts bits past it.
+        let w = EmptyWindow::new(20);
+        for _ in 0..1000 {
+            w.record(true);
+        }
+        assert_eq!((w.seen(), w.empty()), (20, 20));
     }
 
     #[test]

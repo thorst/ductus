@@ -1,6 +1,6 @@
 import { describe as suite, expect, it } from "vitest";
 import type { Schemas } from "@/api/client";
-import { problems, worst } from "./health";
+import { describe, problems, worst } from "./health";
 
 type Interface = Schemas["InterfaceStatus"];
 type Destination = Schemas["DestinationStatus"];
@@ -36,6 +36,12 @@ suite("health", () => {
 
   it("is ok when everything is", () => {
     expect(worst(iface("ok", [destination("lab", "ok")]))).toBe("ok");
+  });
+
+  it("an interface whose keys read empty is a warning, below an error", () => {
+    expect(describe("keyless")).toEqual({ tone: "warn", rank: 2, label: "Keys empty" });
+    const i = iface("keyless", [destination("lab", "error")]);
+    expect(problems(i).map((p) => p.state)).toEqual(["error", "keyless"]);
   });
 
   it("a stopped interface is the worst there is", () => {
