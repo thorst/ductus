@@ -395,7 +395,8 @@ enum Command {
         database_url: Option<String>,
         /// One JSON document for tools (an editor, CI) instead of the text: every finding with its
         /// severity, code (reference/validate.md), file, line and column, whether TypeScript or
-        /// Ductus found it, and a fix where there is one.
+        /// Ductus found it, and a fix where there is one; and `uses`, each function the engine
+        /// calls with where interface.yaml names it and where its code declares it.
         #[arg(long)]
         json: bool,
         /// Write nothing into the project (no editor typings): for `ductus upgrade --check`.

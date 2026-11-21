@@ -84,6 +84,11 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **Why:** listing loads every test file of the project in the engine's runtime (a few hundred milliseconds): once per save, not per keystroke.
 - **What to do:** save, or click **Refresh Tests** in the Test Explorer.
 
+## VS Code's "used by" lines and go-to-definition are as of the last save (level 1)
+- **What:** with the [Ductus extension](../write/vscode.md#the-code-and-interfaceyaml-together), the `used by adt-in → lab` line above a function, F12 from interface.yaml to the function and the peek back come from the last `ductus validate` run (when the workspace opens, and after each save). Rename a function or change `transform:` and they follow after you save; a file with unsaved changes shows no `used by` lines and F12 from it does nothing. With `ductus.validateOnSave: false` they're as of the last **Ductus: Validate the project**.
+- **Why:** which functions interface.yaml names, and where each is declared (through re-exports into shared files), is what validate already works out with the engine's own rules; one run per save, not per keystroke. A file being edited has lines that may have moved since, so it shows nothing rather than a line in the wrong place.
+- **What to do:** save. A function with no `used by` line after the save is one no interface runs (or its name is mistyped: Problems has `DUC125` then).
+
 ## Problems shows Ductus's findings; TypeScript's come from VS Code itself (level 1)
 - **What:** with the [Ductus extension](../write/vscode.md), `ductus validate`'s findings appear in VS Code's Problems view when the workspace opens and after each save (about a second later on a small project; once for several saves close together), except TypeScript's own errors (`TS…`): VS Code's TypeScript already shows those as you type, so they'd be there twice. `ductus validate` in a terminal or CI shows them all. Notes about what wasn't checked (`DUC390`, no database given) aren't shown.
 - **Why:** each finding once, from whoever finds it first; validate's type check needs the file saved, VS Code's doesn't.

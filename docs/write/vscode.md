@@ -8,6 +8,7 @@ already look in VS Code:
 |---|---|
 | **Testing** (the flask in the activity bar) | every interface's tests, by interface, each at its `test(...)` line with a ▷ beside it in the file. Run or debug one test, one interface or everything. Each result shows the moment its test ends; a failure sits on its `expect` line with the expected and actual values side by side |
 | **Problems** | [`ductus validate`](../reference/validate.md)'s findings at their key in the YAML or their place in the code, when the workspace opens and each time you save a file of the project |
+| **The code and interface.yaml together** | above each function an interface runs, which interfaces and destinations run it (`used by adt-in → lab`); F12 on a `transform:` or `script:` value in interface.yaml goes to the function; a `script:` path opens its file |
 | **Run and Debug** | **Ductus: debug these tests**, **Ductus: debug this message** and **Ductus: debug this interface** with no `launch.json`, or F5 with a file of an interface open |
 | **Deploy to dev** (the ☁ button above the editor while your `ductus dev` runs) | your change running in your [`ductus dev`](../install/dev.md), in place: the interfaces you changed take it, the others never pause |
 | **Promote…** (Command Palette) | a release to test or prod, from the project's release files or from the engine it's on, with the gate's report and the outcome, as [`ductus deploy`](../operate/releases.md) does it |
@@ -68,6 +69,37 @@ mistyped, save, and the error goes. Each has its code (`DUC122`), whose meaning 
 [findings reference](../reference/validate.md). TypeScript's own errors aren't repeated: VS Code
 shows those as you type
 ([nuance](../nuances/transforms.md#problems-shows-ductuss-findings-typescripts-come-from-vs-code-itself-level-1)).
+
+## The code and interface.yaml together
+
+interface.yaml says which function each destination runs; VS Code's TypeScript sees only an
+exported function nobody imports. The extension joins the two:
+
+- **Above each function an interface runs**, a line says who runs it: `used by adt-in → lab`, or
+  for a function in a shared file several interfaces use, `used by adt-in → billing, lab · orders
+  → lab` (an HTTP interface in `respond` mode, which answers from its `script`'s `transform`,
+  shows by its name alone). Click it to
+  see those places in interface.yaml. A function no interface runs (a helper, one a test calls)
+  gets no line.
+- **F12** (or **Go to Definition**, or Ctrl+click) in interface.yaml goes to the function:
+  on `toBilling` in `transform: toBilling`, on `lab.ts` in `script: lab.ts` (to the `transform`
+  in it), or on a destination's name (to the `transform` it runs from the interface's `script`).
+  It follows a re-export (`export { toBilling } from "../shared/billing.ts"`) to the shared file.
+- **A `script:` path** is a link: Ctrl+click it to open the file.
+
+```yaml
+# interfaces/adt-in/interface.yaml, in part
+destinations:
+  billing:
+    http: { api: billing }
+    transform: toBilling      # F12 here: shared/billing.ts, at `export function toBilling`
+```
+
+They come from the same `ductus validate --json` run as Problems (its
+[`uses`](testing.md#ductus-validate---json)), so nothing else runs for them: they're as of the
+last save. A file with unsaved changes shows none until you save it, since its lines may have
+moved ([nuance](../nuances/transforms.md#vs-codes-used-by-lines-and-go-to-definition-are-as-of-the-last-save-level-1)).
+With `ductus.validateOnSave` off they're as of the last **Ductus: Validate the project**.
 
 ## Debugging without `launch.json`
 
@@ -239,7 +271,7 @@ address, and adds it to your user settings under the name you give
 |---|---|---|
 | `ductus.path` | empty: `ductus` on the `PATH` | the program to run, as a full path, relative to the workspace folder, or with `${workspaceFolder}` |
 | `ductus.environment` | `dev` | the environment (`--env`) tests, checks and debugging read the project in |
-| `ductus.validateOnSave` | `true` | `validate` after each save; off, only when the workspace opens and with **Ductus: Validate the project** (Command Palette) |
+| `ductus.validateOnSave` | `true` | `validate` after each save; off, only when the workspace opens and with **Ductus: Validate the project** (Command Palette). Problems and the [`used by` lines](#the-code-and-interfaceyaml-together) are as of that run |
 | `ductus.deployToDevOnSave` | `false` | [Deploy to dev](#deploy-to-dev) after each save, while the project's `ductus dev` runs |
 | `ductus.engines` | none | the engines [Promote…](#promote) deploys to and fetches from, [History](#history) and [Debug this message](#debug-this-message) read from, by name: `{ "test": "https://ductus-test:7700" }` (tokens are never kept here) |
 
@@ -250,10 +282,11 @@ developer's workstation in WSL:
 
 | | |
 |---|---|
-| the extension's start | 1.5–3.4 ms: it finds the projects and lists the tests after it has started, never in VS Code's way |
-| its package | 27 KB: one bundled file, nothing else to download |
+| the extension's start | 1.5–6 ms: it finds the projects and lists the tests after it has started, never in VS Code's way |
+| its package | 29 KB: one bundled file, nothing else to download |
 | an interface's tests from the Test Explorer (`adt-in`'s 5) | 60–75 ms, as `ductus test` takes in a terminal |
-| a save to its finding in Problems | 1.25 s (the debounce, 0.4 s, and `validate`, most of it the type check) |
+| a save to its finding in Problems | 1.25–1.87 s (the debounce, 0.4 s, and `validate`, most of it the type check) |
+| a file's `used by` lines | under 1 ms: read from the last `validate`, nothing run (the `validate` itself took as long with them as without: 0.7 s on this project, 3.6 s at 1,001 interfaces) |
 | Deploy to dev of one interface | 23–42 ms from the command to the answer |
 | Promote… of a one-interface release (a file to test; test to prod) | 1.2–1.4 s from **Enter** to the answer, most of it the gate (its tests and `validate` on the engine's machine); a larger project's gate takes longer ([measured](../operate/releases.md#measured)) |
 | an interface's History (a page of 50) | 14 ms from a `ductus dev`; 233 ms from the folder (`ductus history` starting and reading git) |
@@ -269,7 +302,7 @@ doesn't load), that's where it says why.
 copy of this guide's [example project](https://github.com/thorst/ductus/tree/main/examples/guides)
 and the build being tested: the tests found at their lines, an interface's tests run, a failing
 test shown at its `expect` with both values, a port mistyped in interface.yaml shown in Problems on
-save and gone once fixed, a breakpoint in `lab.ts` hit from the Test Explorer's **Debug**,
+save and gone once fixed, `lab.ts`'s `used by adt-in → lab` and F12 from `script: lab.ts` to it, a breakpoint in `lab.ts` hit from the Test Explorer's **Debug**,
 **Ductus: debug these tests** with no `launch.json`, **Deploy to dev** against a real `ductus
 dev`, by the command and on save, the **History** of an interface from that `ductus dev` (the two
 deploys there) and from the folder, a message that `ductus dev` stored opened through the web UI's

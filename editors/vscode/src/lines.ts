@@ -85,6 +85,108 @@ export interface ValidateDocument {
   errors: number;
   warnings: number;
   findings: Finding[];
+  /** Missing from a ductus before 0.7.6.4. */
+  uses?: Use[];
+}
+
+/** A place in a project file: the path relative to the project with `/`, line and column from 1. */
+export interface Place {
+  file: string;
+  line: number;
+  column: number;
+  end_line?: number;
+  end_column?: number;
+}
+
+/** A function the engine calls: where interface.yaml names it, and where it's declared. */
+export interface Use {
+  interface: string;
+  /** None for an interface that answers (respond mode). */
+  destination?: string;
+  function: string;
+  yaml: Place;
+  /** None when its file doesn't export it (validate's DUC125 says so). */
+  code?: Place;
+}
+
+/** A code lens: above a declared function, who runs it, and the interface.yaml places to peek. */
+export interface Lens {
+  line: number;
+  column: number;
+  title: string;
+  targets: Place[];
+}
+
+/**
+ * The code lenses for one file (relative to the project): one per function some interface runs,
+ * "used by adt-in → lab, billing · orders → lab" (respond mode: the interface alone), interfaces
+ * and destinations sorted. Exports nobody runs get none (shared helpers would all carry one).
+ */
+export function lensesFor(uses: Use[], file: string): Lens[] {
+  const byPlace = new Map<string, { at: Place; uses: Use[] }>();
+  for (const use of uses) {
+    if (use.code?.file !== file) continue;
+    const key = `${use.code.line}:${use.code.column}`;
+    const entry = byPlace.get(key) ?? { at: use.code, uses: [] };
+    entry.uses.push(use);
+    byPlace.set(key, entry);
+  }
+  return [...byPlace.values()]
+    .sort((a, b) => a.at.line - b.at.line || a.at.column - b.at.column)
+    .map(({ at, uses }) => {
+      const destinations = new Map<string, Set<string>>();
+      for (const u of uses) {
+        const set = destinations.get(u.interface) ?? new Set<string>();
+        if (u.destination) set.add(u.destination);
+        destinations.set(u.interface, set);
+      }
+      const parts = [...destinations.keys()].sort().map((name) => {
+        const ds = [...destinations.get(name)!].sort();
+        return ds.length ? `${name} → ${ds.join(", ")}` : name;
+      });
+      return {
+        line: at.line,
+        column: at.column,
+        title: `used by ${parts.join(" · ")}`,
+        targets: uses.map((u) => u.yaml),
+      };
+    });
+}
+
+/**
+ * Where the function named at a place in interface.yaml is declared: the `transform:` or
+ * `script:` value (or the destination's key) under the cursor. Line and column from 1; the end is
+ * exclusive, a place with no end is its first character only.
+ */
+export function definitionAt(uses: Use[], file: string, line: number, column: number): Place | undefined {
+  const inside = (p: Place) => {
+    const endLine = p.end_line ?? p.line;
+    const endColumn = p.end_column ?? p.column + 1;
+    const afterStart = line > p.line || (line === p.line && column >= p.column);
+    const beforeEnd = line < endLine || (line === endLine && column < endColumn);
+    return afterStart && beforeEnd;
+  };
+  return uses.find((u) => u.code && u.yaml.file === file && inside(u.yaml))?.code;
+}
+
+/**
+ * The `script:` values in an interface.yaml's text (the interface's and each destination's),
+ * each with where it's written (line and column from 1, the end exclusive) and the path it names:
+ * the editor makes them links to the file. A value with `${` isn't a path yet: left out.
+ */
+export function scriptPaths(text: string): { line: number; column: number; end: number; path: string }[] {
+  const found: { line: number; column: number; end: number; path: string }[] = [];
+  text.split("\n").forEach((written, i) => {
+    // `script: lab.ts`, `script: "lab.ts"`, and in flow style `{ ..., script: lab.ts }`; a comment after.
+    const re = /(?:^|[\s{,])script:\s*(["']?)([^\s"',}#]+)\1/g;
+    for (const m of written.matchAll(re)) {
+      const path = m[2];
+      if (path.includes("${")) continue;
+      const column = m.index + m[0].length - m[1].length - path.length + 1;
+      found.push({ line: i + 1, column, end: column + path.length, path });
+    }
+  });
+  return found;
 }
 
 /** `validate --json`'s document, or undefined when the output isn't one (it didn't run). */

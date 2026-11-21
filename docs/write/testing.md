@@ -429,11 +429,99 @@ $ ductus validate --json
       "message": "not checked against a database (set DUCTUS_DATABASE_URL): lane changes, retention changes",
       "hint": "set DUCTUS_DATABASE_URL (or --database-url)"
     }
+  ],
+  "uses": [
+    {
+      "interface": "adt-to-billing",
+      "destination": "billing",
+      "function": "transform",
+      "yaml": {
+        "file": "interfaces/adt-to-billing/interface.yaml",
+        "line": 12,
+        "column": 13,
+        "end_line": 12,
+        "end_column": 23
+      },
+      "code": {
+        "file": "interfaces/adt-to-billing/billing.ts",
+        "line": 16,
+        "column": 23
+      }
+    },
+    {
+      "interface": "census-in",
+      "destination": "ehr",
+      "function": "transform",
+      "yaml": {
+        "file": "interfaces/census-in/interface.yaml",
+        "line": 11,
+        "column": 52,
+        "end_line": 11,
+        "end_column": 61
+      },
+      "code": {
+        "file": "interfaces/census-in/census.ts",
+        "line": 4,
+        "column": 17
+      }
+    },
+    {
+      "interface": "orders-xml",
+      "destination": "supplier",
+      "function": "transform",
+      "yaml": {
+        "file": "interfaces/orders-xml/interface.yaml",
+        "line": 9,
+        "column": 57,
+        "end_line": 9,
+        "end_column": 66
+      },
+      "code": {
+        "file": "interfaces/orders-xml/orders.ts",
+        "line": 4,
+        "column": 17
+      }
+    },
+    {
+      "interface": "remits-in",
+      "destination": "billing-office",
+      "function": "transform",
+      "yaml": {
+        "file": "interfaces/remits-in/interface.yaml",
+        "line": 10,
+        "column": 63,
+        "end_line": 10,
+        "end_column": 72
+      },
+      "code": {
+        "file": "interfaces/remits-in/remits.ts",
+        "line": 14,
+        "column": 17
+      }
+    },
+    {
+      "interface": "results-to-fhir",
+      "destination": "fhir",
+      "function": "transform",
+      "yaml": {
+        "file": "interfaces/results-to-fhir/interface.yaml",
+        "line": 13,
+        "column": 13,
+        "end_line": 13,
+        "end_column": 23
+      },
+      "code": {
+        "file": "interfaces/results-to-fhir/to-fhir.ts",
+        "line": 9,
+        "column": 17
+      }
+    }
   ]
 }
 ```
 
-(`adt-to-billing` gets the warning because `adt-in`, which routes to it, didn't load.)
+(`adt-to-billing` gets the warning because `adt-in`, which routes to it, didn't load; for the same
+reason `adt-in`'s destinations aren't among the `uses`.)
 
 | Field | What it is |
 |---|---|
@@ -446,6 +534,19 @@ $ ductus validate --json
 | `line`, `column`, `end_line`, `end_column` | from 1, columns counted in characters: the key in YAML (`port`), the code in TypeScript, the `${...}` that has no value, or where the YAML parser stopped. Absent when the file doesn't have even the first part of the key (a missing `about:`) ([nuance](../nuances/transforms.md#a-places-precision-in-validate---json-depends-on-the-file-level-2)) |
 | `interface` | the interface it's about |
 | `hint` | what to do, when the message says (already part of `message`) |
+
+**`uses`** lists each function the engine calls, with where interface.yaml names it and where its
+code declares it: what an editor needs to go from `transform: toBilling` to the function and back
+([VS Code](vscode.md#the-code-and-interfaceyaml-together) does both). One per destination that
+runs code, and one for an HTTP interface in `respond` mode; interfaces whose interface.yaml
+doesn't load have none. The text output has none of it.
+
+| Field | What it is |
+|---|---|
+| `interface`, `destination` | who runs it; no `destination` for an interface in `respond` mode |
+| `function` | its name, as the engine calls it (`toBilling`, or `transform` when interface.yaml names none) |
+| `yaml` | where interface.yaml names it, as `file`, `line`, `column`, `end_line`, `end_column`: the `transform:` value, else the destination's `script:` value, else the destination's name (it runs `transform` from the interface's `script`); in `respond` mode, the interface's `script:` value |
+| `code` | where it's declared, as `file`, `line`, `column` (its name): followed through a re-export (`export { toBilling } from "../shared/billing.ts"`) to the shared file. Absent when the file doesn't export it (`DUC125` in `findings` says so) |
 
 ## Beyond unit tests
 

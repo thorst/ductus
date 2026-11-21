@@ -189,6 +189,27 @@ function findDebuggerStatements(sourceFile) {
   return found;
 }
 
+/**
+ * What a file exports, each with where it's declared: `validate --json`'s `uses` place the
+ * function interface.yaml names (the editor's code lenses and go-to-definition). A re-export
+ * (`export { toBilling } from "../shared/billing.ts"`) is followed to the shared file.
+ */
+function findExports(checker, sourceFile) {
+  const module = checker.getSymbolAtLocation(sourceFile);
+  if (!module) return [];
+  const found = [];
+  for (const symbol of checker.getExportsOfModule(module)) {
+    const target = symbol.flags & ts.SymbolFlags.Alias ? checker.getAliasedSymbol(symbol) : symbol;
+    const decl = target.declarations?.[0];
+    if (!decl) continue; // an export of something that doesn't exist: TypeScript reports it
+    const file = decl.getSourceFile();
+    if (file.isDeclarationFile) continue; // the SDK's, re-exported: no place in the project
+    const pos = file.getLineAndCharacterOfPosition((decl.name ?? decl).getStart(file));
+    found.push({ module: sourceFile.fileName, name: symbol.name, file: file.fileName, line: pos.line + 1, column: pos.character + 1 });
+  }
+  return found;
+}
+
 /** The project files a file imports (static and dynamic imports, re-exports). */
 function localImports(sourceFile, options, host) {
   const specifiers = [];
@@ -256,6 +277,7 @@ globalThis.__ductus_check = (filesJson, libsJson, sharedJson, wantDiagnostics) =
   const references = [];
   const imports = {};
   const consoleCalls = [];
+  const exports = [];
   for (const sourceFile of program.getSourceFiles()) {
     if (sourceFile.isDeclarationFile || sourceFile.fileName.startsWith(LIB_DIR)) continue;
     const at = (start) => {
@@ -274,6 +296,7 @@ globalThis.__ductus_check = (filesJson, libsJson, sharedJson, wantDiagnostics) =
     for (const c of findConsoleCalls(checker, sourceFile)) {
       consoleCalls.push({ ...at(c.start), method: c.method, topLevel: c.topLevel });
     }
+    exports.push(...findExports(checker, sourceFile));
   }
   if (!wantDiagnostics) return JSON.stringify({ diagnostics: [], references, imports });
   const diagnostics = ts.getPreEmitDiagnostics(program).map((d) => {
@@ -293,5 +316,5 @@ globalThis.__ductus_check = (filesJson, libsJson, sharedJson, wantDiagnostics) =
       message: ts.flattenDiagnosticMessageText(d.messageText, "\n"),
     };
   });
-  return JSON.stringify({ diagnostics: diagnostics.concat(lints), references, imports, console: consoleCalls });
+  return JSON.stringify({ diagnostics: diagnostics.concat(lints), references, imports, console: consoleCalls, exports });
 };

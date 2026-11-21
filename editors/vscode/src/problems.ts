@@ -1,7 +1,7 @@
 import * as path from "node:path";
 import * as vscode from "vscode";
 import type { Finder } from "./binary";
-import { type Finding, parseValidate, problemsByFile } from "./lines";
+import { type Finding, parseValidate, problemsByFile, type Use } from "./lines";
 import { output } from "./process";
 import type { Projects } from "./projects";
 import { environment, validateOnSave } from "./settings";
@@ -18,6 +18,8 @@ const DEBOUNCE_MS = 400;
 export class Problems implements vscode.Disposable {
   readonly collection = vscode.languages.createDiagnosticCollection("ductus");
   private readonly shown = new Map<string, vscode.Uri[]>();
+  /** Each project's functions and where they're used, from its last run (the code lenses'). */
+  readonly uses = new Map<string, Use[]>();
   private readonly timers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly running = new Map<string, Promise<void>>();
   private readonly again = new Set<string>();
@@ -97,6 +99,7 @@ export class Problems implements vscode.Disposable {
       uris.push(uri);
     }
     this.shown.set(root, uris);
+    this.uses.set(root, document.uses ?? []);
     this.ran.fire(root);
   }
 
@@ -105,6 +108,7 @@ export class Problems implements vscode.Disposable {
       if (!this.projects.roots.includes(root)) {
         uris.forEach((u) => this.collection.delete(u));
         this.shown.delete(root);
+        this.uses.delete(root);
       }
     }
   }

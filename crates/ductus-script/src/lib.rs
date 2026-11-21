@@ -14,7 +14,7 @@ mod inspect;
 mod loader;
 mod ops;
 
-pub use check::{Analysis, ConsoleCall, Diagnostic, ResourceReference, analyze, type_check};
+pub use check::{Analysis, ConsoleCall, Diagnostic, Export, ResourceReference, analyze, type_check};
 pub use guard::{Cause, DebugSwitch};
 pub use inspect::{FromIsolate, InspectorSessions, ToIsolate};
 pub use ops::{BoxFuture, FetchRequest, FetchResponse, KILL, QUARANTINE, Services, TRANSIENT};

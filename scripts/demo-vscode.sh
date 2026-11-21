@@ -4,7 +4,8 @@
 # (@vscode/test-electron, downloaded once into editors/vscode/.vscode-test) on a copy of the guides'
 # project with the extension and this build of ductus: the tests found at their lines, an
 # interface's tests run, a failing test shown at its expect with the expected and actual values,
-# a mistyped port in Problems on save and gone when fixed, a breakpoint hit from the Test
+# a mistyped port in Problems on save and gone when fixed, (0.7.6.4) lab.ts's "used by" code lens,
+# go-to-definition from `script: lab.ts` and the `script:` paths as links, a breakpoint hit from the Test
 # Explorer's Debug, "Ductus: debug these tests" with no launch.json, (0.7.6.3.1) Deploy to dev
 # against a real `ductus dev`, by the command and on save, and (0.7.6.3.2) Promote… across two
 # engines in release mode started here (test, and prod requiring test first, each with its own
@@ -12,7 +13,7 @@
 # prod, each token asked for once and checked first (a viewer's turned away); (0.7.6.3.3) the
 # History view (dev's reloads, then the folder's own) and a message dev stored, debugged through the
 # web UI's `vscode://` link to a breakpoint. Measures the extension's activation, a save to
-# Problems, a deploy to dev, the history, the debugged message, the promotions and the package's size.
+# Problems, the code lenses, a deploy to dev, the history, the debugged message, the promotions and the package's size.
 # Needs: node 24, xvfb-run (a display for VS Code), VS Code's libraries (libgtk-3, libnss3,
 # libasound2, libgbm1; CI's Ubuntu has them), the development database's server (scripts/dev/db.sh).
 set -euo pipefail
@@ -79,11 +80,14 @@ fail=""
 [ "$size" -lt 100000 ] || fail+=" package-over-100KB"
 for t in "finds ductus and activates" "the tests are found by interface" "an interface's tests run" \
   "a failure is shown at its expect" "validate's findings are in Problems" \
+  "interface.yaml and its code as one" \
   "Debug from the Test Explorer stops at a breakpoint" "debugging works without launch.json" \
   "Deploy to dev: a running ductus dev takes a change in place" \
   "History and Debug this message: dev's reloads listed" \
   "Promote…: a release file to test, then from test to prod"; do
   grep -q "✔ $t" "$LOG" || fail+=" \"$t\""
 done
-grep -q ' 10 passing' "$LOG" || fail+=" not-all-passing"
+grep -q ' 11 passing' "$LOG" || fail+=" not-all-passing"
+# A test added here but not to the list above still fails the demo.
+! grep -qE '^ +[0-9]+ failing' "$LOG" || fail+=" failing"
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

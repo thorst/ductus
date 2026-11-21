@@ -276,6 +276,17 @@ pub fn locate(text: &str, key: &[String]) -> Option<Span> {
     deepest(&tree(text)?, key).0
 }
 
+/// Where `key`'s value is written, when the file has every part of `key` and the value is a scalar
+/// (`toLab` in `transform: toLab`): what an editor jumps from. None otherwise (`locate` then gives
+/// the key).
+pub fn locate_value(text: &str, key: &[String]) -> Option<Span> {
+    let root = tree(text)?;
+    match deepest(&root, key) {
+        (_, Node { span, kind: Kind::Scalar(_) }, true) => Some(*span),
+        _ => None,
+    }
+}
+
 /// How far down `key` goes in `root`: where its deepest part found is written, the node there,
 /// and whether every part was found.
 fn deepest<'a>(root: &'a Node, key: &[String]) -> (Option<Span>, &'a Node, bool) {
@@ -422,6 +433,15 @@ about:
         assert_eq!(at(YAML, "destinations.lab.mllp.port"), Some((5, 34)));
         assert_eq!(at(YAML, "destinations.lab.transform"), Some((6, 5)));
         assert_eq!(at(YAML, "about.from.hosts.1"), Some((13, 9)));
+    }
+
+    #[test]
+    fn a_scalar_value_is_placed_from_its_first_character_to_its_end() {
+        let value = |k: &str| locate_value(YAML, &key(k)).map(|s| (s.start.line, s.start.column, s.end.column));
+        assert_eq!(value("destinations.lab.transform"), Some((6, 16, 21)), "toLab");
+        assert_eq!(value("name"), Some((1, 7, 13)), "adt-in, not the comment after it");
+        assert_eq!(value("destinations.lab"), None, "a map");
+        assert_eq!(value("destinations.billing.transform"), None, "not in the file");
     }
 
     #[test]

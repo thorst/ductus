@@ -50,6 +50,22 @@ pub struct Analysis {
     /// Calls of the global `console` (empty unless diagnostics were asked for).
     #[serde(default)]
     pub console: Vec<ConsoleCall>,
+    /// What each file exports and where it's declared (empty unless diagnostics were asked for).
+    #[serde(default)]
+    pub exports: Vec<Export>,
+}
+
+/// A name a file exports, with where it's declared: in the file itself, or in the file a
+/// re-export (`export { f } from "./other.ts"`) leads to.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Export {
+    /// The exporting file (same path form as the keys passed in).
+    pub module: String,
+    pub name: String,
+    /// Where it's declared: the file, and the line and column of its name (from 1).
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
 }
 
 /// `console.log(...)` in code: where, and which method.

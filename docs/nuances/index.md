@@ -25,7 +25,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Order, retries and durability](ordering.md) (8)
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
-- [Writing transforms](transforms.md) (19)
+- [Writing transforms](transforms.md) (20)
 - [Debugging](debugging.md) (17)
 - [Shared pool](shared-pool.md) (3)
 - [Runaway scripts](runaway.md) (6)
@@ -51,7 +51,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Releases](releases.md) (41)
 - [Windows](windows.md) (9)
 
-## Level 1: Foundations (47)
+## Level 1: Foundations (48)
 
 - [Retention is 1, 3 or 7 weeks, not any number of days](retention.md#retention-is-1-3-or-7-weeks-not-any-number-of-days-level-1) (Retention)
 - [Missing fields read as "" and never throw](transforms.md#missing-fields-read-as--and-never-throw-level-1) (Writing transforms)
@@ -62,6 +62,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [`console` in tests: each line under the test that wrote it](transforms.md#console-in-tests-each-line-under-the-test-that-wrote-it-level-1) (Writing transforms)
 - [A quoted number in an environment file is text](transforms.md#a-quoted-number-in-an-environment-file-is-text-level-1) (Writing transforms)
 - [VS Code's Test Explorer shows the tests as they were last listed](transforms.md#vs-codes-test-explorer-shows-the-tests-as-they-were-last-listed-level-1) (Writing transforms)
+- [VS Code's "used by" lines and go-to-definition are as of the last save](transforms.md#vs-codes-used-by-lines-and-go-to-definition-are-as-of-the-last-save-level-1) (Writing transforms)
 - [Problems shows Ductus's findings; TypeScript's come from VS Code itself](transforms.md#problems-shows-ductuss-findings-typescripts-come-from-vs-code-itself-level-1) (Writing transforms)
 - [`ductus test --inspect` waits for a debugger before anything runs](debugging.md#ductus-test---inspect-waits-for-a-debugger-before-anything-runs-level-1) (Debugging)
 - [One interface's tests per debugging run](debugging.md#one-interfaces-tests-per-debugging-run-level-1) (Debugging)

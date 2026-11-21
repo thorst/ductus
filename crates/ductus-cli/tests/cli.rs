@@ -1505,8 +1505,16 @@ fn validate_json_places_each_finding_in_its_file() {
     let (ok, out) = without_a_database(dir.path(), &["validate", "--json"]);
     assert!(!ok, "{out}");
     let doc: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
-    assert_eq!(keys(&doc), ["environment", "errors", "findings", "valid", "warnings"]);
+    assert_eq!(keys(&doc), ["environment", "errors", "findings", "uses", "valid", "warnings"]);
     assert_eq!((&doc["valid"], &doc["environment"]), (&false.into(), &"dev".into()));
+    // Only `a`'s config loads; its `toLab` isn't exported, so its use has no `code`.
+    assert_eq!(
+        doc["uses"],
+        serde_json::json!([{
+            "interface": "a", "destination": "lab", "function": "toLab",
+            "yaml": { "file": "interfaces/a/interface.yaml", "line": 8, "column": 16, "end_line": 8, "end_column": 21 },
+        }])
+    );
     let findings = doc["findings"].as_array().unwrap();
     let find = |code: &str| findings.iter().find(|f| f["code"] == code).unwrap_or_else(|| panic!("no {code} in {out}"));
     let place =
@@ -1540,6 +1548,64 @@ fn validate_json_places_each_finding_in_its_file() {
         (&"note".into(), &"set DUCTUS_DATABASE_URL (or --database-url)".into())
     );
     assert!(note.get("file").is_none(), "{note}");
+}
+
+/// `validate --json`'s `uses`: each function the engine calls, where interface.yaml names it (the
+/// `transform:` value, the `script:` value, the destination's key, respond mode's `script:`) and
+/// where it's declared, through a renamed re-export into a shared file. What an editor's code
+/// lenses and go-to-definition read; the text output has none of it.
+#[test]
+fn validate_json_uses_name_each_function_and_where_it_s_declared() {
+    let about = "about: { from: { application: EHR }, to: { application: Lab } }\n";
+    let dir = project(&[
+        ("shared/billing.ts", "// billing\nexport function toBilling(m: string) {\n  return m;\n}\n"),
+        (
+            "interfaces/adt/interface.yaml",
+            &format!(
+                "name: adt\nsource: {{ mllp: {{ port: 7101 }} }}\nscript: route.ts\n{about}destinations:\n  lab:\n    mllp: {{ host: localhost, port: 7102 }}\n    transform: toLab\n  billing:\n    mllp: {{ host: localhost, port: 7103 }}\n    script: billing.ts\n  archive:\n    file: {{ dir: out }}\n"
+            ),
+        ),
+        (
+            "interfaces/adt/route.ts",
+            "export function transform(m: string) {\n  return m;\n}\n\nexport const toLab = (m: string) => m;\n",
+        ),
+        ("interfaces/adt/billing.ts", "export { toBilling as transform } from \"../../shared/billing.ts\";\n"),
+        (
+            "interfaces/hello/interface.yaml",
+            &format!(
+                "name: hello\nsource: {{ http: {{ port: 7104, path: /hello, method: GET, mode: respond }} }}\nformat: text\n{about}script: hello.ts\n"
+            ),
+        ),
+        ("interfaces/hello/hello.ts", "export function transform() {\n  return \"hello\";\n}\n"),
+    ]);
+    let (ok, out) = without_a_database(dir.path(), &["validate", "--json"]);
+    assert!(ok, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let place =
+        |file: &str, line: u32, column: u32| serde_json::json!({ "file": file, "line": line, "column": column });
+    let yaml = |line: u32, column: u32, end: Option<u32>| {
+        let mut p = place("interfaces/adt/interface.yaml", line, column);
+        if let Some(end) = end {
+            p["end_line"] = line.into();
+            p["end_column"] = end.into();
+        }
+        p
+    };
+    let used = |destination: &str, function: &str, yaml: serde_json::Value, code: serde_json::Value| serde_json::json!({ "interface": "adt", "destination": destination, "function": function, "yaml": yaml, "code": code });
+    let mut hello_yaml = place("interfaces/hello/interface.yaml", 5, 9);
+    (hello_yaml["end_line"], hello_yaml["end_column"]) = (5.into(), 17.into());
+    assert_eq!(
+        doc["uses"],
+        serde_json::json!([
+            // Destinations by name, as interface.yaml's other checks list them.
+            used("archive", "transform", yaml(12, 3, Some(10)), place("interfaces/adt/route.ts", 1, 17)),
+            used("billing", "transform", yaml(11, 13, Some(23)), place("shared/billing.ts", 2, 17)),
+            used("lab", "toLab", yaml(8, 16, Some(21)), place("interfaces/adt/route.ts", 5, 14)),
+            { "interface": "hello", "function": "transform", "yaml": hello_yaml, "code": place("interfaces/hello/hello.ts", 1, 17) },
+        ])
+    );
+    let (ok, text) = without_a_database(dir.path(), &["validate"]);
+    assert!(ok && !text.contains("toLab"), "{text}");
 }
 
 /// Two interfaces on one port: the second one's source port, in its file.

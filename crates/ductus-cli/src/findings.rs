@@ -1,6 +1,7 @@
 //! What `ductus validate` finds, as text for people (the lines it always printed) or as one JSON
 //! document for editors and CI (`--json`): each finding with its severity, a stable code, the file
-//! and the place in it, and a fix where there's one to give. `CODES` is the list the reference page
+//! and the place in it, and a fix where there's one to give; with `uses`, the functions interfaces
+//! run and where they're named and declared. `CODES` is the list the reference page
 //! (`docs/reference/validate.md`) is made from.
 
 use ductus_core::yaml::{Located, Span, Stage};
@@ -160,6 +161,45 @@ impl Finding {
     }
 }
 
+/// A place in a project file, relative to the project with `/`; line and column from 1.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Place {
+    pub file: String,
+    pub line: u32,
+    pub column: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub end_column: Option<u32>,
+}
+
+impl Place {
+    fn of(file: &str, span: Option<Span>) -> Self {
+        let (line, column, end) = match span {
+            Some(s) => (s.start.line, s.start.column, (s.end != s.start).then_some(s.end)),
+            None => (1, 1, None), // not found in the file (it changed while validate ran): its top
+        };
+        Self { file: file.into(), line, column, end_line: end.map(|e| e.line), end_column: end.map(|e| e.column) }
+    }
+}
+
+/// A function the engine calls, where interface.yaml names it and where its code declares it
+/// (`validate --json`'s `uses`): what an editor's code lenses and go-to-definition read.
+#[derive(Debug, Clone, Serialize)]
+pub struct Use {
+    pub interface: String,
+    /// The destination that runs it; none for an interface that answers (respond mode).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    pub function: String,
+    /// The `transform:` value that names it, else the `script:` value that holds it, else the
+    /// destination's key (`transform` in its interface's `script`).
+    pub yaml: Place,
+    /// Where it's declared (through re-exports); none when its file doesn't export it (`DUC125`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<Place>,
+}
+
 /// The path of an analysed file (absolute, `/`) relative to the project.
 pub fn relative(root: &Path, file: &str) -> String {
     let root = ductus_runtime::project::key(root);
@@ -171,13 +211,34 @@ pub struct Report {
     root: PathBuf,
     json: bool,
     findings: Vec<Finding>,
+    uses: Vec<Use>,
     /// Files read to place findings in them, by path relative to the project.
     texts: RefCell<HashMap<String, Option<String>>>,
 }
 
 impl Report {
     pub fn new(root: &Path, json: bool) -> Self {
-        Self { root: root.to_path_buf(), json, findings: Vec::new(), texts: RefCell::new(HashMap::new()) }
+        let texts = RefCell::new(HashMap::new());
+        Self { root: root.to_path_buf(), json, findings: Vec::new(), uses: Vec::new(), texts }
+    }
+
+    /// Whether the JSON document is being made (`uses` are only in it).
+    pub fn json(&self) -> bool {
+        self.json
+    }
+
+    /// Where `key` is in `file` (relative to the project): its scalar value, else the key itself
+    /// (or the deepest part of it the file has).
+    pub fn place(&self, file: &str, key: &[&str]) -> Place {
+        let key: Vec<String> = key.iter().map(|k| k.to_string()).collect();
+        let span = self
+            .text(file)
+            .and_then(|t| ductus_core::yaml::locate_value(&t, &key).or_else(|| ductus_core::yaml::locate(&t, &key)));
+        Place::of(file, span)
+    }
+
+    pub fn add_use(&mut self, used: Use) {
+        self.uses.push(used);
     }
 
     /// A line of text output that isn't a finding (`environment: dev`, `✓ ...`).
@@ -258,6 +319,7 @@ impl Report {
                 "errors": errors,
                 "warnings": warnings,
                 "findings": self.findings,
+                "uses": self.uses,
             });
             println!("{}", serde_json::to_string_pretty(&document)?);
         } else {

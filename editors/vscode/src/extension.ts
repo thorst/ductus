@@ -9,6 +9,7 @@ import { Problems } from "./problems";
 import { Projects } from "./projects";
 import { Promote } from "./promote";
 import { Tests } from "./testing";
+import { Wiring } from "./wiring";
 
 /** What `activate` returns: for the extension's own tests, not a public API. */
 export interface Api {
@@ -20,6 +21,7 @@ export interface Api {
   promote: Promote;
   history: History;
   messages: Messages;
+  wiring: Wiring;
   binary: Finder;
   /** How long `activate` took, in ms (measured, reported in the output). */
   activationMs: number;
@@ -42,6 +44,7 @@ export function activate(context: vscode.ExtensionContext): Api {
   const promote = new Promote(binary, projects, engines, log);
   const history = new History(binary, projects, dev, engines, context.workspaceState, log);
   const messages = new Messages(binary, projects, dev, engines, log);
+  const wiring = new Wiring(problems, projects);
   context.subscriptions.push(
     log,
     binary,
@@ -53,6 +56,7 @@ export function activate(context: vscode.ExtensionContext): Api {
     promote,
     history,
     messages,
+    wiring,
     // The History view shows in workspaces with a project only.
     projects.onDidChange(() => {
       void vscode.commands.executeCommand("setContext", "ductus.hasProject", projects.roots.length > 0);
@@ -68,7 +72,7 @@ export function activate(context: vscode.ExtensionContext): Api {
 
   // Beside the activation, never in its path: find the projects, then check each once.
   void projects.scan().then(() => projects.roots.forEach((root) => problems.schedule(root, 0)));
-  return { projects, tests, problems, dev, engines, promote, history, messages, binary, activationMs };
+  return { projects, tests, problems, dev, engines, promote, history, messages, wiring, binary, activationMs };
 }
 
 export function deactivate() {}

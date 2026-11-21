@@ -6,7 +6,7 @@ use ductus_script::{Isolate, Runaway};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use crate::findings::{Finding, Report, Severity};
+use crate::findings::{Finding, Place, Report, Severity, Use};
 use ductus_runtime::project::{TYPES_FILE, code_references, files_under, key, resource_kind};
 use ductus_script::errors::Root;
 
@@ -1075,7 +1075,7 @@ async fn check_allow<'a>(
 }
 
 /// Check configs, module loading and types. Returns false if anything is wrong. `json`: one JSON
-/// document with every finding instead of the text.
+/// document with every finding (and the functions interfaces use) instead of the text.
 pub async fn validate(
     root: &Path,
     env: &str,
@@ -1277,6 +1277,9 @@ async fn check_project(
     }
 
     let analysis = type_check.join().map_err(|_| anyhow::anyhow!("the type checker's thread panicked"))??;
+    if report.json() {
+        add_uses(root, report, &places, configs(), &analysis);
+    }
 
     // Databases and APIs named in code must exist (each place reported once, even in a shared
     // library many interfaces import).
@@ -1478,6 +1481,60 @@ async fn check_project(
         report.ok("types: no errors");
     }
     Ok(())
+}
+
+/// Each function the engine calls, where interface.yaml names it and where its code declares it
+/// (`validate --json`'s `uses`, for an editor's code lenses and go-to-definition). Every interface
+/// whose config loaded, valid or not: a function its file doesn't export has no `code` (DUC125
+/// says why).
+fn add_uses<'a>(
+    root: &Path,
+    report: &mut Report,
+    places: &Places,
+    configs: impl Iterator<Item = &'a InterfaceConfig>,
+    analysis: &ductus_script::Analysis,
+) {
+    let exports: std::collections::HashMap<(&str, &str), &ductus_script::Export> =
+        analysis.exports.iter().map(|e| ((e.module.as_str(), e.name.as_str()), e)).collect();
+    for config in configs {
+        let Some(file) = places.file(&config.name).map(str::to_string) else { continue };
+        // Where each function is named, in `functions()`'s order: the `transform:` value, else the
+        // `script:` value (it runs `transform` from that file), else the destination's key.
+        let named: Vec<(Option<&str>, Vec<&str>)> = if config.responds() {
+            vec![(None, vec!["script"])]
+        } else {
+            config
+                .destinations()
+                .map(|(name, d)| {
+                    let mut at = config.destination_key(name);
+                    match (&d.transform, &d.script) {
+                        (Some(_), _) => at.push("transform"),
+                        (None, Some(_)) => at.push("script"),
+                        (None, None) => {}
+                    }
+                    (Some(name), at)
+                })
+                .collect()
+        };
+        for ((destination, at), function) in named.into_iter().zip(config.functions()) {
+            let Some(function) = function else { continue }; // no code: messages go as they came
+            let module = key(&function.module);
+            let code = exports.get(&(module.as_str(), function.name.as_str())).map(|e| Place {
+                file: relative(root, &e.file),
+                line: e.line,
+                column: e.column,
+                end_line: None,
+                end_column: None,
+            });
+            report.add_use(Use {
+                interface: config.name.clone(),
+                destination: destination.map(str::to_string),
+                function: function.name,
+                yaml: report.place(&file, &at),
+                code,
+            });
+        }
+    }
 }
 
 /// Where in interface.yaml a code loading error points: the destination whose function its file

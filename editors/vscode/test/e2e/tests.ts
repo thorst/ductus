@@ -196,6 +196,56 @@ suite("Ductus", () => {
     await waitFor("DUC122 gone", () => !duc122());
   });
 
+  test("interface.yaml and its code as one: a lens on the function, F12 from `script:`, the path a link", async () => {
+    await waitFor("validate's uses", () => (api.problems.uses.get(root) ?? []).length > 0);
+    const code = vscode.Uri.file(at("interfaces/adt-in/lab.ts"));
+    const yaml = vscode.Uri.file(at("interfaces/adt-in/interface.yaml"));
+    // VS Code asks providers only about documents it has open ("Illegal argument" otherwise).
+    const labDocument = await vscode.workspace.openTextDocument(code);
+    await vscode.workspace.openTextDocument(yaml);
+    const ours0 = performance.now();
+    api.wiring.provideCodeLenses(labDocument);
+    console.log(`measure: our lenses for lab.ts ${(performance.now() - ours0).toFixed(2)} ms`);
+    const started = Date.now();
+    const lenses = await vscode.commands.executeCommand<vscode.CodeLens[]>("vscode.executeCodeLensProvider", code);
+    // VS Code's command waits for every provider, TypeScript's own reference lenses included.
+    console.log(`measure: every provider's lenses for lab.ts ${Date.now() - started} ms`);
+    const ours = lenses.filter((l) => l.command?.command === "editor.action.showReferences");
+    assert.deepEqual(
+      ours.map((l) => [l.range.start.line, l.command?.title]),
+      [[9, "used by adt-in → lab"]],
+      "above `export function transform`, line 10 from 1",
+    );
+    const [, , places] = ours[0].command!.arguments as [vscode.Uri, vscode.Position, vscode.Location[]];
+    assert.deepEqual(
+      places.map((p) => [p.uri.fsPath, p.range.start.line]),
+      [[yaml.fsPath, 11]],
+      "peeks `script: lab.ts`",
+    );
+
+    // F12 on `lab.ts` in `script: lab.ts` (line 12, the value from column 13).
+    const found = await vscode.commands.executeCommand<(vscode.Location | vscode.LocationLink)[]>(
+      "vscode.executeDefinitionProvider",
+      yaml,
+      new vscode.Position(11, 14),
+    );
+    const target = found.map((f) =>
+      "targetUri" in f ? { uri: f.targetUri, range: f.targetRange } : { uri: f.uri, range: f.range },
+    );
+    assert.deepEqual(
+      target.map(({ uri, range }) => [uri.fsPath, range.start.line, range.start.character]),
+      [[code.fsPath, 9, 16]],
+      "the function's name",
+    );
+
+    const links = await vscode.commands.executeCommand<vscode.DocumentLink[]>("vscode.executeLinkProvider", yaml);
+    const files = links.filter((l) => l.target?.scheme === "file").map((l) => [l.range.start.line, l.target!.fsPath]);
+    assert.deepEqual(files, [
+      [11, code.fsPath],
+      [15, at("interfaces/adt-in/billing.ts")],
+    ]);
+  });
+
   test("Debug from the Test Explorer stops at a breakpoint in the code a test calls", async () => {
     const code = vscode.Uri.file(at("interfaces/adt-in/lab.ts"));
     const breakpoint = new vscode.SourceBreakpoint(new vscode.Location(code, new vscode.Position(17, 0)));

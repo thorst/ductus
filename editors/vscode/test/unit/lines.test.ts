@@ -7,7 +7,11 @@ import {
   deployArgs,
   deployLines,
   deploySummary,
+  definitionAt,
   entryDetail,
+  lensesFor,
+  scriptPaths,
+  type Use,
   firstParagraph,
   historyArgs,
   historyPath,
@@ -514,6 +518,102 @@ test("try's arguments to debug a stored message, never its token", () => {
       "dev",
     ],
   );
+});
+
+// validate --json's `uses`: adt-in's lab and billing run one shared function, orders' lab too;
+// hello answers (respond mode); a missing export has no code.
+const yamlAt = (file: string, line: number, column: number, end: number) => ({
+  file,
+  line,
+  column,
+  end_line: line,
+  end_column: end,
+});
+const USES: Use[] = [
+  {
+    interface: "orders",
+    destination: "lab",
+    function: "toLab",
+    yaml: yamlAt("interfaces/orders/interface.yaml", 8, 16, 21),
+    code: { file: "shared/lab.ts", line: 3, column: 17 },
+  },
+  {
+    interface: "adt-in",
+    destination: "lab",
+    function: "toLab",
+    yaml: yamlAt("interfaces/adt-in/interface.yaml", 8, 16, 21),
+    code: { file: "shared/lab.ts", line: 3, column: 17 },
+  },
+  {
+    interface: "adt-in",
+    destination: "billing",
+    function: "toLab",
+    yaml: yamlAt("interfaces/adt-in/interface.yaml", 11, 16, 21),
+    code: { file: "shared/lab.ts", line: 3, column: 17 },
+  },
+  {
+    interface: "adt-in",
+    destination: "archive",
+    function: "transform",
+    yaml: yamlAt("interfaces/adt-in/interface.yaml", 12, 3, 10),
+    code: { file: "interfaces/adt-in/route.ts", line: 1, column: 17 },
+  },
+  {
+    interface: "hello",
+    function: "transform",
+    yaml: yamlAt("interfaces/hello/interface.yaml", 5, 9, 17),
+    code: { file: "shared/lab.ts", line: 9, column: 17 },
+  },
+  {
+    interface: "adt-in",
+    destination: "x",
+    function: "gone",
+    yaml: yamlAt("interfaces/adt-in/interface.yaml", 15, 16, 20),
+  },
+];
+
+test("a lens above each function an interface runs: who, sorted; respond mode by the interface alone", () => {
+  const lenses = lensesFor(USES, "shared/lab.ts");
+  assert.deepEqual(
+    lenses.map((l) => [l.line, l.column, l.title, l.targets.length]),
+    [
+      [3, 17, "used by adt-in → billing, lab · orders → lab", 3],
+      [9, 17, "used by hello", 1],
+    ],
+  );
+  assert.deepEqual(lenses[0].targets[0], USES[0].yaml, "the interface.yaml places, to peek");
+  assert.deepEqual(lensesFor(USES, "interfaces/adt-in/other.ts"), [], "a file no interface runs: none");
+  assert.deepEqual(lensesFor([], "shared/lab.ts"), [], "an older ductus (no uses): none");
+});
+
+test("go-to-definition from interface.yaml: the value under the cursor, its end excluded", () => {
+  const file = "interfaces/adt-in/interface.yaml";
+  assert.deepEqual(definitionAt(USES, file, 8, 16), USES[1].code, "the value's first character");
+  assert.deepEqual(definitionAt(USES, file, 8, 20), USES[1].code, "its last");
+  assert.equal(definitionAt(USES, file, 8, 21), undefined, "after it");
+  assert.equal(definitionAt(USES, file, 8, 15), undefined, "before it");
+  assert.deepEqual(definitionAt(USES, file, 12, 5), USES[3].code, "a destination's key: the transform it runs");
+  assert.equal(definitionAt(USES, file, 15, 17), undefined, "not exported: nowhere to go");
+  assert.equal(definitionAt(USES, "interfaces/orders/interface.yaml", 11, 17), undefined, "another file's place");
+});
+
+test("script: values are found as paths, each where it's written", () => {
+  const text = [
+    "name: adt-in",
+    "script: route.ts",
+    "destinations:",
+    "  lab:",
+    '    script: "lab.ts"   # its own',
+    "  billing: { interface: b, script: ../../shared/billing.ts }",
+    "  x: { script: ${SCRIPT} }",
+    "  # script: commented.ts is still a line: the link is harmless",
+  ].join("\n");
+  assert.deepEqual(scriptPaths(text).slice(0, 3), [
+    { line: 2, column: 9, end: 17, path: "route.ts" },
+    { line: 5, column: 14, end: 20, path: "lab.ts" },
+    { line: 6, column: 36, end: 59, path: "../../shared/billing.ts" },
+  ]);
+  assert.ok(!scriptPaths(text).some((s) => s.path.includes("$")), "a reference isn't a path yet");
 });
 
 test("a failed command's first paragraph, without anyhow's framing", () => {
