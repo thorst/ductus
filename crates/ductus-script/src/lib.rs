@@ -14,7 +14,7 @@ mod inspect;
 mod loader;
 mod ops;
 
-pub use check::{Analysis, ConsoleCall, Diagnostic, Export, ResourceReference, analyze, type_check};
+pub use check::{Analysis, ConsoleCall, Diagnostic, Export, ResourceReference, Wait, analyze, type_check};
 pub use guard::{Cause, DebugSwitch};
 pub use inspect::{FromIsolate, InspectorSessions, ToIsolate};
 pub use ops::{BoxFuture, FetchRequest, FetchResponse, KILL, QUARANTINE, Services, TRANSIENT};
@@ -34,6 +34,12 @@ use std::time::Duration;
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(5);
 /// Heap limit for isolates created without one.
 pub const DEFAULT_HEAP_MB: usize = 512;
+/// How long a key function (`add_keys`) may run on one message before it's stopped. A key is read
+/// while the sender waits for its ACK, on one thread for every interface's key functions, so a
+/// loop must be stopped soon; a real key takes microseconds (measured: history.md 0.7.7.3), and
+/// this leaves room for a garbage collection's pause and the first call's compile. The watchdog
+/// checks every 10 ms, so a runaway is stopped between 50 and 60 ms.
+pub const KEY_TIMEOUT: Duration = Duration::from_millis(50);
 
 /// Interface code that was stopped: it ran past its time budget without pausing, or the
 /// isolate's heap filled up while it ran. The isolate stays usable.
@@ -429,6 +435,37 @@ impl Isolate {
         functions: &[Option<Function<'_>>],
         timeout: Duration,
     ) -> Result<(InterfaceId, Vec<Option<FunctionId>>)> {
+        self.load_functions(functions, "__invoke", timeout, timeout).await
+    }
+
+    /// Load one interface's key functions (`InterfaceConfig::key_functions`): each takes the
+    /// decoded message and answers its key, synchronously (`call_key`). Each call may run for
+    /// [`KEY_TIMEOUT`]; the module's top-level code, for [`DEFAULT_TIMEOUT`].
+    pub async fn add_keys(&mut self, functions: &[Function<'_>]) -> Result<(InterfaceId, Vec<FunctionId>)> {
+        let functions: Vec<Option<Function>> = functions.iter().copied().map(Some).collect();
+        let (interface, ids) = self.load_functions(&functions, "__key", DEFAULT_TIMEOUT, KEY_TIMEOUT).await?;
+        Ok((interface, ids.into_iter().flatten().collect()))
+    }
+
+    /// Run a key function (`add_keys`) on a raw message: its key, "" for none. An error when it
+    /// threw, answered something that isn't a key (a promise, an object), or ran away
+    /// ([`Runaway`], within [`KEY_TIMEOUT`]).
+    pub fn call_key(&mut self, function: FunctionId, raw: &str) -> Result<String> {
+        match self.call(function, &[raw])? {
+            RawResult::Value(key) => Ok(key.unwrap_or_default()),
+            RawResult::Promise(_) => bail!("a key function answers at once; it can't wait for anything"),
+        }
+    }
+
+    /// `add_functions` and `add_keys`: each function bound by the SDK's `wrapper` (`__invoke` or
+    /// `__key`), the modules' top-level code given `load` to run, each call `timeout`.
+    async fn load_functions(
+        &mut self,
+        functions: &[Option<Function<'_>>],
+        wrapper: &str,
+        load: Duration,
+        timeout: Duration,
+    ) -> Result<(InterfaceId, Vec<Option<FunctionId>>)> {
         let mut modules: Vec<&Path> = Vec::new();
         for f in functions.iter().flatten() {
             if !modules.contains(&f.module) {
@@ -447,15 +484,15 @@ impl Isolate {
             glue.push_str(&format!("import * as entry{i} from \"{url}\";\n"));
             urls.push(url.to_string());
         }
-        glue.push_str(
-            r#"import { __invoke } from "@ductus/sdk";
-const bind = (entry, file, name, formats) => {
+        glue.push_str(&format!(
+            r#"import {{ {wrapper} }} from "@ductus/sdk";
+const bind = (entry, file, name, formats) => {{
   const f = entry[name];
-  if (typeof f !== "function") throw new Error(`${file} must export a function named \`${name}\``);
-  return (raw, meta) => __invoke(f, raw, formats, meta);
-};
-"#,
-        );
+  if (typeof f !== "function") throw new Error(`${{file}} must export a function named \`${{name}}\``);
+  return (raw, meta) => {wrapper}(f, raw, formats, meta);
+}};
+"#
+        ));
         for (i, f) in functions.iter().enumerate() {
             if let Some(f) = f {
                 let entry = modules.iter().position(|m| *m == f.module).expect("listed above");
@@ -468,7 +505,7 @@ const bind = (entry, file, name, formats) => {
             }
         }
         let id = self.runtime.load_side_es_module_from_code(&glue_url, glue).await.map_err(|e| anyhow!("{e}"))?;
-        self.evaluate(id, timeout).await?;
+        self.evaluate(id, load).await?;
 
         let namespace = self.runtime.get_module_namespace(id).map_err(|e| anyhow!("{e}"))?;
         let interface = InterfaceId(self.interfaces.len());

@@ -72,6 +72,8 @@ pub(crate) struct Shared {
     pub intakes: std::sync::RwLock<HashMap<String, Arc<Intake>>>,
     /// Where an interface's health reports its stop (the audit log): an added one's too.
     pub stopped: crate::health::StoppedTx,
+    /// The engine's key thread: a deploy in place loads an interface's key functions there.
+    pub keys: Arc<crate::key_functions::KeyThread>,
 }
 
 /// The worker threads, to place an interface a deploy adds and to join at the engine's stop.
@@ -1064,6 +1066,7 @@ mod tests {
             resources: Default::default(),
             intakes: Default::default(),
             stopped: tokio::sync::mpsc::unbounded_channel().0,
+            keys: crate::key_functions::KeyThread::new(".".into(), Default::default()),
         }
     }
 
@@ -1079,7 +1082,7 @@ mod tests {
         let lanes = Arc::new(Lanes::new(lanes, config.slots(), ids.len()));
         let tier = Arc::new(std::sync::atomic::AtomicI16::new(ductus_core::Retention::DEFAULT.days() as i16));
         let targets = Targets { destinations: ids.clone(), wake: wake.clone() };
-        let settings = crate::ingest::Settings::new(config.clone(), lanes.clone(), tier, targets).unwrap();
+        let settings = crate::ingest::Settings::new(config.clone(), lanes.clone(), tier, targets, None).unwrap();
         let intake = Intake::new(shared.store.clone(), Default::default(), stats.clone(), settings);
         let outlets = config
             .destinations()

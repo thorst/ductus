@@ -189,10 +189,67 @@ function findDebuggerStatements(sourceFile) {
   return found;
 }
 
+// SDK functions that wait for something outside the message (`ioCalls`).
+const IO_FUNCTIONS = new Set(["db", "api", "fetch"]);
+
+/** `db`, `api` or `fetch` if this call is to the SDK's function (through any import alias). */
+function sdkIoFunction(checker, call) {
+  let symbol = checker.getSymbolAtLocation(unwrap(call.expression));
+  if (symbol && symbol.flags & ts.SymbolFlags.Alias) symbol = checker.getAliasedSymbol(symbol);
+  const decl = symbol?.declarations?.[0];
+  if (!decl || !IO_FUNCTIONS.has(symbol.name)) return undefined;
+  let parent = decl.parent;
+  while (parent && !ts.isModuleDeclaration(parent)) parent = parent.parent;
+  return parent && ts.isStringLiteral(parent.name) && parent.name.text === "@ductus/sdk" ? symbol.name : undefined;
+}
+
+/** The function an export's declaration is (a function, or a const holding an arrow or function). */
+function functionOf(decl) {
+  if (ts.isFunctionDeclaration(decl)) return decl;
+  if (ts.isVariableDeclaration(decl) && decl.initializer) {
+    const init = unwrap(decl.initializer);
+    if (ts.isArrowFunction(init) || ts.isFunctionExpression(init)) return init;
+  }
+  return undefined;
+}
+
+/**
+ * What a function waits for: `await`s and calls of the SDK's `db`, `api` and `fetch` in its body.
+ * Key functions must wait for nothing (validate's DUC208): a key is read while the sender waits.
+ */
+function waitsIn(checker, fn) {
+  const found = [];
+  const file = fn.getSourceFile();
+  const visit = (node) => {
+    let what;
+    if (ts.isAwaitExpression(node)) what = "await";
+    else if (ts.isCallExpression(node)) {
+      const io = sdkIoFunction(checker, node);
+      if (io) what = `${io}()`;
+    }
+    if (what) {
+      const pos = file.getLineAndCharacterOfPosition(node.getStart(file));
+      found.push({ line: pos.line + 1, column: pos.character + 1, what });
+    }
+    ts.forEachChild(node, visit);
+  };
+  if (fn.body) visit(fn.body);
+  return found;
+}
+
+/** Whether a function answers a promise: `async`, or a return type with `then`. */
+function isAsync(checker, fn) {
+  if (fn.modifiers?.some((m) => m.kind === ts.SyntaxKind.AsyncKeyword)) return true;
+  const signature = checker.getSignatureFromDeclaration(fn);
+  const returns = signature && checker.getReturnTypeOfSignature(signature);
+  return !!returns && !!checker.getPropertyOfType(returns, "then");
+}
+
 /**
  * What a file exports, each with where it's declared: `validate --json`'s `uses` place the
  * function interface.yaml names (the editor's code lenses and go-to-definition). A re-export
- * (`export { toBilling } from "../shared/billing.ts"`) is followed to the shared file.
+ * (`export { toBilling } from "../shared/billing.ts"`) is followed to the shared file. A function
+ * also says whether it's async and what it waits for (key functions may do neither).
  */
 function findExports(checker, sourceFile) {
   const module = checker.getSymbolAtLocation(sourceFile);
@@ -205,7 +262,16 @@ function findExports(checker, sourceFile) {
     const file = decl.getSourceFile();
     if (file.isDeclarationFile) continue; // the SDK's, re-exported: no place in the project
     const pos = file.getLineAndCharacterOfPosition((decl.name ?? decl).getStart(file));
-    found.push({ module: sourceFile.fileName, name: symbol.name, file: file.fileName, line: pos.line + 1, column: pos.character + 1 });
+    const fn = functionOf(decl);
+    found.push({
+      module: sourceFile.fileName,
+      name: symbol.name,
+      file: file.fileName,
+      line: pos.line + 1,
+      column: pos.character + 1,
+      async: fn ? isAsync(checker, fn) : false,
+      waits: fn ? waitsIn(checker, fn) : [],
+    });
   }
   return found;
 }

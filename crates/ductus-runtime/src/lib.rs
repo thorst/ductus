@@ -27,6 +27,7 @@ mod http;
 pub mod in_place;
 mod ingest;
 pub mod inspect;
+pub mod key_functions;
 pub mod keys;
 pub mod lanes;
 pub mod ldap;
@@ -465,6 +466,17 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let admission = |listener: &str, host: &str, port: u16, list: Option<&ductus_core::allow::Allow>| {
         list.map(|a| allow::Admission::new(listener, host, port, a, names.clone())).transpose()
     };
+    // Key functions (`{ script: key.ts }`) load on the engine's key thread while the database
+    // connects: their intakes need them, nothing before. No interface with one, no thread.
+    let keys = key_functions::KeyThread::new(root.to_path_buf(), env.console());
+    let mut key_loads: std::collections::HashMap<String, tokio::task::JoinHandle<_>> = configs
+        .iter()
+        .filter(|c| !c.responds() && !c.key_scripts().is_empty())
+        .map(|c| {
+            let (keys, config) = (keys.clone(), c.clone());
+            (c.name.clone(), tokio::spawn(async move { keys.load(&config).await }))
+        })
+        .collect();
     phases.mark("project loaded and checked");
     let store = match connected {
         Some(store) => store,
@@ -571,7 +583,12 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         lanes::retire_when_settled(store.clone(), config.name.clone(), lanes.clone(), retiring.clone());
         if !config.responds() {
             let targets = ingest::Targets { destinations: destination_ids.clone(), wake: wake.clone() };
-            let settings = ingest::Settings::new(config.clone(), lanes.clone(), retention.tier(&config.name), targets)?;
+            let scripts = match key_loads.remove(&config.name) {
+                Some(loading) => loading.await.context("loading key functions")??,
+                None => None,
+            };
+            let tier = retention.tier(&config.name);
+            let settings = ingest::Settings::new(config.clone(), lanes.clone(), tier, targets, scripts)?;
             let intake = ingest::Intake::new(store.clone(), gate.clone(), stats.clone(), settings);
             intakes.insert(config.name.clone(), Arc::new(intake));
         }
@@ -602,6 +619,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         resources: resources.clone(),
         intakes: std::sync::RwLock::new(intakes.clone()),
         stopped: stopped_tx.clone(),
+        keys: keys.clone(),
     };
     let mut kept: std::collections::HashMap<String, in_place::Interface> = Default::default();
     for (config, wake, destination_ids, gate, stats, destination_stats, lanes, retiring) in parts {

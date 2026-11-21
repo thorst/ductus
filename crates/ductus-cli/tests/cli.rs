@@ -1605,6 +1605,72 @@ fn validate_warns_when_a_key_reads_empty_in_every_fixture() {
     assert!(text.contains("⚠ a: ordering key `PID-3.1` reads empty in all 2 fixtures"), "{text}");
 }
 
+/// Key functions (0.7.7.3) before deploy: one that waits for anything (`async`, `await`, `db()`,
+/// `fetch()`) is refused where it does it (DUC208), a `db()` elsewhere in the same file is the
+/// transform's business, and a function the file doesn't export is refused at its key part.
+#[test]
+fn validate_refuses_key_functions_that_wait_or_are_missing() {
+    let interface = |name: &str, port: u16, rest: &str| {
+        format!(
+            "name: {name}\nsource: {{ mllp: {{ port: {port} }} }}\nabout: {{ from: {{ application: EHR }}, to: {{ application: Lab }} }}\n{rest}destinations: {{ lab: {{ file: {{ dir: out }} }} }}\n"
+        )
+    };
+    const WAITS: &str = r#"import { db, fetch, type Message } from "@ductus/sdk";
+
+export function key(msg: Message): string {
+  fetch("https://empi.example.org");
+  return msg.get("PID-3.1");
+}
+
+export async function slow(msg: Message): Promise<string> {
+  return msg.get("PID-3.1");
+}
+
+export async function transform(msg: Message) {
+  await db("lab").query("SELECT 1");
+  return msg;
+}
+"#;
+    let dir = project(&[
+        (
+            "interfaces/a/interface.yaml",
+            &interface(
+                "a",
+                7111,
+                "script: code.ts\nordering: { key: { script: code.ts } }\ndedupe: { keys: [MSH-10, { script: code.ts, function: slow }] }\n",
+            ),
+        ),
+        ("interfaces/a/code.ts", WAITS),
+        (
+            "interfaces/b/interface.yaml",
+            &interface("b", 7112, "ordering: { key: [MSH-4, { script: key.ts, function: mrn }] }\n"),
+        ),
+        ("interfaces/b/key.ts", "export function key(m: unknown) { return \"\"; }\n"),
+    ]);
+    let (ok, out) = without_a_database(dir.path(), &["validate", "--json"]);
+    assert!(!ok, "errors: {out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    let found = |code: &str| -> Vec<serde_json::Value> {
+        doc["findings"].as_array().unwrap().iter().filter(|f| f["code"] == code).cloned().collect()
+    };
+    let waits: Vec<(String, i64)> = found("DUC208")
+        .iter()
+        .map(|f| (f["message"].as_str().unwrap().to_string(), f["line"].as_i64().unwrap()))
+        .collect();
+    assert_eq!(
+        waits,
+        [
+            ("interfaces/a/code.ts:4:3 fetch() in key function `key`: a key is read while the sender waits for its ACK, so it can't wait for anything; read the key from the message alone (look values up in a destination's code instead)".to_string(), 4),
+            ("interfaces/a/code.ts:8:23 key function `slow` is async: a key is read while the sender waits for its ACK, so it can't wait for anything; make it a plain function that returns the key".to_string(), 8),
+        ],
+        "the transform's own `await db()` isn't a key function's: {out}"
+    );
+    let missing = found("DUC125");
+    assert_eq!(missing.len(), 1, "{out}");
+    assert!(missing[0]["message"].as_str().unwrap().contains("must export a function named `mrn`"), "{out}");
+    assert_eq!((&missing[0]["file"], &missing[0]["line"]), (&"interfaces/b/interface.yaml".into(), &4.into()), "{out}");
+}
+
 /// `validate --json`'s `uses`: each function the engine calls, where interface.yaml names it (the
 /// `transform:` value, the `script:` value, the destination's key, respond mode's `script:`) and
 /// where it's declared, through a renamed re-export into a shared file. What an editor's code
@@ -2452,6 +2518,91 @@ async fn an_ordering_key_that_reads_empty_makes_the_interface_keyless() {
     ] {
         assert!(metrics.contains(&line), "{line} in {metrics}");
     }
+}
+
+/// A key function (0.7.7.3) keys each message at intake; one that throws, or loops, gets its
+/// message stored quarantined with why, the sender ACKed, and intake goes on keying the next.
+#[tokio::test(flavor = "multi_thread")]
+async fn a_key_function_keys_messages_and_quarantines_what_it_can_t_key() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let (port, api) = (free_port(), free_port());
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("keyfn-{nanos}");
+    let config = format!(
+        "name: {name}\nsource: {{ mllp: {{ host: 127.0.0.1, port: {port} }} }}\nordering: {{ key: [MSH-4, {{ script: key.ts }}] }}\ndestinations: {{ out: {{ file: {{ dir: out-{name} }} }} }}\n"
+    );
+    const KEY: &str = r#"import { type Message } from "@ductus/sdk";
+
+/** The MRN, upper-cased: senders differ in case. */
+export function key(msg: Message): string {
+  const mrn = msg.get("PID-3[.5=MR].1");
+  if (mrn === "") throw new Error("no MRN");
+  if (mrn === "loop") while (true) {}
+  return mrn.toUpperCase();
+}
+"#;
+    let dir = project(&[
+        (format!("interfaces/{name}/interface.yaml").as_str(), config.as_str()),
+        (format!("interfaces/{name}/key.ts").as_str(), KEY),
+    ]);
+    let token_name = format!("{name}-viewer");
+    let _tokens = Tokens::new([token_name.clone()]);
+    let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["token", "create", &token_name, "--role", "viewer"])
+        .env("DUCTUS_DATABASE_URL", &db)
+        .output()
+        .unwrap();
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    let viewer = String::from_utf8_lossy(&out.stdout).lines().next().unwrap().to_string();
+    let _engine = Child(
+        Command::new(env!("CARGO_BIN_EXE_ductus"))
+            .args(["run", "--root", &dir.path().to_string_lossy(), "--threads", "1"])
+            .args(["--api-listen", &format!("127.0.0.1:{api}")])
+            .env("DUCTUS_DATABASE_URL", &db)
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    let base = format!("http://127.0.0.1:{api}/api/v1");
+    let http = reqwest::Client::new();
+    let up =
+        eventually(async || http.get(format!("{base}/health")).send().await.is_ok_and(|r| r.status().is_success()));
+    assert!(up.await, "the API never came up");
+
+    let mut sender = ductus_mllp::Client::new(format!("127.0.0.1:{port}"), std::time::Duration::from_secs(5));
+    for (control, pid3) in [("K1", "abc^^^^MR"), ("K2", "123^^^^SS"), ("K3", "loop^^^^MR"), ("K4", "def^^^^MR")] {
+        let msg = format!("MSH|^~\\&|EPIC|H1|LAB|H|20260101||ADT^A08|{control}|P|2.5\rPID|1||{pid3}\r");
+        let ack = sender.send(msg.as_bytes()).await.unwrap();
+        assert!(String::from_utf8_lossy(&ack).contains("MSA|AA"), "{control}: every message is ACKed");
+    }
+    let page: serde_json::Value = http
+        .get(format!("{base}/interfaces/{name}/messages"))
+        .bearer_auth(&viewer)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let message = |control: &str| {
+        page["messages"].as_array().unwrap().iter().find(|m| m["control_id"] == control).cloned().unwrap()
+    };
+    assert_eq!(message("K1")["ordering_key"], "H1/ABC", "the function's key, after MSH-4");
+    assert_eq!(message("K4")["ordering_key"], "H1/DEF", "intake goes on after a runaway");
+    let thrown = message("K2");
+    assert_eq!((&thrown["status"], &thrown["ordering_key"]), (&"quarantined".into(), &serde_json::Value::Null));
+    assert_eq!(
+        thrown["last_error"],
+        format!(
+            "ordering key {{ script: key.ts }} failed: Error: no MRN (interfaces/{name}/key.ts:6:25)\n    at key (interfaces/{name}/key.ts:6:25)"
+        )
+    );
+    let looped = message("K3");
+    assert_eq!(looped["status"], "quarantined");
+    assert_eq!(
+        looped["last_error"],
+        "ordering key { script: key.ts } failed: stopped: the script ran longer than its 50ms timeout without pausing (endless loop?)"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread")]

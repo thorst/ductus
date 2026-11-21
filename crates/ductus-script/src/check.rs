@@ -66,6 +66,21 @@ pub struct Export {
     pub file: String,
     pub line: u32,
     pub column: u32,
+    /// A function that answers a promise (`async`, or a return type with `then`).
+    #[serde(default)]
+    pub r#async: bool,
+    /// What a function's body waits for (`await`, `db()`, `api()`, `fetch()`), each in `file`.
+    #[serde(default)]
+    pub waits: Vec<Wait>,
+}
+
+/// An `await`, or a call of the SDK's `db`, `api` or `fetch`, in an exported function.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Wait {
+    pub line: u32,
+    pub column: u32,
+    /// `await`, `db()`, `api()` or `fetch()`.
+    pub what: String,
 }
 
 /// `console.log(...)` in code: where, and which method.

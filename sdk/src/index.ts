@@ -138,3 +138,20 @@ export function __invoke(
     ? result.then((r) => serialize(r, formats.output))
     : serialize(result, formats.output);
 }
+
+/** Engine entry point for a key function (`ordering: { key: { script: key.ts } }`): parse by
+ *  format, run it, and answer its key as text. Nothing or `null` is an empty key, a number its
+ *  digits; anything else, or a promise, is an error (the message is quarantined with it).
+ *  @internal Exported for the engine and SDK tests. */
+export function __key(key: (input: unknown) => unknown, raw: string, formats: Formats = HL7): string {
+  const result = key(decode(raw, formats.input));
+  if (result === null || result === undefined) return "";
+  if (typeof result === "string") return result;
+  if (typeof result === "number" || typeof result === "bigint") return String(result);
+  if (typeof (result as { then?: unknown }).then === "function") {
+    throw new Error(
+      `key function \`${key.name}\` returned a promise: a key is read while the sender waits for its ACK, so it can't wait for anything (no async, await, db, api or fetch)`,
+    );
+  }
+  throw new Error(`key function \`${key.name}\` returned ${typeof result}: a key is text (or a number)`);
+}

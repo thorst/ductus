@@ -6,5 +6,9 @@ ordering:
   key:
     - { regex: 'facility="([A-Z]+)"' }
     - "hl7:recordTarget/hl7:patientRole/hl7:id[@root=1.2.3]/@extension"
-dedupe: { keys: [{ regex: '<hl7:id root="2\.16\.840\.1\.113883\.19" extension="([^"]+)"' }] }
+    - { script: keys.ts, function: episode }   # what no path says: code of the interface's own
+dedupe:
+  keys:
+    - { regex: '<hl7:id root="2\.16\.840\.1\.113883\.19" extension="([^"]+)"' }
+    - { script: keys.ts, function: documentId }
 destinations: { files: { file: { dir: out } } }

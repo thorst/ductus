@@ -325,7 +325,7 @@ Which messages must be delivered in the order they arrived: those with the same 
 
 ### `ordering.key`
 
-**Type:** path, { regex }, or a list of them
+**Type:** path, { regex }, { script }, or a list of them
 
 The field whose value decides which messages stay in order with each other, as a key path in the interface's `format`: usually the patient (`PID-3.1`, the MRN), or an order or account. Messages with the same value are delivered in arrival order; different values can overtake each other, so one patient's failing message doesn't hold up everyone.
 
@@ -334,7 +334,8 @@ Paths read real feeds' values without code:
 - HL7: a repetition `PID-3[2].1`; the repetition whose component says what it is `PID-3[.5=MR].1`, with alternatives tried in order `PID-3[.5=MR|.4=HOSP].1`; a subcomponent `PID-3.4.1`.
 - JSON: an array's item by a field `identifier[system=urn:oid:1.2.3].value`.
 - XML: an element by an attribute or a child's text `id[@root=2.16.840.1]/@extension`; names match by their local name, whatever the prefix (the format's `names`).
-- Any format: `{ regex: 'MRN=(\d+)' }` over the message's text (the first group), the only key `text` messages have.
+- Any format: `{ regex: 'MRN=(\d+)' }` over the message's text (the first group).
+- What no path says: a function of the interface's own, `{ script: key.ts }` (the function `key` it exports; `{ script: key.ts, function: mrn }` for another). It gets the decoded message and returns the key, synchronously: it runs while the sender waits for its ACK. One that throws, or runs past 50 ms, gets its message stored quarantined with why.
 
 Several values together are a list: `key: [MSH-4, PID-3.1]` (one patient of one facility); it reads empty when any of them does. The code reads the same paths (`msg.get`, `getPath`).
 
@@ -724,15 +725,27 @@ A repeat is stored with the status `duplicate` (so it can be found) but never qu
 
 ### `dedupe.keys`
 
-**Type:** list of path, or { regex }
+**Type:** list of path, { regex } or { script }
 
-The fields whose values, together, make a message the same as one seen before, as key paths in the interface's `format` (the same paths as `ordering.key`, filters included): HL7 `MSH-10`, JSON `order.id`, XML `Order/@id`, a CSV column or a fixed-length field's name, or `{ regex: '…' }` over the message's text. Choose fields a resend repeats and a new message never does: the sender's control ID, or an order number with its status. A message whose keys all read empty isn't checked. Default: `[MSH-10]` (HL7's message control ID). Example: `keys: [ORC-2, ORC-5]`.
+The fields whose values, together, make a message the same as one seen before, as key paths in the interface's `format` (the same paths as `ordering.key`, filters included): HL7 `MSH-10`, JSON `order.id`, XML `Order/@id`, a CSV column or a fixed-length field's name, or `{ regex: '…' }` over the message's text, or a function `{ script: keys.ts, function: trace }` (as for `ordering.key`). Choose fields a resend repeats and a new message never does: the sender's control ID, or an order number with its status. A message whose keys all read empty isn't checked. Default: `[MSH-10]` (HL7's message control ID). Example: `keys: [ORC-2, ORC-5]`.
 
 ### `dedupe.keys.regex`
 
 **Type:** text
 
 A regular expression over the message's text: the key is its first group (the whole match without one), empty when it doesn't match. Example: `{ regex: 'MRN=(\d+)' }`.
+
+### `dedupe.keys.script`
+
+**Type:** text
+
+The file (beside interface.yaml) exporting a function that returns the message's key, synchronously. Example: `{ script: key.ts }`.
+
+### `dedupe.keys.function`
+
+**Type:** text
+
+The function `script` exports. Default: `key`. Example: `{ script: keys.ts, function: trace }`.
 
 ### `dedupe.window`
 

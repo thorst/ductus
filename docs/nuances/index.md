@@ -22,7 +22,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Several engines on one database](engines.md) (5)
 - [Retention](retention.md) (7)
 - [Several destinations](destinations.md) (8)
-- [Order, retries and durability](ordering.md) (10)
+- [Order, retries and durability](ordering.md) (11)
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
 - [Writing transforms](transforms.md) (21)
@@ -235,7 +235,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (88)
+## Level 3: Professional (89)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
@@ -249,6 +249,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Adding, removing or renaming a destination](destinations.md#adding-removing-or-renaming-a-destination-level-3) (Several destinations)
 - [Many destinations on one interface: when to split](destinations.md#many-destinations-on-one-interface-when-to-split-level-3) (Several destinations)
 - [Order is per key, and one stuck message holds up its key](ordering.md#order-is-per-key-and-one-stuck-message-holds-up-its-key-level-3) (Order, retries and durability)
+- [A key function runs while the sender waits, and its failure quarantines the message](ordering.md#a-key-function-runs-while-the-sender-waits-and-its-failure-quarantines-the-message-level-3) (Order, retries and durability)
 - [Without an ordering key, more workers don't help](ordering.md#without-an-ordering-key-more-workers-dont-help-level-3) (Order, retries and durability)
 - [Temporary failures retry forever by default](ordering.md#temporary-failures-retry-forever-by-default-level-3) (Order, retries and durability)
 - [Database login failures make messages wait, not fail](ordering.md#database-login-failures-make-messages-wait-not-fail-level-3) (Order, retries and durability)

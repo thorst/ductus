@@ -18,7 +18,7 @@ adt-to-billing
   ✓ the NPI is looked up once an hour, not once a message (2ms)
   ✓ a provider the database doesn't know is quarantined (0ms)
 …
-21 passed, 0 failed
+26 passed, 0 failed
 ```
 
 It exits 1 when a test fails, so it belongs in the checks every change goes through (a pull

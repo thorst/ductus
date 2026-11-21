@@ -1,5 +1,5 @@
 // Format tests: run inside the real engine by `cargo test -p ductus-script`.
-import { __invoke, expect, kill, parseCsv, parseFixed, parseXml, test, toCsv, toFixed, XmlElement } from "@ductus/sdk";
+import { __invoke, __key, expect, kill, parseCsv, parseFixed, parseXml, test, toCsv, toFixed, XmlElement } from "@ductus/sdk";
 
 test("CSV: header records, quotes, embedded delimiters and newlines, CRLF", () => {
   const text = 'mrn,name,note\r\n123,"SMITH, JOHN","said ""hi""\nthen left"\r\n456,DOE,\r\n';
@@ -89,6 +89,21 @@ const csv = { kind: "csv", delimiter: ",", header: true } as const;
 test("formats: HL7 in, JSON out", () => {
   const out = __invoke((m: any) => ({ mrn: m.PID[3][1], last: m.PID[5][1] }), ADT, { input: hl7, output: json });
   expect(out).toBe('{"mrn":"123","last":"SMITH"}');
+});
+
+test("a key function's result is its key as text, and anything but text is refused", () => {
+  const formats = { input: hl7, output: hl7 };
+  expect(__key((m: any) => m.get("PID-3.1"), ADT, formats)).toBe("123");
+  expect(__key(() => null, ADT, formats)).toBe("");
+  expect(__key(() => undefined, ADT, formats)).toBe("");
+  expect(__key(() => 42, ADT, formats)).toBe("42");
+  expect(__key((o: any) => o.mrn, '{"mrn":"7"}', { input: json, output: json })).toBe("7");
+  async function key() {
+    return "1";
+  }
+  expect(() => __key(key, ADT, formats)).toThrow("returned a promise");
+  expect(() => __key(() => ({ mrn: 1 }), ADT, formats)).toThrow("returned object: a key is text");
+  expect(() => __key(() => { throw new Error("no MRN"); }, ADT, formats)).toThrow("no MRN");
 });
 
 test("formats: JSON in, CSV out", () => {

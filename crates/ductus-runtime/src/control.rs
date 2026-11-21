@@ -390,6 +390,12 @@ impl Engine {
         // failure (its new port in use) leaves everything as it was; what it receives meanwhile
         // waits for the workers like any message.
         let intake = || running.intake.clone();
+        // Its key functions (`{ script: key.ts }`) load again first: their files may be among what
+        // changed, and one that doesn't load leaves everything as it was.
+        let scripts = match running.intake.is_some() && !config.key_scripts().is_empty() {
+            true => self.kept.shared().keys.load(&config).await?,
+            false => None,
+        };
         let changing = self.sources.change(&running.config, &config, intake());
         changing.await.with_context(|| format!("`{name}`: changing its source"))?;
         let replaced = match self.kept.replace(config.clone(), &self.activity, decided.clone(), generation).await {
@@ -401,6 +407,9 @@ impl Engine {
                 return Err(e);
             }
         };
+        if let (Some(scripts), Some(intake)) = (scripts, &running.intake) {
+            intake.rescript(scripts).await;
+        }
         let (version, id) = self.saved_version(&replaced.config, replaced.files, root, saving, &decided).await;
         self.swap_interface(Running {
             config: replaced.config,
@@ -526,7 +535,8 @@ impl Engine {
             true => {
                 let tier = self.retention.add(self.retention.configured(&config)).await?;
                 let targets = crate::ingest::Targets { destinations: ids.clone(), wake: wake.clone() };
-                let settings = crate::ingest::Settings::new(config.clone(), lanes.clone(), tier, targets)?;
+                let scripts = shared.keys.load(&config).await?;
+                let settings = crate::ingest::Settings::new(config.clone(), lanes.clone(), tier, targets, scripts)?;
                 Some(Arc::new(crate::ingest::Intake::new(store.clone(), gate.clone(), stats.clone(), settings)))
             }
             false => None,
@@ -764,7 +774,9 @@ impl Engine {
                 undo.retention = true;
                 let tier = self.retention.add(self.retention.configured(&config)).await?;
                 let targets = crate::ingest::Targets { destinations: ids.clone(), wake: wake.clone() };
-                let settings = Arc::new(crate::ingest::Settings::new(config.clone(), lanes.clone(), tier, targets)?);
+                let scripts = shared.keys.load(&config).await?;
+                let settings =
+                    Arc::new(crate::ingest::Settings::new(config.clone(), lanes.clone(), tier, targets, scripts)?);
                 match &running.intake {
                     Some(intake) => {
                         undo.intake = Some(intake.reset(settings).await);

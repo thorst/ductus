@@ -161,6 +161,9 @@ pub struct BatchMessage<'a> {
     pub dedupe_key: Option<&'a str>,
     /// Routed from another interface: the id of the message there.
     pub origin: Option<i64>,
+    /// Stored quarantined at every destination with this reason, never queued: its key couldn't be
+    /// read (a key function threw). Not checked for duplicates.
+    pub quarantined: Option<&'a str>,
 }
 
 /// Identifies a stored message. `received_at` lets Postgres go straight to the right partition.
@@ -400,6 +403,40 @@ impl Store {
             row
         } else {
             query.fetch_one(&self.pool).await.context("inserting message")?
+        };
+        Ok(MessageRef { id, received_at })
+    }
+
+    /// Store a message quarantined at every destination with `reason`, never queued: its key
+    /// couldn't be read (a key function threw or ran away). Someone looks, and resends it or
+    /// dismisses it, as any quarantined message.
+    pub async fn insert_quarantined(&self, m: NewMessage<'_>, reason: &str) -> Result<MessageRef> {
+        let query = sqlx::query_as::<_, (i64, DateTime<Utc>)>(
+            "WITH m AS (
+                 INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload, status, tier, last_error)
+                 VALUES ($1, $2, $3, $4, $5, 3, $7, $8) RETURNING id, received_at
+             ), quarantined AS (
+                 INSERT INTO deliveries (message_id, received_at, destination_id, partition_key, tier, status, last_error)
+                 SELECT m.id, m.received_at, d, $2, $7, 3, $8 FROM m, unnest($6::int[]) d
+             )
+             SELECT id, received_at FROM m",
+        )
+        .bind(m.interface)
+        .bind(m.partition_key)
+        .bind(m.ordering_key)
+        .bind(m.control_id)
+        .bind(m.payload)
+        .bind(m.destinations)
+        .bind(m.tier)
+        .bind(reason);
+        let (id, received_at) = if m.relaxed {
+            let mut tx = self.pool.begin().await.context("starting transaction")?;
+            sqlx::query("SET LOCAL synchronous_commit = off").execute(&mut *tx).await.context("relaxing commit")?;
+            let row = query.fetch_one(&mut *tx).await.context("inserting a quarantined message")?;
+            tx.commit().await.context("committing message")?;
+            row
+        } else {
+            query.fetch_one(&self.pool).await.context("inserting a quarantined message")?
         };
         Ok(MessageRef { id, received_at })
     }
@@ -1053,20 +1090,29 @@ async fn insert_batch_in(tx: &mut sqlx::PgConnection, batch: &Batch<'_>) -> Resu
 
     if !batch.messages.is_empty() {
         let m = &batch.messages;
-        let statuses: Vec<i16> =
-            duplicate.iter().map(|&d| if d { Status::Duplicate } else { Status::Pending } as i16).collect();
-        // ORDER BY ordinality: ids follow the order of the batch, which is the lanes' order.
+        let statuses: Vec<i16> = duplicate
+            .iter()
+            .zip(m)
+            .map(|(&d, m)| match (d, m.quarantined) {
+                (true, _) => Status::Duplicate,
+                (false, Some(_)) => Status::Quarantined,
+                (false, None) => Status::Pending,
+            } as i16)
+            .collect();
+        // ORDER BY ordinality: ids follow the order of the batch, which is the lanes' order. A
+        // quarantined message gets its deliveries quarantined too, with the same reason.
         sqlx::query(
             "WITH m AS (
-                 INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload, status, origin_id, tier)
-                 SELECT $1, p, o, c, b, s, r, $9
-                 FROM unnest($2::int[], $3::text[], $4::text[], $5::bytea[], $6::smallint[], $8::bigint[])
-                      WITH ORDINALITY AS t(p, o, c, b, s, r, n)
+                 INSERT INTO messages (interface, partition_key, ordering_key, control_id, payload, status, origin_id, tier, last_error)
+                 SELECT $1, p, o, c, b, s, r, $9, q
+                 FROM unnest($2::int[], $3::text[], $4::text[], $5::bytea[], $6::smallint[], $8::bigint[], $10::text[])
+                      WITH ORDINALITY AS t(p, o, c, b, s, r, q, n)
                  ORDER BY n
-                 RETURNING id, received_at, partition_key, status
+                 RETURNING id, received_at, partition_key, status, last_error
              )
-             INSERT INTO deliveries (message_id, received_at, destination_id, partition_key, tier)
-             SELECT m.id, m.received_at, d, m.partition_key, $9 FROM m, unnest($7::int[]) d WHERE m.status = 0",
+             INSERT INTO deliveries (message_id, received_at, destination_id, partition_key, tier, status, last_error)
+             SELECT m.id, m.received_at, d, m.partition_key, $9, m.status, m.last_error
+             FROM m, unnest($7::int[]) d WHERE m.status IN (0, 3)",
         )
         .bind(batch.interface)
         .bind(m.iter().map(|m| m.partition_key).collect::<Vec<_>>())
@@ -1077,6 +1123,7 @@ async fn insert_batch_in(tx: &mut sqlx::PgConnection, batch: &Batch<'_>) -> Resu
         .bind(batch.destinations)
         .bind(m.iter().map(|m| m.origin).collect::<Vec<_>>())
         .bind(batch.tier)
+        .bind(m.iter().map(|m| m.quarantined).collect::<Vec<_>>())
         .execute(&mut *tx)
         .await
         .context("inserting messages")?;

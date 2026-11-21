@@ -209,6 +209,10 @@ async fn handle(
         Route::Queue(intake) => match intake.accept(&body).await {
             Ok(Accepted::Queued(m)) => json(StatusCode::ACCEPTED, serde_json::json!({ "id": m.id })),
             Ok(Accepted::Duplicate) => json(StatusCode::OK, serde_json::json!({ "duplicate": true })),
+            // Received and kept: the sender's part is done (sending again would quarantine again).
+            Ok(Accepted::Quarantined(m)) => {
+                json(StatusCode::ACCEPTED, serde_json::json!({ "id": m.id, "quarantined": true }))
+            }
             Err(e) if e.is::<Closed>() => {
                 let mut response = json(StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({ "error": e.to_string() }));
                 response.headers_mut().insert("retry-after", axum::http::HeaderValue::from_static("30"));

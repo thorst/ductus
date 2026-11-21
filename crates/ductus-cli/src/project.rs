@@ -1323,6 +1323,20 @@ async fn check_project(
         }
     }
 
+    // Key functions that answer a promise or wait for something: at the engine their messages
+    // would all be quarantined.
+    for config in configs() {
+        for (text, file, line, column) in key_function_problems(config, &analysis) {
+            let at = relative(root, &file);
+            let finding = Finding::error("DUC208", format!("{at}:{line}:{column} {text}"))
+                .file(at)
+                .at(line, column)
+                .interface(&config.name)
+                .hint("make it a plain function that reads the key from the message alone");
+            report.add(finding);
+        }
+    }
+
     // `console` lines this environment writes to its log for every message: fine for a while, to
     // look into something, but not to keep (an environment saying `console: debug` is one where
     // logging everything is the point). Tests' own lines only show in `ductus test`.
@@ -1623,10 +1637,19 @@ fn keys_missed_in_fixtures(config: &InterfaceConfig, dir: &Path) -> Vec<KeyMisse
 }
 
 /// Where in interface.yaml a code loading error points: the destination whose function its file
-/// doesn't export (its `transform`, else its `script`), the destination whose own file the error
-/// names (its `script`), else the interface's `script`.
+/// doesn't export (its `transform`, else its `script`), the key part naming a key function its
+/// file doesn't export, the destination whose own file the error names (its `script`), else the
+/// interface's `script`.
 fn function_key<'a>(config: &'a InterfaceConfig, error: &str) -> Vec<&'a str> {
     let missing = error.split_once("must export a function named `").and_then(|(_, rest)| rest.split('`').next());
+    for (at, part) in key_parts_at(config) {
+        if let ductus_core::keys::KeyPart::Script(k) = part
+            && missing == Some(k.function.as_str())
+            && error.contains(&config.dir.join(&k.script).display().to_string())
+        {
+            return at;
+        }
+    }
     let functions = config.functions();
     let destinations: Vec<_> = config.destinations().zip(functions.iter()).collect();
     for &((name, d), f) in &destinations {
@@ -1646,6 +1669,55 @@ fn function_key<'a>(config: &'a InterfaceConfig, error: &str) -> Vec<&'a str> {
         }
     }
     vec!["script"]
+}
+
+/// Each part of an interface's keys with its place in interface.yaml: `ordering.key` (`.n` when
+/// it has several parts), `dedupe.keys.n`. (Places past the 16th part point at the key itself.)
+fn key_parts_at(config: &InterfaceConfig) -> Vec<(Vec<&'static str>, &ductus_core::keys::KeyPart)> {
+    const INDEX: [&str; 16] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15"];
+    let at = |setting: [&'static str; 2], i: Option<usize>| -> Vec<&'static str> {
+        setting.into_iter().chain(i.and_then(|i| INDEX.get(i).copied())).collect()
+    };
+    let mut out = Vec::new();
+    if let Some(key) = &config.ordering.key {
+        let several = key.0.len() > 1;
+        out.extend(key.0.iter().enumerate().map(|(i, p)| (at(["ordering", "key"], several.then_some(i)), p)));
+    }
+    if let Some(dedupe) = &config.dedupe {
+        out.extend(dedupe.keys.iter().enumerate().map(|(i, p)| (at(["dedupe", "keys"], Some(i)), p)));
+    }
+    out
+}
+
+/// What a key function (`{ script: key.ts }`) does that it mustn't (DUC208): answer a promise, or
+/// wait for anything (`await`, `db()`, `api()`, `fetch()`), each with where. A key is read while the
+/// sender waits for its ACK, on one thread for every interface's keys.
+fn key_function_problems(
+    config: &InterfaceConfig,
+    analysis: &ductus_script::Analysis,
+) -> Vec<(String, String, u32, u32)> {
+    let mut found = Vec::new();
+    for (module, k) in config.key_functions().into_iter().zip(config.key_scripts()) {
+        let module = key(&module.module);
+        let Some(export) = analysis.exports.iter().find(|e| e.module == module && e.name == k.function) else {
+            continue; // not exported: the load says so (DUC125)
+        };
+        if export.r#async {
+            let text = format!(
+                "key function `{}` is async: a key is read while the sender waits for its ACK, so it can't wait for anything; make it a plain function that returns the key",
+                k.function
+            );
+            found.push((text, export.file.clone(), export.line, export.column));
+        }
+        for wait in &export.waits {
+            let text = format!(
+                "{} in key function `{}`: a key is read while the sender waits for its ACK, so it can't wait for anything; read the key from the message alone (look values up in a destination's code instead)",
+                wait.what, k.function
+            );
+            found.push((text, export.file.clone(), wait.line, wait.column));
+        }
+    }
+    found
 }
 
 /// "adt: lanes go from 64 to 32: the 412 messages waiting are sent first, …" (`DUC311`).
@@ -2175,15 +2247,23 @@ fn indent(text: &str, n: usize) -> String {
 }
 
 /// Load an interface's code the way the engine does: every function its destinations name
-/// must be exported by its file (the destination's own, or the interface's).
+/// must be exported by its file (the destination's own, or the interface's), and every key
+/// function its keys name (`{ script: key.ts }`) by its.
 async fn load_functions(config: &ductus_core::InterfaceConfig) -> Result<()> {
     let functions = config.functions();
-    if functions.iter().all(Option::is_none) {
+    let keys = config.key_functions();
+    if functions.iter().all(Option::is_none) && keys.is_empty() {
         return Ok(()); // a `script:` no destination runs: nothing the engine loads
     }
     let mut isolate = Isolate::host();
     isolate.capture_console(); // top-level `console` lines: never among validate's output
-    isolate.add_functions(&ductus_script::Function::all(&functions), config.timeout).await.map(drop)
+    if functions.iter().any(Option::is_some) {
+        isolate.add_functions(&ductus_script::Function::all(&functions), config.timeout).await?;
+    }
+    if !keys.is_empty() {
+        isolate.add_keys(&keys.iter().map(ductus_script::Function::of).collect::<Vec<_>>()).await?;
+    }
+    Ok(())
 }
 
 pub(crate) fn first_line(text: &str) -> &str {

@@ -1098,6 +1098,48 @@ fn endless_loops_are_stopped_and_the_isolate_keeps_working() {
     assert!(message.contains("200ms timeout"), "{message}");
 }
 
+/// Key functions (0.7.7.3): each answers the decoded message's key; one that throws says why, one
+/// that loops is stopped within `KEY_TIMEOUT` and the others go on; a missing export doesn't load.
+#[test]
+fn key_functions_answer_keys_and_are_stopped_when_they_loop() {
+    let dir = project(&[
+        (
+            "a/key.ts",
+            "import type { Message } from \"@ductus/sdk\";\nexport function key(msg: Message) { return msg.get(\"PID-3.1\"); }\nexport function facility(msg: Message) { if (msg.get(\"MSH-4\") === \"\") throw new Error(\"no facility\"); return msg.get(\"MSH-4\"); }\n",
+        ),
+        (
+            "b/key.ts",
+            "export function key(m: unknown) { while (true) {} }\nexport async function late(m: unknown) { return \"1\"; }\n",
+        ),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let a = dir.path().join("a/key.ts");
+    let b = dir.path().join("b/key.ts");
+    fn f<'a>(module: &'a Path, name: &'a str) -> Function<'a> {
+        Function { module, name, formats: DEFAULT_FORMATS }
+    }
+    let (_, a_ids) = rt.block_on(host.add_keys(&[f(&a, "key"), f(&a, "facility")])).unwrap();
+    let (spin, b_ids) = rt.block_on(host.add_keys(&[f(&b, "key"), f(&b, "late")])).unwrap();
+    assert_eq!(host.call_key(a_ids[0], ADT).unwrap(), "123456");
+    assert_eq!(host.call_key(a_ids[1], ADT).unwrap(), "HOSP");
+    let no_facility = ADT.replace("EPIC|HOSP|", "EPIC||");
+    let thrown = format!("{:#}", host.call_key(a_ids[1], &no_facility).unwrap_err());
+    assert!(thrown.contains("Error: no facility") && thrown.contains("a/key.ts"), "{thrown}");
+    let promised = format!("{:#}", host.call_key(b_ids[1], ADT).unwrap_err());
+    assert!(promised.contains("returned a promise"), "{promised}");
+    for _ in 0..2 {
+        let start = Instant::now();
+        let stopped = runaway(host.call_key(b_ids[0], ADT).map(Some));
+        assert_eq!(stopped, Runaway { interface: Some(spin), cause: Cause::Timeout(ductus_script::KEY_TIMEOUT) });
+        assert!(start.elapsed() < Duration::from_millis(500), "took {:?}", start.elapsed());
+        assert_eq!(host.call_key(a_ids[0], ADT).unwrap(), "123456", "the others go on");
+    }
+    let missing = format!("{:#}", rt.block_on(host.add_keys(&[f(&a, "mrn")])).unwrap_err());
+    assert!(missing.contains("must export a function named `mrn`"), "{missing}");
+}
+
 /// A loop after an `await` runs in the event loop: the stack still tells whose it was, and
 /// the event loop works afterwards.
 #[test]

@@ -238,9 +238,24 @@ impl JsonSchema for crate::keys::KeyPart {
                     } },
                     "required": ["regex"],
                     "additionalProperties": false
+                },
+                {
+                    "type": "object",
+                    "properties": {
+                        "script": {
+                            "type": "string",
+                            "description": "The file (beside interface.yaml) exporting a function that returns the message's key, synchronously. Example: `{ script: key.ts }`."
+                        },
+                        "function": {
+                            "type": "string",
+                            "description": "The function `script` exports. Default: `key`. Example: `{ script: keys.ts, function: trace }`."
+                        }
+                    },
+                    "required": ["script"],
+                    "additionalProperties": false
                 }
             ],
-            "x-type": "path, or { regex }"
+            "x-type": "path, { regex } or { script }"
         })
     }
 }
@@ -256,7 +271,7 @@ impl JsonSchema for crate::keys::Key {
         let part = generator.subschema_for::<crate::keys::KeyPart>();
         json_schema!({
             "anyOf": [part, { "type": "array", "items": part, "minItems": 1 }],
-            "x-type": "path, { regex }, or a list of them"
+            "x-type": "path, { regex }, { script }, or a list of them"
         })
     }
 }

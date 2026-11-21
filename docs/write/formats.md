@@ -301,6 +301,10 @@ export function transform(patient: Record<string, unknown>) {
   alternatives tried in order). A number or `true` reads as its text, an object as its JSON.
 - **An invalid path throws**, saying what's wrong and showing a valid one (`a[x]` has a filter
   without `=`): a path is code, not data, so a typo fails the test instead of reading `""`.
+- **When no path says it**, the key can be a function of your own (`{ script: key.ts }`): it gets
+  the message as decoded here and returns the key, synchronously
+  ([a key function](../configure/delivery.md#a-key-function); `remits-in` keys its X12 files by
+  the payment's trace number that way).
 
 ## Text
 

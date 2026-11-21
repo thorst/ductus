@@ -14,19 +14,37 @@
 //!
 //! A key can have several parts (`key: [MSH-4, PID-3.1]`). The SDK reads the same paths
 //! (`msg.get`, `XmlElement.get`, `getPath`); `sdk/tests/key-paths.json` holds the cases both test.
+//!
+//! What a path can't say, a key function says (`{ script: key.ts }`, 0.7.7.3): an exported
+//! synchronous function of the decoded message, run at intake on the engine's key thread
+//! (`ductus_runtime::key_functions`).
 
 use crate::format::{FixedField, Format};
 use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Deserializer};
 use serde_yaml_ng::Value;
 use std::fmt;
+use std::path::PathBuf;
 
-/// One part of a key: a path in the interface's format, or a regular expression over the text.
+/// One part of a key: a path in the interface's format, a regular expression over the text, or a
+/// function in the interface's code.
 #[derive(Debug, Clone, PartialEq)]
 pub enum KeyPart {
     Path(String),
     Regex(String),
+    Script(KeyFunction),
 }
+
+/// `{ script: key.ts, function: mrn }`: the function `key.ts` exports (default `key`), as written
+/// (the file relative to the interface's folder).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct KeyFunction {
+    pub script: PathBuf,
+    pub function: String,
+}
+
+/// The function a key script exports when `function:` doesn't say.
+pub const DEFAULT_KEY_FUNCTION: &str = "key";
 
 /// `ordering.key`: one part, or several read together (`[MSH-4, PID-3.1]`).
 #[derive(Debug, Clone, PartialEq)]
@@ -34,22 +52,39 @@ pub struct Key(pub Vec<KeyPart>);
 
 impl KeyPart {
     fn from_yaml(value: &Value) -> std::result::Result<Self, String> {
-        const SHAPE: &str = "a key is a path (`PID-3.1`) or `{ regex: 'MRN=(\\d+)' }`";
+        const SHAPE: &str = "a key is a path (`PID-3.1`), `{ regex: 'MRN=(\\d+)' }` or a function `{ script: key.ts }`";
         match value {
             Value::String(s) => Ok(KeyPart::Path(s.clone())),
             // A CSV column by its number (`key: 2`).
             Value::Number(n) => Ok(KeyPart::Path(n.to_string())),
             Value::Mapping(m) => {
-                let mut regex = None;
+                let (mut regex, mut script, mut function) = (None, None, None);
                 for (k, v) in m {
                     match (k.as_str(), v) {
                         (Some("regex"), Value::String(r)) => regex = Some(r.clone()),
                         (Some("regex"), _) => return Err("`regex` is text: `{ regex: 'MRN=(\\d+)' }`".into()),
+                        (Some("script"), Value::String(s)) => script = Some(PathBuf::from(s)),
+                        (Some("script"), _) => return Err("`script` is a file: `{ script: key.ts }`".into()),
+                        (Some("function"), Value::String(f)) => function = Some(f.clone()),
+                        (Some("function"), _) => {
+                            return Err("`function` is a name: `{ script: key.ts, function: mrn }`".into());
+                        }
                         (Some(other), _) => return Err(format!("unknown field `{other}`: {SHAPE}")),
                         (None, _) => return Err(SHAPE.into()),
                     }
                 }
-                regex.map(KeyPart::Regex).ok_or_else(|| SHAPE.into())
+                match (regex, script, function) {
+                    (Some(r), None, None) => Ok(KeyPart::Regex(r)),
+                    (None, Some(script), function) => Ok(KeyPart::Script(KeyFunction {
+                        script,
+                        function: function.unwrap_or_else(|| DEFAULT_KEY_FUNCTION.to_string()),
+                    })),
+                    (None, None, Some(_)) => {
+                        Err("`function` goes with `script`: `{ script: key.ts, function: mrn }`".into())
+                    }
+                    (Some(_), ..) => Err(format!("`regex` or `script`, not both: {SHAPE}")),
+                    (None, None, None) => Err(SHAPE.into()),
+                }
             }
             _ => Err(SHAPE.into()),
         }
@@ -83,6 +118,18 @@ impl fmt::Display for KeyPart {
         match self {
             KeyPart::Path(p) => f.write_str(p),
             KeyPart::Regex(r) => write!(f, "{{ regex: '{}' }}", r.replace('\'', "''")),
+            KeyPart::Script(k) => k.fmt(f),
+        }
+    }
+}
+
+impl fmt::Display for KeyFunction {
+    /// As written: `{ script: key.ts }`, with `function:` when it isn't the default.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let script = self.script.to_string_lossy().replace('\\', "/");
+        match self.function.as_str() {
+            DEFAULT_KEY_FUNCTION => write!(f, "{{ script: {script} }}"),
+            function => write!(f, "{{ script: {script}, function: {function} }}"),
         }
     }
 }
@@ -113,6 +160,8 @@ pub enum KeyPath {
     Csv(String),
     Fixed(FixedField),
     Regex(regex::Regex),
+    /// Read by running the function (the runtime's key thread), never from the text here.
+    Script(KeyFunction),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -160,6 +209,19 @@ pub fn compile(format: &Format, part: &KeyPart) -> Result<KeyPath> {
         KeyPart::Regex(r) => {
             let regex = regex::Regex::new(r).with_context(|| format!("invalid regex `{r}`"))?;
             return Ok(KeyPath::Regex(regex));
+        }
+        KeyPart::Script(k) => {
+            let identifier = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '$';
+            if k.function.is_empty()
+                || k.function.starts_with(|c: char| c.is_ascii_digit())
+                || !k.function.chars().all(identifier)
+            {
+                bail!("`function: {}` isn't a function name", k.function);
+            }
+            if k.script.as_os_str().is_empty() {
+                bail!("`script` names the file that exports the key function: `{{ script: key.ts }}`");
+            }
+            return Ok(KeyPath::Script(k.clone()));
         }
         KeyPart::Path(path) => path,
     };
@@ -378,7 +440,14 @@ mod tests {
         assert_eq!(part("PID-3.1").unwrap(), KeyPart::Path("PID-3.1".into()));
         assert_eq!(part("2").unwrap(), KeyPart::Path("2".into()), "a CSV column's number");
         assert_eq!(part("{ regex: 'MRN=(\\d+)' }").unwrap(), KeyPart::Regex("MRN=(\\d+)".into()));
-        assert!(part("{ script: key.ts }").unwrap_err().contains("unknown field `script`"));
+        let script = |s: &str, f: &str| KeyPart::Script(KeyFunction { script: s.into(), function: f.into() });
+        assert_eq!(part("{ script: key.ts }").unwrap(), script("key.ts", "key"), "`key` by default");
+        assert_eq!(part("{ script: keys.ts, function: mrn }").unwrap(), script("keys.ts", "mrn"));
+        assert_eq!(part("{ script: key.ts }").unwrap().to_string(), "{ script: key.ts }");
+        assert_eq!(part("{ script: k.ts, function: mrn }").unwrap().to_string(), "{ script: k.ts, function: mrn }");
+        assert!(part("{ function: mrn }").unwrap_err().contains("goes with `script`"));
+        assert!(part("{ script: k.ts, regex: x }").unwrap_err().contains("not both"));
+        assert!(part("{ scrip: k.ts }").unwrap_err().contains("unknown field `scrip`"));
         assert!(part("{ regex: 1 }").unwrap_err().contains("`regex` is text"));
         let key: Key = serde_yaml_ng::from_str("[MSH-4, { regex: 'x' }]").unwrap();
         assert_eq!(key.to_string(), "[MSH-4, { regex: 'x' }]");
@@ -446,5 +515,10 @@ mod tests {
         assert!(format!("{bad:#}").contains("invalid regex `(`"), "{bad:#}");
         let hl7 = compile(&Format::Hl7, &"PID-3[.5]".into()).unwrap_err().to_string();
         assert!(hl7.contains("a filter is `.component=value`"), "{hl7}");
+        // A function keys any format, text too.
+        let function = |f: &str| KeyPart::Script(KeyFunction { script: "key.ts".into(), function: f.into() });
+        assert!(matches!(compile(&Format::Text, &function("key")), Ok(KeyPath::Script(_))));
+        let bad = compile(&Format::Hl7, &function("not-a-name")).unwrap_err().to_string();
+        assert!(bad.contains("isn't a function name"), "{bad}");
     }
 }

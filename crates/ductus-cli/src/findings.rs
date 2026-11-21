@@ -527,7 +527,13 @@ pub const CODES: &[Code] = &[
         "DUC207",
         "warning",
         "A key reads empty in every fixture",
-        "`ordering.key` (or `dedupe.keys`) read from each file in the interface's `fixtures/` folder, as the engine reads it when a message arrives, is empty in all of them: the path probably doesn't match where the sender puts the value (`PID-3.1` when the MRN is in `PID-2`). The engine would keep every such message in one lane (or check none for duplicates) and say the interface is `keyless`. Open a fixture, find the value, write its path. Files that aren't messages of the interface's format (a test's expected output) are left out; with no fixtures nothing is checked.",
+        "`ordering.key` (or `dedupe.keys`) read from each file in the interface's `fixtures/` folder, as the engine reads it when a message arrives, is empty in all of them: the path probably doesn't match where the sender puts the value (`PID-3.1` when the MRN is in `PID-2`). The engine would keep every such message in one lane (or check none for duplicates) and say the interface is `keyless`. Open a fixture, find the value, write its path. Files that aren't messages of the interface's format (a test's expected output) are left out; with no fixtures nothing is checked. A key with a key function (`{ script: key.ts }`) isn't read here: test the function in the interface's tests.",
+    ),
+    code(
+        "DUC208",
+        "error",
+        "A key function waits for something",
+        "A key function (`ordering: { key: { script: key.ts } }`, or one of `dedupe.keys`) is `async`, or its body has an `await` or calls `db()`, `api()` or `fetch()`. A key is read while the sender waits for its ACK, on one thread for every interface's keys, so a key function answers from the message alone: at the engine, every message it answered a promise for would be quarantined. Read the key from the message; look values up in a destination's code instead. Only the function's own body is checked: code it calls in other functions is stopped at the engine (no database or API is reachable there).",
     ),
     code(
         "DUC210",

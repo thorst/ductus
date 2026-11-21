@@ -1459,6 +1459,7 @@ fn batch<'a>(t: &'a Iface, items: &[(&'a str, Option<&'a str>)], state: Option<(
                 payload: payload.as_bytes(),
                 dedupe_key: *key,
                 origin: None,
+                quarantined: None,
             })
             .collect(),
         dedupe_window: std::time::Duration::from_secs(3600),
@@ -1496,6 +1497,27 @@ async fn batches_keep_order_dedupe_and_save_state_together() {
     assert_eq!(store.source_state(&t.name, "file:x").await.unwrap(), None);
 }
 
+/// A message whose key couldn't be read (0.7.7.3) is stored quarantined at every destination,
+/// with why, alone or in a batch, and never queued.
+#[tokio::test]
+async fn a_message_whose_key_failed_is_stored_quarantined() {
+    let Some(store) = store().await else { return };
+    let t = Iface::single(&store, "keyfail").await;
+    let why = "ordering key function failed: Error: no MRN (interfaces/x/key.ts:2:9)";
+    let one = store.insert_quarantined(t.msg(0, b"alone"), why).await.unwrap();
+    let mut items = batch(&t, &[("ok", None), ("bad", Some("K"))], None);
+    items.messages[1].quarantined = Some(why);
+    items.messages[1].dedupe_key = None;
+    assert_eq!(store.insert_batch(&items).await.unwrap(), [false, false]);
+
+    assert_eq!(store.payloads(&t.name, Status::Pending).await.unwrap(), [b"ok".to_vec()]);
+    assert_eq!(store.payloads(&t.name, Status::Quarantined).await.unwrap(), [b"alone".to_vec(), b"bad".to_vec()]);
+    assert_eq!(payloads(store.pending(t.dest(), &[0], 10).await.unwrap()), [b"ok".to_vec()], "never queued");
+    let deliveries = store.deliveries(one).await.unwrap();
+    assert_eq!(deliveries.len(), 1);
+    assert_eq!((deliveries[0].status, deliveries[0].last_error.as_deref()), (Status::Quarantined, Some(why)));
+}
+
 /// A route stores what a destination sent into the target interface in the same transaction
 /// that records the destination's statuses: both happen, or neither.
 #[tokio::test]
@@ -1517,6 +1539,7 @@ async fn routed_messages_are_queued_in_the_target_exactly_once() {
                 payload: payload.as_bytes(),
                 dedupe_key: Some("same key"),
                 origin: Some(*origin),
+                quarantined: None,
             })
             .collect(),
         dedupe_window: std::time::Duration::from_secs(3600),
@@ -2198,6 +2221,7 @@ async fn everything_at_once_without_lock_errors() {
                         payload: payload.as_bytes(),
                         dedupe_key: Some(key),
                         origin: None,
+                        quarantined: None,
                     })
                     .collect();
                 let batch = Batch {
@@ -2292,6 +2316,7 @@ async fn everything_at_once_without_lock_errors() {
                                 payload: &p.payload,
                                 dedupe_key: None,
                                 origin: Some(p.id),
+                                quarantined: None,
                             })
                             .collect();
                         let batch = Batch {

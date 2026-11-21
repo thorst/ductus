@@ -1034,7 +1034,8 @@ pub struct Dedupe {
     /// The fields whose values, together, make a message the same as one seen before, as key
     /// paths in the interface's `format` (the same paths as `ordering.key`, filters included): HL7
     /// `MSH-10`, JSON `order.id`, XML `Order/@id`, a CSV column or a fixed-length field's name, or
-    /// `{ regex: '…' }` over the message's text. Choose fields a resend repeats and a new message
+    /// `{ regex: '…' }` over the message's text, or a function `{ script: keys.ts, function: trace }`
+    /// (as for `ordering.key`). Choose fields a resend repeats and a new message
     /// never does: the sender's control ID, or an order number with its status. A message whose
     /// keys all read empty isn't checked. Default: `[MSH-10]` (HL7's message control ID). Example:
     /// `keys: [ORC-2, ORC-5]`.
@@ -1147,8 +1148,11 @@ pub struct Ordering {
     /// - JSON: an array's item by a field `identifier[system=urn:oid:1.2.3].value`.
     /// - XML: an element by an attribute or a child's text `id[@root=2.16.840.1]/@extension`;
     ///   names match by their local name, whatever the prefix (the format's `names`).
-    /// - Any format: `{ regex: 'MRN=(\d+)' }` over the message's text (the first group), the only
-    ///   key `text` messages have.
+    /// - Any format: `{ regex: 'MRN=(\d+)' }` over the message's text (the first group).
+    /// - What no path says: a function of the interface's own, `{ script: key.ts }` (the function
+    ///   `key` it exports; `{ script: key.ts, function: mrn }` for another). It gets the decoded
+    ///   message and returns the key, synchronously: it runs while the sender waits for its ACK. One
+    ///   that throws, or runs past 50 ms, gets its message stored quarantined with why.
     ///
     /// Several values together are a list: `key: [MSH-4, PID-3.1]` (one patient of one facility);
     /// it reads empty when any of them does. The code reads the same paths (`msg.get`, `getPath`).
@@ -1334,6 +1338,13 @@ impl InterfaceConfig {
             let place: Vec<&str> = setting.into_iter().chain(index.as_deref()).collect();
             let checked = crate::keys::compile(&self.format, part).map(drop);
             at(&place, checked.with_context(|| format!("key `{part}` (format {})", self.format.name())))?;
+            if let KeyPart::Script(k) = part {
+                let path = self.dir.join(&k.script);
+                if !path.is_file() {
+                    let place: Vec<&str> = place.iter().copied().chain(["script"]).collect();
+                    refuse!(place, "key `{part}`: script not found: {}", path.display());
+                }
+            }
         }
         if matches!(self.source, Source::Mllp { .. }) && self.format != Format::Hl7 {
             refuse!(
@@ -1570,11 +1581,37 @@ impl InterfaceConfig {
             .collect()
     }
 
+    /// The key functions its `ordering.key` and `dedupe.keys` name (`{ script: key.ts }`), each
+    /// once, in the order written (ordering's first), with the interface's input format: what
+    /// the engine's key thread loads. Empty for most interfaces.
+    pub fn key_functions(&self) -> Vec<Function> {
+        let formats = self.format_spec();
+        self.key_scripts()
+            .into_iter()
+            .map(|k| Function { module: self.dir.join(&k.script), name: k.function.clone(), formats: formats.clone() })
+            .collect()
+    }
+
+    /// `key_functions` as written in interface.yaml, in the same order.
+    pub fn key_scripts(&self) -> Vec<&crate::keys::KeyFunction> {
+        let ordering = self.ordering.key.iter().flat_map(|k| &k.0);
+        let dedupe = self.dedupe.iter().flat_map(|d| &d.keys);
+        let mut out: Vec<&crate::keys::KeyFunction> = Vec::new();
+        for part in ordering.chain(dedupe) {
+            if let KeyPart::Script(k) = part
+                && !out.contains(&k)
+            {
+                out.push(k);
+            }
+        }
+        out
+    }
+
     /// Every file of its own the interface's code starts from (its `script` first, then each
-    /// destination's, by name), once each; empty when it has no code.
+    /// destination's, by name, then its key functions'), once each; empty when it has no code.
     pub fn modules(&self) -> Vec<PathBuf> {
         let mut out: Vec<PathBuf> = Vec::new();
-        for f in self.functions().into_iter().flatten() {
+        for f in self.functions().into_iter().flatten().chain(self.key_functions()) {
             if !out.contains(&f.module) {
                 out.push(f.module);
             }
@@ -1910,6 +1947,32 @@ rate_limit: { per_minute: 100, burst: 500, over_limit: drop }
         .unwrap();
         assert!(composite.validate().is_ok());
         assert_eq!(composite.ordering.key.unwrap().to_string(), "[MSH-4, PID-3[.5=MR].1]");
+
+        // A key function's file must exist, refused at the part's `script`.
+        let (place, text) = refused("ordering: { key: [MSH-4, { script: nope.ts }] }\n");
+        assert_eq!(place, "ordering.key.1.script");
+        assert!(text.contains("script not found") && text.contains("nope.ts"), "{text}");
+        assert_eq!(refused("dedupe: { keys: [{ script: k.ts, function: '1x' }] }\n").0, "dedupe.keys.0");
+    }
+
+    /// Key functions (0.7.7.3): listed once each, ordering's first, with the interface's input
+    /// format; their files are among the interface's modules (its code version counts them).
+    #[test]
+    fn key_functions_are_listed_once_and_are_code() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("key.ts"), "export function key() { return \"\"; }").unwrap();
+        let mut c: InterfaceConfig = serde_yaml_ng::from_str(
+            "name: x\nsource: { mllp: { port: 1 } }\ndestinations: { f: { file: { dir: o } } }\nordering: { key: [{ script: key.ts }, MSH-4] }\ndedupe: { keys: [{ script: key.ts }, { script: key.ts, function: dedupe }] }\n",
+        )
+        .unwrap();
+        c.dir = dir.path().to_path_buf();
+        c.validate().unwrap();
+        let functions: Vec<String> = c.key_functions().iter().map(|f| f.name.clone()).collect();
+        assert_eq!(functions, ["key", "dedupe"]);
+        assert_eq!(c.key_functions()[0].module, dir.path().join("key.ts"));
+        assert_eq!(c.modules(), [dir.path().join("key.ts")]);
+        assert!(c.has_code(), "a key function is code");
+        assert!(c.functions().iter().all(Option::is_none), "no destination runs it");
     }
 
     #[test]

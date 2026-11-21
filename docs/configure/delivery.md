@@ -85,6 +85,63 @@ ordering:
 - **A malformed path is refused** by `ductus validate` and at the start, at its place in
   interface.yaml (`ordering.key.1` for a list's second part), with what's wrong and an example.
 
+### A key function
+
+When no path says it, the interface's own code does: a key part can be `{ script: key.ts }`, the
+function `key` that file exports, or `{ script: keys.ts, function: trace }` for another name. It
+gets the message decoded as a transform gets it and returns the key as text (a number is its
+digits; `""`, `null` or nothing is an empty key). It works for `ordering.key` and `dedupe.keys`,
+alone or as one part of a list, in every format.
+
+```yaml
+# interfaces/remits-in/interface.yaml, in part
+dedupe:                             # a payer's resent file: its payment's trace number again
+  keys: [{ script: keys.ts, function: trace }]
+  window: 90d
+```
+
+```ts
+// interfaces/remits-in/keys.ts
+import { parseX12 } from "../../lib/x12.ts";
+
+/**
+ * The payment's trace number (TRN02): a payer that sends the same 835 again sends the same trace
+ * number, so it's the file's dedupe key. Read with the separators the file declares in its ISA
+ * segment, which a regex can't know. A file that isn't X12 is quarantined, with why.
+ */
+export function trace(text: string): string {
+  return parseX12(text).find((seg) => seg.id === "TRN")?.e(2) ?? "";
+}
+```
+
+- **When to use one**: a key that needs a decision (the MRN, else the account number with the
+  facility before it), a value to normalize (case, leading zeros), or a format whose delimiters
+  the message declares (X12). **Prefer a path** whenever one reads the value: it's checked
+  against the fixtures by `validate` and needs no code.
+- **It runs while the sender waits for its ACK**, on one thread the engine keeps for every
+  interface's key functions (made when the first is loaded; an engine without any has none). So it
+  must be **synchronous and quick**: no `async`, `await`, `db()`, `api()` or `fetch()`.
+  `ductus validate` refuses those in its body (DUC208), and at the engine none of them is
+  reachable. Look things up in a destination's code instead.
+- **What it costs** (measured, release build): about 4 µs a message for a key that reads one HL7
+  field (`msg.get("PID-3[.5=MR].1")`), plus about 60 µs when a message crosses to the key thread
+  alone (an MLLP message; a file's messages cross together); a path takes under half a
+  microsecond. Against a durable commit's ~3 ms that's nothing at a feed's pace: at 1,000 messages
+  a second the senders' longest wait for an ACK was the same either way. At full speed it shows:
+  one engine took 4,600–6,200 messages a second over 4 MLLP connections keyed by a function,
+  6,900 by a path (`scripts/bench-keys.sh`).
+- **A key function that throws** (or calls `quarantine("why")`) gets its message **stored
+  quarantined, with why**, at every destination: `ordering key { script: key.ts } failed: Error: no
+  MRN (interfaces/adt/key.ts:6:25)`. The sender gets its ACK (it was received; someone must look,
+  not the sender), and the next message is keyed as usual. One that runs longer than **50 ms** is
+  stopped and its message quarantined the same way; meanwhile other interfaces' key functions wait
+  ([nuance](../nuances/ordering.md#a-key-function-runs-while-the-sender-waits-and-its-failure-quarantines-the-message-level-3)).
+- **Test it like a transform**: import it in a `*.test.ts` and call it on a fixture
+  ([testing](../write/testing.md)). `validate`'s check of keys against fixtures (DUC207) can't
+  read a key that has a function in it.
+- **A deploy of its code** loads it again, as a transform's code is: the next message is keyed by
+  the new code.
+
 ## Failures: `retry`
 
 [`retry`](../reference/config/interface.md#retry) is how a delivery that failed for a reason that

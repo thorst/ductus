@@ -37,7 +37,8 @@ crates/ductus-runtime  engine: lib.rs (startup, its phases timed), code.rs (code
                        project.rs (what code uses, via the type checker), ingest.rs (also the receiving
                        side of routes: accept_routed), http.rs, files.rs + split.rs (file/SFTP sources), sftp.rs,
                        schedule.rs, worker.rs, health.rs (stopped interfaces), destination.rs, keys.rs (reading
-                       keys from a message parsed once: `Document`),
+                       keys from a message parsed once: `Document`), key_functions.rs (`{ script: key.ts }`: the
+                       engine's one key thread and isolate, loads and calls, why a key failed),
                        allow.rs (who may connect: admissions per listener, the one task keeping host names
                        resolved, TCP keepalive), systemd.rs (every listener's socket: kept in systemd's
                        store across restarts and crashes, passed on by a handover; READY/STOPPING/MAINPID),

@@ -25,6 +25,9 @@ pub enum Accepted {
     Queued(MessageRef),
     /// Seen within the dedupe window: stored (status `duplicate`) but not queued.
     Duplicate,
+    /// Its key couldn't be read (a key function threw or ran away): stored quarantined, with why.
+    /// The sender is told it was received: it was, and someone must look at it, not the sender.
+    Quarantined(MessageRef),
 }
 
 /// Stores incoming messages for one interface and wakes the worker that owns each one.
@@ -61,6 +64,31 @@ pub(crate) struct Settings {
     /// Which of the latest messages had empty keys (`monitor.empty_keys`): new with new keys, so a
     /// fixed path clears the interface's *keyless* at once.
     empty: Arc<EmptyKeys>,
+    /// Its key functions on the engine's key thread, when a key part is `{ script: … }`.
+    scripts: Option<Arc<KeyScripts>>,
+}
+
+/// An interface's key functions, loaded, and the parts of its keys that name them.
+pub(crate) struct KeyScripts {
+    loaded: Arc<crate::key_functions::Loaded>,
+    /// Which of the functions each key uses (`Loaded::written`'s places): its failure is that
+    /// key's.
+    ordering: Vec<usize>,
+    dedupe: Vec<usize>,
+}
+
+impl KeyScripts {
+    fn new(loaded: Arc<crate::key_functions::Loaded>, ordering: Option<&[KeyPath]>, dedupe: &[KeyPath]) -> Arc<Self> {
+        let uses = |parts: &[KeyPath]| -> Vec<usize> {
+            let functions = parts.iter().filter_map(|p| match p {
+                KeyPath::Script(f) => loaded.written.iter().position(|w| w == f),
+                _ => None,
+            });
+            functions.collect()
+        };
+        let ordering = ordering.map(uses).unwrap_or_default();
+        Arc::new(Self { dedupe: uses(dedupe), ordering, loaded })
+    }
 }
 
 /// The windows of `monitor.empty_keys`, one per key the interface has.
@@ -71,13 +99,15 @@ struct EmptyKeys {
 
 impl Settings {
     /// `destinations`: the ids of the interface's destinations (`Store::destination_ids`), with
-    /// their workers' wake-ups; `tier`: its retention tier (`Retention::tier`). An error when a key
-    /// path doesn't fit its format.
+    /// their workers' wake-ups; `tier`: its retention tier (`Retention::tier`); `scripts`: its key
+    /// functions (`KeyThread::load`), when it has any. An error when a key path doesn't fit its
+    /// format.
     pub(crate) fn new(
         config: Arc<InterfaceConfig>,
         lanes: Arc<Lanes>,
         tier: Arc<AtomicI16>,
         targets: Targets,
+        scripts: Option<Arc<crate::key_functions::Loaded>>,
     ) -> Result<Self> {
         let compile = |parts: &[ductus_core::keys::KeyPart]| {
             keys::compile_all(&config.format, parts).with_context(|| format!("interface `{}`", config.name))
@@ -93,7 +123,8 @@ impl Settings {
             ordering: ordering.as_ref().map(|_| window()),
             dedupe: (!dedupe.is_empty()).then(window),
         });
-        Ok(Self { config, ordering, dedupe, control_id, lanes, tier, targets, empty })
+        let scripts = scripts.map(|loaded| KeyScripts::new(loaded, ordering.as_deref(), &dedupe));
+        Ok(Self { config, ordering, dedupe, control_id, lanes, tier, targets, empty, scripts })
     }
 
     /// The same, queueing for `targets` instead.
@@ -107,13 +138,15 @@ impl Settings {
             tier: self.tier.clone(),
             targets,
             empty: self.empty.clone(),
+            scripts: self.scripts.clone(),
         }
     }
 
     /// Count the keys of messages just stored (`keys`, one per message): the interface's totals
     /// and the windows `monitor.empty_keys` reads.
     fn watch<'k>(&self, stats: &InterfaceStats, keys: impl IntoIterator<Item = &'k Keys>) {
-        for k in keys {
+        // A message quarantined for its key function counts as quarantined, not as keyless.
+        for k in keys.into_iter().filter(|k| k.quarantine.is_none()) {
             if let (Some(window), Some(key)) = (&self.empty.ordering, &k.ordering_key) {
                 window.record(key.is_empty());
                 if key.is_empty() {
@@ -148,11 +181,27 @@ impl Settings {
         ordering.into_iter().chain(dedupe).collect()
     }
 
-    /// Read a message's lane, ordering key, control ID and dedupe key (the message parsed once for
-    /// all of them).
-    fn keys(&self, payload: &[u8]) -> Keys {
-        let text = String::from_utf8_lossy(payload);
-        let document = keys::Document::new(&self.config.format, &text);
+    /// Read messages' lanes, ordering keys, control IDs and dedupe keys, each message parsed once
+    /// for all of them. Key functions run on the engine's key thread, every message of the call in
+    /// one trip there. An error only when that thread is gone (then nothing is stored).
+    async fn keys(&self, payloads: &[&[u8]]) -> Result<Vec<Keys>> {
+        let texts: Vec<std::borrow::Cow<str>> = payloads.iter().map(|p| String::from_utf8_lossy(p)).collect();
+        let Some(scripts) = &self.scripts else {
+            return Ok(texts.iter().map(|text| self.keys_of(text, &[])).collect());
+        };
+        let scripted = scripts.loaded.run(texts.iter().map(|t| t.to_string()).collect()).await?;
+        let keys = texts.iter().zip(scripted).map(|(text, values)| match values {
+            Ok(values) => self.keys_of(text, &values),
+            Err(failed) => self.failed(text, scripts, failed),
+        });
+        Ok(keys.collect())
+    }
+
+    /// One message's keys, with what its key functions answered (`values`, in `Loaded::written`'s
+    /// order; none without key functions).
+    fn keys_of(&self, text: &str, values: &[String]) -> Keys {
+        let functions = self.scripts.as_ref().map_or(&[][..], |s| &s.loaded.written[..]);
+        let document = keys::Document::new(&self.config.format, text).with_scripts(functions, values);
         let read = |k: &KeyPath| document.read(k).unwrap_or_default();
         let ordering_key = self.ordering.as_ref().map(|parts| document.read_all(parts).unwrap_or_default());
         let values: Vec<String> = self.dedupe.iter().map(read).collect();
@@ -163,6 +212,32 @@ impl Settings {
             // Nothing to identify the message by: no dedupe. The unit separator can't appear in
             // these values, so distinct lists never collide.
             dedupe: values.iter().any(|v| !v.is_empty()).then(|| values.join("\u{1f}")),
+            quarantine: None,
+        }
+    }
+
+    /// A message one of whose key functions gave no key: stored quarantined, with why, in the
+    /// empty key's lane (a resend sends it from there), never checked for duplicates.
+    fn failed(&self, text: &str, scripts: &KeyScripts, failed: crate::key_functions::Failed) -> Keys {
+        let which = match (scripts.ordering.contains(&failed.function), scripts.dedupe.contains(&failed.function)) {
+            (true, true) => "ordering and dedupe key",
+            (true, false) => "ordering key",
+            (false, _) => "dedupe key",
+        };
+        let written = &scripts.loaded.written[failed.function];
+        let reason = format!("{which} {written} failed: {}", failed.why);
+        let interface = &self.config.name;
+        match failed.ran_away {
+            true => tracing::error!(%interface, %reason, "a key function ran away: its message is quarantined"),
+            false => tracing::warn!(%interface, %reason, "a key function failed: its message is quarantined"),
+        }
+        let document = keys::Document::new(&self.config.format, text);
+        Keys {
+            partition: self.lanes.lane_of(""),
+            ordering_key: None,
+            control_id: self.control_id.as_ref().and_then(|k| document.read(k)).filter(|c| !c.is_empty()),
+            dedupe: None,
+            quarantine: Some(reason),
         }
     }
 
@@ -225,6 +300,19 @@ impl Intake {
         self.swap(Arc::new(next)).await;
     }
 
+    /// Read keys with `scripts` from now on: its key functions loaded again (a deploy in place of
+    /// its code, which may have changed them).
+    pub(crate) async fn rescript(&self, scripts: Arc<crate::key_functions::Loaded>) {
+        let current = self.settings();
+        let mut next = current.retargeted(Targets {
+            destinations: current.targets.destinations.clone(),
+            wake: current.targets.wake.clone(),
+        });
+        next.scripts = Some(KeyScripts::new(scripts, current.ordering.as_deref(), &current.dedupe));
+        drop(current);
+        self.swap(Arc::new(next)).await;
+    }
+
     /// Store with `settings` from now on (a deploy in place restarted the interface on new
     /// settings: format, keys, durability, lanes, retention, destinations), once every store with
     /// the old ones has finished. Answers the old ones, which `reset` takes back if the restart
@@ -252,7 +340,10 @@ impl Intake {
         by: ductus_store::Actor<'_>,
     ) -> Result<ductus_store::Edited> {
         let settings = self.settings();
-        let keys = settings.keys(payload);
+        let keys = settings.keys(&[payload]).await?.pop().context("one message, one set of keys")?;
+        if let Some(why) = &keys.quarantine {
+            anyhow::bail!("the edited message's key couldn't be read: {why}");
+        }
         let copy = ductus_store::Copy {
             original,
             interface: &self.name,
@@ -291,14 +382,14 @@ impl Intake {
     /// while draining.
     pub async fn accept(&self, payload: &[u8]) -> Result<Accepted> {
         let result = self.accept_one(payload).await;
-        self.count(&result, |a| if matches!(a, Accepted::Queued(_)) { (1, 0) } else { (0, 1) });
+        self.count(&result, |a| if matches!(a, Accepted::Duplicate) { (0, 1) } else { (1, 0) });
         result
     }
 
     async fn accept_one(&self, payload: &[u8]) -> Result<Accepted> {
         let _pass = self.gate.enter()?;
         let settings = self.settings();
-        let keys = settings.keys(payload);
+        let keys = settings.keys(&[payload]).await?.pop().context("one message, one set of keys")?;
         let targets = &settings.targets;
         let new = NewMessage {
             interface: &self.name,
@@ -310,8 +401,9 @@ impl Intake {
             destinations: &targets.destinations,
             tier: settings.tier(),
         };
-        let accepted = match (&settings.config.dedupe, &keys.dedupe) {
-            (Some(d), Some(key)) => {
+        let accepted = match (&settings.config.dedupe, &keys.dedupe, &keys.quarantine) {
+            (_, _, Some(why)) => Accepted::Quarantined(self.store.insert_quarantined(new, why).await?),
+            (Some(d), Some(key), None) => {
                 let stored = self.store.insert_deduped(new, DedupeKey { key, window: d.window }).await?;
                 if stored.duplicate {
                     tracing::debug!(interface = %self.name, %key, "duplicate");
@@ -320,7 +412,7 @@ impl Intake {
                     Accepted::Queued(stored.message)
                 }
             }
-            _ => Accepted::Queued(self.store.insert(new).await?),
+            (..) => Accepted::Queued(self.store.insert(new).await?),
         };
         settings.watch(&self.stats, std::slice::from_ref(&keys));
         if matches!(accepted, Accepted::Queued(_)) {
@@ -330,7 +422,8 @@ impl Intake {
     }
 
     /// Store many messages and the source's progress in one transaction (see `Store::insert_batch`).
-    /// Returns how many were queued (the rest were duplicates).
+    /// Returns how many were stored to be seen to (queued, or quarantined for their key): the
+    /// rest were duplicates.
     pub async fn accept_batch(&self, payloads: &[Vec<u8>], state: Option<(&str, &str)>) -> Result<usize> {
         let result = self.accept_many(payloads, state).await;
         self.count(&result, |&queued| (queued as u64, (payloads.len() - queued) as u64));
@@ -340,7 +433,8 @@ impl Intake {
     async fn accept_many(&self, payloads: &[Vec<u8>], state: Option<(&str, &str)>) -> Result<usize> {
         let _pass = self.gate.enter()?;
         let settings = self.settings();
-        let keys: Vec<Keys> = payloads.iter().map(|p| settings.keys(p)).collect();
+        let texts: Vec<&[u8]> = payloads.iter().map(Vec::as_slice).collect();
+        let keys = settings.keys(&texts).await?;
         let targets = &settings.targets;
         let batch = Batch {
             interface: &self.name,
@@ -354,6 +448,7 @@ impl Intake {
                     payload,
                     dedupe_key: k.dedupe.as_deref(),
                     origin: None,
+                    quarantined: k.quarantine.as_deref(),
                 })
                 .collect(),
             dedupe_window: settings.dedupe_window(),
@@ -368,6 +463,9 @@ impl Intake {
         let mut queued = 0;
         for (k, _) in keys.iter().zip(&duplicates).filter(|(_, duplicate)| !**duplicate) {
             queued += 1;
+            if k.quarantine.is_some() {
+                continue; // nothing to deliver
+            }
             let slot = k.partition as usize % targets.wake.slots();
             if !std::mem::replace(&mut woken[slot], true) {
                 targets.wake.lane(k.partition);
@@ -387,7 +485,8 @@ impl Intake {
             return self.store.finish(destination, done).await;
         }
         let settings = self.settings();
-        let keys: Vec<Keys> = routed.iter().map(|r| settings.keys(&r.payload)).collect();
+        let texts: Vec<&[u8]> = routed.iter().map(|r| r.payload.as_slice()).collect();
+        let keys = settings.keys(&texts).await?;
         let targets = &settings.targets;
         let batch = Batch {
             interface: &self.name,
@@ -401,6 +500,7 @@ impl Intake {
                     payload: &r.payload,
                     dedupe_key: k.dedupe.as_deref(),
                     origin: Some(r.origin),
+                    quarantined: k.quarantine.as_deref(),
                 })
                 .collect(),
             dedupe_window: settings.dedupe_window(),
@@ -415,7 +515,7 @@ impl Intake {
         let queued = queued?;
         let stored = || keys.iter().zip(&queued).filter(|(_, queued)| **queued).map(|(k, _)| k);
         settings.watch(&self.stats, stored());
-        for k in stored() {
+        for k in stored().filter(|k| k.quarantine.is_none()) {
             targets.wake.lane(k.partition);
         }
         Ok(())
@@ -468,6 +568,8 @@ struct Keys {
     ordering_key: Option<String>,
     control_id: Option<String>,
     dedupe: Option<String>,
+    /// A key function gave no key: the message is stored quarantined with this reason.
+    quarantine: Option<String>,
 }
 
 /// Start an MLLP listener on `host:port` feeding `intake`, accepting as `accepting` says at each

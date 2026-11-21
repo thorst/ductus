@@ -9,7 +9,7 @@
 //! code.
 
 use ductus_core::format::{Format, XmlNames};
-pub use ductus_core::keys::{JsonStep, KeyPath, XmlFilter, XmlStep, XmlWhich, compile, compile_all};
+pub use ductus_core::keys::{JsonStep, KeyFunction, KeyPath, XmlFilter, XmlStep, XmlWhich, compile, compile_all};
 use std::cell::OnceCell;
 
 /// A message, parsed for its format the first time a key needs it (a regex reads the text alone).
@@ -17,6 +17,8 @@ pub struct Document<'a> {
     format: &'a Format,
     text: &'a str,
     parsed: OnceCell<Option<Parsed<'a>>>,
+    /// Its key functions' values, already read (the key thread), with the functions as written.
+    scripted: Option<(&'a [KeyFunction], &'a [String])>,
 }
 
 enum Parsed<'a> {
@@ -32,7 +34,12 @@ enum Parsed<'a> {
 
 impl<'a> Document<'a> {
     pub fn new(format: &'a Format, text: &'a str) -> Self {
-        Self { format, text, parsed: OnceCell::new() }
+        Self { format, text, parsed: OnceCell::new(), scripted: None }
+    }
+
+    /// With what its key functions answered for it: `values[i]` is `functions[i]`'s.
+    pub fn with_scripts(self, functions: &'a [KeyFunction], values: &'a [String]) -> Self {
+        Self { scripted: Some((functions, values)), ..self }
     }
 
     /// None: not a message of the format (not HL7, not JSON, not XML; an empty file).
@@ -67,6 +74,11 @@ impl<'a> Document<'a> {
     /// format says nothing about the key. Missing fields in a message of the format read as
     /// `Some("")`.
     pub fn read(&self, key: &KeyPath) -> Option<String> {
+        if let KeyPath::Script(function) = key {
+            // None without the values (`validate`'s fixtures): nothing can be said about it here.
+            let (functions, values) = self.scripted?;
+            return functions.iter().position(|f| f == function).and_then(|i| values.get(i)).cloned();
+        }
         if let KeyPath::Regex(regex) = key {
             if self.text.trim().is_empty() {
                 return None;

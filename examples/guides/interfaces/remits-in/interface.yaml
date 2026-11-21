@@ -8,3 +8,6 @@ source: { file: { dir: inbound, pattern: "*.835" } }
 format: text                        # X12 has no format of its own yet: read it as text
 output: csv
 destinations: { billing-office: { file: { dir: out }, script: remits.ts } }
+dedupe:                             # a payer's resent file: its payment's trace number again
+  keys: [{ script: keys.ts, function: trace }]
+  window: 90d
