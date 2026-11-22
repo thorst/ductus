@@ -1,6 +1,7 @@
-# A nightly job: the code runs at 02:00 and what it returns is the message.
+# A nightly job: the code runs at 02:00 in New York (the receiver's clock) and what it returns is
+# the message.
 name: nightly-census
-source: { schedule: { cron: "0 2 * * *" } }
+source: { schedule: { cron: "0 2 * * *", timezone: America/New_York } }
 script: census.ts
 format: { csv: }
 destinations: { receiver: { sftp: { server: state, dir: census } } }

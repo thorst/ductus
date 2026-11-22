@@ -243,6 +243,7 @@ impl Alerts {
             at: Utc::now(),
             summary: "This is a test notification.",
             environment: &self.environment,
+            zone: self.settings.zone,
         };
         for row in self.rows_for(channel) {
             self.send(&row, &notice).await?;
@@ -781,6 +782,7 @@ async fn deliver(a: &Alerts, store: &ductus_store::Store, environment: &str, ite
         at: item.at,
         summary: item.summary.as_deref().unwrap_or(""),
         environment,
+        zone: a.settings.zone,
     };
     let result = match tokio::time::timeout(SEND_TIMEOUT, a.send(&item.channel, &notice)).await {
         Ok(result) => result,

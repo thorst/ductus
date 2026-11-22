@@ -2,7 +2,7 @@
 
 `ductus.yaml` sits at the top of the project and holds what applies to every interface in it
 and to the engine that runs them: how long messages are kept, where the web UI listens, how
-people sign in, the audit log, alerts, and the engine's own checks. **It's optional**: every
+people sign in, the audit log, the site's time zone, alerts, and the engine's own checks. **It's optional**: every
 setting has a default, and `ductus init` writes the main ones out so you can see them.
 
 ```yaml
@@ -133,6 +133,36 @@ The audit log and the messages it names are kept for different times: the log fo
 (six years), a message for its interface's retention, so an audit row can outlive the payload it
 mentions ([nuance](../nuances/people.md#copies-of-payloads-and-the-audit-log-are-kept-for-different-times-level-3)). An engine that crashed shows in the log as a
 start whose previous run never stopped ([nuance](../nuances/people.md#a-crash-shows-in-the-audit-log-level-3)).
+
+## The site's time zone
+
+[`timezone`](../reference/config/ductus.md#timezone) is the clock every wall-clock setting is
+read on: schedules' `cron`, `monitor` hours and deadlines (`between`, `active_by`, `from`), the
+hour of the week each destination learns its normal traffic for, and alerts' quiet hours. The
+times in notifications and health summaries ("missed Thu 09:00") are told on it too. An IANA
+name: `America/Chicago`, `Europe/Amsterdam`, `Asia/Kolkata`, `UTC`.
+
+```yaml
+# ductus.yaml, in part
+timezone: America/Chicago
+```
+
+- **Default: the server's own zone**, as the operating system says (on Windows, the service
+  account's). A site whose servers run on its own clock needs nothing.
+- **Set it** when the server doesn't: most containers and many cloud servers run on UTC, and
+  there `cron: "0 6 * * *"` runs at midnight in Chicago and `between: "06:00-22:00"` means
+  01:00 to 17:00 ([nuance](../nuances/files.md#cron-and-monitor-times-are-on-the-sites-clock-the-servers-unless-you-set-timezone-level-2)).
+- **Daylight saving follows the zone's rules**, from the zone database built into the binary, so
+  Windows, Linux and a container without zone files agree: a time the clock skips in spring
+  runs at the first minute after the gap, a time it shows twice in autumn runs once
+  ([nuance](../nuances/files.md#daylight-saving-a-skipped-time-runs-at-the-next-minute-a-repeated-time-runs-once-level-3)).
+- **A schedule can name its own** (`schedule: { cron: "0 6 * * *", timezone: America/New_York
+  }`) for a partner in another zone ([schedules](sources.md#schedules)). Monitor hours and quiet
+  hours are the site's: there's one per engine.
+- **Changing it** takes a restart or a handover like any ductus.yaml change. Schedules lose no
+  run (the last run is kept as a moment, not a clock time), but the learned normals per hour of
+  the week shift by the difference until a few weeks relearn them
+  ([nuance](../nuances/monitoring.md#changing-timezone-shifts-what-each-hour-has-learned-level-3)).
 
 ## Alerts and owners
 

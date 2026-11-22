@@ -1345,6 +1345,37 @@ fn try_runs_one_message_through_every_destination_and_sends_nothing() {
     assert!(!ok && out.contains("give the message: a file, `--fixture NAME`, or `--message ID`"), "{out}");
 }
 
+/// ductus.yaml's `timezone` reaches a running engine's schedules: a run's `due` is told on the
+/// site's clock with its offset (India: +05:30 all year, so the test holds on any date).
+#[test]
+fn a_schedule_tells_its_runs_on_the_sites_clock() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("zone-test-{nanos}");
+    let yaml = format!(
+        "name: {name}\nsource: {{ schedule: {{ every: 1h }} }}\nformat: text\nscript: run.ts\ndestinations: {{ out: {{ file: {{ dir: out }} }} }}\n"
+    );
+    let code = "import type { ScheduledRun } from \"@ductus/sdk\";\n\nexport function transform(run: ScheduledRun) {\n  return JSON.stringify(run);\n}\n";
+    let dir = project(&[
+        ("ductus.yaml", "timezone: Asia/Kolkata\n"),
+        (format!("interfaces/{name}/interface.yaml").as_str(), yaml.as_str()),
+        (format!("interfaces/{name}/run.ts").as_str(), code),
+    ]);
+    let (_engine, log) = start_engine(dir.path(), &db, None, "engine.log");
+    let out = dir.path().join(format!("interfaces/{name}/out"));
+    let written =
+        || std::fs::read_dir(&out).ok()?.flatten().find(|e| !e.file_name().to_string_lossy().starts_with('.'));
+    let until = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while written().is_none() && std::time::Instant::now() < until {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    let file = written().unwrap_or_else(|| panic!("no run written: {}", std::fs::read_to_string(&log).unwrap()));
+    let run: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(file.path()).unwrap()).unwrap();
+    let due = run["due"].as_str().unwrap();
+    assert!(due.ends_with("+05:30"), "{run}");
+    assert_eq!(run["previous"], serde_json::Value::Null, "the first run");
+}
+
 /// Messages already waiting when the engine starts are decided as soon as their code loads, before
 /// the code versions are saved: they're saved after, with the version that decided them (0.7.3.2),
 /// never without one.

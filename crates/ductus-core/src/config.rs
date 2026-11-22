@@ -437,7 +437,8 @@ pub enum Split {
     Records,
 }
 
-/// When a schedule source runs: `every: 15m`, or `cron: "0 2 * * *"` (server local time).
+/// When a schedule source runs: `every: 15m`, or `cron: "0 2 * * *"` (in `timezone`, or the
+/// engine's).
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
@@ -448,11 +449,20 @@ pub struct Schedule {
     #[cfg_attr(test, schemars(with = "Option<crate::schema::shapes::Duration>"))]
     pub every: Option<Duration>,
     /// Run at the times a five-field cron expression gives (minute, hour, day of month, month,
-    /// day of week), in the server's local time: for jobs at a time of day. Runs missed while
+    /// day of week), on the clock of `timezone`: for jobs at a time of day. Runs missed while
     /// the engine was down are made up by one run at start, not one per missed time. Give this
     /// or `every`. Example: `cron: "0 2 * * *"` (02:00 every day).
     #[serde(default)]
     pub cron: Option<String>,
+    /// The time zone `cron` is read in, as an IANA name: for a partner in another zone (a file
+    /// a New York payer posts at 06:00 their time). Daylight saving follows the zone's rules: a
+    /// time skipped in spring runs at the first minute after the gap, a time that repeats in
+    /// autumn runs once. Only with `cron` (`every` counts elapsed time, which no zone changes).
+    /// Default: ductus.yaml's `timezone`, else the server's zone. Example: `timezone:
+    /// America/New_York`.
+    #[serde(default)]
+    #[cfg_attr(test, schemars(with = "Option<crate::schema::shapes::TimeZone>"))]
+    pub timezone: Option<crate::zone::Zone>,
 }
 
 /// Problems with how a set of interfaces share network ports: two MLLP listeners on one port,
@@ -1538,7 +1548,7 @@ impl InterfaceConfig {
                 }
             }
             Source::Schedule(s) => {
-                at(&["source", "schedule"], crate::schedule::Timing::new(s))?;
+                at(&["source", "schedule"], crate::schedule::Timing::new(s, crate::zone::Zone::Server))?;
                 if let Some((name, _)) =
                     self.destinations.iter().find(|(_, d)| self.script.is_none() && d.script.is_none())
                 {

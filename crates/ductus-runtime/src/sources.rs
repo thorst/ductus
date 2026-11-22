@@ -57,6 +57,8 @@ pub struct Sources {
     certificates: Arc<crate::tls::Certificates>,
     sftp: BTreeMap<String, ductus_core::resources::SftpServer>,
     ownership: Arc<crate::ownership::Ownership>,
+    /// ductus.yaml's `timezone`: a schedule's `cron` without its own is read in it.
+    zone: ductus_core::zone::Zone,
     /// The engine's run: every MLLP listener, file pickup and schedule stops with it.
     ended: CancellationToken,
     /// HTTP servers stop with it (first in a handover: a request in flight is answered here, the
@@ -96,6 +98,7 @@ impl Sources {
         certificates: Arc<crate::tls::Certificates>,
         sftp: BTreeMap<String, ductus_core::resources::SftpServer>,
         ownership: Arc<crate::ownership::Ownership>,
+        zone: ductus_core::zone::Zone,
         ended: CancellationToken,
         receiving: CancellationToken,
     ) -> Self {
@@ -104,6 +107,7 @@ impl Sources {
             certificates,
             sftp,
             ownership,
+            zone,
             ended,
             receiving,
             started: Default::default(),
@@ -162,8 +166,9 @@ impl Sources {
                 (until(&stop, watcher.run()), None)
             }
             Source::Schedule(s) => {
-                let timing = ductus_core::schedule::Timing::new(s)?;
-                (until(&stop, crate::schedule::run(intake()?, timing, self.ownership.clone())), None)
+                let timing = ductus_core::schedule::Timing::new(s, self.zone)?;
+                let zone = timing.zone(self.zone);
+                (until(&stop, crate::schedule::run(intake()?, timing, zone, self.ownership.clone())), None)
             }
             Source::Http { .. } | Source::Internal => return Ok(()),
         };

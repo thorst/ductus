@@ -35,6 +35,7 @@ auth:
     group_base: "OU=Groups,DC=hospital,DC=org"
     refresh: 5m
 audit: { keep: 7y, payload_reads: true, payload_read_window: 0s }
+timezone: America/Chicago
 alerts:
   smtp:
     host: ${HOST}

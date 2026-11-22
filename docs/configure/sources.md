@@ -131,7 +131,7 @@ resources.yaml with the address and login ([SFTP servers](resources.md#sftp-serv
 ```yaml
 # interfaces/nightly-census/interface.yaml
 name: nightly-census
-source: { schedule: { cron: "0 2 * * *" } }   # 02:00 every day, the server's local time
+source: { schedule: { cron: "0 2 * * *" } }   # 02:00 every day, on the site's clock
 format: csv
 destinations: { quest: { sftp: { server: quest, dir: census }, script: census.ts } }
 ```
@@ -140,7 +140,23 @@ No input: the code runs on the timer and what it returns becomes the message. `e
 at start, then at that interval (for polling); `cron` runs at the times a five-field expression
 gives (for a time of day). A run is skipped while the previous one's message is still waiting,
 and runs missed while the engine was down are made up by one run, not one per missed time
-([nuance](../nuances/files.md#cron-uses-the-servers-local-time-missed-runs-collapse-to-one-level-3)).
+([nuance](../nuances/files.md#missed-runs-collapse-to-one-a-run-waits-for-the-one-before-level-3)).
+
+**Whose clock:** `cron` is read in ductus.yaml's
+[`timezone`](ductus-yaml.md#the-sites-time-zone), by default the server's zone. Mind a server or
+container on UTC ([nuance](../nuances/files.md#cron-and-monitor-times-are-on-the-sites-clock-the-servers-unless-you-set-timezone-level-2)).
+A schedule for a partner on another clock names its own:
+
+```yaml
+# interfaces/payer-eligibility/interface.yaml, in part
+source: { schedule: { cron: "0 6 * * 1-5", timezone: America/New_York } }   # 06:00 in New York, weekdays
+```
+
+The run's message says when it was due on that clock, with the offset:
+`{"due": "2026-11-23T06:00:00-05:00", "previous": "2026-11-20T06:00:00-05:00"}`. Daylight saving
+follows the zone's rules: a time skipped in spring runs at the first minute after the gap, a time
+repeated in autumn runs once
+([nuance](../nuances/files.md#daylight-saving-a-skipped-time-runs-at-the-next-minute-a-repeated-time-runs-once-level-3)).
 
 ## Internal: from another interface
 

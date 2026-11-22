@@ -81,5 +81,7 @@ services:
   the project when none is set (no `DUCTUS_PROJECT`, which release mode refuses beside it).
 - **The database** in the Compose file is for trying it out. For anything that matters, point
   `DUCTUS_DATABASE_URL` at the DBA's Postgres ([PostgreSQL](postgres.md)).
-- **Time zone**: the image runs on UTC unless you set `TZ`. Cron schedules, quiet hours and
-  `monitor:` times are read in the container's local time.
+- **Time zone**: the image runs on UTC. Cron schedules, quiet hours and `monitor:` times are
+  read on the container's clock unless ductus.yaml names the site's zone: set
+  [`timezone: America/Chicago`](../configure/ductus-yaml.md#the-sites-time-zone) (your IANA
+  zone). It needs no zone files in the image.

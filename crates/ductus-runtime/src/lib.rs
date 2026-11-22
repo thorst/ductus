@@ -610,8 +610,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
     let stopping = tokio_util::sync::CancellationToken::new();
     // A start that fails from here on stops the worker threads it started (a stop cancels it too).
     let _stop_workers = stopping.clone().drop_guard();
-    let activity =
-        activity::Activity::start(store.clone(), watched, stopping.clone()).await.context("loading last activity")?;
+    let activity = activity::Activity::start(store.clone(), watched, stopping.clone(), settings.timezone)
+        .await
+        .context("loading last activity")?;
     phases.mark("last activity loaded");
     // What every interface's jobs and outlets are built with, kept for a deploy in place.
     let shared = in_place::Shared {
@@ -890,6 +891,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         certificates.clone(),
         resources.sftp.clone(),
         owner.ownership.clone(),
+        settings.timezone,
         ended.clone(),
         receiving.clone(),
     );
@@ -948,6 +950,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         retention,
         calls: services.calls(),
         activity,
+        zone: settings.timezone,
         auth: settings.auth.clone(),
         audit: settings.audit,
         instance: instance.clone(),

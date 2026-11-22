@@ -12,6 +12,9 @@ base64 = "0.23.1"
 chrono = "0.4.45"
 croner = "4.0.1"
 chacha20poly1305 = "0.11.0"
+# `timezone:` (`zone.rs`): the IANA zone database built into the binary, so Windows, Linux and a
+# container without zone files read `America/Chicago` alike.
+chrono-tz = "0.10.4"
 # Key paths compiled for validation and intake (`keys.rs`).
 ductus-hl7 = { path = "../ductus-hl7" }
 getrandom = "0.4.3"

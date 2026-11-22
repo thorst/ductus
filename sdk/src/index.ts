@@ -11,9 +11,9 @@ export { html, type HttpRequest, HttpResponse, response } from "./http.ts";
 
 /** What a schedule source's `transform` receives. Times are ISO 8601, server local time. */
 export interface ScheduledRun {
-  /** When this run was due. */
+  /** When this run was due, on the schedule's clock with its offset (`2026-11-22T06:00:00-06:00`): its `timezone`, else ductus.yaml's, else the server's. `new Date(run.due)` reads it. */
   due: string;
-  /** When the previous run was due (null on the first run): use it to pick up what changed since. */
+  /** When the previous run was due, in the same form (null on the first run): use it to pick up what changed since. */
   previous: string | null;
 }
 

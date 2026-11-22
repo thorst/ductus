@@ -79,7 +79,8 @@ on purpose), and an alert that's open when someone pauses stays open, quietly, u
 - **`quiet`**: hours when warnings wait until morning; one that comes and goes in the night is
   never sent, only kept in the history. Keep `critical` out of `severities`
   ([nuance](../nuances/alerts.md#quiet-hours-hold-warnings-until-morning-critical-ones-never-wait-level-2)).
-  The hours are the server's local time.
+  The hours are on ductus.yaml's [`timezone`](ductus-yaml.md#the-sites-time-zone), by default
+  the server's zone.
 - **`certificates.warn_days`** (default `[30, 14, 7]`): the steps before a certificate expires.
   Make the first long enough for your slowest renewal (a vendor's CA, a change board).
 

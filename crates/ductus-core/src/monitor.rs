@@ -12,11 +12,13 @@
 //! ```
 //!
 //! A destination can set its own `behind` (`monitor: { behind: 10m }` on the destination).
-//! Times are the server's local time, like schedules. `empty_keys` is the one expectation on by
-//! default: a key path that reads nothing is a mistake in the config, not an operations choice.
+//! Times are on the clock of ductus.yaml's `timezone` (by default the server's zone), like
+//! schedules. `empty_keys` is the one expectation on by default: a key path that reads nothing
+//! is a mistake in the config, not an operations choice.
 
+use crate::zone::Zone;
 use anyhow::{Result, anyhow, bail};
-use chrono::{DateTime, Duration as Span, Local, NaiveTime, TimeZone, Utc};
+use chrono::{DateTime, Duration as Span, NaiveTime, Utc};
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -32,8 +34,8 @@ pub struct Monitor {
     #[serde(default, deserialize_with = "crate::config::duration_opt")]
     #[cfg_attr(test, schemars(with = "Option<crate::schema::shapes::Duration>"))]
     pub active_within: Option<Duration>,
-    /// The hours `active_within` applies, in the server's local time: `"06:00-22:00"`, or across
-    /// midnight, `"22:00-06:00"`. The quiet time is counted from when the hours start, so a feed
+    /// The hours `active_within` applies, in ductus.yaml's `timezone` (by default the server's
+    /// zone): `"06:00-22:00"`, or across midnight, `"22:00-06:00"`. The quiet time is counted from when the hours start, so a feed
     /// that sleeps at night isn't silent at 06:01. Only with `active_within`. Default: all day.
     /// Example: `between: "06:00-22:00"`.
     #[serde(default)]
@@ -41,7 +43,7 @@ pub struct Monitor {
     /// Something must be received by this time, or the interface has *missed* its deadline: for
     /// feeds that come once a day or week (a nightly file, a Monday batch). `"09:00"` every day,
     /// `"Mon 09:00"`, `"Mon-Fri 09:00"`, `"Mon,Thu 09:00"`, or a five-field cron expression, in
-    /// the server's local time. Only receiving counts. Default: none. Example: `active_by:
+    /// ductus.yaml's `timezone` (by default the server's zone). Only receiving counts. Default: none. Example: `active_by:
     /// "Mon-Fri 07:00"`.
     #[serde(default)]
     pub active_by: Option<At>,
@@ -203,12 +205,12 @@ impl Monitor {
 
     /// With `active_within`: how long the interface has been quiet, if longer than allowed now.
     /// `last` is when something was last received (or when watching began, if never). Outside
-    /// `between`, nothing is expected.
-    pub fn silent(&self, last: DateTime<Utc>, now: DateTime<Utc>) -> Option<Span> {
+    /// `between` (on `zone`'s clock), nothing is expected.
+    pub fn silent(&self, last: DateTime<Utc>, now: DateTime<Utc>, zone: Zone) -> Option<Span> {
         let within = Span::from_std(self.active_within?).ok()?;
         let counted_from = match &self.between {
             None => last,
-            Some(hours) => last.max(hours.started(now)?),
+            Some(hours) => last.max(hours.started(now, zone)?),
         };
         (now - counted_from > within).then(|| now - last)
     }
@@ -221,9 +223,10 @@ impl Monitor {
         last_received: Option<DateTime<Utc>>,
         watched_since: DateTime<Utc>,
         now: DateTime<Utc>,
+        zone: Zone,
     ) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
-        let deadline = self.active_by.as_ref()?.last_at_or_before(now)?;
-        let start = self.window_start(deadline)?;
+        let deadline = self.active_by.as_ref()?.last_at_or_before(now, zone)?;
+        let start = self.window_start(deadline, zone)?;
         if start < watched_since || last_received.is_some_and(|r| r >= start) {
             return None;
         }
@@ -231,19 +234,15 @@ impl Monitor {
     }
 
     /// Where the window that ends at `deadline` starts.
-    fn window_start(&self, deadline: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn window_start(&self, deadline: DateTime<Utc>, zone: Zone) -> Option<DateTime<Utc>> {
         match &self.from {
-            Some(from) => from.last_at_or_before(deadline - Span::seconds(1)),
-            None => {
-                let day = deadline.with_timezone(&Local).date_naive();
-                let midnight = Local.from_local_datetime(&day.and_time(NaiveTime::MIN)).earliest()?;
-                Some(midnight.with_timezone(&Utc))
-            }
+            Some(from) => from.last_at_or_before(deadline - Span::seconds(1), zone),
+            None => Some(zone.moment(zone.at(deadline).date_naive().and_time(NaiveTime::MIN))),
         }
     }
 }
 
-/// Hours of the day (local): `"06:00-22:00"`, or across midnight, `"22:00-06:00"`.
+/// Hours of the day (on a zone's clock): `"06:00-22:00"`, or across midnight, `"22:00-06:00"`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Hours {
     pub start: NaiveTime,
@@ -266,14 +265,14 @@ impl Hours {
         if self.start < self.end { self.start <= t && t < self.end } else { t >= self.start || t < self.end }
     }
 
-    /// Whether `t` is inside the hours (local time).
-    pub fn includes(&self, t: DateTime<Utc>) -> bool {
-        self.contains(t.with_timezone(&Local).time())
+    /// Whether `t` is inside the hours on `zone`'s clock.
+    pub fn includes(&self, t: DateTime<Utc>, zone: Zone) -> bool {
+        self.contains(zone.at(t).time())
     }
 
     /// When the current stretch of hours ends, if `now` is inside them.
-    pub fn ends(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let local = now.with_timezone(&Local);
+    pub fn ends(&self, now: DateTime<Utc>, zone: Zone) -> Option<DateTime<Utc>> {
+        let local = zone.at(now);
         if !self.contains(local.time()) {
             return None;
         }
@@ -281,12 +280,12 @@ impl Hours {
         if local.time() >= self.end {
             day = day.succ_opt()?; // overnight hours, before midnight: they end tomorrow
         }
-        Some(Local.from_local_datetime(&day.and_time(self.end)).earliest()?.with_timezone(&Utc))
+        Some(zone.moment(day.and_time(self.end)))
     }
 
     /// When the current stretch of hours started, if `now` is inside them.
-    fn started(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let local = now.with_timezone(&Local);
+    fn started(&self, now: DateTime<Utc>, zone: Zone) -> Option<DateTime<Utc>> {
+        let local = zone.at(now);
         if !self.contains(local.time()) {
             return None;
         }
@@ -294,7 +293,7 @@ impl Hours {
         if local.time() < self.start {
             day = day.pred_opt()?; // overnight hours, after midnight: they started yesterday
         }
-        Some(Local.from_local_datetime(&day.and_time(self.start)).earliest()?.with_timezone(&Utc))
+        Some(zone.moment(day.and_time(self.start)))
     }
 }
 
@@ -310,7 +309,7 @@ impl<'de> Deserialize<'de> for Hours {
     }
 }
 
-/// Moments that repeat, in local time: `"09:00"` (every day), `"Mon 09:00"`, `"Mon-Fri
+/// Moments that repeat on a zone's clock: `"09:00"` (every day), `"Mon 09:00"`, `"Mon-Fri
 /// 09:00"`, `"Mon,Thu 09:00"`, or cron (`"0 9 * * 1-5"`).
 #[derive(Debug, Clone)]
 pub struct At {
@@ -336,10 +335,9 @@ impl At {
         Ok(Self { text: written.to_string(), cron: Box::new(cron) })
     }
 
-    /// The latest of these moments at or before `t`.
-    pub fn last_at_or_before(&self, t: DateTime<Utc>) -> Option<DateTime<Utc>> {
-        let local = t.with_timezone(&Local);
-        self.cron.find_previous_occurrence(&local, true).ok().map(|at| at.with_timezone(&Utc))
+    /// The latest of these moments at or before `t`, on `zone`'s clock.
+    pub fn last_at_or_before(&self, t: DateTime<Utc>, zone: Zone) -> Option<DateTime<Utc>> {
+        self.cron.find_previous_occurrence(&zone.at(t), true).ok().map(|at| at.with_timezone(&Utc))
     }
 }
 
@@ -426,10 +424,10 @@ impl<'de> Deserialize<'de> for Behind {
 /// Hours in a week: what "normal" is kept for (Monday 07:00 compares with past Mondays at 07:00).
 pub const HOURS_OF_WEEK: usize = 168;
 
-/// The hour of the week of `t` in local time: Monday 00:00-01:00 is 0, Sunday 23:00 is 167.
-pub fn hour_of_week(t: DateTime<Utc>) -> usize {
+/// The hour of the week of `t` on `zone`'s clock: Monday 00:00-01:00 is 0, Sunday 23:00 is 167.
+pub fn hour_of_week(t: DateTime<Utc>, zone: Zone) -> usize {
     use chrono::{Datelike, Timelike};
-    let local = t.with_timezone(&Local);
+    let local = zone.at(t);
     local.weekday().num_days_from_monday() as usize * 24 + local.hour() as usize
 }
 
@@ -728,7 +726,8 @@ impl InterfaceState {
 }
 
 /// An interface's state and how to say it ("silent: nothing received for 47 min"). `keys`: how
-/// many of its latest messages had an empty key, per key it has.
+/// many of its latest messages had an empty key, per key it has. The monitor's hours and
+/// deadlines are on `zone`'s clock.
 pub fn interface_state(
     monitor: &Monitor,
     last_received: Option<DateTime<Utc>>,
@@ -736,6 +735,7 @@ pub fn interface_state(
     stopped: Option<&str>,
     keys: &[KeysSeen],
     now: DateTime<Utc>,
+    zone: Zone,
 ) -> (InterfaceState, String) {
     let mut state = InterfaceState::Ok;
     let mut parts = Vec::new();
@@ -743,12 +743,12 @@ pub fn interface_state(
         state = InterfaceState::Stopped;
         parts.push(format!("stopped: {reason}"));
     }
-    if let Some((start, deadline)) = monitor.missed(last_received, watched_since, now) {
+    if let Some((start, deadline)) = monitor.missed(last_received, watched_since, now, zone) {
         state = state.worse(InterfaceState::Missed);
-        let at = |t: DateTime<Utc>| t.with_timezone(&Local).format("%a %H:%M").to_string();
+        let at = |t: DateTime<Utc>| zone.at(t).format("%a %H:%M").to_string();
         parts.push(format!("missed {}: nothing received since {}", at(deadline), at(start)));
     }
-    if let Some(quiet) = monitor.silent(last_received.unwrap_or(watched_since), now) {
+    if let Some(quiet) = monitor.silent(last_received.unwrap_or(watched_since), now, zone) {
         state = state.worse(InterfaceState::Silent);
         parts.push(format!("silent: nothing received for {}", human(quiet.to_std().unwrap_or_default())));
     }
@@ -806,9 +806,41 @@ pub(crate) fn first_line(text: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The site's zone in these tests: named, so they pass on any machine (in 2026 Chicago
+    /// changes on March 8 and November 1).
+    fn zone() -> Zone {
+        Zone::parse("America/Chicago").unwrap()
+    }
+
+    /// A moment as `zone()`'s clock shows it.
     fn local(text: &str) -> DateTime<Utc> {
-        let naive = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap();
-        Local.from_local_datetime(&naive).earliest().unwrap().with_timezone(&Utc)
+        zone().moment(chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M").unwrap())
+    }
+
+    #[test]
+    fn hours_and_deadlines_across_daylight_saving() {
+        // Overnight hours on the night the clocks go back: the stretch is 9 hours long, and it
+        // ends at 06:00 on the wall clock.
+        let night = Hours::parse("22:00-06:00").unwrap();
+        assert_eq!(night.ends(local("2026-10-31 23:00"), zone()), Some(local("2026-11-01 06:00")));
+        assert_eq!(local("2026-11-01 06:00") - local("2026-10-31 22:00"), Span::hours(9));
+        assert!(night.includes(local("2026-11-01 05:59"), zone()));
+        assert!(!night.includes(local("2026-11-01 06:00"), zone()));
+        // A 09:00 deadline is 09:00 on the wall clock on the day the clocks go forward, and its
+        // window from midnight is an hour shorter (8 hours).
+        let m = monitor("{ active_by: '09:00' }");
+        let watched = local("2026-03-01 00:00");
+        assert_eq!(
+            m.missed(None, watched, local("2026-03-08 09:30"), zone()),
+            Some((local("2026-03-08 00:00"), local("2026-03-08 09:00")))
+        );
+        assert_eq!(local("2026-03-08 09:00") - local("2026-03-08 00:00"), Span::hours(8));
+        // In another zone, the same instants are other hours: the zone decides.
+        let utc = Zone::parse("UTC").unwrap();
+        assert!(!night.includes(local("2026-11-01 05:59"), utc), "11:59 UTC");
+        // The hour of the week: Monday 00:30 in Chicago is Monday 05:30 or 06:30 UTC.
+        assert_eq!(hour_of_week(local("2026-11-02 00:30"), zone()), 0);
+        assert_eq!(hour_of_week(local("2026-11-02 00:30"), utc), 6);
     }
 
     fn monitor(yaml: &str) -> Monitor {
@@ -852,19 +884,19 @@ mod tests {
         let m = monitor("{ active_within: 30m, between: '06:00-22:00' }");
         let last = local("2026-10-07 21:50");
         // At night nothing is expected; in the morning the clock starts at 06:00.
-        assert_eq!(m.silent(last, local("2026-10-08 03:00")), None);
-        assert_eq!(m.silent(last, local("2026-10-08 06:20")), None);
-        let silent = m.silent(last, local("2026-10-08 06:31")).unwrap();
+        assert_eq!(m.silent(last, local("2026-10-08 03:00"), zone()), None);
+        assert_eq!(m.silent(last, local("2026-10-08 06:20"), zone()), None);
+        let silent = m.silent(last, local("2026-10-08 06:31"), zone()).unwrap();
         assert_eq!(silent.num_minutes(), 8 * 60 + 41, "reports the real quiet time");
         // All day: just the gap.
         let always = monitor("{ active_within: 30m }");
-        assert_eq!(always.silent(last, local("2026-10-07 22:15")), None);
-        assert!(always.silent(last, local("2026-10-07 22:21")).is_some());
+        assert_eq!(always.silent(last, local("2026-10-07 22:15"), zone()), None);
+        assert!(always.silent(last, local("2026-10-07 22:21"), zone()).is_some());
         // Overnight hours.
         let night = monitor("{ active_within: 1h, between: '22:00-06:00' }");
-        assert_eq!(night.silent(local("2026-10-07 12:00"), local("2026-10-07 22:59")), None);
-        assert!(night.silent(local("2026-10-07 12:00"), local("2026-10-08 01:00")).is_some());
-        assert_eq!(night.silent(local("2026-10-07 12:00"), local("2026-10-08 07:00")), None);
+        assert_eq!(night.silent(local("2026-10-07 12:00"), local("2026-10-07 22:59"), zone()), None);
+        assert!(night.silent(local("2026-10-07 12:00"), local("2026-10-08 01:00"), zone()).is_some());
+        assert_eq!(night.silent(local("2026-10-07 12:00"), local("2026-10-08 07:00"), zone()), None);
     }
 
     #[test]
@@ -874,32 +906,35 @@ mod tests {
         let watched = local("2026-10-01 00:00");
         let now = local("2026-10-08 09:30");
         // Yesterday's file doesn't count for today; a file after midnight does.
-        let missed = m.missed(Some(local("2026-10-07 23:00")), watched, now).unwrap();
+        let missed = m.missed(Some(local("2026-10-07 23:00")), watched, now, zone()).unwrap();
         assert_eq!(missed, (local("2026-10-08 00:00"), local("2026-10-08 09:00")));
-        assert_eq!(m.missed(Some(local("2026-10-08 06:00")), watched, now), None);
-        assert_eq!(m.missed(Some(local("2026-10-08 06:00")), watched, local("2026-10-08 08:59")), None);
+        assert_eq!(m.missed(Some(local("2026-10-08 06:00")), watched, now, zone()), None);
+        assert_eq!(m.missed(Some(local("2026-10-08 06:00")), watched, local("2026-10-08 08:59"), zone()), None);
         // Late is still received: the missed deadline clears once it comes.
-        assert_eq!(m.missed(Some(local("2026-10-08 09:20")), watched, now), None);
+        assert_eq!(m.missed(Some(local("2026-10-08 09:20")), watched, now, zone()), None);
         // Before this deadline, the latest one is yesterday's.
         assert_eq!(
-            m.missed(Some(local("2026-10-06 23:00")), watched, local("2026-10-08 08:00")),
+            m.missed(Some(local("2026-10-06 23:00")), watched, local("2026-10-08 08:00"), zone()),
             Some((local("2026-10-07 00:00"), local("2026-10-07 09:00")))
         );
         // Nothing expected before the interface was watched.
-        assert_eq!(m.missed(None, local("2026-10-08 07:00"), now), None);
+        assert_eq!(m.missed(None, local("2026-10-08 07:00"), now, zone()), None);
 
         // `from` widens the window: a file sent the evening before.
         let evening = monitor("{ active_by: '09:00', from: '18:00' }");
-        assert_eq!(evening.missed(Some(local("2026-10-07 19:00")), watched, now), None);
+        assert_eq!(evening.missed(Some(local("2026-10-07 19:00")), watched, now, zone()), None);
         assert_eq!(
-            evening.missed(Some(local("2026-10-07 17:00")), watched, now),
+            evening.missed(Some(local("2026-10-07 17:00")), watched, now, zone()),
             Some((local("2026-10-07 18:00"), local("2026-10-08 09:00")))
         );
 
         // Weekly: Monday's deadline is the latest until next Monday.
         let weekly = monitor("{ active_by: 'Mon 09:00', from: 'Fri 18:00' }");
-        assert_eq!(weekly.missed(None, watched, now), Some((local("2026-10-02 18:00"), local("2026-10-05 09:00"))));
-        assert_eq!(weekly.missed(Some(local("2026-10-03 10:00")), watched, now), None);
+        assert_eq!(
+            weekly.missed(None, watched, now, zone()),
+            Some((local("2026-10-02 18:00"), local("2026-10-05 09:00")))
+        );
+        assert_eq!(weekly.missed(Some(local("2026-10-03 10:00")), watched, now, zone()), None);
     }
 
     #[test]
@@ -1028,18 +1063,18 @@ mod tests {
         let m = monitor("{ active_within: 30m, active_by: '09:00' }");
         let now = local("2026-10-08 09:47");
         let watched = local("2026-10-01 00:00");
-        let (state, text) = interface_state(&m, Some(local("2026-10-07 23:00")), watched, None, &[], now);
+        let (state, text) = interface_state(&m, Some(local("2026-10-07 23:00")), watched, None, &[], now, zone());
         assert_eq!(state, InterfaceState::Missed);
         assert_eq!(
             text,
             "missed Thu 09:00: nothing received since Thu 00:00; silent: nothing received for 10 h 47 min"
         );
-        let (state, text) = interface_state(&m, Some(local("2026-10-08 09:46")), watched, None, &[], now);
+        let (state, text) = interface_state(&m, Some(local("2026-10-08 09:46")), watched, None, &[], now, zone());
         assert_eq!((state, text.as_str()), (InterfaceState::Ok, "ok, received 1 min ago"));
-        let (state, _) = interface_state(&m, Some(local("2026-10-08 09:46")), watched, Some("heap"), &[], now);
+        let (state, _) = interface_state(&m, Some(local("2026-10-08 09:46")), watched, Some("heap"), &[], now, zone());
         assert_eq!(state, InterfaceState::Stopped);
         // Never received: quiet since it was first watched.
-        let (_, text) = interface_state(&m, None, local("2026-10-08 09:00"), None, &[], now);
+        let (_, text) = interface_state(&m, None, local("2026-10-08 09:00"), None, &[], now, zone());
         assert_eq!(text, "silent: nothing received for 47 min");
     }
 
@@ -1048,7 +1083,7 @@ mod tests {
         let now = local("2026-10-08 09:47");
         let received = Some(local("2026-10-08 09:46"));
         let seen = |kind, empty, seen| KeysSeen { kind, paths: vec!["PID-3.1".into()], empty, seen };
-        let state = |m: &Monitor, keys: &[KeysSeen]| interface_state(m, received, now, None, keys, now);
+        let state = |m: &Monitor, keys: &[KeysSeen]| interface_state(m, received, now, None, keys, now, zone());
 
         // The default: 90% of the last 100.
         let m = Monitor::default();
@@ -1081,7 +1116,7 @@ mod tests {
         // Keyless is the mildest problem: silent, missed and stopped outrank it.
         let silent = monitor("{ active_within: 30m }");
         let keyless = [seen(KeyKind::Ordering, 100, 100)];
-        let (s, text) = interface_state(&silent, Some(local("2026-10-08 08:00")), now, None, &keyless, now);
+        let (s, text) = interface_state(&silent, Some(local("2026-10-08 08:00")), now, None, &keyless, now, zone());
         assert_eq!(s, InterfaceState::Silent);
         assert!(text.starts_with("silent: nothing received for 1 h 47 min; keyless: ordering key"), "{text}");
         assert_eq!(InterfaceState::Keyless.worse(InterfaceState::Ok), InterfaceState::Keyless);
@@ -1104,9 +1139,9 @@ mod tests {
         // Stored values of the wrong shape start over.
         assert_eq!(Baseline::from_stored(Some(vec![Some(1.0)]), None), Baseline::default());
         // 2026-10-05 is a Monday.
-        assert_eq!(hour_of_week(local("2026-10-05 00:30")), 0);
-        assert_eq!(hour_of_week(local("2026-10-05 07:59")), 7);
-        assert_eq!(hour_of_week(local("2026-10-11 23:00")), 167);
+        assert_eq!(hour_of_week(local("2026-10-05 00:30"), zone()), 0);
+        assert_eq!(hour_of_week(local("2026-10-05 07:59"), zone()), 7);
+        assert_eq!(hour_of_week(local("2026-10-11 23:00"), zone()), 167);
     }
 
     #[test]

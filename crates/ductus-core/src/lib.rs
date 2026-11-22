@@ -28,6 +28,7 @@ pub mod service_account;
 pub mod settings;
 pub mod tls;
 pub mod yaml;
+pub mod zone;
 
 pub use config::InterfaceConfig;
 pub use env::{ConsoleLevel, Environment};

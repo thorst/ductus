@@ -114,6 +114,23 @@ impl JsonSchema for TlsSetting {
     }
 }
 
+/// An IANA time zone name (`zone::Zone`): every name the binary knows, so an editor completes
+/// `America/Chi…` and flags a misspelling.
+pub(crate) struct TimeZone;
+
+impl JsonSchema for TimeZone {
+    fn inline_schema() -> bool {
+        true
+    }
+    fn schema_name() -> Cow<'static, str> {
+        "TimeZone".into()
+    }
+    fn json_schema(_: &mut SchemaGenerator) -> Schema {
+        let names: Vec<&str> = crate::zone::Zone::names().collect();
+        json_schema!({ "enum": names, "x-type": "time zone (America/Chicago)" })
+    }
+}
+
 impl JsonSchema for crate::monitor::Hours {
     fn inline_schema() -> bool {
         true

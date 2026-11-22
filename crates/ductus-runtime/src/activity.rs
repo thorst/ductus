@@ -13,6 +13,7 @@ use crate::stats::{DestinationStats, InterfaceStats};
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use ductus_core::monitor::{Baseline, Recent, hour_of_week};
+use ductus_core::zone::Zone;
 use ductus_store::{BaselineRow, DestinationId, PauseRow, Seen, Store};
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, RwLock};
@@ -54,11 +55,13 @@ pub struct Trends {
     /// The first sample of the hour being watched.
     hour_start: Option<Sample>,
     pub baseline: Baseline,
+    /// Whose clock the hours of the week are (ductus.yaml's `timezone`).
+    zone: Zone,
 }
 
 impl Trends {
-    pub fn new(baseline: Baseline, now: DateTime<Utc>) -> Self {
-        Self { samples: VecDeque::new(), progress: now, hour_start: None, baseline }
+    pub fn new(baseline: Baseline, now: DateTime<Utc>, zone: Zone) -> Self {
+        Self { samples: VecDeque::new(), progress: now, hour_start: None, baseline, zone }
     }
 
     /// Add a sample; returns true when an hour ended and the baseline learned from it.
@@ -68,7 +71,7 @@ impl Trends {
         }
         let mut learned = false;
         match (self.hour_start, self.samples.back()) {
-            (Some(start), Some(&last)) if hour_of_week(s.at) != hour_of_week(start.at) => {
+            (Some(start), Some(&last)) if hour_of_week(s.at, self.zone) != hour_of_week(start.at, self.zone) => {
                 // `last` is the hour's last sample: the hour ran from `start` to it.
                 let watched = (last.at - start.at).to_std().unwrap_or_default();
                 if watched >= LEARN_FROM {
@@ -77,7 +80,7 @@ impl Trends {
                     let sends = last.sends - start.sends;
                     let send_ms =
                         (sends > 0).then(|| (last.send_time - start.send_time).as_secs_f64() * 1000.0 / sends as f64);
-                    self.baseline.learn(hour_of_week(start.at), inflow, send_ms);
+                    self.baseline.learn(hour_of_week(start.at, self.zone), inflow, send_ms);
                     learned = true;
                 }
                 self.hour_start = Some(s);
@@ -182,6 +185,8 @@ pub struct Activity {
     store: Store,
     /// The task that saves them (see `saved`).
     saver: Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// ductus.yaml's `timezone`: whose clock the hours of the week are.
+    zone: Zone,
 }
 
 impl Activity {
@@ -189,7 +194,7 @@ impl Activity {
     pub fn trend(&self, destination: DestinationId, now: DateTime<Utc>) -> (Option<Recent>, Option<f64>, Option<f64>) {
         let Some(trends) = read(&self.trends).get(&destination).cloned() else { return (None, None, None) };
         let t = lock(&trends);
-        let hour = hour_of_week(now);
+        let hour = hour_of_week(now, self.zone);
         (t.recent(now), t.baseline.inflow(hour), t.baseline.send_ms(hour))
     }
 
@@ -218,6 +223,7 @@ fn load_destinations(
     w: &Watched,
     by_id: &mut HashMap<DestinationId, ductus_store::DestinationActivity>,
     now: DateTime<Utc>,
+    zone: Zone,
 ) -> Vec<(DestinationId, Arc<Pause>, Arc<Mutex<Trends>>)> {
     w.destinations
         .iter()
@@ -237,15 +243,16 @@ fn load_destinations(
                     tracing::warn!(interface = %w.stats.name, destination = %stats.name, by = %p.by, since = %p.at, "destination is paused: nothing is sent until `ductus resume`");
                 }
             }
-            (*id, pause, Arc::new(Mutex::new(Trends::new(baseline, now))))
+            (*id, pause, Arc::new(Mutex::new(Trends::new(baseline, now, zone))))
         })
         .collect()
 }
 
 impl Activity {
     /// Load what's stored into the counts' last-seen times and the pause switches, then save
-    /// changes every few seconds until `stop` (and once more then).
-    pub async fn start(store: Store, watched: Vec<Watched>, stop: CancellationToken) -> Result<Self> {
+    /// changes every few seconds until `stop` (and once more then). `zone`: whose clock the
+    /// hours of the week are.
+    pub async fn start(store: Store, watched: Vec<Watched>, stop: CancellationToken, zone: Zone) -> Result<Self> {
         let names: Vec<&str> = watched.iter().map(|w| w.stats.name.as_str()).collect();
         let ids: Vec<DestinationId> = watched.iter().flat_map(|w| w.destinations.iter().map(|(id, _)| *id)).collect();
         let (interfaces, destinations) = store.activity(&names, &ids).await?;
@@ -254,7 +261,7 @@ impl Activity {
         let mut trends = HashMap::new();
         let now = Utc::now();
         for w in &watched {
-            for (id, pause, trend) in load_destinations(w, &mut by_id, now) {
+            for (id, pause, trend) in load_destinations(w, &mut by_id, now, zone) {
                 pauses.insert(id, pause);
                 trends.insert(id, trend);
             }
@@ -278,6 +285,7 @@ impl Activity {
             watched,
             store,
             saver: Mutex::new(Some(saver)),
+            zone,
         })
     }
 
@@ -306,7 +314,7 @@ impl Activity {
                 stats: w.stats.clone(),
                 destinations: w.destinations.iter().filter(|(id, _)| new.contains(id)).cloned().collect(),
             };
-            let loaded = load_destinations(&fresh, &mut by_id, Utc::now());
+            let loaded = load_destinations(&fresh, &mut by_id, Utc::now(), self.zone);
             let (mut pauses, mut trends) = (write(&self.pauses), write(&self.trends));
             for (id, pause, trend) in loaded {
                 pauses.entry(id).or_insert(pause);
@@ -357,6 +365,7 @@ impl Activity {
             watched: Default::default(),
             store,
             saver: Mutex::new(None),
+            zone: Zone::Server,
         }
     }
 
@@ -492,11 +501,14 @@ fn loaded(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{Local, TimeZone};
+
+    /// A named zone, so the hours are the same on any machine.
+    fn zone() -> Zone {
+        Zone::parse("America/Chicago").unwrap()
+    }
 
     fn local(text: &str) -> DateTime<Utc> {
-        let naive = chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").unwrap();
-        Local.from_local_datetime(&naive).earliest().unwrap().with_timezone(&Utc)
+        zone().moment(chrono::NaiveDateTime::parse_from_str(text, "%Y-%m-%d %H:%M:%S").unwrap())
     }
 
     /// Samples every 5 s from `from` for `secs`: `per_min` arriving and finished, sends of `ms`.
@@ -519,7 +531,7 @@ mod tests {
     #[test]
     fn recent_rates_and_each_hour_learned() {
         // 2026-10-05 is a Monday: 07:00 is hour 7 of the week.
-        let mut t = Trends::new(Baseline::default(), local("2026-10-05 07:00:00"));
+        let mut t = Trends::new(Baseline::default(), local("2026-10-05 07:00:00"), zone());
         let mut s =
             Sample { at: local("2026-10-05 07:00:00"), received: 0, done: 0, sends: 0, send_time: Duration::ZERO };
         assert!(t.recent(s.at).is_none(), "nothing sampled yet");
@@ -544,9 +556,24 @@ mod tests {
         assert_eq!(r.since_progress, Duration::from_secs(120));
 
         // An hour watched for less than 15 minutes teaches nothing.
-        let mut late = Trends::new(Baseline::default(), local("2026-10-05 09:50:00"));
+        let mut late = Trends::new(Baseline::default(), local("2026-10-05 09:50:00"), zone());
         let mut s = Sample { at: local("2026-10-05 09:50:00"), ..s };
         feed(&mut late, local("2026-10-05 09:50:00"), 10 * 60 + 5, 60, 5, &mut s);
         assert_eq!(late.baseline, Baseline::default());
+    }
+
+    #[test]
+    fn the_hours_learned_are_the_sites() {
+        // The same instants watched by an engine on UTC with `timezone: America/Chicago` learn
+        // Monday 07:00 Chicago (hour 7), not 12:00 UTC (hour 12).
+        let start = local("2026-10-05 07:00:00");
+        let mut t = Trends::new(Baseline::default(), start, zone());
+        let mut s = Sample { at: start, received: 0, done: 0, sends: 0, send_time: Duration::ZERO };
+        feed(&mut t, start, 60 * 60 + 5, 60, 5, &mut s);
+        assert!(t.baseline.inflow(7).is_some() && t.baseline.inflow(12).is_none());
+        let mut utc = Trends::new(Baseline::default(), start, Zone::parse("UTC").unwrap());
+        let mut s = Sample { at: start, received: 0, done: 0, sends: 0, send_time: Duration::ZERO };
+        feed(&mut utc, start, 60 * 60 + 5, 60, 5, &mut s);
+        assert!(utc.baseline.inflow(12).is_some() && utc.baseline.inflow(7).is_none());
     }
 }

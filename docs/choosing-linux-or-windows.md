@@ -41,8 +41,9 @@ Both are supported, and both behave the same in everything not in this table.
   and for the engine's project folder if a scan on read slows its start.
 - **Postgres** is the same on both: the DBA's server, on Linux or Windows, whatever the engine
   runs on ([PostgreSQL](install/postgres.md)).
-- **Time zone:** cron schedules, quiet hours and `monitor:` times are in the server's local time
-  on both. A server (or container) that runs on UTC reads `"06:00-22:00"` as UTC.
+- **Time zone:** cron schedules, quiet hours and `monitor:` times are on the server's clock on
+  both, unless ductus.yaml sets [`timezone`](configure/ductus-yaml.md#the-sites-time-zone)
+  (`America/Chicago`). A named zone reads the same on both: its rules are built into the binary.
 
 ## How the two are kept the same
 

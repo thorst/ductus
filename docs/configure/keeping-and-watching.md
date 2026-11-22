@@ -39,7 +39,7 @@ team uses, with [`monitor`](../reference/config/interface.md#monitor):
 # interfaces/adt-in/interface.yaml, in part
 monitor:
   active_within: 30m              # something received every 30 minutes...
-  between: "06:00-22:00"          # ...during these hours (the server's local time)
+  between: "06:00-22:00"          # ...during these hours (ductus.yaml's timezone)
   behind: { messages: 500, age: 10m }
 ```
 
@@ -58,6 +58,9 @@ monitor:
 | `empty_keys` (`last`, `percent`) | **keyless** | On by default: an `ordering.key` or `dedupe.keys` that reads empty in 90% of the last 100 messages is almost always a path that doesn't match the sender's messages. Lower `last` for a quiet feed, `percent` where some messages carry no key on purpose, `percent: 0` to turn it off. |
 
 Only receiving counts for `active_within` and `active_by`. A destination can set its own `behind`.
+The hours and deadlines are on ductus.yaml's [`timezone`](ductus-yaml.md#the-sites-time-zone),
+by default the server's zone: on a server or container that runs on UTC, set it, or `09:00` is
+UTC's ([nuance](../nuances/files.md#cron-and-monitor-times-are-on-the-sites-clock-the-servers-unless-you-set-timezone-level-2)).
 
 **`empty_keys` is the one expectation that's on by default**, because it isn't an operations
 choice: a key that reads nothing is a mistake in the config. An ordering key that reads empty puts

@@ -34,7 +34,7 @@
 
 use crate::monitor::{Hours, InterfaceState, State};
 use anyhow::{Result, bail};
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -106,6 +106,11 @@ pub struct AlertSettings {
     /// Default: 30, 14 and 7 days.
     #[serde(default)]
     pub certificates: CertificateSettings,
+    /// ductus.yaml's `timezone` (not written here: `Settings::alerts` sets it), which `quiet`
+    /// hours are read in.
+    #[serde(skip)]
+    #[cfg_attr(test, schemars(skip))]
+    pub zone: crate::zone::Zone,
 }
 
 /// `alerts.certificates`: the days before expiry at which a `certificate` alert fires (the first)
@@ -475,9 +480,9 @@ impl Severity {
 #[cfg_attr(test, derive(schemars::JsonSchema))]
 #[serde(deny_unknown_fields)]
 pub struct Quiet {
-    /// The quiet hours, in the server's local time (mind a server or container that runs on
-    /// UTC): `"22:00-06:00"`. Notifications due in them wait until they end. Required. Example:
-    /// `between: "21:00-07:00"`.
+    /// The quiet hours, in ductus.yaml's `timezone` (by default the server's zone: mind a server
+    /// or container that runs on UTC): `"22:00-06:00"`. Notifications due in them wait until
+    /// they end. Required. Example: `between: "21:00-07:00"`.
     pub between: Hours,
     /// Which severities wait during the quiet hours. Keep `critical` out: a critical alert that
     /// waits until morning wasn't critical. Default: `[warning]`. Example: `severities:
@@ -674,7 +679,7 @@ impl AlertSettings {
     /// When a notification of this severity may go: now (`None`), or when quiet hours end.
     pub fn quiet_until(&self, severity: Severity, at: DateTime<Utc>) -> Option<DateTime<Utc>> {
         let quiet = self.quiet.as_ref().filter(|q| q.severities.contains(&severity))?;
-        quiet.between.ends(at)
+        quiet.between.ends(at, self.zone)
     }
 }
 
@@ -1012,6 +1017,8 @@ pub struct Notice<'a> {
     /// The health view's words ("stalled: nothing sent for 12 min, 340 waiting; ...").
     pub summary: &'a str,
     pub environment: &'a str,
+    /// Where the times in the words are told (ductus.yaml's `timezone`).
+    pub zone: crate::zone::Zone,
 }
 
 impl Notice<'_> {
@@ -1057,7 +1064,7 @@ impl Notice<'_> {
             return format!(
                 "This is a test from Ductus ({} environment), sent at {}. If you can read it, this channel works.\n",
                 self.environment,
-                local(self.at)
+                self.local(self.at)
             );
         }
         if self.condition == Some(Condition::Certificate) {
@@ -1084,7 +1091,7 @@ impl Notice<'_> {
                 self.summary, self.id, self.key, self.environment
             );
         }
-        let since = self.since.map(|t| format!(" since {}", local(t))).unwrap_or_default();
+        let since = self.since.map(|t| format!(" since {}", self.local(t))).unwrap_or_default();
         let what = match self.kind {
             "recovered" => format!("{} is fine again (it was {}{since}).", self.subject(), self.state_text()),
             _ => format!("{} is {}{since}.", self.subject(), self.state_text()),
@@ -1132,14 +1139,17 @@ impl Notice<'_> {
     }
 }
 
-fn local(t: DateTime<Utc>) -> String {
-    t.with_timezone(&Local).format("%Y-%m-%d %H:%M").to_string()
+impl Notice<'_> {
+    /// A time as the site's clock shows it.
+    fn local(&self, t: DateTime<Utc>) -> String {
+        self.zone.at(t).format("%Y-%m-%d %H:%M").to_string()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{Local, TimeZone};
 
     fn settings(yaml: &str) -> AlertSettings {
         let s: AlertSettings = serde_yaml_ng::from_str(yaml).unwrap();
@@ -1389,6 +1399,20 @@ rules:
     }
 
     #[test]
+    fn quiet_hours_in_the_sites_zone() {
+        // ductus.yaml's `timezone` reaches the alerts through `Settings::alerts`.
+        let dir = tempfile::tempdir().unwrap();
+        let yaml = "timezone: America/Chicago\nalerts:\n  quiet: { between: '22:00-06:00' }\n";
+        let settings = crate::settings::Settings::from_text(dir.path(), Some(yaml)).unwrap();
+        let s = settings.alerts(&crate::Environment::default()).unwrap().unwrap();
+        let utc = |text: &str| DateTime::parse_from_rfc3339(text).unwrap().with_timezone(&Utc);
+        // 23:30 in Chicago (CDT) on Oct 31 waits until 06:00 there: after the change to CST.
+        assert_eq!(s.quiet_until(Severity::Warning, utc("2026-11-01T04:30:00Z")), Some(utc("2026-11-01T12:00:00Z")));
+        // 23:30 UTC is 18:30 in Chicago: not quiet there.
+        assert_eq!(s.quiet_until(Severity::Warning, utc("2026-10-14T23:30:00Z")), None);
+    }
+
+    #[test]
     fn notifications_say_what_and_since_when() {
         let n = Notice {
             kind: "fired",
@@ -1402,9 +1426,11 @@ rules:
             at: t(12),
             summary: "stalled: nothing sent for 12 min, 340 waiting",
             environment: "prod",
+            zone: crate::zone::Zone::parse("America/Chicago").unwrap(),
         };
         assert_eq!(n.title(), "[Ductus prod] CRITICAL adt → lab is stalled");
-        assert!(n.body().contains("adt → lab is stalled (critical) since"), "{}", n.body());
+        // 12:00 UTC, told on the site's clock.
+        assert!(n.body().contains("adt → lab is stalled (critical) since 2026-10-14 07:00"), "{}", n.body());
         assert!(n.body().contains("340 waiting") && n.body().contains("Alert 7 (dest:adt/lab)"));
         let recovered = Notice { kind: "recovered", ..n.clone() };
         assert_eq!(recovered.title(), "[Ductus prod] RECOVERED adt → lab: no longer stalled (after 12 min)");
@@ -1550,6 +1576,7 @@ rules:
             at: now,
             summary: &chain,
             environment: "prod",
+            zone: crate::zone::Zone::Server,
         };
         assert_eq!(
             n.title(),

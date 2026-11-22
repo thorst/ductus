@@ -135,6 +135,9 @@ pub struct Engine {
     pub calls: Arc<crate::stats::ResourceCalls>,
     /// When each interface was first watched, and every destination's pause switch.
     pub activity: Activity,
+    /// ductus.yaml's `timezone`: the clock monitor hours and deadlines are read on, and times in
+    /// health summaries are told on.
+    pub zone: ductus_core::zone::Zone,
     drain: watch::Sender<DrainState>,
     monitor: watch::Sender<Arc<Snapshot>>,
     /// What each interface's code uses, worked out on first request (it needs the TypeScript
@@ -228,6 +231,7 @@ pub struct Parts {
     pub retention: Arc<crate::retention::Retention>,
     pub calls: Arc<crate::stats::ResourceCalls>,
     pub activity: Activity,
+    pub zone: ductus_core::zone::Zone,
     pub auth: ductus_core::settings::AuthSettings,
     pub audit: ductus_core::settings::AuditSettings,
     pub instance: String,
@@ -261,6 +265,7 @@ impl Engine {
             retention,
             calls,
             activity,
+            zone,
             auth,
             audit,
             instance,
@@ -297,6 +302,7 @@ impl Engine {
             retention,
             calls,
             activity,
+            zone,
             drain: watch::Sender::new(DrainState::Accepting),
             monitor: watch::Sender::new(Arc::default()),
             code: Default::default(),
@@ -1094,7 +1100,7 @@ impl Engine {
         let stopped = i.health.stopped();
         let keys = i.intake.as_ref().map(|intake| intake.keys_seen()).unwrap_or_default();
         let last = i.stats.last_received.get();
-        monitor::interface_state(&i.config.monitor, last, watched_since, stopped, &keys, now)
+        monitor::interface_state(&i.config.monitor, last, watched_since, stopped, &keys, now, self.zone)
     }
 
     /// A destination's state and why (`n`: its place in `i.destinations`).
@@ -1107,9 +1113,9 @@ impl Engine {
         let (recent, normal_inflow, normal_send_ms) = self.activity.trend(id, now);
         let last_error = stats.last_error();
         let paused = self.paused(id).map(|p| {
-            let day = |t: DateTime<Utc>| t.with_timezone(&chrono::Local).date_naive();
+            let day = |t: DateTime<Utc>| self.zone.at(t).date_naive();
             let at = if day(p.at) == day(now) { "%H:%M" } else { "%Y-%m-%d %H:%M" };
-            let at = p.at.with_timezone(&chrono::Local).format(at);
+            let at = self.zone.at(p.at).format(at);
             match p.reason {
                 Some(reason) => format!("paused by {} at {at}: {reason}", p.by),
                 None => format!("paused by {} at {at} (no reason yet)", p.by),

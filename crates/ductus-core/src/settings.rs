@@ -24,6 +24,7 @@
 //!   keep: 6y          # at least 1y
 //!   payload_reads: true
 //!   payload_read_window: 10m
+//! timezone: America/Chicago  # schedules, monitor hours, quiet hours (default: the server's zone)
 //! alerts: ...         # where alerts go and when (see `crate::alerts`); may use ${secret:...}
 //! owners:             # owners that aren't users
 //!   "Lab Systems": { email: lab-systems@hospital.org }
@@ -105,6 +106,21 @@ pub struct Settings {
     /// kept 6 years, payload reads logged.
     #[serde(default)]
     pub audit: AuditSettings,
+    /// The time zone the engine's wall-clock settings are read in, as an IANA name: schedules'
+    /// `cron` (unless a schedule names its own `timezone`), `monitor` hours (`between`) and
+    /// deadlines (`active_by`, `from`), the hour-of-week "normal" each destination learns, and
+    /// alerts' quiet hours; also the times in notifications and health summaries.
+    ///
+    /// Set it when the server's own zone isn't the one the site works in: most containers and
+    /// many cloud servers run on UTC, and a `cron: "0 6 * * *"` there runs at midnight in
+    /// Chicago. The zone database is inside the binary, so Windows and Linux read a name alike,
+    /// daylight saving included. Changing it moves the learned hour-of-week normals by the
+    /// difference until a few weeks relearn them. Default: the server's zone (what the
+    /// operating system says; on Windows, the service account's). Example: `timezone:
+    /// America/Chicago`.
+    #[serde(default)]
+    #[cfg_attr(test, schemars(with = "crate::schema::shapes::TimeZone"))]
+    pub timezone: crate::zone::Zone,
     /// Where notifications go and when: a mail server, channels (email lists, chat webhooks), and
     /// rules saying which health states alert, how badly and to whom. The engine judges every
     /// interface and destination every 15 seconds and tells people once, then reminds, and says
@@ -640,10 +656,11 @@ impl Settings {
         let Some(raw) = &self.alerts else { return Ok(None) };
         let mut value = raw.clone();
         crate::yaml::substitute(env, &mut value).with_context(|| format!("in {FILE}: alerts"))?;
-        let alerts: crate::alerts::AlertSettings = crate::yaml::from_value(value)
+        let mut alerts: crate::alerts::AlertSettings = crate::yaml::from_value(value)
             .map_err(|e| crate::yaml::under(&["alerts"], e))
             .with_context(|| format!("in {FILE}: alerts"))?;
         crate::yaml::at(&["alerts"], alerts.check().with_context(|| format!("in {FILE}")))?;
+        alerts.zone = self.timezone;
         Ok(Some(alerts))
     }
 }
@@ -724,6 +741,17 @@ mod tests {
         std::fs::write(dir.path().join(FILE), "isolates: { heap_mb: 8 }\n").unwrap();
         let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
         assert!(err.contains("at least 64"), "{err}");
+    }
+
+    #[test]
+    fn loads_the_sites_time_zone() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().timezone, crate::zone::Zone::Server, "the default");
+        std::fs::write(dir.path().join(FILE), "timezone: America/Chicago\n").unwrap();
+        assert_eq!(Settings::load(dir.path()).unwrap().timezone.to_string(), "America/Chicago");
+        std::fs::write(dir.path().join(FILE), "timezone: america/chicago\n").unwrap();
+        let err = format!("{:#}", Settings::load(dir.path()).unwrap_err());
+        assert!(err.contains("unknown time zone `america/chicago`: did you mean `America/Chicago`?"), "{err}");
     }
 
     #[test]

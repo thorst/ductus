@@ -1,5 +1,6 @@
 //! Schedule sources. Each run is queued as a message carrying the run's details
-//! (`{"due": ..., "previous": ...}`); the interface's worker runs `transform` on it like any other
+//! (`{"due": ..., "previous": ...}`, on the cron's clock with its offset:
+//! `2026-11-22T06:00:00-06:00`); the interface's worker runs `transform` on it like any other
 //! message, so a run gets the same guarantees: it survives a crash (and runs after restart),
 //! it's retried on temporary failures, and it's in the message log.
 //!
@@ -9,8 +10,9 @@
 use crate::gate::Closed;
 use crate::ingest::Intake;
 use anyhow::{Context, Result};
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, Utc};
 use ductus_core::schedule::Timing;
+use ductus_core::zone::Zone;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::time::Duration;
@@ -29,12 +31,13 @@ struct State {
     previous: Option<DateTime<Utc>>,
 }
 
-/// `ownership`: runs wait while this engine doesn't hold its interfaces (`ownership`).
-pub async fn run(intake: Arc<Intake>, timing: Timing, ownership: Arc<crate::ownership::Ownership>) {
+/// `zone`: the clock a run's `due` and `previous` are told on (the cron's). `ownership`: runs
+/// wait while this engine doesn't hold its interfaces (`ownership`).
+pub async fn run(intake: Arc<Intake>, timing: Timing, zone: Zone, ownership: Arc<crate::ownership::Ownership>) {
     let name = intake.name().to_string();
-    tracing::debug!(interface = %name, "schedule started");
+    tracing::debug!(interface = %name, zone = %zone, "schedule started");
     loop {
-        match next_run(&intake, &timing, &ownership).await {
+        match next_run(&intake, &timing, zone, &ownership).await {
             Ok(()) => {}
             // Draining: the run waits for the gate to open (and runs once then, however late).
             Err(e) if e.is::<Closed>() => {}
@@ -47,7 +50,7 @@ pub async fn run(intake: Arc<Intake>, timing: Timing, ownership: Arc<crate::owne
 }
 
 /// Wait for the next run and queue it.
-async fn next_run(intake: &Intake, timing: &Timing, ownership: &crate::ownership::Ownership) -> Result<()> {
+async fn next_run(intake: &Intake, timing: &Timing, zone: Zone, ownership: &crate::ownership::Ownership) -> Result<()> {
     let name = intake.name();
     let state: State = match intake.store().source_state(name, STATE_KEY).await? {
         Some(json) => serde_json::from_str(&json).context("reading schedule state")?,
@@ -65,7 +68,7 @@ async fn next_run(intake: &Intake, timing: &Timing, ownership: &crate::ownership
     intake.gate.opened().await;
     ownership.until_held().await;
     let now = Utc::now();
-    let local = |t: DateTime<Utc>| t.with_timezone(&Local).to_rfc3339();
+    let local = |t: DateTime<Utc>| zone.at(t).to_rfc3339();
     let payload = serde_json::json!({ "due": local(due), "previous": state.previous.map(local) }).to_string();
     let anchor = Some(timing.anchor_after(due, now)?);
     let queued = serde_json::to_string(&State { anchor, previous: Some(due) })?;
