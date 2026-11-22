@@ -1,6 +1,6 @@
 # `resources.yaml`
 
-`resources.yaml`: what many interfaces share, each defined once by a name: databases, SFTP servers, HTTP APIs, directories for signing in, and certificates.
+`resources.yaml`: what many interfaces share, each defined once by a name: databases, SFTP servers, HTTP APIs, directories for signing in, certificates and OpenPGP keys.
 
 Interfaces and their code refer to them by name (`db("patient_db")`, `api("empi")`, `server: lab_server`), so no address or credential is ever written in an interface or its code, and each environment fills in its own with `${NAME}` and `${secret:NAME}`. `ductus doctor` checks every entry from the server, and `ductus impact` finds the interfaces behind each one.
 
@@ -487,6 +487,66 @@ The vendor the certificate belongs to (the CA's, for a CA entry), for `ductus im
 Who renews this certificate, best as an email address: alert rules with `to: owner` mail them as it nears expiry, and the web UI shows them on its row. Default: the owner of the one interface that uses it, if just one does. Example: `owner: infrastructure@hospital.org`.
 
 ### `certificates.<name>.custom`
+
+**Type:** names and values of your own
+
+Your company's documentation fields for this entry (those whose `applies_to` in `docs-schema.yaml` includes `resource`). Default: none. Example: `custom: { ticket: CHG-1234 }`.
+
+### `pgp`
+
+**Type:** names, each with settings, below
+
+OpenPGP keys for files (`pgp:` on file and SFTP sources and destinations): our secret key, which decrypts what partners send and signs what we send, and partners' public keys, which encrypt what we send them and check what they send us. Their expiry is watched like the certificates'. A name can't also be a `certificates:` entry's. Default: none. Example: `pgp: { ours: { key_file: /etc/ductus/pgp/ours.asc, passphrase: "${secret:PGP_PASSPHRASE}" }, payer: { public_key_file: pgp/payer.asc } }`.
+
+### `pgp.<name>.key_file`
+
+**Type:** text
+
+A file with our secret key, armored (`-----BEGIN PGP PRIVATE KEY BLOCK-----`, what `gpg --export-secret-keys --armor` writes) or binary. It decrypts files partners encrypted to us (`decrypt:`) and signs the files we send (`sign:`). Re-read when it changes, checked every minute: replace the file to change keys, with no restart. Readable by the account the engine runs as and nobody else. A relative path is read from the project folder. Example: `key_file: /etc/ductus/pgp/ours.asc`.
+
+### `pgp.<name>.key`
+
+**Type:** text
+
+Our secret key as text (armored), usually from a secret (`${secret:PGP_KEY}`), for servers where keys live in a vault rather than in files. Read at start only. Example: `key: "${secret:PGP_KEY}"`.
+
+### `pgp.<name>.passphrase`
+
+**Type:** text
+
+The passphrase that unlocks the secret key, from a secret, when it has one (GnuPG asks for one by default). It's used once, as the key is read: a wrong one stops the start saying so. Default: none. Example: `passphrase: "${secret:PGP_PASSPHRASE}"`.
+
+### `pgp.<name>.public_key_file`
+
+**Type:** text
+
+A file with a partner's public key (armored or binary, what `gpg --export --armor` writes): files we send them are encrypted to it (`encrypt:`), and files they send us must be signed by it (`verify:`). Re-read when it changes, every minute. Example: `public_key_file: pgp/payer.asc`.
+
+### `pgp.<name>.public_key`
+
+**Type:** text
+
+A partner's public key as text (armored). Read at start only. Example: `public_key: | -----BEGIN PGP PUBLIC KEY BLOCK----- ...`.
+
+### `pgp.<name>.application`
+
+**Type:** text
+
+The application the key belongs to, for `ductus impact`. Default: none. Example: `application: Claims clearinghouse`.
+
+### `pgp.<name>.vendor`
+
+**Type:** text
+
+The vendor the key belongs to (the partner, for theirs), for `ductus impact`. Default: none. Example: `vendor: Availity`.
+
+### `pgp.<name>.owner`
+
+**Type:** text
+
+Who renews this key, best as an email address: alert rules with `to: owner` mail them as it nears expiry. Default: the owner of the one interface that uses it, if just one does. Example: `owner: edi-team@hospital.org`.
+
+### `pgp.<name>.custom`
 
 **Type:** names and values of your own
 

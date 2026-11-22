@@ -90,6 +90,8 @@ pub struct Outlet {
     pub api: Option<ductus_core::resources::Api>,
     /// MLLP over TLS, or HTTPS naming a CA or client certificate: the client settings.
     pub tls: Option<Arc<rustls::ClientConfig>>,
+    /// File and SFTP destinations with `pgp:`: their keys, what each file goes through.
+    pub seal: Option<crate::pgp::Seal>,
     /// Routes to another interface: where its messages are stored.
     pub route: Option<Arc<Intake>>,
     /// Its counts and timings, shared by its slots.
@@ -785,7 +787,7 @@ impl Worker {
             destination: name.into(),
             destination_id: outlet.id,
             lanes: job.lanes.clone(),
-            sender: Sender::new(&config, destination, outlet.server, outlet.api, outlet.tls),
+            sender: Sender::new(&config, destination, outlet.server, outlet.api, outlet.tls, outlet.seal),
             route: outlet.route,
             retry: config.retry_for(destination).clone(),
             save_output: destination.save_output,

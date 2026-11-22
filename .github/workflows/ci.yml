@@ -177,6 +177,9 @@ jobs:
           sudo apt-get install -y -qq openssh-server >/dev/null
           BIN=target/release/ductus bash scripts/demo-files.sh
 
+      - name: OpenPGP demo (decrypt and verify on pickup, sign and encrypt on send, against GnuPG; kill -9 mid-file)
+        run: BIN=target/release/ductus bash scripts/demo-pgp.sh
+
       - name: v0.4 release demo (REST + DB + fetch, nightly SFTP CSV, dev and prod environments)
         run: BIN=target/release/ductus bash scripts/demo-v04.sh
 

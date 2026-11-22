@@ -103,6 +103,30 @@ pub struct Trial {
     pub without_resources: Option<String>,
 }
 
+/// A file as interface `interface`'s source reads it: with `pgp:` on the source, an OpenPGP file
+/// (armored or binary) decrypted and its signature checked with resources.yaml's keys, as the
+/// engine would; anything else as it is (a decrypted copy can be tried too). A file the engine
+/// would quarantine is an error saying why.
+pub fn as_picked_up(root: &std::path::Path, env: &str, interface: &str, bytes: Vec<u8>) -> Result<Vec<u8>> {
+    let openpgp = bytes.starts_with(b"-----BEGIN PGP") || bytes.first().is_some_and(|b| b & 0x80 != 0);
+    if !openpgp {
+        return Ok(bytes);
+    }
+    let env = Environment::load(root, env)?;
+    let Some(config) = crate::load_interfaces(root, &env)?.into_iter().find(|c| c.name == interface) else {
+        return Ok(bytes);
+    };
+    let Some(settings) = ductus_core::pgp::on_source(&config.source) else { return Ok(bytes) };
+    let resources = ductus_core::Resources::load(root, &env)?;
+    let certificates = crate::tls::Certificates::default().with_pgp(&resources.pgp)?;
+    let opener = crate::pgp::Opener::new(settings, &certificates)?;
+    let mut text = Vec::new();
+    match opener.open(&bytes[..], &mut text)? {
+        Ok(_) => Ok(text),
+        Err(refused) => bail!("the engine would quarantine this file (its source has `pgp:`): {refused}"),
+    }
+}
+
 /// Try `options.message` through its interface. Must be called on a multi-threaded tokio runtime:
 /// lookups run on it, the code on a thread of its own (with the inspector, the only way it can).
 pub async fn run(options: Options) -> Result<Trial> {

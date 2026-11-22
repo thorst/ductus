@@ -298,7 +298,9 @@ enum Command {
     Try {
         /// The interface: its name, or a file or folder inside its folder.
         interface: String,
-        /// A file holding the message as the sender sends it.
+        /// A file holding the message as the sender sends it. With `pgp:` on the interface's
+        /// source, an encrypted file is decrypted and its signature checked first, with
+        /// resources.yaml's keys, as the engine would (or refused saying why).
         file: Option<PathBuf>,
         /// A file in the interface's `fixtures/` folder instead.
         #[arg(long, conflicts_with = "file")]

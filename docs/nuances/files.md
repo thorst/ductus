@@ -6,7 +6,7 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **What:** a file is ready when its size and modification time haven't changed since the previous poll (or its `marker` file exists). Expect a delay of up to two poll intervals. Dot-files are skipped.
 
 ## One file at a time, oldest first; a failure stops the rest (level 3)
-- **What:** files keep their order: if one fails, later files wait. Unsplit files over 256 MB are left in place with an error.
+- **What:** files keep their order: if one fails, later files wait. Unsplit files over 256 MB are left in place with an error. With `pgp:`, a file that won't decrypt or verify doesn't stop the rest: it's quarantined and the next is read (see [OpenPGP](pgp.md#a-file-that-wont-open-is-quarantined-and-the-next-file-is-read-level-2)).
 
 ## Cron uses the server's local time; missed runs collapse to one (level 3)
 - **What:** after downtime, a schedule runs once, not once per missed time. A run is skipped if the previous run's message is still pending.

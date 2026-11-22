@@ -18,9 +18,28 @@ pub enum SendError {
 
 pub enum Sender {
     Mllp { client: ductus_mllp::Client, ack: AckMode, on_reject: OnReject },
-    File { dir: PathBuf, extension: &'static str },
+    File { dir: PathBuf, extension: String, seal: Option<crate::pgp::Seal> },
     Http { client: reqwest::Client, method: reqwest::Method, url: String, headers: reqwest::header::HeaderMap },
-    Sftp { connection: Box<crate::sftp::Connection>, dir: String, extension: &'static str },
+    Sftp { connection: Box<crate::sftp::Connection>, dir: String, extension: String, seal: Option<crate::pgp::Seal> },
+}
+
+/// A file's extension: the format's, then `.pgp`/`.asc` when it's sealed (`1234.hl7.pgp`).
+fn file_extension(format: &Format, seal: &Option<crate::pgp::Seal>) -> String {
+    match seal {
+        Some(s) => format!("{}.{}", extension(format), s.extension()),
+        None => extension(format).to_string(),
+    }
+}
+
+/// `payload` as the file to write: sealed when the destination has `pgp:`. A key that can't be
+/// used now (expired, say) is worth retrying: the message waits for a working key.
+fn sealed<'a>(seal: &Option<crate::pgp::Seal>, payload: &'a [u8]) -> Result<std::borrow::Cow<'a, [u8]>, SendError> {
+    match seal {
+        None => Ok(std::borrow::Cow::Borrowed(payload)),
+        Some(s) => {
+            s.apply(payload).map(std::borrow::Cow::Owned).map_err(|e| SendError::Transient(format!("OpenPGP: {e:#}")))
+        }
+    }
 }
 
 /// Content-Type for a format's serialized output.
@@ -49,22 +68,25 @@ impl Sender {
     /// A sender for one of `config`'s destinations. `server`: an SFTP destination's server;
     /// `api`: an HTTP destination's API; both from resources.yaml. `tls`: the client settings for
     /// an MLLP destination over TLS, or an HTTPS one naming a CA or client certificate (from
-    /// `Certificates::client`). `None` for a route to another interface: nothing is sent, the
-    /// worker stores the messages there (`Intake::accept_routed`).
+    /// `Certificates::client`). `seal`: a file or SFTP destination's `pgp:`, its keys loaded.
+    /// `None` for a route to another interface: nothing is sent, the worker stores the messages
+    /// there (`Intake::accept_routed`).
     pub fn new(
         config: &InterfaceConfig,
         destination: &DestinationConfig,
         server: Option<SftpServer>,
         api: Option<Api>,
         tls: Option<Arc<rustls::ClientConfig>>,
+        seal: Option<crate::pgp::Seal>,
     ) -> Option<Self> {
         let output = config.output_for(destination);
         Some(match &destination.connector {
             Destination::Interface(_) => return None,
-            Destination::Sftp { server: name, dir } => Sender::Sftp {
+            Destination::Sftp { server: name, dir, .. } => Sender::Sftp {
                 connection: Box::new(crate::sftp::Connection::new(name, server.expect("checked at startup"))),
                 dir: dir.clone(),
-                extension: extension(output),
+                extension: file_extension(output, &seal),
+                seal,
             },
             Destination::Mllp { host, port, timeout_ms, ack, on_reject, tls: _ } => {
                 let timeout = Duration::from_millis(*timeout_ms);
@@ -74,7 +96,9 @@ impl Sender {
                 };
                 Sender::Mllp { client, ack: *ack, on_reject: *on_reject }
             }
-            Destination::File { dir } => Sender::File { dir: config.dir.join(dir), extension: extension(output) },
+            Destination::File { dir, .. } => {
+                Sender::File { dir: config.dir.join(dir), extension: file_extension(output, &seal), seal }
+            }
             Destination::Http { url, api: _, path, method, headers, timeout_ms, .. } => {
                 let mut map = reqwest::header::HeaderMap::new();
                 map.insert(
@@ -130,18 +154,20 @@ impl Sender {
                     code => Err(SendError::Transient(format!("{code}: {}", ack.value("MSA-3")))),
                 }
             }
-            Sender::File { dir, extension } => {
+            Sender::File { dir, extension, seal } => {
+                let payload = sealed(seal, payload)?;
                 let write = async {
                     tokio::fs::create_dir_all(&*dir).await?;
                     // Write then rename, so readers never see a partial file.
                     let tmp = dir.join(format!(".{id}.tmp"));
-                    tokio::fs::write(&tmp, payload).await?;
+                    tokio::fs::write(&tmp, &payload).await?;
                     tokio::fs::rename(&tmp, dir.join(format!("{id}.{extension}"))).await
                 };
                 write.await.map_err(|e| SendError::Transient(e.to_string()))
             }
-            Sender::Sftp { connection, dir, extension } => {
-                connection.put(dir, &format!("{id}.{extension}"), payload).await.map_err(|e| {
+            Sender::Sftp { connection, dir, extension, seal } => {
+                let payload = sealed(seal, payload)?;
+                connection.put(dir, &format!("{id}.{extension}"), &payload).await.map_err(|e| {
                     connection.reset();
                     SendError::Transient(format!("{e:#}"))
                 })
@@ -217,7 +243,7 @@ mod tests {
         let api = resources.apis.get("billing").cloned();
         let send = |config: InterfaceConfig| {
             let d = config.destinations.values().next().cloned().unwrap();
-            let mut sender = Sender::new(&config, &d, None, api.clone(), None).unwrap();
+            let mut sender = Sender::new(&config, &d, None, api.clone(), None, None).unwrap();
             async move { sender.send(1, b"MSH|").await }
         };
         // The API's URL and headers, the destination's headers winning where both set one.
@@ -268,7 +294,7 @@ mod tests {
         .unwrap();
         let d = config.destinations.values().next().cloned().unwrap();
         let tls = tls.map(|t| certificates.client(&t).unwrap());
-        let mut sender = Sender::new(&config, &d, None, None, tls).unwrap();
+        let mut sender = Sender::new(&config, &d, None, None, tls, None).unwrap();
         outcome(sender.send(1, b"MSH|^~\\&|A||||||ADT^A01|1|P|2.5\r").await)
     }
 
@@ -359,7 +385,7 @@ mod tests {
             let d = config.destinations.values().next().cloned().unwrap();
             let Destination::Http { ca, certificate, .. } = &d.connector else { panic!("an HTTP destination") };
             let tls = certificates.named(&ConnectTls::new(ca, certificate)).unwrap();
-            let mut sender = Sender::new(&config, &d, None, None, tls).unwrap();
+            let mut sender = Sender::new(&config, &d, None, None, tls, None).unwrap();
             async move { outcome(sender.send(1, b"{}").await) }
         };
         assert_eq!(send(", ca: server-ca, certificate: client").await, Ok(()));

@@ -326,6 +326,8 @@ pub struct Certificates {
     cas: BTreeMap<String, Authority>,
     /// Entries that didn't load, and why (only `load_what_loads` keeps any).
     broken: BTreeMap<String, String>,
+    /// The `pgp:` keys (`with_pgp`): re-read from their files with the pairs'.
+    pgp: BTreeMap<String, Arc<crate::pgp::Key>>,
     /// Client settings already built, by what they name: destinations naming the same CA and
     /// certificate share one (and its session cache; the platform's roots are read once).
     clients: Mutex<HashMap<ConnectTls, Arc<rustls::ClientConfig>>>,
@@ -396,6 +398,27 @@ impl Certificates {
 
     pub fn pairs(&self) -> impl Iterator<Item = &Arc<Pair>> {
         self.pairs.values()
+    }
+
+    /// Load resources.yaml's `pgp:` keys too. One that doesn't load, or has expired, is an error
+    /// naming it and why.
+    pub fn with_pgp(mut self, keys: &BTreeMap<String, ductus_core::pgp::PgpKey>) -> Result<Self> {
+        for (name, entry) in keys {
+            let key =
+                crate::pgp::Key::load(name, entry).with_context(|| format!("pgp key `{name}` (resources.yaml)"))?;
+            self.pgp.insert(name.clone(), Arc::new(key));
+        }
+        Ok(self)
+    }
+
+    /// The `pgp:` key named (checked by `ductus_core::pgp::check` and the start).
+    pub fn pgp_key(&self, name: &str) -> Result<&Arc<crate::pgp::Key>> {
+        self.pgp.get(name).with_context(|| format!("pgp key `{name}` isn't loaded"))
+    }
+
+    /// The `pgp:` keys loaded.
+    pub fn pgp_keys(&self) -> impl Iterator<Item = &Arc<crate::pgp::Key>> {
+        self.pgp.values()
     }
 
     /// The TLS settings for a listener's `tls:` (names checked by `ductus_core::tls::check`).
@@ -501,7 +524,7 @@ impl Certificates {
         stop: tokio_util::sync::CancellationToken,
     ) -> tokio::sync::mpsc::Receiver<Vec<String>> {
         let (tx, rx) = tokio::sync::mpsc::channel(4);
-        if !self.pairs.values().any(|p| p.files.is_some()) {
+        if !self.pairs.values().any(|p| p.files.is_some()) && !self.pgp.values().any(|k| k.from_file()) {
             return rx;
         }
         let me = self.clone();
@@ -528,6 +551,11 @@ impl Certificates {
         for pair in self.pairs.values() {
             if pair.reload().await {
                 changed.push(pair.name.clone());
+            }
+        }
+        for key in self.pgp.values() {
+            if key.reload().await {
+                changed.push(key.name.clone());
             }
         }
         changed

@@ -142,6 +142,10 @@ if it's missing; the service must be allowed to write there (Linux:
 [the service's folders](../install/windows.md#the-services-account)). An `sftp` destination's
 `server` is an `sftp:` entry in resources.yaml.
 
+A partner who wants files encrypted to their OpenPGP key, or signed with ours, gets them with
+`pgp: { encrypt: payer, sign: ours }` on either: each file is sealed before it's written and named
+`1234.hl7.pgp` ([OpenPGP](pgp.md#sending-encrypted-files)).
+
 ## To another interface
 
 ```yaml

@@ -143,8 +143,8 @@ export interface paths {
         };
         /**
          * Every certificate the engine connects to, as its last check saw it (read even when this
-         *     server doesn't trust them), every one it presents (`side: ours`, as loaded), and when the
-         *     engine checks next by itself.
+         *     server doesn't trust them), every one it presents and every OpenPGP key interfaces use
+         *     (`side: ours`, as loaded), and when the engine checks next by itself.
          */
         get: operations["list_certificates"];
         put?: never;
@@ -1489,13 +1489,20 @@ export interface components {
             /** Format: date-time */
             not_before?: string | null;
             /**
+             * @description An OpenPGP key (a `pgp:` entry, ours: `side` is `ours`), not a certificate: `subject` is
+             *     its user id, `fingerprint` its own (40 hex digits, as `gpg --fingerprint` shows), and
+             *     `chain_earliest` the part of it that ends first (`its encryption subkey`).
+             */
+            pgp: boolean;
+            /**
              * Format: int32
              * @description Ours: 0 (see `presented`).
              */
             port: number;
             /**
              * @description Ours: where it is presented (`0.0.0.0:6661 MLLP over TLS (adt)`, `client certificate to
-             *     hie.example.org:7443 (adt → hie)`).
+             *     hie.example.org:7443 (adt → hie)`); an OpenPGP key: what it's used for (`decrypts files
+             *     `claims-in` picks up`).
              */
             presented: string[];
             /**
@@ -1520,7 +1527,8 @@ export interface components {
             stage?: number | null;
             /**
              * @description `ok`, `expiring` (within the first of `alerts.certificates.warn_days`), `expired`, or
-             *     `unknown` (never read: not checked yet, or never reachable).
+             *     `unknown` (never read: not checked yet, or never reachable). An OpenPGP key that never
+             *     expires is `ok`, with no `days_left`.
              */
             state: string;
             subject?: string | null;

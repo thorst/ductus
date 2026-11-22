@@ -560,6 +560,24 @@ pub const CODES: &[Code] = &[
         "Passwords and tokens cross it readable, and browsers won't keep the session cookie: add `tls: { certificate: <name> }` to `api`.",
     ),
     code(
+        "DUC214",
+        "error",
+        "An OpenPGP setting can't work",
+        "A source's or destination's `pgp:` names a partner's public key where our secret key is needed (`decrypt` and `sign` take a `pgp:` entry with `key_file` or `key`), or names no key at all. (A key resources.yaml doesn't define is DUC202.)",
+    ),
+    code(
+        "DUC215",
+        "error",
+        "An OpenPGP key doesn't load",
+        "A `pgp:` entry's key can't be read, is the wrong kind (a public key in `key_file`, a secret one in `public_key_file`), its passphrase is missing or wrong, it was revoked, or it has expired: the engine would refuse to start.",
+    ),
+    code(
+        "DUC216",
+        "warning",
+        "An OpenPGP key expires within 30 days",
+        "Extend it (`gpg --quick-set-expire`) or get a new one, and give partners the new public key: the engine alerts too, 30, 14 and 7 days before.",
+    ),
+    code(
         "DUC220",
         "warning",
         "An `allow` list names a host that doesn't resolve",

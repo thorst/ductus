@@ -75,6 +75,7 @@ pub fn owned<'a>(configs: impl IntoIterator<Item = &'a InterfaceConfig>, resourc
         (Kind::Sftp, resources.sftp.keys().collect()),
         (Kind::Ldap, resources.ldap.keys().collect()),
         (Kind::Certificate, resources.certificates.keys().collect()),
+        (Kind::Pgp, resources.pgp.keys().collect()),
     ];
     for (kind, names) in kinds {
         for name in names {
@@ -524,7 +525,7 @@ fn edit(text: &str, from: &str, to: &str, keep: impl Fn(usize) -> bool) -> (Stri
 }
 
 /// Where owners live in resources.yaml: `databases.<name>.<postgres|sqlserver>.owner`,
-/// `apis|sftp|ldap|certificates.<name>.owner`.
+/// `apis|sftp|ldap|certificates|pgp.<name>.owner`.
 fn resource_slots(config: &mut Value) -> Vec<(Kind, String, &mut Value)> {
     let Value::Mapping(top) = config else { return Vec::new() };
     let mut slots = Vec::new();
@@ -535,6 +536,7 @@ fn resource_slots(config: &mut Value) -> Vec<(Kind, String, &mut Value)> {
             Some("sftp") => Kind::Sftp,
             Some("ldap") => Kind::Ldap,
             Some("certificates") => Kind::Certificate,
+            Some("pgp") => Kind::Pgp,
             _ => continue,
         };
         let Value::Mapping(entries) = value else { continue };

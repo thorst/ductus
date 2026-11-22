@@ -595,7 +595,10 @@ async fn judge_certificates(engine: &Engine, a: &Alerts, now: DateTime<Utc>) -> 
             .and_then(|i| engine.interface(i))
             .map(|i| i.config.alert.clone())
             .unwrap_or_default();
+        let pgp = row.is_some_and(|r| r.issuer.as_deref() == Some(crate::certificates::PGP_ISSUER));
         let (judgement, summary) = match row.and_then(|r| Some((r, r.chain_min_not_after?))) {
+            // An OpenPGP key that never expires: nothing to count down to.
+            None if pgp => (CertificateNow::Fine, format!("OpenPGP key {} (on {}) never expires.", t.resource, t.host)),
             // Never read (not checked yet, or never reachable): nothing to count down from.
             None => {
                 let why = row.and_then(|r| r.error.as_deref()).unwrap_or("not checked yet");
@@ -615,6 +618,7 @@ async fn judge_certificates(engine: &Engine, a: &Alerts, now: DateTime<Utc>) -> 
                         Side::Remote => r.error.as_deref().filter(|_| r.read_at.is_none_or(|read| read < r.checked_at)),
                     },
                     ours: (t.side == Side::Ours).then_some(presented.as_str()),
+                    pgp,
                 };
                 let summary = alerts::certificate_summary(&facts, now);
                 let judgement = match rule {

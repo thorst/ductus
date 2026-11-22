@@ -1,7 +1,7 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "resources.yaml",
-  "description": "`resources.yaml`: what many interfaces share, each defined once by a name: databases, SFTP servers, HTTP APIs, directories for signing in, and certificates.\n\nInterfaces and their code refer to them by name (`db(\"patient_db\")`, `api(\"empi\")`, `server: lab_server`), so no address or credential is ever written in an interface or its code, and each environment fills in its own with `${NAME}` and `${secret:NAME}`. `ductus doctor` checks every entry from the server, and `ductus impact` finds the interfaces behind each one.",
+  "description": "`resources.yaml`: what many interfaces share, each defined once by a name: databases, SFTP servers, HTTP APIs, directories for signing in, certificates and OpenPGP keys.\n\nInterfaces and their code refer to them by name (`db(\"patient_db\")`, `api(\"empi\")`, `server: lab_server`), so no address or credential is ever written in an interface or its code, and each environment fills in its own with `${NAME}` and `${secret:NAME}`. `ductus doctor` checks every entry from the server, and `ductus impact` finds the interfaces behind each one.",
   "type": "object",
   "properties": {
     "databases": {
@@ -43,6 +43,14 @@
         "$ref": "#/definitions/CertificateEntry"
       },
       "markdownDescription": "Certificates the engine presents (`tls: { certificate: <name> }` on listeners and the API, `certificate: <name>` on connections it makes), and CAs it trusts or checks clients against (`ca: <name>`). Each entry is a certificate with its key (from files or secrets) or a CA alone. Their expiry is watched and alerts at 30, 14 and 7 days. Default: none. Example: `certificates: { ductus-mllp: { cert_file: /etc/ductus/tls/mllp.pem, key_file: /etc/ductus/tls/mllp.key } }`."
+    },
+    "pgp": {
+      "description": "OpenPGP keys for files (`pgp:` on file and SFTP sources and destinations): our secret key, which decrypts what partners send and signs what we send, and partners' public keys, which encrypt what we send them and check what they send us. Their expiry is watched like the certificates'. A name can't also be a `certificates:` entry's. Default: none. Example: `pgp: { ours: { key_file: /etc/ductus/pgp/ours.asc, passphrase: \"${secret:PGP_PASSPHRASE}\" }, payer: { public_key_file: pgp/payer.asc } }`.",
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/definitions/PgpKey"
+      },
+      "markdownDescription": "OpenPGP keys for files (`pgp:` on file and SFTP sources and destinations): our secret key, which decrypts what partners send and signs what we send, and partners' public keys, which encrypt what we send them and check what they send us. Their expiry is watched like the certificates'. A name can't also be a `certificates:` entry's. Default: none. Example: `pgp: { ours: { key_file: /etc/ductus/pgp/ours.asc, passphrase: \"${secret:PGP_PASSPHRASE}\" }, payer: { public_key_file: pgp/payer.asc } }`."
     }
   },
   "additionalProperties": false,
@@ -843,7 +851,86 @@
       },
       "additionalProperties": false,
       "markdownDescription": "A `certificates:` entry: a certificate with its private key (from files, which are re-read when they change, or PEM text from secrets), or a CA alone."
+    },
+    "PgpKey": {
+      "description": "A `pgp:` entry in resources.yaml: our secret key (`key_file` or `key`), or a partner's public key (`public_key_file` or `public_key`).",
+      "type": "object",
+      "properties": {
+        "key_file": {
+          "description": "A file with our secret key, armored (`-----BEGIN PGP PRIVATE KEY BLOCK-----`, what `gpg --export-secret-keys --armor` writes) or binary. It decrypts files partners encrypted to us (`decrypt:`) and signs the files we send (`sign:`). Re-read when it changes, checked every minute: replace the file to change keys, with no restart. Readable by the account the engine runs as and nobody else. A relative path is read from the project folder. Example: `key_file: /etc/ductus/pgp/ours.asc`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A file with our secret key, armored (`-----BEGIN PGP PRIVATE KEY BLOCK-----`, what `gpg --export-secret-keys --armor` writes) or binary. It decrypts files partners encrypted to us (`decrypt:`) and signs the files we send (`sign:`). Re-read when it changes, checked every minute: replace the file to change keys, with no restart. Readable by the account the engine runs as and nobody else. A relative path is read from the project folder. Example: `key_file: /etc/ductus/pgp/ours.asc`."
+        },
+        "key": {
+          "description": "Our secret key as text (armored), usually from a secret (`${secret:PGP_KEY}`), for servers where keys live in a vault rather than in files. Read at start only. Example: `key: \"${secret:PGP_KEY}\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Our secret key as text (armored), usually from a secret (`${secret:PGP_KEY}`), for servers where keys live in a vault rather than in files. Read at start only. Example: `key: \"${secret:PGP_KEY}\"`."
+        },
+        "passphrase": {
+          "description": "The passphrase that unlocks the secret key, from a secret, when it has one (GnuPG asks for one by default). It's used once, as the key is read: a wrong one stops the start saying so. Default: none. Example: `passphrase: \"${secret:PGP_PASSPHRASE}\"`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The passphrase that unlocks the secret key, from a secret, when it has one (GnuPG asks for one by default). It's used once, as the key is read: a wrong one stops the start saying so. Default: none. Example: `passphrase: \"${secret:PGP_PASSPHRASE}\"`."
+        },
+        "public_key_file": {
+          "description": "A file with a partner's public key (armored or binary, what `gpg --export --armor` writes): files we send them are encrypted to it (`encrypt:`), and files they send us must be signed by it (`verify:`). Re-read when it changes, every minute. Example: `public_key_file: pgp/payer.asc`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A file with a partner's public key (armored or binary, what `gpg --export --armor` writes): files we send them are encrypted to it (`encrypt:`), and files they send us must be signed by it (`verify:`). Re-read when it changes, every minute. Example: `public_key_file: pgp/payer.asc`."
+        },
+        "public_key": {
+          "description": "A partner's public key as text (armored). Read at start only. Example: `public_key: | -----BEGIN PGP PUBLIC KEY BLOCK----- ...`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "A partner's public key as text (armored). Read at start only. Example: `public_key: | -----BEGIN PGP PUBLIC KEY BLOCK----- ...`."
+        },
+        "application": {
+          "description": "The application the key belongs to, for `ductus impact`. Default: none. Example: `application: Claims clearinghouse`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The application the key belongs to, for `ductus impact`. Default: none. Example: `application: Claims clearinghouse`."
+        },
+        "vendor": {
+          "description": "The vendor the key belongs to (the partner, for theirs), for `ductus impact`. Default: none. Example: `vendor: Availity`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "The vendor the key belongs to (the partner, for theirs), for `ductus impact`. Default: none. Example: `vendor: Availity`."
+        },
+        "owner": {
+          "description": "Who renews this key, best as an email address: alert rules with `to: owner` mail them as it nears expiry. Default: the owner of the one interface that uses it, if just one does. Example: `owner: edi-team@hospital.org`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Who renews this key, best as an email address: alert rules with `to: owner` mail them as it nears expiry. Default: the owner of the one interface that uses it, if just one does. Example: `owner: edi-team@hospital.org`."
+        },
+        "custom": {
+          "description": "Your company's documentation fields for this entry (those whose `applies_to` in `docs-schema.yaml` includes `resource`). Default: none. Example: `custom: { ticket: CHG-1234 }`.",
+          "type": "object",
+          "additionalProperties": true,
+          "default": {},
+          "markdownDescription": "Your company's documentation fields for this entry (those whose `applies_to` in `docs-schema.yaml` includes `resource`). Default: none. Example: `custom: { ticket: CHG-1234 }`."
+        }
+      },
+      "additionalProperties": false,
+      "markdownDescription": "A `pgp:` entry in resources.yaml: our secret key (`key_file` or `key`), or a partner's public key (`public_key_file` or `public_key`)."
     }
   },
-  "markdownDescription": "`resources.yaml`: what many interfaces share, each defined once by a name: databases, SFTP servers, HTTP APIs, directories for signing in, and certificates.\n\nInterfaces and their code refer to them by name (`db(\"patient_db\")`, `api(\"empi\")`, `server: lab_server`), so no address or credential is ever written in an interface or its code, and each environment fills in its own with `${NAME}` and `${secret:NAME}`. `ductus doctor` checks every entry from the server, and `ductus impact` finds the interfaces behind each one."
+  "markdownDescription": "`resources.yaml`: what many interfaces share, each defined once by a name: databases, SFTP servers, HTTP APIs, directories for signing in, certificates and OpenPGP keys.\n\nInterfaces and their code refer to them by name (`db(\"patient_db\")`, `api(\"empi\")`, `server: lab_server`), so no address or credential is ever written in an interface or its code, and each environment fills in its own with `${NAME}` and `${secret:NAME}`. `ductus doctor` checks every entry from the server, and `ductus impact` finds the interfaces behind each one."
 }

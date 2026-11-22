@@ -6,6 +6,13 @@
 //! reached (`source_state`), so a crash mid-file resumes at that offset with no record lost or
 //! stored twice. The last batch also marks the file done, so a crash before the move doesn't
 //! read the file again either.
+//!
+//! With `pgp:` (0.7.8.1), each file is first decrypted and its signature checked, into a
+//! temporary file only this account can read, deleted after; records and offsets are then the
+//! decrypted text's (a resume decrypts again and seeks: ciphertext can't be entered midway).
+//! Nothing is stored until the whole file checks out. A file that doesn't (not for our key, not
+//! signed by theirs, damaged) is stored once, as received, quarantined with why, and moved or
+//! deleted like any other: the files after it aren't held up by one that will never open.
 
 use crate::gate::Closed;
 use crate::ingest::Intake;
@@ -18,7 +25,7 @@ use ductus_core::format::Format;
 use ductus_core::resources::SftpServer;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, BufReader};
 
@@ -87,6 +94,14 @@ impl Backend {
             }
         }
         Ok(entries)
+    }
+
+    /// The file's path on this machine (a local folder's); None on SFTP.
+    fn local(&self, name: &str) -> Option<PathBuf> {
+        match self {
+            Backend::Local { dir, .. } => Some(dir.join(name)),
+            Backend::Sftp { .. } => None,
+        }
     }
 
     async fn open(&mut self, name: &str) -> Result<Box<dyn ReadSeek>> {
@@ -171,17 +186,29 @@ pub struct FileWatcher {
     refused: HashSet<(String, u64)>,
     /// Whether this engine holds its interfaces: pickup waits while it doesn't (`ownership`).
     ownership: Arc<crate::ownership::Ownership>,
+    /// `pgp:`: each file decrypted and its signature checked before it's read.
+    opener: Option<crate::pgp::Opener>,
+}
+
+/// A file with `pgp:`, opened.
+enum Opened {
+    /// Its decrypted text, in a temporary file (deleted when dropped), and its size.
+    Text(tempfile::NamedTempFile, u64),
+    /// It can't be taken, and why; the file as received is at the path (a temporary copy, for
+    /// one from SFTP, held by the second).
+    Refused(String, PathBuf, Option<tempfile::NamedTempFile>),
 }
 
 impl FileWatcher {
     /// For `config`'s `file` or `sftp` source (the interface's settings now: a deploy in place may
     /// have changed its source since `intake` was made). `server` is the SFTP server from
-    /// resources.yaml.
+    /// resources.yaml. `opener`: the source's `pgp:`, its keys loaded.
     pub fn new(
         config: &InterfaceConfig,
         intake: Arc<Intake>,
         server: Option<SftpServer>,
         ownership: Arc<crate::ownership::Ownership>,
+        opener: Option<crate::pgp::Opener>,
     ) -> Result<Self> {
         let (Source::File(source) | Source::Sftp(source)) = &config.source else {
             bail!("interface `{}` doesn't have a file source", config.name)
@@ -208,6 +235,7 @@ impl FileWatcher {
             last_seen: HashMap::new(),
             refused: HashSet::new(),
             ownership,
+            opener,
         })
     }
 
@@ -317,12 +345,35 @@ impl FileWatcher {
 
         if !state.done {
             let started = std::time::Instant::now();
-            let stored = match self.splitter {
-                Some(splitter) => self.read_records(e, splitter, &key, &mut state).await?,
-                None => match self.read_whole(e, &key, &mut state).await? {
-                    Some(n) => n,
-                    None => return Ok(()),
+            // With `pgp:`, the decrypted text is what's read (kept until the file is stored).
+            let (text, size) = match &self.opener {
+                None => (None, e.size),
+                Some(opener) => match self.open_sealed(e, opener.clone()).await? {
+                    Opened::Text(file, size) => (Some(file), size),
+                    Opened::Refused(why, path, _copy) => {
+                        if !self.quarantine(e, &key, &mut state, &why, &path).await? {
+                            return Ok(()); // too big to store: left in place
+                        }
+                        return self.finish(e, &key).await;
+                    }
                 },
+            };
+            if self.splitter.is_none() && size > MAX_WHOLE_FILE {
+                tracing::error!(
+                    interface = %self.name(), file = %e.name, size,
+                    "file is over {} MB; left in place. Use `split: records` to read it record by record",
+                    MAX_WHOLE_FILE >> 20
+                );
+                self.refused.insert((e.name.clone(), e.size));
+                return Ok(());
+            }
+            let reader: Box<dyn ReadSeek> = match &text {
+                Some(file) => Box::new(tokio::fs::File::open(file.path()).await?),
+                None => self.backend.open(&e.name).await?,
+            };
+            let stored = match self.splitter {
+                Some(splitter) => self.read_records(reader, splitter, &key, &mut state).await?,
+                None => self.read_whole(reader, size, &key, &mut state).await?,
             };
             let seconds = started.elapsed().as_secs_f64();
             tracing::info!(
@@ -330,7 +381,13 @@ impl FileWatcher {
                 seconds = format!("{seconds:.2}"), "file stored"
             );
         }
+        self.finish(e, &key).await
+    }
 
+    /// Everything in the file is stored: move or delete it (and its marker), then forget its
+    /// progress.
+    async fn finish(&mut self, e: &Entry, key: &str) -> Result<()> {
+        let store = self.intake.store().clone();
         match self.source.after {
             After::Move => self.backend.archive(&e.name).await?,
             After::Delete => self.backend.delete(&e.name).await?,
@@ -338,33 +395,93 @@ impl FileWatcher {
         if let Some(marker) = &self.source.marker {
             self.backend.delete(&format!("{}{marker}", e.name)).await?;
         }
-        store.delete_source_state(self.name(), &key).await?;
+        store.delete_source_state(self.name(), key).await?;
         Ok(())
     }
 
-    /// The whole file as one message. None when the file was refused (too big).
-    async fn read_whole(&mut self, e: &Entry, key: &str, state: &mut FileState) -> Result<Option<usize>> {
+    /// Decrypt `e` and check its signature, into a temporary file. An error (the SFTP server
+    /// went away, this machine's disk is full) is tried again at the next look; a file that
+    /// isn't what `pgp:` asks for is `Refused`.
+    async fn open_sealed(&mut self, e: &Entry, opener: crate::pgp::Opener) -> Result<Opened> {
+        // A file on SFTP is copied here first: what's read and what may be quarantined is one copy.
+        let (path, copy) = match self.backend.local(&e.name) {
+            Some(path) => (path, None),
+            None => {
+                let copy =
+                    tempfile::Builder::new().prefix("ductus-pgp-").tempfile().context("making a temporary file")?;
+                let mut from = self.backend.open(&e.name).await?;
+                let mut to = tokio::fs::File::create(copy.path()).await?;
+                tokio::io::copy(&mut from, &mut to).await.context("copying the file from the SFTP server")?;
+                (copy.path().to_path_buf(), Some(copy))
+            }
+        };
+        let text = tempfile::Builder::new().prefix("ductus-pgp-").tempfile().context("making a temporary file")?;
+        let (from, to) = (path.clone(), text.reopen().context("opening the temporary file")?);
+        let opened = tokio::task::spawn_blocking(move || {
+            let input = std::io::BufReader::with_capacity(256 << 10, std::fs::File::open(&from)?);
+            opener.open(input, std::io::BufWriter::with_capacity(256 << 10, to))
+        })
+        .await
+        .context("decrypting stopped")??;
+        Ok(match opened {
+            Ok(size) => Opened::Text(text, size),
+            Err(refused) => Opened::Refused(refused.0, path, copy),
+        })
+    }
+
+    /// Store `e` as received (at `path`), quarantined with `why` and its progress done; false if
+    /// it's too big to store (left in place, as an unsplit file would be).
+    async fn quarantine(
+        &mut self,
+        e: &Entry,
+        key: &str,
+        state: &mut FileState,
+        why: &str,
+        path: &Path,
+    ) -> Result<bool> {
+        let why = format!(
+            "OpenPGP: {why}. Resending it won't help: fix the file or the key (resources.yaml `pgp:`), then put the archived file back in the folder"
+        );
         if e.size > MAX_WHOLE_FILE {
-            tracing::error!(
-                interface = %self.name(), file = %e.name, size = e.size,
-                "file is over {} MB; left in place. Use `split: records` to read it record by record",
-                MAX_WHOLE_FILE >> 20
-            );
+            tracing::error!(interface = %self.name(), file = %e.name, error = %why, "file can't be opened and is too big to keep as a message; left in place");
             self.refused.insert((e.name.clone(), e.size));
-            return Ok(None);
+            return Ok(false);
         }
-        let mut data = Vec::with_capacity(e.size as usize);
-        self.backend.open(&e.name).await?.read_to_end(&mut data).await?;
-        let payloads = if data.iter().all(u8::is_ascii_whitespace) { vec![] } else { vec![data] };
+        let payload = tokio::fs::read(path).await.with_context(|| format!("reading {}", path.display()))?;
         state.offset = e.size;
+        state.records = 1;
+        state.done = true;
+        self.intake.accept_unreadable(&payload, &why, (key, &serde_json::to_string(state)?)).await?;
+        tracing::warn!(interface = %self.name(), file = %e.name, error = %why, "file quarantined: it can't be opened; going on to the next file");
+        Ok(true)
+    }
+
+    /// The whole file (`size` bytes, from `reader`) as one message.
+    async fn read_whole(
+        &mut self,
+        mut reader: Box<dyn ReadSeek>,
+        size: u64,
+        key: &str,
+        state: &mut FileState,
+    ) -> Result<usize> {
+        let mut data = Vec::with_capacity(size as usize);
+        reader.read_to_end(&mut data).await?;
+        let payloads = if data.iter().all(u8::is_ascii_whitespace) { vec![] } else { vec![data] };
+        state.offset = size;
         state.records = payloads.len() as u64;
         state.done = true;
         let queued = self.intake.accept_batch(&payloads, Some((key, &serde_json::to_string(state)?))).await?;
-        Ok(Some(queued))
+        Ok(queued)
     }
 
-    async fn read_records(&mut self, e: &Entry, splitter: Splitter, key: &str, state: &mut FileState) -> Result<usize> {
-        let reader = BufReader::with_capacity(256 << 10, self.backend.open(&e.name).await?);
+    async fn read_records(
+        &mut self,
+        reader: Box<dyn ReadSeek>,
+        splitter: Splitter,
+        key: &str,
+        state: &mut FileState,
+    ) -> Result<usize> {
+        let reader = BufReader::with_capacity(256 << 10, reader);
         let mut records = Records::open(reader, splitter, state.offset).await?;
         let mut batch = Vec::with_capacity(BATCH_RECORDS);
         let (mut bytes, mut queued) = (0, 0);

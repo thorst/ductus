@@ -402,6 +402,14 @@ pub struct FileSource {
     /// message each. Default: `none`. Example: `split: records`.
     #[serde(default)]
     pub split: Split,
+    /// OpenPGP: decrypt each file with our key (`decrypt:`), and take only files signed by the
+    /// partner's key (`verify:`), both `pgp:` entries in resources.yaml. Nothing in a file is
+    /// stored until its signature is checked. A file that isn't encrypted to our key, isn't
+    /// signed by theirs, or was damaged is stored quarantined as received, with why, moved like
+    /// any file, and the next file is read. `split: records` works on the decrypted text.
+    /// Default: files are read as they are. Example: `pgp: { decrypt: ours, verify: payer }`.
+    #[serde(default)]
+    pub pgp: Option<crate::pgp::Receive>,
 }
 
 impl FileSource {
@@ -927,6 +935,13 @@ pub enum Destination {
         /// The folder to write to, made if missing. Relative to the interface's folder unless
         /// written whole. Required. Example: `dir: /data/outbound/lab`.
         dir: PathBuf,
+        /// OpenPGP: sign each file with our key (`sign:`) and encrypt it to the partner's
+        /// (`encrypt:`), both `pgp:` entries in resources.yaml; the name gains `.pgp` (`.asc`
+        /// with `armor: true`). A key that can't be used (expired, say) leaves the message
+        /// waiting and retried, with why. Default: written as it is. Example: `pgp: { encrypt:
+        /// payer, sign: ours }`.
+        #[serde(default)]
+        pgp: Option<crate::pgp::Send>,
     },
     /// Write each message as a file on an SFTP server, named like the `file` destination's.
     /// Files are written under a temporary name and renamed when complete, so a reader on the
@@ -938,6 +953,11 @@ pub enum Destination {
         /// The folder on the server to write to, relative to the folder the login starts in
         /// unless written whole. Required. Example: `dir: inbound/adt`.
         dir: String,
+        /// OpenPGP, as on the `file` destination: `sign:` with our key, `encrypt:` to the
+        /// partner's, `armor:` for text. Default: written as it is. Example: `pgp: { encrypt:
+        /// payer, sign: ours }`.
+        #[serde(default)]
+        pgp: Option<crate::pgp::Send>,
     },
     /// Send each message as an HTTP request (POST unless `method` says otherwise) to a `url`, or
     /// to a `path` under an API from resources.yaml (`api: billing`, which brings its URL,
@@ -1700,6 +1720,9 @@ impl InterfaceConfig {
                 "dedicated_pools".to_string(),
                 vec!["dedicated_pools", db.as_str()],
             ));
+        }
+        for u in crate::pgp::uses([self]) {
+            out.push((Kind::Pgp, u.key, format!("{} pgp.{}", u.place, u.what.setting()), u.at));
         }
         out
     }

@@ -29,10 +29,16 @@ pub struct CertificateInfo {
     /// Ours: 0 (see `presented`).
     pub port: u16,
     /// Ours: where it is presented (`0.0.0.0:6661 MLLP over TLS (adt)`, `client certificate to
-    /// hie.example.org:7443 (adt → hie)`).
+    /// hie.example.org:7443 (adt → hie)`); an OpenPGP key: what it's used for (`decrypts files
+    /// `claims-in` picks up`).
     pub presented: Vec<String>,
+    /// An OpenPGP key (a `pgp:` entry, ours: `side` is `ours`), not a certificate: `subject` is
+    /// its user id, `fingerprint` its own (40 hex digits, as `gpg --fingerprint` shows), and
+    /// `chain_earliest` the part of it that ends first (`its encryption subkey`).
+    pub pgp: bool,
     /// `ok`, `expiring` (within the first of `alerts.certificates.warn_days`), `expired`, or
-    /// `unknown` (never read: not checked yet, or never reachable).
+    /// `unknown` (never read: not checked yet, or never reachable). An OpenPGP key that never
+    /// expires is `ok`, with no `days_left`.
     pub state: String,
     /// Whole days left (UTC dates), counted to the earliest expiry in the chain; negative once
     /// expired.
@@ -109,8 +115,8 @@ pub struct CertificatesOverview {
 }
 
 /// Every certificate the engine connects to, as its last check saw it (read even when this
-/// server doesn't trust them), every one it presents (`side: ours`, as loaded), and when the
-/// engine checks next by itself.
+/// server doesn't trust them), every one it presents and every OpenPGP key interfaces use
+/// (`side: ours`, as loaded), and when the engine checks next by itself.
 #[utoipa::path(
     get, path = "/certificates", tag = "reports", operation_id = "list_certificates",
     responses((status = 200, body = CertificatesOverview))
@@ -138,7 +144,9 @@ async fn list(engine: Eng, _caller: Caller) -> ApiResult<CertificatesOverview> {
             });
             let ends = row.and_then(|r| r.chain_min_not_after);
             let stage = ends.and_then(|e| alerts::certificate_stage(e, now, &warn_days));
+            let pgp = row.is_some_and(|r| r.issuer.as_deref() == Some(crate::certificates::PGP_ISSUER));
             let state = match (ends, stage) {
+                (None, _) if pgp => "ok", // never expires
                 (None, _) => "unknown",
                 (Some(_), Some(0)) => "expired",
                 (Some(_), Some(_)) => "expiring",
@@ -150,6 +158,7 @@ async fn list(engine: Eng, _caller: Caller) -> ApiResult<CertificatesOverview> {
                 host: t.host.clone(),
                 port: t.port,
                 presented: t.presented.clone(),
+                pgp,
                 state: state.into(),
                 days_left: ends.map(|e| alerts::days_left(e, now)),
                 stage,

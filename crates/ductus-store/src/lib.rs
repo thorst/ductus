@@ -162,7 +162,8 @@ pub struct BatchMessage<'a> {
     /// Routed from another interface: the id of the message there.
     pub origin: Option<i64>,
     /// Stored quarantined at every destination with this reason, never queued: its key couldn't be
-    /// read (a key function threw). Not checked for duplicates.
+    /// read (a key function threw), or its file couldn't be opened (OpenPGP). Not checked for
+    /// duplicates.
     pub quarantined: Option<&'a str>,
 }
 

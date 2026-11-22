@@ -23,6 +23,10 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(10);
 /// The first scheduled check, after the engine starts (plus up to as much again at random).
 const FIRST_AFTER: Duration = Duration::from_secs(60);
 
+/// An OpenPGP key's row says this as its issuer (keys certify themselves): how the Doctor page
+/// tells a key from a certificate.
+pub const PGP_ISSUER: &str = "OpenPGP key";
+
 /// Which side of a connection a certificate is on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -95,6 +99,29 @@ pub fn ours(
             presented: vec![p.place],
         });
     }
+    // OpenPGP keys, as ours: held here, their expiry read from what was loaded.
+    for u in ductus_core::pgp::uses(configs.iter().copied()) {
+        let place = u.described();
+        if let Some(t) = out.iter_mut().find(|t| t.resource == u.key) {
+            if t.interface.as_deref() != Some(u.interface) {
+                t.interface = None;
+            }
+            if !t.presented.contains(&place) {
+                t.presented.push(place);
+            }
+            continue;
+        }
+        out.push(CertificateTarget {
+            key: ductus_core::alerts::certificate_key(u.key, host, 0),
+            resource: u.key.to_string(),
+            host: host.to_string(),
+            port: 0,
+            owner: String::new(),
+            interface: Some(u.interface.to_string()),
+            side: Side::Ours,
+            presented: vec![place],
+        });
+    }
     for t in &mut out {
         let interface = t.interface.as_deref().and_then(|i| configs.iter().find(|c| c.name == i));
         let owner =
@@ -110,7 +137,30 @@ pub fn our_row(
     certificates: &crate::tls::Certificates,
     at: DateTime<Utc>,
 ) -> Option<CertificateRow> {
-    let pair = certificates.pair(&t.resource).filter(|_| t.side == Side::Ours)?;
+    if t.side != Side::Ours {
+        return None;
+    }
+    if let Ok(key) = certificates.pgp_key(&t.resource) {
+        let about = key.about();
+        return Some(CertificateRow {
+            side: Side::Ours.label().into(),
+            resource: t.resource.clone(),
+            host: t.host.clone(),
+            port: i32::from(t.port),
+            subject: Some(about.user_id.clone()),
+            issuer: Some(PGP_ISSUER.into()),
+            fingerprint: Some(about.fingerprint.clone()),
+            not_before: Some(about.created),
+            not_after: about.not_after,
+            chain_min_not_after: about.not_after,
+            chain_min_subject: about.earliest.clone(),
+            trusted: None,
+            error: key.renewal_error(),
+            checked_at: at,
+            read_at: Some(at),
+        });
+    }
+    let pair = certificates.pair(&t.resource)?;
     let chain = doctor::Chain::read(pair.chain().as_slice());
     let leaf = chain.leaf.as_ref();
     Some(CertificateRow {
@@ -449,6 +499,54 @@ mod tests {
                 "0.0.0.0:7700 HTTPS (the REST API and web UI)",
                 "0.0.0.0:8443 HTTPS (orders)"
             ]
+        );
+    }
+
+    /// Each OpenPGP key an interface uses is one target of ours, listing what it's used for; one
+    /// used by several interfaces has no one interface's options.
+    #[test]
+    fn pgp_keys_in_use_are_ours_with_what_they_do() {
+        let configs = [
+            config(
+                "name: claims-in\nsource: { file: { dir: in, pgp: { decrypt: ours, verify: payer } } }\ndestinations: { files: { file: { dir: o } } }",
+            ),
+            config(
+                "name: claims-out\nsource: { mllp: { port: 6662 } }\ndestinations: { payer: { sftp: { server: s, dir: up, pgp: { encrypt: payer, sign: ours } } } }",
+            ),
+        ];
+        let configs: Vec<&InterfaceConfig> = configs.iter().collect();
+        let resources: ductus_core::Resources = serde_yaml_ng::from_str(
+            "pgp:\n  ours: { key: K, owner: EDI }\n  payer: { public_key: K }\n  unused: { public_key: K }\n",
+        )
+        .unwrap();
+        let ours = ours(&configs, &resources, None, None, "engine-1");
+        let shown: Vec<_> = ours
+            .iter()
+            .map(|t| (t.key.as_str(), t.owner.as_str(), t.interface.as_deref(), t.presented.clone()))
+            .collect();
+        assert_eq!(
+            shown,
+            [
+                (
+                    "cert:ours:engine-1:0",
+                    "EDI",
+                    None,
+                    vec![
+                        "decrypts files `claims-in` picks up".to_string(),
+                        "signs files `claims-out` sends (destination `payer`)".to_string()
+                    ]
+                ),
+                (
+                    "cert:payer:engine-1:0",
+                    "",
+                    None,
+                    vec![
+                        "checks files `claims-in` picks up are signed by it".to_string(),
+                        "encrypts files `claims-out` sends (destination `payer`)".to_string()
+                    ]
+                ),
+            ],
+            "nothing for a key nobody uses"
         );
     }
 

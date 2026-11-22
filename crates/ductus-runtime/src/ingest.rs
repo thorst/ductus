@@ -430,6 +430,39 @@ impl Intake {
         result
     }
 
+    /// Store a file its source couldn't open (OpenPGP: not encrypted to our key, not signed by
+    /// theirs, damaged) as received, quarantined at every destination with `why`, never queued,
+    /// together with the source's progress (`state`) in one transaction. Its keys aren't read:
+    /// what's stored isn't the format's text. Counted as received.
+    pub async fn accept_unreadable(&self, payload: &[u8], why: &str, state: (&str, &str)) -> Result<()> {
+        let result = async {
+            let _pass = self.gate.enter()?;
+            let settings = self.settings();
+            let batch = Batch {
+                interface: &self.name,
+                messages: vec![BatchMessage {
+                    partition_key: 0,
+                    ordering_key: None,
+                    control_id: None,
+                    payload,
+                    dedupe_key: None,
+                    origin: None,
+                    quarantined: Some(why),
+                }],
+                dedupe_window: settings.dedupe_window(),
+                relaxed: settings.relaxed(),
+                state: Some(state),
+                destinations: &settings.targets.destinations,
+                tier: settings.tier(),
+            };
+            self.store.insert_batch(&batch).await?;
+            Ok(())
+        }
+        .await;
+        self.count(&result, |_| (1, 0));
+        result
+    }
+
     async fn accept_many(&self, payloads: &[Vec<u8>], state: Option<(&str, &str)>) -> Result<usize> {
         let _pass = self.gate.enter()?;
         let settings = self.settings();

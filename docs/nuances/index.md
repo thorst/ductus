@@ -44,6 +44,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [TLS to SQL Server](tls-sqlserver.md) (6)
 - [SQL Server Windows logins](sqlserver-windows-logins.md) (6)
 - [Certificates](certificates.md) (10)
+- [OpenPGP on files](pgp.md) (9)
 - [People and access](people.md) (19)
 - [Local development](dev.md) (3)
 - [Upgrades](upgrades.md) (17)
@@ -102,7 +103,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (130)
+## Level 2: Practitioner (133)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -178,6 +179,9 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A check that can't connect keeps the last dates](certificates.md#a-check-that-cant-connect-keeps-the-last-dates-level-2) (Certificates)
 - [Our certificates count down like the rest, with no check](certificates.md#our-certificates-count-down-like-the-rest-with-no-check-level-2) (Certificates)
 - [A renewal that can't be used shows on its row, not as an alert](certificates.md#a-renewal-that-cant-be-used-shows-on-its-row-not-as-an-alert-level-2) (Certificates)
+- [A file that won't open is quarantined, and the next file is read](pgp.md#a-file-that-wont-open-is-quarantined-and-the-next-file-is-read-level-2) (OpenPGP on files)
+- [`verify:` takes only signed files](pgp.md#verify-takes-only-signed-files-level-2) (OpenPGP on files)
+- [Keys count down like certificates, to their last usable part](pgp.md#keys-count-down-like-certificates-to-their-last-usable-part-level-2) (OpenPGP on files)
 - [Passwords, lockout and what a disabled account loses](people.md#passwords-lockout-and-what-a-disabled-account-loses-level-2) (People and access)
 - [The audit log records who did what, and what it leaves out](people.md#the-audit-log-records-who-did-what-and-what-it-leaves-out-level-2) (People and access)
 - [Dismissing a quarantined message is not deleting it](people.md#dismissing-a-quarantined-message-is-not-deleting-it-level-2) (People and access)
@@ -235,7 +239,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (89)
+## Level 3: Professional (93)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
@@ -299,6 +303,10 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [What has a certificate the engine watches](certificates.md#what-has-a-certificate-the-engine-watches-level-3) (Certificates)
 - [Behind a load balancer, you see the balancer's certificate](certificates.md#behind-a-load-balancer-you-see-the-balancers-certificate-level-3) (Certificates)
 - [Doctor reads the chain our listeners serve, but not the name senders use](certificates.md#doctor-reads-the-chain-our-listeners-serve-but-not-the-name-senders-use-level-3) (Certificates)
+- [Decrypted text is in a temporary file while a file is read](pgp.md#decrypted-text-is-in-a-temporary-file-while-a-file-is-read-level-3) (OpenPGP on files)
+- [Our key's passphrase is used once, as it loads](pgp.md#our-keys-passphrase-is-used-once-as-it-loads-level-3) (OpenPGP on files)
+- [A destination whose key can't be used waits](pgp.md#a-destination-whose-key-cant-be-used-waits-level-3) (OpenPGP on files)
+- [What partners get](pgp.md#what-partners-get-level-3) (OpenPGP on files)
 - [Payload reads are logged before they are shown](people.md#payload-reads-are-logged-before-they-are-shown-level-3) (People and access)
 - [Copies of payloads and the audit log are kept for different times](people.md#copies-of-payloads-and-the-audit-log-are-kept-for-different-times-level-3) (People and access)
 - [A crash shows in the audit log](people.md#a-crash-shows-in-the-audit-log-level-3) (People and access)
@@ -327,7 +335,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - ["Log on as a service": the installer grants it, Group Policy can take it away](windows.md#log-on-as-a-service-the-installer-grants-it-group-policy-can-take-it-away-level-3) (Windows)
 - [A refused connection takes about a second on Windows, and `localhost` may be `::1` first](windows.md#a-refused-connection-takes-about-a-second-on-windows-and-localhost-may-be-1-first-level-3) (Windows)
 
-## Level 4: Advanced (33)
+## Level 4: Advanced (35)
 
 - [A query that holds the message tables for days can pause intake](store.md#a-query-that-holds-the-message-tables-for-days-can-pause-intake-level-4) (The store (Postgres))
 - [Shortening frees disk when partitions go, not at once](retention.md#shortening-frees-disk-when-partitions-go-not-at-once-level-4) (Retention)
@@ -356,6 +364,8 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Opening a database connection over TLS costs ~60 ms, for now](tls-postgres.md#opening-a-database-connection-over-tls-costs-60-ms-for-now-level-4) (TLS to Postgres)
 - [Verification costs nothing measurable](tls-sqlserver.md#verification-costs-nothing-measurable-level-4) (TLS to SQL Server)
 - [A refused certificate is said once, not logged as an error each time](certificates.md#a-refused-certificate-is-said-once-not-logged-as-an-error-each-time-level-4) (Certificates)
+- [What OpenPGP costs](pgp.md#what-openpgp-costs-level-4) (OpenPGP on files)
+- [A resumed file is decrypted again](pgp.md#a-resumed-file-is-decrypted-again-level-4) (OpenPGP on files)
 - [Reading payloads is a permission, not part of a role](people.md#reading-payloads-is-a-permission-not-part-of-a-role-level-4) (People and access)
 - [Nested groups: Active Directory answers, other directories are walked](people.md#nested-groups-active-directory-answers-other-directories-are-walked-level-4) (People and access)
 - [After a reload, code imported later reads the file as it is then](deployments.md#after-a-reload-code-imported-later-reads-the-file-as-it-is-then-level-4) (What runs, recorded)

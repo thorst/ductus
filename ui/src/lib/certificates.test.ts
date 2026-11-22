@@ -16,6 +16,10 @@ describe("a certificate's countdown", () => {
     expect(countdown({ state: "unknown", days_left: null })).toEqual({ text: "Not read yet", tone: "unknown" });
   });
 
+  it("says an OpenPGP key that never expires does so", () => {
+    expect(countdown({ state: "ok", days_left: null })).toEqual({ text: "Never expires", tone: "ok" });
+  });
+
   it("lists the ones needing renewal, worst first", () => {
     const all = [
       { state: "ok", days_left: 90 },

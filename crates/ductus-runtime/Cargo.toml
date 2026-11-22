@@ -36,6 +36,12 @@ rustls-native-certs = "0.8.4"
 rustls-platform-verifier = "0.7.1"
 # Already in the tree through rustls: its errors, read for plain words (`tls::outbound_failure`).
 rustls-webpki = { version = "0.103.15", default-features = false }
+# OpenPGP on file and SFTP sources and destinations (`pgp.rs`, 0.7.8.1): rPGP, pure Rust (MIT or
+# Apache-2.0), so Linux and Windows decrypt alike with nothing to install. Its default `bzip2` reads
+# files a partner's tool compressed that way.
+pgp = "0.21.1"
+# The randomness rPGP's encryption and signing take (its own version: rand_core 0.6).
+rand = "0.8.5"
 russh = "0.64.1"
 russh-sftp = "3.0.1"
 serde = { version = "1.0.229", features = ["derive"] }

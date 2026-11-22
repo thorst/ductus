@@ -8,7 +8,7 @@ that only run while the binary is compiled (macros, build scripts), since they s
 Nothing on this page is downloaded when Ductus runs, except Postgres for `ductus dev` (below). The binary
 needs only the operating system's C library on Linux (glibc 2.34 or later).
 
-- Rust crates: **637** (610 in the Linux build, 620 in the Windows build)
+- Rust crates: **717** (690 in the Linux build, 701 in the Windows build)
 - npm packages in the web UI: **102**
 - TypeScript **6.0.3** (Microsoft, Apache-2.0), inside the binary: `ductus validate` and `ductus types` type-check interface code with it
 
@@ -57,14 +57,14 @@ How many libraries use each license expression (`A OR B`: the library may be use
 
 | License | Rust crates | npm packages |
 |---|---|---|
-| MIT OR Apache-2.0 | 313 |  |
-| MIT | 112 | 98 |
-| Apache-2.0 OR MIT | 61 |  |
+| MIT OR Apache-2.0 | 348 |  |
+| MIT | 118 | 98 |
+| Apache-2.0 OR MIT | 89 |  |
 | Apache-2.0 | 43 | 1 |
+| MIT/Apache-2.0 | 27 |  |
 | Unicode-3.0 | 25 |  |
-| MIT/Apache-2.0 | 23 |  |
+| BSD-3-Clause | 11 |  |
 | Unlicense OR MIT | 9 |  |
-| BSD-3-Clause | 7 |  |
 | ISC | 4 | 1 |
 | Apache-2.0 WITH LLVM-exception OR Apache-2.0 OR MIT | 4 |  |
 | Unlicense/MIT | 4 |  |
@@ -73,6 +73,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | (MIT OR Apache-2.0) AND Unicode-3.0 | 2 |  |
 | 0BSD | 1 | 1 |
 | Apache-2.0 OR BSL-1.0 | 2 |  |
+| BSD-3-Clause OR MIT OR Apache-2.0 | 2 |  |
 | MIT OR Zlib OR Apache-2.0 | 2 |  |
 | MPL-2.0 | 2 |  |
 | Zlib | 2 |  |
@@ -84,6 +85,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | Apache-2.0 WITH LLVM-exception | 1 |  |
 | Apache-2.0/MIT | 1 |  |
 | BSD-2-Clause OR Apache-2.0 OR MIT | 1 |  |
+| bzip2-1.0.6 | 1 |  |
 | CC0-1.0 OR MIT-0 OR Apache-2.0 | 1 |  |
 | CDLA-Permissive-2.0 | 1 |  |
 | ISC AND (Apache-2.0 OR ISC) | 1 |  |
@@ -97,9 +99,13 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | Crate | Version | License | Linux | Windows |
 |---|---|---|---|---|
 | `adler2` | 2.0.1 | 0BSD OR MIT OR Apache-2.0 | ✓ | ✓ |
+| `aead` | 0.5.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `aead` | 0.6.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `aes` | 0.8.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `aes` | 0.9.3 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `aes-gcm` | 0.10.3 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `aes-gcm` | 0.11.1 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `aes-kw` | 0.2.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ahash` | 0.8.12 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `aho-corasick` | 1.1.5 | Unlicense OR MIT | ✓ | ✓ |
 | `allocator-api2` | 0.2.21 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -130,6 +136,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `aws-lc-sys` | 0.45.0 | ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND (Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0) | ✓ | ✓ |
 | `axum` | 0.8.9 | MIT | ✓ | ✓ |
 | `axum-core` | 0.5.6 | MIT | ✓ | ✓ |
+| `base16ct` | 0.2.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `base16ct` | 1.0.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `base64` | 0.22.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `base64` | 0.23.1 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -140,33 +147,43 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `bindgen` | 0.72.1 | BSD-3-Clause | ✓ | ✓ |
 | `bit-set` | 0.8.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `bit-vec` | 0.8.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `bitfields` | 1.0.3 | MIT | ✓ | ✓ |
+| `bitfields-impl` | 1.0.3 | MIT | ✓ | ✓ |
 | `bitflags` | 2.13.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `bitvec` | 1.1.1 | MIT | ✓ | ✓ |
 | `blake2` | 0.10.6 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `blake2` | 0.11.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `block-buffer` | 0.10.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `block-buffer` | 0.12.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `block-padding` | 0.3.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `block-padding` | 0.4.2 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `blowfish` | 0.9.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `blowfish` | 0.10.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `boxed_error` | 0.2.3 | MIT | ✓ | ✓ |
 | `bstr` | 1.13.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `buffer-redux` | 1.1.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `bumpalo` | 3.20.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `bytemuck` | 1.25.2 | Zlib OR Apache-2.0 OR MIT | ✓ |  |
 | `byteorder` | 1.5.0 | Unlicense OR MIT | ✓ | ✓ |
 | `bytes` | 1.12.1 | MIT | ✓ | ✓ |
 | `bytes-str` | 0.2.9 | Apache-2.0 | ✓ | ✓ |
+| `bzip2` | 0.6.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `calendrical_calculations` | 0.2.4 | Apache-2.0 | ✓ | ✓ |
+| `camellia` | 0.1.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `capacity_builder` | 0.5.0 | MIT | ✓ | ✓ |
 | `capacity_builder_macros` | 0.3.0 | MIT | ✓ | ✓ |
+| `cast5` | 0.11.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `castaway` | 0.2.4 | MIT | ✓ | ✓ |
 | `cbc` | 0.2.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `cc` | 1.6.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `cexpr` | 0.6.0 | Apache-2.0/MIT | ✓ | ✓ |
+| `cfb-mode` | 0.8.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `cfg_aliases` | 0.2.2 | MIT | ✓ |  |
 | `cfg-if` | 1.0.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `chacha20` | 0.10.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `chacha20poly1305` | 0.11.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `chrono` | 0.4.45 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `cipher` | 0.4.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `cipher` | 0.5.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `clang-sys` | 1.9.1 | Apache-2.0 | ✓ | ✓ |
 | `clap` | 4.6.7 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -174,12 +191,15 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `clap_derive` | 4.6.7 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `clap_lex` | 1.1.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `clru` | 0.6.3 | MIT | ✓ | ✓ |
+| `cmac` | 0.7.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `cmake` | 0.1.58 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `cmov` | 0.5.4 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `colorchoice` | 1.0.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `compact_str` | 0.7.1 | MIT | ✓ | ✓ |
 | `connection-string` | 0.2.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `const-oid` | 0.9.6 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `const-oid` | 0.10.2 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `convert_case` | 0.10.0 | MIT | ✓ | ✓ |
 | `cooked-waker` | 5.0.0 | MPL-2.0 | ✓ | ✓ |
 | `core_detect` | 1.0.0 | MIT/Apache-2.0 | ✓ | ✓ |
 | `core_maths` | 0.1.1 | MIT | ✓ | ✓ |
@@ -188,11 +208,13 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `cpufeatures` | 0.3.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `crc` | 3.4.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `crc-catalog` | 2.5.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `crc24` | 0.1.6 | MIT/Apache-2.0 | ✓ | ✓ |
 | `crc32fast` | 1.5.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `croner` | 4.0.1 | MIT | ✓ | ✓ |
 | `crossbeam-channel` | 0.5.17 | MIT OR Apache-2.0 |  | ✓ |
 | `crossbeam-queue` | 0.3.14 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `crossbeam-utils` | 0.8.23 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `crypto-bigint` | 0.5.5 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `crypto-bigint` | 0.7.5 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `crypto-common` | 0.1.7 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `crypto-common` | 0.2.2 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -200,16 +222,20 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `crypto-primes` | 0.7.2 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `csv` | 1.4.0 | Unlicense/MIT | ✓ | ✓ |
 | `csv-core` | 0.1.13 | Unlicense/MIT | ✓ | ✓ |
+| `ctr` | 0.9.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ctr` | 0.10.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ctutils` | 0.4.3 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `curve25519-dalek` | 4.1.3 | BSD-3-Clause | ✓ | ✓ |
 | `curve25519-dalek` | 5.0.0 | BSD-3-Clause | ✓ | ✓ |
 | `curve25519-dalek-derive` | 0.1.1 | MIT/Apache-2.0 | ✓ | ✓ |
+| `cx448` | 0.1.1 | BSD-3-Clause | ✓ | ✓ |
 | `darling` | 0.20.11 | MIT | ✓ | ✓ |
 | `darling_core` | 0.20.11 | MIT | ✓ | ✓ |
 | `darling_macro` | 0.20.11 | MIT | ✓ | ✓ |
 | `dashmap` | 6.2.1 | MIT | ✓ | ✓ |
 | `data-encoding` | 2.11.1 | MIT | ✓ | ✓ |
 | `data-url` | 0.3.2 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `dbl` | 0.3.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `debugid` | 0.8.0 | Apache-2.0 | ✓ | ✓ |
 | `delegate` | 0.13.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `deno_ast` | 0.53.3 | MIT | ✓ | ✓ |
@@ -222,12 +248,16 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `deno_terminal` | 0.2.3 | MIT | ✓ | ✓ |
 | `deno_unsync` | 0.4.4 | MIT | ✓ | ✓ |
 | `deno_v8` | 0.4.0 | MIT | ✓ | ✓ |
+| `der` | 0.7.10 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `der` | 0.8.2 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `der-parser` | 10.0.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `deranged` | 0.5.8 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `derive_builder` | 0.20.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `derive_builder_core` | 0.20.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `derive_builder_macro` | 0.20.2 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `derive_more` | 2.1.1 | MIT | ✓ | ✓ |
+| `derive_more-impl` | 2.1.1 | MIT | ✓ | ✓ |
+| `des` | 0.8.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `des` | 0.9.0 | MIT OR Apache-2.0 | ✓ |  |
 | `digest` | 0.10.7 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `digest` | 0.11.3 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -237,11 +267,17 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `displaydoc` | 0.2.7 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `dotenvy` | 0.15.7 | MIT | ✓ | ✓ |
 | `dprint-swc-ext` | 0.26.1 | MIT | ✓ | ✓ |
+| `dsa` | 0.6.3 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `dunce` | 1.0.5 | CC0-1.0 OR MIT-0 OR Apache-2.0 | ✓ | ✓ |
+| `eax` | 0.5.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `ecdsa` | 0.16.9 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `ecdsa` | 0.17.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `ed25519` | 2.2.3 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `ed25519` | 3.0.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `ed25519-dalek` | 2.2.0 | BSD-3-Clause | ✓ | ✓ |
 | `ed25519-dalek` | 3.0.0 | BSD-3-Clause | ✓ | ✓ |
 | `either` | 1.18.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `elliptic-curve` | 0.13.8 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `elliptic-curve` | 0.14.1 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `email_address` | 0.2.9 | MIT | ✓ | ✓ |
 | `email-encoding` | 0.4.2 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -256,6 +292,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `event-listener` | 5.4.2 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `faster-hex` | 0.10.1 | MIT | ✓ | ✓ |
 | `fastrand` | 2.5.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `ff` | 0.13.1 | MIT/Apache-2.0 | ✓ | ✓ |
 | `ff` | 0.14.0 | MIT/Apache-2.0 | ✓ | ✓ |
 | `filetime` | 0.2.29 | MIT/Apache-2.0 | ✓ | ✓ |
 | `find-msvc-tools` | 0.1.14 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -280,8 +317,10 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `futures-util` | 0.3.34 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `generic-array` | 0.14.7 | MIT | ✓ | ✓ |
 | `generic-array` | 1.4.5 | MIT | ✓ | ✓ |
+| `getrandom` | 0.2.17 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `getrandom` | 0.3.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `getrandom` | 0.4.3 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `ghash` | 0.5.1 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `ghash` | 0.6.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `gix` | 0.90.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-actor` | 0.44.1 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -327,6 +366,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `gix-worktree` | 0.59.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `gix-zlib` | 0.4.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `glob` | 0.3.4 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `group` | 0.13.0 | MIT/Apache-2.0 | ✓ | ✓ |
 | `group` | 0.14.0 | MIT/Apache-2.0 | ✓ | ✓ |
 | `gzip-header` | 1.1.0 | MIT/Apache-2.0 | ✓ | ✓ |
 | `h2` | 0.4.19 | MIT | ✓ | ✓ |
@@ -339,7 +379,9 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `heck` | 0.5.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hex` | 0.4.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hex-literal` | 1.1.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `hkdf` | 0.12.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hkdf` | 0.13.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `hmac` | 0.12.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hmac` | 0.13.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `home` | 0.5.12 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `hostname` | 0.4.2 | MIT | ✓ | ✓ |
@@ -365,11 +407,13 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `icu_properties` | 2.3.0 | Unicode-3.0 | ✓ | ✓ |
 | `icu_properties_data` | 2.3.0 | Unicode-3.0 | ✓ | ✓ |
 | `icu_provider` | 2.3.1 | Unicode-3.0 | ✓ | ✓ |
+| `idea` | 0.5.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ident_case` | 1.0.1 | MIT/Apache-2.0 | ✓ | ✓ |
 | `idna` | 1.1.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `idna_adapter` | 1.2.2 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `if_chain` | 1.0.3 | MIT/Apache-2.0 | ✓ | ✓ |
 | `indexmap` | 2.14.2 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `inout` | 0.1.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `inout` | 0.2.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `inventory` | 0.3.24 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ipnet` | 2.12.2 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -383,12 +427,15 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `jiff-tzdb` | 0.1.9 | Unlicense OR MIT |  | ✓ |
 | `jiff-tzdb-platform` | 0.1.3 | Unlicense OR MIT |  | ✓ |
 | `jobserver` | 0.1.35 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `k256` | 0.13.4 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `keccak` | 0.1.6 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `keccak` | 0.2.2 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `kem` | 0.3.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `lazy_static` | 1.5.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `lber` | 0.5.1 | MIT | ✓ | ✓ |
 | `ldap3` | 0.12.1 | MIT/Apache-2.0 | ✓ | ✓ |
 | `lettre` | 0.11.23 | MIT | ✓ | ✓ |
+| `libbz2-rs-sys` | 0.2.7 | bzip2-1.0.6 | ✓ | ✓ |
 | `libc` | 0.2.190 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `libloading` | 0.8.9 | ISC | ✓ | ✓ |
 | `liblzma` | 0.4.8 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -422,21 +469,30 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `nonempty` | 0.12.0 | MIT | ✓ | ✓ |
 | `nu-ansi-term` | 0.50.3 | MIT | ✓ | ✓ |
 | `num_cpus` | 1.17.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `num_enum` | 0.7.6 | BSD-3-Clause OR MIT OR Apache-2.0 | ✓ | ✓ |
+| `num_enum_derive` | 0.7.6 | BSD-3-Clause OR MIT OR Apache-2.0 | ✓ | ✓ |
 | `num-bigint` | 0.4.8 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `num-bigint` | 0.5.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `num-bigint-dig` | 0.8.6 | MIT/Apache-2.0 | ✓ | ✓ |
 | `num-conv` | 0.2.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `num-derive` | 0.5.1 | MIT OR Apache-2.0 | ✓ |  |
 | `num-integer` | 0.1.47 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `num-iter` | 0.1.46 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `num-traits` | 0.2.19 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `object` | 0.39.1 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `ocb3` | 0.1.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `oid` | 0.2.1 | MIT OR Apache-2.0 | ✓ |  |
 | `oid-registry` | 0.8.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `once_cell` | 1.21.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `once_cell_polyfill` | 1.70.2 | MIT OR Apache-2.0 |  | ✓ |
+| `opaque-debug` | 0.3.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `openssl-probe` | 0.2.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `outref` | 0.5.2 | MIT | ✓ | ✓ |
+| `p256` | 0.13.2 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `p256` | 0.14.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `p384` | 0.13.1 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `p384` | 0.14.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `p521` | 0.13.3 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `p521` | 0.14.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `pageant` | 0.2.4 | Apache-2.0 |  | ✓ |
 | `par-core` | 2.0.0 | Apache-2.0 | ✓ | ✓ |
@@ -449,8 +505,10 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `pathdiff` | 0.2.3 | MIT/Apache-2.0 | ✓ | ✓ |
 | `pbkdf2` | 0.13.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `pem` | 4.0.0 | MIT | ✓ | ✓ |
+| `pem-rfc7468` | 0.7.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `pem-rfc7468` | 1.0.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `percent-encoding` | 2.3.2 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `pgp` | 0.21.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `phf` | 0.11.3 | MIT | ✓ | ✓ |
 | `phf_generator` | 0.11.3 | MIT | ✓ | ✓ |
 | `phf_macros` | 0.11.3 | MIT | ✓ | ✓ |
@@ -463,11 +521,14 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `pin-project` | 1.1.13 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `pin-project-internal` | 1.1.13 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `pin-project-lite` | 0.2.17 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `pkcs1` | 0.7.5 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `pkcs1` | 0.8.0-rc.4 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `pkcs5` | 0.8.1 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `pkcs8` | 0.10.2 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `pkcs8` | 0.11.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `pkg-config` | 0.3.34 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `poly1305` | 0.9.1 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `polyval` | 0.6.2 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `polyval` | 0.7.3 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `postgresql_archive` | 0.21.0 | (Apache-2.0 OR MIT) AND PostgreSQL | ✓ | ✓ |
 | `postgresql_commands` | 0.21.0 | (Apache-2.0 OR MIT) AND PostgreSQL | ✓ | ✓ |
@@ -478,6 +539,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `pretty-hex` | 0.4.2 | MIT | ✓ | ✓ |
 | `prettyplease` | 0.2.37 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `primefield` | 0.14.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `primeorder` | 0.13.6 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `primeorder` | 0.14.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `proc-macro2` | 1.0.107 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `prodash` | 31.0.1 | MIT | ✓ | ✓ |
@@ -489,6 +551,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `rand` | 0.8.8 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rand` | 0.9.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rand` | 0.10.3 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `rand_chacha` | 0.3.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rand_chacha` | 0.9.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rand_core` | 0.6.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rand_core` | 0.9.5 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -498,14 +561,18 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `regex-automata` | 0.4.18 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `regex-lite` | 0.1.9 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `regex-syntax` | 0.8.11 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `replace_with` | 0.1.8 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `reqwest` | 0.13.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `reqwest-middleware` | 0.5.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `reqwest-retry` | 0.9.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `reqwest-tracing` | 0.7.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `resb` | 0.1.2 | Unicode-3.0 | ✓ | ✓ |
 | `retry-policies` | 0.5.2 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `rfc6979` | 0.4.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `rfc6979` | 0.6.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `ripemd` | 0.1.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rpassword` | 7.5.4 | Apache-2.0 | ✓ | ✓ |
+| `rsa` | 0.9.10 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rsa` | 0.10.0-rc.18 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `rtoolbox` | 0.0.6 | Apache-2.0 | ✓ | ✓ |
 | `russh` | 0.64.1 | Apache-2.0 | ✓ | ✓ |
@@ -532,6 +599,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `scoped-tls` | 1.0.1 | MIT/Apache-2.0 | ✓ | ✓ |
 | `scopeguard` | 1.2.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `scrypt` | 0.12.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `sec1` | 0.7.3 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `sec1` | 0.8.1 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `secrecy` | 0.10.3 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `semver` | 1.0.28 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -546,17 +614,22 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `serde_urlencoded` | 0.7.1 | MIT/Apache-2.0 | ✓ | ✓ |
 | `serde_v8` | 0.321.0 | MIT | ✓ | ✓ |
 | `serde_yaml_ng` | 0.10.0 | MIT | ✓ | ✓ |
+| `serdect` | 0.2.0 | Apache-2.0 OR MIT | ✓ | ✓ |
+| `serdect` | 0.3.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `sha1` | 0.10.7 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sha1` | 0.11.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `sha1-checked` | 0.10.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sha1dc` | 0.1.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sha2` | 0.10.9 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sha2` | 0.11.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `sha3` | 0.10.9 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sha3` | 0.11.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sha3` | 0.12.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sharded-slab` | 0.1.7 | MIT | ✓ | ✓ |
 | `shlex` | 1.3.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `shlex` | 2.0.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `signal-hook-registry` | 1.4.8 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `signature` | 2.2.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `signature` | 3.0.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `simd-adler32` | 0.3.10 | MIT | ✓ | ✓ |
 | `simdutf8` | 0.1.5 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -565,8 +638,12 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `slab` | 0.4.12 | MIT | ✓ | ✓ |
 | `smallvec` | 1.16.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `smartstring` | 1.0.1 | MPL-2.0+ | ✓ | ✓ |
+| `snafu` | 0.9.2 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `snafu-derive` | 0.9.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `socket2` | 0.6.5 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sourcemap` | 9.3.2 | BSD-3-Clause | ✓ | ✓ |
+| `spin` | 0.9.9 | MIT | ✓ | ✓ |
+| `spki` | 0.7.3 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `spki` | 0.8.1 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `sponge-cursor` | 0.1.0 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `sqlx` | 0.9.0 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -662,6 +739,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `triomphe` | 0.1.16 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `try-lock` | 0.2.5 | MIT | ✓ | ✓ |
 | `tungstenite` | 0.29.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `twofish` | 0.7.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `typed-path` | 0.12.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `typenum` | 1.20.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `uluru` | 3.1.0 | MPL-2.0 | ✓ | ✓ |
@@ -671,7 +749,10 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `unicode-ident` | 1.0.26 | (MIT OR Apache-2.0) AND Unicode-3.0 | ✓ | ✓ |
 | `unicode-normalization` | 0.1.25 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `unicode-properties` | 0.1.4 | MIT/Apache-2.0 | ✓ | ✓ |
+| `unicode-segmentation` | 1.13.3 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `unicode-width` | 0.2.2 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `unicode-xid` | 0.2.6 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `universal-hash` | 0.5.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `universal-hash` | 0.6.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `unsafe-libyaml` | 0.2.11 | MIT | ✓ | ✓ |
 | `untrusted` | 0.7.1 | ISC | ✓ | ✓ |
@@ -714,6 +795,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `wnaf` | 0.14.1 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `writeable` | 0.6.4 | Unicode-3.0 | ✓ | ✓ |
 | `wyz` | 0.5.1 | MIT | ✓ | ✓ |
+| `x25519-dalek` | 2.0.1 | BSD-3-Clause | ✓ | ✓ |
 | `x25519-dalek` | 3.0.0 | BSD-3-Clause | ✓ |  |
 | `x509-parser` | 0.18.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `xattr` | 1.6.1 | MIT OR Apache-2.0 | ✓ | ✓ |
@@ -724,7 +806,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `zerofrom` | 0.1.8 | Unicode-3.0 | ✓ | ✓ |
 | `zerofrom-derive` | 0.1.8 | Unicode-3.0 | ✓ | ✓ |
 | `zeroize` | 1.9.0 | Apache-2.0 OR MIT | ✓ | ✓ |
-| `zeroize_derive` | 1.5.0 | Apache-2.0 OR MIT | ✓ |  |
+| `zeroize_derive` | 1.5.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `zerotrie` | 0.2.5 | Unicode-3.0 | ✓ | ✓ |
 | `zerovec` | 0.11.8 | Unicode-3.0 | ✓ | ✓ |
 | `zerovec-derive` | 0.11.6 | Unicode-3.0 | ✓ | ✓ |
@@ -848,6 +930,6 @@ The packages its production build bundles (the build tools and test tools aren't
 Made by `scripts/dev/dependencies.sh` from these files (a test fails when either changes and this page
 isn't made again):
 
-<!-- made from: Cargo.lock 8974439d48099b72921e70da031143c1f81aa675b70698698abe97658d32ed4e ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
-- `Cargo.lock`, SHA-256 `8974439d48099b72921e70da031143c1f81aa675b70698698abe97658d32ed4e`
+<!-- made from: Cargo.lock f6fe5efcf8e88265747befe25cbc61dd7d4c1a591a6a52fcf91fab83f7d46c7d ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
+- `Cargo.lock`, SHA-256 `f6fe5efcf8e88265747befe25cbc61dd7d4c1a591a6a52fcf91fab83f7d46c7d`
 - `ui/package-lock.json`, SHA-256 `aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5`

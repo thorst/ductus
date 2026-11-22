@@ -941,6 +941,36 @@ fn check_tls<'a>(
             },
         }
     }
+    for (name, entry) in &resources.pgp {
+        let key = ["pgp", name.as_str()];
+        // One at a time, so every broken one is reported.
+        match ductus_runtime::pgp::Key::load(name, entry) {
+            Err(e) => {
+                let finding = Finding::error("DUC215", format!("pgp key `{name}`: {e:#}"));
+                report.add(report.at_key(finding, "resources.yaml", &key));
+            }
+            Ok(loaded) => {
+                let about = loaded.about();
+                let kind = if about.secret { "our secret key" } else { "a partner's public key" };
+                let line = format!("pgp key `{name}`: {kind}, {} ({})", about.user_id, about.fingerprint);
+                match about.not_after {
+                    None => report.ok(format!("{line}, never expires")),
+                    Some(at) => {
+                        let days = (at - chrono::Utc::now()).num_days();
+                        let ends = about.earliest.as_deref().map(|p| format!(" ({p})")).unwrap_or_default();
+                        let line = format!("{line}, expires {}{ends} ({days} days)", at.format("%Y-%m-%d"));
+                        if days < 30 {
+                            let finding = Finding::warning("DUC216", format!("{line}: replace it soon"))
+                                .hint("extend it or get a new key");
+                            report.add(report.at_key(finding, "resources.yaml", &key));
+                        } else {
+                            report.ok(line)
+                        }
+                    }
+                }
+            }
+        }
+    }
     if let Some(api) = api
         && api.tls.is_none()
         && let Ok(Some((host, _))) = api.address(None)
@@ -1269,6 +1299,7 @@ async fn check_project(
     wiring.extend(ductus_core::config::check_routes(configs()).into_iter().map(|p| ("DUC201", p)));
     if let Some(r) = &resources {
         wiring.extend(r.missing_references(configs()).into_iter().map(|p| ("DUC202", p)));
+        wiring.extend(ductus_core::pgp::check(configs(), r).into_iter().map(|p| ("DUC214", p)));
     }
     for (code, problem) in wiring {
         let finding = places.problem(report, Finding::error(code, &problem.text), &problem);

@@ -85,3 +85,17 @@ certificates:
     ca: "${secret:HOSPITAL_CA}"
   partner-ca:
     ca_file: /etc/ductus/tls/partner-ca.pem
+pgp:
+  ours:
+    key_file: /etc/ductus/pgp/hospital.asc
+    passphrase: "${secret:PGP_PASSPHRASE}"
+    application: Claims EDI
+    owner: edi-team@hospital.org
+    custom: { ticket: CHG-1238 }
+  ours-in-vault:
+    key: "${secret:PGP_KEY}"
+  payer:
+    public_key_file: pgp/payer.asc
+    vendor: Availity
+  bank:
+    public_key: "${secret:BANK_PGP_PUBLIC_KEY}"

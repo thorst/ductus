@@ -2372,7 +2372,8 @@ impl Plan {
                 None => return,
             },
             // Ours, not something to connect to: checked when loaded (and served, 0.6.3.3).
-            Kind::Certificate => return,
+            // An OpenPGP key: ours, read when loaded, never connected to.
+            Kind::Certificate | Kind::Pgp => return,
         };
         self.add(section, name.into(), &format!("{} {name}", kind.label()), target, user, interface, name);
     }
@@ -2440,7 +2441,7 @@ pub fn plan(
                 Destination::Http { api: Some(api), .. } => plan.resource(resources, Kind::Api, api, label, me),
                 Destination::Http { .. } | Destination::Interface(_) => {}
                 Destination::Sftp { server, .. } => plan.resource(resources, Kind::Sftp, server, label, me),
-                Destination::File { dir } => {
+                Destination::File { dir, .. } => {
                     let path = c.dir.join(dir);
                     let target = Target::Folder { path: path.clone(), created_if_missing: true };
                     plan.add(5, path.display().to_string(), "destination folder", target, label, me, &resource);

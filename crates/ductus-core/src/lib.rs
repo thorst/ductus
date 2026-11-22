@@ -15,6 +15,7 @@ pub mod ldap;
 pub mod monitor;
 pub mod owners;
 pub mod password;
+pub mod pgp;
 pub mod pgtls;
 pub mod ports;
 pub mod project_files;

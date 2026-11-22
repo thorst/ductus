@@ -4,7 +4,7 @@ Impact, owners and connection checks.
 
 ## `GET /api/v1/certificates`
 
-Every certificate the engine connects to, as its last check saw it (read even when this server doesn't trust them), every one it presents (`side: ours`, as loaded), and when the engine checks next by itself.
+Every certificate the engine connects to, as its last check saw it (read even when this server doesn't trust them), every one it presents and every OpenPGP key interfaces use (`side: ours`, as loaded), and when the engine checks next by itself.
 
 **Who may call it:** anyone signed in (a person or a token).
 
@@ -156,13 +156,14 @@ The JSON bodies the operations above take and return.
 | `issuer` (optional) | text or null |  |
 | `not_after` (optional) | time (RFC 3339) or null | The server certificate's own expiry. |
 | `not_before` (optional) | time (RFC 3339) or null |  |
+| `pgp` | true or false | An OpenPGP key (a `pgp:` entry, ours: `side` is `ours`), not a certificate: `subject` is its user id, `fingerprint` its own (40 hex digits, as `gpg --fingerprint` shows), and `chain_earliest` the part of it that ends first (`its encryption subkey`). |
 | `port` | number | Ours: 0 (see `presented`). |
-| `presented` | list of text | Ours: where it is presented (`0.0.0.0:6661 MLLP over TLS (adt)`, `client certificate to hie.example.org:7443 (adt → hie)`). |
+| `presented` | list of text | Ours: where it is presented (`0.0.0.0:6661 MLLP over TLS (adt)`, `client certificate to hie.example.org:7443 (adt → hie)`); an OpenPGP key: what it's used for (`decrypts files `claims-in` picks up`). |
 | `read_at` (optional) | time (RFC 3339) or null | When the certificate shown was read (older than `checked_at` when the last check couldn't). |
 | `resource` | text | `empi` (resources.yaml), `alerts.smtp`, `alerts.<channel>`, `alerts.heartbeat`, or `<interface>/<destination>`; ours: the `certificates:` entry. |
 | `side` | text | `remote` (a server the engine connects to, as its last check saw it) or `ours` (a pair the engine presents, as it loaded it). |
 | `stage` (optional) | number or null | The step of the countdown it is within (a warn day; 0 once expired). |
-| `state` | text | `ok`, `expiring` (within the first of `alerts.certificates.warn_days`), `expired`, or `unknown` (never read: not checked yet, or never reachable). |
+| `state` | text | `ok`, `expiring` (within the first of `alerts.certificates.warn_days`), `expired`, or `unknown` (never read: not checked yet, or never reachable). An OpenPGP key that never expires is `ok`, with no `days_left`. |
 | `subject` (optional) | text or null |  |
 | `trusted` (optional) | true or false or null | This server trusts it (none for ours: whether senders do isn't known here). |
 

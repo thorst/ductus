@@ -57,6 +57,12 @@
 //!     key: ${secret:API_KEY}
 //!   hospital-ca:
 //!     ca: ${secret:HOSPITAL_CA}                 # a CA only (or ca_file): clients or servers it issued are trusted
+//! pgp:                                         # OpenPGP keys for files (`pgp:` on file and SFTP connectors)
+//!   ours:
+//!     key_file: /etc/ductus/pgp/ours.asc        # our secret key (or `key:` from a secret)
+//!     passphrase: ${secret:PGP_PASSPHRASE}      # if it has one
+//!   payer:
+//!     public_key_file: pgp/payer.asc            # a partner's public key (or `public_key:`)
 //! ```
 //!
 //! Interface code refers to them by name (`db("patient_db")`, `api("empi")`), so no connection
@@ -75,7 +81,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 /// `resources.yaml`: what many interfaces share, each defined once by a name: databases, SFTP
-/// servers, HTTP APIs, directories for signing in, and certificates.
+/// servers, HTTP APIs, directories for signing in, certificates and OpenPGP keys.
 ///
 /// Interfaces and their code refer to them by name (`db("patient_db")`, `api("empi")`, `server:
 /// lab_server`), so no address or credential is ever written in an interface or its code, and
@@ -119,6 +125,14 @@ pub struct Resources {
     /// /etc/ductus/tls/mllp.key } }`.
     #[serde(default)]
     pub certificates: BTreeMap<String, CertificateEntry>,
+    /// OpenPGP keys for files (`pgp:` on file and SFTP sources and destinations): our secret key,
+    /// which decrypts what partners send and signs what we send, and partners' public keys, which
+    /// encrypt what we send them and check what they send us. Their expiry is watched like the
+    /// certificates'. A name can't also be a `certificates:` entry's. Default: none. Example:
+    /// `pgp: { ours: { key_file: /etc/ductus/pgp/ours.asc, passphrase: "${secret:PGP_PASSPHRASE}" },
+    /// payer: { public_key_file: pgp/payer.asc } }`.
+    #[serde(default)]
+    pub pgp: BTreeMap<String, crate::pgp::PgpKey>,
     /// Certificate files written with a root but no drive (Windows only): (entry, as written, read
     /// from), for validate's warning.
     #[serde(skip)]
@@ -133,11 +147,16 @@ pub enum Kind {
     Sftp,
     Ldap,
     Certificate,
+    /// An OpenPGP key (`pgp:`).
+    Pgp,
 }
 
 impl Kind {
+    /// Every kind, in the order reports list them.
+    pub const ALL: [Kind; 6] = [Kind::Database, Kind::Api, Kind::Sftp, Kind::Ldap, Kind::Certificate, Kind::Pgp];
+
     /// How it's named in messages and reports: `database`, `api`, `sftp server`, `directory`,
-    /// `certificate`.
+    /// `certificate`, `pgp key`.
     pub fn label(self) -> &'static str {
         match self {
             Kind::Database => "database",
@@ -145,6 +164,7 @@ impl Kind {
             Kind::Sftp => "sftp server",
             Kind::Ldap => "directory",
             Kind::Certificate => "certificate",
+            Kind::Pgp => "pgp key",
         }
     }
 }
@@ -1013,6 +1033,19 @@ impl Resources {
                 resources.without_drive.push((name.clone(), written, read));
             }
         }
+        for (name, k) in &mut resources.pgp {
+            if let Some(problem) = k.problem() {
+                refuse!(["pgp", name], "in {}: pgp key `{name}`: {problem}", file.display());
+            }
+            if resources.certificates.contains_key(name) {
+                refuse!(
+                    ["pgp", name],
+                    "in {}: `{name}` is both a `certificates:` and a `pgp:` entry: give them different names (alerts and the Doctor page name them by it)",
+                    file.display()
+                );
+            }
+            k.resolve(root);
+        }
         for (name, s) in &resources.sftp {
             if s.password.is_none() && s.private_key.is_none() {
                 refuse!(
@@ -1123,6 +1156,8 @@ impl Resources {
                     &s.owner
                 } else if let Some(l) = self.ldap.get(name) {
                     &l.owner
+                } else if let Some(k) = self.pgp.get(name) {
+                    &k.owner
                 } else {
                     &self.certificates.get(name)?.owner
                 }
@@ -1139,6 +1174,7 @@ impl Resources {
             Kind::Sftp => self.sftp.keys().map(String::as_str).collect(),
             Kind::Ldap => self.ldap.keys().map(String::as_str).collect(),
             Kind::Certificate => self.certificates.keys().map(String::as_str).collect(),
+            Kind::Pgp => self.pgp.keys().map(String::as_str).collect(),
         }
     }
 
@@ -1170,6 +1206,7 @@ impl Resources {
         all.extend(self.sftp.iter().map(|(n, s)| (Kind::Sftp, n.as_str(), &s.custom)));
         all.extend(self.ldap.iter().map(|(n, l)| (Kind::Ldap, n.as_str(), &l.custom)));
         all.extend(self.certificates.iter().map(|(n, c)| (Kind::Certificate, n.as_str(), &c.custom)));
+        all.extend(self.pgp.iter().map(|(n, k)| (Kind::Pgp, n.as_str(), &k.custom)));
         all
     }
 
@@ -1187,6 +1224,7 @@ impl Resources {
             Kind::Certificate => {
                 self.certificates.get(name).map(|c| System::new(&c.application, &c.vendor)).unwrap_or_default()
             }
+            Kind::Pgp => self.pgp.get(name).map(|k| System::new(&k.application, &k.vendor)).unwrap_or_default(),
         }
     }
 
@@ -1217,7 +1255,8 @@ impl Resources {
                 })
                 .into_iter()
                 .collect(),
-            Kind::Certificate => Vec::new(), // presented by us, not connected to
+            // Held by us, not connected to.
+            Kind::Certificate | Kind::Pgp => Vec::new(),
         }
     }
 

@@ -2,7 +2,7 @@
 
 `resources.yaml` defines, once and by a name, everything interfaces connect to that isn't a
 source or a destination of their own: the databases their code queries, SFTP servers, HTTP APIs,
-directories people sign in with, and certificates. Interfaces and their code use the name:
+directories people sign in with, certificates and OpenPGP keys. Interfaces and their code use the name:
 
 ```ts
 const row = await db("patient_db").one("SELECT mrn FROM patients WHERE id = $1", [id]);
@@ -177,3 +177,9 @@ looks people up. `auth.ldap` in ductus.yaml names the one to use and maps its gr
 [`certificates`](../reference/config/resources.md#certificates) are the certificates the engine
 presents (on its listeners, the API, and as a client certificate) and the CAs it trusts or
 checks clients against, each by a name: [TLS and certificates](tls.md).
+
+## OpenPGP keys
+
+[`pgp`](../reference/config/resources.md#pgp) entries are the OpenPGP keys file and SFTP sources
+and destinations decrypt, verify, encrypt and sign with: our secret key, and each partner's public
+key, each by a name (not one a `certificates:` entry has): [OpenPGP](pgp.md#keys-in-resourcesyaml).

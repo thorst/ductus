@@ -217,6 +217,10 @@ impl Shared {
             _ => None,
         };
         let tls = tls.transpose().with_context(|| format!("{}: TLS", config.label_destination(name)))?;
+        let seal = ductus_core::pgp::on_destination(&d.connector)
+            .map(|p| crate::pgp::Seal::new(p, &self.certificates))
+            .transpose()
+            .with_context(|| format!("{}: OpenPGP", config.label_destination(name)))?;
         let route = match d.route() {
             Some(target) => Some(self.intake(target).with_context(|| {
                 format!("{}: routes to `{target}`, which isn't a queued interface here", config.label_destination(name))
@@ -226,6 +230,7 @@ impl Shared {
         Ok(Outlet {
             id: kept.id,
             tls,
+            seal,
             stats: kept.stats,
             pause: kept.pause,
             limiter: kept.limiter.or_else(|| {

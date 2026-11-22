@@ -11,7 +11,7 @@ ductus try [OPTIONS] <INTERFACE> [FILE]
 | | What it does | Default | Environment |
 |---|---|---|---|
 | `<INTERFACE>` | The interface: its name, or a file or folder inside its folder. |  |  |
-| `<FILE>` | A file holding the message as the sender sends it. |  |  |
+| `<FILE>` | A file holding the message as the sender sends it. With `pgp:` on the interface's source, an encrypted file is decrypted and its signature checked first, with resources.yaml's keys, as the engine would (or refused saying why). |  |  |
 
 **Options**
 

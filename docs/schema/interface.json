@@ -630,6 +630,18 @@
             }
           ],
           "markdownDescription": "- `none`: each file is one message.\n- `records`: each record in a file is a message, read as a stream, so a file of any size works: an HL7 batch file is split at each MSH, CSV at each row (the header line kept with every row), fixed-length, text and JSON Lines at each line. If the engine stops halfway, it carries on from the last record stored.\n\nA file as one message is limited to 256 MB; split bigger ones. XML files are always one message each. Default: `none`. Example: `split: records`."
+        },
+        "pgp": {
+          "description": "OpenPGP: decrypt each file with our key (`decrypt:`), and take only files signed by the partner's key (`verify:`), both `pgp:` entries in resources.yaml. Nothing in a file is stored until its signature is checked. A file that isn't encrypted to our key, isn't signed by theirs, or was damaged is stored quarantined as received, with why, moved like any file, and the next file is read. `split: records` works on the decrypted text. Default: files are read as they are. Example: `pgp: { decrypt: ours, verify: payer }`.",
+          "anyOf": [
+            {
+              "$ref": "#/definitions/Receive"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "markdownDescription": "OpenPGP: decrypt each file with our key (`decrypt:`), and take only files signed by the partner's key (`verify:`), both `pgp:` entries in resources.yaml. Nothing in a file is stored until its signature is checked. A file that isn't encrypted to our key, isn't signed by theirs, or was damaged is stored quarantined as received, with why, moved like any file, and the next file is read. `split: records` works on the decrypted text. Default: files are read as they are. Example: `pgp: { decrypt: ours, verify: payer }`."
         }
       },
       "additionalProperties": false,
@@ -667,6 +679,30 @@
           "pattern": "^\\$\\{[^}]+\\}$"
         }
       ]
+    },
+    "Receive": {
+      "description": "`pgp:` on a file or SFTP source: what is done with each file before it's read.",
+      "type": "object",
+      "properties": {
+        "decrypt": {
+          "description": "Decrypt each file with this key of ours (a `pgp:` entry with `key_file` or `key`). A file that isn't encrypted, or isn't encrypted to this key, is stored quarantined with why, and the next file is read. Armored and binary files both work. Default: files aren't decrypted. Example: `decrypt: ours`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Decrypt each file with this key of ours (a `pgp:` entry with `key_file` or `key`). A file that isn't encrypted, or isn't encrypted to this key, is stored quarantined with why, and the next file is read. Armored and binary files both work. Default: files aren't decrypted. Example: `decrypt: ours`."
+        },
+        "verify": {
+          "description": "Accept only files signed by this partner's key (a `pgp:` entry): a file with no signature, or a signature by any other key, or one that doesn't match the file, is stored quarantined with why. Default: signatures aren't checked. Example: `verify: payer`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Accept only files signed by this partner's key (a `pgp:` entry): a file with no signature, or a signature by any other key, or one that doesn't match the file, is stored quarantined with why. Default: signatures aren't checked. Example: `verify: payer`."
+        }
+      },
+      "additionalProperties": false,
+      "markdownDescription": "`pgp:` on a file or SFTP source: what is done with each file before it's read."
     },
     "Schedule": {
       "description": "When a schedule source runs: `every: 15m`, or `cron: \"0 2 * * *\"` (server local time).",
@@ -1324,6 +1360,18 @@
                   "description": "The folder to write to, made if missing. Relative to the interface's folder unless written whole. Required. Example: `dir: /data/outbound/lab`.",
                   "type": "string",
                   "markdownDescription": "The folder to write to, made if missing. Relative to the interface's folder unless written whole. Required. Example: `dir: /data/outbound/lab`."
+                },
+                "pgp": {
+                  "description": "OpenPGP: sign each file with our key (`sign:`) and encrypt it to the partner's (`encrypt:`), both `pgp:` entries in resources.yaml; the name gains `.pgp` (`.asc` with `armor: true`). A key that can't be used (expired, say) leaves the message waiting and retried, with why. Default: written as it is. Example: `pgp: { encrypt: payer, sign: ours }`.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/Send"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "markdownDescription": "OpenPGP: sign each file with our key (`sign:`) and encrypt it to the partner's (`encrypt:`), both `pgp:` entries in resources.yaml; the name gains `.pgp` (`.asc` with `armor: true`). A key that can't be used (expired, say) leaves the message waiting and retried, with why. Default: written as it is. Example: `pgp: { encrypt: payer, sign: ours }`."
                 }
               },
               "additionalProperties": false,
@@ -1387,6 +1435,18 @@
                   "description": "The folder on the server to write to, relative to the folder the login starts in unless written whole. Required. Example: `dir: inbound/adt`.",
                   "type": "string",
                   "markdownDescription": "The folder on the server to write to, relative to the folder the login starts in unless written whole. Required. Example: `dir: inbound/adt`."
+                },
+                "pgp": {
+                  "description": "OpenPGP, as on the `file` destination: `sign:` with our key, `encrypt:` to the partner's, `armor:` for text. Default: written as it is. Example: `pgp: { encrypt: payer, sign: ours }`.",
+                  "anyOf": [
+                    {
+                      "$ref": "#/definitions/Send"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ],
+                  "markdownDescription": "OpenPGP, as on the `file` destination: `sign:` with our key, `encrypt:` to the partner's, `armor:` for text. Default: written as it is. Example: `pgp: { encrypt: payer, sign: ours }`."
                 }
               },
               "additionalProperties": false,
@@ -1973,6 +2033,44 @@
       },
       "additionalProperties": false,
       "markdownDescription": "TLS on a connection the engine makes: whom it trusts besides the platform, and the client certificate it presents. Both name `certificates:` entries (a CA, and a pair)."
+    },
+    "Send": {
+      "description": "`pgp:` on a file or SFTP destination: what is done with each file before it's written.",
+      "type": "object",
+      "properties": {
+        "encrypt": {
+          "description": "Encrypt each file to this partner's key (a `pgp:` entry): only they can read it. The file's name gains `.pgp` (`.asc` with `armor: true`). Default: not encrypted. Example: `encrypt: payer`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Encrypt each file to this partner's key (a `pgp:` entry): only they can read it. The file's name gains `.pgp` (`.asc` with `armor: true`). Default: not encrypted. Example: `encrypt: payer`."
+        },
+        "sign": {
+          "description": "Sign each file with this key of ours (a `pgp:` entry with `key_file` or `key`), so the partner can tell it came from us. Default: not signed. Example: `sign: ours`.",
+          "type": [
+            "string",
+            "null"
+          ],
+          "markdownDescription": "Sign each file with this key of ours (a `pgp:` entry with `key_file` or `key`), so the partner can tell it came from us. Default: not signed. Example: `sign: ours`."
+        },
+        "armor": {
+          "description": "Write the file as ASCII armor (`-----BEGIN PGP MESSAGE-----`, named `.asc`) rather than binary (`.pgp`), for partners whose tools ask for it. Default: `false`. Example: `armor: true`.",
+          "default": false,
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "string",
+              "pattern": "^\\$\\{[^}]+\\}$"
+            }
+          ],
+          "markdownDescription": "Write the file as ASCII armor (`-----BEGIN PGP MESSAGE-----`, named `.asc`) rather than binary (`.pgp`), for partners whose tools ask for it. Default: `false`. Example: `armor: true`."
+        }
+      },
+      "additionalProperties": false,
+      "markdownDescription": "`pgp:` on a file or SFTP destination: what is done with each file before it's written."
     },
     "Dedupe": {
       "type": "object",

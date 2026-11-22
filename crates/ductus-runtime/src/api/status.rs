@@ -823,10 +823,14 @@ fn source_label(source: &Source) -> String {
             let scheme = if tls.is_some() { "https" } else { "http" };
             format!("{scheme} {} {path} on {host}:{port} ({mode}){}", method.to_ascii_uppercase(), tls_label(tls))
         }
-        Source::File(f) => format!("file {}/{}", f.dir.trim_end_matches('/'), f.pattern),
-        Source::Sftp(f) => {
-            format!("sftp {}:{}/{}", f.server.as_deref().unwrap_or("?"), f.dir.trim_end_matches('/'), f.pattern)
-        }
+        Source::File(f) => format!("file {}/{}{}", f.dir.trim_end_matches('/'), f.pattern, opened(&f.pgp)),
+        Source::Sftp(f) => format!(
+            "sftp {}:{}/{}{}",
+            f.server.as_deref().unwrap_or("?"),
+            f.dir.trim_end_matches('/'),
+            f.pattern,
+            opened(&f.pgp)
+        ),
         Source::Schedule(s) => match (&s.every, &s.cron) {
             (Some(every), _) => format!("schedule every {}", humanize(*every)),
             (_, Some(cron)) => format!("schedule cron {cron}"),
@@ -834,6 +838,33 @@ fn source_label(source: &Source) -> String {
         },
         Source::Internal => "internal (routed from other interfaces)".into(),
     }
+}
+
+/// ` (OpenPGP: decrypted with `ours`, signed by `payer`)`, for a source with `pgp:`.
+fn opened(pgp: &Option<ductus_core::pgp::Receive>) -> String {
+    let Some(p) = pgp else { return String::new() };
+    let parts: Vec<String> = [
+        p.decrypt.as_ref().map(|k| format!("decrypted with `{k}`")),
+        p.verify.as_ref().map(|k| format!("signed by `{k}`")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    format!(" (OpenPGP: {})", parts.join(", "))
+}
+
+/// ` (OpenPGP: encrypted to `payer`, signed with `ours`)`, for a destination with `pgp:`.
+fn sealed(pgp: &Option<ductus_core::pgp::Send>) -> String {
+    let Some(p) = pgp else { return String::new() };
+    let parts: Vec<String> = [
+        p.encrypt.as_ref().map(|k| format!("encrypted to `{k}`")),
+        p.sign.as_ref().map(|k| format!("signed with `{k}`")),
+        p.armor.then(|| "armored".to_string()),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    format!(" (OpenPGP: {})", parts.join(", "))
 }
 
 fn humanize(d: std::time::Duration) -> String {
@@ -852,8 +883,8 @@ fn connector_label(d: &Destination) -> String {
             Some(tls) => format!("mllp {host}:{port} over TLS{}", tls.describe()),
             None => format!("mllp {host}:{port}"),
         },
-        Destination::File { dir } => format!("file {}", dir.display()),
-        Destination::Sftp { server, dir } => format!("sftp {server}:{dir}"),
+        Destination::File { dir, pgp } => format!("file {}{}", dir.display(), sealed(pgp)),
+        Destination::Sftp { server, dir, pgp } => format!("sftp {server}:{dir}{}", sealed(pgp)),
         Destination::Http { url: Some(url), method, .. } => {
             format!("http {} {}", method.to_ascii_uppercase(), strip_query(url))
         }

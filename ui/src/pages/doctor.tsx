@@ -247,16 +247,16 @@ function Certificates() {
 }
 
 /**
- * The certificates the engine presents (to senders on its TLS listeners, or as its client certificate), as it
- * loaded them: no check needed, and a renewal shows within a minute.
+ * The certificates the engine presents (to senders on its TLS listeners, or as its client certificate), and the
+ * OpenPGP keys file and SFTP connectors use, as it loaded them: no check needed, and a renewal shows within a minute.
  */
 function Ours({ certificates }: { certificates: Schemas["CertificateInfo"][] }) {
   return (
     <section aria-label="Ours" className="border-t">
       <h3 className="px-4 pt-4 text-sm font-semibold">Ours</h3>
       <p className="px-4 pb-2 text-sm text-muted">
-        What the engine presents, as loaded from resources.yaml. Renewed files are picked up within a minute (or at
-        Check now), without a restart.
+        What the engine presents, and the OpenPGP keys its file connectors use, as loaded from resources.yaml. Renewed
+        files are picked up within a minute (or at Check now), without a restart.
       </p>
       <Table aria-label="Our certificates">
         <thead>
@@ -284,17 +284,32 @@ function Ours({ certificates }: { certificates: Schemas["CertificateInfo"][] }) 
               </Td>
               <Td className="text-xs break-words">
                 <div>{c.subject}</div>
-                <div className="text-muted">
-                  {c.issuer === c.subject ? "self-signed" : `issued by ${c.issuer ?? "?"}`}
-                </div>
-                {c.chain_earliest && <div>The earliest expiry in its chain is {c.chain_earliest}&apos;s.</div>}
+                {c.pgp ? (
+                  <>
+                    <div className="text-muted">
+                      OpenPGP key <span className="font-mono">{c.fingerprint}</span>
+                    </div>
+                    {c.chain_earliest && <div>That&apos;s when {c.chain_earliest} ends.</div>}
+                  </>
+                ) : (
+                  <>
+                    <div className="text-muted">
+                      {c.issuer === c.subject ? "self-signed" : `issued by ${c.issuer ?? "?"}`}
+                    </div>
+                    {c.chain_earliest && <div>The earliest expiry in its chain is {c.chain_earliest}&apos;s.</div>}
+                  </>
+                )}
               </Td>
               <Td className="text-xs tabular-nums">{c.chain_not_after?.slice(0, 10) ?? "–"}</Td>
               <Td className="max-w-xs text-xs break-words">
                 {c.error ? (
                   <span className="inline-flex gap-1 text-bad">
                     <CircleAlert aria-hidden className="mt-px size-3.5 shrink-0" />
-                    <span>The new files can&apos;t be used: {c.error}. Still presenting this one.</span>
+                    <span>
+                      {c.pgp
+                        ? `The new key file can't be used: ${c.error}. Still using this one.`
+                        : `The new files can't be used: ${c.error}. Still presenting this one.`}
+                    </span>
                   </span>
                 ) : (
                   <span className="text-muted">In use as loaded</span>

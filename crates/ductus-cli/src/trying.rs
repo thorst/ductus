@@ -45,7 +45,12 @@ pub async fn run(args: Args) -> Result<()> {
     })?;
     let name = iface.label();
     let (message, said) = match &args.source {
-        Source::File(path) => (from_text(read(path)?), format!("{}", path.display())),
+        Source::File(path) => {
+            let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
+            // An encrypted file as the source would open it (`pgp:`).
+            let bytes = try_message::as_picked_up(&args.root, &args.env, &name, bytes)?;
+            (from_text(String::from_utf8_lossy(&bytes).into_owned()), format!("{}", path.display()))
+        }
         Source::Fixture(fixture) => {
             let path = iface.dir.join("fixtures").join(fixture);
             (from_text(read(&path)?), format!("fixture {fixture}"))

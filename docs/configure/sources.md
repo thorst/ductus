@@ -116,6 +116,10 @@ resources.yaml with the address and login ([SFTP servers](resources.md#sftp-serv
 - **`after`**: `move` (the default, to `archive_dir`, by default `archive` inside `dir`) or
   `delete`, once everything in the file is stored. The engine never deletes what it moved: clean
   the archive yourself.
+- **Encrypted or signed files** (OpenPGP, as payers and clearinghouses send them): `pgp: {
+  decrypt: ours, verify: payer }` decrypts each file and checks who signed it before anything in
+  it is stored; one that won't open is quarantined and the next file is read
+  ([OpenPGP](pgp.md#picking-up-encrypted-files)).
 - **The service must be allowed to move them**: on Linux, add the folders to the unit
   ([nuance](../nuances/files.md#on-linux-the-service-can-write-only-varlibductus-until-you-add-a-folder-level-2));
   on Windows, grant the service's account

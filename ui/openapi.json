@@ -480,7 +480,7 @@
         "tags": [
           "reports"
         ],
-        "summary": "Every certificate the engine connects to, as its last check saw it (read even when this\nserver doesn't trust them), every one it presents (`side: ours`, as loaded), and when the\nengine checks next by itself.",
+        "summary": "Every certificate the engine connects to, as its last check saw it (read even when this\nserver doesn't trust them), every one it presents and every OpenPGP key interfaces use\n(`side: ours`, as loaded), and when the engine checks next by itself.",
         "operationId": "list_certificates",
         "responses": {
           "200": {
@@ -4008,6 +4008,7 @@
           "host",
           "port",
           "presented",
+          "pgp",
           "state"
         ],
         "properties": {
@@ -4089,6 +4090,10 @@
             ],
             "format": "date-time"
           },
+          "pgp": {
+            "type": "boolean",
+            "description": "An OpenPGP key (a `pgp:` entry, ours: `side` is `ours`), not a certificate: `subject` is\nits user id, `fingerprint` its own (40 hex digits, as `gpg --fingerprint` shows), and\n`chain_earliest` the part of it that ends first (`its encryption subkey`)."
+          },
           "port": {
             "type": "integer",
             "format": "int32",
@@ -4100,7 +4105,7 @@
             "items": {
               "type": "string"
             },
-            "description": "Ours: where it is presented (`0.0.0.0:6661 MLLP over TLS (adt)`, `client certificate to\nhie.example.org:7443 (adt → hie)`)."
+            "description": "Ours: where it is presented (`0.0.0.0:6661 MLLP over TLS (adt)`, `client certificate to\nhie.example.org:7443 (adt → hie)`); an OpenPGP key: what it's used for (`decrypts files\n`claims-in` picks up`)."
           },
           "read_at": {
             "type": [
@@ -4128,7 +4133,7 @@
           },
           "state": {
             "type": "string",
-            "description": "`ok`, `expiring` (within the first of `alerts.certificates.warn_days`), `expired`, or\n`unknown` (never read: not checked yet, or never reachable)."
+            "description": "`ok`, `expiring` (within the first of `alerts.certificates.warn_days`), `expired`, or\n`unknown` (never read: not checked yet, or never reachable). An OpenPGP key that never\nexpires is `ok`, with no `days_left`."
           },
           "subject": {
             "type": [

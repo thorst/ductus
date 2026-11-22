@@ -7,9 +7,10 @@ export interface Countdown {
 
 export type Tone = "bad" | "warn" | "ok" | "unknown";
 
-/** "Expired 2 days ago", "Expires today", "14 days left", "Not read yet", and its tone. */
+/** "Expired 2 days ago", "Expires today", "14 days left", "Never expires" (an OpenPGP key), "Not read yet", and its tone. */
 export function countdown(c: Countdown): { text: string; tone: Tone } {
   const days = c.days_left;
+  if (c.state === "ok" && days == null) return { text: "Never expires", tone: "ok" };
   if (c.state === "unknown" || days == null) return { text: "Not read yet", tone: "unknown" };
   const plural = (n: number) => `${n} ${n === 1 ? "day" : "days"}`;
   if (c.state === "expired") {

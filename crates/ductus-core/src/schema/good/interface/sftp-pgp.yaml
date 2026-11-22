@@ -1,0 +1,15 @@
+# Claims files from a payer's SFTP server, encrypted to us and signed by them, one message per
+# HL7 message; acknowledgements back to them encrypted to their key and signed with ours.
+name: payer-claims
+source:
+  sftp:
+    server: payer_sftp
+    dir: outbound
+    pattern: "*.pgp"
+    split: records
+    pgp: { decrypt: ours, verify: payer }
+destinations:
+  payer:
+    sftp: { server: payer_sftp, dir: inbound, pgp: { encrypt: payer, sign: ours, armor: true } }
+  archive:
+    file: { dir: archive, pgp: { encrypt: ours } }

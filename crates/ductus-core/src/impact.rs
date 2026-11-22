@@ -151,7 +151,7 @@ pub fn impact<'a>(
                 endpoints.extend(show(resources.endpoints(kind, resource)));
             }
             match &d.connector {
-                Destination::File { dir } => endpoints.push(format!("folder {}", dir.display())),
+                Destination::File { dir, .. } => endpoints.push(format!("folder {}", dir.display())),
                 Destination::Interface(target) => endpoints.push(format!("interface {target}")),
                 _ => {}
             }

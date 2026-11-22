@@ -17,6 +17,7 @@ echo "##### clean stop";      bash scripts/demo-stop.sh 2>&1 | grep -v Killed | 
 echo "##### database lookup"; bash scripts/demo-lookup.sh | tail -1
 echo "##### http";            bash scripts/demo-http.sh | tail -1
 echo "##### files";           bash scripts/demo-files.sh | tail -1
+echo "##### openpgp";         bash scripts/demo-pgp.sh | tail -1
 echo "##### v0.4 release";    bash scripts/demo-v04.sh | tail -1
 echo "##### runaway scripts"; bash scripts/demo-runaway.sh | tail -1
 echo "##### destinations";    bash scripts/demo-destinations.sh | tail -1

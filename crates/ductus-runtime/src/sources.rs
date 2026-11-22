@@ -153,7 +153,12 @@ impl Sources {
                     Source::Sftp(f) => f.server.as_deref().and_then(|s| self.sftp.get(s).cloned()),
                     _ => None,
                 };
-                let watcher = crate::files::FileWatcher::new(config, intake()?, server, self.ownership.clone())?;
+                let opener = ductus_core::pgp::on_source(&config.source)
+                    .map(|p| crate::pgp::Opener::new(p, &self.certificates))
+                    .transpose()
+                    .with_context(|| format!("interface `{name}`: OpenPGP"))?;
+                let watcher =
+                    crate::files::FileWatcher::new(config, intake()?, server, self.ownership.clone(), opener)?;
                 (until(&stop, watcher.run()), None)
             }
             Source::Schedule(s) => {

@@ -796,6 +796,9 @@ pub struct CertificateFacts<'a> {
     /// Ours (a pair the engine presents): where it is presented (`0.0.0.0:6661 MLLP over TLS
     /// (adt)`, ...). None for a server the engine connects to.
     pub ours: Option<&'a str>,
+    /// An OpenPGP key of ours (`pgp:`), not a certificate: `ours` says what it's used for, and
+    /// `earliest` the part of it that ends first (`its encryption subkey`).
+    pub pgp: bool,
 }
 
 /// "Certificate of empi.example.org:443 (empi) expires in 14 days, on 2026-10-29." and what else
@@ -806,6 +809,7 @@ pub fn certificate_summary(f: &CertificateFacts, now: DateTime<Utc>) -> String {
     let days = days_left(f.not_after, now);
     let plural = |n: i64| if n == 1 { "day" } else { "days" };
     let what = match f.ours {
+        Some(_) if f.pgp => format!("OpenPGP key {} (on {})", f.resource, f.host),
         Some(_) => format!("Our certificate {} (on {})", f.resource, f.host),
         None => format!("Certificate of {}:{} ({})", f.host, f.port, f.resource),
     };
@@ -820,16 +824,27 @@ pub fn certificate_summary(f: &CertificateFacts, now: DateTime<Utc>) -> String {
             n => format!("{what} expires in {n} {}, on {date}.", plural(n)),
         }
     };
-    if let Some(subject) = f.earliest {
-        let whose = if f.ours.is_some() { "our certificate's own" } else { "the server's own certificate" };
-        text.push_str(&format!(" The earliest expiry in its chain is {subject}'s (an intermediate), not {whose}."));
+    match (f.earliest, f.pgp) {
+        (Some(part), true) => {
+            text.push_str(&format!(" That's when {part} ends: extend it, or get a new key, before then."))
+        }
+        (Some(subject), false) => {
+            let whose = if f.ours.is_some() { "our certificate's own" } else { "the server's own certificate" };
+            text.push_str(&format!(" The earliest expiry in its chain is {subject}'s (an intermediate), not {whose}."));
+        }
+        (None, _) => {}
     }
-    if let Some(places) = f.ours {
-        text.push_str(&format!(" Presented at {places}."));
+    match (f.ours, f.pgp) {
+        (Some(uses), true) => text.push_str(&format!(" It {uses}.")),
+        (Some(places), false) => text.push_str(&format!(" Presented at {places}.")),
+        (None, _) => {}
     }
     if let Some(error) = f.error {
         let error: String = error.chars().take(200).collect();
         match f.ours {
+            Some(_) if f.pgp => text.push_str(&format!(
+                " Its file changed but can't be used ({error}): the engine still uses the key loaded before."
+            )),
             Some(_) => text.push_str(&format!(
                 " Its files changed but can't be used ({error}): the engine still presents the one loaded before."
             )),
@@ -1048,8 +1063,13 @@ impl Notice<'_> {
         if self.condition == Some(Condition::Certificate) {
             // Ours (`certificate_summary` starts so): renewing it is our side's job.
             let ours = self.summary.starts_with("Our certificate");
+            let key = self.summary.starts_with("OpenPGP key");
             let todo = if self.kind == "recovered" {
                 "It was renewed: nothing more to do."
+            } else if key && self.summary.contains(" expired") {
+                "Files that use it wait or are quarantined until it's replaced: put the new key in its file (the engine reads it within a minute), or its secret and restart. A partner's key: ask them for their new one."
+            } else if key {
+                "Replace it before then: extend it (`gpg --quick-set-expire`) or make a new one and give the partner its public key; then replace its file (read within a minute, no restart), or its secret and restart. A partner's key: ask them for their new one."
             } else if ours && self.summary.contains(" expired") {
                 "Senders that check it refuse to connect until it is renewed: replace its files (cert_file and key_file; the engine picks them up within a minute), or its secrets and restart."
             } else if ours {
@@ -1505,6 +1525,7 @@ rules:
             earliest: None,
             error: None,
             ours: None,
+            pgp: false,
         };
         let summary = certificate_summary(&facts, now);
         assert_eq!(summary, "Certificate of empi.example.org:443 (empi) expires in 14 days, on 2026-10-28.");
@@ -1562,5 +1583,24 @@ rules:
             n.title().ends_with("WARNING Our certificate ductus-mllp (on engine-1) expires in 14 days, on 2026-10-28")
         );
         assert!(n.body().contains("Renew it before then: replace its files"), "{}", n.body());
+
+        // An OpenPGP key: what it's used for, the part that ends first, and what to do.
+        let key = CertificateFacts {
+            resource: "payer",
+            host: "engine-1",
+            port: 0,
+            not_after: ends_in(14, now),
+            earliest: Some("its encryption subkey"),
+            error: None,
+            ours: Some("decrypts files `claims-in` picks up"),
+            pgp: true,
+        };
+        let key = certificate_summary(&key, now);
+        assert_eq!(
+            key,
+            "OpenPGP key payer (on engine-1) expires in 14 days, on 2026-10-28. That's when its encryption subkey ends: extend it, or get a new key, before then. It decrypts files `claims-in` picks up."
+        );
+        let n = Notice { summary: &key, key: "cert:payer:engine-1:0", ..n };
+        assert!(n.body().contains("Replace it before then: extend it (`gpg --quick-set-expire`)"), "{}", n.body());
     }
 }

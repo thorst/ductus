@@ -48,6 +48,9 @@ Codes are stable: a check keeps its code, a new check gets a new one, and a reti
 | `DUC211` | error | **A certificate doesn't load.** A `certificates:` entry's files can't be read, don't match their key, or have expired: the engine would refuse to start. |
 | `DUC212` | warning | **A certificate expires within 30 days.** Renew it: the engine alerts too, 30, 14 and 7 days before. |
 | `DUC213` | warning | **The REST API is on the network without TLS.** Passwords and tokens cross it readable, and browsers won't keep the session cookie: add `tls: { certificate: <name> }` to `api`. |
+| `DUC214` | error | **An OpenPGP setting can't work.** A source's or destination's `pgp:` names a partner's public key where our secret key is needed (`decrypt` and `sign` take a `pgp:` entry with `key_file` or `key`), or names no key at all. (A key resources.yaml doesn't define is DUC202.). |
+| `DUC215` | error | **An OpenPGP key doesn't load.** A `pgp:` entry's key can't be read, is the wrong kind (a public key in `key_file`, a secret one in `public_key_file`), its passphrase is missing or wrong, it was revoked, or it has expired: the engine would refuse to start. |
+| `DUC216` | warning | **An OpenPGP key expires within 30 days.** Extend it (`gpg --quick-set-expire`) or get a new one, and give partners the new public key: the engine alerts too, 30, 14 and 7 days before. |
 | `DUC220` | warning | **An `allow` list names a host that doesn't resolve.** Nothing is let in for it until it resolves (the engine looks again every 5 minutes). DNS seen from here may not be the engine's. |
 | `DUC221` | warning | **A sender `about` names isn't allowed.** `about.from.hosts` names a host the listener's `allow` would refuse. |
 | `DUC222` | warning | **Can't tell whether a sender is allowed.** `about.from.hosts` names a host that doesn't resolve from here. |

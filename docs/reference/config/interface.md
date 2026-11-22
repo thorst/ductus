@@ -184,6 +184,24 @@ Where `after: move` puts files, relative to the interface's folder (or the SFTP 
 
 A file as one message is limited to 256 MB; split bigger ones. XML files are always one message each. Default: `none`. Example: `split: records`.
 
+### `source.file.pgp`
+
+**Type:** settings, below
+
+OpenPGP: decrypt each file with our key (`decrypt:`), and take only files signed by the partner's key (`verify:`), both `pgp:` entries in resources.yaml. Nothing in a file is stored until its signature is checked. A file that isn't encrypted to our key, isn't signed by theirs, or was damaged is stored quarantined as received, with why, moved like any file, and the next file is read. `split: records` works on the decrypted text. Default: files are read as they are. Example: `pgp: { decrypt: ours, verify: payer }`.
+
+### `source.file.pgp.decrypt`
+
+**Type:** text
+
+Decrypt each file with this key of ours (a `pgp:` entry with `key_file` or `key`). A file that isn't encrypted, or isn't encrypted to this key, is stored quarantined with why, and the next file is read. Armored and binary files both work. Default: files aren't decrypted. Example: `decrypt: ours`.
+
+### `source.file.pgp.verify`
+
+**Type:** text
+
+Accept only files signed by this partner's key (a `pgp:` entry): a file with no signature, or a signature by any other key, or one that doesn't match the file, is stored quarantined with why. Default: signatures aren't checked. Example: `verify: payer`.
+
 ### `source.sftp`
 
 **Type:** settings, below
@@ -613,6 +631,30 @@ Write each message as a file in a folder of this server (or a share it mounts), 
 
 The folder to write to, made if missing. Relative to the interface's folder unless written whole. Required. Example: `dir: /data/outbound/lab`.
 
+### `destinations.<name>.file.pgp`
+
+**Type:** settings, below
+
+OpenPGP: sign each file with our key (`sign:`) and encrypt it to the partner's (`encrypt:`), both `pgp:` entries in resources.yaml; the name gains `.pgp` (`.asc` with `armor: true`). A key that can't be used (expired, say) leaves the message waiting and retried, with why. Default: written as it is. Example: `pgp: { encrypt: payer, sign: ours }`.
+
+### `destinations.<name>.file.pgp.encrypt`
+
+**Type:** text
+
+Encrypt each file to this partner's key (a `pgp:` entry): only they can read it. The file's name gains `.pgp` (`.asc` with `armor: true`). Default: not encrypted. Example: `encrypt: payer`.
+
+### `destinations.<name>.file.pgp.sign`
+
+**Type:** text
+
+Sign each file with this key of ours (a `pgp:` entry with `key_file` or `key`), so the partner can tell it came from us. Default: not signed. Example: `sign: ours`.
+
+### `destinations.<name>.file.pgp.armor`
+
+**Type:** `true` or `false`
+
+Write the file as ASCII armor (`-----BEGIN PGP MESSAGE-----`, named `.asc`) rather than binary (`.pgp`), for partners whose tools ask for it. Default: `false`. Example: `armor: true`.
+
 ### `destinations.<name>.sftp`
 
 **Type:** settings, below
@@ -630,6 +672,14 @@ The SFTP server: an `sftp:` entry in resources.yaml, which holds its address and
 **Type:** text · **Required**
 
 The folder on the server to write to, relative to the folder the login starts in unless written whole. Required. Example: `dir: inbound/adt`.
+
+### `destinations.<name>.sftp.pgp`
+
+**Type:** settings, below
+
+OpenPGP, as on the `file` destination: `sign:` with our key, `encrypt:` to the partner's, `armor:` for text. Default: written as it is. Example: `pgp: { encrypt: payer, sign: ours }`.
+
+Its settings are those of [`destinations.<name>.file.pgp`](#destinationsnamefilepgp).
 
 ### `destinations.<name>.http`
 

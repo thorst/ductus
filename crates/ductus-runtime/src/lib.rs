@@ -34,6 +34,7 @@ pub mod ldap;
 mod limiter;
 pub mod mssql;
 pub mod ownership;
+pub mod pgp;
 pub mod project;
 pub mod release;
 pub mod reload;
@@ -119,6 +120,7 @@ pub(crate) fn check_together(
     let mut tls_problems = ductus_core::tls::check(&ductus_core::tls::listeners(configs(), api_tls), resources);
     let outbound = ductus_core::tls::outbound(configs(), resources, alerts);
     tls_problems.extend(ductus_core::tls::check_outbound(&outbound, resources));
+    tls_problems.extend(ductus_core::pgp::check(configs(), resources).into_iter().map(|p| p.text));
     if !tls_problems.is_empty() {
         bail!("{}", tls_problems.join("\n"));
     }
@@ -400,8 +402,9 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         settings.api.tls.as_ref(),
         alert_settings.as_ref(),
     )?;
-    // Every certificate, before the database: a broken or expired one stops the start here.
-    let certificates = Arc::new(tls::Certificates::load(&resources.certificates)?);
+    // Every certificate and OpenPGP key, before the database: a broken or expired one stops the
+    // start here.
+    let certificates = Arc::new(tls::Certificates::load(&resources.certificates)?.with_pgp(&resources.pgp)?);
     let server_tls = |t: &Option<ductus_core::tls::ListenTls>, alpn: &[&[u8]]| {
         t.as_ref().map(|t| certificates.server(t, alpn)).transpose()
     };
