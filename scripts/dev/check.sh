@@ -87,9 +87,25 @@ cargo clippy --release --all-targets -q -- -D warnings >/dev/null 2>&1 || { echo
 echo "ALL CHECKS PASSED"
 
 # Build outputs only grow: cargo never deletes old artifacts (dependency bumps, Rust updates, a
-# worktree built into the same folder). Said here, with what to do over 30 GB.
-size_mb=$(du -sm "$CARGO_TARGET_DIR" 2>/dev/null | cut -f1)
-echo "build outputs: $CARGO_TARGET_DIR $(awk "BEGIN { printf \"%.1f\", ${size_mb:-0} / 1024 }") GB"
-if [ "${size_mb:-0}" -gt $((30 * 1024)) ]; then
-  echo "  over 30 GB: run \`cargo clean\` (the next check.sh builds everything again); in WSL, then compact its disk (dev-guide/scripts-ci-wsl.md, \"WSL's disk lives on D:\")"
+# worktree built into the same folder); they reached 89 GB and filled the disk (2026-11-22). Past
+# TARGET_LIMIT_GB (default 30) they're trimmed here, after the checks passed: first the
+# incremental caches (the bulk; the next build only recompiles our own crates in full), then, if
+# still over, everything (`cargo clean`: the next check.sh builds it all again).
+limit_gb=${TARGET_LIMIT_GB:-30}
+target_mb() { du -sm "$CARGO_TARGET_DIR" 2>/dev/null | cut -f1; }
+gb() { awk "BEGIN { printf \"%.1f\", ${1:-0} / 1024 }"; }
+size_mb=$(target_mb)
+echo "build outputs: $CARGO_TARGET_DIR $(gb "$size_mb") GB"
+if [ "${size_mb:-0}" -gt $((limit_gb * 1024)) ]; then
+  rm -rf "$CARGO_TARGET_DIR"/*/incremental
+  size_mb=$(target_mb)
+  echo "  over $limit_gb GB: removed the incremental caches, now $(gb "$size_mb") GB"
+  if [ "${size_mb:-0}" -gt $((limit_gb * 1024)) ]; then
+    if cargo clean --target-dir "$CARGO_TARGET_DIR" 2>&1 | tail -n 3; [ "${PIPESTATUS[0]}" -eq 0 ]; then
+      echo "  still over: cargo clean (the next check.sh builds everything again)"
+    else
+      echo "  still over, and cargo clean refused (above): clean it by hand"
+    fi
+  fi
+  echo "  in WSL, the space stays taken on the Windows drive until its disk is compacted (dev-guide/scripts-ci-wsl.md, \"WSL's disk lives on D:\")"
 fi
