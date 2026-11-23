@@ -8,7 +8,7 @@ that only run while the binary is compiled (macros, build scripts), since they s
 Nothing on this page is downloaded when Ductus runs, except Postgres for `ductus dev` (below). The binary
 needs only the operating system's C library on Linux (glibc 2.34 or later).
 
-- Rust crates: **717** (690 in the Linux build, 701 in the Windows build)
+- Rust crates: **720** (693 in the Linux build, 704 in the Windows build)
 - npm packages in the web UI: **102**
 - TypeScript **6.0.3** (Microsoft, Apache-2.0), inside the binary: `ductus validate` and `ductus types` type-check interface code with it
 
@@ -57,8 +57,8 @@ How many libraries use each license expression (`A OR B`: the library may be use
 
 | License | Rust crates | npm packages |
 |---|---|---|
-| MIT OR Apache-2.0 | 348 |  |
-| MIT | 118 | 98 |
+| MIT OR Apache-2.0 | 349 |  |
+| MIT | 120 | 98 |
 | Apache-2.0 OR MIT | 89 |  |
 | Apache-2.0 | 43 | 1 |
 | MIT/Apache-2.0 | 27 |  |
@@ -183,6 +183,7 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `chacha20` | 0.10.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `chacha20poly1305` | 0.11.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `chrono` | 0.4.45 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `chrono-tz` | 0.10.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `cipher` | 0.4.4 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `cipher` | 0.5.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `clang-sys` | 1.9.1 | Apache-2.0 | ✓ | ✓ |
@@ -510,9 +511,11 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `percent-encoding` | 2.3.2 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `pgp` | 0.21.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `phf` | 0.11.3 | MIT | ✓ | ✓ |
+| `phf` | 0.12.1 | MIT | ✓ | ✓ |
 | `phf_generator` | 0.11.3 | MIT | ✓ | ✓ |
 | `phf_macros` | 0.11.3 | MIT | ✓ | ✓ |
 | `phf_shared` | 0.11.3 | MIT | ✓ | ✓ |
+| `phf_shared` | 0.12.1 | MIT | ✓ | ✓ |
 | `picky` | 7.0.0-rc.26 | MIT OR Apache-2.0 | ✓ |  |
 | `picky-asn1` | 0.10.1 | MIT OR Apache-2.0 | ✓ |  |
 | `picky-asn1-der` | 0.5.7 | MIT OR Apache-2.0 | ✓ |  |
@@ -930,6 +933,6 @@ The packages its production build bundles (the build tools and test tools aren't
 Made by `scripts/dev/dependencies.sh` from these files (a test fails when either changes and this page
 isn't made again):
 
-<!-- made from: Cargo.lock f6fe5efcf8e88265747befe25cbc61dd7d4c1a591a6a52fcf91fab83f7d46c7d ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
-- `Cargo.lock`, SHA-256 `f6fe5efcf8e88265747befe25cbc61dd7d4c1a591a6a52fcf91fab83f7d46c7d`
+<!-- made from: Cargo.lock bc839573427b160aaf7e281fc5792789612fed655d128a6d0ea27b35fb9b576a ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
+- `Cargo.lock`, SHA-256 `bc839573427b160aaf7e281fc5792789612fed655d128a6d0ea27b35fb9b576a`
 - `ui/package-lock.json`, SHA-256 `aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5`

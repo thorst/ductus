@@ -226,7 +226,13 @@ Run at start, then at this interval: for polling (an API every `5m`). Give this 
 
 **Type:** text
 
-Run at the times a five-field cron expression gives (minute, hour, day of month, month, day of week), in the server's local time: for jobs at a time of day. Runs missed while the engine was down are made up by one run at start, not one per missed time. Give this or `every`. Example: `cron: "0 2 * * *"` (02:00 every day).
+Run at the times a five-field cron expression gives (minute, hour, day of month, month, day of week), on the clock of `timezone`: for jobs at a time of day. Runs missed while the engine was down are made up by one run at start, not one per missed time. Give this or `every`. Example: `cron: "0 2 * * *"` (02:00 every day).
+
+### `source.schedule.timezone`
+
+**Type:** time zone (America/Chicago)
+
+The time zone `cron` is read in, as an IANA name: for a partner in another zone (a file a New York payer posts at 06:00 their time). Daylight saving follows the zone's rules: a time skipped in spring runs at the first minute after the gap, a time that repeats in autumn runs once. Only with `cron` (`every` counts elapsed time, which no zone changes). Default: ductus.yaml's `timezone`, else the server's zone. Example: `timezone: America/New_York`.
 
 ### `script`
 
@@ -938,13 +944,13 @@ Something must be received at least this often (at least `1m`): longer than this
 
 **Type:** hours (06:00-22:00)
 
-The hours `active_within` applies, in the server's local time: `"06:00-22:00"`, or across midnight, `"22:00-06:00"`. The quiet time is counted from when the hours start, so a feed that sleeps at night isn't silent at 06:01. Only with `active_within`. Default: all day. Example: `between: "06:00-22:00"`.
+The hours `active_within` applies, in ductus.yaml's `timezone` (by default the server's zone): `"06:00-22:00"`, or across midnight, `"22:00-06:00"`. The quiet time is counted from when the hours start, so a feed that sleeps at night isn't silent at 06:01. Only with `active_within`. Default: all day. Example: `between: "06:00-22:00"`.
 
 ### `monitor.active_by`
 
 **Type:** time (09:00, Mon-Fri 09:00, or cron)
 
-Something must be received by this time, or the interface has *missed* its deadline: for feeds that come once a day or week (a nightly file, a Monday batch). `"09:00"` every day, `"Mon 09:00"`, `"Mon-Fri 09:00"`, `"Mon,Thu 09:00"`, or a five-field cron expression, in the server's local time. Only receiving counts. Default: none. Example: `active_by: "Mon-Fri 07:00"`.
+Something must be received by this time, or the interface has *missed* its deadline: for feeds that come once a day or week (a nightly file, a Monday batch). `"09:00"` every day, `"Mon 09:00"`, `"Mon-Fri 09:00"`, `"Mon,Thu 09:00"`, or a five-field cron expression, in ductus.yaml's `timezone` (by default the server's zone). Only receiving counts. Default: none. Example: `active_by: "Mon-Fri 07:00"`.
 
 ### `monitor.from`
 

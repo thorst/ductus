@@ -338,6 +338,14 @@ Log who reads a message's payload (in the web UI or through the API), before it'
 
 One person reading the same message again within this long counts as one read, one row (a page that reloads itself would otherwise write a row each time). `0s` writes a row for every read. Default: `10m`. Example: `payload_read_window: 0s`.
 
+### `timezone`
+
+**Type:** time zone (America/Chicago)
+
+The time zone the engine's wall-clock settings are read in, as an IANA name: schedules' `cron` (unless a schedule names its own `timezone`), `monitor` hours (`between`) and deadlines (`active_by`, `from`), the hour-of-week "normal" each destination learns, and alerts' quiet hours; also the times in notifications and health summaries.
+
+Set it when the server's own zone isn't the one the site works in: most containers and many cloud servers run on UTC, and a `cron: "0 6 * * *"` there runs at midnight in Chicago. The zone database is inside the binary, so Windows and Linux read a name alike, daylight saving included. Changing it moves the learned hour-of-week normals by the difference until a few weeks relearn them. Default: the server's zone (what the operating system says; on Windows, the service account's). Example: `timezone: America/Chicago`.
+
 ### `alerts`
 
 **Type:** settings, below
@@ -517,7 +525,7 @@ Hours when notifications of some severities wait until morning (warnings, overni
 
 **Type:** hours (06:00-22:00) · **Required**
 
-The quiet hours, in the server's local time (mind a server or container that runs on UTC): `"22:00-06:00"`. Notifications due in them wait until they end. Required. Example: `between: "21:00-07:00"`.
+The quiet hours, in ductus.yaml's `timezone` (by default the server's zone: mind a server or container that runs on UTC): `"22:00-06:00"`. Notifications due in them wait until they end. Required. Example: `between: "21:00-07:00"`.
 
 ### `alerts.quiet.severities`
 
