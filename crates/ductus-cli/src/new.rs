@@ -19,6 +19,9 @@ pub enum SourceKind {
     Sftp,
     /// A timer: the transform runs every hour and produces the message.
     Schedule,
+    /// What other interfaces route to it (a destination with `interface: <name>`); the line
+    /// the sending interface needs is printed.
+    Internal,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
@@ -55,7 +58,7 @@ pub fn interface(o: NewInterface) -> Result<()> {
     use FormatKind as F;
     use SourceKind as S;
     let format = format.unwrap_or(match source {
-        S::Mllp | S::File | S::Sftp => F::Hl7,
+        S::Mllp | S::File | S::Sftp | S::Internal => F::Hl7,
         S::Http | S::Schedule => F::Json,
     });
     match (source, format) {
@@ -99,6 +102,7 @@ pub fn interface(o: NewInterface) -> Result<()> {
         (S::Http, Some(p)) => format!("HTTP on port {p}: GET /{name}/{{id}}"),
         (S::Sftp, _) => format!("files from SFTP server `{}`", server.unwrap_or_default()),
         (S::File, _) => format!("files from in/{name}"),
+        (S::Internal, _) => "what other interfaces route to it".to_string(),
         _ => "every hour".to_string(),
     };
     println!("created interfaces/{name}/ ({summary})");
@@ -106,7 +110,35 @@ pub fn interface(o: NewInterface) -> Result<()> {
         println!("  {file}");
     }
     println!("\nnext: ductus test --interface {name}");
+    if source == S::Internal {
+        println!("\n{}", route_hint(&name, format));
+    }
     Ok(())
+}
+
+/// What the sending interface adds to route here: the receiving `format` must be what the
+/// destination outputs, so a format other than HL7 (the default output) is named on it.
+fn route_hint(name: &str, format: FormatKind) -> String {
+    let output = match format {
+        FormatKind::Hl7 => String::new(),
+        FormatKind::Fixed => ", output: { fixed: <the same layout as its format> }".into(),
+        f => format!(", output: {}", format_name(f)),
+    };
+    format!(
+        "it gets what other interfaces route to it: in the sending interface's interface.yaml, add\n  \
+         destinations:\n    {name}: {{ interface: {name}{output} }}"
+    )
+}
+
+fn format_name(format: FormatKind) -> &'static str {
+    match format {
+        FormatKind::Hl7 => "hl7",
+        FormatKind::Json => "json",
+        FormatKind::Xml => "xml",
+        FormatKind::Text => "text",
+        FormatKind::Csv => "csv",
+        FormatKind::Fixed => "fixed",
+    }
 }
 
 /// The requested port if it's free, else the first free one in the range. "Free" means no
@@ -199,6 +231,9 @@ fn render(
             server.unwrap_or_default()
         ),
         S::Schedule => "source: { schedule: { every: 1h } }   # or cron: \"0 2 * * *\"".to_string(),
+        S::Internal => format!(
+            "source: internal   # what other interfaces route here: `destinations: {{ {name}: {{ interface: {name} }} }}`"
+        ),
     };
     let format_yaml = match format {
         F::Hl7 => String::new(),
@@ -230,6 +265,7 @@ fn render(
     // Left blank, `ductus validate` warns.
     let from = match source {
         S::Schedule => "  # from: nothing sends to a schedule (the databases and APIs it uses name their own systems)\n".into(),
+        S::Internal => "  # from: the interfaces that route here are its senders (`ductus impact` follows routes)\n".into(),
         S::Http => "  from: { application: \"\", vendor: \"\", hosts: [] }   # who calls; hosts: their addresses or subnets\n".into(),
         S::Sftp => "  from: { application: \"\", vendor: \"\" }   # or name them on the SFTP server in resources.yaml\n".into(),
         _ => "  from: { application: \"\", vendor: \"\", hosts: [] }   # hosts: where senders connect from (IPs or subnets)\n"

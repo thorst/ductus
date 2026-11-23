@@ -62,10 +62,24 @@ itself, so MSH-9 is the message type, as in every spec.
 - **Writing into a segment the message doesn't have throws** ("message has no PV1 segment; add
   it first with msg.add("PV1")"): a missing segment is usually a mistake worth seeing.
 - **Simple fields read as text, composite ones as fields.** PV1-2 (a code) is a string;
-  PID-5 (a name, with components) is a field you index into. The editor knows which is which for
-  the common segments of HL7 2.5 (MSH, EVN, PID, NK1, PV1, ORC, OBR, OBX, NTE, AL1, DG1, MRG, MSA,
-  ERR) and shows each field's name; any other segment, Z segments included, works the same way
-  with numbers.
+  PID-5 (a name, with components) is a field you index into. The engine and the editor know
+  which is which for these segments of HL7 2.5, and the editor shows each field's name and type
+  on hover (`IN1-4 Insurance Company Name (XON)`):
+
+  | Feeds | Segments |
+  |---|---|
+  | Every message | MSH, EVN, MSA, ERR, NTE |
+  | Patients and visits (ADT) | PID, PD1, NK1, PV1, PV2, ROL, AL1, DG1, PR1, MRG |
+  | Insurance and billing (ADT, DFT) | IN1, IN2, GT1, FT1 |
+  | Orders and results (ORM, OML, ORU) | ORC, OBR, OBX, TQ1, SPM |
+  | Documents (MDM) | TXA |
+  | Scheduling (SIU) | SCH, AIS, AIG, AIL, AIP |
+  | Pharmacy and immunization (RDE, RAS, VXU) | RXO, RXE, RXR, RXA |
+  | Master files (MFN) | MFI, MFE |
+
+  Any other segment, Z segments included, works the same way with numbers, every field read as
+  a field: `String(msg.ZPV[2])` or `msg.ZPV[2].value` for its text
+  ([nuance](../nuances/transforms.md#a-segment-without-a-definition-reads-every-field-as-a-field-level-2)).
 - **Escaping is done for you.** Reading decodes `\F\`, `\S\`, `\T\`, `\R\` and `\E\`; writing a
   component or simple field encodes the delimiters in it. A composite field set as a whole
   (`msg.PID[5] = "SMITH^ANNA"`) is taken as HL7, separators and all.

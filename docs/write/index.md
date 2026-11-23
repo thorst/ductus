@@ -129,7 +129,7 @@ one copy per thread, not one per project ([nuance](../nuances/shared-pool.md#a-s
 
 ## A new interface, and the editor
 
-`ductus new interface orders-in` (with `--source mllp|http|file|sftp|schedule` and `--format`)
+`ductus new interface orders-in` (with `--source mllp|http|file|sftp|schedule|internal` and `--format`)
 writes a working interface: its interface.yaml, a `transform.ts`, a test and a sample message,
 passing `ductus test` and `ductus validate` as written. Start from there.
 

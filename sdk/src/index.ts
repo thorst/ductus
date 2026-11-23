@@ -36,6 +36,11 @@ export { expect, fixture, hl7, input, mock, type MockResponse, test } from "./te
 export { __runTests, __setFixtures } from "./testing.ts";
 export { type Api, api, type Database, db, env, fetch, type FetchOptions, FetchResponse, secret } from "./services.ts";
 export { generateTypes as __generateTypes } from "./typegen.ts";
+import { DATATYPES, PRIMITIVES, SEGMENT_NAMES, SEGMENTS } from "./schema.ts";
+import { GENERIC_SEGMENTS } from "./typegen.ts";
+/** The HL7 definitions, for the SDK's own tests (`sdk/tests/schema.test.ts`).
+ *  @internal */
+export const __schema = { DATATYPES, GENERIC_SEGMENTS, PRIMITIVES, SEGMENT_NAMES, SEGMENTS };
 
 // Must match ductus_script::KILL / QUARANTINE.
 const KILL = "\u0000ductus:kill\u0000";

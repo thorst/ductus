@@ -25,7 +25,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Order, retries and durability](ordering.md) (11)
 - [Resending and correcting messages](resend.md) (3)
 - [Routing between interfaces](routes.md) (6)
-- [Writing transforms](transforms.md) (21)
+- [Writing transforms](transforms.md) (22)
 - [Debugging](debugging.md) (17)
 - [Shared pool](shared-pool.md) (3)
 - [Runaway scripts](runaway.md) (6)
@@ -103,7 +103,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (134)
+## Level 2: Practitioner (135)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -121,6 +121,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Resend sends a message again in place: first in its lane, not last](resend.md#resend-sends-a-message-again-in-place-first-in-its-lane-not-last-level-2) (Resending and correcting messages)
 - [The receiving interface's keys, dedupe and destinations apply](routes.md#the-receiving-interfaces-keys-dedupe-and-destinations-apply-level-2) (Routing between interfaces)
 - [Routes are fixed in interface.yaml, and loops are refused](routes.md#routes-are-fixed-in-interfaceyaml-and-loops-are-refused-level-2) (Routing between interfaces)
+- [A segment without a definition reads every field as a field](transforms.md#a-segment-without-a-definition-reads-every-field-as-a-field-level-2) (Writing transforms)
 - [XML names match whatever their prefix](transforms.md#xml-names-match-whatever-their-prefix-level-2) (Writing transforms)
 - [Imports used only for their side effects are removed](transforms.md#imports-used-only-for-their-side-effects-are-removed-level-2) (Writing transforms)
 - [Copy what you change, not the whole thing through JSON](transforms.md#copy-what-you-change-not-the-whole-thing-through-json-level-2) (Writing transforms)

@@ -172,6 +172,17 @@ An interface with `source: internal` receives what other interfaces route to it 
 there, so nothing is lost or sent twice between the two
 ([routes](destinations.md#to-another-interface)).
 
+`ductus new interface adt-to-billing --source internal` writes one to start from (HL7 unless
+`--format` says otherwise) and prints what the sender adds, with the `output:` the format needs:
+
+```text
+it gets what other interfaces route to it: in the sending interface's interface.yaml, add
+  destinations:
+    adt-to-billing: { interface: adt-to-billing }
+```
+
+Until something routes to it, `ductus validate` warns that it will get nothing.
+
 ## Who may connect: `allow`
 
 ```yaml

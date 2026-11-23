@@ -1835,9 +1835,23 @@ fn generated_interfaces_pass_test_and_validate_as_generated() {
     }
     assert!(std::fs::read_to_string(dir.path().join("interfaces/api/interface.yaml")).unwrap().contains("port: 8080"));
 
+    // An internal interface prints the line its sender needs, with the output its format reads.
+    let (ok, out) = new(&["routed", "--source", "internal"]);
+    assert!(ok && out.contains("created interfaces/routed/ (what other interfaces route to it)"), "{out}");
+    assert!(
+        out.contains(
+            "in the sending interface's interface.yaml, add\n  destinations:\n    routed: { interface: routed }\n"
+        ),
+        "{out}"
+    );
+    let (ok, out) = new(&["routed-json", "--source", "internal", "--format", "json"]);
+    assert!(ok && out.contains("    routed-json: { interface: routed-json, output: json }\n"), "{out}");
+    let (ok, out) = new(&["z", "--source", "internal", "--port", "7100"]);
+    assert!(!ok && out.contains("--port is for MLLP and HTTP sources"), "{out}");
+
     let (ok, out) = ductus(dir.path(), &["test"]);
     assert!(ok, "{out}");
-    assert!(out.contains("13 passed, 0 failed"), "{out}");
+    assert!(out.contains("15 passed, 0 failed"), "{out}");
     for env in ["dev", "prod"] {
         let (ok, out) = ductus(dir.path(), &["validate", "--env", env]);
         assert!(ok, "{env}: {out}");
@@ -1846,7 +1860,22 @@ fn generated_interfaces_pass_test_and_validate_as_generated() {
         assert!(out.contains("⚠ api: about.from: add the calling system's"), "{out}");
         assert!(!out.contains("⚠ api: about.to"), "respond mode has no destination: {out}");
         assert!(!out.contains("⚠ nightly: about.from"), "a schedule has no sender: {out}");
+        assert!(!out.contains("⚠ routed: about.from"), "its senders are the interfaces routing to it: {out}");
+        assert!(out.contains("⚠ routed: has `source: internal` but no interface routes to it"), "{out}");
     }
+    // The printed lines, pasted into senders, are routes `validate` takes.
+    for (sender, line) in [
+        ("file-hl7", "  routed: { interface: routed }\n"),
+        ("file-json", "  routed-json: { interface: routed-json, output: json }\n"),
+    ] {
+        edit(
+            &dir.path().join(format!("interfaces/{sender}/interface.yaml")),
+            "destinations:\n",
+            &format!("destinations:\n{line}"),
+        );
+    }
+    let (ok, out) = ductus(dir.path(), &["validate"]);
+    assert!(ok && !out.contains("no interface routes to it"), "{out}");
     let settings = std::fs::read_to_string(dir.path().join("ductus.yaml")).unwrap();
     std::fs::write(dir.path().join("ductus.yaml"), format!("{settings}require_about: true\n")).unwrap();
     let (ok, out) = ductus(dir.path(), &["validate"]);

@@ -6,6 +6,12 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 - **What:** `msg.PID[30][1]` on a message without it is `""`. This avoids null checks everywhere, but a typo in a position also quietly gives `""`.
 - **What to do:** test with real sample messages (`ductus test`) and assert on the fields you map.
 
+## A segment without a definition reads every field as a field (level 2)
+- **What:** for the segments the SDK defines ([the list](../write/formats.md#hl7-v2)), a simple field reads as a string (`msg.IN1[8]` is `"GRP-42"`) and a composite one as a field you index into (`msg.IN1[4][1]`). For any other segment (Z segments, and standard ones not in the list yet, like RGS or UB2) the engine can't tell which is which, so every field reads as a field: `msg.ZPV[2] === "X"` is false, because it compares a field with a string; `msg.ZPV[2].value === "X"`, `String(msg.ZPV[2])` or `msg.get("ZPV-2")` give its text. Writing works the same for both, except that a whole field set on a segment without a definition is taken as HL7 (`^` separates components) where a simple field's text would have its separators escaped.
+- **Why:** whether a field has components is in the standard's definition, not in the message: `ABC` could be a code or the first component of a coded entry. A field read as a field always works (`[1]` is its text when it has no components); a string can't be indexed into.
+- **When it changes:** an upgrade that defines more segments turns their simple fields from fields into strings. Code that read them with `.value` or `[1]` then reads `undefined` or one character of the text. 0.7.8 defined PD1, PV2, ROL, IN1, IN2, GT1, PR1, FT1, TQ1, SPM, TXA, SCH, AIS, AIG, AIL, AIP, RXO, RXE, RXR, RXA, MFI and MFE; the release notes list any added later.
+- **What to do:** read a segment's text with `msg.get("SEG-n")` where you don't want to care: it gives text whatever the definition. After an upgrade, `ductus test` and `ductus validate` (the type checker knows the new types) show code that relied on the old reading.
+
 ## `return null` filters; throwing quarantines (level 1)
 - **What:** `null` → filtered (kept for audit, never delivered); `kill("reason")` → filtered with a reason; a thrown error or `quarantine("reason")` → quarantined for a person to look at.
 

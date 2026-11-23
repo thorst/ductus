@@ -44,8 +44,9 @@ hospital/
 | `docs-schema.yaml` | Documentation fields your company keeps about interfaces, beyond Ductus's own. Optional. | [Documentation fields](documentation-fields.md) |
 
 `ductus init` makes a new project with all of these but `docs-schema.yaml` and `secrets/`, and one
-interface; `ductus new interface <name> --source mllp|http|file|sftp|schedule` adds another,
-with its code, a test and a sample message, on a free port.
+interface; `ductus new interface <name> --source mllp|http|file|sftp|schedule|internal` adds
+another, with its code, a test and a sample message, on a free port (for `internal`, it prints
+the line the sending interface needs).
 
 ## How the engine reads it
 

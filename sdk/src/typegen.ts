@@ -3,12 +3,10 @@
 
 import { DATATYPES, type FieldDef, isComposite, SEGMENT_NAMES, SEGMENTS } from "./schema.ts";
 
-/** Common segments without field definitions yet: typed as generic segments. */
-const GENERIC_SEGMENTS = [
-  "PD1", "PV2", "IN1", "IN2", "IN3", "GT1", "ROL", "SPM", "TQ1", "TQ2", "TXA", "SCH", "AIS", "AIG", "AIL",
-  "AIP", "RGS", "FT1", "PR1", "IAM", "DB1", "ACC", "UB1", "UB2", "QRD", "QRF", "RXA", "RXR", "RXE", "RXO",
-  "RXC", "RXD", "RXG", "CTI", "BLG", "ZPD",
-];
+/** Common segments without field definitions yet: typed as generic segments (every field a Field). */
+export const GENERIC_SEGMENTS = [
+  "IN3", "TQ2", "RGS", "IAM", "DB1", "ACC", "UB1", "UB2", "QRD", "QRF", "RXC", "RXD", "RXG", "CTI", "BLG",
+].filter((name) => !(name in SEGMENTS));
 
 function doc(text: string, indent: string): string {
   return `${indent}/** ${text.replace(/\*\//g, "*\\/")} */\n`;
