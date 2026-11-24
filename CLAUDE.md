@@ -20,7 +20,7 @@ Code-first healthcare integration engine: Rust runtime, embedded V8 for TypeScri
 - Windows host; **build and run everything in WSL2 Ubuntu** (`wsl -d Ubuntu`). Repo at `/mnt/d/Projects/integration_engine/ductus`. `CARGO_TARGET_DIR=$HOME/target` (building on `/mnt/d` is slow); binary at `~/target/release/ductus`.
 - Postgres 18 in WSL. The binary has **no default database**: scripts get theirs from `scripts/dev/db.sh` (a personal login in `scripts/dev/db.local.sh`, not in Git); at a prompt, export `DUCTUS_DATABASE_URL` yourself. `ductus dev` needs none (its own Postgres).
 - From PowerShell, multi-line or `$`-heavy shell commands get mangled: write a script file and run `wsl -d Ubuntu -- bash /mnt/c/...script.sh`. `/tmp` in WSL is tmpfs: don't benchmark disk there.
-- WSL's disk image is on D: and only grows; the VM gets killed under memory pressure (`wsl --shutdown` and `CARGO_BUILD_JOBS=4` before a long check.sh). Details, compaction steps and every other machine/CI gotcha: `dev-guide/scripts-ci-wsl.md`.
+- WSL's disk image is on E: (its own 1 TB SSD; the repos stay on D:) and only grows; the VM gets killed under memory pressure (`wsl --shutdown` and `CARGO_BUILD_JOBS=4` before a long check.sh). Details, compaction steps and every other machine/CI gotcha: `dev-guide/scripts-ci-wsl.md`.
 
 ## Code conventions
 
