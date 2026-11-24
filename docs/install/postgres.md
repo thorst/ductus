@@ -130,8 +130,8 @@ A renewed pair is used by the next new connection
 
 A verified connection's certificate (`verify-full`, `verify-ca`) is watched like any other:
 alerts at 30, 14 and 7 days ([nuance](../nuances/tls-postgres.md#the-databases-certificate-is-watched-when-the-engine-checks-it-level-3)). Opening a
-connection over TLS costs about 60 ms for now, which pools hide
-([measured](../nuances/tls-postgres.md#opening-a-database-connection-over-tls-costs-60-ms-for-now-level-4)).
+connection over TLS costs about 5 ms more than plain, which pools hide
+([measured](../nuances/tls-postgres.md#opening-a-database-connection-over-tls-costs-5-ms-more-level-4)).
 
 ## Sizing
 

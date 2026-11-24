@@ -107,5 +107,5 @@ if [ "${size_mb:-0}" -gt $((limit_gb * 1024)) ]; then
       echo "  still over, and cargo clean refused (above): clean it by hand"
     fi
   fi
-  echo "  in WSL, the space stays taken on the Windows drive until its disk is compacted (dev-guide/scripts-ci-wsl.md, \"WSL's disk lives on D:\")"
+  echo "  in WSL, the space stays taken on the Windows drive until its disk is compacted (dev-guide/scripts-ci-wsl.md, \"WSL's disk lives on E:\")"
 fi

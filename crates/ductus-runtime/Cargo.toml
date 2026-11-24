@@ -51,7 +51,7 @@ sha2 = "0.10.9"
 tempfile = "3.27.0"
 # Already in the tree through tokio: TCP keepalive on accepted connections (`allow::keepalive`).
 socket2 = "0.6.5"
-sqlx = { version = "0.9.0", default-features = false, features = ["runtime-tokio", "postgres", "json", "tls-rustls-aws-lc-rs"] }
+sqlx = { version = "0.9.1", default-features = false, features = ["runtime-tokio", "postgres", "json", "tls-rustls-aws-lc-rs"] }
 # winauth: Windows logins on Windows through SSPI (Negotiate: Kerberos, else NTLM; our fork, see the
 # workspace's [patch.crates-io]).
 tiberius = { version = "0.13.0", default-features = false, features = ["tds80", "rustls", "chrono", "sql-browser-tokio", "winauth"] }

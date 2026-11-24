@@ -533,7 +533,7 @@ pub const CODES: &[Code] = &[
         "DUC208",
         "error",
         "A key function waits for something",
-        "A key function (`ordering: { key: { script: key.ts } }`, or one of `dedupe.keys`) is `async`, or its body has an `await` or calls `db()`, `api()` or `fetch()`. A key is read while the sender waits for its ACK, on one thread for every interface's keys, so a key function answers from the message alone: at the engine, every message it answered a promise for would be quarantined. Read the key from the message; look values up in a destination's code instead. Only the function's own body is checked: code it calls in other functions is stopped at the engine (no database or API is reachable there).",
+        "A key function (`ordering: { key: { script: key.ts } }`, or one of `dedupe.keys`) is `async`, or its body has an `await` or calls `db()`, `api()` or `fetch()`. A key is read while the sender waits for its ACK, on one thread for every interface's keys, so a key function answers from the message alone: at the engine, every message it answered a promise for would be quarantined. Read the key from the message; look values up in a destination's code instead. Only the function's own body is checked: code it calls in other functions is stopped at the engine (no database or API is reachable there). \"Async\" is read from the code as written: `async`, or a declared return type of `Promise<…>`; a plain function that returns another function's promise without saying so is caught at the engine instead (give a key function a return type).",
     ),
     code(
         "DUC210",

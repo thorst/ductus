@@ -21,7 +21,7 @@ needs only the operating system's C library on Linux (glibc 2.34 or later).
 | `rustls` | 0.23.45 | Apache-2.0 OR ISC OR MIT | TLS for every connection the engine makes or accepts | Linux, Windows |
 | `aws-lc-rs` | 1.18.1 | ISC AND (Apache-2.0 OR ISC) | The cryptography under TLS (AWS-LC; post-quantum key exchange preferred) | Linux, Windows |
 | `rustls-platform-verifier` | 0.7.1 | MIT OR Apache-2.0 | Checks certificates against the operating system's trusted roots | Linux, Windows |
-| `sqlx` | 0.9.0 | MIT OR Apache-2.0 | PostgreSQL: the engine's store and queue, and `db()` calls to Postgres | Linux, Windows |
+| `sqlx` | 0.9.1 | MIT OR Apache-2.0 | PostgreSQL: the engine's store and queue, and `db()` calls to Postgres | Linux, Windows |
 | `tiberius` (fork) | 0.13.0 | MIT/Apache-2.0 | SQL Server for `db()` calls (our fork: Windows logins) | Linux, Windows |
 | `tokio` | 1.53.2 | MIT | The asynchronous runtime: sockets, timers, tasks | Linux, Windows |
 | `hyper` | 1.11.1 | MIT | HTTP/1 and HTTP/2, under the API, HTTP sources and destinations | Linux, Windows |
@@ -649,11 +649,11 @@ How many libraries use each license expression (`A OR B`: the library may be use
 | `spki` | 0.7.3 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `spki` | 0.8.1 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `sponge-cursor` | 0.1.0 | MIT OR Apache-2.0 | ✓ | ✓ |
-| `sqlx` | 0.9.0 | MIT OR Apache-2.0 | ✓ | ✓ |
-| `sqlx-core` | 0.9.0 | MIT OR Apache-2.0 | ✓ | ✓ |
-| `sqlx-macros` | 0.9.0 | MIT OR Apache-2.0 | ✓ | ✓ |
-| `sqlx-macros-core` | 0.9.0 | MIT OR Apache-2.0 | ✓ | ✓ |
-| `sqlx-postgres` | 0.9.0 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `sqlx` | 0.9.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `sqlx-core` | 0.9.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `sqlx-macros` | 0.9.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `sqlx-macros-core` | 0.9.1 | MIT OR Apache-2.0 | ✓ | ✓ |
+| `sqlx-postgres` | 0.9.1 | MIT OR Apache-2.0 | ✓ | ✓ |
 | `ssh-cipher` | 0.3.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `ssh-encoding` | 0.3.0 | Apache-2.0 OR MIT | ✓ | ✓ |
 | `ssh-key` | 0.7.0-rc.11 | Apache-2.0 OR MIT | ✓ | ✓ |
@@ -933,6 +933,6 @@ The packages its production build bundles (the build tools and test tools aren't
 Made by `scripts/dev/dependencies.sh` from these files (a test fails when either changes and this page
 isn't made again):
 
-<!-- made from: Cargo.lock bc839573427b160aaf7e281fc5792789612fed655d128a6d0ea27b35fb9b576a ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
-- `Cargo.lock`, SHA-256 `bc839573427b160aaf7e281fc5792789612fed655d128a6d0ea27b35fb9b576a`
+<!-- made from: Cargo.lock 3d4b76cee1fc480f2762918468e745bddecce96ffc06d1cec7e60d679a1c3b43 ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
+- `Cargo.lock`, SHA-256 `3d4b76cee1fc480f2762918468e745bddecce96ffc06d1cec7e60d679a1c3b43`
 - `ui/package-lock.json`, SHA-256 `aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5`

@@ -161,8 +161,8 @@ impl Store {
     pub async fn history_deployments(&self, page: Page<'_>, all: bool) -> Result<Vec<DeploymentEntry>> {
         // Each version's interface.yaml text comes with it when the two differ (what tells which
         // parts the change touched), in this statement: another round trip costs more than the
-        // texts (a statement with a large parameter waits ~40 ms for a delayed ACK until sqlx
-        // sets TCP_NODELAY). Which deployments: a page from each table (each through its
+        // texts (under sqlx 0.9.0, without TCP_NODELAY, a statement with a large parameter also
+        // waited ~40 ms for a delayed ACK). Which deployments: a page from each table (each through its
         // `(interface, deployment_id)` index), merged.
         let page_of = |table: &str| {
             format!(

@@ -365,7 +365,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Prometheus series grow with destinations](monitoring.md#prometheus-series-grow-with-destinations-level-4) (Monitoring)
 - [Judging alerts costs little, and runs all the time](alerts.md#judging-alerts-costs-little-and-runs-all-the-time-level-4) (Alerts)
 - [What TLS costs](tls-listening.md#what-tls-costs-level-4) (TLS on what the engine listens on)
-- [Opening a database connection over TLS costs ~60 ms, for now](tls-postgres.md#opening-a-database-connection-over-tls-costs-60-ms-for-now-level-4) (TLS to Postgres)
+- [Opening a database connection over TLS costs ~5 ms more](tls-postgres.md#opening-a-database-connection-over-tls-costs-5-ms-more-level-4) (TLS to Postgres)
 - [Verification costs nothing measurable](tls-sqlserver.md#verification-costs-nothing-measurable-level-4) (TLS to SQL Server)
 - [A refused certificate is said once, not logged as an error each time](certificates.md#a-refused-certificate-is-said-once-not-logged-as-an-error-each-time-level-4) (Certificates)
 - [What OpenPGP costs](pgp.md#what-openpgp-costs-level-4) (OpenPGP on files)
