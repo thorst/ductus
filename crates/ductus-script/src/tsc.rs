@@ -120,7 +120,13 @@ impl Tsc {
         let dir = folder.path();
         const TYPINGS: &str = "ductus-sdk.d.ts";
         std::fs::write(dir.join(TYPINGS), typings).context("writing the SDK's typings for tsc")?;
-        let mut listed: Vec<&str> = files.iter().map(String::as_str).collect();
+        // tsc can't open Windows' verbatim paths (`//?/C:/…`, what canonicalizing gives, as a
+        // release unpacked for its check is): it's given them plain, and its findings are put
+        // back under the names it was asked about.
+        let plain: Vec<String> = files.iter().map(|f| plain_path(f)).collect();
+        let asked: std::collections::HashMap<&str, &str> =
+            plain.iter().map(String::as_str).zip(files.iter().map(String::as_str)).collect();
+        let mut listed: Vec<&str> = plain.iter().map(String::as_str).collect();
         listed.push(TYPINGS);
         let config = format!(
             "{{\n  \"compilerOptions\": {OPTIONS},\n  \"files\": {}\n}}\n",
@@ -139,6 +145,8 @@ impl Tsc {
         for d in &mut found {
             if d.file.as_deref() == Some(typings_at.as_str()) {
                 d.file = Some(typings_key.to_string());
+            } else if let Some(original) = d.file.as_deref().and_then(|f| asked.get(f)) {
+                d.file = Some(original.to_string());
             }
         }
         // Exit 0: no errors; 1 or 2: errors (in the code or the config), printed. Anything else, or
@@ -171,6 +179,19 @@ fn cache_dir() -> Option<PathBuf> {
             .filter(|v| !v.is_empty())
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".cache")))
+    }
+}
+
+/// A Windows verbatim path written plainly: `//?/C:/x` → `C:/x`, `//?/UNC/server/share/x` →
+/// `//server/share/x` (either slash). Anything else as it is.
+fn plain_path(path: &str) -> String {
+    if !(path.starts_with("//?/") || path.starts_with(r"\\?\")) {
+        return path.to_string();
+    }
+    let rest = path[4..].replace('\\', "/");
+    match rest.strip_prefix("UNC/") {
+        Some(share) => format!("//{share}"),
+        None => rest,
     }
 }
 
@@ -300,6 +321,17 @@ mod tests {
         if cfg!(windows) {
             assert_eq!(d[1].file.as_deref(), Some("D:/Projects/p/t.ts"));
         }
+    }
+
+    /// Windows' verbatim paths (a release unpacked for its check is canonicalized) are given to tsc
+    /// plainly: it can't open `//?/C:/…` (TS6053 "not found", found on CI's Windows runner).
+    #[test]
+    fn verbatim_paths_are_written_plainly() {
+        assert_eq!(plain_path("//?/C:/Users/x/a.ts"), "C:/Users/x/a.ts");
+        assert_eq!(plain_path(r"\\?\C:\Users\x\a.ts"), "C:/Users/x/a.ts");
+        assert_eq!(plain_path("//?/UNC/server/share/a.ts"), "//server/share/a.ts");
+        assert_eq!(plain_path("/home/p/a.ts"), "/home/p/a.ts");
+        assert_eq!(plain_path("D:/p/a.ts"), "D:/p/a.ts");
     }
 
     /// What it doesn't understand is shown, never dropped: an error when tsc failed.
