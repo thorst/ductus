@@ -115,7 +115,7 @@ environment: dev
 ⚠ adt-in: about.to: add the receiving system's `application` or `vendor`
   (warnings: `ductus impact` can't find what isn't named; `require_about: true` in ductus.yaml makes them errors)
 note: not checked against a database (set DUCTUS_DATABASE_URL): lane changes, retention changes
-✓ types: no errors
+✓ types: no errors (TypeScript 7.0.2)
 
 valid
 ```
@@ -473,7 +473,7 @@ environment: prod
 ✓ certificate `hospital-ca`: a CA
 ⚠ database: plain, no TLS: the server doesn't offer it (sslmode=prefer); whoever answers at its address is believed: add sslmode=verify-full to DUCTUS_DATABASE_URL (sslrootcert=/path/ca.pem for a private CA)
 ✓ database: new (no engine has run on it yet): no messages wait, no retention is applied
-✓ types: no errors
+✓ types: no errors (TypeScript 7.0.2)
 
 valid
 $ sudo systemctl enable --now ductus

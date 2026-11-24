@@ -1256,15 +1256,17 @@ fn remote_imports_are_refused() {
     assert!(err.contains("not allowed"), "{err}");
 }
 
+/// TypeScript 7's `tsc` (`scripts/dev/tsc.sh` puts it where tests find it), on files on disk with
+/// the SDK's typings: the SDK's HL7 types catch a mapping mistake at its line.
 #[test]
 fn type_check_catches_mapping_mistakes() {
     let rt = rt();
     let _guard = rt.enter();
     let types = rt.block_on(Isolate::generate_types()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
     let mut files = std::collections::BTreeMap::new();
-    files.insert("/p/.ductus/types/ductus-sdk.d.ts".to_string(), types);
     files.insert(
-        "/p/good.ts".to_string(),
+        "good.ts".to_string(),
         r#"import type { Message } from "@ductus/sdk";
 export function transform(msg: Message) {
   if (msg.PID[8] === "F") msg.PID[5][1] = msg.PID[5][1].toUpperCase();
@@ -1276,21 +1278,53 @@ export function transform(msg: Message) {
         .to_string(),
     );
     files.insert(
-        "/p/bad.ts".to_string(),
+        "lib/bad.ts".to_string(),
         r#"import type { Message } from "@ductus/sdk";
+import { helper } from "./helper.ts";
 export function transform(msg: Message) {
   const last: number = msg.PID[5][1];
   msg.PID[5][1].toUpperCasee();
-  return msg;
+  return helper(msg);
 }"#
         .to_string(),
     );
+    files.insert("lib/helper.ts".to_string(), "export const helper = <T>(m: T): T => m;\n".to_string());
+    let key = |name: &str| ductus_runtime_key(&dir.path().join(name));
+    let mut paths = Vec::new();
+    for (name, text) in &files {
+        let path = dir.path().join(name);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, text).unwrap();
+        paths.push(key(name));
+    }
 
-    let diagnostics = ductus_script::type_check(&files, &[]).unwrap();
+    let tsc = ductus_script::tsc::Tsc::find().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(tsc.version().unwrap(), ductus_script::tsc::TSC_VERSION);
+    let typings = key(".ductus/types/ductus-sdk.d.ts");
+    let diagnostics = tsc.check(&paths, &types, &typings).unwrap();
+    let bad = key("lib/bad.ts");
     let errors: Vec<_> = diagnostics.iter().filter(|d| d.is_error()).collect();
-    assert!(errors.iter().all(|d| d.file.as_deref() == Some("/p/bad.ts")), "unexpected errors: {errors:#?}");
-    assert!(errors.iter().any(|d| d.line == 3 && d.message.contains("not assignable to type 'number'")), "{errors:#?}");
-    assert!(errors.iter().any(|d| d.line == 4 && d.message.contains("toUpperCasee")), "{errors:#?}");
+    assert!(errors.iter().all(|d| d.file.as_deref() == Some(bad.as_str())), "unexpected errors: {errors:#?}");
+    assert!(
+        errors.iter().any(|d| (d.line, d.column) == (4, 9) && d.message.contains("not assignable to type 'number'")),
+        "{errors:#?}"
+    );
+    assert!(errors.iter().any(|d| d.line == 5 && d.message.contains("toUpperCasee")), "{errors:#?}");
+    assert_eq!(errors.len(), 2, "{errors:#?}");
+
+    // Nothing wrong: nothing said. And the folder was only read.
+    let good: Vec<String> = paths.iter().filter(|p| !p.ends_with("bad.ts")).cloned().collect();
+    assert!(tsc.check(&good, &types, &typings).unwrap().is_empty());
+    assert!(!dir.path().join("tsconfig.json").exists() && !dir.path().join(".ductus").exists());
+
+    // A broken compiler is an error, not "no errors".
+    let fake = ductus_script::tsc::Tsc { path: dir.path().join("lib/helper.ts") };
+    assert!(fake.check(&good, &types, &typings).is_err());
+}
+
+/// The project's keys: absolute, `/` (ductus_runtime::project::key).
+fn ductus_runtime_key(path: &std::path::Path) -> String {
+    std::path::absolute(path).unwrap().to_string_lossy().replace('\\', "/")
 }
 
 #[test]
@@ -1317,7 +1351,7 @@ export function transform(msg: Message) {
         "let cache = new Map();\nconst ok = 1;\nexport { cache, ok };".to_string(),
     );
 
-    let d = ductus_script::type_check(&files, &["/p/lib/shared.ts".to_string()]).unwrap();
+    let d = ductus_script::analyze_syntax(&files, &["/p/lib/shared.ts".to_string()], true).diagnostics;
     let lint = |code: u32| {
         d.iter().filter(move |x| x.code == code).map(|x| (x.file.clone().unwrap(), x.line)).collect::<Vec<_>>()
     };
@@ -1373,7 +1407,7 @@ db("test_only"); transform("x");"#
             .to_string(),
     );
 
-    let analysis = ductus_script::analyze(&files, &[], true).unwrap();
+    let analysis = ductus_script::analyze_syntax(&files, &[], true);
     let names = |entry: &str| {
         analysis.references_from(entry).iter().map(|r| format!("{} {}", r.kind, r.name)).collect::<Vec<_>>()
     };
@@ -1384,8 +1418,8 @@ db("test_only"); transform("x");"#
     assert_eq!(dynamic, [(8, false)], "a name that isn't written out is a warning: {:#?}", analysis.diagnostics);
     assert!(analysis.diagnostics.iter().all(|d| !d.is_error()), "{:#?}", analysis.diagnostics);
 
-    // Without diagnostics: the same references, no type checking.
-    let quick = ductus_script::analyze(&files, &[], false).unwrap();
+    // Without diagnostics: the same references.
+    let quick = ductus_script::analyze_syntax(&files, &[], false);
     assert!(quick.diagnostics.is_empty());
     assert_eq!(quick.references, analysis.references);
 }

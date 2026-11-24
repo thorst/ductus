@@ -378,9 +378,9 @@ $ ductus test --list --interface adt-in --json
 
 ### `ductus validate --json`
 
-One JSON document, after every check has run (validate takes about a second on a project of a few
-interfaces, most of it the TypeScript type check, and 4–7 s at a thousand on four cores, with
-every interface's code loaded at the same time as the type check). The text output is unchanged without
+One JSON document, after every check has run (validate takes about 0.3–0.6 s on a project of a few
+interfaces, and about 4 s at a thousand on four cores, most of it loading every interface's code;
+TypeScript's type check, about 0.2 s there, runs beside the loading). The text output is unchanged without
 `--json`. Here `adt-in`'s port was mistyped as 66610 and the secrets weren't set:
 
 ```text

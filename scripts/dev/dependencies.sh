@@ -32,7 +32,7 @@ fi
 
 LINUX="$work/x86_64-unknown-linux-gnu.txt" WINDOWS="$work/x86_64-pc-windows-msvc.txt" \
   POSTGRES=$(sed -n 's/^const VERSION: &str = "=\(.*\)";/\1/p' crates/ductus-cli/src/dev.rs) \
-  TYPESCRIPT=$(tr -d '\r\n' <vendor/typescript/VERSION) \
+  TYPESCRIPT=$(sed -n 's/^VERSION=//p' scripts/dev/tsc.sh) \
   V8_ENGINE="$v8_engine" \
   CARGO_LOCK_SHA=$(sha256sum Cargo.lock | cut -d' ' -f1) \
   NPM_LOCK_SHA=$(sha256sum ui/package-lock.json | cut -d' ' -f1) \
@@ -125,7 +125,7 @@ w("needs only the operating system's C library on Linux (glibc 2.34 or later).")
 w();
 w(`- Rust crates: **${rust.length}** (${rust.filter((c) => c.builds.has("linux")).length} in the Linux build, ${rust.filter((c) => c.builds.has("windows")).length} in the Windows build)`);
 w(`- npm packages in the web UI: **${npm.length}**`);
-w(`- TypeScript **${env.TYPESCRIPT}** (Microsoft, Apache-2.0), inside the binary: \`ductus validate\` and \`ductus types\` type-check interface code with it`);
+w(`- TypeScript **${env.TYPESCRIPT}** (Microsoft, Apache-2.0): its compiler, \`tsc\` (a native program), ships beside the binary in every package, and \`ductus validate\` type-checks interface code with it`);
 w();
 w("## The notable ones");
 w();
@@ -139,7 +139,7 @@ for (const [name, what] of notable) {
   const licenses = [...new Set(found.map((f) => f.license))].join("; ");
   w(`| \`${c.name}\`${c.git ? " (fork)" : ""} | ${versions} | ${cell(licenses)} | ${what} | ${where(c)} |`);
 }
-w(`| TypeScript | ${env.TYPESCRIPT} | Apache-2.0 | Type-checks interface code (\`validate\`, \`types\`); kept in \`vendor/typescript\` | Linux, Windows |`);
+w(`| TypeScript | ${env.TYPESCRIPT} | Apache-2.0 | Type-checks interface code (\`validate\`, and so the deploy gate): its \`tsc\` in a \`typescript\` folder beside the binary, pinned by \`scripts/dev/tsc.sh\` | Linux, Windows |`);
 for (const [name, what] of notableNpm) {
   for (const p of pkg(name)) w(`| \`${p.name}\` (npm) | ${p.version} | ${cell(p.license)} | ${what} | the web UI |`);
 }

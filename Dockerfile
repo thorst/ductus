@@ -25,6 +25,10 @@ WORKDIR /src
 # The Rust named in rust-toolchain.toml (pinned), in a layer of its own: kept until the file changes.
 COPY rust-toolchain.toml .
 RUN rustup toolchain install && rustc --version
+# TypeScript 7's compiler (`tsc` and its lib.*.d.ts), what `validate` type-checks with: pinned by
+# version and SHA-256 in tsc.sh, kept until the script changes. Shipped beside the binary below.
+COPY scripts/dev/tsc.sh /tmp/tsc.sh
+RUN bash /tmp/tsc.sh linux-x64 /typescript
 COPY . .
 COPY --from=ui /src/ui/dist ui/dist
 RUN --mount=type=cache,target=/root/.cargo/registry \
@@ -39,17 +43,19 @@ ARG VERSION=0.0.0-dev
 WORKDIR /src
 COPY packaging/linux packaging/linux
 COPY --from=engine /ductus /ductus
+COPY --from=engine /typescript /typescript
 ENV ARCH=amd64 VERSION=${VERSION}
 RUN mkdir /out \
     && nfpm package --config packaging/linux/nfpm.yaml --packager deb --target /out/ \
     && nfpm package --config packaging/linux/nfpm.yaml --packager rpm --target /out/
 
-# The portable archive (ductus-<version>-linux-x64.tar.gz): the same binary, the license, and the
-# unit and settings file as samples; for `ductus upgrade --check` before installing, and servers
-# without a package manager's access.
+# The portable archive (ductus-<version>-linux-x64.tar.gz): the same binary with TypeScript's
+# compiler in `typescript/` beside it, the license, and the unit and settings file as samples; for
+# `ductus upgrade --check` before installing, and servers without a package manager's access.
 FROM debian:trixie-slim AS archive-build
 ARG VERSION=0.0.0-dev
 COPY --from=engine /ductus /a/ductus-${VERSION}/ductus
+COPY --from=engine /typescript /a/ductus-${VERSION}/typescript
 COPY LICENSE packaging/archive/README.md packaging/linux/ductus.service packaging/linux/ductus.env /a/ductus-${VERSION}/
 RUN mkdir /out && tar -C /a --owner=0 --group=0 -czf /out/ductus-${VERSION}-linux-x64.tar.gz ductus-${VERSION}
 
@@ -64,6 +70,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates
     && rm -rf /var/lib/apt/lists/* \
     && useradd --system --uid 10001 --user-group --home-dir /project --no-create-home --shell /usr/sbin/nologin ductus
 COPY --from=engine /ductus /usr/local/bin/ductus
+# TypeScript's compiler, where ductus looks from /usr/local/bin (`validate`, the deploy gate).
+COPY --from=engine /typescript /usr/local/lib/ductus/typescript
 ARG VERSION=dev
 LABEL org.opencontainers.image.title="Ductus" \
       org.opencontainers.image.description="Healthcare integration engine (development build: not for production before v1.0)" \

@@ -1127,8 +1127,6 @@ async fn check_project(
     read_only: bool,
 ) -> Result<()> {
     let types = if read_only { Isolate::generate_types().await? } else { write_types(root).await? };
-    let mut files = BTreeMap::new();
-    files.insert(key(&root.join(TYPES_FILE)), types);
 
     report.say(format!("environment: {env}"));
     let env = match Environment::load(root, env) {
@@ -1231,16 +1229,21 @@ async fn check_project(
 
     let interfaces = interface_dirs(root, &env)?;
     let places = Places::new(root, &interfaces);
-    // The type check (~2.5 s alone at a thousand interfaces, reading every .ts file first) on a
-    // thread of its own while the code loads on others.
+    // The analysis (what code names, imports and exports, the lints) and TypeScript's `tsc` (a
+    // process: ~0.2 s at a thousand interfaces) side by side, on threads of their own while the
+    // code loads on others.
     let type_check = {
         let (root, dirs) = (root.to_path_buf(), interfaces.iter().map(|i| i.dir.clone()).collect::<Vec<_>>());
-        std::thread::spawn(move || -> Result<ductus_script::Analysis> {
-            let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
-            let _inside = runtime.enter(); // V8 posts its delayed tasks to the runtime
+        std::thread::spawn(move || -> Result<(ductus_script::Analysis, Types)> {
             let dirs: Vec<&Path> = dirs.iter().map(PathBuf::as_path).collect();
+            let mut files = BTreeMap::new();
             let shared = ductus_runtime::project::project_files(&root, &dirs, &mut files)?;
-            ductus_script::analyze(&files, &shared, true)
+            let keys: Vec<String> = files.keys().cloned().collect();
+            let typings_key = key(&root.join(TYPES_FILE));
+            let tsc = std::thread::spawn(move || Types::check(&keys, &types, &typings_key));
+            let analysis = ductus_script::analyze_syntax(&files, &shared, true);
+            let types = tsc.join().map_err(|_| anyhow::anyhow!("the type checker's thread panicked"))?;
+            Ok((analysis, types))
         })
     };
     // Each interface's code loaded in an isolate of its own, spread over threads. Not shared as a
@@ -1321,7 +1324,7 @@ async fn check_project(
         report.add(finding);
     }
 
-    let analysis = type_check.join().map_err(|_| anyhow::anyhow!("the type checker's thread panicked"))??;
+    let (analysis, types) = type_check.join().map_err(|_| anyhow::anyhow!("the type checker's thread panicked"))??;
     if report.json() {
         add_uses(root, report, &places, configs(), &analysis);
     }
@@ -1532,14 +1535,62 @@ async fn check_project(
         ),
     }
 
-    let diagnostics = &analysis.diagnostics;
-    for d in diagnostics {
-        report.add(Finding::diagnostic(d, root));
-    }
-    if diagnostics.is_empty() {
-        report.ok("types: no errors");
+    // TypeScript's errors, then the lints; never "valid" without a type check.
+    match types {
+        Types::Checked { version, diagnostics } => {
+            for d in &diagnostics {
+                report.add(Finding::diagnostic(d, root));
+            }
+            for d in &analysis.diagnostics {
+                report.add(Finding::diagnostic(d, root));
+            }
+            if !diagnostics.iter().any(|d| d.is_error()) {
+                report.ok(format!("types: no errors (TypeScript {version})"));
+            }
+        }
+        Types::NotFound(missing) => {
+            for d in &analysis.diagnostics {
+                report.add(Finding::diagnostic(d, root));
+            }
+            let hint = format!(
+                "install the whole package (its `typescript` folder beside ductus), or set {}",
+                ductus_script::tsc::TSC_VARIABLE
+            );
+            report.add(Finding::error("DUC126", format!("types: not checked: {missing}")).hint(hint));
+        }
+        Types::Failed(e) => {
+            for d in &analysis.diagnostics {
+                report.add(Finding::diagnostic(d, root));
+            }
+            report.add(Finding::error("DUC127", format!("types: not checked: {e:#}")));
+        }
     }
     Ok(())
+}
+
+/// What TypeScript's `tsc` said about the project's code.
+enum Types {
+    /// By `tsc` of `version`: its errors (none: the code type-checks).
+    Checked { version: String, diagnostics: Vec<ductus_script::Diagnostic> },
+    /// No `tsc` where ductus looks for one.
+    NotFound(ductus_script::tsc::NotFound),
+    /// It's there but didn't run, or crashed.
+    Failed(anyhow::Error),
+}
+
+impl Types {
+    /// `files` (the project's, on disk) with the SDK's `typings` (named `typings_key` in findings).
+    fn check(files: &[String], typings: &str, typings_key: &str) -> Types {
+        let tsc = match ductus_script::tsc::Tsc::find() {
+            Ok(tsc) => tsc,
+            Err(missing) => return Types::NotFound(missing),
+        };
+        let checked = tsc.version().and_then(|version| Ok((version, tsc.check(files, typings, typings_key)?)));
+        match checked {
+            Ok((version, diagnostics)) => Types::Checked { version, diagnostics },
+            Err(e) => Types::Failed(e),
+        }
+    }
 }
 
 /// Each function the engine calls, where interface.yaml names it and where its code declares it

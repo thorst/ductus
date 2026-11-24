@@ -477,7 +477,7 @@ $ curl -sS -X POST -H "Authorization: Bearer $TOKEN" "$DUCTUS_URL/api/v1/release
         },
         "validate": {
             "ok": true,
-            "output": "environment: prod\n\u2713 release-demo-adt: config and code load\n\u26a0 release-demo-adt: about.from: add the sending system's `application` or `vendor`\n\u26a0 release-demo-adt: about.to: add the receiving system's `application` or `vendor`\n  (warnings: `ductus impact` can't find what isn't named; `require_about: true` in ductus.yaml makes them errors)\n\u2713 database: TLS 1.3, not verified (sslmode=prefer): the server's certificate isn't checked (on this machine)\n\u2713 database: every interface's lanes reach the messages waiting for it\n\u2713 types: no errors\n\nvalid\n"
+            "output": "environment: prod\n\u2713 release-demo-adt: config and code load\n\u26a0 release-demo-adt: about.from: add the sending system's `application` or `vendor`\n\u26a0 release-demo-adt: about.to: add the receiving system's `application` or `vendor`\n  (warnings: `ductus impact` can't find what isn't named; `require_about: true` in ductus.yaml makes them errors)\n\u2713 database: TLS 1.3, not verified (sslmode=prefer): the server's certificate isn't checked (on this machine)\n\u2713 database: every interface's lanes reach the messages waiting for it\n\u2713 types: no errors (TypeScript 7.0.2)\n\nvalid\n"
         }
     }
 }
@@ -498,7 +498,7 @@ per environment, `GET /releases/{id}` every one with its report) and is in the a
 > | Part | Time | What it uses |
 > |---|---|---|
 > | The release read back from the database, its id checked | a few tenths of a second | one CPU, a few database reads |
-> | `validate`: every interface's code loaded, the type check, the database checks | ~5 s, every check | half the CPUs, ~290 MB, read-only queries |
+> | `validate`: every interface's code loaded, the type check, the database checks | ~4–5 s, every check | half the CPUs, ~110 MB (and TypeScript's `tsc`, ~95 MB for its 0.2 s), read-only queries |
 > | The tests of what the release changes there | none to ~4 s | every CPU |
 > | The report recorded | milliseconds | one row, one audit row |
 >

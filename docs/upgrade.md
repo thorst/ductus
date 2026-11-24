@@ -280,10 +280,11 @@ password account, Restart Manager): [Windows installer](install/windows.md#upgra
 
 ### The portable archive
 
-Replace the program and hand over, as the package would:
+Replace the program and its TypeScript compiler, and hand over, as the package would:
 
 ```sh
 sudo install -m 0755 ductus-0.6.1/ductus /usr/bin/ductus
+sudo rm -rf /usr/lib/ductus/typescript && sudo cp -r ductus-0.6.1/typescript /usr/lib/ductus/
 sudo systemctl reload ductus
 ```
 

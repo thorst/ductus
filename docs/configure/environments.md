@@ -177,7 +177,7 @@ environment: prod
 ⚠ interfaces/adt-in/route.ts:4:3 console.log(): environment `prod` writes it to the log for every message this code runs for (`console:` isn't set, so `info`); remove it once you've seen what you needed, or set `console: warn` (or `off`) in environments/prod.yaml
 ⚠ interfaces/adt-in/route.ts:5:32 console.warn(): environment `prod` writes it to the log for every message this code runs for (`console:` isn't set, so `info`); remove it once you've seen what you needed, or set `console: warn` (or `off`) in environments/prod.yaml
 note: not checked against a database (set DUCTUS_DATABASE_URL): lane changes, retention changes
-✓ types: no errors
+✓ types: no errors (TypeScript 7.0.2)
 
 valid
 ```

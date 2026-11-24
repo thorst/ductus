@@ -38,6 +38,7 @@ nothing is configured yet, and without a database it would stop at once.
 | Path | What |
 |---|---|
 | `C:\Program Files\Ductus\ductus.exe` | The engine and its command line (the web UI is inside it). The folder is on the system `PATH`. |
+| `C:\Program Files\Ductus\typescript\` | TypeScript 7's compiler (`tsc.exe` and the `lib.*.d.ts` files it reads, Apache-2.0): what `ductus validate` and the deploy gate type-check interface code with. |
 | `C:\ProgramData\Ductus\ductus.env` | Settings (`NAME=value` lines): the database URL, the project, the environment, the secrets key. Written once as a template; never overwritten. |
 | `C:\ProgramData\Ductus\project\` | The project (a Git clone, usually). |
 | `C:\ProgramData\Ductus\logs\` | `ductus.<date>.log`, a file a day, the last 14 kept. |

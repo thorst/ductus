@@ -5,7 +5,7 @@
 //! No type checker. A name is followed through imports, aliases, namespace imports and re-exports
 //! to where it's declared; deno_ast's scope analysis tells a local `db` (or `console`) from the
 //! SDK's (or the global one). So nothing here depends on a TypeScript compiler's API, and it runs
-//! without V8. Type errors are the type checker's (`check.rs`).
+//! without V8. Type errors are TypeScript's own `tsc`'s (`tsc.rs`).
 
 use deno_ast::swc::ast::{self, Expr, Id};
 use deno_ast::swc::common::{BytePos, Spanned, SyntaxContext};

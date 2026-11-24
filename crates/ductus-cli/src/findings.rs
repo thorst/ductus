@@ -96,9 +96,12 @@ impl Finding {
 
     /// A finding of the TypeScript checker or of our lints in it (`DX`), printed as it always was.
     pub fn diagnostic(d: &ductus_script::Diagnostic, root: &Path) -> Self {
-        // Codes 90000+ are Ductus lints; below that, TypeScript's own.
+        // Codes 90000+ are Ductus lints; 0 a line of tsc's that wasn't understood (shown as it is);
+        // the rest TypeScript's own.
         let (code, source) = if d.code >= 90_000 {
             (format!("DX{}", d.code - 90_000), Source::Ductus)
+        } else if d.code == 0 {
+            ("DUC127".to_string(), Source::Ductus)
         } else {
             (format!("TS{}", d.code), Source::Typescript)
         };
@@ -449,6 +452,18 @@ pub const CODES: &[Code] = &[
         "error",
         "An interface's code doesn't load",
         "Its code (a destination's own `script`, or the interface's) doesn't load the way the engine loads it, or doesn't export the function a destination runs (`transform`, or the one `transform:` names): the place is the destination's `transform` or `script`, else the interface's `script`.",
+    ),
+    code(
+        "DUC126",
+        "error",
+        "TypeScript's compiler isn't installed",
+        "`validate` type-checks with TypeScript 7's `tsc`, which every package installs in a `typescript` folder beside the `ductus` program (`/usr/lib/ductus/typescript` for the .deb and .rpm); the message lists where it looked. Without it nothing is called valid: install the whole package (copying only the program leaves it behind), or set `DUCTUS_TSC` to a TypeScript 7 `tsc`. A build from source gets it with `bash scripts/dev/tsc.sh`.",
+    ),
+    code(
+        "DUC127",
+        "error",
+        "TypeScript's compiler failed",
+        "Its `tsc` was found but didn't run, crashed, or printed a line `validate` doesn't read (shown as it is, never dropped: an error when `tsc` failed, else a note). Run the `tsc` the message names with `--version` to see it work; a `tsc` given in `DUCTUS_TSC` must be TypeScript 7's.",
     ),
     code(
         "DUC130",

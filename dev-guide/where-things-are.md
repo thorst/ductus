@@ -77,5 +77,6 @@ docs/                  architecture.md, nuances/ (one page per subject, index.md
                        isn't described), shared-pool.md
 examples/adt-relay     example project
 examples/guides        the docs' "Write interfaces" project (routes, mappings, FHIR, X12, CSV, XML, lookups, tests)
-vendor/typescript      TypeScript 6.0.3 compiler for `ductus validate`
+scripts/dev/tsc.sh     TypeScript 7's native `tsc` for `ductus validate` (pinned + SHA-256; into the per-user cache, or a
+                       package's `typescript/` folder); ductus-script/src/tsc.rs finds it, runs it, parses its output
 ```

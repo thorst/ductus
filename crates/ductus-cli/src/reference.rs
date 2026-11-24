@@ -858,8 +858,10 @@ Codes are stable: a check keeps its code, a new check gets a new one, and a reti
 reused. Three families come from elsewhere:
 
 - **`TS` followed by a number** (`TS2322`): TypeScript's own errors, with `source: typescript` in \
-the JSON. VS Code's TypeScript server shows them as you type; `validate` checks with the TypeScript \
-version it carries.
+the JSON. VS Code's TypeScript server shows them as you type; `validate` checks with the \
+TypeScript 7 `tsc` installed beside `ductus` (the same on every machine, the deploy gate's \
+included), and its last line names the version: `✓ types: no errors (TypeScript 7.0.2)`. Without \
+that `tsc` the project isn't called valid (`DUC126`).
 - **`DX1` to `DX5`**: Ductus's checks of interface code: writing to the global scope (`DX1`), \
 changing built-in prototypes (`DX2`), mutable state in a shared library (`DX3`) ([the shared \
 pool](../shared-pool.md)), a database or API name computed at run time (`DX4`) \

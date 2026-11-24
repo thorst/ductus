@@ -7,6 +7,7 @@ A development build: not for production before v1.0.
 | File | What |
 |---|---|
 | `ductus` (`ductus.exe` on Windows) | the engine and its command line; the web UI is inside it |
+| `typescript/` | TypeScript 7's compiler (`tsc` and the `lib.*.d.ts` it reads), which `ductus validate` type-checks with: keep it beside `ductus` (without it `validate` says DUC126 and calls nothing valid) |
 | `LICENSE` | Apache-2.0 |
 | `ductus.service`, `ductus.env` (Linux) | the systemd unit and settings file the packages install, as samples |
 
@@ -36,6 +37,7 @@ its user and its folders, and upgrade in place. Without them (Linux):
 
 ```sh
 sudo install -m 0755 ductus /usr/bin/ductus
+sudo install -d /usr/lib/ductus && sudo cp -r typescript /usr/lib/ductus/   # ductus finds it there from /usr/bin
 sudo useradd --system --home-dir /var/lib/ductus --create-home --shell /usr/sbin/nologin ductus
 sudo install -d -m 0755 /etc/ductus
 sudo install -m 0640 -g ductus ductus.env /etc/ductus/ductus.env   # then edit it

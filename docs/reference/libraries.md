@@ -10,7 +10,7 @@ needs only the operating system's C library on Linux (glibc 2.34 or later).
 
 - Rust crates: **720** (693 in the Linux build, 704 in the Windows build)
 - npm packages in the web UI: **102**
-- TypeScript **6.0.3** (Microsoft, Apache-2.0), inside the binary: `ductus validate` and `ductus types` type-check interface code with it
+- TypeScript **7.0.2** (Microsoft, Apache-2.0): its compiler, `tsc` (a native program), ships beside the binary in every package, and `ductus validate` type-checks interface code with it
 
 ## The notable ones
 
@@ -37,7 +37,7 @@ needs only the operating system's C library on Linux (glibc 2.34 or later).
 | `gix` | 0.90.0 | MIT OR Apache-2.0 | Reads the project's git commit at each start (gitoxide; no `git` needed on the server) | Linux, Windows |
 | `clap` | 4.6.7 | MIT OR Apache-2.0 | The `ductus` command line | Linux, Windows |
 | `windows-service` | 0.8.1 | MIT OR Apache-2.0 | Runs as a Windows service | Windows |
-| TypeScript | 6.0.3 | Apache-2.0 | Type-checks interface code (`validate`, `types`); kept in `vendor/typescript` | Linux, Windows |
+| TypeScript | 7.0.2 | Apache-2.0 | Type-checks interface code (`validate`, and so the deploy gate): its `tsc` in a `typescript` folder beside the binary, pinned by `scripts/dev/tsc.sh` | Linux, Windows |
 | `react` (npm) | 19.3.0 | MIT | The web UI's components | the web UI |
 | `react-dom` (npm) | 19.3.0 | MIT | Renders them in the browser | the web UI |
 | `@tanstack/react-router` (npm) | 1.170.41 | MIT | The web UI's pages and links | the web UI |

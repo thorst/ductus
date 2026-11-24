@@ -1581,6 +1581,68 @@ fn validate_json_places_each_finding_in_its_file() {
     assert!(note.get("file").is_none(), "{note}");
 }
 
+/// `validate` type-checks with TypeScript 7's `tsc` and says which version did; `DUCTUS_TSC` picks
+/// another; with none where it looks, the project isn't valid (DUC126, saying where it looked), and
+/// a `tsc` that doesn't work isn't "no errors" (DUC127). A shared file nothing imports is checked
+/// too, and the project folder is only read.
+#[test]
+fn validate_type_checks_with_typescript_7_and_says_so() {
+    let interface = "name: a\nsource: { mllp: { port: 7001 } }\nscript: t.ts\nabout: { from: { application: EHR }, to: { application: Lab } }\ndestinations: { lab: { mllp: { host: localhost, port: 7002 } } }\n";
+    let dir = project(&[
+        ("interfaces/a/interface.yaml", interface),
+        (
+            "interfaces/a/t.ts",
+            "import type { Message } from \"@ductus/sdk\";\nexport function transform(m: Message) {\n  return m;\n}\n",
+        ),
+    ]);
+    let run = |tsc: Option<&Path>, args: &[&str]| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_ductus"));
+        command.args(args).current_dir(dir.path()).env_remove("DUCTUS_DATABASE_URL");
+        match tsc {
+            Some(path) => command.env("DUCTUS_TSC", path),
+            None => command.env_remove("DUCTUS_TSC"),
+        };
+        let out = command.output().unwrap();
+        (
+            out.status.success(),
+            format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+        )
+    };
+    let (ok, out) = run(None, &["validate"]);
+    assert!(ok, "{out}");
+    let version = ductus_script::tsc::TSC_VERSION;
+    assert!(out.contains(&format!("✓ types: no errors (TypeScript {version})")), "{out}");
+
+    // A shared file nothing imports, with a type error: still checked.
+    std::fs::create_dir_all(dir.path().join("lib")).unwrap();
+    std::fs::write(dir.path().join("lib/unused.ts"), "export const n: number = \"x\";\n").unwrap();
+    let (ok, out) = run(None, &["validate"]);
+    assert!(!ok && out.contains("lib/unused.ts:1:14 error TS2322"), "{out}");
+    assert!(!out.contains("types: no errors"), "{out}");
+    std::fs::remove_file(dir.path().join("lib/unused.ts")).unwrap();
+
+    // Not found: where it looked, and not valid.
+    let nowhere = dir.path().join("no-such-tsc");
+    let (ok, out) = run(Some(&nowhere), &["validate", "--json"]);
+    assert!(!ok, "{out}");
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap_or_else(|e| panic!("{e}: {out}"));
+    let missing = doc["findings"].as_array().unwrap().iter().find(|f| f["code"] == "DUC126").expect(&out).clone();
+    assert_eq!(missing["severity"], "error");
+    let message = missing["message"].as_str().unwrap();
+    assert!(message.contains("DUCTUS_TSC names") && message.contains("no-such-tsc"), "{message}");
+
+    // Found but not a compiler (a file that isn't a program): it failed, not "no errors".
+    let (ok, out) = run(Some(&dir.path().join("interfaces/a/t.ts")), &["validate"]);
+    assert!(!ok && out.contains("types: not checked"), "{out}");
+    assert!(!out.contains("types: no errors"), "{out}");
+
+    // Nothing written into the project beyond what `ductus types` writes.
+    let mut written: Vec<String> =
+        std::fs::read_dir(dir.path()).unwrap().map(|e| e.unwrap().file_name().to_string_lossy().into_owned()).collect();
+    written.sort();
+    assert_eq!(written, [".ductus", ".vscode", "interfaces", "lib", "tsconfig.json"]);
+}
+
 /// A key path that reads nothing in any of the interface's fixtures is told before deploy (DUC207),
 /// at the key in interface.yaml; fixtures in another format (an expected output) don't count, a
 /// key one fixture has is fine, and an interface without fixtures isn't judged.

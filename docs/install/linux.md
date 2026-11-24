@@ -41,6 +41,7 @@ configured yet. It prints what to do next, which is the rest of this page.
 | Path | What |
 |---|---|
 | `/usr/bin/ductus` | The engine and its command line (the web UI is inside it). |
+| `/usr/lib/ductus/typescript/` | TypeScript 7's compiler (`tsc` and the `lib.*.d.ts` files it reads, Apache-2.0): what `ductus validate` and the deploy gate type-check interface code with. |
 | `/usr/lib/systemd/system/ductus.service` | The service: runs as `ductus`, sandboxed (below). |
 | `/etc/ductus/ductus.env` | Settings: the database URL, the project, the environment, the secrets key. Readable by root and the `ductus` group only. An upgrade never replaces it. |
 | `/var/lib/ductus` | The service's home and the only place it can write. The project goes in `/var/lib/ductus/project`. |

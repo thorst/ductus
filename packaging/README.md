@@ -3,8 +3,10 @@
 How Ductus is installed: a container image, Linux packages with a systemd service, and a Windows
 MSI with a Windows service. Every one is a development build until v1.0.
 
-The engine is one binary (`ductus`, the web UI inside it) plus PostgreSQL, which is never
-bundled: it's the DBA's, on the same server or another, and so are its backups (pgBackRest or WAL
+The engine is one binary (`ductus`, the web UI inside it), with TypeScript 7's compiler in a
+`typescript` folder beside it (`tsc` and its `lib.*.d.ts`, ~27 MB, ~10 MB compressed: what
+`ductus validate` and the deploy gate type-check with; `run` doesn't need it), plus PostgreSQL,
+which is never bundled: it's the DBA's, on the same server or another, and so are its backups (pgBackRest or WAL
 archiving). Everything the engine maintains (partitions, retention, cleanup) runs inside it: no
 cron jobs.
 
@@ -52,12 +54,14 @@ new version, and which settings it deprecates. Exit 1 on anything that would ref
 
 ## Portable archive
 
-`ductus-<version>-linux-x64.tar.gz` (the binary, `LICENSE`, the unit and `ductus.env` as samples)
-and `ductus-<version>-windows-x64.zip` (`ductus.exe`, `LICENSE`): the program without an installer,
+`ductus-<version>-linux-x64.tar.gz` (the binary, `typescript/`, `LICENSE`, the unit and
+`ductus.env` as samples) and `ductus-<version>-windows-x64.zip` (`ductus.exe`, `typescript\`,
+`LICENSE`): the program without an installer,
 for `upgrade --check` before installing and for servers that can't use the packages. Its
 `README.md` is `packaging/archive/README.md`. The `.tar.gz` comes out of the same Dockerfile build
 as the packages (`--target packages`); the zip from `packaging/windows/archive.ps1 -Binary
-ductus.exe -Version 0.6.0-dev.20261028`. CI builds both, runs each one's `upgrade --check`
+ductus.exe -TypeScript <dir> -Version 0.6.0-dev.20261028` (`<dir>`: `bash scripts/dev/tsc.sh
+win32-x64 <dir>`). CI builds both, runs each one's `upgrade --check`
 (`demo-packages.sh`, the `windows` job) and keeps them as artifacts; releases attach them
 (below).
 
@@ -86,7 +90,8 @@ for its version, the docs zip's links, the SBOMs, `SHA256SUMS`): `scripts/dev/re
 The tools a rebuild must find again are pinned: Rust in `rust-toolchain.toml` (CI, the Dockerfile
 and every developer's cargo), nfpm by version and digest in the Dockerfile, WiX by version in CI,
 mdBook/lychee/Pagefind in `scripts/dev/docs-tools.sh`, cargo-cyclonedx in
-`scripts/dev/release-tools.sh`. Each is bumped on purpose, in a commit of its own.
+`scripts/dev/release-tools.sh`; TypeScript's `tsc`, which every package ships, by version and
+SHA-256 per platform in `scripts/dev/tsc.sh`. Each is bumped on purpose, in a commit of its own.
 
 ## Container image
 
@@ -95,8 +100,8 @@ docker build -t ductus:dev .
 PROJECT=$PWD/examples/adt-relay docker compose -f packaging/docker/compose.yaml up
 ```
 
-- Debian 13 slim, the binary at `/usr/local/bin/ductus` (the same one as in the packages), CA
-  certificates; runs as user `ductus` (uid 10001), never root.
+- Debian 13 slim, the binary at `/usr/local/bin/ductus` (the same one as in the packages),
+  TypeScript's compiler at `/usr/local/lib/ductus/typescript`, CA certificates; runs as user `ductus` (uid 10001), never root.
 - The project is mounted read-only at `/project`. From v1.0, production images will be built
   `FROM` the engine image with the project inside (an image per release of your interfaces).
 - The API listens on `0.0.0.0:7700` inside the container; publish it to `127.0.0.1` unless a TLS
@@ -120,6 +125,7 @@ becomes `0.5.0~dev.20261009`, which sorts before `0.5.0`.
 | Path | What |
 |---|---|
 | `/usr/bin/ductus` | the engine and CLI |
+| `/usr/lib/ductus/typescript/` | TypeScript 7's `tsc` and its `lib.*.d.ts` (`validate`, the deploy gate) |
 | `/usr/lib/systemd/system/ductus.service` | the service (runs as `ductus`, hardened: writes only `/var/lib/ductus`) |
 | `/etc/ductus/ductus.env` | settings: root and the `ductus` group only; an upgrade never replaces it |
 | `/var/lib/ductus` | the service's home; the project goes in `/var/lib/ductus/project` |
@@ -156,7 +162,7 @@ notepad C:\ProgramData\Ductus\ductus.env             # DUCTUS_DATABASE_URL at le
 Start-Service Ductus                                   # then Restart-Service after edits
 ```
 
-Built by `packaging/windows/build.ps1` (WiX v5: `dotnet tool install --global wix --version 5.0.2`,
+Built by `packaging/windows/build.ps1 -Binary ductus.exe -TypeScript <dir> -Version …` (WiX v5: `dotnet tool install --global wix --version 5.0.2`,
 then `wix extension add --global WixToolset.Util.wixext/5.0.2`) from a release `ductus.exe`
 (`cargo build --release -p ductus`, MSVC). Unsigned for now: SmartScreen warns on a downloaded
 installer; a code-signing certificate is a later decision.
@@ -164,6 +170,7 @@ installer; a code-signing certificate is a later decision.
 | Path | What |
 |---|---|
 | `C:\Program Files\Ductus\ductus.exe` | the engine and CLI; the folder is on the system PATH |
+| `C:\Program Files\Ductus\typescript\` | TypeScript 7's `tsc.exe` and its `lib.*.d.ts` (`validate`, the deploy gate) |
 | `C:\ProgramData\Ductus\ductus.env` | settings (the variables above; `NAME=value` lines): the installer writes a template once and never overwrites it |
 | `C:\ProgramData\Ductus\project\` | the project (a Git clone) |
 | `C:\ProgramData\Ductus\logs\` | `ductus.<date>.log`, daily, the last 14 kept |

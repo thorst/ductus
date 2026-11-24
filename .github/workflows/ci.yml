@@ -90,6 +90,11 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # TypeScript 7's compiler, which `validate` type-checks with (pinned; ~10 MB from npm), into
+      # the per-user cache where a build from source looks for it.
+      - name: TypeScript's tsc (scripts/dev/tsc.sh)
+        run: bash scripts/dev/tsc.sh
+
       # `ductus dev`'s Postgres binaries (Maven Central, ~60 MB), kept between runs; a change to
       # dev.rs (its pinned version) fetches them again.
       - uses: actions/cache@v6
@@ -347,6 +352,11 @@ jobs:
       - name: Build the tests
         run: cargo test --release --locked --no-run
 
+      # TypeScript 7's tsc.exe, into %LOCALAPPDATA%\ductus where a build from source looks for it.
+      - name: TypeScript's tsc (scripts/dev/tsc.sh)
+        shell: bash
+        run: bash scripts/dev/tsc.sh
+
       - uses: actions/cache@v6
         with:
           path: ~\AppData\Local\ductus\postgres
@@ -421,23 +431,29 @@ jobs:
       - name: Build
         run: cargo build --release --locked -p ductus
 
+      # TypeScript 7's tsc.exe and its lib.*.d.ts (pinned), which the installer and the zip ship
+      # beside ductus.exe: TSC_DIR for the steps below.
+      - name: TypeScript's tsc for the packages (scripts/dev/tsc.sh)
+        shell: bash
+        run: echo "TSC_DIR=$(bash scripts/dev/tsc.sh win32-x64 "$RUNNER_TEMP/typescript")" >> "$GITHUB_ENV"
+
       - name: Installer (WiX)
         shell: pwsh
         run: |
           dotnet tool install --global wix --version 5.0.2
           wix extension add --global WixToolset.Util.wixext/5.0.2
-          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version ${{ env.RELEASE_VERSION || '0.6.0-ci' }} -Out dist
+          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -TypeScript $env:TSC_DIR -Version ${{ env.RELEASE_VERSION || '0.6.0-ci' }} -Out dist
           # A second build (its own ProductCode): the demo's upgrades go from one to the other, a
           # real major upgrade. The same file again would only be a maintenance run.
-          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version ${{ env.RELEASE_VERSION || '0.6.0-ci' }} -Out dist-upgrade
+          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -TypeScript $env:TSC_DIR -Version ${{ env.RELEASE_VERSION || '0.6.0-ci' }} -Out dist-upgrade
           # A build numbered as the next minor version (the same program): the demo upgrades to it
           # and goes back, as a site would after an upgrade it regrets.
           $v = [version](("${{ env.RELEASE_VERSION || '0.6.0-ci' }}" -split '-')[0])
-          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -Version "$($v.Major).$($v.Minor + 1).0" -Out dist-newer
+          ./packaging/windows/build.ps1 -Binary target/release/ductus.exe -TypeScript $env:TSC_DIR -Version "$($v.Major).$($v.Minor + 1).0" -Out dist-newer
 
       - name: Portable archive (ductus-<version>-windows-x64.zip)
         shell: pwsh
-        run: ./packaging/windows/archive.ps1 -Binary target/release/ductus.exe -Version ${{ env.RELEASE_VERSION || '0.6.0-ci' }} -Out dist
+        run: ./packaging/windows/archive.ps1 -Binary target/release/ductus.exe -TypeScript $env:TSC_DIR -Version ${{ env.RELEASE_VERSION || '0.6.0-ci' }} -Out dist
 
       - name: A Postgres for the service (ductus dev --database-only)
         shell: pwsh

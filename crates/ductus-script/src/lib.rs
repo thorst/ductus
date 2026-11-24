@@ -8,15 +8,14 @@
 //! a runaway interface is stopped with a [`Runaway`] error instead of stalling the thread.
 
 mod analysis;
-mod check;
 pub mod errors;
 mod guard;
 mod inspect;
 mod loader;
 mod ops;
+pub mod tsc;
 
 pub use analysis::{Analysis, ConsoleCall, Diagnostic, Export, ResourceReference, Wait, analyze_syntax};
-pub use check::{analyze, type_check};
 pub use guard::{Cause, DebugSwitch};
 pub use inspect::{FromIsolate, InspectorSessions, ToIsolate};
 pub use ops::{BoxFuture, FetchRequest, FetchResponse, KILL, QUARANTINE, Services, TRANSIENT};

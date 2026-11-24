@@ -61,8 +61,8 @@ applies it in place where it can
 ([deploying](../nuances/upgrades.md#deploying-project-changes-systemctl-reload-level-1)).
 
 `ductus validate` reads it the same way without starting anything, for an environment
-(`--env prod`), and also type-checks every interface's code with the TypeScript compiler built
-into the engine. Run it before every commit, and in CI; with `DUCTUS_DATABASE_URL` set it also
+(`--env prod`), and also type-checks every interface's code with TypeScript 7's compiler, which
+ships beside the engine in every package. Run it before every commit, and in CI; with `DUCTUS_DATABASE_URL` set it also
 checks the project against the database, reading only. `ductus test` runs every interface's
 tests.
 

@@ -21,6 +21,11 @@ contents:
   - src: /ductus # where the Dockerfile puts the binary (nfpm doesn't expand variables here)
     dst: /usr/bin/ductus
     file_info: { mode: 0755 }
+  # TypeScript 7's compiler (`tsc` and its lib.*.d.ts), which `validate` and the deploy gate
+  # type-check with: ductus looks for it in ../lib/ductus/typescript from its own folder.
+  - src: /typescript
+    dst: /usr/lib/ductus/typescript
+    type: tree
   - src: packaging/linux/ductus.service
     dst: /usr/lib/systemd/system/ductus.service
     file_info: { mode: 0644 }

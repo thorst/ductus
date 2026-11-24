@@ -14,6 +14,7 @@ and upgrade in place with no connection refused.
 | File | What |
 |---|---|
 | `ductus` (`ductus.exe`) | The engine and its command line; the web UI is inside it. |
+| `typescript/` | TypeScript 7's compiler (`tsc`, a native program, and the `lib.*.d.ts` files it reads), Apache-2.0: what `ductus validate`, and so `upgrade --check` and the deploy gate, type-check interface code with. `ductus` finds it beside itself: keep the two together ([nuance](../nuances/upgrades.md#the-typescript-folder-goes-wherever-the-program-goes-level-1)). About 27 MB. |
 | `LICENSE` | Apache-2.0. |
 | `README.md` | What this page says, in short. |
 | `ductus.service`, `ductus.env` (Linux only) | The systemd unit and settings file the packages install, as samples. |
@@ -59,6 +60,7 @@ Prefer the packages. Without them, on Linux, the archive's samples give the same
 
 ```sh
 sudo install -m 0755 ductus /usr/bin/ductus
+sudo install -d /usr/lib/ductus && sudo cp -r typescript /usr/lib/ductus/   # ductus finds it there from /usr/bin
 sudo useradd --system --home-dir /var/lib/ductus --create-home --shell /usr/sbin/nologin ductus
 sudo install -d -m 0755 /etc/ductus
 sudo install -m 0640 -g ductus ductus.env /etc/ductus/ductus.env   # then edit it
@@ -67,7 +69,7 @@ sudo systemctl daemon-reload && sudo systemctl enable --now ductus
 ```
 
 Everything on [Linux packages](linux.md) from "What the package installs" on then applies,
-except that upgrades are yours: replace `/usr/bin/ductus` and run `sudo systemctl reload ductus`
+except that upgrades are yours: replace `/usr/bin/ductus` and `/usr/lib/ductus/typescript` and run `sudo systemctl reload ductus`
 (the handover, as the package does). On Windows, the `.zip` has no service setup: use the MSI
 for a service; `ductus.exe` from the zip is for the command line and for trying a version.
 

@@ -67,7 +67,7 @@ export async function toBilling(msg: Message, meta: Meta) {
 }
 ```
 
-Hovering `msg.PID[5]` in VS Code shows **PID-5 Patient Name (XPN)**. `ductus validate` type-checks everything with an embedded TypeScript compiler.
+Hovering `msg.PID[5]` in VS Code shows **PID-5 Patient Name (XPN)**. `ductus validate` type-checks everything with TypeScript 7's native compiler, shipped with Ductus.
 
 `interfaces/adt-in/transform.test.ts`:
 
@@ -175,7 +175,7 @@ Every guarantee has an end-to-end demo in `scripts/` that kills the engine mid-s
 
 ## Building
 
-Requires Rust (stable); the tests need a PostgreSQL. TypeScript type checking uses an embedded copy of the TypeScript 6 compiler (`vendor/typescript`, Apache-2.0); Node.js is needed only to build the web UI (`ui/`, embedded in the binary).
+Requires Rust (stable); the tests need a PostgreSQL. `ductus validate` type-checks with TypeScript 7's native `tsc` (Apache-2.0), which the packages ship beside the binary: from source, `bash scripts/dev/tsc.sh` fetches the pinned version once (no Node needed). Node.js is needed only to build the web UI (`ui/`, embedded in the binary).
 
 ```
 cargo build --release

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The gates every change must pass before commit (CI runs the same):
 #   web UI (format, types, lint, tests, build) -> the VS Code extension (format, types, lint,
-#   unit tests) -> format -> build (incl. the ductus binary, with
+#   unit tests) -> TypeScript's tsc fetched (scripts/dev/tsc.sh, once) -> format -> build (incl. the ductus binary, with
 #   the UI embedded) -> the API document the UI is typed from is current -> the docs' reference
 #   pages, the docs site and its links (when mdBook and lychee are installed) -> clippy -D warnings
 #   -> all tests.
@@ -54,6 +54,9 @@ echo "== vscode extension"
   echo
 )
 export DUCTUS_REQUIRE_UI=1
+# TypeScript 7's tsc, which `validate` and its tests type-check with: fetched once (pinned) into the
+# per-user cache where a build from source looks for it.
+bash scripts/dev/tsc.sh >/dev/null
 echo "== fmt";    cargo fmt --all
 echo "== build";  cargo build --release 2>&1 | grep -E '^(warning|error)|-->' || true
 # The UI's API types are generated from the API document; a changed API means new types.

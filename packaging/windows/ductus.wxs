@@ -25,7 +25,11 @@
     <MediaTemplate EmbedCab="yes" />
 
     <StandardDirectory Id="ProgramFiles64Folder">
-      <Directory Id="INSTALLFOLDER" Name="Ductus" />
+      <Directory Id="INSTALLFOLDER" Name="Ductus">
+        <!-- TypeScript 7's compiler (tsc.exe and its lib.*.d.ts): what `validate` and the deploy
+             gate type-check with; ductus.exe looks for it here, beside itself. -->
+        <Directory Id="TYPESCRIPTFOLDER" Name="typescript" />
+      </Directory>
     </StandardDirectory>
     <StandardDirectory Id="CommonAppDataFolder">
       <Directory Id="DATADIR" Name="Ductus">
@@ -95,6 +99,11 @@
       </Component>
     </ComponentGroup>
 
+    <!-- Every file of the folder build.ps1 is given (-TypeScript), replaced with the program. -->
+    <ComponentGroup Id="TypeScript" Directory="TYPESCRIPTFOLDER">
+      <Files Include="!(bindpath.TypeScript)\**" />
+    </ComponentGroup>
+
     <!-- Kept on uninstall and upgrade: the person's settings, project and logs. -->
     <ComponentGroup Id="Data" Directory="DATADIR">
       <Component Id="SettingsFile" Bitness="always64" Permanent="yes" NeverOverwrite="yes">
@@ -156,6 +165,7 @@
 
     <Feature Id="Main" Title="Ductus" Level="1">
       <ComponentGroupRef Id="Engine" />
+      <ComponentGroupRef Id="TypeScript" />
       <ComponentGroupRef Id="Data" />
       <ComponentGroupRef Id="RestartAfterUpgrade" />
     </Feature>

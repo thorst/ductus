@@ -63,6 +63,20 @@ check "$msifile is ProductVersion $msi" \
   '[ "$(msiinfo export "$out/$msifile" Property | tr -d "\r" | sed -n "s/^ProductVersion\t//p")" = "$msi" ]'
 check "$zip holds ductus-$version/ductus.exe" 'unzip -Z1 "$out/$zip" | grep -Fx "ductus-$version/ductus.exe" >/dev/null'
 
+# Each holds TypeScript's compiler where ductus looks for it (validate refuses to call a project
+# valid without it), with the lib.*.d.ts it can't run without.
+tsc_version=$(sed -n 's/^VERSION=//p' scripts/dev/tsc.sh)
+check "$deb holds /usr/lib/ductus/typescript/tsc and its libs" \
+  'dpkg-deb -c "$out/$deb" | grep -E " \./usr/lib/ductus/typescript/(tsc|lib\.es2023\.d\.ts)$" | grep -c . | grep -qx 2'
+check "$rpm holds /usr/lib/ductus/typescript/tsc and its libs" \
+  'rpm -qlp "$out/$rpm" 2>/dev/null | grep -E "^/usr/lib/ductus/typescript/(tsc|lib\.es2023\.d\.ts)$" | grep -c . | grep -qx 2'
+check "$tgz's typescript/tsc is TypeScript $tsc_version" \
+  '[ "$("$work/ductus-$version/typescript/tsc" --version)" = "Version $tsc_version" ]'
+check "$zip holds ductus-$version/typescript/tsc.exe and its libs" \
+  '[ "$(unzip -Z1 "$out/$zip" | grep -E "^ductus-$version/typescript/(tsc\.exe|lib\.es2023\.d\.ts)$" | grep -c .)" = 2 ]'
+check "$msifile installs typescript\\tsc.exe" \
+  'msiinfo export "$out/$msifile" File | tr -d "\r" | grep -iE "tsc\.exe" >/dev/null'
+
 # The docs, as the site's pages with mdBook's search (it works from file://; Pagefind, the site's,
 # doesn't), titled with the version on every page, under one folder.
 echo "== the docs" >&2
