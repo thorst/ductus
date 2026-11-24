@@ -37,7 +37,7 @@ pub async fn run(o: Options) -> Result<bool> {
         }
     }
     let resources = Resources::load(&o.root, &environment).context("resources.yaml")?;
-    let code = code_uses(&o.root, &interfaces).await?;
+    let code = code_uses(&o.root, &interfaces)?;
     let configs: Vec<&InterfaceConfig> = interfaces.iter().filter_map(|i| i.config.as_ref().ok()).collect();
     let mut probes = doctor::plan(&configs, &resources, &code, &o.database_url, &o.interfaces);
     // What alerts connect to (mail server, webhooks, heartbeat); broken alert settings are

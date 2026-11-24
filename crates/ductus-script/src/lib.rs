@@ -7,6 +7,7 @@
 //! Every call into JavaScript has a time budget and every isolate a heap limit (`guard.rs`):
 //! a runaway interface is stopped with a [`Runaway`] error instead of stalling the thread.
 
+mod analysis;
 mod check;
 pub mod errors;
 mod guard;
@@ -14,7 +15,8 @@ mod inspect;
 mod loader;
 mod ops;
 
-pub use check::{Analysis, ConsoleCall, Diagnostic, Export, ResourceReference, Wait, analyze, type_check};
+pub use analysis::{Analysis, ConsoleCall, Diagnostic, Export, ResourceReference, Wait, analyze_syntax};
+pub use check::{analyze, type_check};
 pub use guard::{Cause, DebugSwitch};
 pub use inspect::{FromIsolate, InspectorSessions, ToIsolate};
 pub use ops::{BoxFuture, FetchRequest, FetchResponse, KILL, QUARANTINE, Services, TRANSIENT};

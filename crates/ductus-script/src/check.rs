@@ -1,8 +1,9 @@
-//! Type checking with the embedded TypeScript compiler (vendored, v6, see vendor/typescript).
+//! Type checking with the embedded TypeScript compiler (vendored, v6, see vendor/typescript), and
+//! the analysis (`analysis.rs`) beside it.
 
+use crate::analysis::{Analysis, Diagnostic, analyze_syntax};
 use anyhow::{Context, Result, anyhow};
 use deno_core::{JsRuntime, RuntimeOptions, v8};
-use serde::Deserialize;
 use std::collections::BTreeMap;
 
 include!(concat!(env!("OUT_DIR"), "/ts_libs.rs"));
@@ -10,122 +11,28 @@ include!(concat!(env!("OUT_DIR"), "/ts_libs.rs"));
 const TYPESCRIPT: &str = include_str!("../../../vendor/typescript/lib/typescript.js");
 const CHECK: &str = include_str!("check.js");
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct Diagnostic {
-    /// Absolute path, or `None` for global errors.
-    pub file: Option<String>,
-    pub line: u32,
-    pub column: u32,
-    pub code: u32,
-    /// "error", "warning", "suggestion" or "message".
-    pub category: String,
-    pub message: String,
-}
-
-impl Diagnostic {
-    pub fn is_error(&self) -> bool {
-        self.category == "error"
-    }
-}
-
-/// A resource named in code: `db("patient_db")` or `api("empi")`.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ResourceReference {
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    /// `db` or `api`.
-    pub kind: String,
-    pub name: String,
-}
-
-/// What the checker found in a set of files.
-#[derive(Debug, Clone, Default, Deserialize)]
-pub struct Analysis {
-    /// Empty unless diagnostics were asked for.
-    pub diagnostics: Vec<Diagnostic>,
-    pub references: Vec<ResourceReference>,
-    /// Each file's imports that are project files (same path form as the keys passed in).
-    pub imports: BTreeMap<String, Vec<String>>,
-    /// Calls of the global `console` (empty unless diagnostics were asked for).
-    #[serde(default)]
-    pub console: Vec<ConsoleCall>,
-    /// What each file exports and where it's declared (empty unless diagnostics were asked for).
-    #[serde(default)]
-    pub exports: Vec<Export>,
-}
-
-/// A name a file exports, with where it's declared: in the file itself, or in the file a
-/// re-export (`export { f } from "./other.ts"`) leads to.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Export {
-    /// The exporting file (same path form as the keys passed in).
-    pub module: String,
-    pub name: String,
-    /// Where it's declared: the file, and the line and column of its name (from 1).
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    /// A function that answers a promise (`async`, or a return type with `then`).
-    #[serde(default)]
-    pub r#async: bool,
-    /// What a function's body waits for (`await`, `db()`, `api()`, `fetch()`), each in `file`.
-    #[serde(default)]
-    pub waits: Vec<Wait>,
-}
-
-/// An `await`, or a call of the SDK's `db`, `api` or `fetch`, in an exported function.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct Wait {
-    pub line: u32,
-    pub column: u32,
-    /// `await`, `db()`, `api()` or `fetch()`.
-    pub what: String,
-}
-
-/// `console.log(...)` in code: where, and which method.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct ConsoleCall {
-    pub file: String,
-    pub line: u32,
-    pub column: u32,
-    /// `log`, `warn`, ...
-    pub method: String,
-    /// Outside every function: it runs once, when the module loads (each start), not per call.
-    #[serde(rename = "topLevel")]
-    pub top_level: bool,
-}
-
-impl Analysis {
-    /// The resources code reachable from `entry` (through its imports) names, sorted, each once.
-    pub fn references_from(&self, entry: &str) -> Vec<&ResourceReference> {
-        let mut seen = std::collections::BTreeSet::from([entry]);
-        let mut todo = vec![entry];
-        while let Some(file) = todo.pop() {
-            for next in self.imports.get(file).into_iter().flatten() {
-                if seen.insert(next) {
-                    todo.push(next);
-                }
-            }
-        }
-        let mut found: Vec<_> = self.references.iter().filter(|r| seen.contains(r.file.as_str())).collect();
-        found.sort_by(|a, b| (&a.kind, &a.name).cmp(&(&b.kind, &b.name)));
-        found.dedup_by(|a, b| (&a.kind, &a.name) == (&b.kind, &b.name));
-        found
-    }
-}
-
-/// Type-check a set of files and run the shared-pool safety lints. Keys are absolute paths
-/// using `/` separators; include the generated `@ductus/sdk` typings as one of them.
-/// `shared_modules` are files imported by interfaces but not inside one (shared libraries):
-/// top-level mutable state in them is flagged.
+/// Type-check a set of files and run the lints. Keys are absolute paths using `/` separators;
+/// include the generated `@ductus/sdk` typings as one of them. `shared_modules` are files imported
+/// by interfaces but not inside one (shared libraries): top-level mutable state in them is flagged.
 pub fn type_check(files: &BTreeMap<String, String>, shared_modules: &[String]) -> Result<Vec<Diagnostic>> {
     Ok(analyze(files, shared_modules, true)?.diagnostics)
 }
 
-/// Like `type_check`, and also finds the resources code names and the imports between files.
-/// Without `diagnostics` it only parses and resolves names, which is much faster.
+/// The analysis of `files` (`analysis::analyze_syntax`: the resources code names, the imports
+/// between files), and with `diagnostics` the type errors before the lints, the `console` calls and
+/// the exports too. Without `diagnostics` no type checker runs (nor V8): it's quick.
 pub fn analyze(files: &BTreeMap<String, String>, shared_modules: &[String], diagnostics: bool) -> Result<Analysis> {
+    let mut analysis = analyze_syntax(files, shared_modules, diagnostics);
+    if diagnostics {
+        let mut found = type_errors(files)?;
+        found.append(&mut analysis.diagnostics);
+        analysis.diagnostics = found;
+    }
+    Ok(analysis)
+}
+
+/// TypeScript's diagnostics for `files` (in memory, with the standard library typings).
+fn type_errors(files: &BTreeMap<String, String>) -> Result<Vec<Diagnostic>> {
     let mut runtime = JsRuntime::new(RuntimeOptions::default());
     runtime.execute_script("typescript.js", TYPESCRIPT).map_err(|e| anyhow!("loading TypeScript: {e}"))?;
     runtime.execute_script("check.js", CHECK).map_err(|e| anyhow!("loading checker: {e}"))?;
@@ -142,12 +49,9 @@ pub fn analyze(files: &BTreeMap<String, String>, shared_modules: &[String], diag
         .get(scope, key.into())
         .and_then(|v| v8::Local::<v8::Function>::try_from(v).ok())
         .context("checker not installed")?;
-    let shared_json = serde_json::to_string(shared_modules)?;
     let args = [
         v8::String::new(scope, &files_json).context("files")?.into(),
         v8::String::new(scope, &libs_json).context("libs")?.into(),
-        v8::String::new(scope, &shared_json).context("shared")?.into(),
-        v8::Boolean::new(scope, diagnostics).into(),
     ];
     let receiver = v8::undefined(scope);
     let result = match function.call(scope, receiver.into(), &args) {

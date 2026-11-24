@@ -1202,19 +1202,14 @@ impl Engine {
         cell.get_or_try_init(|| async {
             let root = self.root.clone();
             let configs: Vec<InterfaceConfig> = self.interfaces().iter().map(|i| (*i.config).clone()).collect();
-            // The analysis runs the TypeScript compiler in V8: on a thread of its own, so
-            // it never holds up the runtime that serves intake.
-            let (tx, rx) = tokio::sync::oneshot::channel();
-            std::thread::Builder::new().name("code-analysis".into()).spawn(move || {
-                let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build();
-                let result = runtime.map_err(anyhow::Error::from).and_then(|rt| {
-                    let dirs: Vec<&std::path::Path> = configs.iter().map(|c| c.dir.as_path()).collect();
-                    let refs: Vec<&InterfaceConfig> = configs.iter().collect();
-                    rt.block_on(crate::project::code_uses(&root, &dirs, &refs))
-                });
-                let _ = tx.send(result.map(Arc::new));
-            })?;
-            rx.await?
+            // Reading and parsing every .ts file: off the runtime's worker threads, so it never
+            // holds up intake.
+            tokio::task::spawn_blocking(move || {
+                let dirs: Vec<&std::path::Path> = configs.iter().map(|c| c.dir.as_path()).collect();
+                let refs: Vec<&InterfaceConfig> = configs.iter().collect();
+                crate::project::code_uses(&root, &dirs, &refs).map(Arc::new)
+            })
+            .await?
         })
         .await
         .cloned()

@@ -1985,10 +1985,10 @@ pub async fn test_alert(root: &Path, env: &str, channel: &str) -> Result<()> {
 
 /// The databases and APIs each interface's code uses (`db("...")`, `api("...")`, through its
 /// imports).
-pub(crate) async fn code_uses(root: &Path, interfaces: &[InterfaceDir]) -> Result<ductus_core::impact::CodeUses> {
+pub(crate) fn code_uses(root: &Path, interfaces: &[InterfaceDir]) -> Result<ductus_core::impact::CodeUses> {
     let dirs: Vec<&Path> = interfaces.iter().map(|i| i.dir.as_path()).collect();
     let configs: Vec<&InterfaceConfig> = interfaces.iter().filter_map(|i| i.config.as_ref().ok()).collect();
-    ductus_runtime::project::code_uses(root, &dirs, &configs).await
+    ductus_runtime::project::code_uses(root, &dirs, &configs)
 }
 
 /// `ductus impact`: every interface a vendor, application or host touches, how, and where to
@@ -2007,7 +2007,7 @@ pub async fn impact(root: &Path, env: &str, query: ductus_core::impact::Query, r
         }
     }
     let configs: Vec<&InterfaceConfig> = interfaces.iter().filter_map(|i| i.config.as_ref().ok()).collect();
-    let code = code_uses(root, &interfaces).await?;
+    let code = code_uses(root, &interfaces)?;
 
     let lookup = |name: &str| -> Vec<std::net::IpAddr> {
         use std::net::ToSocketAddrs;

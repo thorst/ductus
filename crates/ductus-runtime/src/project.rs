@@ -6,7 +6,6 @@ use anyhow::{Context, Result};
 use ductus_core::InterfaceConfig;
 use ductus_core::impact::CodeUses;
 use ductus_core::resources::Kind;
-use ductus_script::Isolate;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -84,14 +83,13 @@ pub fn resource_kind(function: &str) -> Option<Kind> {
     }
 }
 
-/// The databases and APIs each interface's code uses. Parsing and name resolution only, no
-/// type check, so it's quick. `interface_dirs` are every interface folder, loaded or not (a
-/// file inside one is that interface's, not a shared library).
-pub async fn code_uses(root: &Path, interface_dirs: &[&Path], configs: &[&InterfaceConfig]) -> Result<CodeUses> {
+/// The databases and APIs each interface's code uses. Parsing and name resolution in Rust only (no
+/// type checker, no V8), so it's quick. `interface_dirs` are every interface folder, loaded or not
+/// (a file inside one is that interface's, not a shared library).
+pub fn code_uses(root: &Path, interface_dirs: &[&Path], configs: &[&InterfaceConfig]) -> Result<CodeUses> {
     let mut files = BTreeMap::new();
-    files.insert(key(&root.join(TYPES_FILE)), Isolate::generate_types().await?);
     let shared = project_files(root, interface_dirs, &mut files)?;
-    let analysis = ductus_script::analyze(&files, &shared, false)?;
+    let analysis = ductus_script::analyze_syntax(&files, &shared, false);
     Ok(configs
         .iter()
         .map(|c| {

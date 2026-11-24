@@ -1390,6 +1390,77 @@ db("test_only"); transform("x");"#
     assert_eq!(quick.references, analysis.references);
 }
 
+/// The analysis follows names as a type checker would (0.7.9.1, read from the syntax): the SDK's
+/// functions through aliases, namespaces and a shared file's re-exports; a local name that shadows
+/// one isn't it; the global `console` only; exports followed to where they're declared; async by
+/// `async` or a declared promise type; what an exported function waits for.
+#[test]
+fn the_analysis_follows_names_through_imports_and_re_exports() {
+    let files: std::collections::BTreeMap<String, String> = [
+        (
+            "/p/lib/sdk.ts",
+            "export { db, fetch as get } from \"@ductus/sdk\";\nexport * as sdk from \"@ductus/sdk\";\nexport * from \"./more.ts\";\n",
+        ),
+        ("/p/lib/more.ts", "export function helper(m: string) {\n  return m;\n}\nexport const later = 1;\n"),
+        (
+            "/p/interfaces/a/t.ts",
+            r#"import { db as store, get, sdk } from "../../lib/sdk.ts";
+import * as lib from "../../lib/sdk.ts";
+console.log("loaded");
+export async function transform(m: string) {
+  await store("one").query("SELECT 1");
+  sdk.api("two");
+  lib.sdk["db"]("three");
+  get("https://x");
+  return m;
+}
+export function shadowed(store: (n: string) => void, console: { log(s: string): void }) {
+  store("not_a_resource");
+  console.log("a parameter, not the global");
+}
+export const later = (): Promise<string> => Promise.resolve("");
+export const plain = (m: string) => {
+  lib.db("four");
+  return m;
+};
+export { helper as toLab } from "../../lib/sdk.ts";
+export default function main() {}
+"#,
+        ),
+    ]
+    .into_iter()
+    .map(|(k, v)| (k.to_string(), v.to_string()))
+    .collect();
+    let a = "/p/interfaces/a/t.ts";
+    let analysis = ductus_script::analyze_syntax(&files, &["/p/lib/sdk.ts".into(), "/p/lib/more.ts".into()], true);
+
+    let names: Vec<_> =
+        analysis.references.iter().map(|r| format!("{}:{} {} {}", r.line, r.column, r.kind, r.name)).collect();
+    assert_eq!(names, ["5:9 db one", "6:3 api two", "7:3 db three", "17:3 db four"]);
+    assert_eq!(analysis.imports[a], ["/p/lib/sdk.ts"]);
+    assert_eq!(analysis.imports["/p/lib/sdk.ts"], ["/p/lib/more.ts"]);
+    assert!(analysis.diagnostics.is_empty(), "{:#?}", analysis.diagnostics);
+
+    let console: Vec<_> = analysis.console.iter().map(|c| (c.line, c.method.as_str(), c.top_level)).collect();
+    assert_eq!(console, [(3, "log", true)], "the parameter named console isn't the global");
+
+    let export = |name: &str| analysis.exports.iter().find(|e| e.module == a && e.name == name).unwrap();
+    let t = export("transform");
+    assert!(t.r#async);
+    let waits: Vec<_> = t.waits.iter().map(|w| format!("{}:{} {}", w.line, w.column, w.what)).collect();
+    assert_eq!(waits, ["5:3 await", "5:9 db()", "6:3 api()", "7:3 db()", "8:3 fetch()"]);
+    assert!(export("later").r#async, "a declared Promise return type");
+    assert!(!export("plain").r#async);
+    assert_eq!(export("plain").waits.iter().map(|w| w.what.as_str()).collect::<Vec<_>>(), ["db()"]);
+    let to_lab = export("toLab");
+    assert_eq!((to_lab.file.as_str(), to_lab.line, to_lab.column), ("/p/lib/more.ts", 1, 17));
+    assert_eq!((export("default").line, export("default").column), (21, 25), "the default function's name");
+    // A shared file passes on what `export *` brings it; the SDK's re-exports have no place here.
+    let shared: Vec<_> =
+        analysis.exports.iter().filter(|e| e.module == "/p/lib/sdk.ts").map(|e| e.name.as_str()).collect();
+    assert_eq!(shared, ["helper", "later"]);
+}
+
 #[test]
 fn generates_typings_with_field_docs() {
     let rt = rt();
