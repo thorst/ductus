@@ -373,7 +373,11 @@ echo "== 16. two deploys at once on test: Ann's billing and Bob's claims (releas
 echo 'export const PAYER = "P1";' >"$P/lib/payers.ts"
 side "$BILLING" BILLING_PORT B3
 side "$CLAIMS" CLAIMS_PORT C3
-g commit -qam "billing and claims, each their own change"
+# A test that takes 1.5 s holds Ann's gate (it runs billing's tests), so Bob's deploy, 0.2 s
+# later, surely arrives while hers runs: with only the gate's own work (0.3 s since validate
+# type-checks with TS 7's tsc) hers could be done first, and there'd be no turn to wait for.
+printf 'import { test } from "@ductus/sdk";\n\ntest("takes a moment", () => {\n  const end = Date.now() + 1500;\n  while (Date.now() < end) {}\n});\n' >"$P/interfaces/$BILLING/slow.test.ts"
+g add "interfaces/$BILLING/slow.test.ts" && g commit -qam "billing and claims, each their own change"
 step r10 'env -u DUCTUS_DATABASE_URL ductus release -m "billing B3, claims C3"'
 S10=$(short_id r10) REL10=.ductus/releases/$(basename "$(released r10)")
 export BOB_TEST=$(token test bob)

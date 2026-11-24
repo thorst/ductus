@@ -63,8 +63,8 @@ save a test file or an interface.yaml
 ## Problems
 
 `ductus validate --json` runs when the workspace opens and after you save a file of the project
-(once for several saves close together, never two at a time for one project; about a second on a
-small project, most of it the type check). Its findings replace the last run's: fix the port you
+(once for several saves close together, never two at a time for one project; under a second on a
+small project). Its findings replace the last run's: fix the port you
 mistyped, save, and the error goes. Each has its code (`DUC122`), whose meaning and fix are in the
 [findings reference](../reference/validate.md). TypeScript's own errors aren't repeated: VS Code
 shows those as you type
@@ -285,10 +285,10 @@ developer's workstation in WSL:
 | the extension's start | 1.5–6 ms: it finds the projects and lists the tests after it has started, never in VS Code's way |
 | its package | 29 KB: one bundled file, nothing else to download |
 | an interface's tests from the Test Explorer (`adt-in`'s 5) | 60–75 ms, as `ductus test` takes in a terminal |
-| a save to its finding in Problems | 1.25–1.87 s (the debounce, 0.4 s, and `validate`, most of it the type check) |
+| a save to its finding in Problems | 1.25–1.87 s (the debounce, 0.4 s, and `validate`), measured when `validate` took ~1 s on this project; with TypeScript 7's `tsc` (0.7.9.2) it takes 0.3–0.6 s |
 | a file's `used by` lines | under 1 ms: read from the last `validate`, nothing run (the `validate` itself took as long with them as without: 0.7 s on this project, 3.6 s at 1,001 interfaces) |
 | Deploy to dev of one interface | 23–42 ms from the command to the answer |
-| Promote… of a one-interface release (a file to test; test to prod) | 1.2–1.4 s from **Enter** to the answer, most of it the gate (its tests and `validate` on the engine's machine); a larger project's gate takes longer ([measured](../operate/releases.md#measured)) |
+| Promote… of a one-interface release (a file to test; test to prod) | about 0.5 s from **Enter** to the answer (493–497 ms; 1.2–1.4 s before validate type-checked with TypeScript 7's `tsc`), most of it the gate (its tests and `validate` on the engine's machine); a larger project's gate takes longer ([measured](../operate/releases.md#measured)) |
 | an interface's History (a page of 50) | 14 ms from a `ductus dev`; 233 ms from the folder (`ductus history` starting and reading git) |
 | Debug this message, from the link to the end of the session (one breakpoint, continued at once) | 1.6 s: `ductus try` starting, the debugger attaching, the message read through the API |
 
