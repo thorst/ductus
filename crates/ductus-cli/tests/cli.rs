@@ -2538,7 +2538,15 @@ impl Drop for Tokens {
 /// The releases of a test's project (its temporary folder's name), forgotten when the test ends,
 /// also when it fails half-way: left behind, they're "deployed to prod" on the shared database and
 /// a later demo's engine finds them (demo-release's "nothing deployed yet" failed so, twice).
+/// Every test that deploys takes one right after making its project, before its engines (so it
+/// drops after them), in place of forgetting its releases at its end, which a failure never reaches.
 struct Releases(String);
+
+impl Releases {
+    fn of(dir: &Path) -> Self {
+        Releases(dir.file_name().unwrap().to_string_lossy().into_owned())
+    }
+}
 
 impl Drop for Releases {
     fn drop(&mut self) {
@@ -5891,6 +5899,7 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-qm", "an environment of its own"]);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let _releases = Releases::of(dir.path());
     let work = tempfile::tempdir().unwrap();
     let (control, releases) = (work.path().join("control"), work.path().join("releases"));
     let bin = env!("CARGO_BIN_EXE_ductus");
@@ -6081,12 +6090,6 @@ async fn a_release_deploys_through_the_handover_and_wont_undo_a_colleagues_work(
     let (ok, out) = deploy(&ann, &[a_id, "-m", "again"]);
     assert!(!ok && out.contains("(folder mode)") && out.contains("DUCTUS_RELEASES"), "{out}");
     drop(folder);
-
-    let ids: Vec<Vec<u8>> = [&a, &b, &c, &s, &t]
-        .iter()
-        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
-        .collect();
-    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
 /// A deploy in place under traffic (0.7.5.1): interfaces A and B both receive while a release
@@ -6134,6 +6137,7 @@ async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-qm", "first"]);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let _releases = Releases::of(dir.path());
     let (control, releases) = (work.path().join("control"), work.path().join("releases"));
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
@@ -6396,11 +6400,6 @@ async fn a_deploy_in_place_changes_one_interface_while_another_sends() {
     }
 
     drop(engine);
-    let ids: Vec<Vec<u8>> = [&one, &two, &three, &four, &five, &six]
-        .iter()
-        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
-        .collect();
-    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
 /// Sources changed in place (0.7.5.2.2), one engine throughout. While a sender sends to M's
@@ -6456,6 +6455,7 @@ async fn sources_change_in_place_while_their_senders_send() {
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-qm", "first"]);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let _releases = Releases::of(dir.path());
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let token_name = format!("{m}-deployer");
@@ -6652,11 +6652,6 @@ async fn sources_change_in_place_while_their_senders_send() {
     assert_eq!(running().await, engine.0, "the same engine still");
 
     drop(engine);
-    let ids: Vec<Vec<u8>> = [&one, &two, &three]
-        .iter()
-        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
-        .collect();
-    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
 /// The isolate budget (0.7.5.3.3, `isolates.superseded_mb`), set tiny: one pool thread runs A and
@@ -7098,6 +7093,7 @@ async fn what_a_start_sets_up_restarts_one_interface_alone_while_its_sender_send
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-qm", "first"]);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let _releases = Releases::of(dir.path());
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let token_name = format!("{r}-deployer");
@@ -7266,11 +7262,6 @@ async fn what_a_start_sets_up_restarts_one_interface_alone_while_its_sender_send
     assert_eq!(read(&log).matches("handover: handed over to").count(), 1, "only the first: {}", read(&log));
 
     drop(engine);
-    let ids: Vec<Vec<u8>> = [&one, &two, &three, &four]
-        .iter()
-        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
-        .collect();
-    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
 /// A variable's new value applied in place (0.7.5.2.3), one engine throughout. M listens on
@@ -7311,6 +7302,7 @@ async fn a_variable_s_new_value_moves_a_port_and_reloads_the_code_that_reads_it_
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-qm", "first"]);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let _releases = Releases::of(dir.path());
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let token_name = format!("{m}-deployer");
@@ -7445,11 +7437,6 @@ async fn a_variable_s_new_value_moves_a_port_and_reloads_the_code_that_reads_it_
     let (sent, failed) = sender.await.unwrap();
     assert!(sent > 50 && failed.is_empty(), "K's sender was never refused ({sent}): {failed:?}");
     drop(engine);
-    let ids: Vec<Vec<u8>> = [&one, &two, &three]
-        .iter()
-        .map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap())
-        .collect();
-    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
 /// What waits for an interface removed in place stays (0.7.5.2.1): F, a file pickup whose
@@ -7491,6 +7478,7 @@ async fn an_interface_removed_in_place_keeps_what_waits_and_sends_it_when_added_
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-qm", "K"]);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let _releases = Releases::of(dir.path());
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
     let token_name = format!("{k}-deployer");
@@ -7646,8 +7634,6 @@ async fn an_interface_removed_in_place_keeps_what_waits_and_sends_it_when_added_
     }
 
     drop(engine);
-    let ids: Vec<Vec<u8>> = released.iter().map(|id| ductus_runtime::deploy::unhex(id).unwrap()).collect();
-    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
 /// Deploys without a control socket (0.7.4.4.2): Windows, a container, a plain `ductus run`. The
@@ -7661,6 +7647,7 @@ async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_proces
     let (mllp, api) = (free_port(), free_port());
     let (dir, name) = release_project(mllp);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let _releases = Releases::of(dir.path());
     let work = tempfile::tempdir().unwrap();
     let releases = work.path().join("releases");
     let bin = env!("CARGO_BIN_EXE_ductus");
@@ -7802,9 +7789,6 @@ async fn a_deploy_without_a_control_socket_hands_over_in_the_engine_s_own_proces
     drop(held);
 
     drop(engine);
-    let ids: Vec<Vec<u8>> =
-        [&a, &b, &b2, &c].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
-    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
 /// Promotion and rollback (0.7.4.4.3), in the engines' own processes (so on every system): a file
@@ -7822,6 +7806,7 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-qm", "a test environment"]);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
+    let _releases = Releases::of(dir.path());
     let work = tempfile::tempdir().unwrap();
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
@@ -8107,10 +8092,6 @@ async fn a_release_is_promoted_by_its_record_and_rolled_back() {
     assert_eq!(page["deployed"].as_array().map(Vec::len), Some(3), "{page:#}");
 
     drop(prod_engine);
-    let store = ductus_store::Store::connect(&db, 2).await.unwrap();
-    let ids: Vec<Vec<u8>> =
-        [&a, &b, &d].iter().map(|r| ductus_runtime::deploy::unhex(r["id"].as_str().unwrap()).unwrap()).collect();
-    ductus_store::testing::forget_releases(&store, &ids).await.unwrap();
 }
 
 /// Composed releases and deploys in turn (0.7.5.3.2). A and B share `lib/shared.ts`. Release 2
@@ -8153,7 +8134,7 @@ async fn a_deploy_takes_one_interface_out_of_a_release_and_deploys_sent_at_once_
     git(dir.path(), &["add", "."]);
     git(dir.path(), &["commit", "-qm", "first"]);
     let project_name = dir.path().file_name().unwrap().to_string_lossy().into_owned();
-    let _releases = Releases(project_name.clone());
+    let _releases = Releases::of(dir.path());
     let (control, releases) = (work.path().join("control"), work.path().join("releases"));
     let bin = env!("CARGO_BIN_EXE_ductus");
     let read = |path: &Path| std::fs::read_to_string(path).unwrap_or_default();
