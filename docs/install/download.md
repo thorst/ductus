@@ -205,7 +205,7 @@ works, but people then read an old version's docs as current; link to docs.getdu
 ## Between releases: development builds
 
 Every push to `main` also builds the packages, the archives and the installer in CI as
-development builds of what comes next (versions like `0.7.0-dev.2`, kept 90 days as the run's
+development builds of what comes next (versions like `0.8.0-dev.2`, kept 90 days as the run's
 artifacts `linux-packages` and `windows-installer`; no checksums, attestations or SBOMs), and
 [the packages](linux.md) and [the installer](windows.md) can be built from a clone of the
 repository. They are for testing the project itself: use a release for anything else.
