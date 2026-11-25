@@ -118,7 +118,11 @@ try {
     Start-Sleep 1
     $r = Deploy @($secondFile, "-m", "second deploy") "deploy2"
     Check "deployed in place" ($r.Ok -and $r.Out -match "applied in place") $r.Out
-    $gen.WaitForExit()
+    # Bounded: when nothing listens (a refused deploy), the sender retries forever.
+    if (-not $gen.WaitForExit(120000)) {
+        Stop-Process -Id $gen.Id -Force -ErrorAction SilentlyContinue
+        Check "the sender finished within 2 minutes" $false
+    }
     $sent = Get-Content "$work\gen.log" -Raw
     Write-Host "      sender: $(($sent -split "`n" | Select-Object -Last 2) -join ' ')"
     Check "the sender: nothing refused, nothing rejected" ($sent -match "rejected 0, refused 0,") $sent
