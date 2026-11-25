@@ -18,12 +18,12 @@ code-signed before v1.0, so nothing else tells you it's genuine. **You can skip 
 
 | File | For | Page |
 |---|---|---|
-| `ductus_0.6.0_amd64.deb` | Ubuntu 22.04 and later, Debian 12 and later | [Linux packages](linux.md) |
-| `ductus-0.6.0-1.x86_64.rpm` | RHEL, Rocky, Alma 9 | [Linux packages](linux.md) |
-| `ductus-0.6.0-x64.msi` | Windows Server, Windows 11 | [Windows installer](windows.md) |
-| `ductus-0.6.0-linux-x64.tar.gz`, `ductus-0.6.0-windows-x64.zip` | The program alone: checking an upgrade before installing it, servers without the packages | [The portable archive](archive.md) |
-| `ductus-docs-0.6.0.zip` | These docs, as they are for this version, to read offline | [The docs as a download](#the-docs-as-a-download) |
-| `ductus-0.6.0-linux-x64.cdx.json`, `ductus-0.6.0-windows-x64.cdx.json`, `ductus-0.6.0-web-ui.cdx.json` | Your security team: every library in each build | [The SBOMs](#the-sboms-every-library-inside) |
+| `ductus_0.7.0_amd64.deb` | Ubuntu 22.04 and later, Debian 12 and later | [Linux packages](linux.md) |
+| `ductus-0.7.0-1.x86_64.rpm` | RHEL, Rocky, Alma 9 | [Linux packages](linux.md) |
+| `ductus-0.7.0-x64.msi` | Windows Server, Windows 11 | [Windows installer](windows.md) |
+| `ductus-0.7.0-linux-x64.tar.gz`, `ductus-0.7.0-windows-x64.zip` | The program alone: checking an upgrade before installing it, servers without the packages | [The portable archive](archive.md) |
+| `ductus-docs-0.7.0.zip` | These docs, as they are for this version, to read offline | [The docs as a download](#the-docs-as-a-download) |
+| `ductus-0.7.0-linux-x64.cdx.json`, `ductus-0.7.0-windows-x64.cdx.json`, `ductus-0.7.0-web-ui.cdx.json` | Your security team: every library in each build | [The SBOMs](#the-sboms-every-library-inside) |
 | `SHA256SUMS` | Checking any of the files above | [Below](#check-the-checksum) |
 
 Every file comes from the same CI run, on the tagged commit, and only after every test and demo
@@ -64,8 +64,8 @@ with `~` where the version has `-`: that is how Debian and RPM spell "sorts befo
 On Windows, in PowerShell, the hash of the file, then the line `SHA256SUMS` has for it:
 
 ```powershell
-(Get-FileHash .\ductus-0.6.0-x64.msi -Algorithm SHA256).Hash
-Select-String ductus-0.6.0-x64.msi .\SHA256SUMS
+(Get-FileHash .\ductus-0.7.0-x64.msi -Algorithm SHA256).Hash
+Select-String ductus-0.7.0-x64.msi .\SHA256SUMS
 ```
 
 The two must be the same 64 characters (`Get-FileHash` writes them in capitals, `SHA256SUMS` in
@@ -91,7 +91,7 @@ Check one with the [GitHub CLI](https://cli.github.com/), signed in with any Git
 (`gh auth login`):
 
 ```sh
-gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus
+gh attestation verify ductus_0.7.0_amd64.deb -R thorst/ductus
 ```
 
 It looks up the file's SHA-256 in GitHub's record of attestations, checks the signature, and
@@ -157,7 +157,7 @@ download it again from the release page. The same happens for a file from anothe
 
 **In a script, check the exit code, not the text:** `gh` writes this report only to a terminal.
 Run from a script, a pipe or a CI job, it prints nothing at all and exits 0 (verified) or 1 (not):
-`gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus || exit 1`. Add `--format json`
+`gh attestation verify ductus_0.7.0_amd64.deb -R thorst/ductus || exit 1`. Add `--format json`
 for the details as JSON.
 
 **When to use which:** the checksum always (it needs nothing but the system's own tools); the
@@ -172,9 +172,9 @@ format Dependency-Track, Microsoft Defender and most scanners import.
 
 | File | Lists |
 |---|---|
-| `ductus-0.6.0-linux-x64.cdx.json` | Every Rust crate compiled into the Linux binary (the .deb, .rpm and .tar.gz hold the same one) |
-| `ductus-0.6.0-windows-x64.cdx.json` | The same for `ductus.exe` (the .msi and .zip): a few crates differ by platform |
-| `ductus-0.6.0-web-ui.cdx.json` | The web UI's npm packages (the UI is built into both binaries) |
+| `ductus-0.7.0-linux-x64.cdx.json` | Every Rust crate compiled into the Linux binary (the .deb, .rpm and .tar.gz hold the same one) |
+| `ductus-0.7.0-windows-x64.cdx.json` | The same for `ductus.exe` (the .msi and .zip): a few crates differ by platform |
+| `ductus-0.7.0-web-ui.cdx.json` | The web UI's npm packages (the UI is built into both binaries) |
 
 On the dry run: 530 crates in the Linux binary's, 534 in the Windows one's, 95 npm packages in
 the web UI's, about 700 KB, 700 KB and 100 KB. They leave out the tools used only while building (code generators, the build scripts' own
@@ -187,8 +187,8 @@ v0.9.
 
 ## The docs as a download
 
-`ductus-docs-0.6.0.zip` is this site as it is for that version: unzip it anywhere, open
-`ductus-docs-0.6.0/index.html` in a browser. Every page says the version in its title. It's
+`ductus-docs-0.7.0.zip` is this site as it is for that version: unzip it anywhere, open
+`ductus-docs-0.7.0/index.html` in a browser. Every page says the version in its title. It's
 about 3.2 MB (3,212,719 bytes on the dry run). It's for:
 
 - **A server room or network without internet access**: the docs are with the download, nothing

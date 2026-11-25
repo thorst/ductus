@@ -169,21 +169,27 @@ It never sends a message to a destination.
 
 ```text
 $ ductus doctor
-ductus doctor · environment dev · 2026-10-31 06:35:42 -04:00
-on DESKTOP-GCT6E6V · ductus 0.6.0-dev
-checked 5 connection(s) in 0.0 s: 4 ok, 1 warning(s), 0 failed
+ductus doctor · environment dev · 2026-11-25 11:41:55 -05:00
+on DESKTOP-GCT6E6V · ductus 0.7.0-dev
+checked 4 connection(s) in 0.1 s: 3 ok, 1 warning(s), 0 failed
 
-✓ engine database  127.0.0.1:41293 Postgres
+✓ engine database  localhost:5432 Postgres
     used by  the engine (DUCTUS_DATABASE_URL)
-    address  127.0.0.1 (an address, nothing to look up)
-    connect  127.0.0.1:41293 from 127.0.0.1 in 0.2 ms
-    TLS      none: the server doesn't offer TLS (sslmode=prefer), the connection is plain
-    login    as `postgres`, database `ductus`: PostgreSQL 18.6; plain, no TLS: the server doesn't offer it (sslmode=prefer)
-    commits  0.1 ms median of 20 (each waits for the disk): strict ingest ≈ 10000 msg/s per sender connection, one commit per ACK; more connections share commits. A 1M/day ADT feed averages ~12 msg/s.
+    DNS      localhost → 127.0.0.1 (0.4 ms)
+    connect  127.0.0.1:5432 from 127.0.0.1 in 0.1 ms
+    TLS      not verified (sslmode=prefer), and sslmode=verify-full would refuse it: the certificate is for DESKTOP-GCT6E6V.localdomain, not localhost; certificate for DESKTOP-GCT6E6V.localdomain, self-signed, valid until 2036-10-03 (3599 days)
+    login    as `todd`, database `ductus_doclab`: PostgreSQL 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1); TLS 1.3, not verified (sslmode=prefer): the server's certificate isn't checked
+    commits  1.2 ms median of 20 (each waits for the disk): strict ingest ≈ 810 msg/s per sender connection, one commit per ACK; more connections share commits. A 1M/day ADT feed averages ~12 msg/s.
 
 ✓ MLLP destination  127.0.0.1:6670 MLLP
     used by  adt-in → lab
-…
+    address  127.0.0.1 (an address, nothing to look up)
+    connect  127.0.0.1:6670 from 127.0.0.1 in 0.2 ms
+
+✓ destination folder  ./interfaces/adt-in/out/adt-in
+    used by  adt-in → archive
+    folder   exists; can write
+
 ⚠ listening port  0.0.0.0:6661 MLLP
     used by  adt-in
   ⚠ port     in use: by a running engine, or another program
@@ -211,12 +217,12 @@ checked 5 connection(s) in 0.0 s: 4 ok, 1 warning(s), 0 failed
 ## Who did what: `ductus audit export`
 
 ```text
-$ ductus audit export --since 2026-10-31
-5 entries
-{"id":1,"at":"2026-10-31T10:34:05.714979Z","actor_kind":"system","actor":"todd","via":"cli","ip":null,"action":"token.create","subject":"ops-probe","interface":null,"message":null,"outcome":"ok","detail":{"role":"operator","permissions":["payloads"]}}
-{"id":2,"at":"2026-10-31T10:34:06.045144Z","actor_kind":"system","actor":"engine","via":"engine","ip":null,"action":"engine.start","subject":null,"interface":null,"message":null,"outcome":"ok","detail":{"host":"DESKTOP-GCT6E6V","version":"0.6.0-dev","instance":"18e396c42b8b8823-620","previous":"first","environment":"dev","previous_start":null}}
-{"id":3,"at":"2026-10-31T10:34:10.284626Z","actor_kind":"token","actor":"ops-probe","via":"token","ip":"127.0.0.1","action":"destination.pause","subject":"adt-in/lab","interface":"adt-in","message":null,"outcome":"ok","detail":{"reason":null}}
-…
+$ ductus audit export --since 2026-11-25
+{"id":1,"at":"2026-11-25T16:41:54.967126Z","actor_kind":"system","actor":"engine","via":"engine","ip":null,"action":"engine.start","subject":null,"interface":null,"message":null,"outcome":"ok","detail":{"host":"DESKTOP-GCT6E6V","version":"0.7.0-dev","instance":"18eb5758a9dc69c7-5de","previous":"first","environment":"dev","previous_start":null}}
+{"id":2,"at":"2026-11-25T16:41:55.756316Z","actor_kind":"system","actor":"todd","via":"cli","ip":null,"action":"token.create","subject":"ops-probe","interface":null,"message":null,"outcome":"ok","detail":{"role":"operator","permissions":["payloads"]}}
+{"id":3,"at":"2026-11-25T16:41:55.782108Z","actor_kind":"token","actor":"ops-probe","via":"token","ip":"127.0.0.1","action":"destination.pause","subject":"adt-in/lab","interface":"adt-in","message":null,"outcome":"ok","detail":{"reason":null}}
+{"id":4,"at":"2026-11-25T16:41:55.809645Z","actor_kind":"token","actor":"ops-probe","via":"token","ip":"127.0.0.1","action":"destination.resume","subject":"adt-in/lab","interface":"adt-in","message":null,"outcome":"ok","detail":null}
+4 entries
 ```
 
 One JSON object per line, oldest first: for a SIEM, or an auditor's question ("who resent

@@ -356,7 +356,7 @@ purpose, with **exit code 3**:
 $ ductus run
 error: another engine is running one of this engine's interfaces on this database:
   adt-in
-    owned by: DESKTOP-GCT6E6V, pid 1696, ductus 0.6.0-dev, started 2026-10-31 12:54:28 UTC (instance 18e39e6d3fcb787f-6a0)
+    owned by: DESKTOP-GCT6E6V, pid 1904, ductus 0.7.0-dev, started 2026-11-25 16:41:58 UTC (instance 18eb575973527695-770)
 Two engines running one interface would both send its messages: duplicates, and per-patient order breaks.
 Stop that engine first, or remove these interfaces from this one's project.
 ```

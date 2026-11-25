@@ -115,14 +115,14 @@ it. **It sends nothing and writes nothing**: a read-only login, or a replica, is
 ```text
 $ ductus replay --since 1h
 adt-in: 300 message(s) replayed in 0.1 s
-ductus replay: version 0.6.0-dev against the record and kept outputs, 2026-10-31 15:25 to 2026-10-31 16:25 UTC, environment dev (nothing was sent)
+ductus replay: version 0.7.0-dev against the record and kept outputs, 2026-11-25 15:41 to 2026-11-25 16:41 UTC, environment dev (nothing was sent)
 note: no installed version found (/usr/bin/ductus): outputs compared with kept outputs only; name a binary with --against
 
 adt-in: 300 message(s) in 0.1 s
   ✓ archive: 300 compared, 300 same decision (outputs not compared)
   ✓ lab: 300 compared, 300 same decision (outputs not compared)
 
-300 message(s), 600 comparison(s): 0 identical, 600 same decision (outputs not compared), 0 different, 0 drift, 0 not comparable, 0 waiting (0.1 s)
+300 message(s), 600 comparison(s): 0 identical, 600 same decision (outputs not compared), 0 different, 0 drift, 0 not comparable, 0 waiting (0.2 s)
 ⚠ outputs not compared: 600 comparison(s) matched by decision only (both sent), not by what was sent, because no version ran beside this one and no destination keeps its outputs; to compare outputs, run it on the server, where the installed version runs beside it, or name the installed binary with --against PATH
 ```
 

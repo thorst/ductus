@@ -16,9 +16,9 @@ run it.
 
 ```sh
 # Ubuntu, Debian
-sudo apt install ./ductus_0.6.0_amd64.deb
+sudo apt install ./ductus_0.7.0_amd64.deb
 # RHEL, Rocky, Alma
-sudo dnf install ./ductus-0.6.0-1.x86_64.rpm
+sudo dnf install ./ductus-0.7.0-1.x86_64.rpm
 ```
 
 Both files are on the [release](download.md) page. Check the one you downloaded first, in its
@@ -26,11 +26,11 @@ folder with the release's `SHA256SUMS` (each file you have says `OK`):
 
 ```sh
 sha256sum --check --ignore-missing SHA256SUMS
-gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus    # GitHub built it, from the tagged source
+gh attestation verify ductus_0.7.0_amd64.deb -R thorst/ductus    # GitHub built it, from the tagged source
 ```
 
 To test changes not yet released, `docker build --target packages --build-arg
-VERSION=0.6.1-dev.1 --output dist .` in a clone of the repository makes both as development
+VERSION=0.7.1-dev.1 --output dist .` in a clone of the repository makes both as development
 builds ([development builds](download.md#between-releases-development-builds)).
 
 The install creates the `ductus` user and group, and doesn't start anything: nothing is

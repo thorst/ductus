@@ -40,5 +40,6 @@ echo "##### VS Code";         bash scripts/demo-vscode.sh | tail -1
 echo "##### ductus try";      bash scripts/demo-try.sh | tail -1
 echo "##### releases";        bash scripts/demo-release.sh | tail -1
 echo "##### promote";         bash scripts/demo-promote.sh | tail -1
+echo "##### v0.7 release";    bash scripts/demo-v07.sh | tail -1
 echo "##### reload";          bash scripts/demo-reload.sh | tail -1
 echo "##### scale";           SHARED=300 EPIC_SECONDS=10 SAMPLED=50 bash scripts/demo-scale.sh | tail -1

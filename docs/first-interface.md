@@ -373,10 +373,10 @@ server.
 <!-- scripts/demo-v06.sh -->
 ```text
 $ cd /tmp
-$ sudo apt install ./ductus_0.6.0~dev.1_amd64.deb
+$ sudo apt install ./ductus_0.7.0~dev.1_amd64.deb
 …
-Unpacking ductus (0.6.0~dev.1) ...
-Setting up ductus (0.6.0~dev.1) ...
+Unpacking ductus (0.7.0~dev.1) ...
+Setting up ductus (0.7.0~dev.1) ...
 
 Ductus is installed. It isn't running yet: first tell it where its database and project are.
   1. Edit /etc/ductus/ductus.env (the database URL, the project folder, the environment).
@@ -385,7 +385,7 @@ Ductus is installed. It isn't running yet: first tell it where its database and 
   4. journalctl -u ductus -f      (it says "started" once every interface is up)
 ```
 
-(`0.6.0~dev.1` is the demo's development package; a release is `ductus_0.6.0_amd64.deb`.) In
+(`0.7.0~dev.1` is the demo's development package; a release is `ductus_0.7.0_amd64.deb`.) In
 `/etc/ductus/ductus.env` the demo sets one line, the database; `DUCTUS_ENV=prod` and
 `DUCTUS_PROJECT=/var/lib/ductus/project` are already the package's defaults
 ([the file](install/linux.md#configure)):
@@ -461,7 +461,7 @@ $ sudo -u ductus ductus cert show ductus-mllp
   subject  CN=mllp.hospital.org
   names    mllp.hospital.org
   issuer   issued by Test Hospital CA
-  valid    2026-10-31 → 2027-01-29: 89 days left
+  valid    2026-11-25 → 2027-02-23: 89 days left
   chain    complete: mllp.hospital.org, issued by Test Hospital CA (the CA `hospital-ca` in resources.yaml)
   key      matches (./tls/mllp.key)
 → Senders must trust Test Hospital CA (the hospital's CA): ask them to confirm.
@@ -469,7 +469,7 @@ $ sudo -u ductus ductus validate --env-file /etc/ductus/ductus.env
 environment: prod
 ✓ resources: 0 database(s), 0 SFTP server(s), 0 API(s), 2 certificate(s)
 ✓ adt-in: config and code load
-✓ certificate `ductus-mllp`: CN=mllp.hospital.org (mllp.hospital.org), expires 2027-01-29 (89 days)
+✓ certificate `ductus-mllp`: CN=mllp.hospital.org (mllp.hospital.org), expires 2027-02-23 (89 days)
 ✓ certificate `hospital-ca`: a CA
 ⚠ database: plain, no TLS: the server doesn't offer it (sslmode=prefer); whoever answers at its address is believed: add sslmode=verify-full to DUCTUS_DATABASE_URL (sslrootcert=/path/ca.pem for a private CA)
 ✓ database: new (no engine has run on it yet): no messages wait, no retention is applied
@@ -481,30 +481,30 @@ Created symlink /etc/systemd/system/multi-user.target.wants/ductus.service → /
 $ systemctl show -p StatusText ductus
 StatusText=running 1 interface
 $ sudo -u ductus ductus doctor --env-file /etc/ductus/ductus.env
-ductus doctor · environment prod · 2026-10-31 23:46:41 +00:00
-on ductus1 · ductus 0.6.0-dev
+ductus doctor · environment prod · 2026-11-25 15:52:43 +00:00
+on ductus1 · ductus 0.7.0-dev
 checked 3 connection(s) in 0.1 s: 1 ok, 2 warning(s), 0 failed
 
 ⚠ engine database  db1.hospital.org:5432 Postgres
     used by  the engine (DUCTUS_DATABASE_URL)
-    DNS      db1.hospital.org → 172.18.0.2 (0.9 ms)
+    DNS      db1.hospital.org → 172.18.0.2 (0.8 ms)
     connect  172.18.0.2:5432 from 172.18.0.3 in 0.2 ms
   ⚠ TLS      none: the server doesn't offer TLS (sslmode=prefer), the connection is plain
     login    as `ductus`, database `ductus`: PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2); plain, no TLS: the server doesn't offer it (sslmode=prefer)
-    commits  2.2 ms median of 20 (each waits for the disk): strict ingest ≈ 450 msg/s per sender connection, one commit per ACK; more connections share commits. A 1M/day ADT feed averages ~12 msg/s.
+    commits  1.7 ms median of 20 (each waits for the disk): strict ingest ≈ 570 msg/s per sender connection, one commit per ACK; more connections share commits. A 1M/day ADT feed averages ~12 msg/s.
   → Queries, their results and the login cross the network readable: ask the DBA to turn on ssl, then set sslmode=verify-full.
 
 ✓ MLLP destination  127.0.0.1:6662 MLLP
-    used by  adt-in
+    used by  adt-in → lab
     address  127.0.0.1 (an address, nothing to look up)
-    connect  127.0.0.1:6662 from 127.0.0.1 in 0.3 ms
+    connect  127.0.0.1:6662 from 127.0.0.1 in 0.2 ms
 
 ⚠ listening port  0.0.0.0:6661 MLLP over TLS
     used by  adt-in
   ⚠ port     in use: by a running engine, or another program
     address  127.0.0.1 (an address, nothing to look up)
     connect  127.0.0.1:6661 from 127.0.0.1 in 0.2 ms
-    TLS      TLS 1.3, post-quantum key exchange (X25519MLKEM768), serves `ductus-mllp`: certificate for mllp.hospital.org, issued by Test Hospital CA, valid until 2027-01-29 (89 days); covers mllp.hospital.org
+    TLS      TLS 1.3, post-quantum key exchange (X25519MLKEM768), serves `ductus-mllp`: certificate for mllp.hospital.org, issued by Test Hospital CA, valid until 2027-02-23 (89 days); covers mllp.hospital.org
     chain    complete: mllp.hospital.org, issued by Test Hospital CA (the CA `hospital-ca` in resources.yaml)
   → If the engine isn't running on this server, another program holds port 6661: find it with `ss -ltnp` (Linux) or `netstat -ano` (Windows).
   → Senders must trust Test Hospital CA (the hospital's CA): ask them to confirm.
@@ -528,7 +528,7 @@ $ openssl x509 -req -in /root/epic/sender.csr -CA /root/hospital-ca/ca.pem -CAke
 Certificate request self-signature ok
 subject=CN = epic.hospital.org
 $ ductus gen --to mllp.hospital.org:6661 --ca /root/hospital-ca/ca.pem --cert /root/epic/sender.pem --key /root/epic/sender.key --count 100
-sent 100 messages over 1 connection(s) in 0.6s (156/s), retries 0, rejected 0, refused 0, dropped 0, longest wait 139 ms
+sent 100 messages over 1 connection(s) in 0.3s (290/s), retries 0, rejected 0, refused 0, dropped 0, longest wait 94 ms
 ```
 
 The lab system's receiver (`ductus sink` in the demo) got all 100, once each, in order. A sender
@@ -540,7 +540,7 @@ why, once a minute per sender:
 $ timeout 5 ductus gen --to mllp.hospital.org:6661 --ca /root/hospital-ca/ca.pem --count 1
 sending failed, retrying: TLS: the receiver wants a client certificate (name one in --cert)
 $ journalctl -u ductus -o cat --no-pager | grep "TLS handshake refused" | tail -1
-2026-10-31T23:47:03.775177Z  WARN ductus_runtime::tls: TLS handshake refused (logged once a minute per sender) listener="interface `adt-in` (MLLP)" peer=127.0.0.1 reason=the sender presented no client certificate
+2026-11-25T15:53:04.543195Z  WARN ductus_runtime::tls: TLS handshake refused (logged once a minute per sender) listener="interface `adt-in` (MLLP)" peer=127.0.0.1 reason=the sender presented no client certificate
 ```
 
 The demo then upgrades this server and goes back, both under traffic:

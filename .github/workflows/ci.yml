@@ -243,6 +243,9 @@ jobs:
       - name: Promote demo (three engines and databases; prod requires test and main; dev → test → prod with the record, a feature branch refused even forced, a colleague's work refused then forced, rolled back twice, then a rollback lowering lanes under traffic, every patient in order)
         run: BIN=target/release/ductus bash scripts/demo-promote.sh
 
+      - name: v0.7 release demo (a new project's failing test, VS Code's debugger at the bug through launch.json, the fix promoted dev → test → prod across three engines, a sender's messages through prod, a colleague's change in place, `ductus history` saying who changed what and why)
+        run: BIN=target/release/ductus bash scripts/demo-v07.sh
+
       - name: One-owner demo (a second engine with the same interfaces refused, another project alongside, the lock lost and taken back, kill -9 then a start at once, lanes lowered with a backlog, the old lanes sent first)
         run: BIN=target/release/ductus bash scripts/demo-one-owner.sh
 

@@ -11,8 +11,8 @@ machine ([`ductus dev`](dev.md) needs no installer and no administrator).
 > **Unsigned before v1.0.** The installer isn't signed with a code-signing certificate yet, so
 > Windows SmartScreen says "Windows protected your PC" and "unknown publisher" when it's run from
 > a download. Check the file before you run it: its SHA-256 against the release's `SHA256SUMS`
-> (`Get-FileHash ductus-0.6.0-x64.msi`), and that GitHub built it from the tagged source
-> (`gh attestation verify ductus-0.6.0-x64.msi -R thorst/ductus`): both are on
+> (`Get-FileHash ductus-0.7.0-x64.msi`), and that GitHub built it from the tagged source
+> (`gh attestation verify ductus-0.7.0-x64.msi -R thorst/ductus`): both are on
 > [Downloading and checking a release](download.md#check-the-checksum). Then "More info" → "Run
 > anyway", or unblock it first (`Unblock-File`). Signing comes with v1.0
 > ([nuance](../nuances/windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1)).
@@ -23,7 +23,7 @@ machine ([`ductus dev`](dev.md) needs no installer and no administrator).
 As an administrator:
 
 ```powershell
-msiexec /i ductus-0.6.0-x64.msi /qn          # silent; without /qn, the usual wizard
+msiexec /i ductus-0.7.0-x64.msi /qn          # silent; without /qn, the usual wizard
 ```
 
 To test changes not yet released, `packaging/windows/build.ps1` in a clone of the repository makes
@@ -60,7 +60,7 @@ engine logs in with Windows. Three choices
 | Account | How | When |
 |---|---|---|
 | `NT SERVICE\Ductus` (the default) | Nothing to do. A virtual account: no password; on the network it is the computer (`HOSPITAL\SERVER01$`). | The engine logs in to nothing with Windows, or a DBA grants the computer's account. |
-| A gMSA (group managed service account) | `msiexec /i ductus-0.6.0-x64.msi /qn SERVICEACCOUNT=HOSPITAL\svc-ductus$` | The engine needs its own identity on the network (a SQL Server Windows login, a share). Windows keeps the password; upgrades keep the account. **The best choice when you need one.** |
+| A gMSA (group managed service account) | `msiexec /i ductus-0.7.0-x64.msi /qn SERVICEACCOUNT=HOSPITAL\svc-ductus$` | The engine needs its own identity on the network (a SQL Server Windows login, a share). Windows keeps the password; upgrades keep the account. **The best choice when you need one.** |
 | An account with a password | Install, then `ductus service account HOSPITAL\svc-ductus --start` (it asks for the password; `--password-stdin` in scripts) | Only where a gMSA isn't possible: **after every upgrade** the service waits for the password again ([why](../nuances/windows.md#an-upgrade-cant-keep-an-accounts-password-the-service-waits-for-it-level-2)). |
 
 The installer (and `ductus service account`) grants the account "Log on as a service". Where
@@ -180,6 +180,6 @@ slowest message 3.3 s to its ACK, 12,000 of 12,000 received once each and in ord
 
 ## Uninstall
 
-"Apps" in Settings, or `msiexec /x ductus-0.6.0-x64.msi /qn`: removes the service, the program
+"Apps" in Settings, or `msiexec /x ductus-0.7.0-x64.msi /qn`: removes the service, the program
 and the Event Log source. `C:\ProgramData\Ductus` (settings, project, logs) stays, and so does
 everything in the database.

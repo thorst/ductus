@@ -1,7 +1,7 @@
 # The portable archive
 
-The engine as one program, without an installer: `ductus-0.6.0-linux-x64.tar.gz` and
-`ductus-0.6.0-windows-x64.zip`, each unpacking into a folder `ductus-0.6.0`. Unpack it anywhere
+The engine as one program, without an installer: `ductus-0.7.0-linux-x64.tar.gz` and
+`ductus-0.7.0-windows-x64.zip`, each unpacking into a folder `ductus-0.7.0`. Unpack it anywhere
 and run it; nothing is registered, and nothing is installed. Both are on each
 [release](download.md), with `SHA256SUMS` to check them against.
 
@@ -25,13 +25,13 @@ Run the **new** version's program against the database and project your engines 
 before the change window:
 
 ```sh
-tar xzf ductus-0.6.1-linux-x64.tar.gz && cd ductus-0.6.1
+tar xzf ductus-0.7.1-linux-x64.tar.gz && cd ductus-0.7.1
 ./ductus upgrade --check --env-file /etc/ductus/ductus.env --root /var/lib/ductus/project
 ```
 
 ```powershell
-Expand-Archive ductus-0.6.1-windows-x64.zip -DestinationPath C:\Temp     # makes C:\Temp\ductus-0.6.1
-C:\Temp\ductus-0.6.1\ductus.exe upgrade --check --env-file C:\ProgramData\Ductus\ductus.env --root C:\ProgramData\Ductus\project
+Expand-Archive ductus-0.7.1-windows-x64.zip -DestinationPath C:\Temp     # makes C:\Temp\ductus-0.7.1
+C:\Temp\ductus-0.7.1\ductus.exe upgrade --check --env-file C:\ProgramData\Ductus\ductus.env --root C:\ProgramData\Ductus\project
 ```
 
 It reads only, changing nothing in the database or the project, and says what the new version's

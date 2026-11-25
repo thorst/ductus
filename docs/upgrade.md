@@ -69,13 +69,13 @@ From a lab engine (`DESKTOP-GCT6E6V` is the machine it ran on):
 
 ```text
 $ ./ductus upgrade --check
-ductus upgrade --check: what version 0.6.0-dev would do here (nothing is changed)
+ductus upgrade --check: what version 0.7.0-dev would do here (nothing is changed)
 
 The database
 ✓ migrations: nothing to apply
 
 Engines on this database
-✓ 18e39e5085ef2289-3ee on DESKTOP-GCT6E6V (pid 1006): version 0.6.0-dev, environment dev, since 2026-10-31 12:52 UTC, runs 1 interface(s)
+✓ 18eb5758a9dc69c7-5de on DESKTOP-GCT6E6V (pid 1502): version 0.7.0-dev, environment dev, since 2026-11-25 16:41 UTC, runs 1 interface(s)
 
 The project (., environment dev)
 ✓ validate: valid
@@ -85,7 +85,7 @@ Between versions
 ✓ required stops: none (versions before 1.0 upgrade to any later one)
 ✓ deprecated settings: none used
 
-ready to upgrade to 0.6.0-dev (checked in 0.6 s)
+ready to upgrade to 0.7.0-dev (checked in 0.3 s)
 ```
 
 What each section means, and what to do when it isn't ✓:
@@ -107,10 +107,11 @@ The project (., environment dev)
 ✓ validate: valid
 ✗ test: 0 passed, 1 failed
     adt-in
-      ✗ sets the receiving application and keeps the patient
+      ✗ sets the receiving application and keeps the patient  (interfaces/adt-in/archive.test.ts:4:1)
           expected "RECEIVER", got "LAB"
+          at interfaces/adt-in/archive.test.ts:6:28
 …
-The last 1h replayed through 0.6.0-dev (nothing is sent)
+The last 1h replayed through 0.7.0-dev (nothing is sent)
 ✓ replay against the record and kept outputs: 300 message(s), 600 comparison(s), 0 identical, 600 same decision (outputs not compared), 0 different
     note: no installed version found (/usr/bin/ductus): outputs compared with kept outputs only; name a binary with --against
 ⚠ replay: outputs not compared: 600 comparison(s) matched by decision only (both sent), not by what was sent, because no version ran beside this one and no destination keeps its outputs; to compare outputs, run it on the server, where the installed version runs beside it, or name the installed binary with --against PATH
@@ -124,7 +125,7 @@ still sent. That's what the ⚠ is for. "Identical" is only ever claimed for an 
 compared.
 
 On a database no version has run on yet, the first section says so instead: "a new database: the
-first start creates every table (25 migrations)".
+first start creates every table (36 migrations)".
 
 `--json` gives the same as one document: `ok` and `problems`, every check with its `section`,
 `level` and `text`, and the details (`migrations.pending` with each one's tables, `engines`,
@@ -133,24 +134,16 @@ the project's `validate` and `test` output):
 ```text
 $ ./ductus upgrade --check --json
 {
-    "version": "0.6.0-dev",
-    "ok": true,
-    "problems": 0,
-    "seconds": 0.61,
-    "checks": [
-        {
-            "section": "database",
-            "level": "ok",
-            "text": "migrations: nothing to apply",
-            "more": []
-        },
-…
-    "migrations": {
-        "new_database": false,
-        "pending": [],
-        "newer": [],
-        "edited": [],
-        "failed": []
+  "version": "0.7.0-dev",
+  "ok": true,
+  "problems": 0,
+  "seconds": 0.31,
+  "checks": [
+    {
+      "section": "database",
+      "level": "ok",
+      "text": "migrations: nothing to apply",
+      "more": []
     },
 …
 ```
@@ -202,17 +195,18 @@ The same tool compares a *code* change with `--baseline <git revision>`:
 
 ```text
 $ ductus replay --since 1h --baseline HEAD --report replay.html
-adt-in: 300 message(s) replayed in 0.0 s
-ductus replay: version 0.6.0-dev against the project at HEAD, 2026-10-31 15:25 to 2026-10-31 16:25 UTC, environment dev (nothing was sent)
+adt-in: 300 message(s) replayed in 0.1 s
+ductus replay: version 0.7.0-dev against the project at HEAD, 2026-11-25 15:41 to 2026-11-25 16:41 UTC, environment dev (nothing was sent)
 
-adt-in: 300 message(s) in 0.0 s
+adt-in: 300 message(s) in 0.1 s
+  note: 600 record(s) were decided by other code than this (67eb15b6cff8): b6f492d871ee (600); a difference from the record may be that change
   ✗ archive: 300 compared, 300 different
-      vs the project at HEAD: MSH-5 differs in 300 message(s) (e.g. message 406: "RECEIVER" → "LAB")
+      vs the project at HEAD: MSH-5 differs in 300 message(s) (e.g. message 1: "RECEIVER" → "LAB")
   ✗ lab: 300 compared, 300 different
-      vs the project at HEAD: MSH-5 differs in 300 message(s) (e.g. message 406: "RECEIVER" → "LAB")
+      vs the project at HEAD: MSH-5 differs in 300 message(s) (e.g. message 1: "RECEIVER" → "LAB")
 
-300 message(s), 600 comparison(s): 0 identical, 600 different, 0 drift, 0 not comparable, 0 waiting (0.1 s)
-report: …/replay.html (sha256:794fea6a30fe050d12f3253ba1240f39f40f5219f780783cb192b06c3d20489f)
+300 message(s), 600 comparison(s): 0 identical, 600 different, 0 drift, 0 not comparable, 0 waiting (0.2 s)
+report: replay.html (sha256:6776a10da49ab76ae3accec725c905fc53719ad8bcf307efba2228411f0d0180)
 ```
 
 Here the earlier project ran beside this one, so every output was compared: the change shows
@@ -226,8 +220,8 @@ More on replay, with what the clock and `Math.random` do in it:
 ### Linux packages: the handover
 
 ```sh
-sudo apt install ./ductus_0.6.1_amd64.deb          # Ubuntu, Debian
-sudo dnf install ./ductus-0.6.1-1.x86_64.rpm       # RHEL, Rocky, Alma
+sudo apt install ./ductus_0.7.1_amd64.deb          # Ubuntu, Debian
+sudo dnf install ./ductus-0.7.1-1.x86_64.rpm       # RHEL, Rocky, Alma
 ```
 
 **What happens:** the package replaces the program and runs `systemctl reload ductus`. The new
@@ -244,10 +238,10 @@ handover` always does; these are the lines `journalctl -u ductus` shows):
 
 ```text
 $ ductus handover --control …/control
-started …/ductus (pid 1312): it reads the project, migrates the database and loads every interface's code while this one runs
-ductus 0.6.0-dev (pid 1312) is ready after 104 ms and receives beside this one: stopping this one
-this engine stopped in 1 ms and let go of its interfaces: the new one takes them
-handed over to ductus 0.6.0-dev (pid 1312): receiving never stopped, sending paused 41 ms
+started …/ductus (pid 1904): it reads the project, migrates the database and loads every interface's code while this one runs
+ductus 0.7.0-dev (pid 1904) is ready after 276 ms and receives beside this one: stopping this one
+this engine stopped in 4 ms and let go of its interfaces: the new one takes them
+handed over to ductus 0.7.0-dev (pid 1904): receiving never stopped, sending paused 24 ms
 ```
 
 - **A new version that can't start** (a broken project, a failed database change, another engine
@@ -265,7 +259,7 @@ handed over to ductus 0.6.0-dev (pid 1312): receiving never stopped, sending pau
 ### Windows installer
 
 ```powershell
-msiexec /i ductus-0.6.1-x64.msi /qn          # as an administrator; no need to uninstall first
+msiexec /i ductus-0.7.1-x64.msi /qn          # as an administrator; no need to uninstall first
 ```
 
 **What happens:** the installer stops the service cleanly, replaces the program and starts it
@@ -283,8 +277,8 @@ password account, Restart Manager): [Windows installer](install/windows.md#upgra
 Replace the program and its TypeScript compiler, and hand over, as the package would:
 
 ```sh
-sudo install -m 0755 ductus-0.6.1/ductus /usr/bin/ductus
-sudo rm -rf /usr/lib/ductus/typescript && sudo cp -r ductus-0.6.1/typescript /usr/lib/ductus/
+sudo install -m 0755 ductus-0.7.1/ductus /usr/bin/ductus
+sudo rm -rf /usr/lib/ductus/typescript && sudo cp -r ductus-0.7.1/typescript /usr/lib/ductus/
 sudo systemctl reload ductus
 ```
 
@@ -361,7 +355,7 @@ problem in Ductus itself is a rollback, and an [issue](https://github.com/thorst
 
 | Installed with | Going back |
 |---|---|
-| Linux package | `sudo apt install -y --allow-downgrades ./ductus_0.6.0_amd64.deb` (apt asks before a downgrade; `-y` answers it), or `sudo dnf downgrade ./ductus-0.6.0-1.x86_64.rpm`: the package hands over to the older program as an upgrade does (when the older one is 0.6.6.3 or later; before that, it restarts). [On a server](#going-back-under-traffic) shows one |
+| Linux package | `sudo apt install -y --allow-downgrades ./ductus_0.7.0_amd64.deb` (apt asks before a downgrade; `-y` answers it), or `sudo dnf downgrade ./ductus-0.7.0-1.x86_64.rpm`: the package hands over to the older program as an upgrade does (when the older one is 0.6.6.3 or later; before that, it restarts). [On a server](#going-back-under-traffic) shows one |
 | Windows installer | The installer refuses to install an older version over a newer one ("A newer version of Ductus is already installed. Uninstall it first to go back."). Uninstall (`msiexec /x`), then install the older MSI: `C:\ProgramData\Ductus` and the database stay. Give `SERVICEACCOUNT=` again if the service ran as another account (a gMSA): the install sets the account afresh |
 | Portable archive | Put the older program back and `sudo systemctl reload ductus` |
 | Docker | Run the older image |
@@ -399,8 +393,8 @@ outputs are from `scripts/demo-v06.sh`, which runs them under real systemd on ev
 **Why:** "receiving never stops" is a claim; this is what a sender saw while it happened, and
 what the database looks like after going back.
 
-The demo's two packages (`0.6.0~dev.1` and `~dev.2`) hold the same program, so they show the
-mechanics of an upgrade, not a version's changes; a release's files are named `0.6.0`, `0.6.1`.
+The demo's two packages (`0.7.0~dev.1` and `~dev.2`) hold the same program, so they show the
+mechanics of an upgrade, not a version's changes; a release's files are named `0.7.0`, `0.7.1`.
 
 ### Check first, from the new version's archive
 
@@ -411,15 +405,15 @@ beside the installed one:
 <!-- scripts/demo-v06.sh -->
 ```text
 $ cd /tmp
-$ tar -xzf ductus-0.6.0-dev.2-linux-x64.tar.gz
-$ sudo -u ductus ./ductus-0.6.0-dev.2/ductus upgrade --check --replay 1d --env-file /etc/ductus/ductus.env --root /var/lib/ductus/project
-ductus upgrade --check: what version 0.6.0-dev would do here (nothing is changed)
+$ tar -xzf ductus-0.7.0-dev.2-linux-x64.tar.gz
+$ sudo -u ductus ./ductus-0.7.0-dev.2/ductus upgrade --check --replay 1d --env-file /etc/ductus/ductus.env --root /var/lib/ductus/project
+ductus upgrade --check: what version 0.7.0-dev would do here (nothing is changed)
 
 The database
 ✓ migrations: nothing to apply
 
 Engines on this database
-✓ 18e3c2043934cad1-14e on ductus1 (pid 334): version 0.6.0-dev, environment prod, since 2026-10-31 23:46 UTC, runs 1 interface(s)
+✓ 18eb54a944ea6059-169 on ductus1 (pid 361): version 0.7.0-dev, environment prod, since 2026-11-25 15:52 UTC, runs 1 interface(s)
 
 The project (/var/lib/ductus/project, environment prod)
 ✓ validate: valid
@@ -430,10 +424,10 @@ Between versions
 ✓ required stops: none (versions before 1.0 upgrade to any later one)
 ✓ deprecated settings: none used
 
-The last 1d replayed through 0.6.0-dev (nothing is sent)
-✓ replay against version 0.6.0-dev (installed): 100 message(s), 100 comparison(s), 100 identical, 0 different
+The last 1d replayed through 0.7.0-dev (nothing is sent)
+✓ replay against version 0.7.0-dev (installed): 100 message(s), 100 comparison(s), 100 identical, 0 different
 
-ready to upgrade to 0.6.0-dev (checked in 0.9 s)
+ready to upgrade to 0.7.0-dev (checked in 0.3 s)
 ```
 
 On the server, the replay found the installed version (`/usr/bin/ductus`) and ran it beside the
@@ -448,18 +442,18 @@ client certificate; 1.5 s in, the package is installed:
 
 <!-- scripts/demo-v06.sh -->
 ```text
-$ sudo apt install ./ductus_0.6.0~dev.2_amd64.deb
+$ sudo apt install ./ductus_0.7.0~dev.2_amd64.deb
 …
-Unpacking ductus (0.6.0~dev.2) over (0.6.0~dev.1) ...
-Setting up ductus (0.6.0~dev.2) ...
+Unpacking ductus (0.7.0~dev.2) over (0.7.0~dev.1) ...
+Setting up ductus (0.7.0~dev.2) ...
 $ journalctl -u ductus -o cat --no-pager | grep "^handed over"
-handed over to ductus 0.6.0-dev (pid 637): receiving never stopped, sending paused 180 ms
+handed over to ductus 0.7.0-dev (pid 687): receiving never stopped, sending paused 26 ms
 ```
 
 What the sender saw (`ductus gen`'s last line), and what the receiver got:
 
 ```text
-retries 4, rejected 0, refused 0, dropped 4, longest wait 504 ms
+retries 4, rejected 0, refused 0, dropped 4, longest wait 399 ms
 unique 1000 | duplicates 0 | out of order 0 | patients 100
 ```
 
@@ -467,9 +461,9 @@ unique 1000 | duplicates 0 | out of order 0 | patients 100
 - **Dropped 4, retries 4**: each of the 4 open connections was closed once, by the old engine
   as it let go, with no message lost on it, and opened again at once on the new one. A sender's
   MLLP client does this by itself; to its operators it looks like nothing.
-- **Longest wait 504 ms**: the slowest ACK, from first try to ACK, for a message that waited
+- **Longest wait 399 ms**: the slowest ACK, from first try to ACK, for a message that waited
   out the close, the reconnect and the TLS handshake.
-- **Every message once and in order** at the receiver; sending paused 180 ms while the new
+- **Every message once and in order** at the receiver; sending paused 26 ms while the new
   engine took the interfaces.
 
 Over four runs of the demo on a laptop (an upgrade and a downgrade each), the longest wait was
@@ -488,30 +482,30 @@ same sender sends while the older package goes in:
 
 <!-- scripts/demo-v06.sh -->
 ```text
-$ sudo apt install -y --allow-downgrades ./ductus_0.6.0~dev.1_amd64.deb
+$ sudo apt install -y --allow-downgrades ./ductus_0.7.0~dev.1_amd64.deb
 …
 The following packages will be DOWNGRADED:
   ductus
 …
-dpkg: warning: downgrading ductus from 0.6.0~dev.2 to 0.6.0~dev.1
+dpkg: warning: downgrading ductus from 0.7.0~dev.2 to 0.7.0~dev.1
 …
-Unpacking ductus (0.6.0~dev.1) over (0.6.0~dev.2) ...
-Setting up ductus (0.6.0~dev.1) ...
+Unpacking ductus (0.7.0~dev.1) over (0.7.0~dev.2) ...
+Setting up ductus (0.7.0~dev.1) ...
 $ journalctl -u ductus -o cat --no-pager | grep "^handed over" | tail -1
-handed over to ductus 0.6.0-dev (pid 832): receiving never stopped, sending paused 26 ms
+handed over to ductus 0.7.0-dev (pid 895): receiving never stopped, sending paused 32 ms
 $ cd /var/lib/ductus/project
 $ sudo -u ductus ductus upgrade --check --env-file /etc/ductus/ductus.env
-ductus upgrade --check: what version 0.6.0-dev would do here (nothing is changed)
+ductus upgrade --check: what version 0.7.0-dev would do here (nothing is changed)
 
 The database
 ✓ migrations: nothing to apply
 ✓ applied by a newer version than this one: 9999 (fine: migrations only add, so this version runs on them)
 …
-ready to upgrade to 0.6.0-dev (checked in 0.5 s)
+ready to upgrade to 0.7.0-dev (checked in 0.2 s)
 ```
 
 ```text
-retries 4, rejected 0, refused 0, dropped 4, longest wait 349 ms
+retries 4, rejected 0, refused 0, dropped 4, longest wait 332 ms
 unique 1000 | duplicates 0 | out of order 0 | patients 100
 ```
 
