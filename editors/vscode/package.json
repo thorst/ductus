@@ -3,7 +3,7 @@
   "displayName": "Ductus",
   "description": "Ductus integration engine: interface tests in the Test Explorer, run and debugged per test; validate's findings in Problems on save; debugging without launch.json; Deploy to dev; Promote… a release across your engines; each interface's history; a stored message debugged from the web UI.",
   "version": "0.7.0",
-  "publisher": "ductus",
+  "publisher": "getductus",
   "license": "Apache-2.0",
   "repository": {
     "type": "git",

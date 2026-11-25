@@ -180,7 +180,7 @@ test("a quarantined message: why, what each destination did, and its HL7 fields"
   const origin = new URL(page.url()).origin;
   await expect(page.getByRole("link", { name: "Debug in VS Code" })).toHaveAttribute(
     "href",
-    `vscode://ductus.ductus/debug-message?${new URLSearchParams({ engine: origin, interface: "orders", message: id })}`,
+    `vscode://getductus.ductus/debug-message?${new URLSearchParams({ engine: origin, interface: "orders", message: id })}`,
   );
   // A viewer looks; acting is for operators.
   await expect(page.getByRole("button", { name: "Edit and resend" })).toHaveCount(0);

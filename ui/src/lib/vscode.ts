@@ -1,9 +1,10 @@
 /**
  * The Ductus extension for VS Code, as VS Code knows it: `<publisher>.<name>` from
- * editors/vscode/package.json (vscode.test.ts checks they agree; the publisher changes once it's
- * published to the Marketplace).
+ * editors/vscode/package.json (vscode.test.ts checks they agree). `getductus` is the publisher
+ * on the Marketplace and Open VSX, so a `.vsix` from a release and the published one are the same
+ * extension.
  */
-export const EXTENSION = "ductus.ductus";
+export const EXTENSION = "getductus.ductus";
 
 /**
  * The link that opens a stored message in VS Code under the debugger: the extension runs

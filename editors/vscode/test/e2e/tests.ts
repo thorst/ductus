@@ -81,7 +81,7 @@ function run(items: vscode.TestItem[], debug = false) {
 }
 
 suiteSetup(async () => {
-  const extension = vscode.extensions.getExtension<Api>("ductus.ductus");
+  const extension = vscode.extensions.getExtension<Api>("getductus.ductus");
   assert.ok(extension, "the extension is installed");
   api = await extension.activate();
   vscode.debug.registerDebugAdapterTrackerFactory("*", {

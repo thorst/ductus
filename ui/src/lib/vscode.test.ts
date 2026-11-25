@@ -6,7 +6,7 @@ import { EXTENSION, debugInVsCode } from "./vscode";
 describe("Debug in VS Code", () => {
   it("links to the extension with the engine, the interface and the message", () => {
     expect(debugInVsCode("https://ductus-prod:7700/", "adt-in", 42)).toBe(
-      "vscode://ductus.ductus/debug-message?engine=https%3A%2F%2Fductus-prod%3A7700&interface=adt-in&message=42",
+      "vscode://getductus.ductus/debug-message?engine=https%3A%2F%2Fductus-prod%3A7700&interface=adt-in&message=42",
     );
   });
 

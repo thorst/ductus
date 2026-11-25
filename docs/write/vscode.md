@@ -24,10 +24,15 @@ and `ductus validate` say in a terminal: nothing is checked twice by different c
 - **`ductus` 0.7.0 or newer** on the `PATH` (the [installers](../install/index.md) put it there),
   or the setting `ductus.path`. Without one, or with an older one, the extension says so with a
   link to the download, and its views stay empty.
-- **The extension**: in VS Code's Extensions view, search **Ductus** (published with each release
-  from 0.7.0). Until then, or for one you built: `npm ci && npm run package` in `editors/vscode`
-  of the [repository](https://github.com/thorst/ductus) makes `dist/ductus.vsix`; Extensions →
-  **…** → **Install from VSIX…**.
+- **The extension**: download the `.vsix` from the
+  [release's page](https://github.com/thorst/ductus/releases) (beside the engine's files, the
+  same version), then in VS Code's Extensions view **…** → **Install from VSIX…** and pick it.
+  A `.vsix` doesn't update itself: install the next release's the same way when you upgrade
+  `ductus`. It's not yet in the VS Code Marketplace or Open VSX; when it is, under the publisher
+  `getductus`, it's the same extension (`getductus.ductus`), so the published one replaces the
+  one you installed by hand. One you built yourself: `npm ci && npm run package` in
+  `editors/vscode` of the [repository](https://github.com/thorst/ductus) makes
+  `dist/ductus.vsix`.
 - **A project in WSL, a container or over SSH**: open it there with VS Code's Remote
   Development, so the extension runs where `ductus` and the project are.
 

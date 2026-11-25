@@ -21,7 +21,7 @@ export interface MessageDebug {
  * code under VS Code's debugger, as `ductus try <interface> --message ID --from URL --inspect`
  * does in a terminal (nothing is sent; the read is in that engine's audit log). From the Command
  * Palette (a typed id, the open file's interface), or from the web UI's **Debug in VS Code** link
- * on a message's page (`vscode://ductus.ductus/debug-message?engine=…&interface=…&message=…`).
+ * on a message's page (`vscode://getductus.ductus/debug-message?engine=…&interface=…&message=…`).
  *
  * A link opens only an engine you named in `ductus.engines` or your own `ductus dev`: one from
  * anywhere else asks first, showing its URL, and adds it once you name it (a web page can't send
