@@ -6,7 +6,9 @@
 #   a dry run (DRY_RUN is true)      RELEASE_VERSION=0.0.0-dryrun.<RUN_NUMBER>, RELEASE_KIND=dry-run.
 #                                    With --apply, Cargo.toml and Cargo.lock say that version too, in
 #                                    this checkout only, so every file the run builds carries it
-#                                    (`ductus --version` included), as a release's would carry its own.
+#                                    (`ductus --version` included), as a release's would carry its own;
+#                                    and editors/vscode/package.json says 0.0.0 (an extension's version
+#                                    is three numbers only, as an MSI's).
 #                                    0.0.0: a dry run's files can't be taken for a release's, and sort
 #                                    below every real version.
 #   a tag (REF is refs/tags/v0.6.0)  RELEASE_VERSION=0.6.0, RELEASE_KIND=tag. Fails unless Cargo.toml
@@ -35,6 +37,12 @@ if [ "$dry_run" = true ]; then
       { ours = 0; print }
       END { if (changed == 0) exit 1 }' Cargo.lock >Cargo.lock.new || { echo "no ductus crate in Cargo.lock says $cargo" >&2; rm -f Cargo.lock.new; exit 1; }
     mv Cargo.lock.new Cargo.lock
+    # The extension's own version: its first "version" key (the manifest's, before any nested one).
+    extension=editors/vscode/package.json
+    if [ -f "$extension" ]; then
+      sed -i '0,/^  "version": "[^"]*"/s//  "version": "'"${version%%-*}"'"/' "$extension"
+      grep -q '^  "version": "'"${version%%-*}"'"' "$extension" || { echo "no version in $extension" >&2; exit 1; }
+    fi
     echo "this checkout now builds $version (Cargo.toml said $cargo)" >&2
   fi
   echo "RELEASE_VERSION=$version"

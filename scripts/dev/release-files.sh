@@ -8,6 +8,7 @@
 #
 #   ductus_<v>_amd64.deb  ductus-<v>-1.x86_64.rpm  ductus-<v>-linux-x64.tar.gz  the Linux packages
 #   ductus-<v>-x64.msi  ductus-<v>-windows-x64.zip                            Windows
+#   ductus-<v>.vsix                the VS Code extension, built here from editors/vscode
 #   ductus-docs-<v>.zip            the docs as a site on disk (mdBook's search works from file://)
 #   ductus-<v>-{linux,windows}-x64.cdx.json  ductus-<v>-web-ui.cdx.json      CycloneDX SBOMs
 #   SHA256SUMS                     every file above
@@ -17,6 +18,8 @@
 # link inside it working; SHA256SUMS must verify. Exit 1 with what's wrong. Needs dpkg-deb, rpm,
 # msiinfo (msitools), unzip, mdBook and lychee (docs-tools.sh), cargo-cyclonedx (release-tools.sh),
 # cargo and npm. Takes about a minute, mostly the docs build and lychee.
+# The extension's id (`<publisher>.<name>`) is pinned to the web UI's links by ui's vscode.test.ts,
+# and its version to Cargo.toml's by cli.rs (the_release_version_comes_from_the_tag_or_the_dry_run).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 export PATH="$HOME/.local/bin:$PATH"
@@ -76,6 +79,20 @@ check "$zip holds ductus-$version/typescript/tsc.exe and its libs" \
   '[ "$(unzip -Z1 "$out/$zip" | grep -E "^ductus-$version/typescript/(tsc\.exe|lib\.es2023\.d\.ts)$" | grep -c .)" = 2 ]'
 check "$msifile installs typescript\\tsc.exe" \
   'msiinfo export "$out/$msifile" File | tr -d "\r" | grep -iE "tsc\.exe" >/dev/null'
+
+# The VS Code extension: its version is three numbers (a pre-release 0.7.1-rc.1's is 0.7.1, as the
+# MSI's), and its publisher the one its id (`getductus.ductus`) and the web UI's links name.
+echo "== the extension" >&2
+vsix=ductus-$version.vsix
+(cd editors/vscode && npm ci --no-audit --no-fund --loglevel=error && npm run package --silent) >"$work/vsix.log" 2>&1 || {
+  cat "$work/vsix.log" >&2
+  echo "FAILED: the extension's package (npm run package in editors/vscode)" >&2
+  exit 1
+}
+cp editors/vscode/dist/ductus.vsix "$out/$vsix"
+identity=$(unzip -p "$out/$vsix" extension.vsixmanifest | grep -o '<Identity [^>]*>')
+check "$vsix is getductus.ductus $msi ($identity)" \
+  '[[ "$identity" == *" Id=\"ductus\""* && "$identity" == *" Version=\"$msi\""* && "$identity" == *" Publisher=\"getductus\""* ]]'
 
 # The docs, as the site's pages with mdBook's search (it works from file://; Pagefind, the site's,
 # doesn't), titled with the version on every page, under one folder.

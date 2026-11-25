@@ -22,6 +22,7 @@ code-signed before v1.0, so nothing else tells you it's genuine. **You can skip 
 | `ductus-0.7.0-1.x86_64.rpm` | RHEL, Rocky, Alma 9 | [Linux packages](linux.md) |
 | `ductus-0.7.0-x64.msi` | Windows Server, Windows 11 | [Windows installer](windows.md) |
 | `ductus-0.7.0-linux-x64.tar.gz`, `ductus-0.7.0-windows-x64.zip` | The program alone: checking an upgrade before installing it, servers without the packages | [The portable archive](archive.md) |
+| `ductus-0.7.0.vsix` | The VS Code extension of this version | [In VS Code](../write/vscode.md#install) |
 | `ductus-docs-0.7.0.zip` | These docs, as they are for this version, to read offline | [The docs as a download](#the-docs-as-a-download) |
 | `ductus-0.7.0-linux-x64.cdx.json`, `ductus-0.7.0-windows-x64.cdx.json`, `ductus-0.7.0-web-ui.cdx.json` | Your security team: every library in each build | [The SBOMs](#the-sboms-every-library-inside) |
 | `SHA256SUMS` | Checking any of the files above | [Below](#check-the-checksum) |

@@ -10,6 +10,7 @@ upgrade notes). No support is offered for pre-releases.
 | `ductus-@PACKAGE_VERSION@-1.x86_64.rpm` | RHEL, Rocky, Alma 9 | [Linux packages](https://docs.getductus.com/install/linux.html) |
 | `ductus-@VERSION@-x64.msi` | Windows Server, Windows 11 | [Windows installer](https://docs.getductus.com/install/windows.html) |
 | `ductus-@VERSION@-linux-x64.tar.gz`, `ductus-@VERSION@-windows-x64.zip` | Checking an upgrade before installing it (`ductus upgrade --check`); servers without the packages | [The portable archive](https://docs.getductus.com/install/archive.html) |
+| `ductus-@VERSION@.vsix` | The VS Code extension of this version: Extensions → … → Install from VSIX… | [In VS Code](https://docs.getductus.com/write/vscode.html#install) |
 | `ductus-docs-@VERSION@.zip` | These docs as they are for this version, offline: unzip, open `ductus-docs-@VERSION@/index.html` | |
 | `ductus-@VERSION@-linux-x64.cdx.json`, `ductus-@VERSION@-windows-x64.cdx.json`, `ductus-@VERSION@-web-ui.cdx.json` | Your security team's tools: every library in each build (CycloneDX SBOMs) | [Libraries and versions](https://github.com/thorst/ductus/blob/v@VERSION@/docs/reference/libraries.md) |
 | `SHA256SUMS` | Checking a download | Below |

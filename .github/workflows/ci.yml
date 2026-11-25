@@ -515,8 +515,8 @@ jobs:
           if-no-files-found: ignore
 
   # What a release holds (scripts/dev/release-files.sh), from this commit's own jobs and only once
-  # every one of them passed: the Linux packages and archive, the MSI and zip, the docs zip, the
-  # SBOMs, SHA256SUMS. On a v* tag: attested (GitHub's build provenance, signed through Sigstore's
+  # every one of them passed: the Linux packages and archive, the MSI and zip, the VS Code
+  # extension (built here), the docs zip, the SBOMs, SHA256SUMS. On a v* tag: attested (GitHub's build provenance, signed through Sigstore's
   # public log: pushing the tag is what makes it public) and made a *draft* pre-release, which Todd
   # reviews and publishes. A dry run (gh workflow run ci.yml -f dry_run=true): the same files with
   # version 0.0.0-dryrun.<run>, kept as the run's `release` artifact with the notes; no release, no
@@ -556,8 +556,17 @@ jobs:
         run: |
           bash scripts/dev/release-files.sh "$RELEASE_VERSION" artifacts release
           # @PACKAGE_VERSION@: nfpm's spelling in the .deb and .rpm names (0.6.1-rc.1 is 0.6.1~rc.1).
-          sed -e "s/@PACKAGE_VERSION@/${RELEASE_VERSION/-/\~}/g" -e "s/@VERSION@/$RELEASE_VERSION/g" \
-            packaging/release-notes.md >release-notes.md
+          # What's new in this version first (packaging/whats-new/<version>.md, written for each
+          # release; a dry run has none), then what every release says.
+          notes=packaging/release-notes.md
+          [ -f "packaging/whats-new/$RELEASE_VERSION.md" ] && notes="packaging/whats-new/$RELEASE_VERSION.md $notes"
+          for f in $notes; do cat "$f"; echo; done |
+            sed -e "s/@PACKAGE_VERSION@/${RELEASE_VERSION/-/\~}/g" -e "s/@VERSION@/$RELEASE_VERSION/g" >release-notes.md
+          # A tag without its own "What's new" is a release nobody described: say so before it's made.
+          if [ "$RELEASE_KIND" = tag ] && [ ! -f "packaging/whats-new/$RELEASE_VERSION.md" ]; then
+            echo "no packaging/whats-new/$RELEASE_VERSION.md: write what's new in $RELEASE_VERSION, commit, and tag again" >&2
+            exit 1
+          fi
       - name: Attest every file (who built it, from which commit and workflow)
         if: env.RELEASE_KIND == 'tag'
         uses: actions/attest-build-provenance@v4

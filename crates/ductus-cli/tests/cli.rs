@@ -115,16 +115,30 @@ fn the_libraries_page_is_current() {
 }
 
 /// ci.yml's release version (scripts/dev/release-version.sh): a tag must say what Cargo.toml says,
-/// and a dry run makes a copy of the workspace build `0.0.0-dryrun.<run>`, Cargo.lock included.
+/// and a dry run makes a copy of the workspace build `0.0.0-dryrun.<run>`, Cargo.lock included,
+/// and the VS Code extension 0.0.0. The extension's version is always Cargo.toml's without its
+/// pre-release (`0.7.0-dev` → `0.7.0`; an extension's is three numbers), so the release's `.vsix`
+/// is the release's version (release-files.sh checks the file).
 #[cfg(target_os = "linux")]
 #[test]
 fn the_release_version_comes_from_the_tag_or_the_dry_run() {
     let repo = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
     let dir = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(dir.path().join("scripts/dev")).unwrap();
-    for file in ["scripts/dev/release-version.sh", "Cargo.toml", "Cargo.lock"] {
+    std::fs::create_dir_all(dir.path().join("editors/vscode")).unwrap();
+    for file in ["scripts/dev/release-version.sh", "Cargo.toml", "Cargo.lock", "editors/vscode/package.json"] {
         std::fs::copy(repo.join(file), dir.path().join(file)).unwrap();
     }
+    let extension_version = |root: &Path| {
+        let text = std::fs::read_to_string(root.join("editors/vscode/package.json")).unwrap();
+        serde_json::from_str::<serde_json::Value>(&text).unwrap()["version"].as_str().unwrap().to_string()
+    };
+    let three = env!("CARGO_PKG_VERSION").split('-').next().unwrap();
+    assert_eq!(
+        extension_version(&repo),
+        three,
+        "editors/vscode/package.json's version is Cargo.toml's without its pre-release: change them together"
+    );
     let run = |args: &[&str]| {
         let out =
             Command::new("bash").arg(dir.path().join("scripts/dev/release-version.sh")).args(args).output().unwrap();
@@ -147,6 +161,7 @@ fn the_release_version_comes_from_the_tag_or_the_dry_run() {
     assert!(ok && out == "RELEASE_VERSION=0.0.0-dryrun.42\nRELEASE_KIND=dry-run\n", "{out}");
     let toml = std::fs::read_to_string(dir.path().join("Cargo.toml")).unwrap();
     assert!(toml.contains("\nversion = \"0.0.0-dryrun.42\"\n") && !toml.contains(ours), "{toml}");
+    assert_eq!(extension_version(dir.path()), "0.0.0", "the dry run's extension");
     let lock = std::fs::read_to_string(dir.path().join("Cargo.lock")).unwrap();
     let crates = lock.matches("version = \"0.0.0-dryrun.42\"").count();
     assert_eq!(crates, lock.matches("\nname = \"ductus").count(), "every workspace crate's entry, nothing else");
