@@ -9,6 +9,10 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
+/// One test's engines at a time: a reload is asked of the process, and an engine running for
+/// another test beside the handover's made the handover test fail.
+static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 fn free_port() -> u16 {
     std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port()
 }
@@ -67,6 +71,7 @@ async fn reload() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn an_in_process_handover_takes_over_and_leaves_nothing_behind() {
     let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let _alone = ONE_AT_A_TIME.lock().await;
     let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
     let name = format!("in-process-{nanos}");
     let port = free_port();
@@ -131,4 +136,69 @@ async fn an_in_process_handover_takes_over_and_leaves_nothing_behind() {
     tokio::time::sleep(Duration::from_secs(2)).await;
     let after = tokio::runtime::Handle::current().metrics().num_alive_tasks();
     assert!(after <= before + 2, "tasks left once every engine ended: {after} (before: {before})");
+}
+
+/// An engine with a respond-mode interface stops at once, also with a caller's kept-alive
+/// connection open (which it closes). Until 0.8.1.2 its HTTP servers were kept to the end of
+/// the stop, so the responder they feed never ended and every stop took its whole time limit
+/// (30 s), saying messages in hand were left pending.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn an_engine_answering_http_requests_stops_at_once() {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let _alone = ONE_AT_A_TIME.lock().await;
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let name = format!("in-process-respond-{nanos}");
+    let port = free_port();
+    let dir = tempfile::tempdir().unwrap();
+    let root: PathBuf = dir.path().to_path_buf();
+    let folder = root.join(format!("interfaces/{name}"));
+    std::fs::create_dir_all(&folder).unwrap();
+    std::fs::create_dir_all(root.join("environments")).unwrap();
+    std::fs::write(root.join("ductus.yaml"), "{}\n").unwrap();
+    std::fs::write(root.join("environments/dev.yaml"), "variables: {}\n").unwrap();
+    std::fs::write(
+        folder.join("interface.yaml"),
+        format!(
+            "name: {name}\nsource: {{ http: {{ host: 127.0.0.1, port: {port}, path: \"/p/{{id}}\", method: GET, mode: respond }} }}\nformat: json\nscript: transform.ts\n"
+        ),
+    )
+    .unwrap();
+    std::fs::write(
+        folder.join("transform.ts"),
+        "export function transform(req: { params: { id: string } }) {\n  return { id: req.params.id };\n}\n",
+    )
+    .unwrap();
+
+    let stop = tokio_util::sync::CancellationToken::new();
+    let (started, up) = tokio::sync::oneshot::channel();
+    let options = EngineOptions {
+        stop_timeout: Duration::from_secs(30),
+        on_started: Some(Box::new(move || {
+            let _ = started.send(());
+        })),
+        ..options(&stop, &root, &db)
+    };
+    let engine = tokio::spawn({
+        let (root, db) = (root.clone(), db.clone());
+        async move { ductus_runtime::run(&root, &db, options).await }
+    });
+    tokio::time::timeout(Duration::from_secs(60), up).await.expect("the engine starts").unwrap();
+
+    // A caller that keeps its connection after its answer, as callers are told to.
+    let mut caller = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+    caller.write_all(b"GET /p/42 HTTP/1.1\r\nHost: engine\r\n\r\n").await.unwrap();
+    let mut answer = vec![0u8; 1024];
+    let n = tokio::time::timeout(Duration::from_secs(10), caller.read(&mut answer)).await.expect("an answer").unwrap();
+    let answer = String::from_utf8_lossy(&answer[..n]).to_string();
+    assert!(answer.starts_with("HTTP/1.1 200") && answer.contains(r#"{"id":"42"}"#), "{answer}");
+
+    let asked = std::time::Instant::now();
+    stop.cancel();
+    let ended = tokio::time::timeout(Duration::from_secs(60), engine).await.expect("the run ends").unwrap();
+    let took = asked.elapsed();
+    assert!(ended.is_ok(), "{ended:?}");
+    assert!(took < Duration::from_secs(5), "the stop took {took:?} (its limit: 30 s)");
+    let closed = tokio::time::timeout(Duration::from_secs(5), caller.read(&mut [0u8; 64])).await;
+    assert!(matches!(closed, Ok(Ok(0)) | Ok(Err(_))), "the kept-alive connection was closed: {closed:?}");
 }

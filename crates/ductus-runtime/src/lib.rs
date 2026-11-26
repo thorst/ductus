@@ -1367,6 +1367,16 @@ async fn stop(engine: &control::Engine, stopping: &tokio_util::sync::Cancellatio
     }
     stopping.cancel();
     engine.shutdown.cancel(); // the API takes no new requests
+    // The HTTP servers stopped with `stopping` (their `receiving` is its child) and answer what's
+    // in flight; once one ends it's dropped here, and with it the channel its respond-mode
+    // interfaces' responders read, which ends them. Kept (as until 0.8.1.2), they held every
+    // responder, its thread and so the stop, until the stop's time limit.
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    for mut server in engine.sources.take_servers() {
+        if tokio::time::timeout_at(until, &mut server).await.is_err() {
+            server.abort(); // a request its code never answers: the responders end all the same
+        }
+    }
     // Every worker thread, the start's and those deploys added since.
     let threads = engine.kept.take_threads();
     let _ = tokio::task::spawn_blocking(move || {

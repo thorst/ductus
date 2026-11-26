@@ -17,6 +17,19 @@ use super::Store;
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 
+/// The catalog's partitions (`c`) of this engine's partitioned tables (`t`), with `i` their
+/// `pg_inherits` row: in the engine's own schema only. The catalog lists every schema's tables,
+/// and the names this file then counts, detaches and drops are unqualified (its `search_path`
+/// finds them): another schema's partition with a name this one lacks (a `ductus bench` running
+/// beside the engine, a second engine's schema on one database) made the whole run fail until
+/// 0.8.1.2, retried each hour.
+macro_rules! partitions {
+    () => {
+        "FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_class t ON t.oid = i.inhparent
+              AND t.relnamespace = current_schema()::regnamespace AND c.relnamespace = t.relnamespace"
+    };
+}
+
 /// A retention tier: how many days messages are kept.
 pub type Tier = i16;
 
@@ -609,14 +622,14 @@ impl Store {
     /// Not the current month: more of its messages can still come (as the partitions covering
     /// it expire), so it would only be made again.
     pub async fn drop_finished_held(&self) -> Result<Vec<String>> {
-        let months: Vec<String> = sqlx::query_scalar(
-            "SELECT DISTINCT right(c.relname, 6)
-             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_class t ON t.oid = i.inhparent
-             WHERE t.relname IN ('messages_held', 'deliveries_held') AND NOT i.inhdetachpending
+        let months: Vec<String> = sqlx::query_scalar(concat!(
+            "SELECT DISTINCT right(c.relname, 6) ",
+            partitions!(),
+            " WHERE t.relname IN ('messages_held', 'deliveries_held') AND NOT i.inhdetachpending
                AND c.relname ~ '^(messages|deliveries)_held_[0-9]{6}$'
                AND right(c.relname, 6) < to_char(now() AT TIME ZONE 'UTC', 'YYYYMM')
              ORDER BY 1",
-        )
+        ))
         .fetch_all(&self.pool)
         .await
         .context("listing the held area's months")?;
@@ -646,12 +659,12 @@ impl Store {
     /// What the held area holds, month by month and per interface. Counts every held row, so
     /// it's for a background task (hourly), not for each API call.
     pub async fn held_area(&self) -> Result<HeldArea> {
-        let partitions: Vec<String> = sqlx::query_scalar(
-            "SELECT c.relname::text
-             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_class t ON t.oid = i.inhparent
-             WHERE t.relname = 'messages_held' AND NOT i.inhdetachpending AND c.relname ~ '^messages_held_[0-9]{6}$'
+        let partitions: Vec<String> = sqlx::query_scalar(concat!(
+            "SELECT c.relname::text ",
+            partitions!(),
+            " WHERE t.relname = 'messages_held' AND NOT i.inhdetachpending AND c.relname ~ '^messages_held_[0-9]{6}$'
              ORDER BY 1",
-        )
+        ))
         .fetch_all(&self.pool)
         .await
         .context("listing the held area's months")?;
@@ -693,15 +706,15 @@ impl Store {
     pub async fn drop_expired(&self) -> Result<Expired> {
         let mut out = Expired::default();
         self.finish_interrupted_drops().await?;
-        let expired: Vec<(String, Tier)> = sqlx::query_as(
-            "SELECT c.relname::text, substring(t.relname from 11)::smallint
-             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_class t ON t.oid = i.inhparent
-             WHERE t.relname ~ '^messages_t[0-9]+$' AND c.relname ~ '^messages_t[0-9]+_[0-9]{8}$' AND NOT i.inhdetachpending
+        let expired: Vec<(String, Tier)> = sqlx::query_as(concat!(
+            "SELECT c.relname::text, substring(t.relname from 11)::smallint ",
+            partitions!(),
+            " WHERE t.relname ~ '^messages_t[0-9]+$' AND c.relname ~ '^messages_t[0-9]+_[0-9]{8}$' AND NOT i.inhdetachpending
                AND (to_date(right(c.relname, 8), 'YYYYMMDD')
                     + ('1 ' || ductus_tier_unit(substring(t.relname from 11)::integer))::interval)::date
                    <= current_date - substring(t.relname from 11)::integer
              ORDER BY 1",
-        )
+        ))
         .fetch_all(&self.pool)
         .await
         .context("listing expired partitions")?;
@@ -724,15 +737,15 @@ impl Store {
             }
         }
         // `deliveries` partitions whose `messages` partition is gone (a run stopped between them).
-        let orphans: Vec<String> = sqlx::query_scalar(
-            "SELECT c.relname::text
-             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_class t ON t.oid = i.inhparent
-             WHERE t.relname ~ '^deliveries_t[0-9]+$' AND c.relname ~ '^deliveries_t[0-9]+_[0-9]{8}$' AND NOT i.inhdetachpending
+        let orphans: Vec<String> = sqlx::query_scalar(concat!(
+            "SELECT c.relname::text ",
+            partitions!(),
+            " WHERE t.relname ~ '^deliveries_t[0-9]+$' AND c.relname ~ '^deliveries_t[0-9]+_[0-9]{8}$' AND NOT i.inhdetachpending
                AND to_regclass('messages' || substr(c.relname, 11)) IS NULL
                AND (to_date(right(c.relname, 8), 'YYYYMMDD')
                     + ('1 ' || ductus_tier_unit(substring(t.relname from 13)::integer))::interval)::date
                    <= current_date - substring(t.relname from 13)::integer",
-        )
+        ))
         .fetch_all(&self.pool)
         .await
         .context("listing expired delivery partitions")?;
@@ -835,11 +848,11 @@ impl Store {
     /// Finish what an interrupted run left: detaches still pending (a detach cut off while it
     /// waited), and partitions detached but not dropped.
     async fn finish_interrupted_drops(&self) -> Result<()> {
-        let pending: Vec<(String, String)> = sqlx::query_as(
-            "SELECT t.relname::text, c.relname::text
-             FROM pg_inherits i JOIN pg_class c ON c.oid = i.inhrelid JOIN pg_class t ON t.oid = i.inhparent
-             WHERE i.inhdetachpending AND t.relname ~ '^(messages|deliveries)_(t[0-9]+|held)$'",
-        )
+        let pending: Vec<(String, String)> = sqlx::query_as(concat!(
+            "SELECT t.relname::text, c.relname::text ",
+            partitions!(),
+            " WHERE i.inhdetachpending AND t.relname ~ '^(messages|deliveries)_(t[0-9]+|held)$'",
+        ))
         .fetch_all(&self.pool)
         .await
         .context("looking for unfinished detaches")?;

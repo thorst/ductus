@@ -3490,6 +3490,55 @@ async fn a_shorter_retention_deletes_what_is_past_it_and_moves_the_rest() {
     assert_eq!((s.days, s.changing_from, s.rows_left), (7, None, None));
 }
 
+/// Retention reads only its own schema's partitions: another schema on the database with tables
+/// of the same names (a `ductus bench`, a second engine's schema) and partitions this one lacks
+/// is neither listed nor touched. Until 0.8.1.2 the catalog was read for every schema, and the
+/// other one's partition names, looked up here, failed the whole run.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn retention_sees_only_its_own_schemas_partitions() {
+    let Some(store) = store().await else { return };
+    let _serial = LONG_LOCKS.lock().await;
+    let pool = sqlx::PgPool::connect(&std::env::var("DUCTUS_TEST_DATABASE_URL").unwrap()).await.unwrap();
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let other = format!("test_other_{}_{}", std::process::id(), nanos % 1_000_000_000);
+    let partitioned = |table: &str, partition: &str, from: &str, to: &str| {
+        format!(
+            "CREATE TABLE {other}.{table} (received_at timestamptz NOT NULL) PARTITION BY RANGE (received_at);
+             CREATE TABLE {other}.{partition} PARTITION OF {other}.{table} FOR VALUES FROM ('{from}') TO ('{to}');"
+        )
+    };
+    let setup = format!(
+        "CREATE SCHEMA {other}; {}{}{}",
+        partitioned("messages_held", "messages_held_199001", "1990-01-01", "1990-02-01"),
+        partitioned("messages_t7", "messages_t7_19900101", "1990-01-01", "1990-01-08"),
+        partitioned("deliveries_t7", "deliveries_t7_19900108", "1990-01-08", "1990-01-15"),
+    );
+    sqlx::raw_sql(sqlx::AssertSqlSafe(setup)).execute(&pool).await.unwrap();
+
+    let area = store.held_area().await;
+    let expired = store.drop_expired().await;
+    let held = store.drop_finished_held().await;
+    let left: Vec<String> =
+        sqlx::query_scalar("SELECT relname::text FROM pg_class WHERE relnamespace = $1::regnamespace ORDER BY 1")
+            .bind(&other)
+            .fetch_all(&pool)
+            .await
+            .unwrap();
+    sqlx::raw_sql(sqlx::AssertSqlSafe(format!("DROP SCHEMA {other} CASCADE"))).execute(&pool).await.unwrap();
+
+    let area = area.unwrap();
+    assert!(!area.months.iter().any(|m| m.partition == "messages_held_199001"), "{:?}", area.months);
+    let expired = expired.unwrap();
+    assert!(!expired.dropped.iter().chain(expired.kept.iter().map(|k| &k.partition)).any(|p| p.contains("1990")));
+    assert!(!held.unwrap().iter().any(|p| p.contains("1990")));
+    assert!(
+        ["messages_held_199001", "messages_t7_19900101", "deliveries_t7_19900108"]
+            .iter()
+            .all(|p| left.iter().any(|l| l == p)),
+        "the other schema's partitions are untouched: {left:?}"
+    );
+}
+
 /// Expired partitions are dropped, `deliveries` with `messages`, except while they hold
 /// quarantined (or pending) messages, or rows of an interface that keeps its messages longer.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -8561,7 +8561,7 @@ fn bench_measures_in_a_schema_of_its_own_and_leaves_none_behind() {
         rt.block_on(ductus_store::testing::execute(&db, &format!("CREATE SCHEMA {name}"))).unwrap();
     }
 
-    let out = bench(&db, &["--seconds", "1", "--json", "--yes"]);
+    let out = bench(&db, &["--seconds", "1", "--quick", "--json", "--yes"]);
     let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
     let left = rt.block_on(ductus_store::scratch::left(&db)).unwrap();
     rt.block_on(ductus_store::testing::execute(&db, &format!("DROP SCHEMA IF EXISTS {recent} CASCADE"))).unwrap();
@@ -8575,21 +8575,56 @@ fn bench_measures_in_a_schema_of_its_own_and_leaves_none_behind() {
         keys.sort();
         keys.join(" ")
     };
-    assert_eq!(keys(&report), "advice commits database ductus machine scenarios seconds_per_scenario took_s");
+    assert_eq!(keys(&report), "advice commits database ductus machine passes scenarios seconds_per_scenario took_s");
     assert_eq!(keys(&report["machine"]), "cores cpu host memory_gb os");
     assert_eq!(keys(&report["database"]), "host location round_trip_ms schema synchronous_commit version");
     assert_eq!(keys(&report["commits"]), "count median_ms p99_ms");
+    assert_eq!(report["passes"], 1, "{report}");
     let scenarios = report["scenarios"].as_array().unwrap();
     let ids: Vec<_> = scenarios.iter().map(|s| s["id"].as_str().unwrap()).collect();
-    assert_eq!(ids, ["mllp-strict-1", "mllp-strict-16", "mllp-relaxed-16"]);
-    for s in scenarios {
-        assert_eq!(
-            keys(s),
-            "ack_p50_ms ack_p99_ms connections delivered_after_ms delivered_per_second durability id messages name per_second seconds"
-        );
-        assert!(s["messages"].as_u64().unwrap() > 0 && s["per_second"].as_f64().unwrap() > 0.0, "{s}");
-        assert!(s["ack_p50_ms"].as_f64().unwrap() > 0.0 && s["delivered_per_second"].as_f64().unwrap() > 0.0, "{s}");
+    let cores = report["machine"]["cores"].as_u64().unwrap();
+    let mut expected = vec![
+        "mllp-strict-1",
+        "mllp-strict-16",
+        "mllp-relaxed-16",
+        "fanout-1",
+        "fanout-5",
+        "fanout-25",
+        "file-csv",
+        "http-respond-1",
+        "http-respond-16",
+        "transforms-1",
+        "transforms-all",
+        "memory-idle",
+    ];
+    if cores == 1 {
+        expected.retain(|id| *id != "transforms-all");
     }
+    assert_eq!(ids, expected);
+    // Each number in its order (the report's columns), each a range over the passes.
+    let numbers = |id: &str| {
+        let s = scenarios.iter().find(|s| s["id"] == id).unwrap();
+        assert_eq!(keys(s), "id name numbers");
+        let numbers = s["numbers"].as_object().unwrap();
+        for (key, range) in numbers {
+            assert_eq!(keys(range), "high low passes", "{id} {key}");
+            assert_eq!(range["passes"].as_array().unwrap().len(), 1, "{id} {key}");
+            assert!(range["low"].as_f64().unwrap() > 0.0, "{id} {key}: {range}");
+        }
+        numbers.keys().cloned().collect::<Vec<_>>().join(" ")
+    };
+    for id in ["mllp-strict-1", "mllp-strict-16", "mllp-relaxed-16"] {
+        assert_eq!(numbers(id), "stored_per_second ack_p50_ms ack_p99_ms delivered_per_second");
+    }
+    for id in ["fanout-1", "fanout-5", "fanout-25"] {
+        assert_eq!(numbers(id), "stored_per_second all_delivered_s deliveries_per_second");
+    }
+    assert_eq!(numbers("file-csv"), "rows_per_second");
+    for id in ["http-respond-1", "http-respond-16"] {
+        assert_eq!(numbers(id), "requests_per_second p50_ms p99_ms");
+    }
+    assert_eq!(numbers("transforms-1"), "transforms_per_second per_thread_per_second");
+    assert_eq!(numbers("memory-idle"), "memory_100_mb memory_1000_mb per_interface_mb interfaces_per_gb ready_1000_s");
     assert!(report["commits"]["median_ms"].as_f64().unwrap() > 0.0, "{report}");
     assert!(report["machine"]["cores"].as_u64().unwrap() >= 1, "{report}");
     assert!(!report["advice"].as_array().unwrap().is_empty(), "{report}");
@@ -8639,7 +8674,7 @@ fn a_bench_stopped_with_ctrl_c_drops_its_schema() {
     for line in lines.by_ref() {
         let line = line.unwrap();
         said += &format!("{line}\n");
-        if line.starts_with("strict MLLP, 1 connection") {
+        if line.contains("MLLP strict, 1 connection") {
             break;
         }
     }
