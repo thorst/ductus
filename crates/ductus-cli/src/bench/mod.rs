@@ -14,8 +14,11 @@
 //! so a disk's or a neighbour's slow moment shows as a wider range instead of one scenario's
 //! number.
 
+mod compare;
 mod memory;
 mod report;
+
+pub use compare::compare;
 mod transforms;
 
 use anyhow::{Context, Result, anyhow, bail};

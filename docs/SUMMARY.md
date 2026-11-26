@@ -168,6 +168,7 @@
     - [environments/*.yaml](reference/config/environment.md)
     - [docs-schema.yaml](reference/config/docs-schema.md)
   - [Validate findings](reference/validate.md)
+  - [Doctor findings](reference/doctor.md)
   - [Event Log IDs](reference/event-log.md)
   - [Prometheus metrics](reference/metrics.md)
   - [Audit actions](reference/audit.md)

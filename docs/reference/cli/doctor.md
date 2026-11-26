@@ -1,6 +1,6 @@
 # `ductus doctor`
 
-Check every connection the project needs, from this server: DNS, TCP (with the address a firewall request needs), TLS (certificate, expiry), then each system's own login. Explains failures in plain words. Never sends anything to a destination. Exits 1 if something failed.
+Check every connection the project needs, from this server: DNS, TCP (with the address a firewall request needs), TLS (certificate, expiry), then each system's own login. For the engine's database also how long a durable commit takes and the Postgres settings that matter to the engine (`DOC` findings: durability, caching, connections for a handover, autovacuum). Explains failures in plain words. Never sends anything to a destination. Exits 1 if something failed.
 
 ```text
 ductus doctor [OPTIONS]

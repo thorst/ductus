@@ -34,6 +34,7 @@ pub mod ldap;
 mod limiter;
 pub mod mssql;
 pub mod ownership;
+pub mod pg_settings;
 pub mod pgp;
 pub mod project;
 pub mod release;

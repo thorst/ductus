@@ -145,6 +145,7 @@ fn pages() -> Result<Vec<Page>> {
     pages.extend(api()?);
     pages.extend(config()?);
     pages.push(validate_codes());
+    pages.push(doctor_codes());
     pages.push(event_log());
     pages.push(metrics());
     pages.push(audit());
@@ -165,6 +166,7 @@ and returns.
 - [Configuration files](config/index.md): every setting of `interface.yaml`, `resources.yaml`, \
 `ductus.yaml`, the environment files and `docs-schema.yaml`.
 - [Validate findings](validate.md): every code `ductus validate` reports, and what to do.
+- [Doctor findings](doctor.md): what `ductus doctor` says about the database's settings.
 - [Event Log IDs](event-log.md): what the Windows service writes to the Event Log.
 - [Prometheus metrics](metrics.md): what `GET /api/v1/metrics` serves.
 - [Audit actions](audit.md): what the audit log records.
@@ -880,6 +882,33 @@ can't be read.
         let _ = writeln!(text, "| `{}` | {} | **{}** {} |", c.code, c.severity, cell(c.title), cell(c.about));
     }
     Page::new("validate.md", "Validate findings", 1, text)
+}
+
+fn doctor_codes() -> Page {
+    let mut text = String::from(
+        "# Doctor findings
+
+Besides timing durable commits, `ductus doctor` reads the engine's Postgres settings that \
+decide whether a commit is durable, how much the server caches, whether there are connections \
+for an engine and a handover, and whether old rows are cleaned up (one query of `pg_settings` \
+and a count of `pg_stat_activity`, on its own connection). Its `settings` line shows each as \
+set; each finding below is said after it with its code.
+
+A **warning** is a risk to messages or to a start, and makes the check a warning. A **note** is \
+tuning (marked `(tuning)`) and leaves the check passed: Postgres's defaults are sized to start on \
+any machine, not for a database server of its own. Doctor says what a setting is and what it's \
+usually set to, never a number for the database's server, whose RAM and disks it can't see \
+unless it runs there. To see what a change does, [`ductus bench`](cli/bench.md) before and \
+after, and `ductus bench compare` the two.
+
+| Code | Kind | What it means, and what to do |
+|---|---|---|
+",
+    );
+    for c in ductus_runtime::pg_settings::CODES {
+        let _ = writeln!(text, "| `{}` | {} | **{}** {} |", c.code, c.severity, cell(c.title), cell(c.about));
+    }
+    Page::new("doctor.md", "Doctor findings", 1, text)
 }
 
 fn event_log() -> Page {

@@ -5,8 +5,8 @@
 //! `memory_1000_mb`) and kept per pass, so a run reports each as the range its passes gave and
 //! the advice reads the median.
 
-use serde::Serialize;
 use serde::ser::SerializeMap;
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
 /// A durable commit slower than this is worth acting on (as `ductus doctor` warns).
@@ -42,7 +42,7 @@ pub struct Report {
     pub took_s: f64,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Machine {
     pub host: String,
     /// `Ubuntu 24.04.1 LTS (Linux 6.6.87)`, `Windows`.
@@ -53,7 +53,7 @@ pub struct Machine {
     pub memory_gb: Option<f64>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Database {
     /// The server's version, `18.1`.
     pub version: String,
@@ -67,7 +67,7 @@ pub struct Database {
     pub schema: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Commits {
     pub count: usize,
     pub median_ms: f64,
@@ -101,7 +101,7 @@ impl Serialize for Numbers {
 }
 
 /// One number over the passes: the lowest, the highest, and each pass's in the order run.
-#[derive(Debug, Serialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct Range {
     pub low: f64,
     pub high: f64,
@@ -201,17 +201,17 @@ fn about(x: f64) -> String {
 }
 
 /// `2.41 ms`, `0.08 ms`, `1.2 s`.
-fn took(ms: f64) -> String {
+pub(super) fn took(ms: f64) -> String {
     if ms >= 1000.0 { format!("{:.1} s", ms / 1000.0) } else { format!("{ms:.2} ms") }
 }
 
 /// `112 MB`, `0.11 MB`.
-fn megabytes(mb: f64) -> String {
+pub(super) fn megabytes(mb: f64) -> String {
     if mb >= 10.0 { format!("{mb:.0} MB") } else { format!("{mb:.2} MB") }
 }
 
 /// A number as the report prints it, by its name's unit.
-fn number(key: &str, x: f64) -> String {
+pub(super) fn number(key: &str, x: f64) -> String {
     if key.ends_with("_ms") {
         took(x)
     } else if key.ends_with("_s") {
@@ -224,7 +224,7 @@ fn number(key: &str, x: f64) -> String {
 }
 
 /// A range as the report prints it: `6,272`, `6,100–6,400`, `1.40–1.52 ms`.
-fn range(key: &str, r: &Range) -> String {
+pub(super) fn range(key: &str, r: &Range) -> String {
     let (low, high) = (number(key, r.low), number(key, r.high));
     if low == high {
         return low;
@@ -238,7 +238,7 @@ fn range(key: &str, r: &Range) -> String {
 }
 
 /// A number's column heading.
-fn label(key: &str) -> &str {
+pub(super) fn label(key: &str) -> &str {
     match key {
         "stored_per_second" => "stored/s",
         "ack_p50_ms" => "ACK p50",
@@ -262,7 +262,7 @@ fn label(key: &str) -> &str {
 }
 
 /// A group's table heading: what was run.
-fn heading(group: &str) -> &str {
+pub(super) fn heading(group: &str) -> &str {
     match group {
         "mllp" => "MLLP ingest (synthetic ADT, each message delivered to a file)",
         "fanout" => "Fan-out (strict, 16 connections, each message to every destination's folder)",

@@ -632,7 +632,28 @@ impl Run<'_> {
                 self.step("commits", Outcome::Fail, format!("{COMMITS} commits took over {}", took(self.timeout * 4)))
             }
         }
+        self.settings(&mut connection).await;
         endpoint
+    }
+
+    /// Postgres's settings that matter to the engine, each finding a `DOC` code
+    /// (`pg_settings`): warnings make the step a warning, notes are said beside it.
+    async fn settings(&mut self, connection: &mut PgConnection) {
+        let read = tokio::time::timeout(self.timeout, crate::pg_settings::read(connection)).await;
+        let read = match read {
+            Ok(Ok(read)) => read,
+            Ok(Err(e)) => {
+                return self.step("settings", Outcome::Warn, format!("couldn't read Postgres's settings: {e}"));
+            }
+            Err(_) => return self.step("settings", Outcome::Warn, format!("no answer in {}", self.waited())),
+        };
+        let found = crate::pg_settings::judge(&read);
+        let outcome = if found.iter().any(|f| f.warning) { Outcome::Warn } else { Outcome::Ok };
+        self.step("settings", outcome, read.summary());
+        for f in found {
+            let kind = if f.warning { "" } else { " (tuning)" };
+            self.advise(format!("{}{kind}: {}", f.code, f.text));
+        }
     }
 
     /// Postgres's TLS by hand, as its clients start it (the 8-byte SSLRequest; the server answers
@@ -2772,6 +2793,12 @@ mod tests {
         assert_eq!(step(&c, "login").outcome, Outcome::Ok, "{c:#?}");
         assert!(step(&c, "login").detail.contains("PostgreSQL"), "{c:#?}");
         assert!(step(&c, "commits").detail.contains(&format!("median of {COMMITS}")), "{c:#?}");
+        // Postgres's settings, read on the same connection: every one named, findings by code.
+        let settings = &step(&c, "settings").detail;
+        for name in ["synchronous_commit on", "fsync on", "shared_buffers ", "max_connections ", "autovacuum on"] {
+            assert!(settings.contains(name), "{name}: {c:#?}");
+        }
+        assert!(c.advice.iter().all(|a| a.starts_with("DOC")), "{c:#?}");
 
         // A wrong password is named as such.
         let mut wrong: url::Url = url.parse().unwrap();

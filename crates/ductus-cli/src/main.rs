@@ -689,8 +689,10 @@ enum Command {
     },
     /// Check every connection the project needs, from this server: DNS, TCP (with the address
     /// a firewall request needs), TLS (certificate, expiry), then each system's own login.
-    /// Explains failures in plain words. Never sends anything to a destination. Exits 1 if
-    /// something failed.
+    /// For the engine's database also how long a durable commit takes and the Postgres
+    /// settings that matter to the engine (`DOC` findings: durability, caching, connections
+    /// for a handover, autovacuum). Explains failures in plain words. Never sends anything to
+    /// a destination. Exits 1 if something failed.
     Doctor {
         /// Only what these interfaces use (repeat for several); the engine's database always.
         #[arg(long)]
@@ -903,8 +905,12 @@ enum Command {
     /// interfaces. Every scenario runs three times, alternated, and each number is the range
     /// they gave (`--quick`: once). Runs in a schema of its own in the database, made and
     /// dropped by it (the engine's own data is never read or touched), so the login needs
-    /// `CREATE` on the database. Nothing is sent anywhere but this machine.
+    /// `CREATE` on the database. Nothing is sent anywhere but this machine. `ductus bench
+    /// compare` puts saved runs (`--json`) side by side.
+    #[command(args_conflicts_with_subcommands = true)]
     Bench {
+        #[command(subcommand)]
+        face: Option<BenchFace>,
         /// Seconds each timed scenario (MLLP, HTTP, transforms) measures for, after a second's
         /// warm-up (1–600). Fan-out, file and memory run a set amount of work instead.
         #[arg(long, default_value_t = 2, value_parser = clap::value_parser!(u64).range(1..=600))]
@@ -1190,6 +1196,20 @@ enum NewCommand {
         /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum BenchFace {
+    /// Put saved runs of `ductus bench --json` side by side (two machines, two instance types, a
+    /// database near and far, two versions): each number is its run's median, matched by
+    /// scenario and number, and with two runs the last column is the second's over the first's
+    /// where their ranges don't overlap (`≈` where they do: within one run's own spread).
+    Compare {
+        /// Two or more files, each saved with `ductus bench --json > name.json`; each column is
+        /// headed by its file's name.
+        #[arg(required = true, num_args = 2.., value_name = "FILE")]
+        files: Vec<PathBuf>,
     },
 }
 
@@ -1845,7 +1865,8 @@ async fn run(cli: Cli) -> Result<()> {
             let files = tools::TlsFiles { ca: clients_ca, cert, key };
             tools::sink(port, reject, tls.then_some(tools::SinkTls { files, subjects })).await
         }
-        Command::Bench { seconds, quick, json, yes, database_url } => {
+        Command::Bench { face: Some(BenchFace::Compare { files }), .. } => bench::compare(&files),
+        Command::Bench { face: None, seconds, quick, json, yes, database_url } => {
             let database_url = tools::database_url(database_url)?;
             bench::run(bench::Options { database_url, seconds, quick, json, yes }).await
         }
