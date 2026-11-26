@@ -45,22 +45,21 @@ sha256sum --check --ignore-missing SHA256SUMS
 ```
 
 Each file says `OK`. Anything else (`FAILED`, `No such file`) means the file isn't the one the
-release holds: download it again from the release page, and don't install it. On the release
-job's dry run (version `0.0.0-dryrun.118`; a release's files are named the same way with its
-version), with only the `.deb` downloaded beside `SHA256SUMS`, then the same file with one byte
-added to it:
+release holds: download it again from the release page, and don't install it. On v0.7.0, with
+only the `.deb` downloaded beside `SHA256SUMS`, then the same file with one byte added to it:
 
 ```text
 $ sha256sum --check --ignore-missing SHA256SUMS
-ductus_0.0.0~dryrun.118_amd64.deb: OK
+ductus_0.7.0_amd64.deb: OK
 $ sha256sum --check --ignore-missing SHA256SUMS
+ductus_0.7.0_amd64.deb: FAILED
 sha256sum: WARNING: 1 computed checksum did NOT match
 sha256sum: SHA256SUMS: no file was verified
-ductus_0.0.0~dryrun.118_amd64.deb: FAILED
 ```
 
-The second exits 1, so a script can stop on it. (A pre-release's `.deb` and `.rpm` are named
-with `~` where the version has `-`: that is how Debian and RPM spell "sorts before the release".)
+The second exits 1, so a script can stop on it. (A development build's `.deb` and `.rpm` are
+named with `~` where the version has `-`, as in `ductus_0.8.0~dev.2_amd64.deb`: that is how
+Debian and RPM spell "sorts before the release".)
 
 On Windows, in PowerShell, the hash of the file, then the line `SHA256SUMS` has for it:
 
@@ -70,14 +69,14 @@ Select-String ductus-0.7.0-x64.msi .\SHA256SUMS
 ```
 
 The two must be the same 64 characters (`Get-FileHash` writes them in capitals, `SHA256SUMS` in
-small letters: the case doesn't matter). On the dry run's MSI:
+small letters: the case doesn't matter). On v0.7.0's MSI:
 
 ```text
-PS> (Get-FileHash .\ductus-0.0.0-dryrun.118-x64.msi -Algorithm SHA256).Hash
-3F8DB975E899350CCC54FC0DAF3F659A7BC5A1BA69DE074ADE95AF47BE43A47D
-PS> Select-String ductus-0.0.0-dryrun.118-x64.msi .\SHA256SUMS
+PS> (Get-FileHash .\ductus-0.7.0-x64.msi -Algorithm SHA256).Hash
+3B2C195C038D921DFC0402832A420E36DD3ED21511792699470307A58B84761E
+PS> Select-String ductus-0.7.0-x64.msi .\SHA256SUMS
 
-SHA256SUMS:6:3f8db975e899350ccc54fc0daf3f659a7bc5a1ba69de074ade95af47be43a47d  ductus-0.0.0-dryrun.118-x64.msi
+SHA256SUMS:7:3b2c195c038d921dfc0402832a420e36dd3ed21511792699470307a58b84761e  ductus-0.7.0-x64.msi
 ```
 
 ## Check who built it: the attestation
@@ -96,11 +95,11 @@ gh attestation verify ductus_0.7.0_amd64.deb -R thorst/ductus
 ```
 
 It looks up the file's SHA-256 in GitHub's record of attestations, checks the signature, and
-checks the attestation was made by a workflow of `thorst/ductus`. On v0.6.0's `.deb` (gh 2.87.3):
+checks the attestation was made by a workflow of `thorst/ductus`. On v0.7.0's `.deb` (gh 2.87.3):
 
 ```text
-$ gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus
-Loaded digest sha256:afb4c7f622a256e1aade44cc9a8a9f023504523c6bdac69a66d4eabc381e2ba9 for file://ductus_0.6.0_amd64.deb
+$ gh attestation verify ductus_0.7.0_amd64.deb -R thorst/ductus
+Loaded digest sha256:70bdb2457d7e3b79a4ae354a37db6b9220d85b4a08650037b940f4d439198813 for file://ductus_0.7.0_amd64.deb
 Loaded 1 attestation from GitHub API
 
 The following policy criteria will be enforced:
@@ -116,13 +115,13 @@ The following 1 attestation matched the policy criteria
 
 - Attestation #1
   - Build repo:..... thorst/ductus
-  - Build workflow:. .github/workflows/ci.yml@refs/tags/v0.6.0
+  - Build workflow:. .github/workflows/ci.yml@refs/tags/v0.7.0
   - Signer repo:.... thorst/ductus
-  - Signer workflow: .github/workflows/ci.yml@refs/tags/v0.6.0
+  - Signer workflow: .github/workflows/ci.yml@refs/tags/v0.7.0
 ```
 
 **What to look for:** `✓ Verification succeeded!`, and a build workflow that names the release's
-own tag (`@refs/tags/v0.6.0` for 0.6.0): the file was built by the project's CI from that tag,
+own tag (`@refs/tags/v0.7.0` for 0.7.0): the file was built by the project's CI from that tag,
 not from a branch or someone's fork. The `Loaded digest` line's checksum is the same as the
 file's line in `SHA256SUMS`.
 
@@ -130,13 +129,13 @@ On Windows it's the same command (`gh` installs with `winget install GitHub.cli`
 output for the MSI, with its own checksum:
 
 ```text
-PS> gh attestation verify ductus-0.6.0-x64.msi -R thorst/ductus
-Loaded digest sha256:c53fbcf84bf60d21a7a4df857d9258f4a6f626ffc6f32b9ae04c1c368907a1c9 for file://ductus-0.6.0-x64.msi
+PS> gh attestation verify ductus-0.7.0-x64.msi -R thorst/ductus
+Loaded digest sha256:3b2c195c038d921dfc0402832a420e36dd3ed21511792699470307a58b84761e for file://ductus-0.7.0-x64.msi
 Loaded 1 attestation from GitHub API
 ...
 ✓ Verification succeeded!
 ...
-  - Build workflow:. .github/workflows/ci.yml@refs/tags/v0.6.0
+  - Build workflow:. .github/workflows/ci.yml@refs/tags/v0.7.0
 ```
 
 It's the check that replaces a code signature until v1.0
@@ -146,11 +145,11 @@ It's the check that replaces a code signature until v1.0
 byte added) has a checksum GitHub has no attestation for:
 
 ```text
-$ gh attestation verify ductus_0.6.0_amd64.deb -R thorst/ductus
-Loaded digest sha256:179c1bd745298606b4f9224421609b247d70f12cb2888d57a8146fd27c75ffaf for file://ductus_0.6.0_amd64.deb
+$ gh attestation verify ductus_0.7.0_amd64.deb -R thorst/ductus
+Loaded digest sha256:47d1c22ac062a11ac917de40568f36004d7467603461b8a99af3cbf5c3ab91d8 for file://ductus_0.7.0_amd64.deb
 ✗ Loading attestations from GitHub API failed
 
-Error: HTTP 404: Not Found (https://api.github.com/repos/thorst/ductus/attestations/sha256:179c1bd745298606b4f9224421609b247d70f12cb2888d57a8146fd27c75ffaf?per_page=30&predicate_type=https://slsa.dev/provenance/v1)
+Error: HTTP 404: Not Found (https://api.github.com/repos/thorst/ductus/attestations/sha256:47d1c22ac062a11ac917de40568f36004d7467603461b8a99af3cbf5c3ab91d8?per_page=30&predicate_type=https://slsa.dev/provenance/v1)
 ```
 
 The "404" is the point: no attestation exists for a file with that content. Don't install it;
@@ -177,8 +176,8 @@ format Dependency-Track, Microsoft Defender and most scanners import.
 | `ductus-0.7.0-windows-x64.cdx.json` | The same for `ductus.exe` (the .msi and .zip): a few crates differ by platform |
 | `ductus-0.7.0-web-ui.cdx.json` | The web UI's npm packages (the UI is built into both binaries) |
 
-On the dry run: 530 crates in the Linux binary's, 534 in the Windows one's, 95 npm packages in
-the web UI's, about 700 KB, 700 KB and 100 KB. They leave out the tools used only while building (code generators, the build scripts' own
+On v0.7.0: 690 crates in the Linux binary's, 696 in the Windows one's, 95 npm packages in the
+web UI's, about 900 KB, 900 KB and 100 KB. They leave out the tools used only while building (code generators, the build scripts' own
 libraries): those aren't in the program you run. The same lists, for reading, with the notable
 libraries first (V8, TypeScript, rustls, sqlx, tokio), are on
 [Libraries and versions](../reference/libraries.md); that page also counts build-time crates, so
@@ -190,7 +189,7 @@ v0.9.
 
 `ductus-docs-0.7.0.zip` is this site as it is for that version: unzip it anywhere, open
 `ductus-docs-0.7.0/index.html` in a browser. Every page says the version in its title. It's
-about 3.2 MB (3,212,719 bytes on the dry run). It's for:
+about 4 MB (4,070,748 bytes for 0.7.0). It's for:
 
 - **A server room or network without internet access**: the docs are with the download, nothing
   is fetched from anywhere.

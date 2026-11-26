@@ -8,7 +8,7 @@
 # offline docs zip (target/book from docs-check.sh, attached to each release) keeps mdBook's search.
 #
 # Used by docs.yml: every docs change builds it and docs-search-check.cjs tries its search; a release
-# tag or a docs-0.6 publish uploads it to Pages. Tools: scripts/dev/docs-tools.sh. Takes 7-10 s on
+# tag or a publish from its docs-X.Y branch uploads it to Pages. Tools: scripts/dev/docs-tools.sh. Takes 7-10 s on
 # WSL's /mnt/d (Pagefind itself under 1 s).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -17,7 +17,7 @@ out=$(realpath -m "${1:-target/site}")
 
 rm -rf "$out"
 # Every page's title names the version it describes ("Ductus 0.6.0"), as the docs zip's do: the
-# site is published from a release tag (or docs-0.6, which follows it), so Cargo.toml says the
+# site is published from a release tag (or its docs-X.Y branch, made from it), so Cargo.toml says the
 # release's version there. Same reading of Cargo.toml as release-version.sh.
 version=$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\([^"]*\)".*/\1/p' Cargo.toml)
 [ -n "$version" ] || { echo "no version in Cargo.toml's [workspace.package]" >&2; exit 1; }
