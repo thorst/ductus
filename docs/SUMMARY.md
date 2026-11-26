@@ -145,6 +145,7 @@
     - [ductus api-spec](reference/cli/api-spec.md)
     - [ductus types](reference/cli/types.md)
     - [ductus status](reference/cli/status.md)
+    - [ductus bench](reference/cli/bench.md)
     - [ductus gen](reference/cli/gen.md)
     - [ductus sink](reference/cli/sink.md)
   - [REST API](reference/api/index.md)

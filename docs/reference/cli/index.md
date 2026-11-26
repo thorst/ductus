@@ -40,6 +40,7 @@ Options can also come from the environment (the variable each one names), or fro
 | [`ductus api-spec`](api-spec.md) | Print the REST API's OpenAPI document (the same as `GET /api/v1/openapi.json`, without a running engine). |
 | [`ductus types`](types.md) | Write what an editor needs to help with the project, for the version installed: the SDK's typings (.ductus/types) and a tsconfig.json for the interfaces' code, and the configuration files' schemas (.ductus/schema) with VS Code's settings pointing at them, for completion, descriptions on hover and mistakes underlined in interface.yaml, resources.yaml and ductus.yaml. |
 | [`ductus status`](status.md) | Show message counts by interface and status (from the database, also while the engine is down); with a token, also each interface's and destination's health from the running engine (silent, behind, stalled, paused, catching up...). |
+| [`ductus bench`](bench.md) | Measure what this machine and its database do with the real engine, and what the numbers mean for sizing: durable commits, the round trip to the database, and messages stored per second over MLLP (strict on 1 and 16 connections, relaxed on 16) with each ACK's wait and how soon delivery caught up. |
 | [`ductus gen`](gen.md) | Send synthetic ADT messages over MLLP. |
 | [`ductus sink`](sink.md) | Receive messages over MLLP, ACK them, and verify per-patient ordering. |
 

@@ -8533,3 +8533,131 @@ async fn the_gate_tests_what_a_release_changes_and_writes_nothing() {
     let (ok, out) = without_a_database(dir.path(), &["release", "check", &path.to_string_lossy(), "--env", "prod"]);
     assert!(!ok && out.contains("don't match its id"), "{out}");
 }
+
+/// `ductus bench` with `--database-url` set to `url` (and DUCTUS_DATABASE_URL removed).
+fn bench(url: &str, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .arg("bench")
+        .args(args)
+        .arg("--database-url")
+        .arg(url)
+        .env_remove("DUCTUS_DATABASE_URL")
+        .output()
+        .unwrap()
+}
+
+/// `ductus bench` (0.8.1) runs the real engine in a schema of its own, says what it measured in
+/// a JSON whose shape is pinned here (people keep and compare these), and drops its schema at
+/// the end; a schema an earlier bench left over a day ago goes too, one another bench may be
+/// using now stays. `--yes`: other tests' engines run on the same database meanwhile.
+#[test]
+fn bench_measures_in_a_schema_of_its_own_and_leaves_none_behind() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_secs();
+    let tag = format!("{:06x}", (std::process::id() as u64 * 7919 + now) % 0xff_ffff);
+    let (old, recent) = (format!("ductus_bench_{}_{tag}", now - 2 * 86_400), format!("ductus_bench_{now}_{tag}"));
+    for name in [&old, &recent] {
+        rt.block_on(ductus_store::testing::execute(&db, &format!("CREATE SCHEMA {name}"))).unwrap();
+    }
+
+    let out = bench(&db, &["--seconds", "1", "--json", "--yes"]);
+    let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let left = rt.block_on(ductus_store::scratch::left(&db)).unwrap();
+    rt.block_on(ductus_store::testing::execute(&db, &format!("DROP SCHEMA IF EXISTS {recent} CASCADE"))).unwrap();
+    assert!(out.status.success(), "{stdout}{stderr}");
+    // (Which bench swept it, this one or another test's running beside it, isn't known: what it
+    // says when it sweeps is the store's test.)
+
+    let report: serde_json::Value = serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {stdout}"));
+    let keys = |v: &serde_json::Value| {
+        let mut keys: Vec<_> = v.as_object().unwrap().keys().cloned().collect();
+        keys.sort();
+        keys.join(" ")
+    };
+    assert_eq!(keys(&report), "advice commits database ductus machine scenarios seconds_per_scenario took_s");
+    assert_eq!(keys(&report["machine"]), "cores cpu host memory_gb os");
+    assert_eq!(keys(&report["database"]), "host location round_trip_ms schema synchronous_commit version");
+    assert_eq!(keys(&report["commits"]), "count median_ms p99_ms");
+    let scenarios = report["scenarios"].as_array().unwrap();
+    let ids: Vec<_> = scenarios.iter().map(|s| s["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["mllp-strict-1", "mllp-strict-16", "mllp-relaxed-16"]);
+    for s in scenarios {
+        assert_eq!(
+            keys(s),
+            "ack_p50_ms ack_p99_ms connections delivered_after_ms delivered_per_second durability id messages name per_second seconds"
+        );
+        assert!(s["messages"].as_u64().unwrap() > 0 && s["per_second"].as_f64().unwrap() > 0.0, "{s}");
+        assert!(s["ack_p50_ms"].as_f64().unwrap() > 0.0 && s["delivered_per_second"].as_f64().unwrap() > 0.0, "{s}");
+    }
+    assert!(report["commits"]["median_ms"].as_f64().unwrap() > 0.0, "{report}");
+    assert!(report["machine"]["cores"].as_u64().unwrap() >= 1, "{report}");
+    assert!(!report["advice"].as_array().unwrap().is_empty(), "{report}");
+
+    let schema = report["database"]["schema"].as_str().unwrap();
+    assert!(schema.starts_with("ductus_bench_"), "{schema}");
+    assert!(!left.iter().any(|s| s == schema), "the bench's schema was dropped: {left:?}");
+    assert!(!left.contains(&old), "the old one was swept: {left:?}");
+    assert!(left.contains(&recent), "one that may be in use stayed: {left:?}");
+}
+
+/// What `ductus bench` refuses before making anything: a URL that sets `options` (the bench adds
+/// its own `search_path`), and a database an engine runs on, unless `--yes` (both would be
+/// slower, and its numbers wrong).
+#[test]
+fn bench_refuses_a_url_with_options_and_a_live_engine_without_yes() {
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let join = if db.contains('?') { '&' } else { '?' };
+    let out = bench(&format!("{db}{join}options=-c%20work_mem%3D8MB"), &["--seconds", "1"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && said.contains("give the URL without `options=`"), "{said}");
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let _engine = rt.block_on(ductus_store::testing::connection_named(&db, "ductus engine lock")).unwrap();
+    let out = bench(&db, &["--seconds", "1"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{said}");
+    assert!(said.contains("running on this database") && said.contains("give --yes to bench anyway"), "{said}");
+}
+
+/// Ctrl-C in the middle of a bench stops its engine and drops its schema before it exits.
+#[cfg(unix)]
+#[test]
+fn a_bench_stopped_with_ctrl_c_drops_its_schema() {
+    use std::io::{BufRead, BufReader};
+    let Ok(db) = std::env::var("DUCTUS_TEST_DATABASE_URL") else { return };
+    let mut child = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["bench", "--seconds", "30", "--yes", "--database-url", &db])
+        .env_remove("DUCTUS_DATABASE_URL")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut said = String::new();
+    let mut lines = BufReader::new(child.stderr.take().unwrap()).lines();
+    // Interrupted while the engine runs, sending (the first scenario's 30 s).
+    for line in lines.by_ref() {
+        let line = line.unwrap();
+        said += &format!("{line}\n");
+        if line.starts_with("strict MLLP, 1 connection") {
+            break;
+        }
+    }
+    let schema = said
+        .lines()
+        .find_map(|l| l.strip_prefix("benching in the schema "))
+        .and_then(|l| l.split_whitespace().next())
+        .unwrap_or_else(|| panic!("{said}"))
+        .to_string();
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    // SAFETY: kill(2) on our own child's pid.
+    unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+    for line in lines {
+        said += &format!("{}\n", line.unwrap());
+    }
+    let status = child.wait().unwrap();
+    assert!(!status.success() && said.contains("stopped (Ctrl-C)"), "{status}: {said}");
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    let left = rt.block_on(ductus_store::scratch::left(&db)).unwrap();
+    assert!(!left.contains(&schema), "{schema} is still there: {said}");
+}

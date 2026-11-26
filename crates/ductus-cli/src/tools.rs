@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use crate::traffic::{self, Pace, Rng, Sent, now};
+
 /// The engine's database, from `--database-url` or `DUCTUS_DATABASE_URL`. There is no default:
 /// a default would point at somebody's own server.
 pub fn database_url(given: Option<String>) -> Result<String> {
@@ -20,32 +22,6 @@ pub fn database_url(given: Option<String>) -> Result<String> {
             "no database: set DUCTUS_DATABASE_URL (postgres://user:password@host/database) or pass --database-url; for local development `ductus dev` starts its own Postgres"
         ),
     }
-}
-
-const LAST: &[&str] =
-    &["SMITH", "JOHNSON", "WILLIAMS", "BROWN", "JONES", "GARCIA", "MILLER", "DAVIS", "LOPEZ", "WILSON"];
-const FIRST: &[&str] =
-    &["JAMES", "MARY", "ROBERT", "PATRICIA", "JOHN", "JENNIFER", "MICHAEL", "LINDA", "DAVID", "ELENA"];
-
-fn now() -> String {
-    chrono::Local::now().format("%Y%m%d%H%M%S").to_string()
-}
-
-/// A synthetic ADT^A08. MSH-10 carries the global sequence number so the sink can check order.
-fn adt(seq: u64, patient: u64) -> String {
-    let mrn = 100_000 + patient;
-    let last = LAST[(patient % LAST.len() as u64) as usize];
-    let first = FIRST[(patient / LAST.len() as u64 % FIRST.len() as u64) as usize];
-    let sex = if patient.is_multiple_of(2) { "F" } else { "M" };
-    let ts = now();
-    format!(
-        "MSH|^~\\&|EPIC|HOSP|DUCTUS|HOSP|{ts}||ADT^A08|{seq}|P|2.5\r\
-         EVN|A08|{ts}\r\
-         PID|1||{mrn}^^^MRN||{last}^{first}||19{:02}0101|{sex}\r\
-         PV1|1|I|4W^{}^A\r",
-        patient % 100,
-        400 + patient % 40,
-    )
 }
 
 /// Certificate files for `gen`/`sink --tls`, as the engine's `certificates:` entries would name
@@ -97,18 +73,6 @@ pub struct GenOptions {
     pub from: Option<std::net::IpAddr>,
 }
 
-/// Small deterministic PRNG (xorshift64*), so runs are reproducible.
-struct Rng(u64);
-
-impl Rng {
-    fn next_f64(&mut self) -> f64 {
-        self.0 ^= self.0 >> 12;
-        self.0 ^= self.0 << 25;
-        self.0 ^= self.0 >> 27;
-        (self.0.wrapping_mul(0x2545F4914F6CDD1D) >> 11) as f64 / (1u64 << 53) as f64
-    }
-}
-
 pub async fn generate(opts: GenOptions) -> Result<()> {
     let patients = opts.patients.max(1);
     let connections = opts.connections.max(1);
@@ -143,20 +107,16 @@ pub async fn generate(opts: GenOptions) -> Result<()> {
         if let Some(local) = opts.from {
             client = client.from(local);
         }
-        tasks.push(tokio::spawn(async move { send_lane(client, lane, per_connection_rate, start).await }));
+        let pace = Pace { rate: per_connection_rate, start, until: None, keep_waits: false };
+        tasks.push(tokio::spawn(traffic::send(client, lane, pace)));
     }
     let mut total = Sent::default();
     for task in tasks {
-        let lane = task.await?;
-        total.retries += lane.retries;
-        total.rejected += lane.rejected;
-        total.refused += lane.refused;
-        total.dropped += lane.dropped;
-        total.longest = total.longest.max(lane.longest);
+        total.add(task.await?);
     }
 
     let secs = start.elapsed().as_secs_f64();
-    let Sent { retries, rejected, refused, dropped, longest } = total;
+    let Sent { retries, rejected, refused, dropped, longest, .. } = total;
     // What a sender saw: connections refused (nothing listening) and dropped (closed or reset
     // under a message), and the longest a message took from its first try to its ACK.
     println!(
@@ -166,75 +126,6 @@ pub async fn generate(opts: GenOptions) -> Result<()> {
         longest.as_millis()
     );
     Ok(())
-}
-
-/// One connection's account of its sending.
-#[derive(Default)]
-struct Sent {
-    retries: u64,
-    rejected: u64,
-    refused: u64,
-    dropped: u64,
-    longest: Duration,
-}
-
-/// Send one connection's messages in order, resending each until it's ACKed.
-async fn send_lane(mut client: ductus_mllp::Client, messages: Vec<(u64, u64)>, rate: f64, start: Instant) -> Sent {
-    let interval = (rate > 0.0).then(|| Duration::from_secs_f64(1.0 / rate));
-    let mut sent = Sent::default();
-    // Said once each time it changes, so a refused handshake doesn't retry in silence.
-    let mut last_error = String::new();
-    for (i, (seq, patient)) in messages.into_iter().enumerate() {
-        let message = adt(seq, patient);
-        let first_try = Instant::now();
-        // A lost ACK means we can't know whether it was stored, so resend.
-        loop {
-            match client.send(message.as_bytes()).await {
-                Ok(ack) => {
-                    let ack = String::from_utf8_lossy(&ack);
-                    match Message::parse(&ack).map(|a| a.value("MSA-1").to_string()).as_deref() {
-                        Ok("AA") => break,
-                        Ok("AR") => {
-                            sent.rejected += 1;
-                            break;
-                        }
-                        _ => sent.retries += 1,
-                    }
-                }
-                Err(e) => {
-                    use std::io::ErrorKind::*;
-                    // A connection closed under us is tried again on a new one almost at once, as
-                    // senders do; anything else every 0.5 s.
-                    let pause = match e.kind() {
-                        ConnectionRefused => {
-                            sent.refused += 1;
-                            500
-                        }
-                        ConnectionReset | ConnectionAborted | BrokenPipe | UnexpectedEof => {
-                            sent.dropped += 1;
-                            50
-                        }
-                        _ => 500,
-                    };
-                    // The engine's words, with gen's options where they name the engine's.
-                    let why = ductus_runtime::tls::outbound_failure(&e)
-                        .map(|w| w.replace("`tls.certificate`", "--cert").replace("`tls.ca`", "--ca"))
-                        .unwrap_or_else(|| e.to_string());
-                    if why != last_error {
-                        eprintln!("sending failed, retrying: {why}");
-                        last_error = why;
-                    }
-                    sent.retries += 1;
-                    tokio::time::sleep(Duration::from_millis(pause)).await;
-                }
-            }
-        }
-        sent.longest = sent.longest.max(first_try.elapsed());
-        if let Some(interval) = interval {
-            tokio::time::sleep_until((start + interval * (i as u32 + 1)).into()).await;
-        }
-    }
-    sent
 }
 
 #[derive(Default)]

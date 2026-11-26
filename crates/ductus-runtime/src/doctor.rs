@@ -1677,20 +1677,11 @@ async fn refused_after<S: AsyncRead + AsyncWrite + Unpin>(
 
 /// Median time of a durable commit, and whether commits wait for the disk at all.
 ///
-/// Each commit writes a transactional WAL message (no table is touched), so it waits for the
-/// flush like a message insert does. A transaction that only takes an id is not enough:
-/// without WAL of its own Postgres doesn't wait for the flush (measured 0.28 ms vs 3.06 ms on
-/// the same disk). Logical decoding consumers, if any, see the message under the prefix
-/// `ductus doctor` and ignore it.
+/// The median of [`COMMITS`] durable commits (`ductus_store::scratch::time_commits`, shared
+/// with `ductus bench`), and `synchronous_commit`.
 async fn commit_times(connection: &mut PgConnection) -> Result<(Duration, String), sqlx::Error> {
     let synchronous: String = sqlx::query_scalar("SHOW synchronous_commit").fetch_one(&mut *connection).await?;
-    let mut times = Vec::with_capacity(COMMITS);
-    for _ in 0..COMMITS {
-        let started = Instant::now();
-        sqlx::query("SELECT pg_logical_emit_message(true, 'ductus doctor', '')").execute(&mut *connection).await?;
-        times.push(started.elapsed());
-    }
-    times.sort();
+    let times = ductus_store::scratch::time_commits(connection, COMMITS, "ductus doctor").await?;
     Ok((times[COMMITS / 2], synchronous))
 }
 

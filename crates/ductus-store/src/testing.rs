@@ -101,6 +101,22 @@ impl TestSchema {
     }
 }
 
+/// Run one statement on `url` (a schema made or dropped by name, say), on a connection of its own.
+pub async fn execute(url: &str, sql: &str) -> Result<()> {
+    let pool = sqlx::postgres::PgPoolOptions::new().max_connections(1).connect(&crate::tls::connect_url(url)).await?;
+    sqlx::raw_sql(sqlx::AssertSqlSafe(sql.to_string())).execute(&pool).await.context("running a test's statement")?;
+    pool.close().await;
+    Ok(())
+}
+
+/// A connection to `url` that shows in `pg_stat_activity` as `application_name`, held until
+/// dropped: what a running engine's lock connection looks like to `ductus bench`.
+pub async fn connection_named(url: &str, application_name: &str) -> Result<sqlx::PgConnection> {
+    use sqlx::Connection;
+    let options: sqlx::postgres::PgConnectOptions = crate::tls::connect_url(url).parse()?;
+    Ok(sqlx::PgConnection::connect_with(&options.application_name(application_name)).await?)
+}
+
 /// The accounts one test makes. Name each with [`TestUsers::name`]; an async test ends with
 /// [`TestUsers::forget`]. Dropping the guard deletes them too: that's all a plain `#[test]` needs,
 /// and what catches an async test that failed before `forget` (as best it can: see `Drop`).

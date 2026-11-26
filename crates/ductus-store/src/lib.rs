@@ -22,6 +22,7 @@ pub mod migrations;
 mod releases;
 mod replay;
 mod retention;
+pub mod scratch;
 #[cfg(feature = "testing")]
 pub mod testing;
 pub mod tls;

@@ -1,4 +1,5 @@
 mod admin;
+mod bench;
 mod cert;
 mod deploy;
 mod dev;
@@ -18,6 +19,7 @@ mod service;
 mod sinks;
 mod spread;
 mod tools;
+mod traffic;
 mod trying;
 mod upgrade;
 
@@ -893,6 +895,28 @@ enum Command {
         #[command(flatten)]
         api: ApiArgs,
     },
+    /// Measure what this machine and its database do with the real engine, and what the numbers
+    /// mean for sizing: durable commits, the round trip to the database, and messages stored per
+    /// second over MLLP (strict on 1 and 16 connections, relaxed on 16) with each ACK's wait and
+    /// how soon delivery caught up. Runs in a schema of its own in the database, made and dropped
+    /// by it (the engine's own data is never read or touched), so the login needs `CREATE` on
+    /// the database. Takes about half a minute; nothing is sent anywhere but this machine.
+    Bench {
+        /// Seconds each scenario sends for, after a second's warm-up (1–600).
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=600))]
+        seconds: u64,
+        /// As JSON (the machine, the database, each scenario's numbers and the advice), to keep
+        /// or compare with another machine's.
+        #[arg(long)]
+        json: bool,
+        /// Bench although an engine is running on this database (both are slower meanwhile; its
+        /// data is still never touched).
+        #[arg(long)]
+        yes: bool,
+        /// The database to bench, as a PostgreSQL URL: `postgres://ductus@db1/ductus?sslmode=verify-full`.
+        #[arg(long, env = "DUCTUS_DATABASE_URL")]
+        database_url: Option<String>,
+    },
     /// Send synthetic ADT messages over MLLP.
     Gen {
         /// The MLLP listener to send to, `host:port`.
@@ -1453,10 +1477,12 @@ async fn run(cli: Cli) -> Result<()> {
             // Doctor's report says what failed; the TLS verifier would log each failure again.
             if matches!(cli.command, Command::Doctor { .. }) {
                 "warn,rustls_platform_verifier=off,tiberius=error".into()
-            } else if matches!(cli.command, Command::Upgrade { .. } | Command::Replay { .. } | Command::Release { .. })
-            {
+            } else if matches!(
+                cli.command,
+                Command::Upgrade { .. } | Command::Replay { .. } | Command::Release { .. } | Command::Bench { .. }
+            ) {
                 // Their reports say what went wrong, and `--json` (or `--emit`'s lines) must be the
-                // only thing on stdout.
+                // only thing on stdout. The bench's engines log nothing: its report says what failed.
                 "off".into()
             } else {
                 // A certificate the platform verifier refuses is logged by it at ERROR every time,
@@ -1811,6 +1837,10 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Sink { port, reject, tls, cert, key, clients_ca, subjects, .. } => {
             let files = tools::TlsFiles { ca: clients_ca, cert, key };
             tools::sink(port, reject, tls.then_some(tools::SinkTls { files, subjects })).await
+        }
+        Command::Bench { seconds, json, yes, database_url } => {
+            let database_url = tools::database_url(database_url)?;
+            bench::run(bench::Options { database_url, seconds, json, yes }).await
         }
     }
 }
