@@ -4559,8 +4559,10 @@ async fn lanes_nothing_recorded_are_adopted_and_sent_first() {
 
     let (mut engine, log) = start_engine(dir.path(), &db, None, "32.log");
     assert!(wait_for_log(&log, "started interfaces=", 60), "{}", std::fs::read_to_string(&log).unwrap());
+    // Told beside the start (lanes.rs's `tell`), so it can land after "started".
+    assert!(wait_for_log(&log, "lanes changed", 30), "{}", std::fs::read_to_string(&log).unwrap());
     let text = std::fs::read_to_string(&log).unwrap();
-    assert!(text.contains("lanes changed") && text.contains("waiting=3"), "{text}");
+    assert!(text.contains("waiting=3"), "{text}");
     let names = [name.clone()];
     let lanes = |rows: Vec<ductus_store::LaneGeneration>| -> Vec<(i32, i32, bool)> {
         rows.iter().map(|g| (g.first_lane, g.lanes, g.mixed)).collect()
@@ -4598,7 +4600,11 @@ async fn lanes_nothing_recorded_are_adopted_and_sent_first() {
         "{:?}",
         audit().await
     );
-    assert!(audit().await.contains(&"interface.lanes_changed".into()));
+    assert!(
+        eventually(async || audit().await.contains(&"interface.lanes_changed".into())).await,
+        "{:?}",
+        audit().await
+    );
     engine.0.kill().unwrap();
     engine.0.wait().unwrap();
     let (ok, out) = ductus(dir.path(), &["validate", "--database-url", &db]);
