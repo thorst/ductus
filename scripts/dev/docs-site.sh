@@ -26,6 +26,11 @@ MDBOOK_BOOK__TITLE="${MDBOOK_BOOK__TITLE:-Ductus $version}" MDBOOK_OUTPUT__HTML_
   mdbook build docs -d "$out" 2>&1 | grep -vE '\[INFO\]' >&2 || true
 [ -f "$out/index.html" ] || { echo "the docs site didn't build (mdbook build docs)" >&2; exit 1; }
 [ ! -e "$out/searchindex.js" ] || { echo "mdBook's search index is in the site: it should be off here" >&2; exit 1; }
+# mdBook's book.js sets an empty `window.onunload` (an old back/forward-cache workaround). Chrome is
+# retiring unload handlers, rolled out to some browsers at a time: those log "Permissions policy
+# violation: unload is not allowed in this document" on every page, which failed docs.yml's
+# no-errors check on 2026-11-26 (the run before, same image, passed). Nothing here needs it.
+sed -i '/^window\.onunload = function() { };$/d' "$out/book.js"
 
 # Index each page's own text (its <main>), not the menus around it. print.html (the whole book on
 # one page) and 404.html stay out of the results: Pagefind then skips pages without the mark. A

@@ -21,6 +21,8 @@ mode=offline
 
 mdbook build docs 2>&1 | grep -vE '\[INFO\]' >&2 || true
 [ -f target/book/index.html ] || { echo "the docs site didn't build (mdbook build docs)" >&2; exit 1; }
+# mdBook's empty `window.onunload`, which Chrome is retiring: out of the docs zip too (docs-site.sh says why).
+sed -i '/^window\.onunload = function() { };$/d' target/book/book.js
 
 # --root-dir: links that start with / are read inside the site, not the machine's root.
 args=(--no-progress --include-fragments --root-dir "$PWD/target/book")
