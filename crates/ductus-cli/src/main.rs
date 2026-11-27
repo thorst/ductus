@@ -1216,7 +1216,10 @@ enum BenchFace {
     /// this machine: messages a second, each message's time (p50/p95/p99), what each destination
     /// decided, and each lookup per message. Nothing is connected, stored or sent, and no
     /// database is needed. Mocked lookups answer no rows unless given some (`--rows`): code that
-    /// takes another path then (a quarantine, say) is counted and said.
+    /// takes another path then (a quarantine, say) is counted and said. With `--real`, the
+    /// environment's own databases and APIs answer instead (never production's). A respond-mode
+    /// HTTP interface is run on requests (each fixture a body, or a `*.request.json`), its
+    /// answers counted by HTTP status.
     Interface {
         /// The interface: its name, or a file or folder inside its folder.
         interface: String,
@@ -1243,6 +1246,17 @@ enum BenchFace {
         /// objects), or an API's body: `--rows provider_db=rows.json`. Default: no rows; `{}`.
         #[arg(long, value_name = "NAME=FILE")]
         rows: Vec<String>,
+        /// Use the environment's real databases and APIs (resources.yaml for `--env`) instead of
+        /// mocks, as the engine would: its reads and its writes are made, at the rate the code
+        /// runs, so a test environment's systems get the load. For when the mocks' latency is a
+        /// guess and the real one matters. Refused for a production environment (`prod`,
+        /// `production`, `prd`, `live`, and `prod-…`). Asks first, naming the environment;
+        /// `--yes` to run without asking (a script). Default: mocks.
+        #[arg(long, conflicts_with_all = ["mock", "rows"])]
+        real: bool,
+        /// With `--real`: don't ask first.
+        #[arg(long, requires = "real")]
+        yes: bool,
         /// The interface's busiest rate, messages a second: the report says what share of what
         /// it does here that is, and when it's more, the threads and config it would take.
         /// Default: 150 (a busy feed's peak), said as such.
@@ -1254,7 +1268,8 @@ enum BenchFace {
         /// The project folder: the one with `interfaces/` and ductus.yaml.
         #[arg(long, default_value = ".")]
         root: PathBuf,
-        /// The environment whose variables and secrets the code reads.
+        /// The environment whose variables and secrets the code reads (and with `--real`, whose
+        /// databases and APIs answer).
         #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
         env: String,
     },
@@ -1915,12 +1930,39 @@ async fn run(cli: Cli) -> Result<()> {
         Command::Bench { face: Some(BenchFace::Compare { files }), .. } => bench::compare(&files),
         Command::Bench {
             face:
-                Some(BenchFace::Interface { interface, files, threads, seconds, count, mock, rows, peak, json, root, env }),
+                Some(BenchFace::Interface {
+                    interface,
+                    files,
+                    threads,
+                    seconds,
+                    count,
+                    mock,
+                    rows,
+                    real,
+                    yes,
+                    peak,
+                    json,
+                    root,
+                    env,
+                }),
             ..
         } => {
             let threads = threads.map(|n| n as usize);
-            let args =
-                bench::interface::Args { root, env, interface, files, threads, seconds, count, mock, rows, peak, json };
+            let args = bench::interface::Args {
+                root,
+                env,
+                interface,
+                files,
+                threads,
+                seconds,
+                count,
+                mock,
+                rows,
+                real,
+                yes,
+                peak,
+                json,
+            };
             bench::interface::run(args).await
         }
         Command::Bench { face: None, seconds, quick, json, yes, database_url } => {

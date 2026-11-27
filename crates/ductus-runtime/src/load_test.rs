@@ -15,14 +15,23 @@
 //! that's serialized (an op that records an `Instant`: ~0.1 µs a stamp). The function's own time
 //! is its stage less what it waited on lookups (each moment counted once however many were in
 //! flight). The engine never binds the timed twin, so its own path costs nothing more.
+//!
+//! With `real` (`--real`), the environment's own databases and APIs answer instead, through the
+//! engine's services (its pools, `dedicated_pools`, TLS): reads and writes as the engine makes
+//! them. Never in a production environment (`production_refused`).
+//!
+//! A respond-mode HTTP interface is run as its responder runs it: each fixture is a request's
+//! body (or, `*.request.json`, a whole request), its `transform` answers it, and the answers are
+//! counted by HTTP status.
 
+use crate::services::{EngineServices, SharedServices};
 use crate::split::{Records, Splitter};
 use crate::worker::{self, Outcome};
 use anyhow::{Context, Result, anyhow, bail};
 use ductus_core::config::{Isolation, Source, Split};
 use ductus_core::format::Format;
 use ductus_core::{Environment, InterfaceConfig};
-use ductus_script::{BoxFuture, FetchRequest, FetchResponse, Function, FunctionId, Isolate, Services};
+use ductus_script::{BoxFuture, FetchRequest, FetchResponse, Function, FunctionId, Isolate, Runaway, Services};
 use ductus_store::MessageRef;
 use serde::Serialize;
 use std::cell::RefCell;
@@ -91,12 +100,39 @@ pub struct Options {
     /// Time each stage (`__invokeTimed`); false: the engine's own `__invoke`, to measure what the
     /// stamps cost.
     pub stages: bool,
+    /// The environment's real databases and APIs instead of `mocks` (never a production one:
+    /// `production_refused`). Its writes are made.
+    pub real: bool,
 }
 
-/// What a destination decided, counted over the measured messages.
+/// The environment names `--real` refuses, ignoring case: production's, by the usual names. A
+/// load test there would put a test's load, and its writes, on the systems patients' data lives
+/// in. Its own `-…`/`_…` variants (`prod-east`) are refused too.
+pub const PRODUCTION: [&str; 4] = ["prod", "production", "prd", "live"];
+
+/// Why `env` can't be load-tested against for real, or None.
+pub fn production_refused(env: &str) -> Option<String> {
+    let lower = env.to_ascii_lowercase();
+    let named = PRODUCTION
+        .iter()
+        .find(|p| lower == **p || lower.strip_prefix(**p).is_some_and(|rest| rest.starts_with(['-', '_'])))?;
+    Some(format!(
+        "`{env}` reads as a production environment (`{named}`): a load test is never run against production's databases and APIs. Run it against a test environment (`--env test --real`), or with mocks (without `--real`)"
+    ))
+}
+
+/// The name a respond-mode interface's answers are counted under (it has no destinations).
+pub const RESPONSE: &str = "response";
+
+/// What a destination decided, counted over the measured messages. A respond-mode interface's
+/// answers are counted under [`RESPONSE`]: `sent` is every request answered, `statuses` by HTTP
+/// status (a thrown error by what the engine answers it with: 422, 503 or 500).
 #[derive(Debug, Clone, Default, Serialize, PartialEq)]
 pub struct Decisions {
     pub destination: String,
+    /// Respond mode: the answers by HTTP status ("200": 980, "404": 20).
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub statuses: BTreeMap<u16, u64>,
     pub sent: u64,
     pub filtered: u64,
     pub quarantined: u64,
@@ -119,11 +155,16 @@ pub struct Lookup {
     /// Of those, writes (`db().execute`; an API's or URL's requests other than GET and HEAD):
     /// answered as done, nothing written.
     pub writes: u64,
-    /// Each call's latency as mocked, in milliseconds.
-    pub latency_ms: f64,
-    /// What the calls waited on average, in milliseconds: the mock's latency and a few tenths of
-    /// a millisecond (the thread waking), more when the threads outnumber the cores.
+    /// Each call's latency as mocked, in milliseconds; None: the real resource (`--real`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latency_ms: Option<f64>,
+    /// What the calls waited on average, in milliseconds: mocked, its latency and a few tenths of
+    /// a millisecond (the thread waking), more when the threads outnumber the cores; real, what
+    /// the resource took.
     pub waited_ms: f64,
+    /// Real calls that failed (`--real`): the code saw an error (a temporary one retries).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub failed: u64,
     /// It answered rows (or a body) given with `--rows`; false: none.
     pub given_rows: bool,
 }
@@ -197,7 +238,12 @@ impl Waiting {
 struct Tally {
     calls: u64,
     writes: u64,
+    failed: u64,
     waited: Duration,
+}
+
+fn is_zero(n: &u64) -> bool {
+    *n == 0
 }
 
 type Tallies = BTreeMap<(&'static str, String), Tally>;
@@ -206,6 +252,12 @@ type Tallies = BTreeMap<(&'static str, String), Tally>;
 #[derive(Debug, Clone, Serialize)]
 pub struct Load {
     pub interface: String,
+    /// The environment whose variables, secrets (and with `real`, resources) the code used.
+    pub env: String,
+    /// Its real databases and APIs answered (`--real`); false: mocks.
+    pub real: bool,
+    /// A respond-mode HTTP interface: each message is a request, answered by its `transform`.
+    pub respond: bool,
     pub threads: usize,
     /// Why that many (the engine's rule, or `--threads`).
     pub threads_why: String,
@@ -247,6 +299,10 @@ pub struct Load {
 /// The threads the engine gives `config`, and why: one worker in the shared pool, `workers` when
 /// dedicated; and never more than its lanes (one without an ordering key: one message at a time).
 pub fn threads_for(config: &InterfaceConfig) -> (usize, String) {
+    if config.responds() {
+        // One responder takes the requests; it answers them side by side while they wait.
+        return (1, "respond mode: one thread answers its requests".into());
+    }
     let (slots, lanes) = (config.slots() as usize, config.partition_count() as usize);
     match (config.isolation, lanes) {
         (_, 1) if slots > 1 => (1, format!("{slots} workers, but no ordering key: one message at a time")),
@@ -264,18 +320,21 @@ pub fn run(options: Options) -> Result<Load> {
         crate::load_interfaces(&options.root, &env)?.into_iter().find(|c| c.name == options.interface).with_context(
             || format!("no interface named `{}` in {}", options.interface, options.root.join("interfaces").display()),
         )?;
-    if config.responds() {
-        bail!(
-            "`{}` answers HTTP requests itself (`respond`): not measured by `ductus bench interface` yet",
-            config.name
-        );
-    }
-    let inputs = inputs(&options.root, &options.env, &config, &options.files)?;
+    let inputs = match config.responds() {
+        true => requests(&config, &options.files)?,
+        false => inputs(&options.root, &options.env, &config, &options.files)?,
+    };
     let (threads, threads_why) = match options.threads {
         Some(n) => (n.max(1), format!("`--threads {n}`")),
         None => threads_for(&config),
     };
     let heap_mb = ductus_core::settings::Settings::load(&options.root)?.isolates.heap_mb;
+    // Real resources: the engine's services on a runtime of their own (its sockets are served
+    // there, not on the threads running code), kept until every thread is done.
+    let real = match options.real {
+        false => None,
+        true => Some(Real::open(&options.root, &env, &config)?),
+    };
     let config = Arc::new(config);
     let inputs = Arc::new(inputs);
     let ready = Arc::new(Barrier::new(threads + 1));
@@ -292,6 +351,7 @@ pub fn run(options: Options) -> Result<Load> {
                 inputs: inputs.clone(),
                 env: env.clone(),
                 mocks: options.mocks.clone(),
+                real: real.as_ref().map(Real::services),
                 timer: timer.clone(),
                 heap_mb,
                 thread: t,
@@ -314,29 +374,134 @@ pub fn run(options: Options) -> Result<Load> {
         done.push(worker.join().map_err(|_| anyhow!("a thread running the code panicked"))??);
     }
     let took = began.elapsed();
-    Ok(summed(&config, inputs.len(), threads, threads_why, took, &options.mocks, done))
+    drop(real);
+    let run = Run { env: options.env, real: options.real, inputs: inputs.len(), threads, threads_why, took };
+    Ok(summed(&config, run, &options.mocks, done))
+}
+
+/// The environment's real resources, as a start opens them: pools connect on first use.
+struct Real {
+    /// Where their sockets are served; shut down (and with it every connection) at the run's end.
+    io: Option<tokio::runtime::Runtime>,
+    shared: Arc<SharedServices>,
+    /// The interface's own pools (`dedicated_pools`), shared by its threads as by its workers.
+    own: crate::services::Pools,
+}
+
+impl Real {
+    fn open(root: &std::path::Path, env: &Environment, config: &InterfaceConfig) -> Result<Self> {
+        let resources = ductus_core::Resources::load(root, env)
+            .with_context(|| format!("loading resources.yaml for `{}` (`--real` uses its resources)", env.name))?;
+        let missing = resources.missing_references([config]);
+        if !missing.is_empty() {
+            bail!("{}", missing.join("\n"));
+        }
+        let certificates = crate::tls::Certificates::load(&resources.certificates)?;
+        let io = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .thread_name("bench-io")
+            .enable_all()
+            .build()
+            .context("starting the runtime for real lookups")?;
+        let shared = {
+            let _guard = io.enter();
+            // The services keep an environment of their own (a deploy can swap it).
+            Arc::new(SharedServices::new(Environment::load(root, &env.name)?, &resources, &certificates)?)
+        };
+        let own = {
+            let _guard = io.enter();
+            shared.dedicated_pools(config)
+        };
+        Ok(Self { io: Some(io), shared, own })
+    }
+
+    fn services(&self) -> EngineServices {
+        EngineServices::new(self.shared.clone(), self.own.clone())
+    }
+}
+
+impl Drop for Real {
+    fn drop(&mut self) {
+        // Pools close in the background; don't wait for their sockets.
+        if let Some(io) = self.io.take() {
+            io.shutdown_background();
+        }
+    }
+}
+
+/// A respond-mode interface's requests, as its HTTP source hands them to the code: each file (or
+/// fixture) is a request's body, sent as the source's method to its path (no query, headers or
+/// path parameters); a file named `*.request.json` is a whole request instead, `{"method",
+/// "path", "params", "query", "headers", "body"}`, each part it leaves out as above (a `body`
+/// that isn't a string is sent as its JSON).
+fn requests(config: &InterfaceConfig, files: &[PathBuf]) -> Result<Vec<Input>> {
+    let Source::Http { method, path, .. } = &config.source else { bail!("`{}` isn't an HTTP interface", config.name) };
+    let files = files_or_fixtures(config, files)?;
+    let mut out = Vec::new();
+    for file in &files {
+        let text = std::fs::read_to_string(file).with_context(|| format!("reading {}", file.display()))?;
+        let name = file_name(file);
+        let mut request = serde_json::json!({
+            "method": method.to_ascii_uppercase(), "path": path, "params": {}, "query": {}, "headers": {}, "body": "",
+        });
+        if name.ends_with(".request.json") {
+            let given: serde_json::Map<String, serde_json::Value> = serde_json::from_str(&text)
+                .with_context(|| format!("{}: a `.request.json` file holds a JSON object", file.display()))?;
+            for (key, value) in given {
+                let value = match (key.as_str(), value) {
+                    ("method" | "path" | "params" | "query" | "headers", value) => value,
+                    ("body", serde_json::Value::String(body)) => serde_json::Value::String(body),
+                    ("body", json) => serde_json::Value::String(json.to_string()),
+                    (other, _) => bail!(
+                        "{}: `{other}` isn't part of a request (method, path, params, query, headers, body)",
+                        file.display()
+                    ),
+                };
+                request[key] = value;
+            }
+            // As the server hands them over: header names in lower case.
+            if let Some(headers) = request["headers"].as_object_mut() {
+                *headers = std::mem::take(headers).into_iter().map(|(k, v)| (k.to_ascii_lowercase(), v)).collect();
+            }
+        } else {
+            request["body"] = serde_json::Value::String(text);
+        }
+        out.push(Input { name, payload: request.to_string() });
+    }
+    if out.is_empty() {
+        bail!("no requests to run: give one with `--file` (a body, or a `.request.json`)");
+    }
+    Ok(out)
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned())
+}
+
+/// The files given, else the interface's `fixtures/`, sorted.
+fn files_or_fixtures(config: &InterfaceConfig, files: &[PathBuf]) -> Result<Vec<PathBuf>> {
+    if !files.is_empty() {
+        return Ok(files.to_vec());
+    }
+    let dir = config.dir.join("fixtures");
+    let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .with_context(|| {
+            format!(
+                "`{}` has no fixtures to run ({} isn't there): give a message with `--file`",
+                config.name,
+                dir.display()
+            )
+        })?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file())
+        .collect();
+    found.sort();
+    Ok(found)
 }
 
 /// The messages: each file (or fixture) as the interface's source hands it over.
 fn inputs(root: &std::path::Path, env: &str, config: &InterfaceConfig, files: &[PathBuf]) -> Result<Vec<Input>> {
-    let files: Vec<PathBuf> = if files.is_empty() {
-        let dir = config.dir.join("fixtures");
-        let mut found: Vec<PathBuf> = std::fs::read_dir(&dir)
-            .with_context(|| {
-                format!(
-                    "`{}` has no fixtures to run ({} isn't there): give a message with `--file`",
-                    config.name,
-                    dir.display()
-                )
-            })?
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .filter(|p| p.is_file())
-            .collect();
-        found.sort();
-        found
-    } else {
-        files.to_vec()
-    };
+    let files = files_or_fixtures(config, files)?;
     let splitter = match &config.source {
         Source::File(f) | Source::Sftp(f) if f.split == Split::Records => Some(match &config.format {
             Format::Hl7 => Splitter::Hl7,
@@ -350,7 +515,7 @@ fn inputs(root: &std::path::Path, env: &str, config: &InterfaceConfig, files: &[
     for path in &files {
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let bytes = crate::try_message::as_picked_up(root, env, &config.name, bytes)?;
-        let name = path.file_name().map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+        let name = file_name(path);
         let Some(splitter) = splitter else {
             out.push(Input { name, payload: String::from_utf8_lossy(&bytes).into_owned() });
             continue;
@@ -380,6 +545,8 @@ struct Job {
     inputs: Arc<Vec<Input>>,
     env: Arc<Environment>,
     mocks: Mocks,
+    /// `--real`: the engine's services, which answer instead of the mocks.
+    real: Option<EngineServices>,
     timer: Timer,
     heap_mb: usize,
     thread: usize,
@@ -423,16 +590,19 @@ impl Job {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let calls = Rc::new(RefCell::new(BTreeMap::new()));
         let waiting = Rc::new(RefCell::new(Waiting::default()));
-        let services = MockServices {
-            env: self.env.clone(),
-            mocks: self.mocks.clone(),
-            timer: self.timer.clone(),
-            calls: calls.clone(),
-            waiting: waiting.clone(),
+        let recorder = Recorder { calls: calls.clone(), waiting: waiting.clone() };
+        let services: Rc<dyn Services> = match &self.real {
+            Some(inner) => Rc::new(RealServices { inner: inner.clone(), recorder }),
+            None => Rc::new(MockServices {
+                env: self.env.clone(),
+                mocks: self.mocks.clone(),
+                timer: self.timer.clone(),
+                recorder,
+            }),
         };
         let mut isolate = {
             let _guard = runtime.enter();
-            Isolate::new(Some(Rc::new(services)), self.heap_mb)
+            Isolate::new(Some(services), self.heap_mb)
         };
         // `console` goes nowhere: a line per message would measure the terminal.
         isolate.capture_console();
@@ -480,7 +650,7 @@ impl Job {
     }
 
     fn counts(&self) -> Counts {
-        let destinations: Vec<&str> = self.config.destinations().map(|(d, _)| d).collect();
+        let destinations = outlets(&self.config);
         Counts {
             decisions: destinations
                 .iter()
@@ -538,13 +708,15 @@ impl Job {
         // Ids of their own per thread, as stored messages have.
         let id = (self.thread as i64) << 40 | n as i64;
         let message = MessageRef { id, received_at: chrono::Utc::now() };
-        for (i, (destination, _)) in self.config.destinations().enumerate() {
+        let respond = self.config.responds();
+        for (i, destination) in outlets(&self.config).iter().enumerate() {
             let result = match loaded.functions[i] {
                 None => None,
                 Some(function) => {
-                    let meta = worker::meta(message, destination, None);
+                    // A responder's transform gets the request and no `meta`.
+                    let meta = (!respond).then(|| worker::meta(message, destination, None));
                     let waited = loaded.waiting.borrow().total;
-                    let result = loaded.isolate.call_function(function, &input.payload, Some(&meta)).await;
+                    let result = loaded.isolate.call_function(function, &input.payload, meta.as_deref()).await;
                     let waited = loaded.waiting.borrow().total - waited;
                     // A function that threw (quarantined, retried) has no serialize stamp.
                     let times = match loaded.isolate.take_stamps()[..] {
@@ -565,6 +737,10 @@ impl Job {
                 }
             };
             let counted = &mut counts.decisions[i];
+            if respond {
+                answered(counted, &input.name, result)?;
+                continue;
+            }
             match Outcome::of(&input.payload, result, self.config.project_root()) {
                 Outcome::Deliver(_) => counted.sent += 1,
                 Outcome::Filter(_) => counted.filtered += 1,
@@ -582,6 +758,40 @@ impl Job {
         }
         Ok(())
     }
+}
+
+/// What decisions are counted under: its destinations, or [`RESPONSE`] in respond mode (in the
+/// order of `functions()`).
+fn outlets(config: &InterfaceConfig) -> Vec<String> {
+    match config.responds() {
+        true => vec![RESPONSE.to_string()],
+        false => config.destinations().map(|(d, _)| d.to_string()).collect(),
+    }
+}
+
+/// A respond-mode answer counted by its HTTP status, as the engine would answer the caller: the
+/// response the code made, or for a thrown error 422, 503 or 500 (`http::status_of_error`).
+fn answered(counted: &mut Decisions, input: &str, result: Option<Result<Option<String>>>) -> Result<()> {
+    let Some(result) = result else { bail!("respond mode without a `script:`: there is no code to run") };
+    let status = match result {
+        Ok(Some(envelope)) => {
+            serde_json::from_str::<serde_json::Value>(&envelope).ok().and_then(|e| e["status"].as_u64()).unwrap_or(500)
+                as u16
+        }
+        // The engine answers a response it can't read with 500.
+        Ok(None) => 500,
+        Err(e) => {
+            if let Some(runaway) = e.downcast_ref::<Runaway>() {
+                bail!("{input}: the code {runaway}");
+            }
+            let error = format!("{e:#}");
+            counted.first_reason.get_or_insert_with(|| format!("{input}: {}", error.lines().next().unwrap_or("")));
+            crate::http::status_of_error(&error).as_u16()
+        }
+    };
+    counted.sent += 1;
+    *counted.statuses.entry(status).or_default() += 1;
+    Ok(())
 }
 
 struct Loaded {
@@ -625,19 +835,22 @@ pub fn thread_cpu() -> Option<Duration> {
     }
 }
 
-/// Every thread's numbers as one.
-fn summed(
-    config: &InterfaceConfig,
+/// What the run was, for its report.
+struct Run {
+    env: String,
+    real: bool,
     inputs: usize,
     threads: usize,
     threads_why: String,
     took: Duration,
-    mocks: &Mocks,
-    done: Vec<Done>,
-) -> Load {
+}
+
+/// Every thread's numbers as one.
+fn summed(config: &InterfaceConfig, run: Run, mocks: &Mocks, done: Vec<Done>) -> Load {
+    let Run { env, real, inputs, threads, threads_why, took } = run;
     let mut latencies: Vec<Duration> = Vec::new();
     let mut decisions: Vec<Decisions> =
-        config.destinations().map(|(d, _)| Decisions { destination: d.to_string(), ..Default::default() }).collect();
+        outlets(config).into_iter().map(|destination| Decisions { destination, ..Default::default() }).collect();
     let mut stages = vec![StageSum::default(); decisions.len()];
     let mut calls = Tallies::new();
     let (mut keys, mut waited, mut heap) = (Duration::ZERO, Duration::ZERO, 0);
@@ -656,6 +869,9 @@ fn summed(
             sum.filtered += one.filtered;
             sum.quarantined += one.quarantined;
             sum.retried += one.retried;
+            for (status, n) in one.statuses {
+                *sum.statuses.entry(status).or_default() += n;
+            }
             if sum.first_reason.is_none() {
                 sum.first_reason = one.first_reason;
             }
@@ -664,6 +880,7 @@ fn summed(
             let sum = calls.entry(k).or_default();
             sum.calls += one.calls;
             sum.writes += one.writes;
+            sum.failed += one.failed;
             sum.waited += one.waited;
         }
     }
@@ -676,15 +893,15 @@ fn summed(
     let per_second = messages as f64 / took.as_secs_f64().max(1e-9);
     let per_message = |d: Duration| d.as_secs_f64() * 1000.0 / messages.max(1) as f64;
     let functions = config.functions();
-    let stages = config
-        .destinations()
+    let stages = outlets(config)
+        .into_iter()
         .zip(stages)
         .zip(&functions)
         .filter(|(_, function)| function.is_some())
-        .map(|(((destination, _), sum), _)| {
+        .map(|((destination, sum), _)| {
             let mean = |d: Duration| d.as_secs_f64() * 1000.0 / sum.timed.max(1) as f64;
             Stages {
-                destination: destination.to_string(),
+                destination,
                 decode_ms: mean(sum.decode),
                 code_ms: mean(sum.code),
                 lookups_ms: mean(sum.lookups),
@@ -697,9 +914,10 @@ fn summed(
         .into_iter()
         .map(|((kind, name), tally)| Lookup {
             kind,
-            latency_ms: mocks.latency(kind, &name).as_secs_f64() * 1000.0,
+            latency_ms: (!real).then(|| mocks.latency(kind, &name).as_secs_f64() * 1000.0),
             waited_ms: tally.waited.as_secs_f64() * 1000.0 / tally.calls.max(1) as f64,
-            given_rows: mocks.rows.contains_key(&name),
+            failed: tally.failed,
+            given_rows: !real && mocks.rows.contains_key(&name),
             name,
             calls: tally.calls,
             writes: tally.writes,
@@ -707,6 +925,9 @@ fn summed(
         .collect();
     Load {
         interface: config.name.clone(),
+        env,
+        real,
+        respond: config.responds(),
         threads,
         threads_why,
         inputs,
@@ -817,33 +1038,92 @@ impl Drop for Timer {
     }
 }
 
-/// The engine's services, answered here: see the module's comment.
-struct MockServices {
-    env: Arc<Environment>,
-    mocks: Mocks,
-    timer: Timer,
+/// Tallies each lookup on one thread, mocked or real: its call, whether it wrote, what it waited.
+struct Recorder {
     calls: Rc<RefCell<Tallies>>,
     waiting: Rc<RefCell<Waiting>>,
 }
 
-impl MockServices {
-    /// `value` after the resource's latency, the call and its wait tallied.
-    fn answer<T: 'static>(&self, kind: &'static str, name: &str, write: bool, value: T) -> BoxFuture<T> {
+impl Recorder {
+    fn time<T: 'static>(&self, kind: &'static str, name: &str, write: bool, call: BoxFuture<T>) -> BoxFuture<T> {
         let key = (kind, name.to_string());
-        let latency = self.mocks.latency(kind, name);
-        let (timer, calls, waiting) = (self.timer.clone(), self.calls.clone(), self.waiting.clone());
+        let (calls, waiting) = (self.calls.clone(), self.waiting.clone());
         Box::pin(async move {
             let began = Instant::now();
             waiting.borrow_mut().begin(began);
-            timer.wait(began + latency).await;
+            let result = call.await;
             waiting.borrow_mut().end(Instant::now());
             let mut calls = calls.borrow_mut();
             let tally = calls.entry(key).or_default();
             tally.calls += 1;
             tally.writes += u64::from(write);
+            tally.failed += u64::from(result.is_err());
             tally.waited += began.elapsed();
-            Ok(value)
+            result
         })
+    }
+}
+
+/// A request's kind and name as the report counts it: `api` and its resources.yaml name, or
+/// `fetch` for a URL; and whether it writes (anything but GET and HEAD).
+fn fetched(request: &FetchRequest) -> (&'static str, String, bool) {
+    let write = !matches!(request.method.to_ascii_uppercase().as_str(), "GET" | "HEAD");
+    match &request.api {
+        Some(api) => ("api", api.clone(), write),
+        None => ("fetch", "fetch".to_string(), write),
+    }
+}
+
+/// The engine's services, answered here: see the module's comment.
+struct MockServices {
+    env: Arc<Environment>,
+    mocks: Mocks,
+    timer: Timer,
+    recorder: Recorder,
+}
+
+impl MockServices {
+    /// `value` after the resource's latency, the call and its wait tallied.
+    fn answer<T: 'static>(&self, kind: &'static str, name: &str, write: bool, value: T) -> BoxFuture<T> {
+        let (timer, at) = (self.timer.clone(), Instant::now() + self.mocks.latency(kind, name));
+        self.recorder.time(
+            kind,
+            name,
+            write,
+            Box::pin(async move {
+                timer.wait(at).await;
+                Ok(value)
+            }),
+        )
+    }
+}
+
+/// The engine's own services (`--real`), each call tallied as the mocks' are.
+struct RealServices {
+    inner: EngineServices,
+    recorder: Recorder,
+}
+
+impl Services for RealServices {
+    fn db_query(&self, resource: &str, sql: &str, params: Vec<serde_json::Value>) -> BoxFuture<Vec<serde_json::Value>> {
+        self.recorder.time("db", resource, false, self.inner.db_query(resource, sql, params))
+    }
+
+    fn db_execute(&self, resource: &str, sql: &str, params: Vec<serde_json::Value>) -> BoxFuture<u64> {
+        self.recorder.time("db", resource, true, self.inner.db_execute(resource, sql, params))
+    }
+
+    fn fetch(&self, request: FetchRequest) -> BoxFuture<FetchResponse> {
+        let (kind, name, write) = fetched(&request);
+        self.recorder.time(kind, &name, write, self.inner.fetch(request))
+    }
+
+    fn variable(&self, name: &str) -> Option<String> {
+        self.inner.variable(name)
+    }
+
+    fn secret(&self, name: &str) -> Result<Option<String>> {
+        self.inner.secret(name)
     }
 }
 
@@ -867,10 +1147,7 @@ impl Services for MockServices {
     }
 
     fn fetch(&self, request: FetchRequest) -> BoxFuture<FetchResponse> {
-        let (kind, name) = match &request.api {
-            Some(api) => ("api", api.clone()),
-            None => ("fetch", "fetch".to_string()),
-        };
+        let (kind, name, write) = fetched(&request);
         let body = self.mocks.rows.get(&name).map_or_else(
             || "{}".to_string(),
             |b| match b {
@@ -879,7 +1156,6 @@ impl Services for MockServices {
             },
         );
         let headers = BTreeMap::from([("content-type".to_string(), "application/json".to_string())]);
-        let write = !matches!(request.method.to_ascii_uppercase().as_str(), "GET" | "HEAD");
         self.answer(kind, &name, write, FetchResponse { status: 200, headers, body })
     }
 
@@ -999,6 +1275,7 @@ mod tests {
                 until: Until::Seconds(Duration::from_secs(3)),
                 mocks: Mocks::default(),
                 stages,
+                real: false,
             };
             run(options).unwrap().per_second
         };
@@ -1015,6 +1292,67 @@ mod tests {
         let cost = (p - t) / p * 100.0;
         println!("plain {p:.0} msg/s, timed {t:.0} msg/s: the stamps cost {cost:.2}% (runs: {plain:?} / {timed:?})");
         assert!(cost < 2.0, "{cost:.2}%");
+    }
+
+    #[test]
+    fn production_is_refused_by_its_usual_names() {
+        for env in ["prod", "PROD", "production", "prd", "live", "prod-east", "Prod_2"] {
+            assert!(production_refused(env).is_some_and(|why| why.contains("never run against production")), "{env}");
+        }
+        for env in ["dev", "test", "uat", "staging", "product", "prodtest", "preprod", "delivery"] {
+            assert_eq!(production_refused(env), None, "{env}");
+        }
+    }
+
+    #[test]
+    fn a_respond_mode_request_is_the_body_or_a_whole_request() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("interface.yaml"),
+            "name: lookup\nsource: { http: { port: 7001, path: \"/patients/{mrn}\", method: GET, mode: respond } }\nformat: json\nscript: t.ts\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("t.ts"), "export function transform() { return \"\"; }\n").unwrap();
+        let config = InterfaceConfig::load(dir.path()).unwrap();
+        let body = dir.path().join("a.json");
+        std::fs::write(&body, r#"{"x":1}"#).unwrap();
+        let whole = dir.path().join("b.request.json");
+        std::fs::write(
+            &whole,
+            r#"{"params": {"mrn": "123"}, "headers": {"X-Trace": "t"}, "body": {"y": 2}, "query": {"full": "1"}}"#,
+        )
+        .unwrap();
+        let got: Vec<serde_json::Value> = requests(&config, &[body, whole.clone()])
+            .unwrap()
+            .into_iter()
+            .map(|i| serde_json::from_str(&i.payload).unwrap())
+            .collect();
+        assert_eq!(
+            got[0],
+            serde_json::json!({"method": "GET", "path": "/patients/{mrn}", "params": {}, "query": {}, "headers": {}, "body": "{\"x\":1}"})
+        );
+        assert_eq!(
+            got[1],
+            serde_json::json!({"method": "GET", "path": "/patients/{mrn}", "params": {"mrn": "123"}, "query": {"full": "1"}, "headers": {"x-trace": "t"}, "body": "{\"y\":2}"})
+        );
+        std::fs::write(&whole, r#"{"verb": "GET"}"#).unwrap();
+        let refused = requests(&config, &[whole]).err().unwrap().to_string();
+        assert!(refused.contains("`verb` isn't part of a request"), "{refused}");
+    }
+
+    #[test]
+    fn a_respond_mode_answer_counts_under_its_status() {
+        let mut counted = Decisions::default();
+        answered(&mut counted, "a", Some(Ok(Some(r#"{"status":404,"headers":{},"body":""}"#.into())))).unwrap();
+        answered(&mut counted, "b", Some(Ok(Some(r#"{"status":200,"headers":{},"body":""}"#.into())))).unwrap();
+        let thrown = |marker: &str| Some(Err(anyhow!("{marker} no such patient")));
+        answered(&mut counted, "c", thrown(ductus_script::QUARANTINE)).unwrap();
+        answered(&mut counted, "d", thrown(ductus_script::TRANSIENT)).unwrap();
+        answered(&mut counted, "e", Some(Err(anyhow!("TypeError: x is undefined")))).unwrap();
+        assert_eq!(counted.statuses, BTreeMap::from([(200, 1), (404, 1), (422, 1), (500, 1), (503, 1)]));
+        assert_eq!(counted.sent, 5);
+        assert!(counted.first_reason.as_deref().is_some_and(|r| r.starts_with("c: ")), "{counted:?}");
+        assert!(answered(&mut counted, "f", None).is_err(), "no code, nothing to measure");
     }
 
     #[test]

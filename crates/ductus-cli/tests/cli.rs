@@ -8788,7 +8788,9 @@ fn bench_interface_runs_the_code_with_its_lookups_mocked() {
     }
     let lookups_ms = load["lookups_ms"].as_f64().unwrap();
     assert!((10.0..12.0).contains(&lookups_ms) && load["heap_mb"].as_f64().unwrap() > 1.0, "{load}");
-    assert!(load["cpu_ms"].as_f64().unwrap() < 2.0, "the waits take no CPU: {load}");
+    // A debug build's code takes ~2 ms of CPU a message (2.04 on 0.8.2.2's own commit): well
+    // under the 10 ms it waits, which would all be CPU if the waits spun.
+    assert!(load["cpu_ms"].as_f64().unwrap() < lookups_ms / 2.0, "the waits take no CPU: {load}");
     assert!(load.get("key_ms").is_none(), "no key functions: {load}");
     // 150/s is more than one thread does with two 5 ms waits a message (~90/s): the threads it
     // takes, and the key it needs for them; with `--peak` under its rate, a share of it.
@@ -8805,4 +8807,110 @@ fn bench_interface_runs_the_code_with_its_lookups_mocked() {
     assert!(!ok && out.contains("`--mock db`: give a kind or a resource and a latency, as `db=5ms`"), "{out}");
     let (ok, out) = bench(&["--rows", "provider_db=missing.json"]);
     assert!(!ok && out.contains("`--rows provider_db=missing.json`: reading missing.json"), "{out}");
+}
+
+/// `ductus bench interface` on a respond-mode interface: each fixture a request (here whole
+/// `.request.json`s), its answers counted by status. Its lookups are mocked unless `--real`, which
+/// reaches the real system (a stand-in API here, counting what it's asked), says the environment
+/// first, asks (refused without a terminal unless `--yes`) and is refused outright for production.
+#[test]
+fn bench_interface_answers_requests_and_reaches_real_systems_only_when_asked() {
+    use std::io::{BufRead, Write};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // The stand-in: answers every request `{}`, on kept-alive connections, counting them.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let served = std::sync::Arc::new(AtomicU64::new(0));
+    let counter = served.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let counter = counter.clone();
+            std::thread::spawn(move || {
+                let mut reader = std::io::BufReader::new(stream.try_clone().unwrap());
+                let mut stream = stream;
+                loop {
+                    let mut line = String::new();
+                    let mut first = true;
+                    loop {
+                        line.clear();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            return;
+                        }
+                        if line == "\r\n" && !first {
+                            break;
+                        }
+                        first = false;
+                    }
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    let _ = stream
+                        .write_all(b"HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: 2\r\n\r\n{}");
+                }
+            });
+        }
+    });
+    let script = format!(
+        "import {{ fetch, response, type HttpRequest }} from \"@ductus/sdk\";\n\nexport async function transform(req: HttpRequest) {{\n  if (req.params.mrn === \"0\") return response({{ status: 404, body: {{ error: \"no such patient\" }} }});\n  const found = await fetch(\"http://127.0.0.1:{port}/patients/\" + req.params.mrn);\n  return response({{ body: {{ mrn: req.params.mrn, status: found.status }} }});\n}}\n"
+    );
+    let dir = project(&[
+        (
+            "interfaces/patients/interface.yaml",
+            "name: patients\nsource: { http: { port: 7311, path: \"/patients/{mrn}\", method: GET, mode: respond } }\nformat: json\nscript: answer.ts\n",
+        ),
+        ("interfaces/patients/answer.ts", &script),
+        ("interfaces/patients/fixtures/a.request.json", "{ \"params\": { \"mrn\": \"123\" } }"),
+        ("interfaces/patients/fixtures/b.request.json", "{ \"params\": { \"mrn\": \"0\" } }"),
+        ("environments/dev.yaml", ""),
+        ("environments/test.yaml", ""),
+        ("environments/prod.yaml", ""),
+    ]);
+    let bench = |args: &[&str]| {
+        let mut all = vec!["bench", "interface", "patients", "--count", "40"];
+        all.extend_from_slice(args);
+        ductus(dir.path(), &all)
+    };
+
+    // Mocked: nothing reaches the API; the answers by status, the lookup per request.
+    let (ok, out) = bench(&["--mock", "fetch=1ms"]);
+    assert!(ok, "{out}");
+    for expected in [
+        " on 1 thread (respond mode: one thread answers its requests), 2 requests from its fixtures, in turn; databases and APIs mocked, nothing sent\n",
+        "  response: 50% answered 200, 50% answered 404; decode ",
+        "  fetch() to URLs: 0.50 calls per message, each mocked at 1.00 ms, answering 200 `{}`",
+        "  → At 150/s (a busy feed's peak; give yours with `--peak`) it uses ",
+        " of what one engine answers (",
+    ] {
+        assert!(out.contains(expected), "missing {expected:?} in\n{out}");
+    }
+    assert_eq!(served.load(Ordering::Relaxed), 0);
+
+    // `--real`: never production; elsewhere said first and asked (no terminal here: `--yes`).
+    let (ok, out) = bench(&["--env", "prod", "--real", "--yes"]);
+    assert!(!ok && out.contains("`prod` reads as a production environment (`prod`)"), "{out}");
+    let (ok, out) = bench(&["--env", "test", "--real"]);
+    assert!(!ok, "{out}");
+    assert!(out.contains("`patients` against environment `test`'s real systems: no databases or APIs in its resources.yaml (fetch() to URLs is real too)."), "{out}");
+    assert!(out.contains("add --yes to run without asking"), "{out}");
+    let (ok, out) = bench(&["--env", "test", "--real", "--mock", "db=1ms"]);
+    assert!(!ok && out.contains("cannot be used with"), "mocks and --real don't mix: {out}");
+    assert_eq!(served.load(Ordering::Relaxed), 0, "nothing reached it before it was allowed");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_ductus"))
+        .args(["bench", "interface", "patients", "--count", "40", "--env", "test", "--real", "--yes", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && said.contains("against environment `test`'s real systems"), "{said}");
+    let document: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let load = &document["load"];
+    assert_eq!(
+        (load["real"].as_bool(), load["respond"].as_bool(), load["env"].as_str()),
+        (Some(true), Some(true), Some("test"))
+    );
+    assert_eq!(load["decisions"][0]["statuses"], serde_json::json!({ "200": 20, "404": 20 }), "{load}");
+    let fetched = &load["lookups"][0];
+    assert_eq!((fetched["kind"].as_str(), fetched["calls"].as_u64()), (Some("fetch"), Some(20)), "{load}");
+    assert!(fetched.get("latency_ms").is_none() && document["mocks"].is_null(), "{document}");
+    // The warm-up's calls and the 20 measured ones all reached it.
+    assert!(served.load(Ordering::Relaxed) > 20, "{}", served.load(Ordering::Relaxed));
 }

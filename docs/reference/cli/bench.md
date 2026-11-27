@@ -33,7 +33,7 @@ ductus bench compare [OPTIONS] <FILE> <FILE>...
 
 ## `ductus bench interface`
 
-Run one interface's real code on its fixtures in a loop, on as many threads as the engine would give it, with its databases and APIs mocked at a set latency, and say what it does on this machine: messages a second, each message's time (p50/p95/p99), what each destination decided, and each lookup per message. Nothing is connected, stored or sent, and no database is needed. Mocked lookups answer no rows unless given some (`--rows`): code that takes another path then (a quarantine, say) is counted and said.
+Run one interface's real code on its fixtures in a loop, on as many threads as the engine would give it, with its databases and APIs mocked at a set latency, and say what it does on this machine: messages a second, each message's time (p50/p95/p99), what each destination decided, and each lookup per message. Nothing is connected, stored or sent, and no database is needed. Mocked lookups answer no rows unless given some (`--rows`): code that takes another path then (a quarantine, say) is counted and said. With `--real`, the environment's own databases and APIs answer instead (never production's). A respond-mode HTTP interface is run on requests (each fixture a body, or a `*.request.json`), its answers counted by HTTP status.
 
 ```text
 ductus bench interface [OPTIONS] <INTERFACE>
@@ -55,8 +55,10 @@ ductus bench interface [OPTIONS] <INTERFACE>
 | `--count <COUNT>` | Run this many messages (after the warm-up) instead of for `--seconds`. |  |  |
 | `--mock <KIND|NAME=LATENCY>` | A lookup's latency, by kind (`db`, `api`, `fetch`) or by resources.yaml name, which wins over its kind: `--mock db=5ms --mock empi=120ms`. Default: `db=5ms`, `api=40ms`, `fetch=40ms`. |  |  |
 | `--rows <NAME=FILE>` | What a mocked resource answers, from a JSON file: a database's rows (an array of objects), or an API's body: `--rows provider_db=rows.json`. Default: no rows; `{}`. |  |  |
+| `--real` | Use the environment's real databases and APIs (resources.yaml for `--env`) instead of mocks, as the engine would: its reads and its writes are made, at the rate the code runs, so a test environment's systems get the load. For when the mocks' latency is a guess and the real one matters. Refused for a production environment (`prod`, `production`, `prd`, `live`, and `prod-…`). Asks first, naming the environment; `--yes` to run without asking (a script). Default: mocks. |  |  |
+| `--yes` | With `--real`: don't ask first. |  |  |
 | `--peak <PER_SECOND>` | The interface's busiest rate, messages a second: the report says what share of what it does here that is, and when it's more, the threads and config it would take. Default: 150 (a busy feed's peak), said as such. |  |  |
 | `--json` | As JSON: the machine, the mocks, every number and the verdict's sentences. |  |  |
 | `--root <ROOT>` | The project folder: the one with `interfaces/` and ductus.yaml. | `.` |  |
-| `--env <ENV>` | The environment whose variables and secrets the code reads. | `dev` | `DUCTUS_ENV` |
+| `--env <ENV>` | The environment whose variables and secrets the code reads (and with `--real`, whose databases and APIs answer). | `dev` | `DUCTUS_ENV` |
 

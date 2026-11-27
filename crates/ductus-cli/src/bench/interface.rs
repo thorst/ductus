@@ -6,6 +6,7 @@ use crate::project::{interface_dirs, names_interface};
 use anyhow::{Context, Result, anyhow, bail};
 use ductus_core::Environment;
 use ductus_runtime::load_test::{self, Load, Mocks, Until};
+use std::io::{IsTerminal, Write};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -22,6 +23,10 @@ pub struct Args {
     pub mock: Vec<String>,
     /// `NAME=FILE.json`, as typed.
     pub rows: Vec<String>,
+    /// The environment's real databases and APIs instead of mocks.
+    pub real: bool,
+    /// With `real`: don't ask first.
+    pub yes: bool,
     /// The interface's busiest rate, messages a second; None: [`PEAK`], said as such.
     pub peak: Option<u64>,
     pub json: bool,
@@ -40,6 +45,28 @@ pub async fn run(args: Args) -> Result<()> {
         format!("`{}` isn't an interface (there are: {})", args.interface, names.join(", "))
     })?;
     let mocks = mocks(&args.mock, &args.rows)?;
+    if args.real {
+        if let Some(why) = load_test::production_refused(&env.name) {
+            bail!("{why}");
+        }
+        // Said before anything runs, on stderr (`--json`'s output stays the document).
+        eprintln!("{}", against(&args.root, &env, &iface.label(), &args)?);
+        if !args.yes {
+            if !std::io::stdin().is_terminal() {
+                bail!(
+                    "`--real` runs against `{}`'s real databases and APIs: add --yes to run without asking",
+                    env.name
+                );
+            }
+            eprint!("Run it against `{}`? Type yes: ", env.name);
+            std::io::stderr().flush()?;
+            let mut answer = String::new();
+            std::io::stdin().read_line(&mut answer)?;
+            if answer.trim() != "yes" {
+                bail!("not run");
+            }
+        }
+    }
     let until = match args.count {
         Some(n) => Until::Count(n),
         None => Until::Seconds(Duration::from_secs(args.seconds)),
@@ -53,6 +80,7 @@ pub async fn run(args: Args) -> Result<()> {
         until,
         mocks: mocks.clone(),
         stages: true,
+        real: args.real,
     };
     let load = tokio::task::spawn_blocking(move || load_test::run(options))
         .await
@@ -62,7 +90,7 @@ pub async fn run(args: Args) -> Result<()> {
     if args.json {
         let document = serde_json::json!({
             "machine": machine,
-            "mocks": mocked(&mocks),
+            "mocks": if args.real { serde_json::Value::Null } else { mocked(&mocks) },
             "peak_per_second": args.peak.map_or(PEAK, |p| p as f64),
             "load": load,
             "verdict": verdict,
@@ -75,6 +103,27 @@ pub async fn run(args: Args) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// What `--real` will reach, said before it runs: the environment, its resources this interface
+/// can use, and that writes are made.
+fn against(root: &std::path::Path, env: &Environment, interface: &str, args: &Args) -> Result<String> {
+    let resources = ductus_core::Resources::load(root, env)
+        .with_context(|| format!("loading resources.yaml for `{}` (`--real` uses its resources)", env.name))?;
+    let mut names: Vec<String> = resources.databases.keys().map(|n| format!("database `{n}`")).collect();
+    names.extend(resources.apis.keys().map(|n| format!("API `{n}`")));
+    let what = match names.len() {
+        0 => "no databases or APIs in its resources.yaml (fetch() to URLs is real too)".to_string(),
+        _ => names.join(", "),
+    };
+    let how_long = match args.count {
+        Some(n) => format!("{} messages", whole(n as f64)),
+        None => format!("{} s", args.seconds),
+    };
+    Ok(format!(
+        "`{interface}` against environment `{}`'s real systems: {what}. For a second's warm-up and {how_long}, as fast as the code runs: its reads and its writes (db().execute, POST, PUT...) are made.",
+        env.name
+    ))
 }
 
 /// What limits it, and what it means at the peak given (or [`PEAK`]): one sentence each.
@@ -99,7 +148,13 @@ pub fn verdict(load: &Load, peak: Option<f64>, cores: usize) -> Vec<String> {
             fine(wall),
             super::report::about(alone)
         );
-        if load.threads == 1 && !load.keyed {
+        if load.respond {
+            line += &format!(
+                " The engine answers requests side by side while they wait, so with enough callers at once it answers about {}/s; each caller still waits {}.",
+                super::report::about(alone),
+                fine(wall)
+            );
+        } else if load.threads == 1 && !load.keyed {
             line += " Without an ordering key messages go one at a time, so each wait holds up the next message.";
         }
         out.push(line);
@@ -125,6 +180,30 @@ pub fn verdict(load: &Load, peak: Option<f64>, cores: usize) -> Vec<String> {
         None => (PEAK, format!("At {}/s (a busy feed's peak; give yours with `--peak`)", whole(PEAK))),
     };
     let cores_busy = load.cpu_ms.map(|cpu| rate * cpu / 1000.0);
+    if load.respond {
+        // Requests wait side by side: what one engine answers is its code's pace, not one
+        // caller's.
+        let capacity = 1000.0 / (wall - load.lookups_ms).max(1e-3);
+        let mut line = match rate <= capacity {
+            true => {
+                format!("{at} it uses {} of what one engine answers ({}/s)", share(rate / capacity), whole(capacity))
+            }
+            false => {
+                let needed = (rate / capacity).ceil() as usize;
+                format!(
+                    "{at} it needs about {needed} engines at this speed ({}/s each): one thread answers a respond-mode interface and no engine claims it, so run {needed} behind a load balancer",
+                    whole(capacity)
+                )
+            }
+        };
+        match cores_busy {
+            Some(busy) if busy >= 1.0 => line += &format!(", its code keeping {busy:.1} cores busy"),
+            Some(busy) => line += &format!(", and {} of one core", share(busy)),
+            None => {}
+        }
+        out.push(line + ".");
+        return out;
+    }
     if rate <= load.per_second {
         let mut line = format!(
             "{at} it uses {} of what it does here ({}/s)",
@@ -236,12 +315,17 @@ pub fn text(load: &Load, fixtures: bool) -> String {
         n => format!("{n} threads"),
     };
     let from = if fixtures { "its fixtures" } else { "the files given" };
+    let (one, many) = if load.respond { ("request", "requests") } else { ("message", "messages") };
     let cycled = match load.inputs {
-        1 => format!("1 message from {from}, again and again"),
-        n => format!("{n} messages from {from}, in turn"),
+        1 => format!("1 {one} from {from}, again and again"),
+        n => format!("{n} {many} from {from}, in turn"),
+    };
+    let resources = match load.real {
+        true => format!("`{}`'s real databases and APIs, nothing else sent", load.env),
+        false => "databases and APIs mocked, nothing sent".to_string(),
     };
     let mut out = format!(
-        "{}: {:.1} s on {threads} ({}), {cycled}; databases and APIs mocked, nothing sent\n",
+        "{}: {:.1} s on {threads} ({}), {cycled}; {resources}\n",
         load.interface, load.seconds, load.threads_why
     );
     let per_thread =
@@ -265,10 +349,15 @@ pub fn text(load: &Load, fixtures: bool) -> String {
     }
     for d in &load.decisions {
         let mut parts = Vec::new();
+        if load.respond {
+            for (status, n) in &d.statuses {
+                parts.push(format!("{} answered {status}", percent(*n, load.messages)));
+            }
+        }
         for (n, what) in
             [(d.sent, "sent"), (d.filtered, "filtered"), (d.quarantined, "quarantined"), (d.retried, "retried")]
         {
-            if n > 0 {
+            if n > 0 && !load.respond {
                 parts.push(format!("{} {what}", percent(n, load.messages)));
             }
         }
@@ -298,6 +387,18 @@ pub fn text(load: &Load, fixtures: bool) -> String {
         let per = l.calls as f64 / load.messages.max(1) as f64;
         let what = lookup_name(l);
         let reads = l.calls - l.writes;
+        let Some(latency) = l.latency_ms else {
+            // Real: what it took, its writes made, its failures counted.
+            let mut line = format!("  {what}: {per:.2} calls per message, {} on average", took(l.waited_ms));
+            if l.writes > 0 {
+                line += &format!(", {} of them writes (made)", percent(l.writes, l.calls));
+            }
+            if l.failed > 0 {
+                line += &format!(", {} failed", percent(l.failed, l.calls));
+            }
+            out += &(line + "\n");
+            continue;
+        };
         let rows = match (l.given_rows, l.kind) {
             _ if reads == 0 => "writes, answered as done (nothing is written)".to_string(),
             (true, _) => "with the rows given".to_string(),
@@ -305,17 +406,22 @@ pub fn text(load: &Load, fixtures: bool) -> String {
             (false, _) => format!("answering 200 `{{}}` (give a body: `--rows {}=body.json`)", l.name),
         };
         // Waits well past the mock's latency: more threads than this machine has cores.
-        let waited = if l.waited_ms > l.latency_ms * 1.2 + 0.5 {
+        let waited = if l.waited_ms > latency * 1.2 + 0.5 {
             format!(" (waited {} on average: the threads outnumber the cores)", took(l.waited_ms))
         } else {
             String::new()
         };
-        out +=
-            &format!("  {what}: {per:.2} calls per message, each mocked at {}{waited}, {rows}\n", took(l.latency_ms));
+        out += &format!("  {what}: {per:.2} calls per message, each mocked at {}{waited}, {rows}\n", took(latency));
     }
-    let off_path = load.decisions.iter().any(|d| d.quarantined + d.retried > 0);
-    if off_path && load.lookups.iter().any(|l| !l.given_rows && l.calls > l.writes) {
-        out += "  → some messages were quarantined or retried with lookups answering nothing: the numbers are for that path. Give the lookups rows (`--rows`) to measure the usual one.\n";
+    let off_path = load.decisions.iter().any(|d| {
+        let errors: u64 = d.statuses.range(400..).map(|(_, n)| n).sum();
+        d.quarantined + d.retried + errors > 0
+    });
+    if off_path && load.lookups.iter().any(|l| !l.given_rows && l.latency_ms.is_some() && l.calls > l.writes) {
+        let how = if load.respond { "answered with an error" } else { "quarantined or retried" };
+        out += &format!(
+            "  → some {many} were {how} with lookups answering nothing: the numbers are for that path. Give the lookups rows (`--rows`) to measure the usual one.\n"
+        );
     }
     out
 }
@@ -342,6 +448,9 @@ mod tests {
         let code = wall - lookups_ms;
         Load {
             interface: "orders".into(),
+            env: "dev".into(),
+            real: false,
+            respond: false,
             threads: 1,
             threads_why: String::new(),
             inputs: 1,
@@ -373,8 +482,9 @@ mod tests {
                 name: "provider_db".into(),
                 calls: 1000,
                 writes: 0,
-                latency_ms: lookups_ms,
+                latency_ms: Some(lookups_ms),
                 waited_ms: lookups_ms,
+                failed: 0,
                 given_rows: true,
             }],
         }
@@ -410,6 +520,28 @@ mod tests {
         );
         let said = verdict(&load(1000.0, 0.0, true), Some(100_000.0), 64);
         assert!(said[1].contains("`partitions: 100`, `isolation: dedicated` and `workers: 100`"), "{}", said[1]);
+    }
+
+    /// Respond mode: requests wait side by side, so one engine answers at its code's pace, and
+    /// more than that takes more engines (not workers).
+    #[test]
+    fn a_responder_s_verdict_counts_requests_side_by_side() {
+        let responder = Load { respond: true, ..load(190.0, 5.0, false) };
+        let said = verdict(&responder, None, 8);
+        assert!(
+            said[0].ends_with(
+                "The engine answers requests side by side while they wait, so with enough callers at once it answers about 3,800/s; each caller still waits 5.26 ms."
+            ),
+            "{}",
+            said[0]
+        );
+        assert_eq!(
+            said[1],
+            "At 150/s (a busy feed's peak; give yours with `--peak`) it uses 4% of what one engine answers (3,800/s), and 4% of one core."
+        );
+        let said = verdict(&responder, Some(10_000.0), 8);
+        assert!(said[1].contains("it needs about 3 engines at this speed (3,800/s each)"), "{}", said[1]);
+        assert!(said[1].contains("run 3 behind a load balancer, its code keeping 2.6 cores busy."), "{}", said[1]);
     }
 
     #[test]

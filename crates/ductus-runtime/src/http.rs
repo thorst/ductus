@@ -286,14 +286,33 @@ fn response_from(envelope: &str) -> Response {
 /// Transform errors: deliberate quarantine -> 422 with the reason; temporary -> 503;
 /// anything else -> 500 (details only in the log, never sent to the caller).
 fn error_response(interface: &str, error: &str) -> Response {
-    if let Some((_, reason)) = error.split_once(ductus_script::QUARANTINE) {
-        let reason = reason.lines().next().unwrap_or("").trim();
-        return json(StatusCode::UNPROCESSABLE_ENTITY, serde_json::json!({ "error": reason }));
+    let status = status_of_error(error);
+    match status {
+        StatusCode::UNPROCESSABLE_ENTITY => {
+            let reason = error.split_once(ductus_script::QUARANTINE).map_or("", |(_, r)| r);
+            let reason = reason.lines().next().unwrap_or("").trim();
+            json(status, serde_json::json!({ "error": reason }))
+        }
+        StatusCode::SERVICE_UNAVAILABLE => {
+            tracing::warn!(%interface, %error, "temporary failure answering request");
+            json(status, serde_json::json!({ "error": "temporarily unavailable" }))
+        }
+        _ => {
+            tracing::error!(%interface, %error, "transform failed answering request");
+            json(status, serde_json::json!({ "error": "internal error" }))
+        }
     }
-    if error.contains(ductus_script::TRANSIENT) {
-        tracing::warn!(%interface, %error, "temporary failure answering request");
-        return json(StatusCode::SERVICE_UNAVAILABLE, serde_json::json!({ "error": "temporarily unavailable" }));
+}
+
+/// What a respond-mode caller is answered when the code threw `error`: 422 for `quarantine()`,
+/// 503 for a temporary failure (a lookup's database down), else 500. `ductus bench interface`
+/// counts answers by this too.
+pub(crate) fn status_of_error(error: &str) -> StatusCode {
+    if error.contains(ductus_script::QUARANTINE) {
+        StatusCode::UNPROCESSABLE_ENTITY
+    } else if error.contains(ductus_script::TRANSIENT) {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
     }
-    tracing::error!(%interface, %error, "transform failed answering request");
-    json(StatusCode::INTERNAL_SERVER_ERROR, serde_json::json!({ "error": "internal error" }))
 }
