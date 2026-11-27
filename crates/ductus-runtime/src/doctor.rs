@@ -2793,9 +2793,10 @@ mod tests {
         assert_eq!(step(&c, "login").outcome, Outcome::Ok, "{c:#?}");
         assert!(step(&c, "login").detail.contains("PostgreSQL"), "{c:#?}");
         assert!(step(&c, "commits").detail.contains(&format!("median of {COMMITS}")), "{c:#?}");
-        // Postgres's settings, read on the same connection: every one named, findings by code.
+        // Postgres's settings, read on the same connection: every one named, findings by code. Names,
+        // not values: CI's database is `ductus dev`'s, which runs with fsync off (DOC001 there).
         let settings = &step(&c, "settings").detail;
-        for name in ["synchronous_commit on", "fsync on", "shared_buffers ", "max_connections ", "autovacuum on"] {
+        for name in ["synchronous_commit ", "fsync ", "shared_buffers ", "max_connections ", "autovacuum "] {
             assert!(settings.contains(name), "{name}: {c:#?}");
         }
         assert!(c.advice.iter().all(|a| a.starts_with("DOC")), "{c:#?}");

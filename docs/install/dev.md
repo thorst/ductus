@@ -5,7 +5,8 @@ nothing to configure. It's how you write and try interfaces on your own machine,
 Windows.
 
 **Use it** for development, demos and learning. **Don't** use it to run anything that matters:
-it uses Postgres's default settings, nobody backs its data up, and it has no service, no
+it uses Postgres's default settings with `fsync` off (fast, and a crash of the machine can
+corrupt its data), nobody backs its data up, and it has no service, no
 handover and no restart on failure
 ([nuance](../nuances/dev.md#ductus-dev-is-a-development-tool-not-a-way-to-run-in-production-level-1)).
 Everywhere else, use `ductus run` (or a [package](index.md)) with your DBA's Postgres.
