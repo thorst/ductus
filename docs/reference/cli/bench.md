@@ -55,7 +55,8 @@ ductus bench interface [OPTIONS] <INTERFACE>
 | `--count <COUNT>` | Run this many messages (after the warm-up) instead of for `--seconds`. |  |  |
 | `--mock <KIND|NAME=LATENCY>` | A lookup's latency, by kind (`db`, `api`, `fetch`) or by resources.yaml name, which wins over its kind: `--mock db=5ms --mock empi=120ms`. Default: `db=5ms`, `api=40ms`, `fetch=40ms`. |  |  |
 | `--rows <NAME=FILE>` | What a mocked resource answers, from a JSON file: a database's rows (an array of objects), or an API's body: `--rows provider_db=rows.json`. Default: no rows; `{}`. |  |  |
-| `--json` | As JSON: the machine, the mocks and every number. |  |  |
+| `--peak <PER_SECOND>` | The interface's busiest rate, messages a second: the report says what share of what it does here that is, and when it's more, the threads and config it would take. Default: 150 (a busy feed's peak), said as such. |  |  |
+| `--json` | As JSON: the machine, the mocks, every number and the verdict's sentences. |  |  |
 | `--root <ROOT>` | The project folder: the one with `interfaces/` and ductus.yaml. | `.` |  |
 | `--env <ENV>` | The environment whose variables and secrets the code reads. | `dev` | `DUCTUS_ENV` |
 

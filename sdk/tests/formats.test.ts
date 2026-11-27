@@ -1,5 +1,5 @@
 // Format tests: run inside the real engine by `cargo test -p ductus-script`.
-import { __invoke, __key, expect, kill, parseCsv, parseFixed, parseXml, test, toCsv, toFixed, XmlElement } from "@ductus/sdk";
+import { __invoke, __invokeTimed, __key, expect, kill, parseCsv, parseFixed, parseXml, test, toCsv, toFixed, XmlElement } from "@ductus/sdk";
 
 test("CSV: header records, quotes, embedded delimiters and newlines, CRLF", () => {
   const text = 'mrn,name,note\r\n123,"SMITH, JOHN","said ""hi""\nthen left"\r\n456,DOE,\r\n';
@@ -136,6 +136,17 @@ test("formats: XML in and out, strings pass through, kill works for any format",
   expect(__invoke(() => "raw", "{}", { input: json, output: hl7 })).toBe("raw");
   expect(String(__invoke(() => kill("nope"), "{}", { input: json, output: json }))).toContain("nope");
   expect(() => __invoke(() => ({ a: 1 }), ADT, { input: hl7, output: hl7 })).toThrow("output: json");
+});
+
+test("the bench's timed twin answers as __invoke does, meta and errors included", async () => {
+  const formats = { input: hl7, output: json };
+  const meta = '{"id":7,"receivedAt":"2026-11-27T12:00:00Z","destination":"lab"}';
+  const f = (m: any, meta: any) => ({ mrn: m.PID[3][1], id: meta.id });
+  expect(__invokeTimed(f, ADT, formats, meta)).toBe(__invoke(f, ADT, formats, meta));
+  expect(await __invokeTimed(async (m: any) => m.PID[3][1], ADT, formats)).toBe("123");
+  expect(__invokeTimed(() => null, ADT, formats)).toBe(null);
+  expect(String(__invokeTimed(() => kill("nope"), ADT, formats))).toContain("nope");
+  expect(() => __invokeTimed(() => ({ a: 1 }), ADT, { input: hl7, output: hl7 })).toThrow("output: json");
 });
 
 test("XmlElement can be built from scratch", () => {

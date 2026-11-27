@@ -70,3 +70,7 @@ const ductusConsole = {
 core.wrapConsole(ductusConsole, core.v8Console);
 globalThis.console = ductusConsole;
 globalThis.__ductus_console_take = () => ops.op_ductus_console_take();
+
+// The SDK's `__invokeTimed` (only `ductus bench interface` binds it): the time at each stage's
+// end, kept by the engine when it asked for them (`Isolate::time_stages`), else nothing.
+globalThis.__ductus_stamp = (stage) => ops.op_ductus_stamp(stage);

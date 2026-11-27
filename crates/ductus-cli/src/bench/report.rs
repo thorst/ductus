@@ -192,7 +192,7 @@ pub fn whole(x: f64) -> String {
 }
 
 /// To two significant figures, for a number whose precision would mislead: `24,000`, `850`.
-fn about(x: f64) -> String {
+pub(super) fn about(x: f64) -> String {
     if x < 100.0 {
         return whole(x);
     }

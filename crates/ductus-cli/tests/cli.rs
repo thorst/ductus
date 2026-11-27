@@ -8729,12 +8729,21 @@ fn bench_interface_runs_the_code_with_its_lookups_mocked() {
         "orders: ",
         " on 1 thread (no ordering key: one message at a time), 2 messages from its fixtures, in turn; databases and APIs mocked, nothing sent\n",
         "50 messages\n",
-        "  audit: 100% sent\n",
-        "  lab: 100% quarantined\n      first: o0",
+        "  CPU: ",
+        " a message on its thread; JavaScript heap: ",
+        " a thread after the warm-up\n",
+        "  audit: 100% sent; decode ",
+        ", lookups 1.",
+        "  lab: 100% quarantined; decode ",
+        ", lookups 5.",
+        "\n      first: o0",
         ".hl7: no provider\n",
         "  database `audit_db`: 1.00 calls per message, each mocked at 1.00 ms, writes, answered as done (nothing is written)\n",
         "  database `provider_db`: 1.00 calls per message, each mocked at 5.00 ms, answering no rows (give some: `--rows provider_db=rows.json`)\n",
         "→ some messages were quarantined or retried with lookups answering nothing",
+        "  → The lookups are the limit: a message waits ",
+        "most on database `provider_db`",
+        "  → At 150/s (a busy feed's peak; give yours with `--peak`) it ",
     ] {
         assert!(out.contains(expected), "missing {expected:?} in\n{out}");
     }
@@ -8768,6 +8777,26 @@ fn bench_interface_runs_the_code_with_its_lookups_mocked() {
     let (rate, p50) = (load["per_second"].as_f64().unwrap(), load["p50_ms"].as_f64().unwrap());
     assert!(rate <= 101.0 && p50 >= 10.0, "{load}");
     assert_eq!(document["mocks"]["db_ms"], 5.0);
+    // Where the time went: each destination's lookups are its 5 ms wait, the rest is code.
+    let stages = load["stages"].as_array().unwrap();
+    assert_eq!(stages.len(), 2, "{load}");
+    for s in stages {
+        let ms = |k: &str| s[k].as_f64().unwrap();
+        assert!((5.0..6.0).contains(&ms("lookups_ms")), "{s}");
+        assert!(ms("decode_ms") > 0.0 && ms("code_ms") < 1.0 && ms("serialize_ms") > 0.0, "{s}");
+        assert_eq!(s["timed"], 100);
+    }
+    let lookups_ms = load["lookups_ms"].as_f64().unwrap();
+    assert!((10.0..12.0).contains(&lookups_ms) && load["heap_mb"].as_f64().unwrap() > 1.0, "{load}");
+    assert!(load["cpu_ms"].as_f64().unwrap() < 2.0, "the waits take no CPU: {load}");
+    assert!(load.get("key_ms").is_none(), "no key functions: {load}");
+    // 150/s is more than one thread does with two 5 ms waits a message (~90/s): the threads it
+    // takes, and the key it needs for them; with `--peak` under its rate, a share of it.
+    let peak = document["verdict"][1].as_str().unwrap();
+    assert!(peak.starts_with("At 150/s (a busy feed's peak") && peak.contains("needs about 2 threads"), "{peak}");
+    assert!(peak.contains("give it an ordering key"), "{peak}");
+    let (ok, out) = bench(&["--count", "20", "--mock", "db=1ms", "--rows", "provider_db=rows.json", "--peak", "10"]);
+    assert!(ok && out.contains("  → At your peak of 10/s it uses "), "{out}");
 
     // `--threads` is said as given; a mock or rows file that can't be read is refused saying how.
     let (ok, out) = bench(&["--count", "20", "--threads", "2", "--mock", "db=1ms"]);

@@ -439,6 +439,32 @@ impl Isolate {
         self.load_functions(functions, "__invoke", timeout, timeout).await
     }
 
+    /// `add_functions`, each bound by the SDK's `__invokeTimed`: every call stamps when it starts,
+    /// when the message is read, when the function's result is there and when that's serialized
+    /// (`take_stamps`, after `time_stages`). For `ductus bench interface`; the engine's own
+    /// functions are never bound so.
+    pub async fn add_functions_timed(
+        &mut self,
+        functions: &[Option<Function<'_>>],
+        timeout: Duration,
+    ) -> Result<(InterfaceId, Vec<Option<FunctionId>>)> {
+        self.load_functions(functions, "__invokeTimed", timeout, timeout).await
+    }
+
+    /// Keep the stamps of functions loaded with `add_functions_timed` from now on.
+    pub fn time_stages(&mut self) {
+        self.runtime.op_state().borrow_mut().put(ops::Stamps::default());
+    }
+
+    /// The stamps since the last take, in order: (stage, when), stage 0 a call's start, 1 its
+    /// message read, 2 its function's result there, 3 that serialized.
+    pub fn take_stamps(&mut self) -> Vec<(u32, std::time::Instant)> {
+        match self.runtime.op_state().borrow_mut().try_borrow_mut::<ops::Stamps>() {
+            Some(stamps) => std::mem::take(&mut stamps.0),
+            None => Vec::new(),
+        }
+    }
+
     /// Load one interface's key functions (`InterfaceConfig::key_functions`): each takes the
     /// decoded message and answers its key, synchronously (`call_key`). Each call may run for
     /// [`KEY_TIMEOUT`]; the module's top-level code, for [`DEFAULT_TIMEOUT`].

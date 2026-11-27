@@ -22,8 +22,15 @@ pub struct Args {
     pub mock: Vec<String>,
     /// `NAME=FILE.json`, as typed.
     pub rows: Vec<String>,
+    /// The interface's busiest rate, messages a second; None: [`PEAK`], said as such.
+    pub peak: Option<u64>,
     pub json: bool,
 }
+
+/// A busy feed's peak, for "what share" when no `--peak` is given (as `ductus bench` says it).
+pub const PEAK: f64 = 150.0;
+/// The lanes an ordering key gives when `partitions` isn't set (`defaults::partitions`).
+const PARTITIONS: usize = 64;
 
 pub async fn run(args: Args) -> Result<()> {
     let env = Environment::load(&args.root, &args.env)?;
@@ -45,18 +52,139 @@ pub async fn run(args: Args) -> Result<()> {
         threads: args.threads,
         until,
         mocks: mocks.clone(),
+        stages: true,
     };
     let load = tokio::task::spawn_blocking(move || load_test::run(options))
         .await
         .map_err(|e| anyhow!("the load test failed: {e}"))??;
+    let machine = super::report::machine();
+    let verdict = verdict(&load, args.peak.map(|p| p as f64), machine.cores);
     if args.json {
-        let document =
-            serde_json::json!({ "machine": super::report::machine(), "mocks": mocked(&mocks), "load": load });
+        let document = serde_json::json!({
+            "machine": machine,
+            "mocks": mocked(&mocks),
+            "peak_per_second": args.peak.map_or(PEAK, |p| p as f64),
+            "load": load,
+            "verdict": verdict,
+        });
         println!("{}", serde_json::to_string_pretty(&document)?);
     } else {
         print!("{}", text(&load, args.files.is_empty()));
+        for line in &verdict {
+            println!("  → {line}");
+        }
     }
     Ok(())
+}
+
+/// What limits it, and what it means at the peak given (or [`PEAK`]): one sentence each.
+pub fn verdict(load: &Load, peak: Option<f64>, cores: usize) -> Vec<String> {
+    let mut out = Vec::new();
+    if load.messages == 0 {
+        return out;
+    }
+    let per_thread = load.per_thread_per_second.max(1e-9);
+    // A message's time on its thread, everything included (the bench runs one at a time there).
+    let wall = 1000.0 / per_thread;
+    if load.lookups_ms >= wall / 2.0 {
+        let most = load
+            .lookups
+            .iter()
+            .max_by(|a, b| (a.calls as f64 * a.waited_ms).total_cmp(&(b.calls as f64 * b.waited_ms)));
+        let most = most.map_or_else(String::new, |l| format!(", most on {}", lookup_name(l)));
+        let alone = 1000.0 / (wall - load.lookups_ms).max(1e-3);
+        let mut line = format!(
+            "The lookups are the limit: a message waits {} of its {} on them{most}; without the waits this code would do about {} msg/s a thread.",
+            fine(load.lookups_ms),
+            fine(wall),
+            super::report::about(alone)
+        );
+        if load.threads == 1 && !load.keyed {
+            line += " Without an ordering key messages go one at a time, so each wait holds up the next message.";
+        }
+        out.push(line);
+    } else {
+        let sum = |f: fn(&load_test::Stages) -> f64| load.stages.iter().map(f).sum::<f64>();
+        let parts = [
+            ("its key functions", load.key_ms.unwrap_or(0.0)),
+            ("reading the message (decode)", sum(|s| s.decode_ms)),
+            ("the functions' own code", sum(|s| s.code_ms)),
+            ("serializing the results", sum(|s| s.serialize_ms)),
+        ];
+        let (what, ms) = parts.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).expect("four parts");
+        out.push(format!(
+            "The code is the limit: {} msg/s a thread; of each message's {}, the most goes to {what} ({}).",
+            whole(per_thread),
+            fine(wall),
+            fine(ms)
+        ));
+    }
+
+    let (rate, at) = match peak {
+        Some(p) => (p, format!("At your peak of {}/s", whole(p))),
+        None => (PEAK, format!("At {}/s (a busy feed's peak; give yours with `--peak`)", whole(PEAK))),
+    };
+    let cores_busy = load.cpu_ms.map(|cpu| rate * cpu / 1000.0);
+    if rate <= load.per_second {
+        let mut line = format!(
+            "{at} it uses {} of what it does here ({}/s)",
+            share(rate / load.per_second),
+            whole(load.per_second)
+        );
+        if let Some(busy) = cores_busy {
+            line += &format!(", and {} of one core", share(busy));
+        }
+        out.push(line + ".");
+    } else {
+        let needed = (rate / per_thread).ceil() as usize;
+        let workers = format!("`isolation: dedicated` and `workers: {needed}`");
+        let config = match (load.keyed, needed > load.lanes) {
+            (false, _) => {
+                let partitions = if needed > PARTITIONS { format!(", `partitions: {needed}`") } else { String::new() };
+                format!(
+                    "give it an ordering key (`ordering: {{ key: ... }}`: messages with different keys then go side by side){partitions}, {workers}"
+                )
+            }
+            (true, true) => format!("`partitions: {needed}`, {workers}"),
+            (true, false) => workers,
+        };
+        let mut line =
+            format!("{at} it needs about {needed} threads at this speed ({} msg/s each): {config}", whole(per_thread));
+        if let Some(busy) = cores_busy
+            && busy > cores as f64
+        {
+            line += &format!(". Its code alone would keep {busy:.1} cores busy, and this machine has {cores}");
+        }
+        out.push(format!("{line}; check it with `--threads {needed}`."));
+    }
+    out
+}
+
+fn lookup_name(l: &load_test::Lookup) -> String {
+    match l.kind {
+        "db" => format!("database `{}`", l.name),
+        "api" => format!("API `{}`", l.name),
+        _ => "fetch() to URLs".to_string(),
+    }
+}
+
+/// A short time to the digits that matter: `4.2 µs`, `38 µs`, `5.06 ms`.
+fn fine(ms: f64) -> String {
+    match ms {
+        _ if ms < 0.01 => format!("{:.1} µs", ms * 1000.0),
+        _ if ms < 1.0 => format!("{:.0} µs", ms * 1000.0),
+        _ => took(ms),
+    }
+}
+
+/// A fraction as a share: `0.4%`, `12%`, `<0.1%`.
+fn share(x: f64) -> String {
+    let p = x * 100.0;
+    match p {
+        _ if p < 0.05 => "<0.1%".into(),
+        _ if p < 1.0 => format!("{p:.1}%"),
+        _ => format!("{p:.0}%"),
+    }
 }
 
 /// The mocks from `--mock` and `--rows`: a kind (`db`, `api`, `fetch`) or a resources.yaml name,
@@ -126,6 +254,15 @@ pub fn text(load: &Load, fixtures: bool) -> String {
         took(load.p99_ms),
         took(load.max_ms)
     );
+    let mut used = match load.cpu_ms {
+        Some(cpu) => format!("  CPU: {} a message on its thread", fine(cpu)),
+        None => "  CPU: not read on this system".to_string(),
+    };
+    used += &format!("; JavaScript heap: {} a thread after the warm-up\n", super::report::megabytes(load.heap_mb));
+    out += &used;
+    if let Some(key) = load.key_ms {
+        out += &format!("  key functions: {} a message (they run while the sender waits for its ACK)\n", fine(key));
+    }
     for d in &load.decisions {
         let mut parts = Vec::new();
         for (n, what) in
@@ -135,7 +272,21 @@ pub fn text(load: &Load, fixtures: bool) -> String {
                 parts.push(format!("{} {what}", percent(n, load.messages)));
             }
         }
-        out += &format!("  {}: {}\n", d.destination, parts.join(", "));
+        let stages = match load.stages.iter().find(|s| s.destination == d.destination) {
+            Some(s) if s.timed > 0 => {
+                let lookups =
+                    if s.lookups_ms > 0.0 { format!(", lookups {}", fine(s.lookups_ms)) } else { String::new() };
+                format!(
+                    "; decode {}, code {}{lookups}, serialize {}",
+                    fine(s.decode_ms),
+                    fine(s.code_ms),
+                    fine(s.serialize_ms)
+                )
+            }
+            Some(_) => "; not timed (no message could be read as its format says)".to_string(),
+            None => String::new(),
+        };
+        out += &format!("  {}: {}{stages}\n", d.destination, parts.join(", "));
         if let Some(why) = &d.first_reason {
             out += &format!("      first: {}\n", why.lines().next().unwrap_or(""));
         }
@@ -145,11 +296,7 @@ pub fn text(load: &Load, fixtures: bool) -> String {
     }
     for l in &load.lookups {
         let per = l.calls as f64 / load.messages.max(1) as f64;
-        let what = match l.kind {
-            "db" => format!("database `{}`", l.name),
-            "api" => format!("API `{}`", l.name),
-            _ => "fetch() to URLs".to_string(),
-        };
+        let what = lookup_name(l);
         let reads = l.calls - l.writes;
         let rows = match (l.given_rows, l.kind) {
             _ if reads == 0 => "writes, answered as done (nothing is written)".to_string(),
@@ -186,7 +333,90 @@ fn percent(n: u64, of: u64) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::percent;
+    use super::{fine, percent, share, verdict};
+    use ductus_runtime::load_test::{Load, Lookup, Stages};
+
+    /// One thread doing `rate` a second, `lookups_ms` of each message waiting on `provider_db`.
+    fn load(rate: f64, lookups_ms: f64, keyed: bool) -> Load {
+        let wall = 1000.0 / rate;
+        let code = wall - lookups_ms;
+        Load {
+            interface: "orders".into(),
+            threads: 1,
+            threads_why: String::new(),
+            inputs: 1,
+            messages: 1000,
+            seconds: 1000.0 / rate,
+            per_second: rate,
+            per_thread_per_second: rate,
+            p50_ms: wall,
+            p95_ms: wall,
+            p99_ms: wall,
+            max_ms: wall,
+            key_ms: None,
+            stages: vec![Stages {
+                destination: "lab".into(),
+                decode_ms: code * 0.2,
+                code_ms: code * 0.7,
+                lookups_ms,
+                serialize_ms: code * 0.1,
+                timed: 1000,
+            }],
+            lookups_ms,
+            cpu_ms: Some(code),
+            heap_mb: 4.0,
+            keyed,
+            lanes: if keyed { 64 } else { 1 },
+            decisions: Vec::new(),
+            lookups: vec![Lookup {
+                kind: "db",
+                name: "provider_db".into(),
+                calls: 1000,
+                writes: 0,
+                latency_ms: lookups_ms,
+                waited_ms: lookups_ms,
+                given_rows: true,
+            }],
+        }
+    }
+
+    #[test]
+    fn the_verdict_names_the_limit_and_what_the_peak_takes() {
+        // 5 ms lookups: 190/s, the waits the limit; 150/s fits.
+        let said = verdict(&load(190.0, 5.0, false), None, 8);
+        assert_eq!(
+            said[0],
+            "The lookups are the limit: a message waits 5.00 ms of its 5.26 ms on them, most on database `provider_db`; without the waits this code would do about 3,800 msg/s a thread. Without an ordering key messages go one at a time, so each wait holds up the next message."
+        );
+        assert_eq!(
+            said[1],
+            "At 150/s (a busy feed's peak; give yours with `--peak`) it uses 79% of what it does here (190/s), and 4% of one core."
+        );
+        // A peak above it: the threads, and the key it needs for them.
+        let said = verdict(&load(190.0, 5.0, false), Some(1000.0), 8);
+        assert_eq!(
+            said[1],
+            "At your peak of 1,000/s it needs about 6 threads at this speed (190 msg/s each): give it an ordering key (`ordering: { key: ... }`: messages with different keys then go side by side), `isolation: dedicated` and `workers: 6`; check it with `--threads 6`."
+        );
+        // Pure code: the code is the limit; a keyed interface needs only workers, until its lanes run out.
+        let said = verdict(&load(20_000.0, 0.0, true), Some(100_000.0), 2);
+        assert_eq!(
+            said[0],
+            "The code is the limit: 20,000 msg/s a thread; of each message's 50 µs, the most goes to the functions' own code (35 µs)."
+        );
+        assert_eq!(
+            said[1],
+            "At your peak of 100,000/s it needs about 5 threads at this speed (20,000 msg/s each): `isolation: dedicated` and `workers: 5`. Its code alone would keep 5.0 cores busy, and this machine has 2; check it with `--threads 5`."
+        );
+        let said = verdict(&load(1000.0, 0.0, true), Some(100_000.0), 64);
+        assert!(said[1].contains("`partitions: 100`, `isolation: dedicated` and `workers: 100`"), "{}", said[1]);
+    }
+
+    #[test]
+    fn short_times_and_shares_keep_their_digits() {
+        assert_eq!([fine(0.0042), fine(0.038), fine(5.061)], ["4.2 µs", "38 µs", "5.06 ms"]);
+        assert_eq!([share(0.0004), share(0.004), share(0.12)], ["<0.1%", "0.4%", "12%"]);
+    }
 
     #[test]
     fn shares_round_and_never_say_none_or_all_when_it_isnt() {

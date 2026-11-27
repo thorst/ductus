@@ -207,9 +207,22 @@ fn op_ductus_console_take(state: &mut OpState) -> String {
     }
 }
 
+/// The times the SDK's `__invokeTimed` stamped (stage, when), in order, kept in the isolate's
+/// `OpState` once `Isolate::time_stages` put it there; without it a stamp is dropped.
+#[derive(Default)]
+pub struct Stamps(pub Vec<(u32, std::time::Instant)>);
+
+#[op2(fast)]
+fn op_ductus_stamp(state: &mut OpState, stage: u32) {
+    if let Some(stamps) = state.try_borrow_mut::<Stamps>() {
+        stamps.0.push((stage, std::time::Instant::now()));
+    }
+}
+
 deno_core::extension!(
     ductus_ops,
     ops = [
+        op_ductus_stamp,
         op_ductus_db_query,
         op_ductus_db_execute,
         op_ductus_fetch,

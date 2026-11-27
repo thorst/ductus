@@ -9,6 +9,12 @@
 //! with `--rows`, else none. Writes are answered too (nothing is written), so an interface that
 //! writes can be measured. Each destination's decision is counted: code that takes another path
 //! on empty rows shows as quarantined or filtered messages instead of hiding in an average.
+//!
+//! Where the time goes: each function is bound by the SDK's `__invokeTimed`, which stamps the
+//! time as a call starts, once the message is read, when the function's result is there and once
+//! that's serialized (an op that records an `Instant`: ~0.1 µs a stamp). The function's own time
+//! is its stage less what it waited on lookups (each moment counted once however many were in
+//! flight). The engine never binds the timed twin, so its own path costs nothing more.
 
 use crate::split::{Records, Splitter};
 use crate::worker::{self, Outcome};
@@ -82,6 +88,9 @@ pub struct Options {
     pub threads: Option<usize>,
     pub until: Until,
     pub mocks: Mocks,
+    /// Time each stage (`__invokeTimed`); false: the engine's own `__invoke`, to measure what the
+    /// stamps cost.
+    pub stages: bool,
 }
 
 /// What a destination decided, counted over the measured messages.
@@ -119,6 +128,70 @@ pub struct Lookup {
     pub given_rows: bool,
 }
 
+/// Where one destination's function spent a message's time, on average over the calls that
+/// finished (a function that threw has no result to stamp), in milliseconds.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct Stages {
+    pub destination: String,
+    /// Reading the message as its format says (HL7 parsed, JSON read...), and its `meta`.
+    pub decode_ms: f64,
+    /// The function's own time: from the message read to its result, less its lookups' waits.
+    pub code_ms: f64,
+    /// What it waited on mocked lookups (each moment once, however many were in flight).
+    pub lookups_ms: f64,
+    /// Turning its result into the outgoing message.
+    pub serialize_ms: f64,
+    /// Calls timed.
+    pub timed: u64,
+}
+
+/// One destination's stages summed on one thread.
+#[derive(Debug, Clone, Copy, Default)]
+struct StageSum {
+    decode: Duration,
+    code: Duration,
+    lookups: Duration,
+    serialize: Duration,
+    timed: u64,
+}
+
+impl StageSum {
+    fn add(&mut self, other: StageSum) {
+        self.decode += other.decode;
+        self.code += other.code;
+        self.lookups += other.lookups;
+        self.serialize += other.serialize;
+        self.timed += other.timed;
+    }
+}
+
+/// The time lookups were in flight on one thread, each moment once: two lookups awaited together
+/// (`Promise.all`) wait as long as the slower, not their sum.
+#[derive(Debug, Default)]
+struct Waiting {
+    in_flight: u32,
+    since: Option<Instant>,
+    total: Duration,
+}
+
+impl Waiting {
+    fn begin(&mut self, at: Instant) {
+        if self.in_flight == 0 {
+            self.since = Some(at);
+        }
+        self.in_flight += 1;
+    }
+
+    fn end(&mut self, at: Instant) {
+        self.in_flight = self.in_flight.saturating_sub(1);
+        if self.in_flight == 0
+            && let Some(since) = self.since.take()
+        {
+            self.total += at - since;
+        }
+    }
+}
+
 /// What the code asked of one mocked resource on one thread.
 #[derive(Debug, Clone, Copy, Default)]
 struct Tally {
@@ -148,6 +221,25 @@ pub struct Load {
     pub p95_ms: f64,
     pub p99_ms: f64,
     pub max_ms: f64,
+    /// The interface's key functions (`ordering.key.script`, `dedupe`), all of them per message on
+    /// average, in milliseconds: they run while the sender waits for its ACK. None: it has none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key_ms: Option<f64>,
+    /// Per destination with code, in the config's order.
+    pub stages: Vec<Stages>,
+    /// What a message waited on lookups, every destination's, on average, in milliseconds.
+    pub lookups_ms: f64,
+    /// The CPU time a message took on its thread, in milliseconds (None where the thread's CPU
+    /// time isn't read: neither Linux nor Windows).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_ms: Option<f64>,
+    /// What one thread's JavaScript heap holds after the warm-up, its garbage collected (the
+    /// largest of the threads'), in MB: the code, its module-level state, the SDK.
+    pub heap_mb: f64,
+    /// Whether it has an ordering key, and its lanes (`partitions`; 1 without a key): what the
+    /// threads can be.
+    pub keyed: bool,
+    pub lanes: usize,
     pub decisions: Vec<Decisions>,
     pub lookups: Vec<Lookup>,
 }
@@ -205,6 +297,7 @@ pub fn run(options: Options) -> Result<Load> {
                 thread: t,
                 until: options.until,
                 left: left.clone(),
+                stages: options.stages,
             };
             let (ready, go) = (ready.clone(), go.clone());
             std::thread::Builder::new()
@@ -293,13 +386,26 @@ struct Job {
     until: Until,
     /// Messages still to run (`Until::Count`), shared by every thread.
     left: Arc<AtomicU64>,
+    stages: bool,
+}
+
+/// What one thread counted, message by message.
+struct Counts {
+    decisions: Vec<Decisions>,
+    /// Per destination, as `decisions`.
+    stages: Vec<StageSum>,
+    keys: Duration,
 }
 
 /// What one thread measured.
 struct Done {
     latencies: Vec<Duration>,
-    decisions: Vec<Decisions>,
+    counts: Counts,
     calls: Tallies,
+    /// Lookups in flight, each moment once.
+    waited: Duration,
+    cpu: Option<Duration>,
+    heap: usize,
 }
 
 impl Job {
@@ -316,11 +422,13 @@ impl Job {
     fn load(&self) -> Result<(tokio::runtime::Runtime, Loaded)> {
         let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build()?;
         let calls = Rc::new(RefCell::new(BTreeMap::new()));
+        let waiting = Rc::new(RefCell::new(Waiting::default()));
         let services = MockServices {
             env: self.env.clone(),
             mocks: self.mocks.clone(),
             timer: self.timer.clone(),
             calls: calls.clone(),
+            waiting: waiting.clone(),
         };
         let mut isolate = {
             let _guard = runtime.enter();
@@ -328,13 +436,20 @@ impl Job {
         };
         // `console` goes nowhere: a line per message would measure the terminal.
         isolate.capture_console();
+        if self.stages {
+            isolate.time_stages();
+        }
         let functions = self.config.functions();
         let keys = self.config.key_functions();
-        let mut loaded = Loaded { isolate, functions: Vec::new(), keys: Vec::new(), calls, seq: 0 };
+        let mut loaded = Loaded { isolate, functions: Vec::new(), keys: Vec::new(), calls, waiting, seq: 0, heap: 0 };
         let local = tokio::task::LocalSet::new();
         local.block_on(&runtime, async {
             if functions.iter().any(Option::is_some) {
-                let added = loaded.isolate.add_functions(&Function::all(&functions), self.config.timeout).await;
+                let (functions, timeout) = (Function::all(&functions), self.config.timeout);
+                let added = match self.stages {
+                    true => loaded.isolate.add_functions_timed(&functions, timeout).await,
+                    false => loaded.isolate.add_functions(&functions, timeout).await,
+                };
                 loaded.functions = added.context("loading the interface's code")?.1;
             } else {
                 loaded.functions = vec![None; functions.len()];
@@ -343,32 +458,47 @@ impl Job {
                 let keys: Vec<Function> = keys.iter().map(Function::of).collect();
                 loaded.keys = loaded.isolate.add_keys(&keys).await.context("loading its key functions")?.1;
             }
-            let warm = Instant::now() + WARM_UP;
-            let mut decisions = self.decisions();
-            while Instant::now() < warm {
-                self.one(&mut loaded, &mut decisions).await?;
+            // The heap is read three quarters in (collecting it can throw compiled code away),
+            // then the code runs warm again.
+            let mut counts = self.counts();
+            for (part, read_heap) in [(WARM_UP * 3 / 4, true), (WARM_UP / 4, false)] {
+                let until = Instant::now() + part;
+                while Instant::now() < until {
+                    self.one(&mut loaded, &mut counts).await?;
+                }
+                if read_heap {
+                    loaded.heap = loaded.isolate.heap_used_collected();
+                }
             }
             anyhow::Ok(())
         })?;
         loaded.calls.borrow_mut().clear();
+        loaded.waiting.borrow_mut().total = Duration::ZERO;
         let _ = loaded.isolate.take_console();
+        let _ = loaded.isolate.take_stamps();
         Ok((runtime, loaded))
     }
 
-    fn decisions(&self) -> Vec<Decisions> {
-        self.config
-            .destinations()
-            .map(|(d, _)| Decisions { destination: d.to_string(), ..Default::default() })
-            .collect()
+    fn counts(&self) -> Counts {
+        let destinations: Vec<&str> = self.config.destinations().map(|(d, _)| d).collect();
+        Counts {
+            decisions: destinations
+                .iter()
+                .map(|d| Decisions { destination: d.to_string(), ..Default::default() })
+                .collect(),
+            stages: vec![StageSum::default(); destinations.len()],
+            keys: Duration::ZERO,
+        }
     }
 
     async fn measure(&self, loaded: &mut Loaded) -> Result<Done> {
-        let mut decisions = self.decisions();
+        let mut counts = self.counts();
         let mut latencies = Vec::new();
         let deadline = match self.until {
             Until::Seconds(s) => Some(Instant::now() + s),
             Until::Count(_) => None,
         };
+        let cpu = thread_cpu();
         loop {
             match deadline {
                 Some(at) if Instant::now() >= at => break,
@@ -380,26 +510,30 @@ impl Job {
                 }
             }
             let began = Instant::now();
-            self.one(loaded, &mut decisions).await?;
+            self.one(loaded, &mut counts).await?;
             latencies.push(began.elapsed());
             if latencies.len() % 256 == 0 {
                 let _ = loaded.isolate.take_console();
             }
         }
+        let cpu = cpu.zip(thread_cpu()).map(|(began, now)| now.saturating_sub(began));
         let calls = std::mem::take(&mut *loaded.calls.borrow_mut());
-        Ok(Done { latencies, decisions, calls })
+        let waited = loaded.waiting.borrow().total;
+        Ok(Done { latencies, counts, calls, waited, cpu, heap: loaded.heap })
     }
 
     /// The next message through its key functions and every destination's function, as a worker
-    /// calls them, each decision counted.
-    async fn one(&self, loaded: &mut Loaded, decisions: &mut [Decisions]) -> Result<()> {
+    /// calls them, each decision counted and each stage timed.
+    async fn one(&self, loaded: &mut Loaded, counts: &mut Counts) -> Result<()> {
         let n = loaded.seq;
         loaded.seq += 1;
         let input = &self.inputs[(n as usize + self.thread) % self.inputs.len()];
         for &key in &loaded.keys {
+            let began = Instant::now();
             if let Err(e) = loaded.isolate.call_key(key, &input.payload) {
                 bail!("{}: its key function failed: {e:#}", input.name);
             }
+            counts.keys += began.elapsed();
         }
         // Ids of their own per thread, as stored messages have.
         let id = (self.thread as i64) << 40 | n as i64;
@@ -409,10 +543,28 @@ impl Job {
                 None => None,
                 Some(function) => {
                     let meta = worker::meta(message, destination, None);
-                    Some(loaded.isolate.call_function(function, &input.payload, Some(&meta)).await)
+                    let waited = loaded.waiting.borrow().total;
+                    let result = loaded.isolate.call_function(function, &input.payload, Some(&meta)).await;
+                    let waited = loaded.waiting.borrow().total - waited;
+                    // A function that threw (quarantined, retried) has no serialize stamp.
+                    let times = match loaded.isolate.take_stamps()[..] {
+                        [(0, a), (1, b), (2, c), (3, d)] => Some((a, b, c, d)),
+                        [(0, a), (1, b), (2, c)] => Some((a, b, c, c)),
+                        _ => None,
+                    };
+                    if let Some((start, read, answered, written)) = times {
+                        counts.stages[i].add(StageSum {
+                            decode: read - start,
+                            code: (answered - read).saturating_sub(waited),
+                            lookups: waited,
+                            serialize: written - answered,
+                            timed: 1,
+                        });
+                    }
+                    Some(result)
                 }
             };
-            let counted = &mut decisions[i];
+            let counted = &mut counts.decisions[i];
             match Outcome::of(&input.payload, result, self.config.project_root()) {
                 Outcome::Deliver(_) => counted.sent += 1,
                 Outcome::Filter(_) => counted.filtered += 1,
@@ -437,8 +589,40 @@ struct Loaded {
     functions: Vec<Option<FunctionId>>,
     keys: Vec<FunctionId>,
     calls: Rc<RefCell<Tallies>>,
+    waiting: Rc<RefCell<Waiting>>,
     /// Messages run on this thread so far: picks the next input and makes its id.
     seq: u64,
+    /// V8's heap after the warm-up, collected, in bytes.
+    heap: usize,
+}
+
+/// This thread's CPU time so far (None where it isn't read: neither Linux nor Windows). Windows
+/// counts it in scheduler ticks (~15.6 ms), so a second's run reads within a few percent.
+pub fn thread_cpu() -> Option<Duration> {
+    #[cfg(target_os = "linux")]
+    {
+        let mut time = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        // SAFETY: clock_gettime writes the timespec it's given and nothing else.
+        let read = unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut time) } == 0;
+        read.then(|| Duration::new(time.tv_sec as u64, time.tv_nsec as u32))
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+        let zero = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut created, mut exited, mut kernel, mut user) = (zero, zero, zero, zero);
+        // SAFETY: the current thread's pseudo-handle, and four FILETIMEs for it to write.
+        let read =
+            unsafe { GetThreadTimes(GetCurrentThread(), &mut created, &mut exited, &mut kernel, &mut user) } != 0;
+        // 100 ns units.
+        let units = |t: FILETIME| (u64::from(t.dwHighDateTime) << 32) | u64::from(t.dwLowDateTime);
+        read.then(|| Duration::from_nanos((units(kernel) + units(user)) * 100))
+    }
+    #[cfg(not(any(target_os = "linux", windows)))]
+    {
+        None
+    }
 }
 
 /// Every thread's numbers as one.
@@ -454,10 +638,20 @@ fn summed(
     let mut latencies: Vec<Duration> = Vec::new();
     let mut decisions: Vec<Decisions> =
         config.destinations().map(|(d, _)| Decisions { destination: d.to_string(), ..Default::default() }).collect();
+    let mut stages = vec![StageSum::default(); decisions.len()];
     let mut calls = Tallies::new();
+    let (mut keys, mut waited, mut heap) = (Duration::ZERO, Duration::ZERO, 0);
+    let mut cpu = Some(Duration::ZERO);
     for d in done {
         latencies.extend(d.latencies);
-        for (sum, one) in decisions.iter_mut().zip(d.decisions) {
+        keys += d.counts.keys;
+        waited += d.waited;
+        heap = heap.max(d.heap);
+        cpu = cpu.zip(d.cpu).map(|(a, b)| a + b);
+        for (sum, one) in stages.iter_mut().zip(d.counts.stages) {
+            sum.add(one);
+        }
+        for (sum, one) in decisions.iter_mut().zip(d.counts.decisions) {
             sum.sent += one.sent;
             sum.filtered += one.filtered;
             sum.quarantined += one.quarantined;
@@ -480,6 +674,25 @@ fn summed(
     };
     let messages = latencies.len() as u64;
     let per_second = messages as f64 / took.as_secs_f64().max(1e-9);
+    let per_message = |d: Duration| d.as_secs_f64() * 1000.0 / messages.max(1) as f64;
+    let functions = config.functions();
+    let stages = config
+        .destinations()
+        .zip(stages)
+        .zip(&functions)
+        .filter(|(_, function)| function.is_some())
+        .map(|(((destination, _), sum), _)| {
+            let mean = |d: Duration| d.as_secs_f64() * 1000.0 / sum.timed.max(1) as f64;
+            Stages {
+                destination: destination.to_string(),
+                decode_ms: mean(sum.decode),
+                code_ms: mean(sum.code),
+                lookups_ms: mean(sum.lookups),
+                serialize_ms: mean(sum.serialize),
+                timed: sum.timed,
+            }
+        })
+        .collect();
     let lookups = calls
         .into_iter()
         .map(|((kind, name), tally)| Lookup {
@@ -505,6 +718,13 @@ fn summed(
         p95_ms: ms(0.95),
         p99_ms: ms(0.99),
         max_ms: ms(1.0),
+        key_ms: (!config.key_functions().is_empty()).then(|| per_message(keys)),
+        stages,
+        lookups_ms: per_message(waited),
+        cpu_ms: cpu.map(per_message),
+        heap_mb: heap as f64 / (1024.0 * 1024.0),
+        keyed: config.ordering.key.is_some(),
+        lanes: config.partition_count() as usize,
         decisions,
         lookups,
     }
@@ -603,6 +823,7 @@ struct MockServices {
     mocks: Mocks,
     timer: Timer,
     calls: Rc<RefCell<Tallies>>,
+    waiting: Rc<RefCell<Waiting>>,
 }
 
 impl MockServices {
@@ -610,10 +831,12 @@ impl MockServices {
     fn answer<T: 'static>(&self, kind: &'static str, name: &str, write: bool, value: T) -> BoxFuture<T> {
         let key = (kind, name.to_string());
         let latency = self.mocks.latency(kind, name);
-        let (timer, calls) = (self.timer.clone(), self.calls.clone());
+        let (timer, calls, waiting) = (self.timer.clone(), self.calls.clone(), self.waiting.clone());
         Box::pin(async move {
             let began = Instant::now();
+            waiting.borrow_mut().begin(began);
             timer.wait(began + latency).await;
+            waiting.borrow_mut().end(Instant::now());
             let mut calls = calls.borrow_mut();
             let tally = calls.entry(key).or_default();
             tally.calls += 1;
@@ -724,6 +947,74 @@ mod tests {
         late.sort();
         // The median late by under half a millisecond (typically 0.05–0.1 ms).
         assert!(late[late.len() / 2] < Duration::from_micros(500), "{late:?}");
+    }
+
+    /// Lookups in flight together count once: two 5 ms waits side by side, then one alone, are
+    /// 10 ms of waiting, not 15.
+    #[test]
+    fn waits_side_by_side_count_once() {
+        let t0 = Instant::now();
+        let at = |ms: u64| t0 + Duration::from_millis(ms);
+        let mut waiting = Waiting::default();
+        waiting.begin(at(0));
+        waiting.begin(at(1));
+        waiting.end(at(5));
+        waiting.end(at(6));
+        waiting.begin(at(10));
+        waiting.end(at(14));
+        assert_eq!(waiting.total, Duration::from_millis(10));
+        assert_eq!(waiting.in_flight, 0);
+    }
+
+    #[test]
+    fn a_thread_s_cpu_time_counts_its_work_not_its_sleep() {
+        let Some(began) = thread_cpu() else { return };
+        std::thread::sleep(Duration::from_millis(50));
+        let slept = thread_cpu().unwrap() - began;
+        let until = Instant::now() + Duration::from_millis(50);
+        let mut x = 0u64;
+        while Instant::now() < until {
+            x = std::hint::black_box(x.wrapping_add(1));
+        }
+        let worked = thread_cpu().unwrap() - began - slept;
+        assert!(slept < Duration::from_millis(10), "{slept:?}");
+        // Windows counts in ~15.6 ms ticks.
+        assert!(worked > Duration::from_millis(30), "{worked:?}");
+    }
+
+    /// What the stamps cost (0.8.2.2's check: under 2% of a transform): the guides' ORU to FHIR
+    /// transform on one thread, timed and not, alternated. `cargo test -p ductus-runtime --release
+    /// --lib stage_timing -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "a measurement: run it by hand"]
+    fn stage_timing_costs_little() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/guides");
+        let measure = |stages| {
+            let options = Options {
+                root: root.clone(),
+                env: "dev".into(),
+                interface: "results-to-fhir".into(),
+                files: Vec::new(),
+                threads: Some(1),
+                until: Until::Seconds(Duration::from_secs(3)),
+                mocks: Mocks::default(),
+                stages,
+            };
+            run(options).unwrap().per_second
+        };
+        let (mut timed, mut plain) = (Vec::new(), Vec::new());
+        for _ in 0..5 {
+            plain.push(measure(false));
+            timed.push(measure(true));
+        }
+        let median = |v: &mut Vec<f64>| {
+            v.sort_by(f64::total_cmp);
+            v[v.len() / 2]
+        };
+        let (t, p) = (median(&mut timed), median(&mut plain));
+        let cost = (p - t) / p * 100.0;
+        println!("plain {p:.0} msg/s, timed {t:.0} msg/s: the stamps cost {cost:.2}% (runs: {plain:?} / {timed:?})");
+        assert!(cost < 2.0, "{cost:.2}%");
     }
 
     #[test]

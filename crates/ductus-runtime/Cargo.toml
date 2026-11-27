@@ -75,6 +75,11 @@ tiberius = { version = "0.13.0", default-features = false, features = ["sspi-rs"
 # Already in the tree through tokio: systemd's notify socket with descriptors attached (`systemd.rs`).
 libc = "0.2.190"
 
+[target.'cfg(windows)'.dependencies]
+# Already in the tree (the CLI's, mllp's): a thread's CPU time (`GetThreadTimes`) for `ductus
+# bench interface`'s CPU per message (`load_test::thread_cpu`).
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+
 [build-dependencies]
 flate2 = "1.1.10"
 

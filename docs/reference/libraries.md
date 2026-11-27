@@ -933,6 +933,6 @@ The packages its production build bundles (the build tools and test tools aren't
 Made by `scripts/dev/dependencies.sh` from these files (a test fails when either changes and this page
 isn't made again):
 
-<!-- made from: Cargo.lock 2ac2b8fcf67261f44c73548ee9df7444112a962a6d06d1cab246f459d5d717d9 ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
-- `Cargo.lock`, SHA-256 `2ac2b8fcf67261f44c73548ee9df7444112a962a6d06d1cab246f459d5d717d9`
+<!-- made from: Cargo.lock 681c751d76b841a0085d3a92ce7ff82d7204d226a233f3da3afb827687f5947c ui/package-lock.json aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5 -->
+- `Cargo.lock`, SHA-256 `681c751d76b841a0085d3a92ce7ff82d7204d226a233f3da3afb827687f5947c`
 - `ui/package-lock.json`, SHA-256 `aec4cea823c0e8b27156b1e5038d2521714f67461399e2431aebb321ea34ffa5`

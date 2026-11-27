@@ -1243,7 +1243,12 @@ enum BenchFace {
         /// objects), or an API's body: `--rows provider_db=rows.json`. Default: no rows; `{}`.
         #[arg(long, value_name = "NAME=FILE")]
         rows: Vec<String>,
-        /// As JSON: the machine, the mocks and every number.
+        /// The interface's busiest rate, messages a second: the report says what share of what
+        /// it does here that is, and when it's more, the threads and config it would take.
+        /// Default: 150 (a busy feed's peak), said as such.
+        #[arg(long, value_name = "PER_SECOND", value_parser = clap::value_parser!(u64).range(1..))]
+        peak: Option<u64>,
+        /// As JSON: the machine, the mocks, every number and the verdict's sentences.
         #[arg(long)]
         json: bool,
         /// The project folder: the one with `interfaces/` and ductus.yaml.
@@ -1909,12 +1914,13 @@ async fn run(cli: Cli) -> Result<()> {
         }
         Command::Bench { face: Some(BenchFace::Compare { files }), .. } => bench::compare(&files),
         Command::Bench {
-            face: Some(BenchFace::Interface { interface, files, threads, seconds, count, mock, rows, json, root, env }),
+            face:
+                Some(BenchFace::Interface { interface, files, threads, seconds, count, mock, rows, peak, json, root, env }),
             ..
         } => {
             let threads = threads.map(|n| n as usize);
             let args =
-                bench::interface::Args { root, env, interface, files, threads, seconds, count, mock, rows, json };
+                bench::interface::Args { root, env, interface, files, threads, seconds, count, mock, rows, peak, json };
             bench::interface::run(args).await
         }
         Command::Bench { face: None, seconds, quick, json, yes, database_url } => {

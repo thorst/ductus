@@ -144,6 +144,43 @@ export function __invoke(
     : serialize(result, formats.output);
 }
 
+/** `__invoke` with each stage's end stamped (`ductus bench interface`'s per-stage times): 0 as it
+ *  starts, 1 once the message is read (decoded, and its `meta`), 2 when the function's result is
+ *  there (a promise's once it settles) or it threw, 3 once that's serialized. A stamp is an op that records
+ *  the time; with no stamp op (outside the engine) it's plain `__invoke`. The engine never binds
+ *  it: only the bench does, so a message's path costs nothing more.
+ *  @internal Exported for the bench and SDK tests. */
+export function __invokeTimed(
+  transform: (input: unknown, meta?: Meta) => unknown,
+  raw: string,
+  formats: Formats = HL7,
+  meta?: string,
+): string | null | Promise<string | null> {
+  const stamp = (globalThis as { __ductus_stamp?: (stage: number) => void }).__ductus_stamp ?? (() => {});
+  stamp(0);
+  const input = formats.http ? requestFrom(raw, formats.input) : decode(raw, formats.input);
+  const parsed = formats.http || meta === undefined ? undefined : (JSON.parse(meta) as Meta);
+  stamp(1);
+  // A function that throws (a quarantine, a retry) still has its time: stamped 2, and no 3.
+  const failed = (e: unknown): never => {
+    stamp(2);
+    throw e;
+  };
+  let result: unknown;
+  try {
+    result = formats.http ? transform(input) : transform(input, parsed);
+  } catch (e) {
+    return failed(e);
+  }
+  const done = (r: unknown) => {
+    stamp(2);
+    const out = formats.http ? respond(r, formats.output) : serialize(r, formats.output);
+    stamp(3);
+    return out;
+  };
+  return result instanceof Promise ? result.then(done, failed) : done(result);
+}
+
 /** Engine entry point for a key function (`ordering: { key: { script: key.ts } }`): parse by
  *  format, run it, and answer its key as text. Nothing or `null` is an empty key, a number its
  *  digits; anything else, or a promise, is an error (the message is quarantined with it).

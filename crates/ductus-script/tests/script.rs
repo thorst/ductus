@@ -261,6 +261,75 @@ export function toBilling(m: Message, meta: Meta) {
     assert!(format!("{err:#}").contains("must export a function named `toFax`"), "{err:#}");
 }
 
+/// `add_functions_timed` (the bench's): the function's output, and four stamps a call in
+/// order (start, message read, result there, serialized), for an async function too, its result
+/// stamped once its promise settles (after what it did past its `await`). Without `time_stages`
+/// nothing is kept.
+#[test]
+fn timed_functions_stamp_each_stage_and_answer_as_untimed_ones() {
+    let dir = project(&[(
+        "t.ts",
+        r#"import type { Message } from "@ductus/sdk";
+export function plain(m: Message) { m.set("MSH-5", "LAB"); return m; }
+export async function later(m: Message) {
+  await Promise.resolve();
+  const until = Date.now() + 20;
+  while (Date.now() < until) {}
+  return { mrn: m.PID[3][1] };
+}"#,
+    )]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let module = dir.path().join("t.ts");
+    let json = r#"{"input":{"kind":"hl7"},"output":{"kind":"json"}}"#;
+    let function = |name, formats| Some(Function { module: &module, name, formats });
+    let functions = [function("plain", DEFAULT_FORMATS), function("later", json)];
+    let mut timed = Isolate::host();
+    let (_, f) = rt.block_on(timed.add_functions_timed(&functions, SECOND)).unwrap();
+    let (plain, later) = (f[0].unwrap(), f[1].unwrap());
+    let local = tokio::task::LocalSet::new();
+
+    assert!(local.block_on(&rt, timed.call_function(plain, ADT, None)).is_ok());
+    assert!(timed.take_stamps().is_empty(), "kept only after time_stages");
+    timed.time_stages();
+    // (One isolate a thread: the SDK's own test compares the twin's answers with `__invoke`'s.)
+    let out = local.block_on(&rt, timed.call_function(plain, ADT, None)).unwrap().unwrap();
+    assert!(out.starts_with("MSH|^~\\&|EPIC|HOSP|LAB|"), "{out}");
+    let stamps = timed.take_stamps();
+    assert_eq!(stamps.iter().map(|s| s.0).collect::<Vec<_>>(), [0, 1, 2, 3]);
+    assert!(stamps.windows(2).all(|w| w[0].1 <= w[1].1));
+
+    let out = local.block_on(&rt, timed.call_function(later, ADT, None)).unwrap();
+    assert_eq!(out.as_deref(), Some(r#"{"mrn":"123456"}"#));
+    let stamps = timed.take_stamps();
+    assert_eq!(stamps.iter().map(|s| s.0).collect::<Vec<_>>(), [0, 1, 2, 3]);
+    assert!(
+        // 20 ms by `Date.now()`, which counts whole milliseconds: at least 19 by the clock.
+        stamps[2].1 - stamps[1].1 >= Duration::from_millis(19),
+        "the function's stage holds what it did after its await: {:?}",
+        stamps[2].1 - stamps[1].1
+    );
+
+    // A function that throws is stamped up to its throw, sync or async, and its error is as before.
+    let dir2 = project(&[(
+        "q.ts",
+        r#"import { quarantine } from "@ductus/sdk";
+export function now() { throw quarantine("no provider"); }
+export async function later() { await Promise.resolve(); throw quarantine("no provider"); }"#,
+    )]);
+    let module = dir2.path().join("q.ts");
+    let throwing = [
+        Some(Function { module: &module, name: "now", formats: DEFAULT_FORMATS }),
+        Some(Function { module: &module, name: "later", formats: DEFAULT_FORMATS }),
+    ];
+    let f = rt.block_on(timed.add_functions_timed(&throwing, SECOND)).unwrap().1;
+    for function in f.into_iter().flatten() {
+        let err = local.block_on(&rt, timed.call_function(function, ADT, None)).unwrap_err();
+        assert!(format!("{err:#}").contains("no provider"), "{err:#}");
+        assert_eq!(timed.take_stamps().iter().map(|s| s.0).collect::<Vec<_>>(), [0, 1, 2]);
+    }
+}
+
 /// Each destination in a file of its own (0.7.4.1): one interface, a function per file, a
 /// destination without code (None), and state: each file's own, a file both import shared.
 #[test]

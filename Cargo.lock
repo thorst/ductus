@@ -2070,6 +2070,7 @@ dependencies = [
  "url",
  "utoipa",
  "utoipa-axum",
+ "windows-sys 0.61.2",
  "x509-parser",
 ]
 
