@@ -35,7 +35,8 @@ Use it as `Authorization: Bearer <token>`, or DUCTUS_API_TOKEN for `ductus drain
 | `ductus drain` / `resume` | Stop taking messages, deliver what's stored | operator token |
 | `ductus alerts` | What's open; `alerts test` sends a test notification | viewer token; the project for `test` |
 | `ductus retention` | Retention per interface, changes, confirmations | viewer token; operator to `confirm` |
-| `ductus doctor` | Every connection the project needs, checked from here | the project |
+| `ductus doctor` | Every connection the project needs, checked from here; the database's settings | the project |
+| `ductus bench` | What this machine and its database do: messages a second, fan-out, files, respond mode, memory ([measuring](bench.md)) | database, with `CREATE` |
 | `ductus audit export` | The audit log, as JSON lines | database |
 | `ductus user`, `token` | Accounts and tokens | database |
 
@@ -169,26 +170,30 @@ It never sends a message to a destination.
 
 ```text
 $ ductus doctor
-ductus doctor · environment dev · 2026-11-25 11:41:55 -05:00
-on DESKTOP-GCT6E6V · ductus 0.7.0-dev
-checked 4 connection(s) in 0.1 s: 3 ok, 1 warning(s), 0 failed
+ductus doctor · environment dev · 2026-11-26 18:50:22 -05:00
+on DESKTOP-GCT6E6V · ductus 0.7.0
+checked 4 connection(s) in 0.2 s: 3 ok, 1 warning(s), 0 failed
 
 ✓ engine database  localhost:5432 Postgres
     used by  the engine (DUCTUS_DATABASE_URL)
-    DNS      localhost → 127.0.0.1 (0.4 ms)
-    connect  127.0.0.1:5432 from 127.0.0.1 in 0.1 ms
-    TLS      not verified (sslmode=prefer), and sslmode=verify-full would refuse it: the certificate is for DESKTOP-GCT6E6V.localdomain, not localhost; certificate for DESKTOP-GCT6E6V.localdomain, self-signed, valid until 2036-10-03 (3599 days)
+    DNS      localhost → 127.0.0.1 (0.8 ms)
+    connect  127.0.0.1:5432 from 127.0.0.1 in 0.3 ms
+    TLS      not verified (sslmode=prefer), and sslmode=verify-full would refuse it: the certificate is for DESKTOP-GCT6E6V.localdomain, not localhost; certificate for DESKTOP-GCT6E6V.localdomain, self-signed, valid until 2036-10-03 (3598 days)
     login    as `todd`, database `ductus_doclab`: PostgreSQL 18.6 (Ubuntu 18.6-0ubuntu0.26.04.1); TLS 1.3, not verified (sslmode=prefer): the server's certificate isn't checked
-    commits  1.2 ms median of 20 (each waits for the disk): strict ingest ≈ 810 msg/s per sender connection, one commit per ACK; more connections share commits. A 1M/day ADT feed averages ~12 msg/s.
+    commits  1.2 ms median of 20 (each waits for the disk): strict ingest ≈ 860 msg/s per sender connection, one commit per ACK; more connections share commits. A 1M/day ADT feed averages ~12 msg/s.
+    settings synchronous_commit on, fsync on, wal_sync_method fdatasync, shared_buffers 128 MB, effective_cache_size 4 GB, max_connections 100 (7 open now), random_page_cost 4, effective_io_concurrency 16, autovacuum on
+  → DOC004 (tuning): shared_buffers is 128 MB, Postgres's default or less: on a database server of its own, about a quarter of its RAM is usual (a restart applies it).
+  → DOC005 (tuning): effective_cache_size is 4 GB, Postgres's default: on a database server of its own, half to three quarters of its RAM is usual (it's the planner's guess and allocates nothing).
+  → DOC008 (tuning): random_page_cost is 4, priced for hard disks: on SSD or NVMe, 1.1 is usual, so the planner uses indexes as readily as they deserve.
 
 ✓ MLLP destination  127.0.0.1:6670 MLLP
     used by  adt-in → lab
     address  127.0.0.1 (an address, nothing to look up)
-    connect  127.0.0.1:6670 from 127.0.0.1 in 0.2 ms
+    connect  127.0.0.1:6670 from 127.0.0.1 in 0.6 ms
 
-✓ destination folder  ./interfaces/adt-in/out/adt-in
+✓ destination folder  ./interfaces/adt-in/out
     used by  adt-in → archive
-    folder   exists; can write
+    folder   doesn't exist yet; the engine creates it on the first message
 
 ⚠ listening port  0.0.0.0:6661 MLLP
     used by  adt-in
@@ -203,6 +208,12 @@ checked 4 connection(s) in 0.1 s: 3 ok, 1 warning(s), 0 failed
 - The `commits` line is the store's disk: on a laptop (here) it's quick; on a server, what it
   says per sender connection is the ceiling for strict senders. A port "in use" while the engine
   runs is expected, as here.
+- The `settings` line is the database's own settings, and each `DOC` code after it says what
+  one means: a **warning** is a risk to messages or a start (act on it), a `(tuning)` **note** is
+  Postgres's default where a server of its own is usually tuned, and leaves the check ✓
+  ([nuance](../nuances/doctor.md#postgress-own-defaults-are-notes-only-risks-are-warnings-level-3),
+  [every code](../reference/doctor.md)). What a change does there:
+  [`ductus bench`](bench.md#the-databases-settings-ductus-doctor) before and after.
 - The engine runs the certificate part of it on its own every 6 hours
   ([`doctor`](../reference/config/ductus.md#doctor) in ductus.yaml); the console's
   **Connections** page shows the last runs and has **Check now**.

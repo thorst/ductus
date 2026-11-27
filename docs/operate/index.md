@@ -62,5 +62,9 @@ What each state means exactly, and when it shows:
   checksummed file, and `ductus release check --env prod` checks it against prod's settings and
   database, running the tests of what it changes there, before you deploy
   ([releases and the gate](releases.md)).
+- **A new server, a database move or a Postgres setting**: `ductus bench` before and after, and
+  `ductus bench compare` the two, says in messages a second what the change did
+  ([measuring this machine](bench.md)); `ductus doctor` says which of the database's settings
+  are a risk.
 - **A shorter retention** deletes messages, so it waits for a confirmation
   ([retention](retention.md#changing-retention)).

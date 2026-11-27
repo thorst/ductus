@@ -144,6 +144,14 @@ measures the commit time from the engine's server and says what it means
 Put Postgres's write-ahead log on the fastest disk you have (NVMe, or a cloud disk with low write
 latency). For scale: a million HL7 messages a day averages 12 a second.
 
+**Measure it rather than guess:** `ductus bench`, run on the engine's server against this
+database, says what senders get on 1 and 16 connections, fan-out, files, respond mode and memory
+per interface, each with what it means; it works in a schema of its own and drops it, so the
+production database is safe to bench before the engine starts
+([measuring this machine](../operate/bench.md)). `ductus doctor` reads the database's settings and
+warns about the ones that can lose messages or stop a handover
+([doctor findings](../reference/doctor.md)).
+
 **Space** is roughly: messages a day × their average size × the days kept (retention: 7, 21 or
 49 days; [retention](../reference/config/ductus.md#retention)), plus a small row per destination
 per message (its delivery and status), the indexes, what destinations keep with

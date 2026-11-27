@@ -461,7 +461,7 @@ $ sudo -u ductus ductus cert show ductus-mllp
   subject  CN=mllp.hospital.org
   names    mllp.hospital.org
   issuer   issued by Test Hospital CA
-  valid    2026-11-25 → 2027-02-23: 89 days left
+  valid    2026-11-27 → 2027-02-25: 89 days left
   chain    complete: mllp.hospital.org, issued by Test Hospital CA (the CA `hospital-ca` in resources.yaml)
   key      matches (./tls/mllp.key)
 → Senders must trust Test Hospital CA (the hospital's CA): ask them to confirm.
@@ -469,7 +469,7 @@ $ sudo -u ductus ductus validate --env-file /etc/ductus/ductus.env
 environment: prod
 ✓ resources: 0 database(s), 0 SFTP server(s), 0 API(s), 2 certificate(s)
 ✓ adt-in: config and code load
-✓ certificate `ductus-mllp`: CN=mllp.hospital.org (mllp.hospital.org), expires 2027-02-23 (89 days)
+✓ certificate `ductus-mllp`: CN=mllp.hospital.org (mllp.hospital.org), expires 2027-02-25 (89 days)
 ✓ certificate `hospital-ca`: a CA
 ⚠ database: plain, no TLS: the server doesn't offer it (sslmode=prefer); whoever answers at its address is believed: add sslmode=verify-full to DUCTUS_DATABASE_URL (sslrootcert=/path/ca.pem for a private CA)
 ✓ database: new (no engine has run on it yet): no messages wait, no retention is applied
@@ -481,30 +481,34 @@ Created symlink /etc/systemd/system/multi-user.target.wants/ductus.service → /
 $ systemctl show -p StatusText ductus
 StatusText=running 1 interface
 $ sudo -u ductus ductus doctor --env-file /etc/ductus/ductus.env
-ductus doctor · environment prod · 2026-11-25 15:52:43 +00:00
-on ductus1 · ductus 0.7.0-dev
+ductus doctor · environment prod · 2026-11-27 00:01:05 +00:00
+on ductus1 · ductus 0.7.0
 checked 3 connection(s) in 0.1 s: 1 ok, 2 warning(s), 0 failed
 
 ⚠ engine database  db1.hospital.org:5432 Postgres
     used by  the engine (DUCTUS_DATABASE_URL)
-    DNS      db1.hospital.org → 172.18.0.2 (0.8 ms)
-    connect  172.18.0.2:5432 from 172.18.0.3 in 0.2 ms
+    DNS      db1.hospital.org → 172.18.0.2 (1.3 ms)
+    connect  172.18.0.2:5432 from 172.18.0.3 in 0.3 ms
   ⚠ TLS      none: the server doesn't offer TLS (sslmode=prefer), the connection is plain
     login    as `ductus`, database `ductus`: PostgreSQL 18.6 (Debian 18.6-1.pgdg13+2); plain, no TLS: the server doesn't offer it (sslmode=prefer)
-    commits  1.7 ms median of 20 (each waits for the disk): strict ingest ≈ 570 msg/s per sender connection, one commit per ACK; more connections share commits. A 1M/day ADT feed averages ~12 msg/s.
+    commits  0.9 ms median of 20 (each waits for the disk): strict ingest ≈ 1100 msg/s per sender connection, one commit per ACK; more connections share commits. A 1M/day ADT feed averages ~12 msg/s.
+    settings synchronous_commit on, fsync on, wal_sync_method fdatasync, shared_buffers 128 MB, effective_cache_size 4 GB, max_connections 100 (7 open now), random_page_cost 4, effective_io_concurrency 16, autovacuum on
   → Queries, their results and the login cross the network readable: ask the DBA to turn on ssl, then set sslmode=verify-full.
+  → DOC004 (tuning): shared_buffers is 128 MB, Postgres's default or less: on a database server of its own, about a quarter of its RAM is usual (a restart applies it).
+  → DOC005 (tuning): effective_cache_size is 4 GB, Postgres's default: on a database server of its own, half to three quarters of its RAM is usual (it's the planner's guess and allocates nothing).
+  → DOC008 (tuning): random_page_cost is 4, priced for hard disks: on SSD or NVMe, 1.1 is usual, so the planner uses indexes as readily as they deserve.
 
 ✓ MLLP destination  127.0.0.1:6662 MLLP
     used by  adt-in → lab
     address  127.0.0.1 (an address, nothing to look up)
-    connect  127.0.0.1:6662 from 127.0.0.1 in 0.2 ms
+    connect  127.0.0.1:6662 from 127.0.0.1 in 0.3 ms
 
 ⚠ listening port  0.0.0.0:6661 MLLP over TLS
     used by  adt-in
   ⚠ port     in use: by a running engine, or another program
     address  127.0.0.1 (an address, nothing to look up)
-    connect  127.0.0.1:6661 from 127.0.0.1 in 0.2 ms
-    TLS      TLS 1.3, post-quantum key exchange (X25519MLKEM768), serves `ductus-mllp`: certificate for mllp.hospital.org, issued by Test Hospital CA, valid until 2027-02-23 (89 days); covers mllp.hospital.org
+    connect  127.0.0.1:6661 from 127.0.0.1 in 0.3 ms
+    TLS      TLS 1.3, post-quantum key exchange (X25519MLKEM768), serves `ductus-mllp`: certificate for mllp.hospital.org, issued by Test Hospital CA, valid until 2027-02-25 (89 days); covers mllp.hospital.org
     chain    complete: mllp.hospital.org, issued by Test Hospital CA (the CA `hospital-ca` in resources.yaml)
   → If the engine isn't running on this server, another program holds port 6661: find it with `ss -ltnp` (Linux) or `netstat -ano` (Windows).
   → Senders must trust Test Hospital CA (the hospital's CA): ask them to confirm.
@@ -514,7 +518,10 @@ checked 3 connection(s) in 0.1 s: 1 ok, 2 warning(s), 0 failed
 Doctor passes (nothing failed: it exits 0) with two warnings to read, not ignore. The database
 connection isn't encrypted: the demo's database server offers no TLS, and a real one should
 ([PostgreSQL](install/postgres.md)); the warning goes once `DUCTUS_DATABASE_URL` says
-`sslmode=verify-full`. Port 6661 is in use: here by the engine itself, which doctor can't tell
+`sslmode=verify-full`. The three `(tuning)` notes are Postgres's defaults on a stock install, not
+warnings: worth a look with the DBA once the database has a server of its own
+([what each means](reference/doctor.md), and [`ductus bench`](operate/bench.md) to measure a
+change). Port 6661 is in use: here by the engine itself, which doctor can't tell
 from another program; run before the start, the same check says whether the port is free.
 
 **The sending system** gets its own certificate from the same CA (in real life its team asks

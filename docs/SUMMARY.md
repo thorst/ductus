@@ -59,6 +59,7 @@
   - [Retention and storage](operate/retention.md)
   - [What runs, recorded](operate/deployments.md)
   - [Releases and the gate](operate/releases.md)
+  - [Measuring this machine: ductus bench](operate/bench.md)
 
 # Upgrade and troubleshoot
 
@@ -84,6 +85,7 @@
   - [Databases and APIs](nuances/databases-and-apis.md)
   - [Impact and `about:`](nuances/impact.md)
   - [Checking connections (`ductus doctor`)](nuances/doctor.md)
+  - [Measuring this machine (`ductus bench`)](nuances/bench.md)
   - [Files, SFTP and schedules](nuances/files.md)
   - [Operations: drain mode and the REST API](nuances/drain-and-api.md)
   - [The web UI](nuances/web-ui.md)
