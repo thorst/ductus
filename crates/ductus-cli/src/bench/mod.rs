@@ -15,6 +15,7 @@
 //! number.
 
 mod compare;
+pub mod interface;
 mod memory;
 mod report;
 

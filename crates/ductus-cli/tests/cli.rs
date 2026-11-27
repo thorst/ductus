@@ -8696,3 +8696,84 @@ fn a_bench_stopped_with_ctrl_c_drops_its_schema() {
     let left = rt.block_on(ductus_store::scratch::left(&db)).unwrap();
     assert!(!left.contains(&schema), "{schema} is still there: {said}");
 }
+
+/// `ductus bench interface` runs an interface's real code on its fixtures in a loop, its lookups
+/// mocked at the latency given: a 5 ms lookup caps one thread near 200 messages a second, each
+/// call counted, every destination's decision counted (a lookup answering no rows takes the
+/// code's other path: said); `--rows` gives the rows; no database needed; `--count` exact.
+#[test]
+fn bench_interface_runs_the_code_with_its_lookups_mocked() {
+    let dir = project(&[
+        (
+            "interfaces/orders/interface.yaml",
+            "name: orders\nsource: { mllp: { port: 6661 } }\nscript: route.ts\ndestinations:\n  lab:\n    mllp: { host: 127.0.0.1, port: 7001 }\n    transform: toLab\n  audit:\n    file: { dir: out }\n    transform: toAudit\n",
+        ),
+        (
+            "interfaces/orders/route.ts",
+            "import { db, quarantine, type Message } from \"@ductus/sdk\";\n\nexport async function toLab(msg: Message) {\n  const npi = await db(\"provider_db\").one(\"SELECT npi FROM providers WHERE id = $1\", [msg.get(\"PID-3\")]);\n  if (!npi) throw quarantine(\"no provider\");\n  msg.set(\"MSH-5\", \"LAB\");\n  return msg;\n}\n\nexport async function toAudit(msg: Message) {\n  await db(\"audit_db\").execute(\"INSERT INTO seen VALUES ($1)\", [msg.get(\"MSH-10\")]);\n  return msg;\n}\n",
+        ),
+        ("interfaces/orders/fixtures/o01.hl7", "MSH|^~\\&|EHR|HOSP|X|HOSP|20261101||ORM^O01|77|P|2.5\rPID|1||123456\r"),
+        ("interfaces/orders/fixtures/o02.hl7", "MSH|^~\\&|EHR|HOSP|X|HOSP|20261101||ORM^O01|78|P|2.5\rPID|1||654321\r"),
+        ("rows.json", "[{ \"npi\": \"1093817465\" }]"),
+    ]);
+    let bench = |args: &[&str]| {
+        let mut all = vec!["bench", "interface", "orders"];
+        all.extend_from_slice(args);
+        ductus(dir.path(), &all)
+    };
+
+    // No rows: every message takes the quarantine path, and the report says why.
+    let (ok, out) = bench(&["--count", "50", "--mock", "provider_db=5ms", "--mock", "audit_db=1ms"]);
+    assert!(ok, "{out}");
+    for expected in [
+        "orders: ",
+        " on 1 thread (no ordering key: one message at a time), 2 messages from its fixtures, in turn; databases and APIs mocked, nothing sent\n",
+        "50 messages\n",
+        "  audit: 100% sent\n",
+        "  lab: 100% quarantined\n      first: o0",
+        ".hl7: no provider\n",
+        "  database `audit_db`: 1.00 calls per message, each mocked at 1.00 ms, writes, answered as done (nothing is written)\n",
+        "  database `provider_db`: 1.00 calls per message, each mocked at 5.00 ms, answering no rows (give some: `--rows provider_db=rows.json`)\n",
+        "→ some messages were quarantined or retried with lookups answering nothing",
+    ] {
+        assert!(out.contains(expected), "missing {expected:?} in\n{out}");
+    }
+
+    // With rows, the usual path; JSON pins the shape and the latency's limit holds.
+    let (ok, out) = bench(&["--count", "100", "--mock", "db=5ms", "--rows", "provider_db=rows.json", "--json"]);
+    assert!(ok, "{out}");
+    let document: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let load = &document["load"];
+    assert_eq!(
+        (load["messages"].as_u64(), load["threads"].as_u64(), load["inputs"].as_u64()),
+        (Some(100), Some(1), Some(2))
+    );
+    let decisions = load["decisions"].as_array().unwrap();
+    assert_eq!(
+        decisions[0],
+        serde_json::json!({ "destination": "audit", "sent": 100, "filtered": 0, "quarantined": 0, "retried": 0 })
+    );
+    assert_eq!(decisions[1]["sent"], 100, "{load}");
+    let lookups = load["lookups"].as_array().unwrap();
+    let calls: Vec<(&str, u64, u64, bool)> = lookups
+        .iter()
+        .map(|l| {
+            let n = |k: &str| l[k].as_u64().unwrap();
+            (l["name"].as_str().unwrap(), n("calls"), n("writes"), l["given_rows"].as_bool().unwrap())
+        })
+        .collect();
+    assert_eq!(calls, [("audit_db", 100, 100, false), ("provider_db", 100, 0, true)]);
+    assert!(lookups.iter().all(|l| l["waited_ms"].as_f64().unwrap() < 5.5), "{load}");
+    // Two 5 ms waits a message, one thread: at most 100/s, and the p50 at least 10 ms.
+    let (rate, p50) = (load["per_second"].as_f64().unwrap(), load["p50_ms"].as_f64().unwrap());
+    assert!(rate <= 101.0 && p50 >= 10.0, "{load}");
+    assert_eq!(document["mocks"]["db_ms"], 5.0);
+
+    // `--threads` is said as given; a mock or rows file that can't be read is refused saying how.
+    let (ok, out) = bench(&["--count", "20", "--threads", "2", "--mock", "db=1ms"]);
+    assert!(ok && out.contains(" on 2 threads (`--threads 2`)"), "{out}");
+    let (ok, out) = bench(&["--mock", "db"]);
+    assert!(!ok && out.contains("`--mock db`: give a kind or a resource and a latency, as `db=5ms`"), "{out}");
+    let (ok, out) = bench(&["--rows", "provider_db=missing.json"]);
+    assert!(!ok && out.contains("`--rows provider_db=missing.json`: reading missing.json"), "{out}");
+}

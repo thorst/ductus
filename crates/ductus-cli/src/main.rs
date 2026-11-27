@@ -1211,6 +1211,48 @@ enum BenchFace {
         #[arg(required = true, num_args = 2.., value_name = "FILE")]
         files: Vec<PathBuf>,
     },
+    /// Run one interface's real code on its fixtures in a loop, on as many threads as the engine
+    /// would give it, with its databases and APIs mocked at a set latency, and say what it does on
+    /// this machine: messages a second, each message's time (p50/p95/p99), what each destination
+    /// decided, and each lookup per message. Nothing is connected, stored or sent, and no
+    /// database is needed. Mocked lookups answer no rows unless given some (`--rows`): code that
+    /// takes another path then (a quarantine, say) is counted and said.
+    Interface {
+        /// The interface: its name, or a file or folder inside its folder.
+        interface: String,
+        /// A file to run instead of its `fixtures/` (repeat for more), split into records as its
+        /// source would (`split: records`).
+        #[arg(long = "file", value_name = "FILE")]
+        files: Vec<PathBuf>,
+        /// Threads, each with its own JavaScript engine. Default: what the engine gives it (one in
+        /// the shared pool or without an ordering key; `workers` when dedicated, up to its lanes).
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..=256))]
+        threads: Option<u64>,
+        /// Seconds to measure for, after a second's warm-up (1–600).
+        #[arg(long, default_value_t = 5, value_parser = clap::value_parser!(u64).range(1..=600))]
+        seconds: u64,
+        /// Run this many messages (after the warm-up) instead of for `--seconds`.
+        #[arg(long, conflicts_with = "seconds", value_parser = clap::value_parser!(u64).range(1..))]
+        count: Option<u64>,
+        /// A lookup's latency, by kind (`db`, `api`, `fetch`) or by resources.yaml name, which
+        /// wins over its kind: `--mock db=5ms --mock empi=120ms`. Default: `db=5ms`, `api=40ms`,
+        /// `fetch=40ms`.
+        #[arg(long, value_name = "KIND|NAME=LATENCY")]
+        mock: Vec<String>,
+        /// What a mocked resource answers, from a JSON file: a database's rows (an array of
+        /// objects), or an API's body: `--rows provider_db=rows.json`. Default: no rows; `{}`.
+        #[arg(long, value_name = "NAME=FILE")]
+        rows: Vec<String>,
+        /// As JSON: the machine, the mocks and every number.
+        #[arg(long)]
+        json: bool,
+        /// The project folder: the one with `interfaces/` and ductus.yaml.
+        #[arg(long, default_value = ".")]
+        root: PathBuf,
+        /// The environment whose variables and secrets the code reads.
+        #[arg(long, env = "DUCTUS_ENV", default_value = "dev")]
+        env: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1866,6 +1908,15 @@ async fn run(cli: Cli) -> Result<()> {
             tools::sink(port, reject, tls.then_some(tools::SinkTls { files, subjects })).await
         }
         Command::Bench { face: Some(BenchFace::Compare { files }), .. } => bench::compare(&files),
+        Command::Bench {
+            face: Some(BenchFace::Interface { interface, files, threads, seconds, count, mock, rows, json, root, env }),
+            ..
+        } => {
+            let threads = threads.map(|n| n as usize);
+            let args =
+                bench::interface::Args { root, env, interface, files, threads, seconds, count, mock, rows, json };
+            bench::interface::run(args).await
+        }
         Command::Bench { face: None, seconds, quick, json, yes, database_url } => {
             let database_url = tools::database_url(database_url)?;
             bench::run(bench::Options { database_url, seconds, quick, json, yes }).await

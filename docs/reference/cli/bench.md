@@ -31,3 +31,31 @@ ductus bench compare [OPTIONS] <FILE> <FILE>...
 |---|---|---|---|
 | `<FILE>` | Two or more files, each saved with `ductus bench --json > name.json`; each column is headed by its file's name. |  |  |
 
+## `ductus bench interface`
+
+Run one interface's real code on its fixtures in a loop, on as many threads as the engine would give it, with its databases and APIs mocked at a set latency, and say what it does on this machine: messages a second, each message's time (p50/p95/p99), what each destination decided, and each lookup per message. Nothing is connected, stored or sent, and no database is needed. Mocked lookups answer no rows unless given some (`--rows`): code that takes another path then (a quarantine, say) is counted and said.
+
+```text
+ductus bench interface [OPTIONS] <INTERFACE>
+```
+
+**Arguments**
+
+| | What it does | Default | Environment |
+|---|---|---|---|
+| `<INTERFACE>` | The interface: its name, or a file or folder inside its folder. |  |  |
+
+**Options**
+
+| | What it does | Default | Environment |
+|---|---|---|---|
+| `--file <FILE>` | A file to run instead of its `fixtures/` (repeat for more), split into records as its source would (`split: records`). |  |  |
+| `--threads <THREADS>` | Threads, each with its own JavaScript engine. Default: what the engine gives it (one in the shared pool or without an ordering key; `workers` when dedicated, up to its lanes). |  |  |
+| `--seconds <SECONDS>` | Seconds to measure for, after a second's warm-up (1–600). | `5` |  |
+| `--count <COUNT>` | Run this many messages (after the warm-up) instead of for `--seconds`. |  |  |
+| `--mock <KIND|NAME=LATENCY>` | A lookup's latency, by kind (`db`, `api`, `fetch`) or by resources.yaml name, which wins over its kind: `--mock db=5ms --mock empi=120ms`. Default: `db=5ms`, `api=40ms`, `fetch=40ms`. |  |  |
+| `--rows <NAME=FILE>` | What a mocked resource answers, from a JSON file: a database's rows (an array of objects), or an API's body: `--rows provider_db=rows.json`. Default: no rows; `{}`. |  |  |
+| `--json` | As JSON: the machine, the mocks and every number. |  |  |
+| `--root <ROOT>` | The project folder: the one with `interfaces/` and ductus.yaml. | `.` |  |
+| `--env <ENV>` | The environment whose variables and secrets the code reads. | `dev` | `DUCTUS_ENV` |
+

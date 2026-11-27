@@ -32,6 +32,7 @@ pub mod keys;
 pub mod lanes;
 pub mod ldap;
 mod limiter;
+pub mod load_test;
 pub mod mssql;
 pub mod ownership;
 pub mod pg_settings;
