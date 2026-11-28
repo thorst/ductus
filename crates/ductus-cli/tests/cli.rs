@@ -8775,11 +8775,10 @@ fn bench_interface_runs_the_code_with_its_lookups_mocked() {
         })
         .collect();
     assert_eq!(calls, [("audit_db", 100, 100, false), ("provider_db", 100, 0, true)]);
-    // Waking is late by a few tenths of a ms on an idle machine, more with the whole suite running
-    // beside it (5.57 ms in WSL, 8.15 on CI's Windows runner, 0.8.2.4): under 2× + 1 ms, which a
-    // timer ending on Windows' 15.6 ms tick (what it did before `Wakeup`) doesn't meet.
-    let bound = |latency: f64| latency * 2.0 + 1.0;
-    assert!(lookups.iter().all(|l| (5.0..bound(5.0)).contains(&l["waited_ms"].as_f64().unwrap())), "{load}");
+    // Never answered early. How late is the timer's own test's (ductus-runtime
+    // `the_mocks_timer_wakes_at_its_deadline_not_on_a_tick`): here the whole suite runs beside it,
+    // and CI's Windows runner stretched 5 ms mocks to 8 and 13 ms on average (0.8.2.4).
+    assert!(lookups.iter().all(|l| l["waited_ms"].as_f64().unwrap() >= 5.0), "{load}");
     // Two 5 ms waits a message, one thread: at most 100/s, and the p50 at least 10 ms.
     let (rate, p50) = (load["per_second"].as_f64().unwrap(), load["p50_ms"].as_f64().unwrap());
     assert!(rate <= 101.0 && p50 >= 10.0, "{load}");
@@ -8789,12 +8788,12 @@ fn bench_interface_runs_the_code_with_its_lookups_mocked() {
     assert_eq!(stages.len(), 2, "{load}");
     for s in stages {
         let ms = |k: &str| s[k].as_f64().unwrap();
-        assert!((5.0..bound(5.0)).contains(&ms("lookups_ms")), "{s}");
+        assert!(ms("lookups_ms") >= 5.0, "{s}");
         assert!(ms("decode_ms") > 0.0 && ms("code_ms") < 1.0 && ms("serialize_ms") > 0.0, "{s}");
         assert_eq!(s["timed"], 100);
     }
     let lookups_ms = load["lookups_ms"].as_f64().unwrap();
-    assert!((10.0..2.0 * bound(5.0)).contains(&lookups_ms) && load["heap_mb"].as_f64().unwrap() > 1.0, "{load}");
+    assert!(lookups_ms >= 10.0 && load["heap_mb"].as_f64().unwrap() > 1.0, "{load}");
     // A debug build's code takes ~2 ms of CPU a message (2.04 on 0.8.2.2's own commit): well
     // under the 10 ms it waits, which would all be CPU if the waits spun.
     assert!(load["cpu_ms"].as_f64().unwrap() < lookups_ms / 2.0, "the waits take no CPU: {load}");

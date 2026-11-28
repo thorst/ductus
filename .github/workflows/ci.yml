@@ -404,6 +404,11 @@ jobs:
       - name: Windows login time vs a SQL login (measured, not judged)
         run: cargo test --release --locked --workspace --lib time_a_windows_login -- --ignored --nocapture
 
+      # The step above tests the CLI package only; `ductus bench interface`'s mock timer has a
+      # Windows path of its own (`load_test::Wakeup`: a condvar there woke on the 15.6 ms tick).
+      - name: bench interface's mock timer on Windows
+        run: cargo test --release --locked --workspace --lib load_test::tests::the_timer_wakes_each_wait_at_its_deadline
+
   # The Windows build, installer and service, in parallel with the others.
   windows:
     runs-on: windows-latest

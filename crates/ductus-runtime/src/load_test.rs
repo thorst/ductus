@@ -1354,8 +1354,12 @@ mod tests {
         });
         let mut late = waits;
         late.sort();
-        // The median late by under half a millisecond (typically 0.05–0.1 ms).
-        assert!(late[late.len() / 2] < Duration::from_micros(500), "{late:?}");
+        // The median late by under half a millisecond (typically 0.05–0.1 ms). On Windows a
+        // high-resolution timer's own step is ~0.5 ms: medians of 0.5–0.65 ms there, none past 1.1
+        // (native, 2026-11-27); its scheduler's tick, which the timer waited on before `Wakeup`,
+        // made them 14 ms.
+        let bound = if cfg!(windows) { Duration::from_micros(1500) } else { Duration::from_micros(500) };
+        assert!(late[late.len() / 2] < bound, "{late:?}");
     }
 
     /// Lookups in flight together count once: two 5 ms waits side by side, then one alone, are
