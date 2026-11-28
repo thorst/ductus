@@ -84,10 +84,11 @@ for t in "finds ductus and activates" "the tests are found by interface" "an int
   "Debug from the Test Explorer stops at a breakpoint" "debugging works without launch.json" \
   "Deploy to dev: a running ductus dev takes a change in place" \
   "History and Debug this message: dev's reloads listed" \
-  "Promote…: a release file to test, then from test to prod"; do
+  "Promote…: a release file to test, then from test to prod" \
+  "Load test this interface: the bench's report, and what limits it"; do
   grep -q "✔ $t" "$LOG" || fail+=" \"$t\""
 done
-grep -q ' 11 passing' "$LOG" || fail+=" not-all-passing"
+grep -q ' 12 passing' "$LOG" || fail+=" not-all-passing"
 # A test added here but not to the list above still fails the demo.
 ! grep -qE '^ +[0-9]+ failing' "$LOG" || fail+=" failing"
 if [ -z "$fail" ]; then echo PASS; else echo "FAIL:$fail"; exit 1; fi

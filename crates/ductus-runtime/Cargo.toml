@@ -77,8 +77,9 @@ libc = "0.2.190"
 
 [target.'cfg(windows)'.dependencies]
 # Already in the tree (the CLI's, mllp's): a thread's CPU time (`GetThreadTimes`) for `ductus
-# bench interface`'s CPU per message (`load_test::thread_cpu`).
-windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_System_Threading"] }
+# bench interface`'s CPU per message (`load_test::thread_cpu`), and its mocks' high-resolution
+# timer (`load_test::Wakeup`; `Win32_Security` for the create calls' attribute pointer type).
+windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_Threading"] }
 
 [build-dependencies]
 flate2 = "1.1.10"

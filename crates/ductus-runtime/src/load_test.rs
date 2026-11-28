@@ -992,7 +992,119 @@ struct Timer(Arc<TimerShared>);
 
 struct TimerShared {
     due: std::sync::Mutex<TimerState>,
+    wakeup: Wakeup,
+}
+
+/// How the timer's thread sleeps until the next deadline or a new one. A condvar, except on
+/// Windows: there a condvar's (and `thread::sleep`'s) timeout ends on the scheduler's tick, ~15.6
+/// ms, so a 1 ms mock waited 14 (CI, 2026-11-27); a high-resolution waitable timer and an event
+/// for a new deadline end it on time, and nothing polls.
+struct Wakeup {
+    #[cfg(not(windows))]
     changed: std::sync::Condvar,
+    #[cfg(windows)]
+    win: windows_wakeup::Handles,
+}
+
+impl Wakeup {
+    fn new() -> Result<Self> {
+        Ok(Self {
+            #[cfg(not(windows))]
+            changed: std::sync::Condvar::new(),
+            #[cfg(windows)]
+            win: windows_wakeup::Handles::new()?,
+        })
+    }
+
+    /// A deadline was added, or the run is over: the sleeper looks again.
+    fn notify(&self) {
+        #[cfg(not(windows))]
+        self.changed.notify_one();
+        #[cfg(windows)]
+        self.win.notify();
+    }
+
+    /// Give up `state` and sleep for at most `for_`, or until [`Wakeup::notify`].
+    fn sleep(&self, state: std::sync::MutexGuard<'_, TimerState>, for_: Duration) {
+        #[cfg(not(windows))]
+        {
+            let _unused = self.changed.wait_timeout(state, for_).unwrap_or_else(|e| e.into_inner());
+        }
+        #[cfg(windows)]
+        {
+            // The event is auto-reset and stays set: a deadline added between here and the wait
+            // ends the wait at once, so none is missed.
+            drop(state);
+            self.win.sleep(for_);
+        }
+    }
+}
+
+#[cfg(windows)]
+mod windows_wakeup {
+    use anyhow::{Result, bail};
+    use std::time::Duration;
+    use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
+    use windows_sys::Win32::System::Threading::{
+        CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, CreateEventW, CreateWaitableTimerExW, INFINITE, SetEvent,
+        SetWaitableTimer, TIMER_ALL_ACCESS, WaitForMultipleObjects,
+    };
+
+    pub struct Handles {
+        timer: HANDLE,
+        event: HANDLE,
+    }
+
+    // SAFETY: both are kernel object handles, usable from any thread; closed once, in drop.
+    unsafe impl Send for Handles {}
+    unsafe impl Sync for Handles {}
+
+    impl Handles {
+        pub fn new() -> Result<Self> {
+            use std::ptr::null;
+            // SAFETY: no attributes, no name; the flags and access are the documented ones.
+            let mut timer = unsafe {
+                CreateWaitableTimerExW(null(), null(), CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS)
+            };
+            if timer.is_null() {
+                // Before Windows 10 1803 there's no high-resolution timer: the tick's, then.
+                // SAFETY: as above, without the flag.
+                timer = unsafe { CreateWaitableTimerExW(null(), null(), 0, TIMER_ALL_ACCESS) };
+            }
+            // SAFETY: an unnamed auto-reset event, not set.
+            let event = unsafe { CreateEventW(null(), 0, 0, null()) };
+            if timer.is_null() || event.is_null() {
+                bail!("can't make the mocks' timer: {}", std::io::Error::last_os_error());
+            }
+            Ok(Self { timer, event })
+        }
+
+        pub fn notify(&self) {
+            // SAFETY: our own event handle, open until drop.
+            unsafe { SetEvent(self.event) };
+        }
+
+        pub fn sleep(&self, for_: Duration) {
+            // Relative due times are negative, in 100 ns units.
+            let due = -((for_.as_nanos() / 100).clamp(1, i64::MAX as u128) as i64);
+            let handles = [self.timer, self.event];
+            // SAFETY: our own handles; no completion routine; the array outlives the wait.
+            unsafe {
+                SetWaitableTimer(self.timer, &due, 0, None, std::ptr::null(), 0);
+                WaitForMultipleObjects(2, handles.as_ptr(), 0, INFINITE);
+            }
+        }
+    }
+
+    impl Drop for Handles {
+        fn drop(&mut self) {
+            // SAFETY: opened in `new`, closed only here.
+            unsafe {
+                CloseHandle(self.timer);
+                CloseHandle(self.event);
+            }
+        }
+    }
 }
 
 #[derive(Default)]
@@ -1005,7 +1117,7 @@ struct TimerState {
 
 impl Timer {
     fn start() -> Result<Self> {
-        let shared = Arc::new(TimerShared { due: Default::default(), changed: Default::default() });
+        let shared = Arc::new(TimerShared { due: Default::default(), wakeup: Wakeup::new()? });
         let weak = Arc::downgrade(&shared);
         std::thread::Builder::new()
             .name("bench-timer".into())
@@ -1023,7 +1135,7 @@ impl Timer {
             let seq = state.seq;
             state.due.insert((at, seq), tell);
         }
-        self.0.changed.notify_one();
+        self.0.wakeup.notify();
         let _ = told.await;
     }
 
@@ -1044,7 +1156,7 @@ impl Timer {
             }
             // Wake at the next deadline, or within 100 ms to see whether the run is over.
             let next = state.due.keys().next().map_or(Duration::from_millis(100), |&(at, _)| at - now);
-            let _unused = shared.changed.wait_timeout(state, next).unwrap_or_else(|e| e.into_inner());
+            shared.wakeup.sleep(state, next);
         }
     }
 }
@@ -1054,7 +1166,7 @@ impl Drop for Timer {
         // The run's own handle (the last but the threads', which are gone by then) stops it.
         if Arc::strong_count(&self.0) == 1 {
             self.0.due.lock().unwrap_or_else(|e| e.into_inner()).stop = true;
-            self.0.changed.notify_one();
+            self.0.wakeup.notify();
         }
     }
 }

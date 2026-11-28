@@ -2,7 +2,8 @@
 // tests discovered at their lines, a run's results, a failure at its place with both values,
 // Problems on save, a breakpoint hit from the Test Explorer's Debug, a debug configuration with no
 // launch.json, Deploy to dev against a real `ductus dev`, the History view and Debug this message
-// (a message that dev stored, through the web UI's link) against it, and Promote… across two
+// (a message that dev stored, through the web UI's link) against it, Load test this interface
+// (`ductus bench interface`), and Promote… across two
 // engines in release mode (scripts/demo-vscode.sh starts them). Lines starting `measure:` are read by
 // scripts/demo-vscode.sh.
 import * as assert from "node:assert/strict";
