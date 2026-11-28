@@ -290,6 +290,7 @@ What an interface runs, and the deployment it came with.
 | `holds_interfaces` | true or false | False while the engine has lost the database connection that holds its interfaces: sending, file pickup and schedules wait until it is back (receiving goes on). |
 | `host` | text | The server's name. |
 | `interfaces` | number |  |
+| `isolates` | list of [`IsolateInfo`](#isolateinfo) | Each worker thread's JavaScript isolate, by thread name: its heap and garbage collections as of its last collection (an isolate that allocates nothing collects nothing: its numbers then stand still, since nothing changed). |
 | `others` | list of [`OtherEngine`](#otherengine) | Other engines running on this database, oldest first, and the interfaces each runs. An interface runs on one engine at a time. |
 | `releases` (optional) | [`ReleaseMode`](#releasemode) or null |  |
 | `resources` | list of [`ResourceCalls`](#resourcecalls) | Calls from interface code to each database and API in resources.yaml (`fetch`: URLs called directly), since the engine started. |
@@ -502,6 +503,24 @@ A variable of the engine's environment file whose value a deploy changes (0.7.5.
 | `state` | text | `running`, or `stopped` (its code ran away: its messages wait until it's fixed and the engine restarted). |
 | `stopped_reason` (optional) | text or null |  |
 | `workers` | number | Parallel workers (dedicated) or 1 (shared). |
+
+### `IsolateInfo`
+
+A worker thread's isolate (`GET /engine` `isolates`).
+
+| Field | Type | |
+|---|---|---|
+| `allocated_bytes` | number | Bytes it has allocated since it was made. |
+| `heap_limit_bytes` | number | Its heap limit (`isolates.heap_mb`, raised by a quarter each time code that reached it is stopped). |
+| `heap_total_bytes` | number | Bytes V8 has reserved for its heap. |
+| `heap_used_bytes` | number | Bytes its objects take after the last collection. |
+| `interface` (optional) | text or null | The one interface it runs (a dedicated or debugged thread); none for a pool thread, whose isolate holds all its interfaces (its heap can't be told apart per interface). |
+| `major_collections` | number | Major (full) collections and the time they paused its code. |
+| `major_pause_ms` | number |  |
+| `minor_collections` | number | Minor (young generation) collections and the time they paused its code. |
+| `minor_pause_ms` | number |  |
+| `old_live_bytes` | number | The old generation right after the last full collection: what the code keeps (0 before the first one). Rising across hours of steady traffic means code keeps something per message. |
+| `thread` | text | `pool-N` (a shared pool thread), `<interface>-wN` (a dedicated interface's worker N) or `<interface>-debug` (`ductus dev --inspect`). |
 
 ### `LaneInfo`
 

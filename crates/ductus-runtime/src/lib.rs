@@ -951,6 +951,7 @@ async fn run_engine(root: &Path, database_url: &str, mut options: EngineOptions)
         ),
         retention,
         calls: services.calls(),
+        isolates: services.isolates(),
         activity,
         zone: settings.timezone,
         auth: settings.auth.clone(),

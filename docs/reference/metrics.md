@@ -33,3 +33,9 @@ Counters and histograms count from when the engine started (`rate()` and `increa
 | `ductus_http_request_errors_total` | counter | `interface` | Respond-mode HTTP requests that failed. |
 | `ductus_resource_call_seconds` | histogram | `kind`, `resource` | Calls from interface code to a database or API. |
 | `ductus_resource_call_errors_total` | counter | `kind`, `resource` | Calls that failed (network, SQL, timeout). |
+| `ductus_heap_used_bytes` | gauge | `thread`, `interface` | Bytes the isolate's JavaScript objects take after its last garbage collection (live, and garbage the last minor collection didn't reach). One series per worker thread (`thread`); `interface` only on a dedicated interface's own thread: a shared pool thread's isolate holds all its interfaces together. |
+| `ductus_heap_limit_bytes` | gauge | `thread`, `interface` | The isolate's heap limit (`isolates.heap_mb`; raised by a quarter each time code that reached it is stopped). |
+| `ductus_heap_old_live_bytes` | gauge | `thread`, `interface` | The old generation right after the last full collection: what the code keeps. Rising across hours of steady traffic means code keeps something per message. 0 before the first full collection. |
+| `ductus_heap_allocated_bytes_total` | counter | `thread`, `interface` | Bytes the isolate has allocated, as of its last collection (its rate over messages' is bytes allocated per message). |
+| `ductus_gc_collections_total` | counter | `thread`, `interface`, `kind` | Garbage collections, by kind: `minor` (the young generation: frequent, short), `major` (everything: rarer, longer). |
+| `ductus_gc_pause_seconds_total` | counter | `thread`, `interface`, `kind` | Time the isolate's code was paused by garbage collection, by kind (incremental marking between pauses not included). |

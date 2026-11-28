@@ -188,6 +188,10 @@ pub struct EngineInfo {
     /// Calls from interface code to each database and API in resources.yaml (`fetch`: URLs
     /// called directly), since the engine started.
     resources: Vec<ResourceCalls>,
+    /// Each worker thread's JavaScript isolate, by thread name: its heap and garbage collections as
+    /// of its last collection (an isolate that allocates nothing collects nothing: its numbers
+    /// then stand still, since nothing changed).
+    isolates: Vec<IsolateInfo>,
     /// False while the engine has lost the database connection that holds its interfaces:
     /// sending, file pickup and schedules wait until it is back (receiving goes on).
     holds_interfaces: bool,
@@ -354,6 +358,56 @@ pub struct ResourceCalls {
     errors: u64,
 }
 
+/// A worker thread's isolate (`GET /engine` `isolates`).
+#[derive(Serialize, ToSchema)]
+pub struct IsolateInfo {
+    /// `pool-N` (a shared pool thread), `<interface>-wN` (a dedicated interface's worker N) or
+    /// `<interface>-debug` (`ductus dev --inspect`).
+    thread: String,
+    /// The one interface it runs (a dedicated or debugged thread); none for a pool thread, whose
+    /// isolate holds all its interfaces (its heap can't be told apart per interface).
+    interface: Option<String>,
+    /// Bytes its objects take after the last collection.
+    heap_used_bytes: u64,
+    /// Bytes V8 has reserved for its heap.
+    heap_total_bytes: u64,
+    /// Its heap limit (`isolates.heap_mb`, raised by a quarter each time code that reached it is
+    /// stopped).
+    heap_limit_bytes: u64,
+    /// The old generation right after the last full collection: what the code keeps (0 before
+    /// the first one). Rising across hours of steady traffic means code keeps something per message.
+    old_live_bytes: u64,
+    /// Bytes it has allocated since it was made.
+    allocated_bytes: u64,
+    /// Minor (young generation) collections and the time they paused its code.
+    minor_collections: u64,
+    minor_pause_ms: f64,
+    /// Major (full) collections and the time they paused its code.
+    major_collections: u64,
+    major_pause_ms: f64,
+}
+
+impl IsolateInfo {
+    fn of(i: stats::IsolateHeap) -> Self {
+        let h = i.heap;
+        let ms = |nanos: u64| nanos as f64 / 1e6;
+        let (minor, major) = (ductus_script::GcKind::Minor as usize, ductus_script::GcKind::Major as usize);
+        Self {
+            thread: i.thread,
+            interface: i.interface,
+            heap_used_bytes: h.used,
+            heap_total_bytes: h.total,
+            heap_limit_bytes: h.limit,
+            old_live_bytes: h.old_live,
+            allocated_bytes: h.allocated,
+            minor_collections: h.collections[minor],
+            minor_pause_ms: ms(h.pause_nanos[minor]),
+            major_collections: h.collections[major],
+            major_pause_ms: ms(h.pause_nanos[major]),
+        }
+    }
+}
+
 /// The engine: version, environment, uptime, drain state.
 #[utoipa::path(get, path = "/engine", tag = "engine", responses((status = 200, body = EngineInfo)))]
 async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
@@ -379,6 +433,7 @@ async fn engine(engine: Eng, _caller: Caller) -> ApiResult<EngineInfo> {
                 errors: stats::get(&s.errors),
             })
             .collect(),
+        isolates: engine.isolates.read().into_iter().map(IsolateInfo::of).collect(),
         holds_interfaces: engine.ownership.is_held(),
         others: others
             .into_iter()

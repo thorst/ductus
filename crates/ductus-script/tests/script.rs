@@ -1290,6 +1290,65 @@ fn heap_exhaustion_is_stopped() {
     }
 }
 
+/// The heap watch (`Isolate::heap_watch`, V8's GC callbacks): collections counted by kind with
+/// their pauses, the heap as of the last one, readable from another thread; and the old generation
+/// after a full collection grows with what code keeps, not with what it only allocates.
+#[test]
+fn the_heap_watch_counts_collections_and_sees_what_code_keeps() {
+    let dir = project(&[
+        (
+            "churn/transform.ts",
+            "export function transform(m: string) { let n = 0; for (let i = 0; i < 200; i++) n += [i, String(i), { i }].length; return n > 0 ? m : ''; }",
+        ),
+        (
+            "keep/transform.ts",
+            "const kept: string[] = []; export function transform(m: string) { kept.push(m + kept.length); return m; }",
+        ),
+    ]);
+    let rt = rt();
+    let _guard = rt.enter();
+    let mut host = Isolate::host();
+    let watch = host.heap_watch();
+    let made = watch.read();
+    assert!(made.used > 0 && made.total >= made.used, "{made:?}");
+    assert_eq!(made.limit >> 20, ductus_script::DEFAULT_HEAP_MB as u64, "{made:?}");
+    let churn = rt.block_on(host.add_interface(&dir.path().join("churn/transform.ts"))).unwrap();
+    let keep = rt.block_on(host.add_interface(&dir.path().join("keep/transform.ts"))).unwrap();
+    let run = |host: &mut Isolate, id, times| {
+        for _ in 0..times {
+            assert_eq!(rt.block_on(host.transform_with(id, ADT)).unwrap().as_deref(), Some(ADT));
+        }
+    };
+
+    run(&mut host, churn, 3_000);
+    let churned = watch.read();
+    let minor = ductus_script::GcKind::Minor as usize;
+    let major = ductus_script::GcKind::Major as usize;
+    assert!(churned.collections[minor] > made.collections[minor], "garbage gets collected: {churned:?}");
+    assert!(churned.pause_nanos[minor] > made.pause_nanos[minor], "{churned:?}");
+    assert!(churned.allocated > made.allocated + (1 << 20), "{churned:?}");
+
+    host.heap_used_collected(); // a full collection
+    let before = watch.read();
+    assert!(before.collections[major] > churned.collections[major], "{before:?}");
+    assert!(before.old_live > 0, "{before:?}");
+
+    run(&mut host, churn, 20_000);
+    host.heap_used_collected();
+    let after_churn = watch.read();
+    run(&mut host, keep, 20_000);
+    host.heap_used_collected();
+    let after_keep = watch.read();
+    let grew = |a: &ductus_script::Heap, b: &ductus_script::Heap| b.old_live.saturating_sub(a.old_live);
+    assert!(grew(&before, &after_churn) < 512 << 10, "only garbage: {before:?} -> {after_churn:?}");
+    // 20,000 strings of ~95 characters kept, and the array holding them.
+    assert!(grew(&after_churn, &after_keep) > 2 << 20, "kept: {after_churn:?} -> {after_keep:?}");
+
+    // Other threads read it without the isolate's.
+    let elsewhere = std::thread::spawn(move || watch.read()).join().unwrap();
+    assert_eq!(elsewhere, after_keep);
+}
+
 #[test]
 fn endless_loops_while_loading_are_reported() {
     let dir = project(&[("transform.ts", "while (true) {}\nexport function transform(m: unknown) { return m; }")]);

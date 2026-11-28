@@ -133,6 +133,8 @@ pub struct Engine {
     pub retention: Arc<crate::retention::Retention>,
     /// Calls to each database and API in resources.yaml (`fetch` for URLs called directly).
     pub calls: Arc<crate::stats::ResourceCalls>,
+    /// Each worker thread's isolate: its heap and collections, as of its last collection.
+    pub isolates: Arc<crate::stats::Isolates>,
     /// When each interface was first watched, and every destination's pause switch.
     pub activity: Activity,
     /// ductus.yaml's `timezone`: the clock monitor hours and deadlines are read on, and times in
@@ -230,6 +232,7 @@ pub struct Parts {
     pub kept: crate::in_place::Kept,
     pub retention: Arc<crate::retention::Retention>,
     pub calls: Arc<crate::stats::ResourceCalls>,
+    pub isolates: Arc<crate::stats::Isolates>,
     pub activity: Activity,
     pub zone: ductus_core::zone::Zone,
     pub auth: ductus_core::settings::AuthSettings,
@@ -264,6 +267,7 @@ impl Engine {
             kept,
             retention,
             calls,
+            isolates,
             activity,
             zone,
             auth,
@@ -301,6 +305,7 @@ impl Engine {
             kept,
             retention,
             calls,
+            isolates,
             activity,
             zone,
             drain: watch::Sender::new(DrainState::Accepting),

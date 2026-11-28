@@ -10,6 +10,7 @@
 mod analysis;
 pub mod errors;
 mod guard;
+mod heap;
 mod inspect;
 mod loader;
 mod ops;
@@ -17,6 +18,7 @@ pub mod tsc;
 
 pub use analysis::{Analysis, ConsoleCall, Diagnostic, Export, ResourceReference, Wait, analyze_syntax};
 pub use guard::{Cause, DebugSwitch};
+pub use heap::{GcKind, Heap, HeapWatch};
 pub use inspect::{FromIsolate, InspectorSessions, ToIsolate};
 pub use ops::{BoxFuture, FetchRequest, FetchResponse, KILL, QUARANTINE, Services, TRANSIENT};
 
@@ -197,6 +199,9 @@ pub struct Isolate {
     loaded: Rc<loader::Loaded>,
     /// The generation project files load as from now on (`set_generation`).
     generation: u64,
+    /// What V8's GC callbacks write to (`heap_watch`). Last: dropped after `runtime`, whose
+    /// isolate calls into it.
+    gc: Box<heap::GcCallbacks>,
 }
 
 /// Replaces `Date` and `Math.random` so that a replay computes what the engine computed then, and
@@ -264,6 +269,7 @@ impl Isolate {
         let context = runtime.main_context();
         let guard = Guard::new(runtime.v8_isolate(), context, heap_mb);
         runtime.add_near_heap_limit_callback(guard.heap_callback());
+        let gc = heap::GcCallbacks::install(runtime.v8_isolate());
         Self {
             runtime,
             entries: Vec::new(),
@@ -273,7 +279,15 @@ impl Isolate {
             inspector,
             loaded,
             generation: 0,
+            gc,
         }
+    }
+
+    /// This isolate's heap and garbage collections, as of its last collection: the reading other
+    /// threads can take without waiting for this one (`HeapWatch::read`). It outlives the isolate
+    /// (its numbers then stay as they were last).
+    pub fn heap_watch(&self) -> std::sync::Arc<HeapWatch> {
+        self.gc.watch()
     }
 
     /// The generation the next loads (`add_functions`, `code_files`) name project files by

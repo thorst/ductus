@@ -62,6 +62,8 @@ pub struct SharedServices {
     api_http: BTreeMap<String, reqwest::Client>,
     /// Each resource's calls: counted and timed.
     calls: Arc<ResourceCalls>,
+    /// Each worker thread's isolate: its heap and collections (`stats::Isolates`).
+    isolates: Arc<crate::stats::Isolates>,
     /// Database and HTTP calls run on the engine's main (multi-threaded) runtime. A socket is served by
     /// the runtime that opened it; if a worker thread's runtime opened it, its replies would
     /// wait while that thread is busy running JavaScript.
@@ -120,6 +122,7 @@ impl SharedServices {
             http: http_client(),
             api_http,
             calls: Arc::new(ResourceCalls::new(resources.databases.keys().cloned(), resources.apis.keys().cloned())),
+            isolates: Arc::default(),
             io: tokio::runtime::Handle::current(),
         })
     }
@@ -138,6 +141,11 @@ impl SharedServices {
     /// Each resource's call counts and timings (for the API and `/metrics`).
     pub(crate) fn calls(&self) -> Arc<ResourceCalls> {
         self.calls.clone()
+    }
+
+    /// Each worker thread's isolate, as of its last collection (for the API and `/metrics`).
+    pub(crate) fn isolates(&self) -> Arc<crate::stats::Isolates> {
+        self.isolates.clone()
     }
 
     /// Run a call, timed under `stats` when it's a known resource.
@@ -446,6 +454,11 @@ impl EngineServices {
     /// Which `console` lines from interface code reach the log (the environment's `console:`).
     pub(crate) fn console(&self) -> ductus_core::ConsoleLevel {
         self.shared.environment().console()
+    }
+
+    /// Where a worker thread registers its isolate's heap watch.
+    pub(crate) fn isolates(&self) -> Arc<crate::stats::Isolates> {
+        self.shared.isolates()
     }
 }
 

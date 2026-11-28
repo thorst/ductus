@@ -194,6 +194,42 @@ pub const METRICS: &[Metric] = &[
         labels: "kind, resource",
         help: "Calls that failed (network, SQL, timeout).",
     },
+    Metric {
+        name: "ductus_heap_used_bytes",
+        kind: "gauge",
+        labels: "thread, interface",
+        help: "Bytes the isolate's JavaScript objects take after its last garbage collection (live, and garbage the last minor collection didn't reach). One series per worker thread (`thread`); `interface` only on a dedicated interface's own thread: a shared pool thread's isolate holds all its interfaces together.",
+    },
+    Metric {
+        name: "ductus_heap_limit_bytes",
+        kind: "gauge",
+        labels: "thread, interface",
+        help: "The isolate's heap limit (`isolates.heap_mb`; raised by a quarter each time code that reached it is stopped).",
+    },
+    Metric {
+        name: "ductus_heap_old_live_bytes",
+        kind: "gauge",
+        labels: "thread, interface",
+        help: "The old generation right after the last full collection: what the code keeps. Rising across hours of steady traffic means code keeps something per message. 0 before the first full collection.",
+    },
+    Metric {
+        name: "ductus_heap_allocated_bytes_total",
+        kind: "counter",
+        labels: "thread, interface",
+        help: "Bytes the isolate has allocated, as of its last collection (its rate over messages' is bytes allocated per message).",
+    },
+    Metric {
+        name: "ductus_gc_collections_total",
+        kind: "counter",
+        labels: "thread, interface, kind",
+        help: "Garbage collections, by kind: `minor` (the young generation: frequent, short), `major` (everything: rarer, longer).",
+    },
+    Metric {
+        name: "ductus_gc_pause_seconds_total",
+        kind: "counter",
+        labels: "thread, interface, kind",
+        help: "Time the isolate's code was paused by garbage collection, by kind (incremental marking between pauses not included).",
+    },
 ];
 
 /// Start a family from `METRICS`.
@@ -416,6 +452,38 @@ async fn metrics(engine: Eng, _caller: Caller) -> Result<impl IntoResponse, ApiE
     for (kind, name, s) in engine.calls.all() {
         let labels = format!("kind=\"{kind}\",resource=\"{}\"", label(name));
         out.sample("ductus_resource_call_errors_total", &labels, stats::get(&s.errors));
+    }
+
+    // Each isolate as of its last collection (written by V8's GC callbacks: nothing waits here).
+    let isolates = engine.isolates.read();
+    let thread = |i: &stats::IsolateHeap| match &i.interface {
+        Some(interface) => format!("thread=\"{}\",interface=\"{}\"", label(&i.thread), label(interface)),
+        None => format!("thread=\"{}\"", label(&i.thread)),
+    };
+    for (name, value) in [
+        ("ductus_heap_used_bytes", (|h: &ductus_script::Heap| h.used) as fn(&ductus_script::Heap) -> u64),
+        ("ductus_heap_limit_bytes", |h| h.limit),
+        ("ductus_heap_old_live_bytes", |h| h.old_live),
+        ("ductus_heap_allocated_bytes_total", |h| h.allocated),
+    ] {
+        family(&mut out, name);
+        for i in &isolates {
+            out.sample(name, &thread(i), value(&i.heap));
+        }
+    }
+    family(&mut out, "ductus_gc_collections_total");
+    for i in &isolates {
+        for kind in ductus_script::GcKind::ALL {
+            let labels = format!("{},kind=\"{}\"", thread(i), kind.label());
+            out.sample("ductus_gc_collections_total", &labels, i.heap.collections[kind as usize]);
+        }
+    }
+    family(&mut out, "ductus_gc_pause_seconds_total");
+    for i in &isolates {
+        for kind in ductus_script::GcKind::ALL {
+            let labels = format!("{},kind=\"{}\"", thread(i), kind.label());
+            out.sample("ductus_gc_pause_seconds_total", &labels, i.heap.pause_nanos[kind as usize] as f64 / 1e9);
+        }
     }
 
     Ok(([(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")], out.finish()))

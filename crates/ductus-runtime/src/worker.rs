@@ -194,6 +194,12 @@ pub fn spawn_thread(
             local.block_on(&runtime, async move {
                 let kept_services = services.clone();
                 let mut host = Isolate::with_inspector(Some(Rc::new(services)), heap_mb, inspector.is_some());
+                // One interface's own thread (dedicated, or debugged) is labelled with it; a pool
+                // thread's heap is all its interfaces' together.
+                let own = jobs
+                    .first()
+                    .filter(|j| inspector.is_some() || j.config.isolation == ductus_core::config::Isolation::Dedicated);
+                kept_services.isolates().add(&name, own.map(|j| j.config.name.clone()), &host.heap_watch());
                 let logging = jobs.first().map(|job| {
                     host.console_to_log(job.config.project_root(), kept_services.console());
                     if let Some(inspector) = &inspector {
@@ -1366,9 +1372,12 @@ mod tests {
             answered
         };
 
+        let isolates = services.isolates();
         let (old, old_handle) = thread("pool-0");
         let (calls, requests) = mpsc::channel(16);
         load(&old, &one, Some(requests)).await.unwrap().unwrap();
+        let watched: Vec<_> = isolates.read().into_iter().map(|i| (i.thread, i.interface)).collect();
+        assert_eq!(watched, [("pool-0".to_string(), None)], "its isolate is watched once it's made");
         assert!(start(&old, None).await.unwrap(), "it held what it loaded");
         assert!(!start(&old, None).await.unwrap(), "and holds it no more");
         assert!(call(&calls).await.contains("one"));
@@ -1405,6 +1414,7 @@ mod tests {
             .expect("the old thread ends")
             .unwrap();
         assert!(call(&calls).await.contains("two"));
+        assert_eq!(isolates.read().len(), 1, "the new thread's isolate alone: the old one ended");
 
         stop.cancel();
         drop((calls, new));

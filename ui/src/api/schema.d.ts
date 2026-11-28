@@ -2148,6 +2148,12 @@ export interface components {
             host: string;
             interfaces: number;
             /**
+             * @description Each worker thread's JavaScript isolate, by thread name: its heap and garbage collections as
+             *     of its last collection (an isolate that allocates nothing collects nothing: its numbers
+             *     then stand still, since nothing changed).
+             */
+            isolates: components["schemas"]["IsolateInfo"][];
+            /**
              * @description Other engines running on this database, oldest first, and the interfaces each runs.
              *     An interface runs on one engine at a time.
              */
@@ -2597,6 +2603,60 @@ export interface components {
              * @description Parallel workers (dedicated) or 1 (shared).
              */
             workers: number;
+        };
+        /** @description A worker thread's isolate (`GET /engine` `isolates`). */
+        IsolateInfo: {
+            /**
+             * Format: int64
+             * @description Bytes it has allocated since it was made.
+             */
+            allocated_bytes: number;
+            /**
+             * Format: int64
+             * @description Its heap limit (`isolates.heap_mb`, raised by a quarter each time code that reached it is
+             *     stopped).
+             */
+            heap_limit_bytes: number;
+            /**
+             * Format: int64
+             * @description Bytes V8 has reserved for its heap.
+             */
+            heap_total_bytes: number;
+            /**
+             * Format: int64
+             * @description Bytes its objects take after the last collection.
+             */
+            heap_used_bytes: number;
+            /**
+             * @description The one interface it runs (a dedicated or debugged thread); none for a pool thread, whose
+             *     isolate holds all its interfaces (its heap can't be told apart per interface).
+             */
+            interface?: string | null;
+            /**
+             * Format: int64
+             * @description Major (full) collections and the time they paused its code.
+             */
+            major_collections: number;
+            /** Format: double */
+            major_pause_ms: number;
+            /**
+             * Format: int64
+             * @description Minor (young generation) collections and the time they paused its code.
+             */
+            minor_collections: number;
+            /** Format: double */
+            minor_pause_ms: number;
+            /**
+             * Format: int64
+             * @description The old generation right after the last full collection: what the code keeps (0 before
+             *     the first one). Rising across hours of steady traffic means code keeps something per message.
+             */
+            old_live_bytes: number;
+            /**
+             * @description `pool-N` (a shared pool thread), `<interface>-wN` (a dedicated interface's worker N) or
+             *     `<interface>-debug` (`ductus dev --inspect`).
+             */
+            thread: string;
         };
         KeptPartition: {
             /** @description Interfaces that now keep their messages longer, with messages still in it. */

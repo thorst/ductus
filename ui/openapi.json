@@ -5681,6 +5681,7 @@
           "stopped",
           "drain",
           "resources",
+          "isolates",
           "holds_interfaces",
           "others"
         ],
@@ -5724,6 +5725,13 @@
           "interfaces": {
             "type": "integer",
             "minimum": 0
+          },
+          "isolates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/IsolateInfo"
+            },
+            "description": "Each worker thread's JavaScript isolate, by thread name: its heap and garbage collections as\nof its last collection (an isolate that allocates nothing collects nothing: its numbers\nthen stand still, since nothing changed)."
           },
           "others": {
             "type": "array",
@@ -6900,6 +6908,85 @@
             "format": "int32",
             "description": "Parallel workers (dedicated) or 1 (shared).",
             "minimum": 0
+          }
+        }
+      },
+      "IsolateInfo": {
+        "type": "object",
+        "description": "A worker thread's isolate (`GET /engine` `isolates`).",
+        "required": [
+          "thread",
+          "heap_used_bytes",
+          "heap_total_bytes",
+          "heap_limit_bytes",
+          "old_live_bytes",
+          "allocated_bytes",
+          "minor_collections",
+          "minor_pause_ms",
+          "major_collections",
+          "major_pause_ms"
+        ],
+        "properties": {
+          "allocated_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes it has allocated since it was made.",
+            "minimum": 0
+          },
+          "heap_limit_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Its heap limit (`isolates.heap_mb`, raised by a quarter each time code that reached it is\nstopped).",
+            "minimum": 0
+          },
+          "heap_total_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes V8 has reserved for its heap.",
+            "minimum": 0
+          },
+          "heap_used_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Bytes its objects take after the last collection.",
+            "minimum": 0
+          },
+          "interface": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The one interface it runs (a dedicated or debugged thread); none for a pool thread, whose\nisolate holds all its interfaces (its heap can't be told apart per interface)."
+          },
+          "major_collections": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Major (full) collections and the time they paused its code.",
+            "minimum": 0
+          },
+          "major_pause_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "minor_collections": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Minor (young generation) collections and the time they paused its code.",
+            "minimum": 0
+          },
+          "minor_pause_ms": {
+            "type": "number",
+            "format": "double"
+          },
+          "old_live_bytes": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The old generation right after the last full collection: what the code keeps (0 before\nthe first one). Rising across hours of steady traffic means code keeps something per message.",
+            "minimum": 0
+          },
+          "thread": {
+            "type": "string",
+            "description": "`pool-N` (a shared pool thread), `<interface>-wN` (a dedicated interface's worker N) or\n`<interface>-debug` (`ductus dev --inspect`)."
           }
         }
       },

@@ -295,6 +295,54 @@ impl ResourceCalls {
     }
 }
 
+/// Every worker thread's isolate, by its heap watch (`ductus_script::HeapWatch`: V8's GC callbacks
+/// write it on the isolate's thread, at each collection). A thread registers once, when its
+/// isolate is made; a watch whose isolate has ended is dropped at the next read. Nothing here runs
+/// on its own: reading it is what `/metrics` and `GET /engine` do.
+#[derive(Default)]
+pub struct Isolates(std::sync::Mutex<Vec<Watched>>);
+
+struct Watched {
+    thread: String,
+    interface: Option<String>,
+    watch: std::sync::Weak<ductus_script::HeapWatch>,
+}
+
+/// One isolate's heap as `Isolates::read` gives it.
+pub struct IsolateHeap {
+    /// Its worker thread: `pool-N` (the shared pool), `<interface>-wN` (a dedicated interface's
+    /// worker N), `<interface>-debug` (`ductus dev --inspect`).
+    pub thread: String,
+    /// The one interface it runs (a dedicated or debugged thread); None for a pool thread, whose
+    /// heap is all its interfaces' together.
+    pub interface: Option<String>,
+    pub heap: ductus_script::Heap,
+}
+
+impl Isolates {
+    /// Watch a thread's isolate from now on. A renewed thread (`in_place::Kept::renew`: the same
+    /// name, a fresh isolate, no interface known yet) takes the interface of the one it replaces.
+    pub fn add(&self, thread: &str, interface: Option<String>, watch: &std::sync::Arc<ductus_script::HeapWatch>) {
+        let mut all = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        let interface = interface.or_else(|| all.iter().rev().find(|w| w.thread == thread)?.interface.clone());
+        all.push(Watched { thread: thread.to_string(), interface, watch: std::sync::Arc::downgrade(watch) });
+    }
+
+    /// The isolates alive, by thread name, each as of its last collection. While a renewal runs
+    /// the old thread and its replacement both live: the replacement (the newer) is given.
+    pub fn read(&self) -> Vec<IsolateHeap> {
+        let mut all = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        all.retain(|w| w.watch.strong_count() > 0);
+        let mut newest = std::collections::BTreeMap::new();
+        for w in all.iter() {
+            if let Some(watch) = w.watch.upgrade() {
+                newest.insert(w.thread.clone(), (w.interface.clone(), watch.read()));
+            }
+        }
+        newest.into_iter().map(|(thread, (interface, heap))| IsolateHeap { thread, interface, heap }).collect()
+    }
+}
+
 pub fn add(counter: &AtomicU64) {
     counter.fetch_add(1, Relaxed);
 }
@@ -352,6 +400,28 @@ impl Default for Exposition {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The isolates' registry: by thread name, a renewal's new isolate (same name, no interface
+    /// known) taking the old one's interface and given instead of it while both live, an ended
+    /// isolate gone at the next read.
+    #[test]
+    fn isolates_are_read_by_thread_and_a_renewed_one_replaces_its_old() {
+        use ductus_script::HeapWatch;
+        use std::sync::Arc;
+        let isolates = Isolates::default();
+        let (pool, old, new) = (Arc::new(HeapWatch::default()), Arc::new(HeapWatch::default()), Arc::default());
+        isolates.add("pool-0", None, &pool);
+        isolates.add("adt-w0", Some("adt".into()), &old);
+        isolates.add("adt-w0", None, &new);
+        let read = || isolates.read().into_iter().map(|i| (i.thread, i.interface)).collect::<Vec<_>>();
+        let both = [("adt-w0".to_string(), Some("adt".to_string())), ("pool-0".to_string(), None)];
+        assert_eq!(read(), both);
+        drop(old);
+        assert_eq!(read(), both, "the new one, with the old one's interface");
+        assert_eq!(isolates.0.lock().unwrap().len(), 2, "the ended one is let go");
+        drop(new);
+        assert_eq!(read(), [("pool-0".to_string(), None)]);
+    }
 
     #[test]
     fn quantiles_interpolate_inside_their_bucket() {

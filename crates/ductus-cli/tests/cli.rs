@@ -2863,6 +2863,11 @@ async fn the_api_shows_the_engine_and_drains_it() {
         "# TYPE ductus_delivery_latency_seconds histogram
 "
         .to_string(),
+        // The one pool thread's isolate (`--threads 1`), read as of its last collection.
+        "ductus_heap_used_bytes{thread=\"pool-0\"} ".to_string(),
+        format!("ductus_heap_limit_bytes{{thread=\"pool-0\"}} {}\n", 512 << 20),
+        "ductus_gc_collections_total{thread=\"pool-0\",kind=\"major\"} ".to_string(),
+        "ductus_gc_pause_seconds_total{thread=\"pool-0\",kind=\"minor\"} ".to_string(),
     ] {
         assert!(
             metrics.contains(&line),
@@ -2870,6 +2875,12 @@ async fn the_api_shows_the_engine_and_drains_it() {
 {metrics}"
         );
     }
+    let isolates = json("/engine", &viewer).await["isolates"].clone();
+    assert_eq!(isolates.as_array().unwrap().len(), 1, "{isolates}");
+    let pool = &isolates[0];
+    assert_eq!((&pool["thread"], &pool["interface"]), (&"pool-0".into(), &serde_json::Value::Null), "{pool}");
+    assert_eq!(pool["heap_limit_bytes"], 512 << 20, "{pool}");
+    assert!(pool["heap_used_bytes"].as_u64().unwrap() > 0 && pool["minor_pause_ms"].is_f64(), "{pool}");
 
     // The message browser.
     let page = json(&format!("/interfaces/{name}/messages?limit=2"), &viewer).await;
