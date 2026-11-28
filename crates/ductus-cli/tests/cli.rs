@@ -8801,10 +8801,13 @@ fn bench_interface_runs_the_code_with_its_lookups_mocked() {
     // The code's own time kept busy, from a second run with the mocks answering at once.
     let own = load["own_warm_ms"].as_f64().unwrap_or_else(|| panic!("measured kept busy: {load}"));
     assert!(own > 0.0 && own < lookups_ms / 2.0, "{load}");
-    // 150/s is more than one thread does with two 5 ms waits a message (~90/s): the threads it
-    // takes, and the key it needs for them; with `--peak` under its rate, a share of it.
+    // 150/s is more than one thread does with two 5 ms waits a message (~90/s, 41 on a loaded CI
+    // runner): the threads that rate takes, and the key it needs for them; with `--peak` under its
+    // rate, a share of it.
     let peak = document["verdict"][1].as_str().unwrap();
-    assert!(peak.starts_with("At 150/s (a busy feed's peak") && peak.contains("needs about 2 threads"), "{peak}");
+    let threads = (150.0 / load["per_thread_per_second"].as_f64().unwrap()).ceil();
+    assert!(peak.starts_with("At 150/s (a busy feed's peak"), "{peak}");
+    assert!(threads >= 2.0 && peak.contains(&format!("needs about {threads} threads")), "{peak}");
     assert!(peak.contains("give it an ordering key"), "{peak}");
     let (ok, out) = bench(&["--count", "20", "--mock", "db=1ms", "--rows", "provider_db=rows.json", "--peak", "10"]);
     assert!(ok && out.contains("  → At your peak of 10/s it uses "), "{out}");
