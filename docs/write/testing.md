@@ -18,12 +18,16 @@ adt-to-billing
   ✓ the NPI is looked up once an hour, not once a message (2ms)
   ✓ a provider the database doesn't know is quarantined (0ms)
 …
-26 passed, 0 failed
+28 passed, 0 failed
 ```
 
 It exits 1 when a test fails, so it belongs in the checks every change goes through (a pull
 request's CI, a script before deploying), next to `ductus validate --env prod`, which type-checks
 the code and checks the configuration against that environment.
+
+Tests say the code is right; how fast it is, and what limits it, is
+[`ductus bench interface`](load-testing.md)'s: the same code on its fixtures in a loop, its
+lookups mocked at a set latency.
 
 **In VS Code**, the [Ductus extension](vscode.md) shows the same tests in the Test Explorer, runs
 or debugs one test, an interface or all of them from there or from the ▷ beside each `test(...)`,

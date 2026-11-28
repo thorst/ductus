@@ -14,6 +14,7 @@ already look in VS Code:
 | **Promote…** (Command Palette) | a release to test or prod, from the project's release files or from the engine it's on, with the gate's report and the outcome, as [`ductus deploy`](../operate/releases.md) does it |
 | **Ductus History** (in the Explorer) | who changed the open file's interface, what and why, newest first: commits, deployments, the audit log, its documentation, as [`ductus history`](../operate/deployments.md) shows it, from your `ductus dev`, an engine or the folder |
 | **Debug in VS Code** (a message's page in the web UI), or **Ductus: Debug a stored message…** | a message an engine stored, run through your copy of the code under the debugger, stopping at your breakpoints; nothing is sent |
+| **Ductus: Load test this interface** (Command Palette) | the open file's interface's code in a loop on its fixtures, lookups mocked: its report, and what limits it, as [`ductus bench interface`](load-testing.md) says it |
 
 It runs the `ductus` you already have, through the same `--json` outputs that tools and CI read
 ([for editors and CI](testing.md#for-editors-and-ci-json)), so what it shows is what `ductus test`
@@ -270,6 +271,27 @@ and the message; it opens in the project that has that interface (several: you c
 address, and adds it to your user settings under the name you give
 ([nuance](../nuances/debugging.md#a-debug-in-vs-code-link-opens-only-engines-you-named-level-2)).
 
+## Load test this interface
+
+With a file of an interface open, **Ductus: Load test this interface** (Command Palette; with no
+interface file open, you pick one) runs, in the project's folder:
+
+```text
+ductus bench interface results-to-fhir --env dev
+```
+
+Its report appears in **View → Output → Ductus load test** as the CLI prints it, line by line,
+while a notification says it's running (**Cancel** stops it). When it ends, a notification says
+what limits the interface: "results-to-fhir: The code is the limit: 24,449 msg/s a thread; …".
+It takes about 6 seconds (a second's warm-up, five measured; one more after it when mocked
+lookups were the limit). How to read the report, give the lookups rows, and what to do with it:
+[Load testing an interface](load-testing.md).
+
+The lookups are always mocked here: `--real` asks before it loads a test environment's systems,
+so run it from a terminal
+([nuance](../nuances/load-testing.md#lookups-are-mocks-unless---real-and---real-never-runs-against-production-by-name-level-2)).
+For `--rows`, `--peak` or `--threads`, run it from a terminal too.
+
 ## Settings
 
 | Setting | Default | What it does |
@@ -311,7 +333,8 @@ save and gone once fixed, `lab.ts`'s `used by adt-in → lab` and F12 from `scri
 **Ductus: debug these tests** with no `launch.json`, **Deploy to dev** against a real `ductus
 dev`, by the command and on save, the **History** of an interface from that `ductus dev` (the two
 deploys there) and from the folder, a message that `ductus dev` stored opened through the web UI's
-**Debug in VS Code** link and stopped at a breakpoint, and **Promote…** across two engines in release mode (test, and
+**Debug in VS Code** link and stopped at a breakpoint, **Load test this interface** on
+`results-to-fhir` (and an interface that isn't one, refused saying so), and **Promote…** across two engines in release mode (test, and
 prod requiring test first): a release file refused by prod's rules, deployed to test, then
 promoted from test to prod, each token asked for once and a viewer's turned away before anything
 ran.

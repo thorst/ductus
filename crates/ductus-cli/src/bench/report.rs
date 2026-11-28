@@ -457,7 +457,7 @@ impl Report {
             out += &format!("- {a}\n");
         }
         out += &format!(
-            "\nMeasured in {:.0} s with synthetic messages delivered to files: your interfaces' code and destinations add their own time (`ductus test` times a message through the code).\n",
+            "\nMeasured in {:.0} s with synthetic messages delivered to files: your interfaces' code and destinations add their own time (`ductus bench interface NAME` measures an interface's code).\n",
             self.took_s
         );
         out

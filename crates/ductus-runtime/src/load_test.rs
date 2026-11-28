@@ -285,6 +285,14 @@ pub struct Load {
     /// time isn't read: neither Linux nor Windows).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cpu_ms: Option<f64>,
+    /// A message's own time on a busy thread, in milliseconds: everything but its lookups' waits,
+    /// measured by a second short run with the mocks answering at once ([`Mocks::at_once`]). A
+    /// thread that waits milliseconds for every lookup runs the code several times slower than one
+    /// kept busy (its CPU slows and its caches go cold meanwhile: 30 µs against 4 µs to read the
+    /// same JSON, measured in WSL 2026-11-27), so this, not `wall - lookups_ms`, is what more
+    /// threads or requests side by side get. None: not measured (no mocked waits, or `--real`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub own_warm_ms: Option<f64>,
     /// What one thread's JavaScript heap holds after the warm-up, its garbage collected (the
     /// largest of the threads'), in MB: the code, its module-level state, the SDK.
     pub heap_mb: f64,
@@ -943,6 +951,7 @@ fn summed(config: &InterfaceConfig, run: Run, mocks: &Mocks, done: Vec<Done>) ->
         stages,
         lookups_ms: per_message(waited),
         cpu_ms: cpu.map(per_message),
+        own_warm_ms: None,
         heap_mb: heap as f64 / (1024.0 * 1024.0),
         keyed: config.ordering.key.is_some(),
         lanes: config.partition_count() as usize,
@@ -952,6 +961,18 @@ fn summed(config: &InterfaceConfig, run: Run, mocks: &Mocks, done: Vec<Done>) ->
 }
 
 impl Mocks {
+    /// The same answers with no latency: for the code's own time on a thread kept busy
+    /// ([`Load::own_warm_ms`]).
+    pub fn at_once(&self) -> Mocks {
+        Mocks {
+            db: Duration::ZERO,
+            api: Duration::ZERO,
+            fetch: Duration::ZERO,
+            named: self.named.keys().map(|n| (n.clone(), Duration::ZERO)).collect(),
+            rows: self.rows.clone(),
+        }
+    }
+
     fn latency(&self, kind: &str, name: &str) -> Duration {
         self.named.get(name).copied().unwrap_or(match kind {
             "db" => self.db,

@@ -33,6 +33,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [Impact and `about:`](impact.md) (8)
 - [Checking connections (`ductus doctor`)](doctor.md) (6)
 - [Measuring this machine (`ductus bench`)](bench.md) (6)
+- [Load testing an interface (`ductus bench interface`)](load-testing.md) (6)
 - [Files, SFTP and schedules](files.md) (6)
 - [Operations: drain mode and the REST API](drain-and-api.md) (6)
 - [The web UI](web-ui.md) (3)
@@ -105,7 +106,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The installer isn't signed yet: SmartScreen says "unknown publisher"](windows.md#the-installer-isnt-signed-yet-smartscreen-says-unknown-publisher-level-1) (Windows)
 - [Certificate files: write the drive](windows.md#certificate-files-write-the-drive-level-1) (Windows)
 
-## Level 2: Practitioner (137)
+## Level 2: Practitioner (139)
 
 - [Stopping the engine: what finishes and what waits](delivery.md#stopping-the-engine-what-finishes-and-what-waits-level-2) (Messages and delivery)
 - [A start waits 30 s for a database that refuses, then says why](store.md#a-start-waits-30-s-for-a-database-that-refuses-then-says-why-level-2) (The store (Postgres))
@@ -151,6 +152,8 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [A pass means "can connect and log in", not "will accept your messages"](doctor.md#a-pass-means-can-connect-and-log-in-not-will-accept-your-messages-level-2) (Checking connections (`ductus doctor`))
 - [The bench works in a schema of its own, and shares the disk with whatever else runs](bench.md#the-bench-works-in-a-schema-of-its-own-and-shares-the-disk-with-whatever-else-runs-level-2) (Measuring this machine (`ductus bench`))
 - [The bench's messages are synthetic and its destinations are files](bench.md#the-benchs-messages-are-synthetic-and-its-destinations-are-files-level-2) (Measuring this machine (`ductus bench`))
+- [Lookups are mocks unless `--real`, and `--real` never runs against production by name](load-testing.md#lookups-are-mocks-unless---real-and---real-never-runs-against-production-by-name-level-2) (Load testing an interface (`ductus bench interface`))
+- [A lookup answering nothing takes the code's other path](load-testing.md#a-lookup-answering-nothing-takes-the-codes-other-path-level-2) (Load testing an interface (`ductus bench interface`))
 - [Cron and monitor times are on the site's clock: the server's, unless you set `timezone`](files.md#cron-and-monitor-times-are-on-the-sites-clock-the-servers-unless-you-set-timezone-level-2) (Files, SFTP and schedules)
 - [On Linux the service can write only `/var/lib/ductus` until you add a folder](files.md#on-linux-the-service-can-write-only-varlibductus-until-you-add-a-folder-level-2) (Files, SFTP and schedules)
 - [A start logs one line, not one per listener](drain-and-api.md#a-start-logs-one-line-not-one-per-listener-level-2) (Operations: drain mode and the REST API)
@@ -245,7 +248,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [What goes to the Event Log, and what only to the files](windows.md#what-goes-to-the-event-log-and-what-only-to-the-files-level-2) (Windows)
 - [The Windows service can only touch what you give it](windows.md#the-windows-service-can-only-touch-what-you-give-it-level-2) (Windows)
 
-## Level 3: Professional (101)
+## Level 3: Professional (104)
 
 - [A message can be delivered twice](delivery.md#a-message-can-be-delivered-twice-level-3) (Messages and delivery)
 - [Your transform can run more than once for the same message](delivery.md#your-transform-can-run-more-than-once-for-the-same-message-level-3) (Messages and delivery)
@@ -282,6 +285,9 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [MLLP's "delivered a second" is one worker's pace, not a limit](bench.md#mllps-delivered-a-second-is-one-workers-pace-not-a-limit-level-3) (Measuring this machine (`ductus bench`))
 - [One pass gives a number, not a range, and two quick runs differ by up to a quarter](bench.md#one-pass-gives-a-number-not-a-range-and-two-quick-runs-differ-by-up-to-a-quarter-level-3) (Measuring this machine (`ductus bench`))
 - [Memory is measured idle](bench.md#memory-is-measured-idle-level-3) (Measuring this machine (`ductus bench`))
+- [A cache in your code meets the same few fixtures again and again](load-testing.md#a-cache-in-your-code-meets-the-same-few-fixtures-again-and-again-level-3) (Load testing an interface (`ductus bench interface`))
+- [The threads are what the config gives](load-testing.md#the-threads-are-what-the-config-gives-level-3) (Load testing an interface (`ductus bench interface`))
+- [Respond mode: the bench asks one request at a time](load-testing.md#respond-mode-the-bench-asks-one-request-at-a-time-level-3) (Load testing an interface (`ductus bench interface`))
 - [A file is picked up one poll after it stops changing](files.md#a-file-is-picked-up-one-poll-after-it-stops-changing-level-3) (Files, SFTP and schedules)
 - [One file at a time, oldest first; a failure stops the rest](files.md#one-file-at-a-time-oldest-first-a-failure-stops-the-rest-level-3) (Files, SFTP and schedules)
 - [Missed runs collapse to one; a run waits for the one before](files.md#missed-runs-collapse-to-one-a-run-waits-for-the-one-before-level-3) (Files, SFTP and schedules)
@@ -349,7 +355,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - ["Log on as a service": the installer grants it, Group Policy can take it away](windows.md#log-on-as-a-service-the-installer-grants-it-group-policy-can-take-it-away-level-3) (Windows)
 - [A refused connection takes about a second on Windows, and `localhost` may be `::1` first](windows.md#a-refused-connection-takes-about-a-second-on-windows-and-localhost-may-be-1-first-level-3) (Windows)
 
-## Level 4: Advanced (35)
+## Level 4: Advanced (36)
 
 - [A query that holds the message tables for days can pause intake](store.md#a-query-that-holds-the-message-tables-for-days-can-pause-intake-level-4) (The store (Postgres))
 - [Shortening frees disk when partitions go, not at once](retention.md#shortening-frees-disk-when-partitions-go-not-at-once-level-4) (Retention)
@@ -365,6 +371,7 @@ Each entry has a **level** (1 = everyone needs it on day one, 5 = expert). The l
 - [The heap limit is shared by everything in an isolate](runaway.md#the-heap-limit-is-shared-by-everything-in-an-isolate-level-4) (Runaway scripts)
 - [Dedicated connection pools only for dedicated interfaces](databases-and-apis.md#dedicated-connection-pools-only-for-dedicated-interfaces-level-4) (Databases and APIs)
 - [The commit time is the store's disk, and the ceiling per strict sender](doctor.md#the-commit-time-is-the-stores-disk-and-the-ceiling-per-strict-sender-level-4) (Checking connections (`ductus doctor`))
+- [A thread that waits on every lookup runs its code slower](load-testing.md#a-thread-that-waits-on-every-lookup-runs-its-code-slower-level-4) (Load testing an interface (`ductus bench interface`))
 - [Draining closes MLLP listeners; it doesn't answer AE](drain-and-api.md#draining-closes-mllp-listeners-it-doesnt-answer-ae-level-4) (Operations: drain mode and the REST API)
 - [Respond-mode HTTP keeps answering while draining](drain-and-api.md#respond-mode-http-keeps-answering-while-draining-level-4) (Operations: drain mode and the REST API)
 - [A drain finishes only when every destination has caught up](drain-and-api.md#a-drain-finishes-only-when-every-destination-has-caught-up-level-4) (Operations: drain mode and the REST API)

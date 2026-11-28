@@ -42,6 +42,7 @@
   - [Formats: HL7 v2, FHIR, X12, CSV, JSON, XML](write/formats.md)
   - [Lookups and code tables](write/lookups.md)
   - [Testing with fixtures](write/testing.md)
+  - [Load testing an interface](write/load-testing.md)
   - [Debugging: breakpoints in your code](write/debugging.md)
   - [In VS Code: the Ductus extension](write/vscode.md)
 
@@ -86,6 +87,7 @@
   - [Impact and `about:`](nuances/impact.md)
   - [Checking connections (`ductus doctor`)](nuances/doctor.md)
   - [Measuring this machine (`ductus bench`)](nuances/bench.md)
+  - [Load testing an interface (`ductus bench interface`)](nuances/load-testing.md)
   - [Files, SFTP and schedules](nuances/files.md)
   - [Operations: drain mode and the REST API](nuances/drain-and-api.md)
   - [The web UI](nuances/web-ui.md)

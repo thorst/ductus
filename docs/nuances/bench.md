@@ -25,7 +25,7 @@ What could surprise you here, why it is so, and what to do. Each entry has a lev
 ## The bench's messages are synthetic and its destinations are files (level 2)
 - **What:** the scenarios send generated HL7 ADT messages (and one CSV, and one HTTP GET), to interfaces whose destinations write files on this machine and whose code is small. Your interfaces' code, lookups (`db()`, `api()`) and receivers add their own time, and a receiver is often the slowest part.
 - **Why:** the bench measures what the engine and the database can do, which is the same for every project; what your interfaces add is theirs.
-- **What to do:** read the bench as the floor the engine gives you. For your own code, `ductus test` times each message through it; the transforms scenario shows what a realistic transform (the guides' ORU to FHIR) costs a thread.
+- **What to do:** read the bench as the floor the engine gives you. For your own code, `ductus bench interface NAME` runs one interface's code in a loop, its lookups mocked, and says what limits it ([Load testing an interface](../write/load-testing.md)); the transforms scenario shows what a realistic transform (the guides' ORU to FHIR) costs a thread.
 
 ## Memory is measured idle (level 3)
 - **What:** the memory scenario starts an engine of its own with 100, then 1,000 MLLP interfaces with a transform each, and reads its memory 2 seconds after it has started, before any message: 150 MB at 1,000 on this project's machine (~0.04 MB an interface beside the engine's own ~110 MB).

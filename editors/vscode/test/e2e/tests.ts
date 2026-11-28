@@ -122,6 +122,14 @@ suite("Ductus", () => {
     await waitFor("the other interfaces' tests", () => api.tests.find(root, "census-in"));
   });
 
+  test("Load test this interface: the bench's report, and what limits it", async () => {
+    const done = await api.load.run(root, "results-to-fhir", ["--seconds", "1"]);
+    assert.ok("limit" in done, `ran: ${JSON.stringify(done)}`);
+    assert.match(done.limit, /^The code is the limit: [\d,]+ msg\/s a thread/);
+    const failed = await api.load.run(root, "no-such-interface");
+    assert.ok("why" in failed && failed.why.includes("`no-such-interface` isn't an interface"), JSON.stringify(failed));
+  });
+
   test("an interface's tests run, each result as it comes", async () => {
     const started = Date.now();
     await run([api.tests.find(root, "adt-in")!]);

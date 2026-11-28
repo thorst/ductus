@@ -141,7 +141,8 @@ editor knows the new version ([nuance](../nuances/dev.md#your-editors-help-is-th
 ## The examples on these pages
 
 The code on these pages is from a small project in the repository, `examples/guides`: ADT routed
-to a lab and to billing, results to a FHIR server, an X12 835 to CSV, a census file to HL7. A
+to a lab and to billing, results to a FHIR server, an X12 835 to CSV, a census file to HL7, a
+patient lookup answering an API's callers. A
 code block that starts with a file's path, such as `// interfaces/adt-in/lab.ts`, is a piece
 of that file, and the docs' tests check that the page and the file agree and that the project's
 own tests pass. Copy it, run `ductus test` in it, and change it.

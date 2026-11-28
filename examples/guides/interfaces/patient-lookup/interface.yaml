@@ -1,0 +1,10 @@
+name: patient-lookup
+about:
+  description: The patient portal's lookup of a patient's enterprise id by MRN, answered at once
+  owner: integration-team
+  from: { application: Patient portal }
+  to: { application: EMPI }
+source:
+  http: { port: 8081, path: "/patients/{mrn}", method: GET, mode: respond }
+script: lookup.ts
+format: json

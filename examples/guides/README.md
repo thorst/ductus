@@ -14,6 +14,7 @@ example on those pages has run.
 | `remits-in` | An X12 835 file read as text, written as CSV |
 | `census-in` | A CSV file split into records, each turned into a new HL7 message |
 | `orders-xml` | An XML document read, changed and written back |
+| `patient-lookup` | An HTTP API answering at once (`mode: respond`) from the EMPI; its fixture is a whole request (`*.request.json`), for `ductus bench interface` |
 
 Shared code lives in `lib/`: `codes.ts` (code tables), `mapping.ts` (field-to-field mappings
 from a table), `x12.ts` (reading X12 segments and elements), `empi.ts` (an API lookup, tested in

@@ -4,7 +4,7 @@ Your [Ductus](https://getductus.com) interfaces' tests in VS Code's Test Explore
 one test at a time; `ductus validate`'s findings in Problems as you save; debugging without a
 `launch.json`; your change deployed to your `ductus dev` in place; a release promoted from test
 to prod; each interface's history beside its code; and a message an engine stored, debugged from
-the web UI in your copy of the code. The extension runs the `ductus` program you already use (its `--json` outputs), so
+the web UI in your copy of the code; an interface load tested. The extension runs the `ductus` program you already use (its `--json` outputs), so
 what it shows is what `ductus test` and `ductus validate` say in a terminal or in CI.
 
 ## What it does
@@ -18,6 +18,7 @@ what it shows is what `ductus test` and `ductus validate` say in a terminal or i
 | **Promote…** (Command Palette)                                                                | a release from the project's release files, or from the engine it's on, to another engine named in `ductus.engines`, with the reason: `ductus deploy` runs it, the engine's gate and rules decide, and the report (the gate's findings, what changed) is in the output. Each engine's token is asked for once and kept in your system's keychain.                                                                    |
 | **Ductus History** (in the Explorer)                                                          | who changed the open file's interface, what and why, newest first (commits, deployments, the audit log, documentation), as `ductus history` shows it: from your running `ductus dev`, an engine named in `ductus.engines`, or the folder. It reads only while the view is open.                                                                                                                                      |
 | **Debug in VS Code** (a message's page in the web UI), or **Ductus: Debug a stored message…** | the message read from its engine (a token with `payloads`; the read is in its audit log) and run through your copy of the code under the debugger, stopping at your breakpoints: `ductus try --message --from --inspect`. Nothing is sent. A link goes on by itself only to your `ductus dev` or an engine you named.                                                                                                |
+| **Ductus: Load test this interface** (Command Palette)                                        | the open file's interface's code in a loop on its fixtures for a few seconds, its lookups mocked (`ductus bench interface`): the report in its own output, and what limits it in a notification.                                                                                                                                                                                                                     |
 
 ## What it needs
 
@@ -50,7 +51,8 @@ what it shows is what `ductus test` and `ductus validate` say in a terminal or i
 --json` (Promote…) only when you ask, or on save with the setting.
 - **History** reads a page (`GET /interfaces/{name}/history`, or `ductus history --json` from the
   folder) when the view is open and the open file's interface changes; hidden, it reads nothing.
-  **Debug this message** runs `ductus try` under the debugger only when you ask.
+  **Debug this message** runs `ductus try` under the debugger only when you ask, and **Load test
+  this interface** `ductus bench interface` (about 6 s) only when you ask.
 - **Nothing runs in the background** otherwise: no timers, no watchers beyond VS Code's own file
   events. The output of every command the extension runs, with how long it took, is in
   **View → Output → Ductus**.

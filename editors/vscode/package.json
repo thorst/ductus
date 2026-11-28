@@ -127,6 +127,11 @@
         "icon": "$(cloud-upload)"
       },
       {
+        "command": "ductus.loadTest",
+        "title": "Load test this interface",
+        "category": "Ductus"
+      },
+      {
         "command": "ductus.validate",
         "title": "Validate the project",
         "category": "Ductus"
@@ -142,6 +147,10 @@
         {
           "command": "ductus.historyOlder",
           "when": "false"
+        },
+        {
+          "command": "ductus.loadTest",
+          "when": "ductus.hasProject"
         }
       ],
       "view/title": [

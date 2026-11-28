@@ -34,6 +34,8 @@ pub struct Args {
 
 /// A busy feed's peak, for "what share" when no `--peak` is given (as `ductus bench` says it).
 pub const PEAK: f64 = 150.0;
+/// How long the second run (`own_warm_ms`, mocks answering at once) measures, after its warm-up.
+const WARM_RUN: Duration = Duration::from_secs(1);
 /// The lanes an ordering key gives when `partitions` isn't set (`defaults::partitions`).
 const PARTITIONS: usize = 64;
 
@@ -71,20 +73,31 @@ pub async fn run(args: Args) -> Result<()> {
         Some(n) => Until::Count(n),
         None => Until::Seconds(Duration::from_secs(args.seconds)),
     };
-    let options = load_test::Options {
+    let options = |threads, until, mocks| load_test::Options {
         root: args.root.clone(),
         env: args.env.clone(),
         interface: iface.label(),
         files: args.files.clone(),
-        threads: args.threads,
+        threads,
         until,
-        mocks: mocks.clone(),
+        mocks,
         stages: true,
         real: args.real,
     };
-    let load = tokio::task::spawn_blocking(move || load_test::run(options))
-        .await
-        .map_err(|e| anyhow!("the load test failed: {e}"))??;
+    let run = |options: load_test::Options| async move {
+        tokio::task::spawn_blocking(move || load_test::run(options))
+            .await
+            .map_err(|e| anyhow!("the load test failed: {e}"))?
+    };
+    let mut load = run(options(args.threads, until, mocks.clone())).await?;
+    // Mocked waits leave the thread idle, and the code runs slower after each (`own_warm_ms`):
+    // what it does kept busy is measured apart, on one thread, the mocks answering at once.
+    if !args.real && load.lookups_ms > 0.0 && load.messages > 0 {
+        let warm = run(options(Some(1), Until::Seconds(WARM_RUN), mocks.at_once())).await?;
+        if warm.messages > 0 {
+            load.own_warm_ms = Some((1000.0 / warm.per_thread_per_second.max(1e-9) - warm.lookups_ms).max(1e-3));
+        }
+    }
     let machine = super::report::machine();
     let verdict = verdict(&load, args.peak.map(|p| p as f64), machine.cores);
     if args.json {
@@ -135,15 +148,32 @@ pub fn verdict(load: &Load, peak: Option<f64>, cores: usize) -> Vec<String> {
     let per_thread = load.per_thread_per_second.max(1e-9);
     // A message's time on its thread, everything included (the bench runs one at a time there).
     let wall = 1000.0 / per_thread;
+    // A message's own time: on a busy thread when measured (`own_warm_ms`), else between waits.
+    let between = (wall - load.lookups_ms).max(1e-3);
+    let own = load.own_warm_ms.unwrap_or(between);
+    let (one, rate) = if load.respond { ("request", "requests/s") } else { ("message", "msg/s") };
     if load.lookups_ms >= wall / 2.0 {
         let most = load
             .lookups
             .iter()
             .max_by(|a, b| (a.calls as f64 * a.waited_ms).total_cmp(&(b.calls as f64 * b.waited_ms)));
         let most = most.map_or_else(String::new, |l| format!(", most on {}", lookup_name(l)));
-        let alone = 1000.0 / (wall - load.lookups_ms).max(1e-3);
+        let alone = 1000.0 / own;
+        let kept_busy = match load.own_warm_ms {
+            // Said only where it differs: a quarter or more.
+            Some(warm) if between > warm * 1.25 => format!(
+                " ({} of its own a {one} on a thread kept busy; {} here, the thread waking after each wait)",
+                fine(warm),
+                fine(between)
+            ),
+            // Real lookups can't be made instant: the code's pace between them is all there is.
+            None if load.real => {
+                " (its pace between the waits, the thread waking after each: kept busy it's faster; without `--real` the bench measures that too)".to_string()
+            }
+            _ => String::new(),
+        };
         let mut line = format!(
-            "The lookups are the limit: a message waits {} of its {} on them{most}; without the waits this code would do about {} msg/s a thread.",
+            "The lookups are the limit: a {one} waits {} of its {} on them{most}; without the waits this code would do about {} {rate} a thread{kept_busy}.",
             fine(load.lookups_ms),
             fine(wall),
             super::report::about(alone)
@@ -168,7 +198,7 @@ pub fn verdict(load: &Load, peak: Option<f64>, cores: usize) -> Vec<String> {
         ];
         let (what, ms) = parts.into_iter().max_by(|a, b| a.1.total_cmp(&b.1)).expect("four parts");
         out.push(format!(
-            "The code is the limit: {} msg/s a thread; of each message's {}, the most goes to {what} ({}).",
+            "The code is the limit: {} {rate} a thread; of each {one}'s {}, the most goes to {what} ({}).",
             whole(per_thread),
             fine(wall),
             fine(ms)
@@ -179,11 +209,17 @@ pub fn verdict(load: &Load, peak: Option<f64>, cores: usize) -> Vec<String> {
         Some(p) => (p, format!("At your peak of {}/s", whole(p))),
         None => (PEAK, format!("At {}/s (a busy feed's peak; give yours with `--peak`)", whole(PEAK))),
     };
-    let cores_busy = load.cpu_ms.map(|cpu| rate * cpu / 1000.0);
+    // A responder's thread is kept busy by requests side by side, so its own time is its CPU; a
+    // queued interface's threads each wait on their own lookups, waking cold, as measured.
+    let cpu_ms = match load.respond {
+        true => load.own_warm_ms.or(load.cpu_ms),
+        false => load.cpu_ms,
+    };
+    let cores_busy = cpu_ms.map(|cpu| rate * cpu / 1000.0);
     if load.respond {
         // Requests wait side by side: what one engine answers is its code's pace, not one
         // caller's.
-        let capacity = 1000.0 / (wall - load.lookups_ms).max(1e-3);
+        let capacity = 1000.0 / own;
         let mut line = match rate <= capacity {
             true => {
                 format!("{at} it uses {} of what one engine answers ({}/s)", share(rate / capacity), whole(capacity))
@@ -210,8 +246,10 @@ pub fn verdict(load: &Load, peak: Option<f64>, cores: usize) -> Vec<String> {
             share(rate / load.per_second),
             whole(load.per_second)
         );
-        if let Some(busy) = cores_busy {
-            line += &format!(", and {} of one core", share(busy));
+        match cores_busy {
+            Some(busy) if busy >= 1.0 => line += &format!(", its code keeping {busy:.1} cores busy"),
+            Some(busy) => line += &format!(", and {} of one core", share(busy)),
+            None => {}
         }
         out.push(line + ".");
     } else {
@@ -330,16 +368,17 @@ pub fn text(load: &Load, fixtures: bool) -> String {
     );
     let per_thread =
         if load.threads > 1 { format!(" ({} per thread)", whole(load.per_thread_per_second)) } else { String::new() };
-    out += &format!("  {} msg/s{per_thread}, {} messages\n", whole(load.per_second), whole(load.messages as f64));
+    let rate = if load.respond { "requests/s" } else { "msg/s" };
+    out += &format!("  {} {rate}{per_thread}, {} {many}\n", whole(load.per_second), whole(load.messages as f64));
     out += &format!(
-        "  each message: p50 {}, p95 {}, p99 {}, slowest {}\n",
+        "  each {one}: p50 {}, p95 {}, p99 {}, slowest {}\n",
         took(load.p50_ms),
         took(load.p95_ms),
         took(load.p99_ms),
         took(load.max_ms)
     );
     let mut used = match load.cpu_ms {
-        Some(cpu) => format!("  CPU: {} a message on its thread", fine(cpu)),
+        Some(cpu) => format!("  CPU: {} a {one} on its thread", fine(cpu)),
         None => "  CPU: not read on this system".to_string(),
     };
     used += &format!("; JavaScript heap: {} a thread after the warm-up\n", super::report::megabytes(load.heap_mb));
@@ -389,7 +428,7 @@ pub fn text(load: &Load, fixtures: bool) -> String {
         let reads = l.calls - l.writes;
         let Some(latency) = l.latency_ms else {
             // Real: what it took, its writes made, its failures counted.
-            let mut line = format!("  {what}: {per:.2} calls per message, {} on average", took(l.waited_ms));
+            let mut line = format!("  {what}: {per:.2} calls per {one}, {} on average", took(l.waited_ms));
             if l.writes > 0 {
                 line += &format!(", {} of them writes (made)", percent(l.writes, l.calls));
             }
@@ -411,7 +450,7 @@ pub fn text(load: &Load, fixtures: bool) -> String {
         } else {
             String::new()
         };
-        out += &format!("  {what}: {per:.2} calls per message, each mocked at {}{waited}, {rows}\n", took(latency));
+        out += &format!("  {what}: {per:.2} calls per {one}, each mocked at {}{waited}, {rows}\n", took(latency));
     }
     let off_path = load.decisions.iter().any(|d| {
         let errors: u64 = d.statuses.range(400..).map(|(_, n)| n).sum();
@@ -473,6 +512,7 @@ mod tests {
             }],
             lookups_ms,
             cpu_ms: Some(code),
+            own_warm_ms: None,
             heap_mb: 4.0,
             keyed,
             lanes: if keyed { 64 } else { 1 },
@@ -520,6 +560,10 @@ mod tests {
         );
         let said = verdict(&load(1000.0, 0.0, true), Some(100_000.0), 64);
         assert!(said[1].contains("`partitions: 100`, `isolation: dedicated` and `workers: 100`"), "{}", said[1]);
+        // A core or more is said in cores, not as a share of one.
+        let busy = Load { per_second: 4000.0, threads: 4, ..load(1000.0, 0.0, true) };
+        let said = verdict(&busy, Some(2500.0), 8);
+        assert!(said[1].ends_with("(4,000/s), its code keeping 2.5 cores busy."), "{}", said[1]);
     }
 
     /// Respond mode: requests wait side by side, so one engine answers at its code's pace, and
@@ -542,6 +586,33 @@ mod tests {
         let said = verdict(&responder, Some(10_000.0), 8);
         assert!(said[1].contains("it needs about 3 engines at this speed (3,800/s each)"), "{}", said[1]);
         assert!(said[1].contains("run 3 behind a load balancer, its code keeping 2.6 cores busy."), "{}", said[1]);
+    }
+
+    /// Between mocked waits the code runs cold; kept busy (measured apart: `own_warm_ms`) it's
+    /// faster, and that is what threads or requests side by side get.
+    #[test]
+    fn the_code_s_own_pace_is_its_pace_kept_busy() {
+        let queued = Load { own_warm_ms: Some(0.05), ..load(190.0, 5.0, false) };
+        let said = verdict(&queued, None, 8);
+        assert!(
+            said[0].contains(
+                "without the waits this code would do about 20,000 msg/s a thread (50 µs of its own a message on a thread kept busy; 263 µs here, the thread waking after each wait)."
+            ),
+            "{}",
+            said[0]
+        );
+        // The share of a core at the peak stays the measured one: each thread wakes cold.
+        assert!(said[1].ends_with("and 4% of one core."), "{}", said[1]);
+        let responder = Load { respond: true, ..queued };
+        let said = verdict(&responder, Some(1000.0), 8);
+        assert!(said[0].contains("with enough callers at once it answers about 20,000/s"), "{}", said[0]);
+        assert_eq!(
+            said[1],
+            "At your peak of 1,000/s it uses 5% of what one engine answers (20,000/s), and 5% of one core."
+        );
+        // Close to the cold time: not said.
+        let close = Load { own_warm_ms: Some(0.25), ..load(190.0, 5.0, false) };
+        assert!(!verdict(&close, None, 8)[0].contains("kept busy"));
     }
 
     #[test]

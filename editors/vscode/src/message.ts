@@ -199,8 +199,12 @@ function hasBreakpoint(root: string): boolean {
   );
 }
 
-/** A project's interfaces, by folder, to pick one. */
-async function pickInterface(root: string): Promise<string | undefined> {
+/** A project's interfaces, by folder, to pick one (`title`: the command it's for). */
+export async function pickInterface(
+  root: string,
+  title = "Debug this message",
+  placeHolder = "The interface the message is of",
+): Promise<string | undefined> {
   let names: string[] = [];
   try {
     names = fs
@@ -212,12 +216,10 @@ async function pickInterface(root: string): Promise<string | undefined> {
     // no interfaces folder: said below
   }
   if (names.length === 0) {
-    void vscode.window.showWarningMessage(`Debug this message: ${root} has no interfaces.`);
+    void vscode.window.showWarningMessage(`${title}: ${root} has no interfaces.`);
     return undefined;
   }
-  return names.length === 1
-    ? names[0]
-    : vscode.window.showQuickPick(names, { placeHolder: "The interface the message is of" });
+  return names.length === 1 ? names[0] : vscode.window.showQuickPick(names, { placeHolder });
 }
 
 /**

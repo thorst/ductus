@@ -15,7 +15,8 @@ and when choosing between instance types.
 **When not:** it measures the engine and the database with synthetic messages delivered to
 files, not your interfaces: their code, their lookups and their receivers add their own time
 ([nuance](../nuances/bench.md#the-benchs-messages-are-synthetic-and-its-destinations-are-files-level-2)).
-For your own code, `ductus test` times each message through it. And it's not a monitoring tool:
+For your own code, [`ductus bench interface`](../write/load-testing.md) runs one interface's code
+in a loop and says what limits it. And it's not a monitoring tool:
 what production does is in [monitoring](monitoring.md).
 
 ## Before you run it
@@ -96,7 +97,7 @@ What it means
 - One thread ran the guides' ORU to FHIR transform 28,094 times a second, 124,952 on 8 threads (4.4× one): an interface at a peak of 150 messages a second keeps 0.5% of one thread busy with code like it, so code is rarely the limit; lookups (`db()`, `fetch`) usually are, and run while other messages are transformed.
 - An idle interface with its code took about 0.04 MB of memory, so a GB holds about 25,000 of them beside the engine's own (~112 MB with 100). Traffic adds its own: messages in hand, connections, the code's data.
 
-Measured in 110 s with synthetic messages delivered to files: your interfaces' code and destinations add their own time (`ductus test` times a message through the code).
+Measured in 110 s with synthetic messages delivered to files: your interfaces' code and destinations add their own time (`ductus bench interface NAME` measures an interface's code).
 ```
 
 A workstation's numbers, not a limit of the engine: a server's disk, CPUs and network give its
