@@ -1384,15 +1384,21 @@ mod tests {
         let Some(began) = thread_cpu() else { return };
         std::thread::sleep(Duration::from_millis(50));
         let slept = thread_cpu().unwrap() - began;
-        let until = Instant::now() + Duration::from_millis(50);
-        let mut x = 0u64;
-        while Instant::now() < until {
-            x = std::hint::black_box(x.wrapping_add(1));
-        }
-        let worked = thread_cpu().unwrap() - began - slept;
         assert!(slept < Duration::from_millis(10), "{slept:?}");
-        // Windows counts in ~15.6 ms ticks.
-        assert!(worked > Duration::from_millis(30), "{worked:?}");
+        // Work until the clock has counted 40 ms of it (Windows counts in ~15.6 ms ticks), or 2 s
+        // pass: a fixed 50 ms of spinning counted under 30 when the machine took the core meanwhile
+        // (0.8.2.4, WSL with other tests beside it).
+        let (started, mut x) = (Instant::now(), 0u64);
+        let worked = loop {
+            for _ in 0..10_000 {
+                x = std::hint::black_box(x.wrapping_add(1));
+            }
+            let worked = thread_cpu().unwrap() - began - slept;
+            if worked >= Duration::from_millis(40) || started.elapsed() > Duration::from_secs(2) {
+                break worked;
+            }
+        };
+        assert!(worked >= Duration::from_millis(40), "2 s of spinning counted {worked:?}");
     }
 
     /// What the stamps cost (0.8.2.2's check: under 2% of a transform): the guides' ORU to FHIR
